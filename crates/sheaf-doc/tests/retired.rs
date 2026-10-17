@@ -184,6 +184,13 @@ const RETIRED: &[(&str, u8)] = &[
     ("stamp_preview::png_path", 6),
     ("stamp_preview::TAPES", 6),
     ("stamps_panel::Library::stems", 6),
+    ("incremental::write_object", 7),
+    ("incremental::write_dict", 7),
+    ("incremental::write_name", 7),
+    ("incremental::runs", 7),
+    ("save::write_atomic", 7),
+    ("images::write_atomic", 7),
+    ("save::WouldBreakSignatures::encrypted", 7),
 ];
 
 /// Last segments only a path matches: names the new design uses again
@@ -226,6 +233,8 @@ const QUALIFIED_ONLY: &[&str] = &[
     "width",
     "contains",
     "objects",
+    "runs",
+    "encrypted",
 ];
 
 #[test]

@@ -79,6 +79,7 @@ fn rewritten(f: &mut Form, items: &[FlatOutlineItem]) -> Vec<u8> {
         src,
         name: "a.pdf".into(),
         derived: None,
+        stamp: None,
     };
     let doc = Document::new(store, primary, items, Box::new(FixedCount(5)));
     crate::save::rewrite(&doc.snapshot()).unwrap()

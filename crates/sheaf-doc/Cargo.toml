@@ -5,12 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# Forms built in code and the lookup for Greg's corpus of real ones
-# (`forms::fixture`, `forms::corpus`), for other crates' tests.
+# Forms and encrypted files built in code and the lookup for Greg's corpus
+# of real ones (`forms::fixture`, `serialize::fixture`, `forms::corpus`),
+# for other crates' tests.
 fixtures = []
 
 [dependencies]
-# Random mark ids, so copies of a file never hand out the same one.
+# Random mark ids, so copies of a file never hand out the same one, and
+# save temp names no other save uses.
 fastrand = "2"
 sheaf-core.workspace = true
 # How far an open has read (M10.5 §14.2).
@@ -32,6 +34,9 @@ image.workspace = true
 quick-xml = "0.41"
 # A file's password is wiped from memory when its blob goes.
 zeroize = "1.9"
+# AES IVs a save writes are keyed hashes of what they encrypt (M10.5 §11.7).
+hmac = "0.13"
+sha2 = "0.11"
 # Text in a mark's staleness digest is NFC, whatever another tool wrote
 # (M10.5 §3.6).
 unicode-normalization = "0.1"

@@ -1,23 +1,33 @@
-//! Materialize a [`Document`] snapshot into PDF bytes.
+//! Materialize a [`Document`](crate::Document) snapshot into PDF bytes.
 //!
 //! The rewrite strategy: load the primary source with lopdf, rebuild its page
 //! tree from the virtual page list (copying pages from other sources with
 //! object renumbering), apply rotations, rebuild the outline, prune what's no
-//! longer referenced, and serialize. Always correct, O(file). The incremental
-//! strategy (append-only, preserving original bytes) lives alongside later.
+//! longer referenced, and write the whole file through
+//! [`serialize::full`], encrypted as the primary is. Always correct,
+//! O(file). The incremental strategy (append-only, preserving original
+//! bytes) is [`crate::incremental`]'s.
+//!
+//! A save to a path replaces the file durably ([`durable::write`]), and a
+//! save to the primary's own file first checks that it's still the file
+//! sheaf read, stopping with [`SaveStop::Ask`] when another program
+//! changed it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use im::Vector;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
+use lopdf::xref::XrefType;
+use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, XrefKind, dictionary};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::attachments::Objects;
 use crate::forms::merge::{CopyMaps, FormCopy};
 use crate::geom::{Geom, Rect};
 use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId, SourceInfo};
+use crate::serialize::{self, crypt::Crypt, durable};
 use crate::source::Source;
 use crate::text_layer;
 use sheaf_core::{DestView, Rotation};
@@ -38,35 +48,38 @@ pub fn export_clean_copy(model: &Snapshot, path: &Path) -> Result<()> {
     let primary = model
         .source(model.primary)
         .context("primary source missing")?;
-    if path.exists()
-        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.name).ok()
-    {
+    if same_file(path, &primary.name) {
         bail!("a clean copy can't replace the open file; choose another name");
     }
     let (bytes, _) = rewrite_with(model, true)?;
-    write_atomic(path, &bytes)
+    Ok(durable::write(path, &bytes, None)?)
 }
 
 /// `clean`: strip all markup instead of writing our annotations. With what
 /// the reader should be told (see `kept::keep_only`).
 fn rewrite_with(model: &Snapshot, clean: bool) -> Result<(Vec<u8>, Vec<String>)> {
     let (pdf, notes) = build_rewrite(model, clean)?;
-    Ok((finish(pdf)?, notes))
+    Ok((finish(pdf, kept_encryption(model))?, notes))
 }
 
-/// Prune, renumber, compress and serialize a rewritten document. It's
-/// written as one section, so a `/Prev` or `/XRefStm` left in the trailer
-/// (lopdf keeps them when it rebuilds a damaged file's cross-references)
-/// would point into it at random.
-fn finish(mut pdf: Pdf) -> Result<Vec<u8>> {
-    pdf.trailer.remove(b"Prev");
-    pdf.trailer.remove(b"XRefStm");
+/// How the primary is encrypted, which a save, a Save As and an export
+/// keep (M10.5 proposal 10). None when it isn't.
+fn kept_encryption(model: &Snapshot) -> Option<&Crypt> {
+    model.source(model.primary)?.src.crypt().map(|c| &**c)
+}
+
+/// Prune, renumber and serialize a rewritten document as one section in
+/// its cross-reference kind, encrypted with `crypt` when given. Streams are
+/// written as they are: a stream the save made was compressed when it was
+/// made, and a source's is never re-encoded.
+fn finish(mut pdf: Pdf, crypt: Option<&Crypt>) -> Result<Vec<u8>> {
     pdf.prune_objects();
     pdf.renumber_objects();
-    pdf.compress();
-    let mut out = Vec::new();
-    pdf.save_to(&mut out)?;
-    Ok(out)
+    let kind = match pdf.reference_table.cross_reference_type {
+        XrefType::CrossReferenceTable => XrefKind::Table,
+        XrefType::CrossReferenceStream => XrefKind::Stream,
+    };
+    serialize::full::write(&pdf.objects, &pdf.trailer, kind, &pdf.version, crypt)
 }
 
 /// Acrobat's Extract Pages: `ids` (kept in document order) become a new
@@ -74,7 +87,7 @@ fn finish(mut pdf: Pdf) -> Result<Vec<u8>> {
 /// them. Returns how many pages were written.
 pub fn extract_pages(model: &Snapshot, ids: &[PageId], path: &Path) -> Result<usize> {
     let bytes = extract_bytes(model, ids)?;
-    write_atomic(path, &bytes)?;
+    durable::write(path, &bytes, None)?;
     Ok(ids.len())
 }
 
@@ -153,7 +166,9 @@ pub fn print_pdf(model: &Snapshot, ids: &[PageId], markup: bool) -> Result<Vec<u
     if markup {
         flatten_annots(&mut pdf)?;
     }
-    finish(pdf)
+    // Printed unencrypted: the bytes go to a printer or a page image, not
+    // to a file someone keeps (M10.5 §12.3).
+    finish(pdf, None)
 }
 
 /// Bookmarks that still point somewhere: a node survives if its target is
@@ -189,15 +204,13 @@ pub fn export_flattened(model: &Snapshot, path: &Path) -> Result<usize> {
     let primary = model
         .source(model.primary)
         .context("primary source missing")?;
-    if path.exists()
-        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.name).ok()
-    {
+    if same_file(path, &primary.name) {
         bail!("a flattened copy can't replace the open file; choose another name");
     }
     let (mut pdf, _) = build_rewrite(model, false)?;
     let n = flatten_annots(&mut pdf)?;
-    let bytes = finish(pdf)?;
-    write_atomic(path, &bytes)?;
+    let bytes = finish(pdf, kept_encryption(model))?;
+    durable::write(path, &bytes, None)?;
     Ok(n)
 }
 
@@ -353,8 +366,9 @@ fn flatten_annots(pdf: &mut Pdf) -> Result<usize> {
         content.extend_from_slice(&pdf.get_page_content(page_id));
         content.extend_from_slice(b"\nQ\n");
         content.extend_from_slice(ops.as_bytes());
-        let content_id =
-            pdf.add_object(Object::Stream(lopdf::Stream::new(dictionary! {}, content)));
+        let mut content = lopdf::Stream::new(dictionary! {}, content);
+        let _ = content.compress();
+        let content_id = pdf.add_object(Object::Stream(content));
         let page_mut = pdf.get_dictionary_mut(page_id)?;
         page_mut.set("Contents", Object::Reference(content_id));
         page_mut.set("Resources", Object::Dictionary(resources));
@@ -827,12 +841,13 @@ pub enum Strategy {
     Rewrite,
 }
 
-/// Save `model` to `path`, incrementally when that's its own primary file
-/// (and the file on disk is still what we opened), otherwise by rewrite.
-/// An incremental failure falls back to a rewrite. A signed file is
-/// rewritten too: the app asks first ([`Signed::Ask`]).
+/// Save `model` to `path`, incrementally when that's its own primary file,
+/// otherwise by rewrite. An incremental failure falls back to a rewrite.
+/// A signed file is rewritten too: the app asks first ([`Signed::Ask`]).
+/// When another program changed the file since it was read, nothing is
+/// written ([`IfChanged::Ask`]).
 pub fn save_to_path(model: &Snapshot, path: &Path) -> Result<Strategy> {
-    Ok(save_to_path_noting(model, path, Signed::Rewrite)?.0)
+    Ok(save_to_path_noting(model, path, Signed::Rewrite, IfChanged::Ask)?.0)
 }
 
 /// How a save treats a file with signed fields or a certification (M10
@@ -856,8 +871,35 @@ pub enum Signed {
 pub struct WouldBreakSignatures {
     /// Signed fields (a certification is one).
     pub signatures: usize,
-    /// It's encrypted, so it can't be appended to yet (M11).
-    pub encrypted: bool,
+}
+
+/// What a save in place does when another program changed the file since
+/// sheaf read it (M10.5 proposal 33).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IfChanged {
+    /// Write nothing and stop with [`Ask::FileChanged`], for the reader
+    /// to choose.
+    Ask,
+    /// Replace it, the other program's changes with it.
+    Overwrite,
+}
+
+/// Why a save stopped before writing (M10.5 §11.1). Slice 9 moves it and
+/// [`Ask`] to `materialize/`, and adds the rest.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SaveStop {
+    /// The reader has a choice to make first.
+    #[error(transparent)]
+    Ask(Ask),
+}
+
+/// A choice a save asks the reader to make (M10.5 §9.2).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum Ask {
+    /// The file at `path` isn't the one sheaf read: Save As…, Overwrite or
+    /// Cancel.
+    #[error("{} changed on disk since sheaf read it", .path.display())]
+    FileChanged { path: Arc<Path> },
 }
 
 /// [`save_to_path`], and what the reader should be told about the saved
@@ -868,33 +910,41 @@ pub struct WouldBreakSignatures {
 /// an incremental save would keep the removed content in the earlier
 /// revision (M9 bug 14). A rewrite of a signed or certified file is
 /// `signed`'s to decide.
+///
+/// A save to the primary's own file checks first, and again just before
+/// replacing it, that the file is still the one read (its stamp). If not,
+/// `if_changed` says whether to stop with [`SaveStop::Ask`], writing
+/// nothing, or to replace it anyway.
 pub fn save_to_path_noting(
     model: &Snapshot,
     path: &Path,
     signed: Signed,
+    if_changed: IfChanged,
 ) -> Result<(Strategy, Vec<String>)> {
     let primary = model
         .source(model.primary)
         .context("primary source missing")?;
-    let same_file = std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.name).ok();
-    let unchanged = std::fs::metadata(&primary.name)
-        .map(|m| m.len() as usize == primary.src.bytes().len())
-        .unwrap_or(false);
+    let same_file = same_file(path, &primary.name);
+    let expect = primary
+        .stamp
+        .as_ref()
+        .filter(|_| same_file && if_changed == IfChanged::Ask);
+    if let Some(stamp) = expect
+        && !stamp
+            .holds(path)
+            .with_context(|| format!("reading {}", path.display()))?
+    {
+        return Err(file_changed(path).into());
+    }
+    let write = |bytes: &[u8]| write_checked(path, bytes, expect);
     if signed == Signed::Append {
-        if same_file && !unchanged {
-            bail!(
-                "{} changed on disk since it was opened: sheaf can't append to it",
-                path.display()
-            );
-        }
-        let bytes = crate::incremental::append(model)?;
-        write_atomic(path, &bytes)?;
+        write(&crate::incremental::append(model)?)?;
         return Ok((Strategy::Incremental, Vec::new()));
     }
-    if same_file && unchanged && !model.removes_content {
+    if same_file && !model.removes_content {
         match crate::incremental::incremental(model) {
             Ok(bytes) => {
-                write_atomic(path, &bytes)?;
+                write(&bytes)?;
                 return Ok((Strategy::Incremental, Vec::new()));
             }
             Err(e) => log::warn!("incremental save failed, rewriting instead: {e:#}"),
@@ -906,8 +956,31 @@ pub fn save_to_path_noting(
         return Err(e.into());
     }
     let (bytes, notes) = rewrite_with(model, false)?;
-    write_atomic(path, &bytes)?;
+    write(&bytes)?;
     Ok((Strategy::Rewrite, notes))
+}
+
+/// Replace `path` with `bytes` durably while `expect`, when there is one,
+/// still holds there: otherwise nothing is written, and the save stops
+/// with [`Ask::FileChanged`].
+fn write_checked(path: &Path, bytes: &[u8], expect: Option<&durable::FileStamp>) -> Result<()> {
+    match durable::write(path, bytes, expect) {
+        Err(durable::WriteError::Changed { .. }) => Err(file_changed(path).into()),
+        done => Ok(done?),
+    }
+}
+
+/// What stops a save to `path`, which another program changed.
+fn file_changed(path: &Path) -> SaveStop {
+    SaveStop::Ask(Ask::FileChanged { path: path.into() })
+}
+
+/// Whether `a` and `b` name one file. Not when either names none.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// What a rewrite of `src` would break: its signed fields and its
@@ -915,27 +988,13 @@ pub fn save_to_path_noting(
 fn signatures_broken(src: &Source) -> Option<WouldBreakSignatures> {
     let facts = crate::forms::read(src).facts;
     let signatures = facts.signed.max(usize::from(facts.certified));
-    (signatures > 0).then(|| WouldBreakSignatures {
-        signatures,
-        encrypted: src.pdf().is_encrypted(),
-    })
+    (signatures > 0).then_some(WouldBreakSignatures { signatures })
 }
 
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let tmp = dir.join(format!(
-        ".{}.sheaf-tmp",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("save")
-    ));
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-    Ok(())
-}
-
-/// Rewrite to `path` atomically (temp file + rename).
+/// Rewrite to `path` durably (a temp file renamed over it).
 pub fn rewrite_to_path(model: &Snapshot, path: &Path) -> Result<()> {
     let bytes = rewrite(model)?;
-    write_atomic(path, &bytes)
+    Ok(durable::write(path, &bytes, None)?)
 }
 
 pub(crate) struct LoadedSource {
@@ -1872,7 +1931,11 @@ mod tests {
 
     /// Outline as (depth, title, page number) by walking the written tree.
     fn read_outline(bytes: &[u8]) -> Vec<(u16, String, Option<u32>)> {
-        let pdf = Pdf::load_mem(bytes).unwrap();
+        outline_in(&Pdf::load_mem(bytes).unwrap())
+    }
+
+    /// [`read_outline`] of a file already read.
+    fn outline_in(pdf: &Pdf) -> Vec<(u16, String, Option<u32>)> {
         let page_no: HashMap<ObjectId, u32> =
             pdf.get_pages().into_iter().map(|(n, id)| (id, n)).collect();
         fn walk(
@@ -1919,7 +1982,7 @@ mod tests {
         if let Ok(o) = catalog.get(b"Outlines").and_then(|o| o.as_reference()) {
             let od = pdf.get_dictionary(o).unwrap();
             walk(
-                &pdf,
+                pdf,
                 od.get(b"First").ok().and_then(|o| o.as_reference().ok()),
                 0,
                 &page_no,
@@ -2180,7 +2243,16 @@ mod tests {
         let out = dir.join("out.pdf");
         rewrite_to_path(&model.snapshot(), &out).unwrap();
         assert!(out.exists());
-        assert!(!dir.join(".out.pdf.sheaf-tmp").exists());
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.to_string_lossy().ends_with(".sheaf-tmp")),
+            "{names:?}"
+        );
         assert_eq!(read_pages(&std::fs::read(&out).unwrap()).len(), 2);
     }
 
@@ -4186,10 +4258,11 @@ mod tests {
         assert_eq!(std::fs::read(&a_path).unwrap(), original);
     }
 
-    /// An encrypted original opens with its password and saves as a plain
-    /// file with the edits applied.
+    /// An encrypted original opens with its password and saves encrypted
+    /// as it was, with the edits applied: the same password opens it, and
+    /// its `/P` and `/ID[0]` are the original's.
     #[test]
-    fn encrypted_source_saves_decrypted() {
+    fn encrypted_source_saves_encrypted() {
         use lopdf::{EncryptionState, EncryptionVersion, Permissions};
         let dir = tempdir();
         let plain = make_pdf(&dir, "plain.pdf", "E", 2, &[("Top", 0, 0)]);
@@ -4249,9 +4322,27 @@ mod tests {
             save_to_path(&model.snapshot(), &out).unwrap(),
             Strategy::Rewrite
         );
-        let saved = Pdf::load(&out).unwrap();
-        assert!(!saved.is_encrypted());
-        assert!(!saved.trailer.has(b"Encrypt"));
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(
+            !bytes.windows(6).any(|w| w == b"MARK E"),
+            "content in the clear"
+        );
+        let lazy = |path: &Path, password| {
+            let bytes = sheaf_core::read_file(path).unwrap();
+            lopdf::LazyPdf::open(bytes, password, &crate::source::Limits::DEFAULT.reader)
+        };
+        assert!(matches!(
+            lazy(&out, None),
+            Err(lopdf::Error::InvalidPassword)
+        ));
+        let crypt = |path: &Path| {
+            let pdf = lazy(path, Some("secret")).unwrap();
+            Crypt::of(&pdf).unwrap().unwrap()
+        };
+        let (now, was) = (crypt(&out), crypt(&enc));
+        assert_eq!(now.dict().get(b"P").ok(), was.dict().get(b"P").ok());
+        assert_eq!(now.first_id().unwrap(), was.first_id().unwrap());
+        let saved = crate::file::load_pdf(&out, Some("secret")).unwrap();
         let pages = saved.get_pages();
         assert_eq!(pages.len(), 2);
         assert_eq!(
@@ -4264,15 +4355,114 @@ mod tests {
                 .unwrap(),
             90
         );
-        // The content survived decryption: the page's text is readable.
+        // The content reads back with the password.
         let content = saved.get_page_content(pages[&1]);
         assert!(
-            String::from_utf8_lossy(&content).contains("E"),
+            String::from_utf8_lossy(&content).contains("MARK E 0"),
             "content stream not decrypted"
         );
         // Outline came through too.
-        let items = read_outline(&std::fs::read(&out).unwrap());
+        let items = outline_in(&saved);
         assert_eq!(items[0].1, "Top");
+
+        // Saved in place, it's appended to, and encrypted the same way.
+        let original = std::fs::read(&enc).unwrap();
+        assert_eq!(
+            save_to_path(&model.snapshot(), &enc).unwrap(),
+            Strategy::Incremental
+        );
+        let bytes = std::fs::read(&enc).unwrap();
+        assert!(bytes.starts_with(&original));
+        assert!(matches!(
+            lazy(&enc, None),
+            Err(lopdf::Error::InvalidPassword)
+        ));
+        assert_eq!(crypt(&enc).dict(), was.dict());
+        let saved = crate::file::load_pdf(&enc, Some("secret")).unwrap();
+        let pages = saved.get_pages();
+        let turned = saved.get_dictionary(pages[&2]).unwrap().get(b"Rotate");
+        assert_eq!(turned.unwrap().as_i64().unwrap(), 90);
+    }
+
+    /// Another program changed the file since it was opened (bug 2): a
+    /// save in place writes nothing and asks, though the change kept the
+    /// file's length. Save As still saves, and Overwrite replaces theirs.
+    #[test]
+    fn a_file_changed_since_open_asks() {
+        let dir = tempdir();
+        let path = make_pdf(&dir, "a.pdf", "A", 2, &[]);
+        let original = std::fs::read(&path).unwrap();
+        let mut model = open(&path, &[], Box::new(FixedCount(10)));
+        let p0 = model.page(0).unwrap().id;
+        model
+            .apply(
+                Edit::RotatePages {
+                    ids: vec![p0],
+                    by: Rotation::R90,
+                },
+                "rot",
+            )
+            .unwrap();
+        let snap = model.snapshot();
+        let mut theirs = original.clone();
+        *theirs.last_mut().unwrap() ^= 0x20;
+        std::fs::write(&path, &theirs).unwrap();
+        let asks = SaveStop::Ask(Ask::FileChanged {
+            path: path.as_path().into(),
+        });
+        for signed in [Signed::Ask, Signed::Rewrite, Signed::Append] {
+            let err = save_to_path_noting(&snap, &path, signed, IfChanged::Ask).unwrap_err();
+            assert_eq!(err.downcast_ref::<SaveStop>(), Some(&asks), "{signed:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), theirs, "{signed:?}");
+        }
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["a.pdf"], "nothing was started beside it");
+        // Saved as another file: written there, and theirs left.
+        let copy = dir.join("copy.pdf");
+        assert_eq!(save_to_path(&snap, &copy).unwrap(), Strategy::Rewrite);
+        let turned = vec![("A 0".to_string(), 90), ("A 1".to_string(), 0)];
+        assert_eq!(read_pages(&std::fs::read(&copy).unwrap()), turned);
+        assert_eq!(std::fs::read(&path).unwrap(), theirs);
+        // Overwritten: what sheaf read, with the edit, replaces theirs.
+        let (strategy, _) =
+            save_to_path_noting(&snap, &path, Signed::Rewrite, IfChanged::Overwrite).unwrap();
+        assert_eq!(strategy, Strategy::Incremental);
+        let ours = std::fs::read(&path).unwrap();
+        assert!(ours.starts_with(&original));
+        assert_eq!(read_pages(&ours), turned);
+    }
+
+    /// The check just before the rename: a file another program changed
+    /// while the save was writing stops it with the same ask, and is left
+    /// as they left it, with nothing beside it.
+    #[test]
+    fn a_file_changed_while_saving_asks() {
+        let dir = tempdir();
+        let path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
+        let (read, meta) = sheaf_core::read_file_and_metadata(&path).unwrap();
+        let stamp = durable::FileStamp::of(&meta, &read).unwrap();
+        // The same length, a new tail.
+        let mut theirs = read.to_vec();
+        *theirs.last_mut().unwrap() ^= 0x20;
+        std::fs::write(&path, &theirs).unwrap();
+        let err = write_checked(&path, b"ours", Some(&stamp)).unwrap_err();
+        let asks = SaveStop::Ask(Ask::FileChanged {
+            path: path.as_path().into(),
+        });
+        assert_eq!(err.downcast_ref::<SaveStop>(), Some(&asks));
+        assert_eq!(std::fs::read(&path).unwrap(), theirs);
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["a.pdf"], "no temp file left");
+        // A stamp that holds lets it through.
+        let now = durable::FileStamp::read(&path).unwrap();
+        write_checked(&path, b"ours", Some(&now)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"ours");
     }
 
     /// Extract keeps the chosen pages in order, their marks, and the

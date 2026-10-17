@@ -3,9 +3,10 @@
 //! See `docs/document-model.md`.
 //!
 //! The files are blobs in a [`Store`], each PDF read lazily as a
-//! [`Source`] with lopdf (vendored, `vendor/lopdf`), which also writes
-//! saves. Nothing in here knows about PDFium: rendering lives in other
-//! crates.
+//! [`Source`] with lopdf (vendored, `vendor/lopdf`). Saves are written by
+//! sheaf's own [`serialize`], encrypted as their source was and replacing
+//! a file durably. Nothing in here knows about PDFium: rendering lives in
+//! other crates.
 
 pub mod annot;
 pub mod assets;
@@ -33,6 +34,7 @@ pub mod prim;
 pub mod properties;
 pub mod recovery;
 pub mod save;
+pub mod serialize;
 pub mod source;
 pub mod stamp_lib;
 pub mod stamps;

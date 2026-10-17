@@ -13,8 +13,9 @@
 //! as `<kind>-7000.pdf`. One that's missing, older than gen.py or not the
 //! length slice 2 measured is made again, with python3; the heavy one
 //! needs DejaVuSans.ttf (gen.py's `--font`). Beside them go the copy a
-//! fixture's document is opened from and saved to, and the cache sheaf's
-//! generated files would go to, in `cache/`.
+//! fixture's document is opened from and saved to, the synthetic's and
+//! the heavy's AES-256 copies (`<kind>-7000-aes256.pdf`), and the cache
+//! sheaf's generated files would go to, in `cache/`.
 //!
 //! Each fixture runs in two processes of its own, the second for the
 //! flatten, and each prints a table: every row's number now, slice 2's
@@ -28,7 +29,12 @@
 //! crop's copy) have run up to 1.46× faster in another build of this file,
 //! with nothing they run changed, and hold steady within a build. That is
 //! code placement: a Rewrite of the heavy 7k is mostly sheaf-doc's own
-//! loops around lopdf's load and save. The baselines are this file's.
+//! loops around lopdf's load and the writer. The baselines are this file's.
+//! From slice 7 the Rewrite, Bates' Rewrite, the flatten and the
+//! incremental save write through sheaf-doc's `serialize/` rather than
+//! lopdf's writer (crop's copy still goes through lopdf's until slice 15),
+//! and the incremental save and the flatten replace their file durably,
+//! fsynced with its directory.
 //!
 //! A gate is asserted from the slice that changes its path: the geometry
 //! walk (slice 3), ready (4), Rewrite (9), the incremental save of one mark
@@ -41,7 +47,10 @@
 //! baseline nor a gate, and a Rewrite of 20,000 of sheaf's marks, some of
 //! them text, beside the writer from before marks were drawn through the
 //! content toolkit, with no gate; from slice 6 Bates' apply classifies
-//! every page, cold, to find an old header to strip. So far slice 1's
+//! every page, cold, to find an old header to strip. Slice 7's are the
+//! incremental save of one mark and the Rewrite again on an AES-256 copy
+//! of the synthetic and heavy fixtures, made by lopdf beside them, with
+//! neither a baseline nor a gate. So far slice 1's
 //! history bench, slice 3's geometry walk, slice 4's ready and slice 5's
 //! ready on 20,000 of sheaf's marks assert, after their tables print. The
 //! 200 OCR versions take about 5 GB until slice 12 bounds history, and
@@ -53,9 +62,11 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lopdf::Object;
 use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::open::Facts;
 use sheaf_doc::save::Strategy;
+use sheaf_doc::serialize::fixture::{USER, encrypt_dict, rc4_aes_128_and_aes_256};
 use sheaf_doc::stamps::{Bates, HeaderFooter};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::{
@@ -335,10 +346,9 @@ fn gates(kind: Kind) {
     // SAFETY: every test here sets the same value before anything reads it.
     unsafe { std::env::set_var("SHEAF_CACHE_DIR", &cache) };
     // The document is opened from a copy, so the incremental save can
-    // write to its own file; the copy is put back after every save.
+    // write to its own file.
     let work = dir.join(format!("{}-{PAGES}-work.pdf", kind.name()));
-    let restore = || std::fs::copy(&path, &work).unwrap();
-    restore();
+    let restore = work_copy(&path, &work);
     let base = kind.baseline();
     let file_mb = mb(std::fs::metadata(&path).unwrap().len());
     let middle = PAGES / 2;
@@ -608,8 +618,7 @@ fn gates(kind: Kind) {
     let (drawn, _) = measure(RUNS, || {
         timed(|| sheaf_doc::save::rewrite(&snap).unwrap()).0
     });
-    drop((snap, engines));
-    doc.undo().unwrap();
+    drop((snap, engines, doc));
     rows.push(Row::time(
         "Bates apply, all pages",
         apply,
@@ -624,6 +633,9 @@ fn gates(kind: Kind) {
     ));
 
     std::fs::remove_file(&work).unwrap();
+    if kind != Kind::Scanned {
+        rows.extend(aes_256_rows(kind, &path));
+    }
 
     print_table(
         &format!("{} 7k: {}, {file_mb:.1} MB", kind.name(), path.display()),
@@ -639,6 +651,51 @@ fn gates(kind: Kind) {
     if let Some(gate) = ready_gate {
         assert!(ready < gate, "ready took {ready:?}, over {gate:?}");
     }
+}
+
+/// The incremental save of one mark and the Rewrite on [`aes_256`]'s copy
+/// of the `kind` fixture, opened with its password, so every object they
+/// write is encrypted, an AES IV a keyed hash (slice 7). Neither has a
+/// baseline or a gate: the plain rows are what they cost beside.
+fn aes_256_rows(kind: Kind, fixture: &Path) -> [Row; 2] {
+    let encrypted = aes_256(kind, fixture);
+    let work = fixture.with_file_name(format!("{}-{PAGES}-aes256-work.pdf", kind.name()));
+    let restore = work_copy(&encrypted, &work);
+    let mut doc = sheaf_doc::open::file(&work, Some(USER)).unwrap().doc;
+    let snap = doc.snapshot();
+    let primary = snap.source(snap.primary).unwrap();
+    assert!(primary.src.crypt().is_some(), "the copy isn't encrypted");
+    let page = doc.page(PAGES as usize / 2).unwrap().id;
+    doc.apply(
+        Edit::AnnotAdd {
+            page,
+            annot: square(0),
+        },
+        "mark",
+    )
+    .unwrap();
+    let marked = doc.snapshot();
+    let (incremental, _) = measure(RUNS, || {
+        let (t, strategy) = timed(|| sheaf_doc::save::save_to_path(&marked, &work).unwrap());
+        assert_eq!(strategy, Strategy::Incremental, "one mark saved by rewrite");
+        restore();
+        t
+    });
+    drop(marked);
+    let (rewrite, _) = measure(RUNS, || {
+        timed(|| sheaf_doc::save::rewrite(&snap).unwrap()).0
+    });
+    drop((snap, doc));
+    std::fs::remove_file(&work).unwrap();
+    [
+        Row::time(
+            "incremental save, one mark, AES-256",
+            incremental,
+            f64::NAN,
+            "",
+        ),
+        Row::time("Rewrite, AES-256", rewrite, f64::NAN, ""),
+    ]
 }
 
 /// The flatten's rows on the `kind` fixture, from the file as opened:
@@ -1005,6 +1062,46 @@ fn fixture(kind: Kind) -> PathBuf {
         println!("warning: {why}: gen.py's --font isn't DejaVuSans.ttf, so HEAVY doesn't apply");
     }
     path
+}
+
+/// The `kind` fixture encrypted with AES-256, its user password
+/// [`USER`], as `<kind>-7000-aes256.pdf` beside it: made by lopdf
+/// (`Document::encrypt`, then its writer, which writes no object streams)
+/// when it's missing or older than the fixture. A fixture with no `/ID` is
+/// given one, as a file with `/Encrypt` must have.
+fn aes_256(kind: Kind, fixture: &Path) -> PathBuf {
+    let path = fixture.with_file_name(format!("{}-{PAGES}-aes256.pdf", kind.name()));
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if modified(&path) < modified(fixture) {
+        let mut pdf = lopdf::Document::load(fixture).unwrap();
+        if !pdf.trailer.has(b"ID") {
+            let id = Object::string_literal("sheaf 7k gate id");
+            pdf.trailer.set("ID", vec![id.clone(), id]);
+        }
+        let [.., (_, state)] = rc4_aes_128_and_aes_256(&pdf);
+        pdf.encrypt(&state).unwrap();
+        let at = pdf.trailer.get(b"Encrypt").unwrap().as_reference().unwrap();
+        *pdf.get_dictionary_mut(at).unwrap() = encrypt_dict(&state);
+        pdf.save(&path).unwrap();
+    }
+    path
+}
+
+/// `fixture` copied to `work`, for a document to be opened from and saved
+/// to, and what puts it back after each save: the fixture's bytes, with
+/// the time the copy was made, so the next save finds the file it read.
+/// Each copy is synced, so a save's fsync doesn't write it out too.
+fn work_copy(fixture: &Path, work: &Path) -> impl Fn() + use<> {
+    std::fs::copy(fixture, work).unwrap();
+    std::fs::File::open(work).unwrap().sync_all().unwrap();
+    let made = std::fs::metadata(work).unwrap().modified().unwrap();
+    let (fixture, work) = (fixture.to_path_buf(), work.to_path_buf());
+    move || {
+        std::fs::copy(&fixture, &work).unwrap();
+        let file = std::fs::File::options().write(true).open(&work).unwrap();
+        file.set_modified(made).unwrap();
+        file.sync_all().unwrap();
+    }
 }
 
 /// Where the fixtures go: `$SHEAF_GATE_DIR`, else `target/gate-7k/`.

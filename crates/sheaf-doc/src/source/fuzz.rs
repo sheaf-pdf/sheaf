@@ -230,7 +230,8 @@ mod tests {
 
     use super::*;
     use crate::forms::fixture::{Form, every_kind, every_mark_kind, hybrid_reference};
-    use crate::source::lazy_tests::{encrypted, plaintext, stream, with_table};
+    use crate::serialize::fixture::encrypted;
+    use crate::source::lazy_tests::{plaintext, stream, with_table};
 
     /// Mutations of each fixture.
     const CASES: usize = 600;

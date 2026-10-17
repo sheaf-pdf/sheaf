@@ -179,6 +179,8 @@ pub mod pdfium {
     #[cfg(test)]
     mod bookmarks;
     #[cfg(test)]
+    mod encrypted;
+    #[cfg(test)]
     mod frames;
 
     /// Held across every use of PDFium, from a load to the document's

@@ -661,8 +661,13 @@ pub struct DocView {
     /// Recovery data found when opening, until the user has been asked.
     pending_recovery: Option<sheaf_doc::recovery::Recovery>,
     /// A save that would break a signed file's signatures, until the user
-    /// has chosen how to save it (M10 proposal 7).
-    pending_signed: Option<(PathBuf, save::WouldBreakSignatures)>,
+    /// has chosen how to save it (M10 proposal 7), and whether the user
+    /// already chose to overwrite a file changed on disk.
+    pending_signed: Option<(PathBuf, save::WouldBreakSignatures, save::IfChanged)>,
+    /// A save stopped because another program changed the file since it
+    /// was read, until the user has chosen what to do (M10.5 proposal 33):
+    /// where, and how a signed file was to be saved.
+    pending_changed: Option<(PathBuf, save::Signed)>,
     /// A save that would remove an XFA copy holding values sheaf doesn't
     /// show, until the user has agreed (M10 proposal 6).
     pending_xfa: Option<PathBuf>,
@@ -777,6 +782,7 @@ impl DocView {
             selftest_ocr: None,
             pending_recovery: None,
             pending_signed: None,
+            pending_changed: None,
             pending_xfa: None,
             pending_edit_last: None,
             autosave: None,
@@ -1723,16 +1729,17 @@ impl DocView {
             cx.notify();
             return Task::ready(false);
         }
-        self.save_signed(path, save::Signed::Ask, cx)
+        self.save_signed(path, save::Signed::Ask, save::IfChanged::Ask, cx)
     }
 
     /// Ask whether to rewrite a signed file, breaking its signatures, or
     /// append to it, keeping what was removed in its earlier revision; then
-    /// save as chosen. An encrypted file can only be rewritten until M11.
+    /// save as chosen, a file changed on disk as `if_changed` says.
     fn ask_how_to_save_signed(
         &mut self,
         path: PathBuf,
         signed: save::WouldBreakSignatures,
+        if_changed: save::IfChanged,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1741,45 +1748,77 @@ impl DocView {
             "Rewrite (breaks {n} signature{})",
             if n == 1 { "" } else { "s" }
         );
-        let mut answers = vec![gpui::PromptButton::new(rewrite)];
-        if !signed.encrypted {
-            answers.push(gpui::PromptButton::ok(
-                "Append (earlier versions stay in the file)",
-            ));
-        }
-        answers.push(gpui::PromptButton::cancel("Cancel"));
-        let detail = if signed.encrypted {
-            "A full save breaks its signatures, and sheaf can't append to an encrypted file yet."
-        } else {
-            "A full save breaks its signatures. Appending keeps them, and keeps what you removed in the file's earlier version, where anyone can recover it."
-        };
         let rx = sheaf_ui::prompts::ask(
             window,
             cx,
             gpui::PromptLevel::Warning,
             &format!("\"{}\" is signed", self.file_name()),
-            Some(detail),
-            &answers,
+            Some(
+                "A full save breaks its signatures. Appending keeps them, and keeps what you removed in the file's earlier version, where anyone can recover it.",
+            ),
+            &[
+                gpui::PromptButton::new(rewrite),
+                gpui::PromptButton::ok("Append (earlier versions stay in the file)"),
+                gpui::PromptButton::cancel("Cancel"),
+            ],
         );
-        let encrypted = signed.encrypted;
         cx.spawn(async move |this, cx| {
             let how = match rx.await {
                 Ok(0) => save::Signed::Rewrite,
-                Ok(1) if !encrypted => save::Signed::Append,
+                Ok(1) => save::Signed::Append,
                 _ => return,
             };
-            this.update(cx, |v, cx| v.save_signed(path, how, cx).detach())
-                .ok();
+            this.update(cx, |v, cx| {
+                v.save_signed(path, how, if_changed, cx).detach()
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Ask what to do about a file another program changed since sheaf
+    /// read it: save it elsewhere, replace it anyway (losing that program's
+    /// changes) or leave it (M10.5 proposal 33).
+    fn ask_file_changed(
+        &mut self,
+        path: PathBuf,
+        signed: save::Signed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = sheaf_ui::prompts::ask(
+            window,
+            cx,
+            gpui::PromptLevel::Warning,
+            &format!("\"{}\" changed on disk", self.file_name()),
+            Some("Another program changed it since sheaf read it."),
+            &[
+                gpui::PromptButton::ok("Save As…"),
+                gpui::PromptButton::new("Overwrite"),
+                gpui::PromptButton::cancel("Cancel"),
+            ],
+        );
+        cx.spawn(async move |this, cx| {
+            let answer = rx.await;
+            this.update(cx, |v, cx| match answer {
+                Ok(0) => v.save_as(cx),
+                Ok(1) => v
+                    .save_signed(path, signed, save::IfChanged::Overwrite, cx)
+                    .detach(),
+                _ => {}
+            })
+            .ok();
         })
         .detach();
     }
 
     /// [`save_to`](Self::save_to), with a signed file treated as `signed`
-    /// says.
+    /// says and a file changed on disk as `if_changed` says.
     fn save_signed(
         &mut self,
         path: PathBuf,
         signed: save::Signed,
+        if_changed: save::IfChanged,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
         let State::Ready(doc) = &mut self.state else {
@@ -1794,6 +1833,7 @@ impl DocView {
         doc.notice = Some(format!("Saving {}…", path.display()));
         let snapshot = doc.model.snapshot();
         let store = doc.model.store().clone();
+        let password = self.password.clone();
         let timing = self.timing;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -1804,11 +1844,12 @@ impl DocView {
                     let path = path.clone();
                     async move {
                         let (strategy, notes) =
-                            save::save_to_path_noting(&snapshot, &path, signed)?;
+                            save::save_to_path_noting(&snapshot, &path, signed, if_changed)?;
                         // What was written, read back: the source the
-                        // document shows from now on.
-                        let saved = SourceInfo::read(&store, &path, None)?;
-                        let handle = RenderHandle::open_bytes(saved.src.bytes().clone(), None)?;
+                        // document shows from now on. It's encrypted as the
+                        // file was, so it opens with the same password.
+                        let saved = SourceInfo::read(&store, &path, password.as_deref())?;
+                        let handle = RenderHandle::open_bytes(saved.src.bytes().clone(), password)?;
                         anyhow::Ok((saved, handle, strategy, notes))
                     }
                 })
@@ -1855,16 +1896,10 @@ impl DocView {
                         view.path = path.clone();
                         let saved_path = path.clone();
                         cx.defer(move |cx| crate::recent::add(&saved_path, cx));
-                        let was_encrypted = view.password.take().is_some();
                         doc.notice = Some(format!(
-                            "Saved {} ({strategy:?}) in {:?}{}{}",
+                            "Saved {} ({strategy:?}) in {:?}{}",
                             path.display(),
                             t.elapsed(),
-                            if was_encrypted {
-                                " — password protection removed"
-                            } else {
-                                ""
-                            },
                             notes.iter().map(|n| format!(" — {n}")).collect::<String>()
                         ));
                         if timing {
@@ -1886,16 +1921,18 @@ impl DocView {
                         true
                     }
                     Err(e) => {
-                        match e.downcast_ref::<save::WouldBreakSignatures>() {
-                            // Asked next frame.
-                            Some(signed) => {
-                                doc.notice = None;
-                                view.pending_signed = Some((path.clone(), signed.clone()));
-                            }
-                            None => {
-                                doc.notice = Some(format!("Save failed: {e:#}"));
-                                log::error!("save: {e:#}");
-                            }
+                        // Asked next frame.
+                        if let Some(broken) = e.downcast_ref::<save::WouldBreakSignatures>() {
+                            doc.notice = None;
+                            view.pending_signed = Some((path.clone(), broken.clone(), if_changed));
+                        } else if let Some(save::SaveStop::Ask(save::Ask::FileChanged { .. })) =
+                            e.downcast_ref::<save::SaveStop>()
+                        {
+                            doc.notice = None;
+                            view.pending_changed = Some((path.clone(), signed));
+                        } else {
+                            doc.notice = Some(format!("Save failed: {e:#}"));
+                            log::error!("save: {e:#}");
                         }
                         false
                     }
@@ -4595,8 +4632,11 @@ impl Render for DocView {
         if let Some(rec) = self.pending_recovery.take() {
             self.offer_recovery(rec, window, cx);
         }
-        if let Some((path, signed)) = self.pending_signed.take() {
-            self.ask_how_to_save_signed(path, signed, window, cx);
+        if let Some((path, signed, if_changed)) = self.pending_signed.take() {
+            self.ask_how_to_save_signed(path, signed, if_changed, window, cx);
+        }
+        if let Some((path, signed)) = self.pending_changed.take() {
+            self.ask_file_changed(path, signed, window, cx);
         }
         if let Some(path) = self.pending_xfa.take() {
             self.ask_to_drop_xfa_values(path, window, cx);

@@ -105,6 +105,14 @@ Marked `sheaf:` in the source.
     memory beside the file's bytes. What the read resolves on the way (an
     indirect `/Length`) and a failure the bytes alone decide are kept as
     `get` keeps them.
+  - `encryption` (M10.5 slice 7) gives the decryption the open
+    authenticated and the number of the `/Encrypt` dictionary, which
+    `get` reads as stored. The security handler reads the dictionary
+    only through a reference, so the open refuses a direct one up front
+    (`InvalidPassword`, as the handler's own failure was), and an
+    encrypted `LazyPdf` always has the number. sheaf-doc's
+    `serialize::crypt` keeps both, so a save of an encrypted file
+    encrypts it as it was; its tests cover it.
   - The bytes are a `ByteSource`: an `Arc<[u8]>`, which a parse sees
     from its offset to the end as the eager reader does, or
     `FileBytes`, a file read by position. A parse of a file is given a
@@ -226,6 +234,29 @@ Marked `sheaf:` in the source.
     object by object as it was; one that encrypts only its attachment
     through `/EFF` holds only that encrypted, and reads as it was; and a
     filter `/CF` doesn't have fails the open.
+- `encryption/crypt_filters.rs` and `encryption.rs`, a seam for the
+  AES IVs a writer gives (M10.5 slice 7). At the commit each AES string
+  and stream drew a random IV, so no two saves of a document were the
+  same bytes, and there was no other way to encrypt.
+  - `CryptFilter::encrypt_with_iv` encrypts with the IV a function
+    gives for the plaintext. Only the AES filters ask for one, and their
+    `encrypt` goes through it with a random IV, as at the commit; the
+    others encrypt as `encrypt` does.
+  - `encrypt_object_with` encrypts an object as `encrypt_object` does,
+    the same walk with the same exceptions, with that function's IVs.
+    `encrypt_object`, and so `Document::encrypt`, draws them at random.
+    Both keep strings' formats: a literal holding ciphertext is escaped
+    as any literal is, and reads back as it was.
+  - sheaf-doc's `serialize::crypt` gives each IV as a keyed hash of the
+    object's number and what it encrypts, so a save is deterministic.
+    `serialize::tests` covers it: the objects of the file above,
+    encrypted through it with RC4-128, AES-128, AES-256 and an `/EFF`
+    state and written by sheaf, read lazily and eagerly as they were,
+    each string in its own format; an object
+    encrypts to the same bytes twice and on two threads, and another
+    value, number or generation gets another IV; and cross-reference
+    streams, the metadata when `/EncryptMetadata` is false, encryption
+    dictionaries and a signature's `/Contents` stay as they were.
 - `document.rs`, `traverse_objects`, and `processor.rs`,
   `prune_objects` (M10.5 slice 6): the references found are kept as a
   set beside their list, and pruning looks each object up in a set. At
@@ -268,7 +299,7 @@ as an `f64` changes lopdf's API, and the encryption fixes change what
 every encrypted file reads as. So going back means upstreaming the
 patch: each stream read once, each reading fix above and the
 traversal's set as a pull request of its own, then f64 reals, the
-encryption fixes and `LazyPdf`.
+encryption fixes, the IV seam and `LazyPdf`.
 Until a release has all of it, sheaf carries the patch.
 
 When one does, delete this directory, its line in the root

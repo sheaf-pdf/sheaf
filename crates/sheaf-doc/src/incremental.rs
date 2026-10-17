@@ -3,20 +3,25 @@
 //! The original bytes are preserved verbatim (what Acrobat does by default,
 //! and what auditors like). Only possible when saving a document back to
 //! its own primary file.
+//!
+//! The section is the serializer's ([`serialize::append`]): in the file's
+//! cross-reference kind, its positions counted from the file's header, its
+//! `/ID[0]` kept, and, when the file is encrypted, each object encrypted
+//! with the file's own key, so an encrypted file stays encrypted.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 
 use anyhow::{Context, Result, bail};
-use lopdf::xref::{XrefEntry, XrefType};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
+use lopdf::xref::XrefEntry;
+use lopdf::{Dictionary, Object, ObjectId, dictionary};
 use sheaf_core::Rotation;
 
-use crate::model::Snapshot;
+use crate::model::{Snapshot, SourceInfo};
 use crate::save::{
     LoadedSource, copy_page_dict, is_identity, link_connectors, strip_sheaf_annots, write_outline,
     write_page_annots,
 };
+use crate::serialize;
 use crate::text_layer;
 
 /// Produce the full new file (original bytes + update section). Refuses
@@ -24,7 +29,7 @@ use crate::text_layer;
 /// the earlier revision (M9 bug 14). Whether anything else was removed is
 /// `save::save_to_path`'s to check (`Snapshot::removes_content`).
 pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
-    Ok(build(snap, Mode::Save)?.1)
+    appended(snap, Mode::Save)
 }
 
 /// The update a signed file gets when the reader would rather append than
@@ -32,15 +37,28 @@ pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
 /// page, a changed form's XFA copy and usage rights, a page's old OCR
 /// text) stays in the earlier revision.
 pub fn append(snap: &Snapshot) -> Result<Vec<u8>> {
-    Ok(build(snap, Mode::Append)?.1)
+    appended(snap, Mode::Append)
 }
 
 /// Just the update section, with the length of the original it appends
 /// to. Empty when there's nothing to write. Used for crash recovery.
 pub fn incremental_section(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
-    let (original_len, mut full) = build(snap, Mode::Sidecar)?;
-    let section = full.split_off(original_len);
-    Ok((original_len, section))
+    let section = build(snap, Mode::Sidecar)?;
+    Ok((primary_info(snap)?.src.bytes().len(), section))
+}
+
+/// The primary's bytes with `mode`'s update after them.
+fn appended(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
+    let section = build(snap, mode)?;
+    Ok([&primary_info(snap)?.src.bytes()[..], &section].concat())
+}
+
+/// The primary source's registration.
+fn primary_info(snap: &Snapshot) -> Result<&SourceInfo> {
+    let info = snap
+        .source(snap.primary)
+        .context("primary source missing")?;
+    Ok(info)
 }
 
 /// What an update is for, and so what it refuses.
@@ -59,29 +77,26 @@ enum Mode {
     Sidecar,
 }
 
-/// The original bytes with the update appended, and where the original ends.
-fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
+/// The update section: nothing when there's nothing to write.
+fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
     let primary_id = snap.primary;
-    let info = snap.source(primary_id).context("primary source missing")?;
-    let original = info.src.bytes();
-    let original_len = original.len();
-    let mut pdf =
-        Pdf::load_mem(original).with_context(|| format!("parsing {}", info.name.display()))?;
+    let info = primary_info(snap)?;
     if snap.header_footer_dirty {
         // Drawing it touches every page's content: a rewrite does that.
         bail!("a new header/footer is written by a full save");
     }
-    if pdf.encryption_state.is_some() || pdf.trailer.has(b"Encrypt") {
-        bail!("incremental save of encrypted files is not supported yet");
-    }
-    let prev_startxref = pdf.xref_start;
-    if mode != Mode::Sidecar && prev_startxref == 0 {
+    if mode != Mode::Sidecar && !info.src.base_sound() {
         // lopdf rebuilt a damaged file's cross-references by scanning it:
         // there's no section for /Prev to point at. A rewrite writes new ones.
         bail!("the file's cross-references are damaged; a full save writes new ones");
     }
+    let base = serialize::append::Base::of(&info.src)?;
+    // Decrypted with the file's password, when it has one.
+    let mut pdf = crate::file::load_source(info)?;
+    // New objects are numbered past every number the file uses, those of
+    // its cross-reference streams too.
+    pdf.max_id = pdf.max_id.max(base.size.saturating_sub(1));
     let orig_max_id = pdf.max_id;
-    let xref_type = pdf.reference_table.cross_reference_type;
 
     let primary = LoadedSource::from_pdf(&pdf)?;
     let origins = crate::save::origins(snap);
@@ -96,7 +111,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
     // Objects to (re)write, by id. New objects are allocated through `pdf`
     // so ids never collide; everything above the original max is new.
     let mut changed: BTreeMap<ObjectId, Object> = BTreeMap::new();
-    let catalog_id = pdf.trailer.get(b"Root")?.as_reference()?;
+    let catalog_id = base.root;
     let mut catalog = pdf.get_dictionary(catalog_id)?.clone();
     let mut catalog_changed = false;
 
@@ -445,87 +460,18 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
             changed.entry(id).or_insert_with(|| obj.clone());
         }
     }
-    if changed.is_empty() {
-        return Ok((original_len, original.to_vec()));
-    }
 
-    // ----- serialize the update section ---------------------------------------
-    let generation = |id: ObjectId, pdf: &Pdf| -> u16 {
-        match pdf.reference_table.entries.get(&id.0) {
-            Some(XrefEntry::Normal { generation, .. }) => *generation,
-            _ => id.1,
-        }
-    };
-    let mut out = original.to_vec();
-    if !out.ends_with(b"\n") {
-        out.push(b'\n');
-    }
-    let mut offsets: BTreeMap<u32, (usize, u16)> = BTreeMap::new();
-    for (id, obj) in &changed {
-        let generation = generation(*id, &pdf);
-        offsets.insert(id.0, (out.len(), generation));
-        writeln!(out, "{} {} obj", id.0, generation)?;
-        write_object(&mut out, obj)?;
-        out.extend_from_slice(b"\nendobj\n");
-    }
-
-    let mut trailer = Dictionary::new();
-    trailer.set("Root", Object::Reference(catalog_id));
-    trailer.set("Prev", prev_startxref as i64);
-    for key in [b"Info".as_slice(), b"ID".as_slice()] {
-        if let Ok(v) = pdf.trailer.get(key) {
-            trailer.set(key.to_vec(), v.clone());
-        }
-    }
-
-    match xref_type {
-        XrefType::CrossReferenceTable => {
-            let xref_offset = out.len();
-            trailer.set("Size", (pdf.max_id + 1) as i64);
-            out.extend_from_slice(b"xref\n");
-            for (start, run) in runs(offsets.keys().copied()) {
-                writeln!(out, "{} {}", start, run.len())?;
-                for id in run {
-                    let (off, generation) = offsets[&id];
-                    writeln!(out, "{:010} {:05} n ", off, generation)?;
-                }
-            }
-            out.extend_from_slice(b"trailer\n");
-            write_object(&mut out, &Object::Dictionary(trailer))?;
-            write!(out, "\nstartxref\n{}\n%%EOF\n", xref_offset)?;
-        }
-        XrefType::CrossReferenceStream => {
-            // The stream describes itself too.
-            let xref_id = pdf.new_object_id();
-            let xref_offset = out.len();
-            offsets.insert(xref_id.0, (xref_offset, 0));
-            let mut index = Vec::new();
-            let mut data = Vec::new();
-            for (start, run) in runs(offsets.keys().copied()) {
-                index.push(Object::Integer(start as i64));
-                index.push(Object::Integer(run.len() as i64));
-                for id in run {
-                    let (off, generation) = offsets[&id];
-                    data.push(1u8);
-                    data.extend_from_slice(&(off as u64).to_be_bytes());
-                    data.extend_from_slice(&generation.to_be_bytes());
-                }
-            }
-            trailer.set("Type", Object::Name(b"XRef".to_vec()));
-            trailer.set("Size", (xref_id.0 + 1) as i64);
-            trailer.set(
-                "W",
-                vec![Object::Integer(1), Object::Integer(8), Object::Integer(2)],
-            );
-            trailer.set("Index", index);
-            let mut stream = Stream::new(trailer, data);
-            stream.allows_compression = false;
-            writeln!(out, "{} 0 obj", xref_id.0)?;
-            write_object(&mut out, &Object::Stream(stream))?;
-            write!(out, "\nendobj\nstartxref\n{}\n%%EOF\n", xref_offset)?;
-        }
-    }
-    Ok((original_len, out))
+    // Each object as the generation the file's table gives it.
+    let objects: BTreeMap<ObjectId, Object> = changed
+        .into_iter()
+        .map(|(id, obj)| match pdf.reference_table.entries.get(&id.0) {
+            Some(XrefEntry::Normal { generation, .. }) => ((id.0, *generation), obj),
+            _ => (id, obj),
+        })
+        .collect();
+    let xref_number = pdf.new_object_id().0;
+    let crypt = info.src.crypt().map(|crypt| &**crypt);
+    serialize::append::section(&base, &objects, &[], xref_number, crypt)
 }
 
 /// Each reference in `o`.
@@ -536,113 +482,5 @@ fn refs(o: &Object, f: &mut dyn FnMut(ObjectId)) {
         Object::Dictionary(d) => d.iter().for_each(|(_, o)| refs(o, f)),
         Object::Stream(s) => s.dict.iter().for_each(|(_, o)| refs(o, f)),
         _ => {}
-    }
-}
-
-/// Contiguous runs of ascending ids.
-fn runs(ids: impl Iterator<Item = u32>) -> Vec<(u32, Vec<u32>)> {
-    let mut out: Vec<(u32, Vec<u32>)> = Vec::new();
-    for id in ids {
-        match out.last_mut() {
-            Some((start, run)) if *start + run.len() as u32 == id => run.push(id),
-            _ => out.push((id, vec![id])),
-        }
-    }
-    out
-}
-
-// ----- minimal PDF object serializer (lopdf's writer is private) ----------
-
-fn write_object(out: &mut Vec<u8>, obj: &Object) -> Result<()> {
-    match obj {
-        Object::Null => out.extend_from_slice(b"null"),
-        Object::Boolean(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
-        Object::Integer(i) => write!(out, "{i}")?,
-        Object::Real(r) => {
-            // Shortest form that round-trips reasonably; PDF has no exponent syntax.
-            let s = format!("{:.6}", r);
-            let s = s.trim_end_matches('0').trim_end_matches('.');
-            out.extend_from_slice(if s.is_empty() || s == "-" {
-                b"0"
-            } else {
-                s.as_bytes()
-            });
-        }
-        Object::Name(n) => write_name(out, n),
-        Object::String(bytes, _) => {
-            // Hex form is always valid regardless of content or the original
-            // format flag.
-            let _ = StringFormat::Hexadecimal;
-            out.push(b'<');
-            for b in bytes {
-                write!(out, "{:02X}", b)?;
-            }
-            out.push(b'>');
-        }
-        Object::Array(items) => {
-            out.push(b'[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(b' ');
-                }
-                write_object(out, item)?;
-            }
-            out.push(b']');
-        }
-        Object::Dictionary(d) => write_dict(out, d)?,
-        Object::Stream(st) => {
-            let mut dict = st.dict.clone();
-            dict.set("Length", st.content.len() as i64);
-            write_dict(out, &dict)?;
-            out.extend_from_slice(b"\nstream\n");
-            out.extend_from_slice(&st.content);
-            out.extend_from_slice(b"\nendstream");
-        }
-        Object::Reference((n, g)) => write!(out, "{n} {g} R")?,
-    }
-    Ok(())
-}
-
-fn write_dict(out: &mut Vec<u8>, d: &Dictionary) -> Result<()> {
-    out.extend_from_slice(b"<<");
-    for (k, v) in d.iter() {
-        write_name(out, k);
-        out.push(b' ');
-        write_object(out, v)?;
-        out.push(b' ');
-    }
-    out.extend_from_slice(b">>");
-    Ok(())
-}
-
-fn write_name(out: &mut Vec<u8>, name: &[u8]) {
-    out.push(b'/');
-    for &b in name {
-        let regular = b.is_ascii_alphanumeric()
-            || matches!(
-                b,
-                b'-' | b'_'
-                    | b'.'
-                    | b'+'
-                    | b'@'
-                    | b'*'
-                    | b'$'
-                    | b','
-                    | b':'
-                    | b';'
-                    | b'='
-                    | b'?'
-                    | b'!'
-                    | b'^'
-                    | b'~'
-                    | b'|'
-                    | b'&'
-                    | b'\''
-            );
-        if regular && b > b' ' && b < 0x7f {
-            out.push(b);
-        } else {
-            out.extend_from_slice(format!("#{:02X}", b).as_bytes());
-        }
     }
 }

@@ -13,7 +13,7 @@ mod conformance;
 #[doc(hidden)]
 pub mod fuzz;
 #[cfg(test)]
-mod lazy_tests;
+pub(crate) mod lazy_tests;
 mod limits;
 mod pages;
 #[cfg(test)]
@@ -27,15 +27,18 @@ use sheaf_core::PageSize;
 
 use crate::content::{ContentError, DrawnForms, PageBlocks};
 use crate::geom::Geom;
+use crate::serialize::crypt::Crypt;
 use crate::store::{Blob, BlobCollision, BlobId};
 
 pub use conformance::{Conformance, PdfA};
 pub use limits::{ContentLimits, FormLimits, Limits, PageTreeLimits};
 pub use pages::{PageFacts, Parent};
 
-/// A PDF, parsed: its blob, read lazily, and its page table.
+/// A PDF, parsed: its blob, read lazily, how it's encrypted, and its
+/// page table.
 pub struct Source {
     blob: Blob,
+    crypt: Option<Arc<Crypt>>,
     pdf: LazyPdf,
     limits: Limits,
     pages: Arc<[PageFacts]>,
@@ -93,13 +96,15 @@ pub enum PageTreeError {
 }
 
 impl Source {
-    /// `blob` read under `limits`: its cross-reference sections, trailer
-    /// and page table.
+    /// `blob` read under `limits`: its cross-reference sections, trailer,
+    /// encryption and page table.
     pub(crate) fn open(blob: Blob, limits: &Limits) -> Result<Source, OpenError> {
         let pdf = LazyPdf::open(blob.bytes().clone(), blob.password(), &limits.reader)?;
+        let crypt = Crypt::of(&pdf)?.map(Arc::new);
         let pages: Arc<[PageFacts]> = pages::table(&pdf, &limits.page_tree)?.into();
         Ok(Source {
             blob,
+            crypt,
             pdf,
             limits: *limits,
             blocks: pages.iter().map(|_| OnceLock::new()).collect(),
@@ -143,6 +148,13 @@ impl Source {
 
     pub fn xref(&self) -> &XrefFacts {
         self.pdf.xref()
+    }
+
+    /// How it's encrypted, for a save to write it encrypted the same way:
+    /// its filters (`StmF`, `StrF`, `EFF`), its key, its `/Encrypt` as
+    /// stored and its `/ID`. None when it isn't.
+    pub fn crypt(&self) -> Option<&Arc<Crypt>> {
+        self.crypt.as_ref()
     }
 
     pub fn object(&self, id: ObjectId) -> lopdf::Result<Arc<Object>> {

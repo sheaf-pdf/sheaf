@@ -35,7 +35,8 @@ Src = Arc<Source>    a Blob parsed lazily (lopdf's LazyPdf), under one Limits,
                      page's Geom, inherited /Resources, /Contents, /Annots),
                      XrefFacts, conformance. Immutable.
 
-SourceInfo           { src: Src, name: PathBuf, derived: Option<Derived> }
+SourceInfo           { src: Src, name: PathBuf, derived: Option<Derived>,
+                       stamp: Option<FileStamp> }   // the file as read (Saving)
                      a registration, which a SourceId names (until M10.5 slice
                      11 makes the BlobId the identity): the same file inserted
                      twice is two registrations of one Src.
@@ -730,8 +731,9 @@ bookmarks that targeted it.
 
 ## Saving
 
-Materialization of `(DocState, sources)` → bytes. Both strategies use lopdf
-for object serialization.
+Materialization of `(DocState, sources)` → bytes. Two strategies, both
+written by sheaf-doc's own serializer (`serialize/`, below); lopdf only
+holds the object graph a Rewrite edits.
 
 **Rewrite** (M2 slice 3, first): load `sources[0]` in lopdf, rebuild the page
 tree from `state.pages` (copying page object subgraphs from other sources
@@ -740,18 +742,21 @@ with renumbering), write each page's rotation as its `/Rotate`, rebuild
 appearance and, in `/SheafAnnot`, its PageSpace JSON and staleness digest:
 version 2, see Coordinates), then cut whatever still points at a page that
 isn't kept (`kept::keep_only`: links, named destinations, the open action,
-form widgets, the structure tree) so pruning takes it out, and save. A copy
-never follows a reference to a page it isn't copying (`save::remap`).
-Simple, always correct, O(file). Used for "Save As" and as the fallback.
+form widgets, the structure tree) so pruning takes it out, and write the
+whole file (`serialize::full`). A copy never follows a reference to a page
+it isn't copying (`save::remap`). Simple, always correct, O(file). Used for
+"Save As" and as the fallback.
 
 **Incremental** (M2 slice 3, second): append to the original bytes a new
 section containing only changed/new objects, a new xref, and a trailer with
 `/Prev`. Preserves the original bytes verbatim (audit-friendly, and what
 Acrobat does by default). Requires knowing which objects changed — derived by
 diffing `state` against the structure read from the source, not tracked
-during editing. lopdf does not write incremental updates, so this is a small
-writer of our own on top of lopdf's object serializer. Only possible when
-`sources[0]` is the file being saved to; otherwise fall back to rewrite.
+during editing. The primary is loaded with its password and the section
+is the serializer's (`serialize::append`), so an encrypted file appends
+encrypted, a signed one included. Only possible when `sources[0]` is the
+file being saved to and its cross-references read as they are
+(`base_sound()`); otherwise fall back to rewrite.
 Also a rewrite when anything in the file was removed since it was saved (a
 page, a mark, a bookmark, OCR text replaced: `Snapshot::removes_content`),
 since an incremental save would leave it in the earlier revision. It writes
@@ -779,7 +784,115 @@ completion the saved file is read back into the store as a fresh single
 source replacing all the others, and `saved = cursor`; each page keeps its
 rotation, now its saved page's own. History is kept (undo across a save
 works; the snapshots still reference the old sources, which stay registered
-until the versions holding them are pruned).
+until the versions holding them are pruned). An encrypted file is read
+back with the document's password, which the view keeps.
+
+### One writer (M10.5 slice 7)
+
+Saves, Save As, extracted pages, Clean Copy, Export Flattened, print and
+recovery sidecars reach their bytes through `serialize/` (§11.7 of
+`todos/m10.5-edit-api.md`). lopdf's writer still writes:
+
+- the derived copies, in memory, until slices 15 to 17 delete them;
+- the comment summary and FDF files, until slice 19's exports;
+- PDFs made from images and blank pages (`images::to_pdf`,
+  `generated::blank_pages`): Images to PDF and a scan without OCR, at
+  the path the reader picked, and inserted image and blank pages and
+  Combine's image items, through the generated cache, until slice 19's
+  memory sources;
+- the stamp library's files (`stamp_lib`: a collection, a stamp's
+  one-page PDF, an image stamp), the reader's own and outside the edit
+  API (§15), until slice 19;
+- pictures PDFium draws from memory (a tape, the layers panel's copy).
+
+- **Objects** (`object`): a direct object as PDF syntax, and an indirect
+  object's `n g obj` frame. Reals are f64 in their shortest round-trip
+  form, always with a point and never an exponent: a NaN or an infinity
+  is refused and nothing is written, magnitudes are clamped to ±3.4e38,
+  and nonzero ones under 1.175e-38 are 0 (Annex C). Strings keep their
+  format, names are escaped, and a stream's `/Length` is its data's.
+- **Cross-references** (`xref`), as a table or a stream in the base's
+  kind: a whole file's one subsection `[0, Size)`, every number it
+  doesn't list free and the free entries linked from entry 0; an
+  update's runs of the numbers it lists, a deleted object free at its
+  generation + 1. A stream lists itself, with `/Index` and a `/W` as
+  narrow as its fields allow, uncompressed. Positions are written from
+  the header, so a file with bytes before `%PDF-` appends as PDFium,
+  pdf.js and qpdf read it; an offset a table's ten digits can't hold is
+  refused.
+- **A whole file** (`full`): the header at the document's version,
+  every object in number order, and one section. Object streams,
+  cross-reference streams and linearization dictionaries are left out
+  (an object stream's members are written as objects of their own), and
+  the trailer keeps its keys but its old sections' own, `/Encrypt` and
+  `/ID`. A stream the save made was compressed where it was made; a
+  source's is written as stored, never re-encoded, so a Rewrite of an
+  uncompressed file stays uncompressed.
+- **An update** (`append`), after the base the source's `XrefFacts`
+  describe: `/Prev` at its last section's real start, `/Root` and
+  `/Info` as stored, `/Size` past every number the base uses, its
+  cross-reference streams' included. Nothing to write is no section.
+- **`/ID`:** the first string is kept and the second is a hash of what
+  was written, so the same objects write the same bytes. The first is
+  read as lopdf makes an RC4 or AES-128 key from it, the array's first
+  string however many it has, so a file whose `/ID` is one string keeps
+  its key, and gets a second. An encrypted file without one (only
+  AES-256 can open without it) gets the hash for both; a plain one
+  without one gets none.
+- **Encryption** (`crypt`, bug 4 and proposal 23): an encrypted source
+  keeps how it's encrypted (`Source::crypt()`: the decryption its
+  password opened, the `/Encrypt` dictionary as stored, its number, and
+  `/ID[0]`). A save encrypts each object it writes on its own, under the
+  number it's written as, through vendored lopdf's `encrypt_object_with`
+  (`vendor/lopdf/SHEAF.md`): strings in stream dictionaries too, an
+  embedded file by `/EFF`'s filter, and the `/Encrypt` dictionary,
+  cross-reference streams, metadata when `/EncryptMetadata` is false and
+  a signature's `/Contents` left as they are. An AES IV is the first 16
+  bytes of HMAC-SHA256, under the file key, of the object's number and
+  generation and what it encrypts, so a save is deterministic and no IV
+  serves two plaintexts. An encrypted string keeps its format, a literal
+  escaped as any is, so it takes about its own length, not twice it. The
+  `/Encrypt` dictionary, its `/P` with it, is written as stored and
+  `/ID[0]` kept, so the file opens with the same passwords and
+  permissions: a Rewrite writes the dictionary as a new object, an
+  update repeats the base's reference. lopdf opens an encrypted file
+  only when its trailer refers to the dictionary, never when it's
+  direct. lopdf's eager reader still takes `/Encrypt` out of the
+  document it loads, so the writers take it from the source; sheaf's
+  loads no longer strip it.
+- **Which outputs stay encrypted** (proposal 10): saves, Save As,
+  extract and split, Clean Copy, Export Flattened and Combine keep the
+  primary's encryption; print, page images and the comment summary are
+  unencrypted. Encryption follows the primary: pages from an encrypted
+  file inserted into a plain one come out plain, and a plain file's
+  pages combined into an encrypted one come out encrypted.
+- **Durable writes** (`durable`, bug 2): a file is replaced whole
+  through a temp file beside it, `.<name>.<16 hex digits>.sheaf-tmp`
+  (the name cut short so the whole fits in 255 bytes), made with
+  create-new, so two saves never share one. It gets the target's
+  permissions (Unix), is fsynced, is renamed over the target, and the
+  directory is fsynced (Unix): a directory that can't be read or synced
+  is logged, not a failed save, since the file is replaced by then. A
+  symbolic link is followed to its file and stays a link. Any failure
+  removes the temp file. Saves, Save As, extracted pages, Clean Copy,
+  Export Flattened, recovery sidecars, image PDFs, scans and the stamp
+  library's collections are written so; print's PDF, page images and
+  comment exports aren't yet (slice 19).
+
+**A file another program changed** (proposal 33). Reading a file stamps
+it from the open handle, `FileStamp { len, mtime, tail }` (the tail an
+xxh3-128 of its last 64 KiB), on the primary's `SourceInfo`, and the
+app's read of the saved file after a save stamps it again. A save to the
+primary's own file checks the stamp before writing anything and again
+just before the rename. If the file was appended to, rewritten at its
+length or only touched, nothing is written and the save stops with
+`SaveStop::Ask(Ask::FileChanged)`; the app asks Save As…, Overwrite or
+Cancel, and Overwrite saves again with `IfChanged::Overwrite`, which
+replaces the file and the other program's change with it. Slice 10 adds
+the hash of the window at the last `startxref` and the whole file's
+`content_hash`. A document recovered after a crash isn't checked yet:
+its primary is the recovered temp file, so a save to the original is a
+Rewrite with no stamp to check (slice 9).
 
 ## Rendering edited pages: the spikes (M10.5 slice 2)
 

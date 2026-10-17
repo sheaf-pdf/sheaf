@@ -164,6 +164,7 @@ fn a_stamp_from_a_cropped_turned_page_lands_where_it_shows() {
             .unwrap(),
         name: "blank.pdf".into(),
         derived: None,
+        stamp: None,
     };
     let mut doc = Document::new(store, primary, &[], Box::new(FixedCount(10)));
     doc.assets()

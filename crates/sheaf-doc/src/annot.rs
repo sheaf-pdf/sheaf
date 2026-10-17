@@ -1880,12 +1880,12 @@ struct Appearance {
 }
 
 impl Appearance {
-    /// It as a form in `pdf`, the resources written through `res`, once a
-    /// save each.
+    /// It as a form in `pdf`, compressed, the resources written through
+    /// `res`, once a save each.
     fn write(self, pdf: &mut lopdf::Document, res: &mut ResObjects) -> lopdf::ObjectId {
         let mut resources = Dictionary::new();
         res.bind(pdf, &self.needs, &mut resources);
-        pdf.add_object(Stream::new(
+        let mut form = Stream::new(
             dictionary! {
                 "Type" => "XObject",
                 "Subtype" => "Form",
@@ -1893,7 +1893,9 @@ impl Appearance {
                 "Resources" => resources,
             },
             self.content,
-        ))
+        );
+        let _ = form.compress();
+        pdf.add_object(form)
     }
 }
 

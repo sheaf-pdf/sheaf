@@ -19,8 +19,8 @@ const MAX_ITEMS: usize = 200_000;
 
 /// A bookmark as PDFium reads it.
 #[derive(Debug)]
-struct Bookmark {
-    title: String,
+pub(super) struct Bookmark {
+    pub(super) title: String,
     page: Option<u32>,
     depth: u16,
     /// Where on `page` it lands: an `/XYZ` position in PageSpace, or
@@ -30,7 +30,7 @@ struct Bookmark {
 
 /// `engine`'s bookmark tree, flattened in pre-order, read under one
 /// hold of the lock.
-fn bookmarks(engine: &PdfiumEngine) -> Vec<Bookmark> {
+pub(super) fn bookmarks(engine: &PdfiumEngine) -> Vec<Bookmark> {
     let _pdfium = lock();
     let root = engine.doc.bookmarks().root();
     if root.is_some() {
@@ -191,6 +191,7 @@ fn positions_round_trip_through_pdfium_and_the_source() {
         src,
         name: "src.pdf".into(),
         derived: None,
+        stamp: None,
     };
     let model = Document::new(
         store,

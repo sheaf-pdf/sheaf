@@ -482,7 +482,8 @@ pub struct AnnotsInFile {
 
 /// A source as lopdf sees it, decrypted as [`load_pdf`] does: its blob's
 /// bytes, opened with its password, so a file replaced since (by a save in
-/// place) doesn't matter.
+/// place) doesn't matter. A save that writes it encrypts with the
+/// source's [`crypt`](crate::source::Source::crypt).
 pub fn load_source(info: &crate::SourceInfo) -> Result<lopdf::Document> {
     load_pdf_mem(info.src.bytes(), info.src.password())
         .with_context(|| format!("loading {}", info.name.display()))
@@ -496,16 +497,16 @@ pub fn load_pdf_mem(bytes: &[u8], password: Option<&str>) -> Result<lopdf::Docum
         pdf = lopdf::Document::load_mem_with_options(bytes, options)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("decrypting")?;
-        pdf.trailer.remove(b"Encrypt");
-        pdf.encryption_state = None;
     }
     Ok(pdf)
 }
 
 /// Load a file with lopdf and, if it's encrypted, decrypt it in memory with
-/// `password` (or the empty user password many files use). The result is
-/// plain: strings and streams readable, `/Encrypt` gone, so writing it
-/// produces an unencrypted file.
+/// `password` (or the empty user password many files use): strings and
+/// streams readable, lopdf's `EncryptionState` kept. lopdf's reader takes
+/// the `/Encrypt` dictionary out, so lopdf's own writer would write the
+/// file unencrypted; sheaf's writers take the encryption from the source
+/// instead ([`Source::crypt`](crate::source::Source::crypt)), and keep it.
 pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> {
     let mut pdf =
         lopdf::Document::load(path).with_context(|| format!("loading {}", path.display()))?;
@@ -515,8 +516,6 @@ pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> 
         pdf = lopdf::Document::load_with_password(path, password.unwrap_or(""))
             .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("decrypting {}", path.display()))?;
-        pdf.trailer.remove(b"Encrypt");
-        pdf.encryption_state = None;
     }
     Ok(pdf)
 }

@@ -241,9 +241,9 @@ pub struct LazyPdf {
     sound: bool,
     /// For [`object_bound`].
     normal_offsets: Vec<usize>,
-    crypt: Option<EncryptionState>,
-    /// The `/Encrypt` dictionary, which isn't decrypted.
-    encrypt: Option<ObjectId>,
+    /// The decryption the open authenticated, and the number of the `/Encrypt` dictionary, which
+    /// isn't decrypted.
+    crypt: Option<(EncryptionState, ObjectId)>,
     /// What reading each object gave, a slot per object number, in chunks made when first used.
     slots: Box<[OnceLock<Chunk>]>,
     /// The object streams decoded, by number. Their members are in `slots`.
@@ -452,7 +452,6 @@ impl LazyPdf {
             facts,
             sound,
             crypt: None,
-            encrypt: None,
             unpacked: Mutex::default(),
             bytes,
         };
@@ -488,6 +487,13 @@ impl LazyPdf {
     /// open authenticated.
     pub fn is_encrypted(&self) -> bool {
         self.crypt.is_some()
+    }
+
+    /// sheaf: how the file is encrypted, when it is: the decryption the open authenticated, and
+    /// the number of the `/Encrypt` dictionary, which [`LazyPdf::get`] reads as it's stored,
+    /// never decrypted.
+    pub fn encryption(&self) -> Option<(&EncryptionState, ObjectId)> {
+        self.crypt.as_ref().map(|(crypt, at)| (crypt, *at))
     }
 
     /// The objects the cross-reference table lists as in use, by number.
@@ -704,8 +710,8 @@ impl LazyPdf {
             }
             stream.start_position = Some(start + self.facts.header_offset);
         }
-        if let Some(crypt) = &self.crypt
-            && self.encrypt != Some(id)
+        if let Some((crypt, encrypt)) = &self.crypt
+            && *encrypt != id
         {
             encryption::decrypt_object(crypt, id, &mut object).map_err(Error::Decryption)?;
         }
@@ -845,15 +851,16 @@ impl LazyPdf {
         if !encrypts(&self.trailer) {
             return Ok(());
         }
+        // The security handler reads `/Encrypt` only through a reference: a direct dictionary
+        // never authenticates.
+        let Ok(encrypt) = self.trailer.get(b"Encrypt").and_then(Object::as_reference) else {
+            return Err(Error::InvalidPassword);
+        };
         let mut document = Document::new();
         document.trailer = self.trailer.clone();
-        let encrypt = self.trailer.get(b"Encrypt").and_then(Object::as_reference).ok();
-        if let Some(id) = encrypt {
-            document.objects.insert(id, self.get(id)?.clone());
-        }
+        document.objects.insert(encrypt, self.get(encrypt)?.clone());
         let crypt = decryption(&document, password)?.ok_or(Error::InvalidPassword)?;
-        self.crypt = Some(crypt);
-        self.encrypt = encrypt;
+        self.crypt = Some((crypt, encrypt));
         // What was read on the way wasn't decrypted.
         self.slots = empty_slots(self.xref.size);
         self.unpacked = Mutex::default();

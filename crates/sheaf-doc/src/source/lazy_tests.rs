@@ -13,17 +13,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lopdf::encryption::DecryptionError;
-use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
 use lopdf::xref::XrefType;
 use lopdf::{
-    ByteSource, Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, Error, FileBytes,
-    LazyPdf, Limit, LoadOptions, Object, ObjectId, Permissions, ReadLimits, Stream, StringFormat,
-    XrefKind, dictionary,
+    ByteSource, Document as Pdf, Error, FileBytes, LazyPdf, Limit, LoadOptions, Object, ObjectId,
+    ReadLimits, Stream, StringFormat, XrefKind, dictionary,
 };
 
 use super::Limits;
 use crate::forms::corpus::Corpus;
 use crate::forms::fixture::{every_kind, hybrid_reference, hybrid_update};
+use crate::serialize::fixture::{USER, attachment_only, encrypted, holds, rc4_aes_128_and_aes_256};
 
 /// How long a hostile file may take to fail.
 pub(super) const QUICK: Duration = Duration::from_secs(5);
@@ -49,7 +48,7 @@ fn open_file(bytes: &[u8], password: Option<&str>) -> LazyPdf {
 
 /// Whether the two readers read the same object. A stream's position in
 /// the bytes aside: they count it from different places.
-fn same(a: &Object, b: &Object) -> bool {
+pub(crate) fn same(a: &Object, b: &Object) -> bool {
     match (a, b) {
         (Object::Stream(a), Object::Stream(b)) => {
             (&a.dict, &a.content, a.allows_compression)
@@ -94,7 +93,7 @@ fn differences(eager: &Pdf, lazy: &LazyPdf) -> Vec<(ObjectId, Difference)> {
     otherwise.chain(only_lazy).collect()
 }
 
-fn assert_same(eager: &Pdf, lazy: &LazyPdf, name: &str) {
+pub(crate) fn assert_same(eager: &Pdf, lazy: &LazyPdf, name: &str) {
     let found = differences(eager, lazy);
     assert!(found.is_empty(), "{name}: {found:?}");
 }
@@ -722,29 +721,38 @@ fn a_broken_xref_falls_back_to_an_eager_load() {
     }
 }
 
-const OWNER: &str = "owner";
-const USER: &str = "user";
-
 /// A signature's `/Contents`, which is never encrypted, and how it's
 /// written.
 const SIGNATURE: &[u8] = &[0x30, 0x82, 0x01, 0x0a, 0xde, 0xad, 0xbe, 0xef];
-const SIGNATURE_WRITTEN: &[u8] = b"<3082010ADEADBEEF>";
+pub(crate) const SIGNATURE_WRITTEN: &[u8] = b"<3082010ADEADBEEF>";
 
 /// What [`plaintext`] holds in a string or a stream, each once.
-const PAGE_STRING: &[u8] = b"a page's string";
-const FORM_STRING: &[u8] = b"a form's string";
-const CONTENT: &[u8] = b"q /Fx Do Q BT (the page's content) Tj ET";
-const XMP: &[u8] = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">an XMP title</x:xmpmeta>";
-const ATTACHMENT: &[u8] = b"an attachment's data";
-const FIELD_NAME: &[u8] = b"a signature's field";
-const TITLE: &[u8] = b"an Info title";
+pub(crate) const PAGE_STRING: &[u8] = b"a page's string";
+pub(crate) const FORM_STRING: &[u8] = b"a form's string";
+pub(crate) const CONTENT: &[u8] = b"q /Fx Do Q BT (the page's content) Tj ET";
+pub(crate) const XMP: &[u8] = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">an XMP title</x:xmpmeta>";
+pub(crate) const ATTACHMENT: &[u8] = b"an attachment's data";
+pub(crate) const FIELD_NAME: &[u8] = b"a signature's field";
+pub(crate) const TITLE: &[u8] = b"an Info title";
+
+/// Every string and stream [`plaintext`] holds but a signature's
+/// `/Contents`.
+pub(crate) const SECRETS: [&[u8]; 7] = [
+    PAGE_STRING,
+    FORM_STRING,
+    CONTENT,
+    XMP,
+    ATTACHMENT,
+    FIELD_NAME,
+    TITLE,
+];
 
 /// A file to encrypt, built here: a page with a string in its
 /// dictionary, whose content draws a form XObject with strings in its
 /// stream's dictionary; XMP metadata; an embedded file with its
 /// `/Params`; a signature; an Info title; and the `/ID` the RC4 and
 /// AES-128 keys are made from.
-pub(super) fn plaintext() -> Pdf {
+pub(crate) fn plaintext() -> Pdf {
     let piece = |private: &[u8]| {
         dictionary! { "Sheaf" => dictionary! {
             "LastModified" => Object::string_literal("D:20261016120000Z"),
@@ -825,38 +833,10 @@ pub(super) fn plaintext() -> Pdf {
     pdf
 }
 
-/// `plain` encrypted with `state`, written with a cross-reference table
-/// and with a stream. The `/Encrypt` dictionary gets `edit`'s changes
-/// first.
-pub(super) fn encrypted(
-    plain: &Pdf,
-    state: &EncryptionState,
-    edit: impl Fn(&mut Dictionary),
-) -> [Vec<u8>; 2] {
-    [
-        XrefType::CrossReferenceTable,
-        XrefType::CrossReferenceStream,
-    ]
-    .map(|kind| {
-        let mut pdf = plain.clone();
-        pdf.encrypt(state).unwrap();
-        let id = pdf.trailer.get(b"Encrypt").unwrap().as_reference().unwrap();
-        edit(pdf.get_dictionary_mut(id).unwrap());
-        pdf.reference_table.cross_reference_type = kind;
-        let mut bytes = Vec::new();
-        pdf.save_to(&mut bytes).unwrap();
-        bytes
-    })
-}
-
-fn holds(bytes: &[u8], text: &[u8]) -> bool {
-    bytes.windows(text.len()).any(|w| w == text)
-}
-
 /// `bytes` read with the user password is `plain`, object by object:
 /// eagerly, and lazily as eagerly, from memory and from a file. Returns
 /// the lazy read from memory.
-fn assert_decrypts_to(plain: &Pdf, bytes: &[u8], name: &str) -> LazyPdf {
+pub(crate) fn assert_decrypts_to(plain: &Pdf, bytes: &[u8], name: &str) -> LazyPdf {
     let eager = Pdf::load_mem_with_options(bytes, LoadOptions::with_password(USER)).unwrap();
     let lazy = LazyPdf::open(
         Arc::<[u8]>::from(bytes),
@@ -894,59 +874,11 @@ fn assert_decrypts_to(plain: &Pdf, bytes: &[u8], name: &str) -> LazyPdf {
 #[test]
 fn rc4_128_aes_128_and_aes_256_decrypt_per_object_identically() {
     let plain = plaintext();
-    let std_cf = |filter: Arc<dyn CryptFilter>| BTreeMap::from([(b"StdCF".to_vec(), filter)]);
-    let versions = [
-        (
-            "RC4-128",
-            EncryptionVersion::V2 {
-                document: &plain,
-                owner_password: OWNER,
-                user_password: USER,
-                key_length: 128,
-                permissions: Permissions::all(),
-            },
-        ),
-        (
-            "AES-128",
-            EncryptionVersion::V4 {
-                document: &plain,
-                encrypt_metadata: true,
-                crypt_filters: std_cf(Arc::new(Aes128CryptFilter)),
-                stream_filter: b"StdCF".to_vec(),
-                string_filter: b"StdCF".to_vec(),
-                owner_password: OWNER,
-                user_password: USER,
-                permissions: Permissions::all(),
-            },
-        ),
-        (
-            "AES-256",
-            EncryptionVersion::V5 {
-                encrypt_metadata: true,
-                crypt_filters: std_cf(Arc::new(Aes256CryptFilter)),
-                file_encryption_key: &[7; 32],
-                stream_filter: b"StdCF".to_vec(),
-                string_filter: b"StdCF".to_vec(),
-                owner_password: OWNER,
-                user_password: USER,
-                permissions: Permissions::all(),
-            },
-        ),
-    ];
-    for (name, version) in versions {
-        let state = EncryptionState::try_from(version).unwrap();
+    for (name, state) in rc4_aes_128_and_aes_256(&plain) {
         for bytes in encrypted(&plain, &state, |_| {}) {
             // Every string and stream is encrypted, those in a stream's
             // dictionary too, but a signature's /Contents.
-            for text in [
-                PAGE_STRING,
-                FORM_STRING,
-                CONTENT,
-                XMP,
-                ATTACHMENT,
-                FIELD_NAME,
-                TITLE,
-            ] {
+            for text in SECRETS {
                 assert!(
                     !holds(&bytes, text),
                     "{name}: {:?}",
@@ -957,27 +889,6 @@ fn rc4_128_aes_128_and_aes_256_decrypt_per_object_identically() {
             assert_decrypts_to(&plain, &bytes, name);
         }
     }
-}
-
-/// V4 with AES-128 for embedded files only: `/StmF` and `/StrF` are
-/// `/Identity`, and `/EFF` names `/CF`'s `/StdCF`.
-fn attachment_only(plain: &Pdf) -> EncryptionState {
-    let mut state = EncryptionState::try_from(EncryptionVersion::V4 {
-        document: plain,
-        encrypt_metadata: true,
-        crypt_filters: BTreeMap::from([(
-            b"StdCF".to_vec(),
-            Arc::new(Aes128CryptFilter) as Arc<dyn CryptFilter>,
-        )]),
-        stream_filter: b"Identity".to_vec(),
-        string_filter: b"Identity".to_vec(),
-        owner_password: OWNER,
-        user_password: USER,
-        permissions: Permissions::all(),
-    })
-    .unwrap();
-    state.set_embedded_file_filter(b"StdCF".to_vec());
-    state
 }
 
 #[test]

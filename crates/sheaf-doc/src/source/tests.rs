@@ -1,6 +1,7 @@
 //! The page table and what a source says of itself: pages numbered and
 //! sized as PDFium numbers and sizes them, a hostile tree a typed error
-//! within the caps, and the conformance claims in its XMP.
+//! within the caps, the conformance claims in its XMP, and how it's
+//! encrypted.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -10,9 +11,12 @@ use std::time::Instant;
 use lopdf::{Object, ObjectId};
 use sheaf_core::{PageSize, Rotation};
 
-use super::lazy_tests::{QUICK, catalog, stream, with_table};
+use super::lazy_tests::{QUICK, catalog, plaintext, stream, with_table};
 use super::{Conformance, Limits, OpenError, PageTreeError, PageTreeLimits, PdfA};
 use crate::geom::Rect;
+use crate::serialize::fixture::{
+    USER, attachment_only, encrypt_dict, encrypted, rc4_aes_128_and_aes_256,
+};
 use crate::store::{BlobKind, Src, Store};
 
 fn object(number: u32, body: &str) -> (u32, Vec<u8>) {
@@ -603,4 +607,40 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
     ])
     .unwrap();
     assert_eq!(src.conformance().unwrap(), Conformance::default());
+}
+
+#[test]
+fn an_encrypted_source_keeps_how_it_is_encrypted() {
+    let plain = plaintext();
+    let mut states = rc4_aes_128_and_aes_256(&plain).to_vec();
+    states.push(("attachment only", attachment_only(&plain)));
+    for (name, state) in states {
+        for bytes in encrypted(&plain, &state, |_| {}) {
+            let kind = BlobKind::file(Path::new("t.pdf"), Some(USER));
+            let src = Store::new().open(bytes.into(), kind).unwrap();
+            let crypt = src.crypt().unwrap();
+            // Its /Encrypt as written, not decrypted, where the trailer
+            // says; its /ID; and its filters.
+            let at = src.pdf().trailer().get(b"Encrypt").unwrap();
+            assert_eq!(crypt.at(), at.as_reference().unwrap(), "{name}");
+            assert_eq!(crypt.dict(), &encrypt_dict(&state), "{name}");
+            let [first, _] = src.xref().id.as_ref().unwrap();
+            assert_eq!(crypt.first_id(), Some(&first[..]), "{name}");
+            let filters = |state: &lopdf::EncryptionState| {
+                [
+                    state.default_stream_filter().to_vec(),
+                    state.default_string_filter().to_vec(),
+                    state.default_embedded_file_filter().to_vec(),
+                ]
+            };
+            assert_eq!(filters(crypt.state()), filters(&state), "{name}");
+        }
+    }
+    let src = open(&[
+        catalog(),
+        object(2, "<< /Type /Pages /Kids [3 0 R] >>"),
+        object(3, "<< /Type /Page /Parent 2 0 R >>"),
+    ])
+    .unwrap();
+    assert!(src.crypt().is_none());
 }

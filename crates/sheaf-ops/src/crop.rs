@@ -191,6 +191,7 @@ mod tests {
                     .unwrap(),
                 name: "t.pdf".into(),
                 derived: None,
+                stamp: None,
             };
             let mut doc = Document::new(store, primary, &[], Box::new(FixedCount(10)));
             let id = doc.state().pages[0].id;

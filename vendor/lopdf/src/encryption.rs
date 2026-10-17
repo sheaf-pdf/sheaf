@@ -759,9 +759,9 @@ impl EncryptionState {
 }
 
 /// Which way a crypt filter is applied to an object's payload.
-#[derive(Clone, Copy)]
-enum Direction {
-    Encrypt,
+enum Direction<'a> {
+    /// sheaf: with the AES IV `iv` gives for each payload.
+    Encrypt { iv: &'a mut dyn FnMut(&[u8]) -> [u8; 16] },
     Decrypt,
 }
 
@@ -774,7 +774,7 @@ enum Direction {
 /// (ISO 32000-1, 7.6). A direction that ever needs a different exemption
 /// belongs in its own wrapper rather than in a test of `direction` here.
 fn transform_object(
-    state: &EncryptionState, obj_id: ObjectId, obj: &mut Object, direction: Direction,
+    state: &EncryptionState, obj_id: ObjectId, obj: &mut Object, direction: &mut Direction<'_>,
 ) -> Result<(), DecryptionError> {
     // The cross-reference stream shall not be encrypted and strings appearing in the
     // cross-reference stream dictionary shall not be encrypted.
@@ -826,7 +826,7 @@ fn transform_object(
 
 /// sheaf: `dict`'s values, but a signature's `/Contents` (ISO 32000-2, 7.6.2).
 fn transform_entries(
-    state: &EncryptionState, obj_id: ObjectId, dict: &mut Dictionary, direction: Direction,
+    state: &EncryptionState, obj_id: ObjectId, dict: &mut Dictionary, direction: &mut Direction<'_>,
 ) -> Result<(), DecryptionError> {
     let signature = is_signature_dictionary(dict);
     for (key, obj) in dict.iter_mut() {
@@ -840,14 +840,15 @@ fn transform_entries(
 
 /// sheaf: `payload` through `crypt_filter`, under the key it derives for `obj_id`.
 fn transform(
-    crypt_filter: &dyn CryptFilter, state: &EncryptionState, obj_id: ObjectId, payload: &[u8], direction: Direction,
+    crypt_filter: &dyn CryptFilter, state: &EncryptionState, obj_id: ObjectId, payload: &[u8],
+    direction: &mut Direction<'_>,
 ) -> Result<Vec<u8>, DecryptionError> {
     // Compute the key from the original file encryption key and the object identifier to use for
     // the corresponding object.
     let key = crypt_filter.compute_key(&state.file_encryption_key, obj_id)?;
 
     match direction {
-        Direction::Encrypt => crypt_filter.encrypt(&key, payload),
+        Direction::Encrypt { iv } => crypt_filter.encrypt_with_iv(&key, payload, &mut **iv),
         Direction::Decrypt => crypt_filter.decrypt(&key, payload),
     }
 }
@@ -898,12 +899,21 @@ fn is_signature_dictionary(dict: &Dictionary) -> bool {
 
 /// Encrypts `obj`.
 pub fn encrypt_object(state: &EncryptionState, obj_id: ObjectId, obj: &mut Object) -> Result<(), DecryptionError> {
-    transform_object(state, obj_id, obj, Direction::Encrypt)
+    // sheaf: with random IVs, as at the commit.
+    transform_object(state, obj_id, obj, &mut Direction::Encrypt { iv: &mut random_iv })
+}
+
+/// sheaf: encrypts `obj` as [`encrypt_object`] does, but with the AES IV `iv` gives for each
+/// payload, from the payload, so the same IVs give the same bytes.
+pub fn encrypt_object_with(
+    state: &EncryptionState, obj_id: ObjectId, obj: &mut Object, iv: &mut dyn FnMut(&[u8]) -> [u8; 16],
+) -> Result<(), DecryptionError> {
+    transform_object(state, obj_id, obj, &mut Direction::Encrypt { iv })
 }
 
 /// Decrypts `obj`.
 pub fn decrypt_object(state: &EncryptionState, obj_id: ObjectId, obj: &mut Object) -> Result<(), DecryptionError> {
-    transform_object(state, obj_id, obj, Direction::Decrypt)
+    transform_object(state, obj_id, obj, &mut Direction::Decrypt)
 }
 
 #[cfg(test)]

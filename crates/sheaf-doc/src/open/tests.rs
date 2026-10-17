@@ -80,6 +80,7 @@ fn no_fact_comes_after_the_first_edit() {
         src: store.open(every_fact().bytes().into(), kind).unwrap(),
         name: "facts.pdf".into(),
         derived: None,
+        stamp: None,
     };
     let src = primary.src.clone();
     let mut doc = start(store, primary, crate::history::default_policy());
@@ -229,6 +230,7 @@ fn opened(bytes: Vec<u8>) -> Opened {
         src: store.open(bytes.into(), kind).unwrap(),
         name: "marks.pdf".into(),
         derived: None,
+        stamp: None,
     };
     let src = primary.src.clone();
     let mut doc = start(store, primary, crate::history::default_policy());

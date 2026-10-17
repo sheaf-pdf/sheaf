@@ -3,8 +3,8 @@
 //! (bug 6); a rewrite drops Reader's usage rights, and `/SigFlags` when
 //! nothing signed needs it (bug 7); an XFA copy holding values the
 //! AcroForm lacks is found; a save that would rewrite a signed file asks,
-//! and appending leaves its signed bytes as they were, but for an
-//! encrypted one.
+//! and appending leaves its signed bytes as they were, an encrypted one's
+//! too.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
@@ -13,7 +13,7 @@ use std::path::Path;
 use lopdf::{Document as Pdf, EncryptionState, EncryptionVersion, Object, Permissions};
 use sheaf_doc::forms::fixture::Form;
 use sheaf_doc::forms::{Finding, check};
-use sheaf_doc::save::{Signed, Strategy, WouldBreakSignatures, save_to_path_noting};
+use sheaf_doc::save::{IfChanged, Signed, Strategy, WouldBreakSignatures, save_to_path_noting};
 use sheaf_doc::{Document, Edit, SourceInfo};
 
 mod common;
@@ -150,7 +150,8 @@ fn a_form_brought_into_a_hybrid_one_is_saved_in_full() {
     )
     .unwrap();
     assert!(sheaf_doc::incremental::incremental(&doc.snapshot()).is_err());
-    let (strategy, notes) = save_to_path_noting(&doc.snapshot(), &path, Signed::Ask).unwrap();
+    let (strategy, notes) =
+        save_to_path_noting(&doc.snapshot(), &path, Signed::Ask, IfChanged::Ask).unwrap();
     assert_eq!(strategy, Strategy::Rewrite);
     assert!(
         notes.contains(&sheaf_doc::forms::rules::XFA_REMOVED.to_string()),
@@ -246,25 +247,19 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
         .unwrap();
     let snap = doc.snapshot();
     // Asked: nothing's written.
-    let err = save_to_path_noting(&snap, &path, Signed::Ask).unwrap_err();
+    let err = save_to_path_noting(&snap, &path, Signed::Ask, IfChanged::Ask).unwrap_err();
     let e = err.downcast_ref::<WouldBreakSignatures>().expect("asks");
-    assert_eq!(
-        *e,
-        WouldBreakSignatures {
-            signatures: 1,
-            encrypted: false
-        }
-    );
+    assert_eq!(*e, WouldBreakSignatures { signatures: 1 });
     assert_eq!(std::fs::read(&path).unwrap(), original);
     // Rewritten elsewhere: the signature breaks, and the value goes.
     let copy = dir.join("rewritten.pdf");
-    save_to_path_noting(&snap, &copy, Signed::Rewrite).unwrap();
+    save_to_path_noting(&snap, &copy, Signed::Rewrite, IfChanged::Ask).unwrap();
     let rewritten = std::fs::read(&copy).unwrap();
     assert!(!signature_fits(&rewritten));
     assert!(!holds(&rewritten, b"LEAKVALUE123"));
     // Appended: the signed bytes are as they were, and the signature fits;
     // the deleted page's value stays in the earlier revision, as said.
-    let (strategy, _) = save_to_path_noting(&snap, &path, Signed::Append).unwrap();
+    let (strategy, _) = save_to_path_noting(&snap, &path, Signed::Append, IfChanged::Ask).unwrap();
     assert_eq!(strategy, Strategy::Incremental);
     let appended = std::fs::read(&path).unwrap();
     assert!(appended.starts_with(&original));
@@ -277,13 +272,14 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
     let second = doc.state().pages[1].id;
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    save_to_path_noting(&doc.snapshot(), &plain, Signed::Ask).unwrap();
+    save_to_path_noting(&doc.snapshot(), &plain, Signed::Ask, IfChanged::Ask).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn an_encrypted_signed_file_asks_with_no_append() {
-    // Opened with its empty user password; sheaf can't append to it yet.
+fn an_encrypted_signed_file_appends_and_keeps_its_signature() {
+    // Opened with its empty user password, asked about, then appended to,
+    // encrypted with the file's own key (M10.5 slice 7).
     let dir = scratch("saves-signed-encrypted");
     let mut f = signed();
     let id = Object::string_literal("0123456789abcdef");
@@ -298,18 +294,47 @@ fn an_encrypted_signed_file_asks_with_no_append() {
     .unwrap();
     f.pdf.encrypt(&state).unwrap();
     let path = write(&dir, "signed.pdf", &mut f);
+    let original = std::fs::read(&path).unwrap();
+    assert!(signature_fits(&original));
     let mut doc = open(&path);
-    let second = doc.state().pages[1].id;
+    let [first, second] = [0, 1].map(|i| doc.state().pages[i].id);
+    let title = "APPENDEDTITLE123";
+    doc.apply(
+        Edit::OutlineInsert {
+            parent: None,
+            after: None,
+            title: title.into(),
+            target: Some(first),
+            view: None,
+        },
+        "Bookmark",
+    )
+    .unwrap();
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    let err = save_to_path_noting(&doc.snapshot(), &path, Signed::Ask).unwrap_err();
+    let snap = doc.snapshot();
+    let err = save_to_path_noting(&snap, &path, Signed::Ask, IfChanged::Ask).unwrap_err();
     assert_eq!(
         err.downcast_ref::<WouldBreakSignatures>(),
-        Some(&WouldBreakSignatures {
-            signatures: 1,
-            encrypted: true
-        })
+        Some(&WouldBreakSignatures { signatures: 1 })
     );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    // Appended: the signed bytes are as they were, and the signature fits.
+    let (strategy, _) = save_to_path_noting(&snap, &path, Signed::Append, IfChanged::Ask).unwrap();
+    assert_eq!(strategy, Strategy::Incremental);
+    let appended = std::fs::read(&path).unwrap();
+    assert!(appended.starts_with(&original));
+    assert!(signature_fits(&appended));
+    let report = check(&appended, None).unwrap();
+    assert_eq!((report.pages, report.signed), (1, 1));
+    // Still encrypted: the bookmark's title is only there decrypted, and
+    // the file opens with its empty user password.
+    let section = &appended[original.len()..];
+    assert!(!section.windows(title.len()).any(|w| w == title.as_bytes()));
+    assert!(holds(&appended, title.as_bytes()));
+    let saved = SourceInfo::read(doc.store(), &path, None).unwrap();
+    assert!(saved.src.pdf().is_encrypted());
+    assert_eq!(saved.src.page_count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -324,7 +349,7 @@ fn a_certified_file_asks_too() {
     let second = doc.state().pages[1].id;
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    let err = save_to_path_noting(&doc.snapshot(), &path, Signed::Ask).unwrap_err();
+    let err = save_to_path_noting(&doc.snapshot(), &path, Signed::Ask, IfChanged::Ask).unwrap_err();
     assert_eq!(
         err.downcast_ref::<WouldBreakSignatures>()
             .map(|e| e.signatures),

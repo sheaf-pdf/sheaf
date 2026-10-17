@@ -48,6 +48,7 @@ pub(crate) fn copy_of(
         src: store.open(bytes.into(), kind)?,
         name: original.name.clone(),
         derived: Some(Derived { from, pages }),
+        stamp: None,
     })
 }
 
@@ -236,6 +237,7 @@ mod tests {
             src: store.open(f.bytes().into(), kind).unwrap(),
             name: "t.pdf".into(),
             derived: None,
+            stamp: None,
         };
         Document::new(store, primary, &[], Box::new(FixedCount(10)))
     }

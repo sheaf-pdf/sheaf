@@ -170,6 +170,7 @@ fn turned_doc() -> Document {
         src: store.open(f.bytes().into(), kind).unwrap(),
         name: "turned.pdf".into(),
         derived: None,
+        stamp: None,
     };
     Document::new(store, primary, &[], Box::new(FixedCount(50)))
 }

@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use in_progress::{Level, Progress};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::images::placement;
+use sheaf_doc::serialize::durable;
 use sheaf_doc::{Box2, Document, Edit, PAGES, SourceInfo, Store, TextLayer};
 use sheaf_image::clean::ScanParams;
 use sheaf_image::io::PageImage;
@@ -234,7 +235,7 @@ pub fn scan(
     }
     let bytes = sheaf_doc::images::to_pdf(&pages, fit)?;
     if engine.is_none() {
-        crate::images::write_atomic(out, &bytes)?;
+        durable::write(out, &bytes, None)?;
         return Ok(report);
     }
     // Add the text through the document model, as the app's OCR does.

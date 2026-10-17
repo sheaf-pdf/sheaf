@@ -20,6 +20,7 @@ use super::page::{ReadObjects, direct};
 use super::res::{Res, ResId};
 use crate::annot::{Box2, Pt};
 use crate::geom::{Affine, Rect};
+use crate::serialize::object;
 
 /// A color, in a device space.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -494,7 +495,7 @@ impl<'f> ContentWriter<'f> {
     /// `BDC`: content tagged `tag`, with property list `props`, named in
     /// the resources' `/Properties`. Lists are never written inline.
     pub fn begin_marked(&mut self, tag: &str, props: Dictionary) {
-        write_name(&mut self.out, tag.as_bytes());
+        object::name(&mut self.out, tag.as_bytes());
         self.out.push(b' ');
         self.name(ResKind::Properties, Res::dict(props));
         self.out.extend_from_slice(b" BDC\n");
@@ -625,17 +626,4 @@ pub fn write_string(out: &mut Vec<u8>, codes: &[u8]) {
         out.push(b);
     }
     out.push(b')');
-}
-
-/// `/` and `name`, a byte that would end it written `#xx`.
-fn write_name(out: &mut Vec<u8>, name: &[u8]) {
-    out.push(b'/');
-    for &b in name {
-        let regular = b.is_ascii_graphic() && !b"#()<>[]{}/%".contains(&b);
-        if regular {
-            out.push(b);
-        } else {
-            let _ = write!(out, "#{b:02X}");
-        }
-    }
 }

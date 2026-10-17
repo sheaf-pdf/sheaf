@@ -18,6 +18,7 @@ use crate::geom::Geom;
 use crate::history::{HistoryPolicy, HistoryStats};
 use crate::open::{Facts, Renamed, ViewFacts};
 use crate::prim::{HeapSize, Key, Prim, Rec, Val, same};
+use crate::serialize::durable::FileStamp;
 use crate::store::{BlobKind, Src, Store};
 use crate::text_layer::TextLayer;
 
@@ -50,6 +51,11 @@ pub struct SourceInfo {
     /// each as the page it was made from, with its annotations and form
     /// fields, and the copy's content (M10 bug 1).
     pub derived: Option<Derived>,
+    /// The file at `name` as the bytes were read from it: a save in place
+    /// writes only while it's still that file, and otherwise asks (M10.5
+    /// proposal 33). None for a source not read from a file: blank pages,
+    /// bytes in memory, a derived copy.
+    pub stamp: Option<FileStamp>,
 }
 
 /// Where a derived source's pages come from: its page `k` is a copy of page
@@ -66,8 +72,9 @@ impl SourceInfo {
     /// [`OpenError::Password`](crate::source::OpenError::Password) in the
     /// chain.
     pub fn read(store: &Store, path: &Path, password: Option<&str>) -> Result<SourceInfo> {
-        let bytes =
-            sheaf_core::read_file(path).with_context(|| format!("reading {}", path.display()))?;
+        let reading = || format!("reading {}", path.display());
+        let (bytes, metadata) = sheaf_core::read_file_and_metadata(path).with_context(reading)?;
+        let stamp = FileStamp::of(&metadata, &bytes).with_context(reading)?;
         let src = store
             .open(bytes, BlobKind::file(path, password))
             .with_context(|| format!("opening {}", path.display()))?;
@@ -75,6 +82,7 @@ impl SourceInfo {
             src,
             name: path.to_path_buf(),
             derived: None,
+            stamp: Some(stamp),
         })
     }
 
@@ -89,6 +97,7 @@ impl SourceInfo {
             src: store.open(bytes.into(), kind).expect("blank pages open"),
             name: "a.pdf".into(),
             derived: None,
+            stamp: None,
         }
     }
 }
@@ -3738,6 +3747,7 @@ mod tests {
                 src,
                 name: "form.pdf".into(),
                 derived: None,
+                stamp: None,
             });
             d.set_source_form(sid, form);
             let out = d
@@ -4298,6 +4308,7 @@ mod tests {
             src: store.open(f.bytes().into(), kind).unwrap(),
             name: "turned.pdf".into(),
             derived: None,
+            stamp: None,
         }
     }
 
@@ -4317,6 +4328,7 @@ mod tests {
             src: src.clone(),
             name: "saved.pdf".into(),
             derived: None,
+            stamp: None,
         });
         src
     }
@@ -4771,6 +4783,7 @@ mod tests {
             src,
             name: "a.pdf".into(),
             derived: None,
+            stamp: None,
         };
         let d = Document::new(store, primary, &outline, Box::new(FixedCount(5)));
         let flat = d.state().outline_flat();
@@ -5527,6 +5540,7 @@ mod tests {
             src: store.open(bytes.into(), kind).unwrap(),
             name: name.into(),
             derived: None,
+            stamp: None,
         }
     }
 
