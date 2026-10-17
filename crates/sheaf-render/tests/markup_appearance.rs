@@ -17,13 +17,13 @@ use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
 fn tempdir() -> PathBuf {
+    // Counted, not timed: the tests run at once, and macOS's clock only
+    // has microseconds, so two of them were given the same directory.
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let d = std::env::temp_dir().join(format!(
         "sheaf-render-markup-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&d).unwrap();
     d

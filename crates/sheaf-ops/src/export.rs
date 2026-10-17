@@ -110,19 +110,9 @@ pub fn run(snapshot: &Snapshot, job: &ExportJob, progress: &dyn Progress) -> Res
 /// The pages as they print, opened in PDFium.
 pub fn flattened(snapshot: &Snapshot, pages: &[PageId], markup: bool) -> Result<PdfiumEngine> {
     let bytes = sheaf_doc::save::print_pdf(snapshot, pages, markup)?;
-    let tmp = std::env::temp_dir().join(format!(
-        "sheaf-export-{}-{}.pdf",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&tmp, bytes)?;
-    // PDFium reads the whole file when it opens.
-    let engine = PdfiumEngine::open(&tmp, None);
-    let _ = std::fs::remove_file(&tmp);
-    engine
+    // From memory, so there's no temporary file for two exports at once
+    // to share (one named by the clock could be, on macOS).
+    PdfiumEngine::open_bytes(bytes.into(), None)
 }
 
 /// Page `i` at `dpi`, RGBA.
