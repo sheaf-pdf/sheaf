@@ -40,10 +40,17 @@ sheaf-image = { path = "crates/sheaf-image" }
 sheaf-cli = { path = "crates/sheaf-cli" }
 sheaf-instance = { path = "crates/sheaf-instance" }
 
-# GPUI is pre-1.0 and only published sporadically; track Zed main at a pinned rev.
-# Bump ZED_REV deliberately — breaking changes are routine.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "93d745668805029476e6d7fbb19652116fed51de" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "93d745668805029476e6d7fbb19652116fed51de", features = ["wayland", "x11"] }
+# GPUI comes from gpui-pre: Longbridge's weekly crates.io snapshot of Zed
+# main, its crates renamed gpui-pre-*. 0.3.9 is zed@93d7456. The sources are
+# Zed's at that commit plus a few packaging edits marked "Modified for
+# gpui-pre" (at 0.3.9: `$crate` paths in `actions!`, a gpui-kit path facade
+# in the proc macros that does nothing unless the crate depends on gpui-kit,
+# vendored sources for gpui-pre-apple's build.rs). sheaf keeps no patches
+# against Zed, so it lets gpui-pre do the snapshotting. gpui-pre doesn't
+# follow semver and breaking changes are routine: pin it exactly and bump it
+# deliberately, with a compatibility check (README, "Updating GPUI").
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["wayland", "x11"] }
 
 # PDF engines. NOTE: the `pdfium` crate (newinnovations) is GPL-3 — do not use it.
 pdfium-render = "0.9.4"
@@ -67,15 +74,27 @@ schemars = { version = "1", default-features = false, features = ["derive", "std
 # sheaf's own crate, published as sheaf-pdf/in-progress.
 in-progress = "0.1"
 
-# Zed's workspace patches that GPUI's Linux backend relies on. Mirrored from
-# zed/Cargo.toml [patch.crates-io] at the pinned rev; patches here are not
-# inherited through a git dependency, so they must be repeated.
+# Zed's workspace patches for crates GPUI uses, mirrored from the
+# [patch.crates-io] of Zed's Cargo.toml at the snapshot's rev.
+# Zed builds GPUI against these forks, but a published crate can't carry
+# patches (gpui-pre's crates ask for the crates.io releases), so they are
+# repeated here; keep them in step with Zed's on every bump. async-task is
+# in every build, async-process, calloop and khronos-egl in the Linux one;
+# windows-capture builds only with GPUI's screen-capture feature (off).
 [patch.crates-io]
 async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
+# Also Zed's build, though not from its patch block: Zed's
+# crates/gpui_linux/Cargo.toml takes xim from its xim-rs fork at this rev,
+# but the crates.io zed-xim that gpui-pre asks for resolves xim-ctext 0.3.0
+# (2022). That can't decode unescaped Latin-1 (é from a dead key or
+# Compose), ISO-8859 parts, GB2312 or KS C 5601, and zed-xim `expect`s the
+# decode, so under X11 an input method (ibus, fcitx) committing any of them
+# panics. Drop this once a zed-xim release depends on xim-ctext 0.4.
+xim-ctext = { git = "https://github.com/zed-industries/xim-rs.git", rev = "16f35a2c881b815a2b6cdfd6687988e84f8447d8" }
 
 # Not Zed's. lopdf 0.45.0 reads an earlier revision of some hybrid-reference
 # files (todos/m10.md, slice 2's note). vendor/lopdf is lopdf's main at
