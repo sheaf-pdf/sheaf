@@ -618,6 +618,23 @@ fn an_unkept_read_keeps_only_what_it_met() {
     ));
 }
 
+/// Finding where an object is reads it, to know it reads, but keeps it no
+/// more than an unkept read would: a Rewrite copying every object of a
+/// large file as it is doesn't hold them all.
+#[test]
+fn a_raw_span_keeps_nothing_it_read() {
+    let bytes = with_table(&[
+        catalog(),
+        pages(),
+        (3, stream("/Length 4 0 R", b"abc")),
+        (4, b"3".to_vec()),
+    ]);
+    let pdf = open(&bytes);
+    let span = pdf.raw_span((3, 0)).unwrap();
+    assert!(bytes[span].starts_with(b"3 0 obj"));
+    assert!(!pdf.is_read((3, 0)) && pdf.is_read((4, 0)));
+}
+
 #[test]
 fn a_length_cycle_is_a_typed_error() {
     // 3's /Length is 4, a stream whose /Length is 3; 5's is itself; and 6's
@@ -725,6 +742,10 @@ fn a_broken_xref_falls_back_to_an_eager_load() {
 /// written.
 const SIGNATURE: &[u8] = &[0x30, 0x82, 0x01, 0x0a, 0xde, 0xad, 0xbe, 0xef];
 pub(crate) const SIGNATURE_WRITTEN: &[u8] = b"<3082010ADEADBEEF>";
+/// The same of a signature dictionary with no `/Type`, which is optional
+/// (ISO 32000-2 Table 255): told by its `/ByteRange` and `/Contents`.
+const UNTYPED_SIGNATURE: &[u8] = &[0x30, 0x82, 0x02, 0x0b, 0xca, 0xfe, 0xba, 0xbe];
+pub(crate) const UNTYPED_SIGNATURE_WRITTEN: &[u8] = b"<3082020BCAFEBABE>";
 
 /// What [`plaintext`] holds in a string or a stream, each once.
 pub(crate) const PAGE_STRING: &[u8] = b"a page's string";
@@ -750,8 +771,8 @@ pub(crate) const SECRETS: [&[u8]; 7] = [
 /// A file to encrypt, built here: a page with a string in its
 /// dictionary, whose content draws a form XObject with strings in its
 /// stream's dictionary; XMP metadata; an embedded file with its
-/// `/Params`; a signature; an Info title; and the `/ID` the RC4 and
-/// AES-128 keys are made from.
+/// `/Params`; a signature, and one with no `/Type`; an Info title; and
+/// the `/ID` the RC4 and AES-128 keys are made from.
 pub(crate) fn plaintext() -> Pdf {
     let piece = |private: &[u8]| {
         dictionary! { "Sheaf" => dictionary! {
@@ -816,6 +837,12 @@ pub(crate) fn plaintext() -> Pdf {
         "T" => Object::string_literal(FIELD_NAME),
         "V" => signature,
     });
+    let untyped = pdf.add_object(dictionary! {
+        "Filter" => "Adobe.PPKLite",
+        "ByteRange" => vec![0.into(), 10.into(), 20.into(), 30.into()],
+        "Contents" => Object::String(UNTYPED_SIGNATURE.to_vec(), StringFormat::Hexadecimal),
+    });
+    let untyped_field = pdf.add_object(dictionary! { "FT" => "Sig", "V" => untyped });
     let catalog = pdf.add_object(dictionary! {
         "Type" => "Catalog",
         "Pages" => pages,
@@ -823,7 +850,7 @@ pub(crate) fn plaintext() -> Pdf {
         "Names" => dictionary! { "EmbeddedFiles" => dictionary! {
             "Names" => vec![Object::string_literal("notes.txt"), spec.into()],
         } },
-        "AcroForm" => dictionary! { "Fields" => vec![field.into()] },
+        "AcroForm" => dictionary! { "Fields" => vec![field.into(), untyped_field.into()] },
     });
     let info = pdf.add_object(dictionary! { "Title" => Object::string_literal(TITLE) });
     pdf.trailer.set("Root", catalog);
@@ -877,7 +904,7 @@ fn rc4_128_aes_128_and_aes_256_decrypt_per_object_identically() {
     for (name, state) in rc4_aes_128_and_aes_256(&plain) {
         for bytes in encrypted(&plain, &state, |_| {}) {
             // Every string and stream is encrypted, those in a stream's
-            // dictionary too, but a signature's /Contents.
+            // dictionary too, but a signature's /Contents, typed or not.
             for text in SECRETS {
                 assert!(
                     !holds(&bytes, text),
@@ -886,6 +913,7 @@ fn rc4_128_aes_128_and_aes_256_decrypt_per_object_identically() {
                 );
             }
             assert!(holds(&bytes, SIGNATURE_WRITTEN), "{name}");
+            assert!(holds(&bytes, UNTYPED_SIGNATURE_WRITTEN), "{name}");
             assert_decrypts_to(&plain, &bytes, name);
         }
     }
@@ -973,11 +1001,6 @@ enum Explained {
     /// The eager load keeps an object stream's members that the
     /// cross-reference table doesn't list in use: lazily they aren't there.
     Unlisted,
-    /// Another entry's offset holds an object with the same number, which
-    /// the eager load keeps instead, keying objects by their headers: an
-    /// earlier revision's Info dictionary. Lazily the table's object is
-    /// read.
-    Shadowed,
     /// A stream or string doesn't decrypt (AES padding): an XMP stream
     /// stored in the clear though `/EncryptMetadata` is true, or a
     /// `/SigRef`'s `/DigestValue`. Lazily a typed error; eagerly what was
@@ -986,12 +1009,10 @@ enum Explained {
 }
 
 impl Explained {
-    /// Whether it explains object `id` reading as `difference`, in a file
-    /// whose trailer's `/Info` is `info`.
-    fn covers(self, id: ObjectId, difference: &Difference, info: Option<ObjectId>) -> bool {
+    /// Whether it explains an object reading as `difference`.
+    fn covers(self, difference: &Difference) -> bool {
         match self {
             Explained::Unlisted => matches!(difference, Difference::Fails(Error::MissingXrefEntry)),
-            Explained::Shadowed => matches!(difference, Difference::Differs) && info == Some(id),
             Explained::Undecryptable => {
                 matches!(difference, Difference::Fails(Error::Decryption(_)))
             }
@@ -1002,12 +1023,7 @@ impl Explained {
 /// The corpus files whose objects read otherwise lazily, why, and how
 /// many objects do.
 const EXPLAINED: &[(&str, Explained, usize)] = &[
-    ("forms/safedocs/0054508.pdf", Explained::Shadowed, 1),
-    ("forms/safedocs/0078699.pdf", Explained::Shadowed, 1),
-    ("forms/safedocs/0155165.pdf", Explained::Shadowed, 1),
     ("forms/safedocs/0169467.pdf", Explained::Undecryptable, 1),
-    ("forms/safedocs/0270171.pdf", Explained::Shadowed, 1),
-    ("forms/safedocs/0372984.pdf", Explained::Shadowed, 1),
     ("forms/safedocs/0845477.pdf", Explained::Unlisted, 70),
     ("forms/safedocs/1156137.pdf", Explained::Unlisted, 1),
     ("forms/safedocs/1263925.pdf", Explained::Undecryptable, 1),
@@ -1085,8 +1101,6 @@ fn corpus_objects_read_lazily_equal_the_eager_load() {
                     c.rebuilt += usize::from(rebuilt);
                     drop(c);
                     if !found.is_empty() {
-                        let info = eager.trailer.get(b"Info").and_then(Object::as_reference);
-                        let found = (info.ok(), found);
                         differ.lock().unwrap().insert(entry.path.clone(), found);
                     }
                 }
@@ -1107,12 +1121,12 @@ fn corpus_objects_read_lazily_equal_the_eager_load() {
         differ.len()
     );
     let mut unexplained = Vec::new();
-    for (path, (info, found)) in &differ {
+    for (path, found) in &differ {
         let why = EXPLAINED.iter().find(|(p, ..)| p == path);
         // Each difference is found twice: from memory and from the file.
         eprintln!("{path}: {} objects, {why:?}", found.len() / 2);
         let explained = why.is_some_and(|&(_, why, objects)| {
-            found.len() == 2 * objects && found.iter().all(|(id, d)| why.covers(*id, d, *info))
+            found.len() == 2 * objects && found.iter().all(|(_, d)| why.covers(d))
         });
         if !explained {
             unexplained.push((path, found));

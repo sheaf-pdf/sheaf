@@ -1903,7 +1903,7 @@ mod tests {
             name: "x.pdf".into(),
             ..SourceInfo::blank(&store, 1)
         };
-        let d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+        let d = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
         let theirs = |name: &str, parent: Option<&str>, date: &str| {
             let summary = ForeignAnnot {
                 subtype: "Text".into(),

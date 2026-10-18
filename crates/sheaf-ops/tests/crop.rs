@@ -8,6 +8,7 @@ use std::sync::Arc;
 use lopdf::{Dictionary, Document as Pdf, Stream, dictionary};
 use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::geom::Geom;
+use sheaf_doc::materialize::How;
 use sheaf_doc::{
     Annot, AnnotId, AnnotKind, Box2, DestView, Document, Edit, OcrWord, PageChars, PageId, Pt,
     TextLayer,
@@ -224,14 +225,18 @@ fn margins_crop_and_marks_follow() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+sheaf_doc::both_ways!(
+    a_cropped_rotated_highlight_still_covers_its_glyphs,
+    a_cropped_rotated_highlight_still_covers_its_glyphs_appended: highlight_covers_its_glyphs
+);
+
 /// A highlight made over a word as the app makes one, from PDFium's glyph
 /// boxes, still covers the word once its page is cropped, turned and
 /// saved either way: reopened, its rects are as they were, and PDFium's
 /// boxes for the word on the saved page, through that page's Geom, lie
 /// inside them.
-#[test]
-fn a_cropped_rotated_highlight_still_covers_its_glyphs() {
-    let dir = scratch("highlight");
+fn highlight_covers_its_glyphs(how: How) {
+    let dir = scratch(&format!("highlight-{how:?}"));
     let src = text_pdf(&dir);
     let mut doc = open(&src);
     let p = doc.state().order()[0];
@@ -258,43 +263,34 @@ fn a_cropped_rotated_highlight_still_covers_its_glyphs() {
     let now = doc.geom(doc.state().order()[0]);
     let shown = (now.visible(), now.rotate);
     assert_eq!(shown.1, Rotation::R90);
-    let snap = doc.snapshot();
-    let written = [
-        ("rewrite", sheaf_doc::save::rewrite(&snap).unwrap()),
-        (
-            "incremental",
-            sheaf_doc::incremental::incremental(&snap).unwrap(),
-        ),
-    ];
-    for (how, bytes) in written {
-        let out = dir.join(format!("{how}.pdf"));
-        std::fs::write(&out, bytes).unwrap();
-        let saved = open(&out);
-        let page = saved.state().order()[0];
-        let geom = saved.geom(page);
-        assert_eq!((geom.visible(), geom.rotate), shown, "{how}");
-        let marks: Vec<&Annot> = saved.state().marks_on(page).collect();
-        let AnnotKind::Highlight { rects: kept } = &marks[0].kind else {
-            panic!("{how}: {:?}", marks[0].kind);
-        };
-        let near = |a: Box2, b: Box2, by: f32| {
-            (a.x - b.x).abs() <= by
-                && (a.y - b.y).abs() <= by
-                && (a.right() - b.right()).abs() <= by
-                && (a.bottom() - b.bottom()).abs() <= by
-        };
-        assert_eq!(kept.len(), rects.len(), "{how}");
-        for (k, r) in kept.iter().zip(&rects) {
-            assert!(near(*k, *r, 1.0 / 16.0), "{how}: {k:?} was {r:?}");
-        }
-        // PDFium's boxes on the saved page fall inside, to its 1/16 pt grid.
-        let engine = PdfiumEngine::open(&out, None).unwrap();
-        for g in glyphs(&engine, &geom, "sheaf") {
-            assert!(
-                kept.iter().any(|k| near(k.union(g), *k, 1.0 / 16.0)),
-                "{how}: {g:?} outside {kept:?}"
-            );
-        }
+    let bytes = how.write(&doc.snapshot());
+    let out = dir.join(format!("{how:?}.pdf"));
+    std::fs::write(&out, bytes).unwrap();
+    let saved = open(&out);
+    let page = saved.state().order()[0];
+    let geom = saved.geom(page);
+    assert_eq!((geom.visible(), geom.rotate), shown, "{how:?}");
+    let marks: Vec<&Annot> = saved.state().marks_on(page).collect();
+    let AnnotKind::Highlight { rects: kept } = &marks[0].kind else {
+        panic!("{how:?}: {:?}", marks[0].kind);
+    };
+    let near = |a: Box2, b: Box2, by: f32| {
+        (a.x - b.x).abs() <= by
+            && (a.y - b.y).abs() <= by
+            && (a.right() - b.right()).abs() <= by
+            && (a.bottom() - b.bottom()).abs() <= by
+    };
+    assert_eq!(kept.len(), rects.len(), "{how:?}");
+    for (k, r) in kept.iter().zip(&rects) {
+        assert!(near(*k, *r, 1.0 / 16.0), "{how:?}: {k:?} was {r:?}");
+    }
+    // PDFium's boxes on the saved page fall inside, to its 1/16 pt grid.
+    let engine = PdfiumEngine::open(&out, None).unwrap();
+    for g in glyphs(&engine, &geom, "sheaf") {
+        assert!(
+            kept.iter().any(|k| near(k.union(g), *k, 1.0 / 16.0)),
+            "{how:?}: {g:?} outside {kept:?}"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

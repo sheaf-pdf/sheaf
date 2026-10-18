@@ -356,7 +356,12 @@ impl Terminal {
     }
 }
 
-/// The form as a whole.
+/// The form as a whole. Its keys of the form's dictionary a save writes
+/// from the state, never from a file (M10.5 §9.1's ownership table):
+/// `/Fields` (the roots), `/CO`, `/DA`, `/Q`, `/NeedAppearances` and
+/// `/SigFlags`, read from the opened file's. `/DR` is the instances'
+/// files' merged as a save writes them, until slice 11 decides renames at
+/// lowering.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FormDoc {
     /// The top of the field tree, in order.
@@ -366,6 +371,62 @@ pub struct FormDoc {
     /// renamed fields go under, and notices.
     pub names: im::OrdMap<FormInst, Arc<str>>,
     pub scripts: ScriptState,
+    /// `/CO`: the fields that calculate, in order; an inserted form's and
+    /// a copy's after the rest. A node no longer in the tree is passed
+    /// over.
+    pub calc_order: Vector<FieldId>,
+    /// `/DA` and `/Q`, for fields that set neither: the opened file's. An
+    /// instance from another file whose form says otherwise has its own
+    /// pushed down onto its roots as it's written.
+    pub da: Option<Arc<str>>,
+    pub align: u8,
+    /// `/NeedAppearances`: the opened file's, or any form's that came in.
+    pub need_appearances: bool,
+    /// `/SigFlags`, the opened file's.
+    pub sig_flags: i64,
+    pub xfa: XfaState,
+}
+
+/// The XFA part the opened file's form has beside its fields (M10
+/// proposal 6), as read at open: what save policy decides about
+/// (`forms::rules::plan`). The part itself stays in the file's form,
+/// which a save drops it from or keeps it in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct XfaState {
+    /// It has one.
+    pub present: bool,
+    /// The XFA is the form (`/NeedsRendering`): the pages are a
+    /// placeholder.
+    pub dynamic: bool,
+    /// Fields whose values its datasets hold and the fields don't.
+    pub values: usize,
+}
+
+impl FormDoc {
+    /// What the form's own dictionary in `facts`, an opened file's, says
+    /// of the keys a save owns, and of its XFA part; `roots` and `names`
+    /// are the tree's.
+    pub(crate) fn opened(
+        roots: Vector<FieldId>,
+        names: im::OrdMap<FormInst, Arc<str>>,
+        facts: &crate::forms::FormFacts,
+    ) -> FormDoc {
+        FormDoc {
+            roots,
+            names,
+            scripts: ScriptState::On,
+            calc_order: facts.calculation_order.iter().copied().collect(),
+            da: facts.da.clone(),
+            align: facts.align,
+            need_appearances: facts.need_appearances,
+            sig_flags: facts.sig_flags,
+            xfa: XfaState {
+                present: facts.xfa,
+                dynamic: facts.dynamic,
+                values: facts.xfa_values,
+            },
+        }
+    }
 }
 
 /// Whether the form's scripts run by default (M10 proposal 5).

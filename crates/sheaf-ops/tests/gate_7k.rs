@@ -25,7 +25,7 @@
 //! elsewhere; each measurement gives its peak and what it added to the
 //! RSS it started from.
 //!
-//! The rows that run today's writer (Rewrite, Bates' Rewrite, flatten and
+//! The rows that run the writer (Rewrite, Bates' Rewrite, flatten and
 //! crop's copy) have run up to 1.46× faster in another build of this file,
 //! with nothing they run changed, and hold steady within a build. That is
 //! code placement: a Rewrite of the heavy 7k is mostly sheaf-doc's own
@@ -34,7 +34,10 @@
 //! incremental save write through sheaf-doc's `serialize/` rather than
 //! lopdf's writer (crop's copy still goes through lopdf's until slice 15),
 //! and the incremental save and the flatten replace their file durably,
-//! fsynced with its directory.
+//! fsynced with its directory. From slice 9 the Rewrite, Bates' Rewrite
+//! and the flatten are the new writer's (`materialize`), the flatten a
+//! post-pass on its graph, and the incremental save's rows, an Append
+//! through `materialize`, print as skipped until slice 10 brings it back.
 //!
 //! A gate is asserted from the slice that changes its path: the geometry
 //! walk (slice 3), ready (4), Rewrite (9), the incremental save of one mark
@@ -53,11 +56,21 @@
 //! neither a baseline nor a gate. Slice 8's is 1,000 mark adds on the
 //! heavy 7k, whose annotations and widgets are records from then on,
 //! beside slice 1's AnnotAdd and the same adds on blank pages, so an add
-//! that scans the records shows. So far slice 1's history bench, slice 3's
-//! geometry walk, slice 4's ready, slice 5's ready on 20,000 of sheaf's
-//! marks and slice 8's mark adds assert, after their tables print. The 200
-//! OCR versions take about 5 GB until slice 12 bounds history, and skip
-//! with less memory available.
+//! that scans the records shows. Slice 9's are the Rewrite by
+//! `materialize`, from its plan and with its post-conditions, in a process
+//! of its own on the synthetic and heavy fixtures, beside slice 8's
+//! writer's numbers ([`WriterBaseline`], taken from that slice's build,
+//! since slice 9 deleted the writer), and alone in
+//! `rewrites_on_the_synthetic_and_heavy_7k`; and, with neither a baseline
+//! nor a gate, the opened file's record (part of ready, timed apart), and
+//! on every fixture one mark saved as the app saves it (planned, written
+//! whole and recorded: a Rewrite until slice 10) and the recovery sidecar
+//! of it, Full until slice 10, with the bytes it writes. So far slice 1's
+//! history bench, slice 3's geometry walk, slice 4's ready, slice 5's
+//! ready on 20,000 of sheaf's marks, slice 8's mark adds and slice 9's
+//! Rewrite assert, after their tables print. The 200 OCR versions take
+//! about 5 GB until slice 12 bounds history, and skip with less memory
+//! available.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -67,8 +80,10 @@ use std::time::{Duration, Instant};
 
 use lopdf::Object;
 use sheaf_core::{PageIndex, Rotation};
+use sheaf_doc::materialize::{
+    AskAnswers, Profile, SaveInput, SaveTarget, StrategyKind, materialize,
+};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
-use sheaf_doc::save::Strategy;
 use sheaf_doc::serialize::fixture::{USER, encrypt_dict, rc4_aes_128_and_aes_256};
 use sheaf_doc::stamps::{Bates, HeaderFooter};
 use sheaf_doc::store::BlobKind;
@@ -93,6 +108,8 @@ const FILL: u32 = 200;
 /// each writes once its rows are done, and which rows those are.
 const OWN_PROCESS: &str = "SHEAF_GATE_FIXTURE_PROCESS";
 const PART: &str = "SHEAF_GATE_PART";
+/// The fixture a process of its own is for, by gen.py's name.
+const KIND: &str = "SHEAF_GATE_KIND";
 /// The memory 200 OCR versions at 1,000 pages need available: they grow
 /// the process by about 4.7 GB until slice 12 bounds history.
 const OCR_200_NEEDS: u64 = 6 << 30;
@@ -197,6 +214,40 @@ const SCANNED: Baseline = Baseline {
     flatten_added_mb: 1041.0,
 };
 
+/// A Rewrite of a fixture as opened on slice 8's writer (`save::rewrite`
+/// at that slice's commit, 0fa5cf1), which slice 9 deleted: its time, in
+/// milliseconds, and its peak and added RSS, in megabytes, on the AMD
+/// EPYC 7302P, each the median of seven processes of its own, each
+/// process's time the median of three runs. They come from that commit's
+/// release build, its harness given a part that times the old writer as
+/// [`rewrite_part`] times `materialize`, run alternately with this file's
+/// part. Timed beside `materialize` in one build while both writers were
+/// there, the old writer took 133 and 712 ms, so code placement (up to
+/// 1.46×, slice 2) moved it under 1% here. The new writer's Rewrite is
+/// held to 1.2× this time and 1.5× the RSS it adds.
+struct WriterBaseline {
+    ms: f64,
+    rss_mb: f64,
+    added_mb: f64,
+}
+
+const SLICE8_REWRITE_SYNTHETIC: WriterBaseline = WriterBaseline {
+    ms: 134.0,
+    rss_mb: 96.5,
+    added_mb: 61.7,
+};
+
+const SLICE8_REWRITE_HEAVY: WriterBaseline = WriterBaseline {
+    ms: 707.0,
+    rss_mb: 468.0,
+    added_mb: 251.0,
+};
+
+/// What the gate allows `materialize`'s Rewrite beside slice 8's writer:
+/// its time and the RSS it adds (M10.5 slice 9).
+const REWRITE_TIME_GATE: f64 = 1.2;
+const REWRITE_ADDED_GATE: f64 = 1.5;
+
 /// Slice 1's history bench on slice 2's code, in milliseconds.
 struct MarksBaseline {
     add_ms: f64,
@@ -261,6 +312,15 @@ impl Kind {
         }
     }
 
+    /// Slice 8's writer's Rewrite (synthetic and heavy only).
+    fn slice8_rewrite(self) -> Option<&'static WriterBaseline> {
+        match self {
+            Kind::Synthetic => Some(&SLICE8_REWRITE_SYNTHETIC),
+            Kind::Heavy => Some(&SLICE8_REWRITE_HEAVY),
+            Kind::Scanned => None,
+        }
+    }
+
     fn baseline(self) -> &'static Baseline {
         match self {
             Kind::Synthetic => &SYNTHETIC,
@@ -306,29 +366,43 @@ fn gates_on_the_scanned_7k() {
 /// opened again. Each child writes a file once its rows are done, so a
 /// filter that names no test fails rather than passing with nothing run.
 fn run(kind: Kind) {
+    let test = format!("gates_on_the_{}_7k", kind.name());
+    let mut parts = vec!["gates", "flatten"];
+    if kind != Kind::Scanned {
+        parts.extend(REWRITE_PARTS);
+    }
+    run_parts(&test, kind, &parts);
+}
+
+/// The Rewrite's part, in a process of its own (slice 9's row): the new
+/// writer beside slice 8's.
+const REWRITE_PARTS: [&str; 1] = ["rewrite"];
+
+/// Each of `parts` of `kind`'s rows in a process of its own, the binary
+/// run again for `test` alone (see [`run`]); in such a process, the one
+/// part it's for.
+fn run_parts(test: &str, kind: Kind, parts: &[&str]) {
     if let Some(done) = std::env::var_os(OWN_PROCESS) {
+        if std::env::var(KIND).is_ok_and(|k| k != kind.name()) {
+            return;
+        }
         match std::env::var(PART).as_deref() {
             Ok("flatten") => flatten(kind),
+            Ok("rewrite") => rewrite_part(kind),
             _ => gates(kind),
         }
         std::fs::write(done, "").unwrap();
         return;
     }
-    let test = format!("gates_on_the_{}_7k", kind.name());
     let exe = std::env::current_exe().unwrap();
-    for part in ["gates", "flatten"] {
+    for &part in parts {
         let done =
             std::env::temp_dir().join(format!("sheaf-{test}-{part}-{}.done", std::process::id()));
         let status = Command::new(&exe)
-            .args([
-                test.as_str(),
-                "--exact",
-                "--ignored",
-                "--nocapture",
-                "--quiet",
-            ])
+            .args([test, "--exact", "--ignored", "--nocapture", "--quiet"])
             .env(OWN_PROCESS, &done)
             .env(PART, part)
+            .env(KIND, kind.name())
             .status()
             .unwrap_or_else(|e| panic!("running {test} in its own process: {e}"));
         assert!(status.success(), "{test} ({part}) failed ({status})");
@@ -421,6 +495,20 @@ fn gates(kind: Kind) {
     rows.push(Row::time("ready", ready, base.ready_ms, gate));
     rows.push(Row::peak("ready", ready_mem, base.ready_rss_mb, ""));
     rows.push(Row::added("ready", ready_mem, base.ready_added_mb, ""));
+    // The opened file's record, which the open synthesizes (slice 9): part
+    // of ready, shown on its own.
+    let info = doc.source(doc.primary()).unwrap().clone();
+    let stamp = doc.saved_record().expect("an opened file's record").stamp;
+    let version = doc.current_version();
+    let (record, _) = measure(QUICK_RUNS, || {
+        timed(|| sheaf_doc::materialize::SaveRecord::opened(version, &info, stamp)).0
+    });
+    rows.push(Row::time(
+        "opened file's record (in ready)",
+        record,
+        f64::NAN,
+        "",
+    ));
 
     // The middle page at 1024 px: on a new engine, then again.
     let mut engine = None;
@@ -478,7 +566,8 @@ fn gates(kind: Kind) {
     });
 
     // An incremental save of one mark, as the app saves to the file it
-    // opened: the file with the section appended, written over it.
+    // opened: an Append, the file with the section appended, written over
+    // it. Skipped until slice 10 brings Append back.
     let middle_id = doc.page(middle as usize).unwrap();
     doc.apply(
         Edit::AnnotAdd {
@@ -489,12 +578,7 @@ fn gates(kind: Kind) {
     )
     .unwrap();
     let snap = doc.snapshot();
-    let (incremental, incremental_mem) = measure(RUNS, || {
-        let (t, strategy) = timed(|| sheaf_doc::save::save_to_path(&snap, &work).unwrap());
-        assert_eq!(strategy, Strategy::Incremental, "one mark saved by rewrite");
-        restore();
-        t
-    });
+    let appended = appended_one_mark(&snap, &work, &restore);
     drop(snap);
     doc.undo().unwrap();
     let gate = if kind == Kind::Scanned {
@@ -502,26 +586,97 @@ fn gates(kind: Kind) {
     } else {
         ""
     };
-    rows.push(Row::time(
-        "incremental save, one mark",
-        incremental,
-        base.incremental_ms,
-        gate,
-    ));
-    rows.push(Row::peak(
-        "incremental save",
-        incremental_mem,
-        base.incremental_rss_mb,
-        "",
-    ));
-    rows.push(Row::added(
-        "incremental save",
-        incremental_mem,
-        base.incremental_added_mb,
-        "",
-    ));
+    match appended {
+        Ok((incremental, incremental_mem)) => {
+            rows.push(Row::time(
+                "incremental save, one mark",
+                incremental,
+                base.incremental_ms,
+                gate,
+            ));
+            rows.push(Row::peak(
+                "incremental save",
+                incremental_mem,
+                base.incremental_rss_mb,
+                "",
+            ));
+            rows.push(Row::added(
+                "incremental save",
+                incremental_mem,
+                base.incremental_added_mb,
+                "",
+            ));
+        }
+        Err(why) => {
+            rows.push(Row::skipped("incremental save, one mark", "ms", &why));
+            rows.push(Row::skipped("incremental save, peak RSS", "MB", &why));
+            rows.push(Row::skipped("incremental save, RSS added", "MB", &why));
+        }
+    }
 
-    // Today's writer: the baseline slice 9's Rewrite is held to.
+    // The same mark saved as the app saves from slice 9 (planned, written
+    // whole, put in place and recorded: a Rewrite until slice 10), and the
+    // recovery sidecar of it, which is the whole file too until slice 10.
+    // Informational. The file is put back after each, so the save
+    // overwrites what its record no longer describes.
+    doc.apply(
+        Edit::AnnotAdd {
+            page: middle_id,
+            annot: square(0),
+        },
+        "mark",
+    )
+    .unwrap();
+    let overwrite = AskAnswers {
+        overwrite: true,
+        ..Default::default()
+    };
+    let (saved, saved_mem) = measure(RUNS, || {
+        let save = || sheaf_doc::materialize::save(&mut doc, &work, &overwrite, &NoProgress);
+        let (t, report) = timed(save);
+        assert_eq!(report.unwrap().strategy, StrategyKind::Rewrite);
+        restore();
+        t
+    });
+    rows.push(Row::time("save, one mark (Rewrite)", saved, f64::NAN, ""));
+    rows.push(Row::peak("save, one mark", saved_mem, f64::NAN, ""));
+    doc.apply(
+        Edit::AnnotAdd {
+            page: middle_id,
+            annot: square(1),
+        },
+        "mark",
+    )
+    .unwrap();
+    let input = doc.recovery_input();
+    let (file, stamp) = (doc.file()).map(|(f, s)| (f.clone(), *s)).unwrap();
+    let mut sidecar = 0;
+    let (recovery, recovery_mem) = measure(RUNS, || {
+        let (t, n) =
+            timed(|| sheaf_doc::recovery::write(&input, &file, &stamp, &NoProgress).unwrap());
+        sidecar = n;
+        t
+    });
+    sheaf_doc::recovery::discard(&work);
+    drop(input);
+    doc.undo().unwrap();
+    doc.undo().unwrap();
+    rows.push(Row::time(
+        "recovery sidecar, one mark (Full)",
+        recovery,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row::peak("recovery sidecar", recovery_mem, f64::NAN, ""));
+    rows.push(Row {
+        what: "recovery sidecar written".into(),
+        now: Some(mb(sidecar as u64)),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: String::new(),
+    });
+
+    // The writer, `materialize` from slice 9, beside slice 2's.
     let snap = doc.snapshot();
     let mut written = 0;
     let (rewrite, rewrite_mem) = measure(RUNS, || {
@@ -530,18 +685,20 @@ fn gates(kind: Kind) {
         t
     });
     drop(snap);
-    let (time_gate, rss_gate) = if kind == Kind::Scanned {
-        ("", "")
+    // Its gate is asserted against slice 8's writer in a process of its
+    // own (`rewrite_part`), where nothing run before it holds memory.
+    let gate = if kind == Kind::Scanned {
+        ""
     } else {
-        ("≤ 1.2× baseline, slice 9", "≤ 1.5× baseline, slice 9")
+        "slice 9's: in its own process"
     };
-    rows.push(Row::time("Rewrite", rewrite, base.rewrite_ms, time_gate));
+    rows.push(Row::time("Rewrite", rewrite, base.rewrite_ms, gate));
     rows.push(Row::peak("Rewrite", rewrite_mem, base.rewrite_rss_mb, ""));
     rows.push(Row::added(
         "Rewrite",
         rewrite_mem,
         base.rewrite_added_mb,
-        rss_gate,
+        gate,
     ));
     rows.push(Row {
         what: "Rewrite, the file written".into(),
@@ -678,27 +835,43 @@ fn aes_256_rows(kind: Kind, fixture: &Path) -> [Row; 2] {
     )
     .unwrap();
     let marked = doc.snapshot();
-    let (incremental, _) = measure(RUNS, || {
-        let (t, strategy) = timed(|| sheaf_doc::save::save_to_path(&marked, &work).unwrap());
-        assert_eq!(strategy, Strategy::Incremental, "one mark saved by rewrite");
-        restore();
-        t
-    });
+    let appended = appended_one_mark(&marked, &work, &restore);
     drop(marked);
     let (rewrite, _) = measure(RUNS, || {
         timed(|| sheaf_doc::save::rewrite(&snap).unwrap()).0
     });
     drop((snap, doc));
     std::fs::remove_file(&work).unwrap();
+    let what = "incremental save, one mark, AES-256";
     [
-        Row::time(
-            "incremental save, one mark, AES-256",
-            incremental,
-            f64::NAN,
-            "",
-        ),
+        match appended {
+            Ok((incremental, _)) => Row::time(what, incremental, f64::NAN, ""),
+            Err(why) => Row::skipped(what, "ms", &why),
+        },
         Row::time("Rewrite, AES-256", rewrite, f64::NAN, ""),
     ]
+}
+
+/// `snap`, a document with one mark more than its file, appended to the
+/// file at `work` (`materialize` with an Append), timed over [`RUNS`] and
+/// put back after each: what it took, or why it can't yet (until slice 10
+/// brings Append back).
+fn appended_one_mark(
+    snap: &sheaf_doc::Snapshot,
+    work: &Path,
+    restore: &dyn Fn(),
+) -> Result<(Duration, Option<Mem>), String> {
+    if let Err(stop) = sheaf_doc::materialize::appended(snap) {
+        return Err(format!("skipped: {stop}"));
+    }
+    Ok(measure(RUNS, || {
+        let (t, ()) = timed(|| {
+            let bytes = sheaf_doc::materialize::appended(snap).unwrap();
+            sheaf_doc::serialize::durable::write(work, &bytes, None).unwrap();
+        });
+        restore();
+        t
+    }))
 }
 
 /// The flatten's rows on the `kind` fixture, from the file as opened:
@@ -733,6 +906,91 @@ fn flatten(kind: Kind) {
             Row::added("flatten", mem, base.flatten_added_mb, ""),
         ],
     );
+}
+
+/// The Rewrite of the `kind` fixture as opened, by `materialize` from its
+/// plan, its post-conditions checked, in a process of its own: its time,
+/// peak and added RSS, beside slice 8's writer's ([`WriterBaseline`]),
+/// asserted within [`REWRITE_TIME_GATE`] of its time and
+/// [`REWRITE_ADDED_GATE`] of the RSS it added (slice 9).
+fn rewrite_part(kind: Kind) {
+    let path = fixture(kind);
+    let doc = sheaf_doc::open::file(&path, None).unwrap().doc;
+    let snap = doc.snapshot();
+    let input = SaveInput::detached(&snap);
+    let target = SaveTarget {
+        path: path.as_path().into(),
+        same_file: false,
+        profile: Profile::default(),
+        stamp: None,
+    };
+    let plan = sheaf_doc::materialize::plan(&input, &target);
+    let mut written = 0;
+    // As slice 8's writer was timed: its output is dropped outside the
+    // time, and a save keeps the record.
+    let (time, mem) = measure(RUNS, || {
+        let (t, out) = timed(|| materialize(&input, &plan, target.clone(), &NoProgress).unwrap());
+        written = out.bytes.len();
+        t
+    });
+    let base = kind.slice8_rewrite().expect("synthetic or heavy");
+    let what = "Rewrite, materialize";
+    let time_gate = REWRITE_TIME_GATE * base.ms;
+    let added_gate = REWRITE_ADDED_GATE * base.added_mb;
+    print_table(
+        &format!("{} 7k, {what} in a process of its own", kind.name()),
+        "slice 8",
+        &[
+            Row::time(
+                what,
+                time,
+                base.ms,
+                format!("≤ {REWRITE_TIME_GATE}× ({time_gate:.0} ms), asserted"),
+            ),
+            Row::peak(what, mem, base.rss_mb, ""),
+            Row::added(
+                what,
+                mem,
+                base.added_mb,
+                format!("≤ {REWRITE_ADDED_GATE}× ({added_gate:.0} MB), asserted"),
+            ),
+            Row {
+                what: format!("{what}, the file written"),
+                now: Some(mb(written as u64)),
+                unit: "MB",
+                baseline: f64::NAN,
+                gate: String::new(),
+            },
+        ],
+    );
+    assert!(
+        ms(time) <= time_gate,
+        "the Rewrite took {time:?}, over {REWRITE_TIME_GATE}× slice 8's {} ms",
+        base.ms
+    );
+    if let Some(mem) = mem {
+        let added = mb(mem.peak.saturating_sub(mem.start));
+        assert!(
+            added <= added_gate,
+            "the Rewrite added {added:.1} MB, over {REWRITE_ADDED_GATE}× slice 8's {} MB",
+            base.added_mb
+        );
+    }
+}
+
+/// The Rewrite's rows alone, the new writer's beside slice 8's, on the
+/// synthetic and heavy fixtures, each in a process of its own (see
+/// [`run`]): what the gate holds the new writer to.
+#[test]
+#[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
+fn rewrites_on_the_synthetic_and_heavy_7k() {
+    for kind in [Kind::Synthetic, Kind::Heavy] {
+        run_parts(
+            "rewrites_on_the_synthetic_and_heavy_7k",
+            kind,
+            &REWRITE_PARTS,
+        );
+    }
 }
 
 /// A render engine on each derived copy, as the app opens one before it
@@ -1020,7 +1278,7 @@ fn marked(mark: impl Fn(u64) -> Annot) -> Document {
     }
     let store = Store::new();
     let primary = SourceInfo::blank(&store, PAGES);
-    let mut d = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
+    let mut d = sheaf_doc::open::start(store, primary, None, sheaf_doc::history::default_policy());
     d.ready(Facts {
         annots: Arc::new(annots),
         ..Default::default()
@@ -1233,7 +1491,13 @@ fn gate_dir() -> PathBuf {
 fn blank(pages: u32) -> Document {
     let store = Store::new();
     let primary = SourceInfo::blank(&store, pages);
-    Document::new(store, primary, &[], sheaf_doc::history::default_policy())
+    Document::new(
+        store,
+        primary,
+        None,
+        &[],
+        sheaf_doc::history::default_policy(),
+    )
 }
 
 /// A small red square, `id` 0 for the document to assign one.
@@ -1347,6 +1611,17 @@ impl Row {
             unit: "ms",
             baseline: baseline_ms,
             gate: gate.into(),
+        }
+    }
+
+    /// A row not measured, and why.
+    fn skipped(what: &str, unit: &'static str, why: &str) -> Row {
+        Row {
+            what: what.into(),
+            now: None,
+            unit,
+            baseline: f64::NAN,
+            gate: why.into(),
         }
     }
 

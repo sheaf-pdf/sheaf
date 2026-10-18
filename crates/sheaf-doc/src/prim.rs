@@ -556,6 +556,8 @@ impl HeapSize for FormDoc {
             + self.names.len() * size_of::<(FormInst, Arc<str>)>()
             + self.names.values().map(Arc::heap_size).sum::<usize>()
             + self.scripts.heap_size()
+            + self.calc_order.heap_size()
+            + self.da.as_ref().map_or(0, Arc::heap_size)
     }
 }
 

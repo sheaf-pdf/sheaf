@@ -25,6 +25,10 @@ pub struct FileAnnots {
     /// The marks given new ids whose `/NM`s change (see `fresh_ids`), in
     /// page order and then `/Annots` order.
     pub renamed: Vec<Renamed>,
+    /// Every mark given a new id, named or not, by page index and its slot
+    /// in `/Annots`: its object says the id it was copied with, so a save
+    /// writes it anew.
+    pub fresh: HashSet<(u32, usize)>,
     /// What the marks hold, by the stems they name it by, found the first
     /// time one is asked for.
     held: OnceLock<Held>,
@@ -148,12 +152,14 @@ impl FileAnnots {
 /// What `src`'s pages hold, read through its [`LazyPdf`](lopdf::LazyPdf)
 /// in one pass over the page table's annotations; `p` counts its pages.
 pub(crate) fn read(src: &Source, p: &dyn Progress) -> FileAnnots {
-    let pages = src.page_ids().inspect(|_| p.inc(1));
+    let pages = (src.pages().iter())
+        .inspect(|_| p.inc(1))
+        .map(|page| (page.id, page.geom.rotate));
     let found = crate::file::annots_in(src.pdf(), pages);
     let hash = src.id().hash;
     let mut rng = fastrand::Rng::with_seed(hash as u64 ^ (hash >> 64) as u64);
     let mut pages = found.pages;
-    let renamed = fresh_ids(&mut pages, &mut rng);
+    let (renamed, fresh) = fresh_ids(&mut pages, &mut rng);
     follow_renamed(&mut pages, &renamed);
     // Other tools' ids, drawn after the marks' new ones, none a mark's.
     let mut taken: HashSet<AnnotId> = marks(&pages).map(|a| a.id).collect();
@@ -191,6 +197,7 @@ pub(crate) fn read(src: &Source, p: &dyn Progress) -> FileAnnots {
     FileAnnots {
         pages,
         renamed,
+        fresh,
         held: OnceLock::new(),
     }
 }
@@ -222,11 +229,16 @@ pub(crate) fn draw(rng: &mut fastrand::Rng, taken: &mut HashSet<AnnotId>) -> Ann
 /// mark in the file. A mark sheaf made has no name of its own, so its next
 /// write gives it the new id's `/NM`, and a reply copied with it stays in
 /// its thread; those are the ones given back. One that keeps another
-/// tool's `/NM` keeps it, and only its id changes.
-fn fresh_ids(pages: &mut HashMap<u32, Vec<InFile>>, rng: &mut fastrand::Rng) -> Vec<Renamed> {
+/// tool's `/NM` keeps it, and only its id changes. Every one given a new
+/// id, by page and slot, too.
+fn fresh_ids(
+    pages: &mut HashMap<u32, Vec<InFile>>,
+    rng: &mut fastrand::Rng,
+) -> (Vec<Renamed>, HashSet<(u32, usize)>) {
     let mut taken: HashSet<AnnotId> = marks(pages).map(|a| a.id).collect();
     let mut seen = HashSet::new();
     let mut renamed = Vec::new();
+    let mut fresh = HashSet::new();
     let mut order: Vec<u32> = pages.keys().copied().collect();
     order.sort_unstable();
     for page in order {
@@ -252,6 +264,7 @@ fn fresh_ids(pages: &mut HashMap<u32, Vec<InFile>>, rng: &mut fastrand::Rng) -> 
                     id: a.id,
                 });
             }
+            fresh.insert((page, entry.slot));
             copies.push(i);
         }
         for i in copies {
@@ -263,7 +276,7 @@ fn fresh_ids(pages: &mut HashMap<u32, Vec<InFile>>, rng: &mut fastrand::Rng) -> 
             }
         }
     }
-    renamed
+    (renamed, fresh)
 }
 
 /// Other tools' comments in the thread of a mark `fresh_ids` renamed, as

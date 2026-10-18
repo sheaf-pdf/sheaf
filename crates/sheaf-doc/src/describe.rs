@@ -219,7 +219,7 @@ mod tests {
     fn doc(n: u32) -> Document {
         let store = Store::new();
         let primary = SourceInfo::blank(&store, n);
-        Document::new(store, primary, &[], Box::new(FixedCount(10)))
+        Document::new(store, primary, None, &[], Box::new(FixedCount(10)))
     }
 
     #[test]

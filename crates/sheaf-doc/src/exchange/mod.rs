@@ -399,9 +399,12 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
             dict.remove(key);
         }
         let map = maps.entry(src.id()).or_default();
-        let Ok(Object::Dictionary(mut copied)) =
-            crate::save::remap(src.pdf(), &Object::Dictionary(dict), &mut out.pdf, map)
-        else {
+        let Ok(Object::Dictionary(mut copied)) = crate::materialize::copy::remap(
+            src.pdf(),
+            &Object::Dictionary(dict),
+            &mut out.pdf,
+            map,
+        ) else {
             continue;
         };
         copied.set("Page", index as i64);

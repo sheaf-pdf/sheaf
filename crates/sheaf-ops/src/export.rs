@@ -292,9 +292,14 @@ mod tests {
             name: "none.pdf".into(),
             ..sheaf_doc::SourceInfo::blank(&store, 1)
         };
-        let snapshot =
-            sheaf_doc::Document::new(store, primary, &[], sheaf_doc::history::default_policy())
-                .snapshot();
+        let snapshot = sheaf_doc::Document::new(
+            store,
+            primary,
+            None,
+            &[],
+            sheaf_doc::history::default_policy(),
+        )
+        .snapshot();
         let tracker = crate::Tracker::new();
         tracker.cancel();
         let err = run(&snapshot, &job, &tracker).unwrap_err();

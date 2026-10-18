@@ -288,8 +288,14 @@ fn add_text(
     out: &Path,
 ) -> Result<()> {
     let store = Store::new();
-    let info = SourceInfo::read(&store, src, None)?;
-    let mut doc = Document::new(store, info, &[], sheaf_doc::history::default_policy());
+    let (info, stamp) = SourceInfo::read(&store, src, None)?;
+    let mut doc = Document::new(
+        store,
+        info,
+        Some(stamp),
+        &[],
+        sheaf_doc::history::default_policy(),
+    );
     let layers = doc
         .state()
         .pages()

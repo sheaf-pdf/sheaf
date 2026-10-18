@@ -22,8 +22,9 @@ use gpui::{
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::geom::{Affine, Geom};
-use sheaf_doc::save;
+use sheaf_doc::serialize::durable::FileStamp;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, FormRef, Pt};
+use sheaf_doc::{materialize, save};
 use sheaf_ui::button::Button;
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_area::{TextArea, TextAreaEvent};
@@ -120,6 +121,9 @@ pub(crate) struct Doc {
     /// Images we've stopped showing; GPU textures are released in `render`,
     /// the only place we have a `Window`.
     pub(crate) retired: Vec<Arc<RenderImage>>,
+    /// How many times every rendered image was dropped
+    /// ([`invalidate_tiles`](Self::invalidate_tiles)): a save never does.
+    pub(crate) tiles_invalidated: u64,
     pub(crate) first_paint: Option<Instant>,
     /// Last edit notice, shown in the status bar.
     pub(crate) notice: Option<String>,
@@ -203,7 +207,6 @@ pub(crate) struct Doc {
     /// Optional content groups and which are hidden (see layers_panel.rs).
     pub(crate) layers: Vec<sheaf_doc::layers::Layer>,
     pub(crate) layers_hidden: HashSet<sheaf_doc::layers::LayerId>,
-    pub(crate) layers_default: HashSet<sheaf_doc::layers::LayerId>,
     pub(crate) layers_generation: u64,
     /// The primary file's marks that sheaf draws itself, as `/NM`s by page
     /// index: PDFium is told not to draw them, again whenever its renderer
@@ -246,6 +249,96 @@ impl Incoming {
 }
 
 impl Doc {
+    /// A document's view state as it opens: `model`, rendered by
+    /// `handles`, in one pane, nothing rendered or selected yet.
+    pub(crate) fn new(
+        model: Document,
+        handles: HashMap<SourceId, RenderHandle>,
+        outline_focus: FocusHandle,
+        measure_scale: sheaf_doc::measure::Scale,
+    ) -> Doc {
+        Doc {
+            model,
+            handles,
+            version: 0,
+            panes: vec![Pane::new(Zoom::FitWidth, PageMode::default())],
+            active: 0,
+            previews: HashMap::new(),
+            tiles: HashMap::new(),
+            shown: HashMap::new(),
+            inflight: HashMap::new(),
+            retired: Vec::new(),
+            tiles_invalidated: 0,
+            first_paint: None,
+            notice: None,
+            reading: None,
+            thumb_scroll: ScrollHandle::new(),
+            thumb_keep: HashSet::new(),
+            review_keep: HashSet::new(),
+            thumb_followed: None,
+            outline_expanded: HashSet::new(),
+            outline_scroll: ScrollHandle::new(),
+            selection: HashSet::new(),
+            sel_anchor: None,
+            drop_target: None,
+            saving: false,
+            outline_focus,
+            outline_selected: None,
+            outline_drop: None,
+            outline_rename: None,
+            outline_menu: None,
+            outline_rows: Vec::new(),
+            drag: None,
+            selected_marks: Vec::new(),
+            comment_filter: Default::default(),
+            comments_hidden: false,
+            comment_view: None,
+            hidden_marks: HashSet::new(),
+            foreign_hidden: HashSet::new(),
+            text_sel: None,
+            text_drag: None,
+            page_chars: HashMap::new(),
+            chars_loading: HashSet::new(),
+            annot_editor: None,
+            poly: None,
+            measure_scale,
+            calibrate: Default::default(),
+            group_list: None,
+            mark_menu: None,
+            selected_foreign: None,
+            adopting: None,
+            labels: std::cell::RefCell::new((u64::MAX, None)),
+            attachments: Vec::new(),
+            collection: None,
+            attachment_selected: None,
+            forms: Default::default(),
+            layers: Vec::new(),
+            layers_hidden: HashSet::new(),
+            layers_generation: 0,
+            drawn_marks: Vec::new(),
+            split: 0.5,
+            split_drag: false,
+        }
+    }
+
+    /// A save's file is written: its version is the saved one now, with
+    /// the file's record, and the save is over. Nothing the document shows
+    /// changes (M10.5 §9.1), so nothing rendered goes: every tile and
+    /// preview stays.
+    pub(crate) fn take_save(
+        &mut self,
+        written: materialize::Written,
+    ) -> anyhow::Result<materialize::SaveReport> {
+        self.saving = false;
+        let report = written.report();
+        let version = written.record.version;
+        if let Err(e) = self.model.record_save(written.record) {
+            self.model.abandon_save(version);
+            return Err(e);
+        }
+        Ok(report)
+    }
+
     /// The mark picked last, if any: the one with handles.
     pub(crate) fn selected_annot(&self) -> Option<(PageId, AnnotId)> {
         self.selected_marks.last().copied()
@@ -386,9 +479,10 @@ impl Doc {
     }
 
     /// Merge hits from the primary file's own text into `hits`, keeping
-    /// document order. A page with an unsaved OCR layer is skipped: the
-    /// layer's hits stand in for it (after a save the layer is in the file
-    /// and gone from the model, so nothing is counted twice). The engine's
+    /// document order. A page with an OCR layer the model draws is
+    /// skipped: the layer's hits stand in for it (the engine shows the
+    /// page without it, before a save and after), so nothing is counted
+    /// twice. The engine's
     /// boxes are on its page as the file shows it; they're kept in
     /// PageSpace.
     pub(crate) fn merge_source_hits(&self, hits: &mut Vec<Hit>, incoming: Vec<SearchHit>) {
@@ -479,6 +573,7 @@ impl Doc {
     /// Drop every rendered image so pages re-rasterize (after the engine's
     /// view of a page changed, e.g. annotations hidden).
     pub(crate) fn invalidate_tiles(&mut self) {
+        self.tiles_invalidated += 1;
         for (_, im) in self.tiles.drain() {
             self.retired.push(im);
         }
@@ -630,20 +725,23 @@ pub struct DocView {
     pub(crate) pending_edit_last: Option<PageId>,
     /// Recovery data found when opening, until the user has been asked.
     pending_recovery: Option<sheaf_doc::recovery::Recovery>,
-    /// A save that would break a signed file's signatures, until the user
-    /// has chosen how to save it (M10 proposal 7), and whether the user
-    /// already chose to overwrite a file changed on disk.
-    pending_signed: Option<(PathBuf, save::WouldBreakSignatures, save::IfChanged)>,
-    /// A save stopped because another program changed the file since it
-    /// was read, until the user has chosen what to do (M10.5 proposal 33):
-    /// where, and how a signed file was to be saved.
-    pending_changed: Option<(PathBuf, save::Signed)>,
-    /// A save that would remove an XFA copy holding values sheaf doesn't
-    /// show, until the user has agreed (M10 proposal 6).
-    pending_xfa: Option<PathBuf>,
+    /// A save stopped to ask the reader something (M10.5 §9.2), its
+    /// version still sealed, until they've answered: whether to replace a
+    /// file another program changed, to break a signed file's signatures,
+    /// or to drop an XFA part that holds values.
+    pending_ask: Option<(Saving, materialize::Ask)>,
     autosave: Option<Task<()>>,
     /// When the edits since the last sidecar write began.
     autosave_since: Option<Instant>,
+    /// Bumped by every change autosave hears of: with the current version,
+    /// what a sidecar is of.
+    edits: u64,
+    /// What the last sidecar written holds (the current version, and
+    /// `edits`, as it was written), so autosave writes nothing new for the
+    /// same; None once a save changed the file it's written against.
+    sidecar_of: Option<(sheaf_doc::VersionId, u64)>,
+    /// A sidecar is being written: the next waits for it.
+    sidecar_writing: bool,
     pub(crate) tool: Tool,
     pub(crate) tick_glyph: String,
     /// The Select tool is over text (the pointer is an I-beam).
@@ -675,6 +773,27 @@ pub struct DocView {
     /// Plugin calls given while the file opens, until it's ready.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_calls: crate::plugins::Waiting,
+}
+
+/// How a document's primary came to the view.
+#[derive(Clone, Copy)]
+enum Came {
+    /// Read from its file, as the stamp found it.
+    Read(FileStamp),
+    /// Restored from its file's recovery sidecar, written against `base`.
+    Restored { base: FileStamp },
+}
+
+/// A save between its seal and its record (M10.5 §9.1): the version it
+/// writes, sealed ([`Document::save_input`]), where it writes, what the
+/// plan decided, what the reader has answered of what it asks, and when
+/// it began.
+pub(crate) struct Saving {
+    input: Arc<materialize::SaveInput>,
+    target: materialize::SaveTarget,
+    plan: materialize::SavePlan,
+    answers: materialize::AskAnswers,
+    started: Instant,
 }
 
 /// A search match, addressed by page id so it survives reordering and so
@@ -713,7 +832,21 @@ impl DocView {
         launched: Instant,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self {
+        let mut this = Self::unopened(path, password, timing, launched, cx);
+        this.open(cx);
+        this
+    }
+
+    /// A view of the file at `path`, not opened yet: [`Self::new`] opens
+    /// it, and a test gives it a document of its own.
+    pub(crate) fn unopened(
+        path: PathBuf,
+        password: Option<String>,
+        timing: bool,
+        launched: Instant,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
             focus_handle: cx.focus_handle(),
             password,
             path,
@@ -751,12 +884,13 @@ impl DocView {
             selftest_flatten: None,
             selftest_ocr: None,
             pending_recovery: None,
-            pending_signed: None,
-            pending_changed: None,
-            pending_xfa: None,
+            pending_ask: None,
             pending_edit_last: None,
             autosave: None,
             autosave_since: None,
+            edits: 0,
+            sidecar_of: None,
+            sidecar_writing: false,
             tool: Tool::Select,
             tick_glyph: "✓".into(),
             text_hover: false,
@@ -775,9 +909,7 @@ impl DocView {
             plugin_panels: HashMap::new(),
             #[cfg(feature = "plugins")]
             plugin_calls: Default::default(),
-        };
-        this.open(cx);
-        this
+        }
     }
 
     /// The file's name, without the dirty marker.
@@ -818,15 +950,15 @@ impl DocView {
                     // The bytes, read once, and the geometry walk: the
                     // layout's sizes, before the first paint.
                     let t = Instant::now();
-                    let primary = SourceInfo::read(&store, &path, password.as_deref())?;
+                    let (primary, stamp) = SourceInfo::read(&store, &path, password.as_deref())?;
                     let walk = t.elapsed();
                     let handle = RenderHandle::open_bytes(primary.src.bytes().clone(), password)?;
-                    anyhow::Ok((store, primary, handle, walk, recovery))
+                    anyhow::Ok((store, primary, stamp, handle, walk, recovery))
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((store, primary, handle, walk, recovery)) => {
+                    Ok((store, primary, stamp, handle, walk, recovery)) => {
                         if timing {
                             eprintln!(
                                 "[timing] open: {walk:?} source, {:?} engine, {:?} since launch, {} pages",
@@ -836,7 +968,7 @@ impl DocView {
                             );
                         }
                         viewer.pending_recovery = recovery;
-                        viewer.install(store, primary, handle, false, cx);
+                        viewer.install(store, primary, Came::Read(stamp), handle, cx);
                     }
                     Err(e) if needs_password(&e) => viewer.lock(cx),
                     Err(e) => viewer.state = State::Failed(format!("{e:#}")),
@@ -872,88 +1004,38 @@ impl DocView {
 
     /// Show a file as it opens, a source in `store` with `handle` rendering
     /// it, as the primary source, and read the rest of it on a background
-    /// thread (see [`Self::finish_open`]). Its name is what was read: the
-    /// document's own path, or when `recovered`, the temporary file that
-    /// holds the recovered changes.
+    /// thread (see [`Self::finish_open`]). How it `came` says what the
+    /// document knows of its file: the file as it was read, for its record,
+    /// or a restored document's base.
     fn install(
         &mut self,
         store: Arc<Store>,
         primary: SourceInfo,
+        came: Came,
         handle: RenderHandle,
-        recovered: bool,
         cx: &mut Context<Self>,
     ) {
         let src = primary.src.clone();
-        let model = opening_model(store, primary, crate::prefs::get(cx).identity.name());
+        let stamp = match came {
+            Came::Read(stamp) => Some(stamp),
+            Came::Restored { .. } => None,
+        };
+        let mut model = opening_model(store, primary, stamp, crate::prefs::get(cx).identity.name());
+        let recovered = match came {
+            Came::Read(_) => false,
+            Came::Restored { base } => {
+                model.set_disk_base(&self.path, base);
+                true
+            }
+        };
+        self.sidecar_of = None;
         let opened = self.path.clone();
         cx.defer(move |cx| crate::recent::add(&opened, cx));
         let mut handles = HashMap::new();
         handles.insert(model.primary(), handle);
-        self.state = State::Ready(Box::new(Doc {
-            model,
-            handles,
-            version: 0,
-            panes: vec![Pane::new(Zoom::FitWidth, PageMode::default())],
-            active: 0,
-            previews: HashMap::new(),
-            tiles: HashMap::new(),
-            shown: HashMap::new(),
-            inflight: HashMap::new(),
-            retired: Vec::new(),
-            first_paint: None,
-            notice: None,
-            reading: None,
-            thumb_scroll: ScrollHandle::new(),
-            thumb_keep: HashSet::new(),
-            review_keep: HashSet::new(),
-            thumb_followed: None,
-            outline_expanded: HashSet::new(),
-            outline_scroll: ScrollHandle::new(),
-            selection: HashSet::new(),
-            sel_anchor: None,
-            drop_target: None,
-            saving: false,
-            outline_focus: cx.focus_handle(),
-            outline_selected: None,
-            outline_drop: None,
-            outline_rename: None,
-            outline_menu: None,
-            outline_rows: Vec::new(),
-            drag: None,
-            selected_marks: Vec::new(),
-            comment_filter: Default::default(),
-            comments_hidden: false,
-            comment_view: None,
-            hidden_marks: HashSet::new(),
-            foreign_hidden: HashSet::new(),
-            text_sel: None,
-            text_drag: None,
-            page_chars: HashMap::new(),
-            chars_loading: HashSet::new(),
-            annot_editor: None,
-            poly: None,
-            measure_scale: crate::state::get(cx)
-                .measure_scale
-                .clone()
-                .unwrap_or_default(),
-            calibrate: Default::default(),
-            group_list: None,
-            mark_menu: None,
-            selected_foreign: None,
-            adopting: None,
-            labels: std::cell::RefCell::new((u64::MAX, None)),
-            attachments: Vec::new(),
-            collection: None,
-            attachment_selected: None,
-            forms: Default::default(),
-            layers: Vec::new(),
-            layers_hidden: HashSet::new(),
-            layers_default: HashSet::new(),
-            layers_generation: 0,
-            drawn_marks: Vec::new(),
-            split: 0.5,
-            split_drag: false,
-        }));
+        let measure_scale = (crate::state::get(cx).measure_scale.clone()).unwrap_or_default();
+        let doc = Doc::new(model, handles, cx.focus_handle(), measure_scale);
+        self.state = State::Ready(Box::new(doc));
         self.finish_open(src, recovered, cx);
         if let Some(src) = self.initial_pattern.take() {
             self.run_initial_pattern(src, cx);
@@ -996,31 +1078,27 @@ impl DocView {
         .detach();
     }
 
-    /// Open the original plus its recovery section from a temporary file,
-    /// leaving the document dirty so Save writes it back to its own path.
+    /// Open the document `rec` recovers, from memory, with no record of
+    /// its file: it stays unsaved, and its first save checks that the file
+    /// is still the one the sidecar was written against (M10.5 §11.10).
     fn recover(&mut self, rec: sheaf_doc::recovery::Recovery, cx: &mut Context<Self>) {
         let path = self.path.clone();
+        let password = self.password.clone();
         self.state = State::Loading;
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
             let t = Instant::now();
+            let base = rec.base;
             let opened = cx
                 .background_executor()
                 .spawn({
                     let path = path.clone();
                     async move {
-                        let stamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0);
-                        let tmp = std::env::temp_dir().join(format!(
-                            "sheaf-recovered-{}-{stamp}.pdf",
-                            std::process::id()
-                        ));
-                        sheaf_doc::recovery::materialize(&path, &rec, &tmp)?;
                         let store = Store::new();
-                        let primary = SourceInfo::read(&store, &tmp, None)?;
-                        let handle = RenderHandle::open_bytes(primary.src.bytes().clone(), None)?;
+                        let primary =
+                            sheaf_doc::recovery::restore(&store, &path, &rec, password.as_deref())?;
+                        let handle =
+                            RenderHandle::open_bytes(primary.src.bytes().clone(), password)?;
                         anyhow::Ok((store, primary, handle))
                     }
                 })
@@ -1028,7 +1106,7 @@ impl DocView {
             this.update(cx, |viewer, cx| {
                 match opened {
                     Ok((store, primary, handle)) => {
-                        viewer.install(store, primary, handle, true, cx);
+                        viewer.install(store, primary, Came::Restored { base }, handle, cx);
                         if timing {
                             eprintln!("[timing] recovered unsaved changes in {:?}", t.elapsed());
                         }
@@ -1052,6 +1130,13 @@ impl DocView {
     /// Write the recovery sidecar a few seconds after the last edit, and at
     /// least every half minute while edits keep coming.
     pub(crate) fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
+        self.edits += 1;
+        self.autosave_again(cx);
+    }
+
+    /// Write the sidecar later: a few seconds from now, or at once when
+    /// the edits waiting began half a minute ago.
+    fn autosave_again(&mut self, cx: &mut Context<Self>) {
         let first = *self.autosave_since.get_or_insert_with(Instant::now);
         let delay = if first.elapsed() >= std::time::Duration::from_secs(30) {
             std::time::Duration::ZERO
@@ -1064,6 +1149,14 @@ impl DocView {
         }));
     }
 
+    /// Bring the recovery sidecar up to date: gone when nothing is unsaved;
+    /// otherwise the current version written whole beside the document's
+    /// file, against that file as sheaf last read or wrote it (its record,
+    /// or a restored document's base), unless the last sidecar holds it
+    /// already. It waits for a save in flight, whose file it would be
+    /// written against, and for the sidecar being written. A document no
+    /// file of this path holds has none, nor, until slice 10, one that
+    /// needs a password.
     fn write_recovery(&mut self, cx: &mut Context<Self>) {
         self.autosave = None;
         self.autosave_since = None;
@@ -1071,39 +1164,104 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let (dirty, saving) = (doc.model.is_dirty(), doc.saving);
-        // Only against the file itself, not a recovered temporary.
-        let primary_is_file = doc
-            .model
-            .source(doc.model.primary())
-            .is_some_and(|s| s.name == path);
-        if !dirty {
+        if !doc.model.is_dirty() {
             sheaf_doc::recovery::discard(&path);
+            self.sidecar_of = None;
             return;
         }
-        if saving {
-            self.schedule_autosave(cx);
+        if doc.saving || self.sidecar_writing {
+            self.autosave_again(cx);
             return;
         }
-        if !primary_is_file || self.password.is_some() {
+        let of = (doc.model.current_version(), self.edits);
+        if self.sidecar_of == Some(of) {
             return;
         }
-        let snap = doc.model.snapshot();
+        let Some((file, base)) = (doc.model.file()).filter(|(file, _)| &***file == path.as_path())
+        else {
+            return;
+        };
+        if self.password.is_some() {
+            return;
+        }
+        let (file, base) = (file.clone(), *base);
+        let input = doc.model.recovery_input();
         let timing = self.timing;
-        cx.background_executor()
-            .spawn(async move {
-                let t = Instant::now();
-                match sheaf_doc::recovery::write(&snap) {
-                    Ok(Some(n)) => {
-                        if timing {
-                            eprintln!("[timing] recovery sidecar: {n} bytes in {:?}", t.elapsed());
-                        }
+        self.sidecar_writing = true;
+        cx.spawn(async move |this, cx| {
+            let written = cx
+                .background_executor()
+                .spawn({
+                    let file = file.clone();
+                    async move {
+                        let t = Instant::now();
+                        let written = sheaf_doc::recovery::write(
+                            &input,
+                            &file,
+                            &base,
+                            &sheaf_ops::NoProgress,
+                        );
+                        (written, t.elapsed())
                     }
-                    Ok(None) => {}
-                    Err(e) => log::warn!("writing recovery sidecar: {e:#}"),
+                })
+                .await;
+            this.update(cx, |v, cx| {
+                v.sidecar_writing = false;
+                let (n, took) = match written {
+                    (Ok(n), took) => (n, took),
+                    (Err(e), _) => {
+                        log::warn!("writing recovery sidecar: {e:#}");
+                        return;
+                    }
+                };
+                if timing {
+                    eprintln!("[timing] recovery sidecar: {n} bytes in {took:?}");
+                }
+                let State::Ready(doc) = &v.state else {
+                    return;
+                };
+                if doc.model.file().is_some_and(|(_, now)| *now == base) {
+                    v.sidecar_of = Some(of);
+                } else {
+                    // A save replaced the file it's written against
+                    // meanwhile: it's stale, and the next one is due.
+                    sheaf_doc::recovery::discard(&file);
+                    v.write_recovery(cx);
                 }
             })
-            .detach();
+            .ok();
+        })
+        .detach();
+    }
+
+    /// [`Self::write_recovery`] on this thread, at once: what a save does
+    /// as it ends. A sidecar already being written was begun against the
+    /// file the save replaced, and, stale when it's done, writes this one
+    /// again after it, in the background.
+    fn write_recovery_now(&mut self, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let file = (doc.model.file()).filter(|(file, _)| &***file == path.as_path());
+        let blocked = self.sidecar_writing || self.password.is_some();
+        let (Some((file, base)), false, true) = (file, blocked, doc.model.is_dirty()) else {
+            return self.write_recovery(cx);
+        };
+        self.autosave = None;
+        self.autosave_since = None;
+        let of = (doc.model.current_version(), self.edits);
+        let t = Instant::now();
+        let input = doc.model.recovery_input();
+        match sheaf_doc::recovery::write(&input, file, base, &sheaf_ops::NoProgress) {
+            Ok(n) => {
+                if self.timing {
+                    eprintln!("[timing] recovery sidecar: {n} bytes in {:?}", t.elapsed());
+                }
+                self.sidecar_of = Some(of);
+            }
+            Err(e) => log::warn!("writing recovery sidecar: {e:#}"),
+        }
     }
 
     /// The user chose to drop unsaved changes: the sidecar goes with them.
@@ -1673,231 +1831,278 @@ impl DocView {
         self.save_to(path, cx)
     }
 
-    /// Save to `path` (the document's own path for plain Save). Runs the
-    /// rewrite on a background thread from a snapshot, then reopens the saved
-    /// file as the new primary source without disturbing undo history.
-    /// Resolves to whether the save succeeded.
+    /// Save to `path`: the document's own path for plain Save, any other
+    /// for Save As, which is a save too, its file the document's from then
+    /// on (M10.5 §9.1). The current version is sealed while it's saved, so
+    /// an edit made meanwhile, an OCR flush among them, makes a version
+    /// after it, which stays unsaved. The plan is made in the background,
+    /// what it asks is asked ([`Self::ask_before_saving`]), the file is
+    /// written in the background, and the version is recorded as the saved
+    /// one ([`Self::finish_save`]). Nothing the screen shows changes.
+    /// Resolves to whether it saved: false when it stopped to ask.
     pub fn save_to(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<bool> {
         if self.still_opening(cx) {
             return Task::ready(false);
         }
-        if self.would_drop_xfa_values() {
-            // Asked next frame.
-            self.pending_xfa = Some(path);
-            cx.notify();
-            return Task::ready(false);
-        }
-        self.save_signed(path, save::Signed::Ask, save::IfChanged::Ask, cx)
-    }
-
-    /// Ask whether to rewrite a signed file, breaking its signatures, or
-    /// append to it, keeping what was removed in its earlier revision; then
-    /// save as chosen, a file changed on disk as `if_changed` says.
-    fn ask_how_to_save_signed(
-        &mut self,
-        path: PathBuf,
-        signed: save::WouldBreakSignatures,
-        if_changed: save::IfChanged,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let n = signed.signatures;
-        let rewrite = format!(
-            "Rewrite (breaks {n} signature{})",
-            if n == 1 { "" } else { "s" }
-        );
-        let rx = sheaf_ui::prompts::ask(
-            window,
-            cx,
-            gpui::PromptLevel::Warning,
-            &format!("\"{}\" is signed", self.file_name()),
-            Some(
-                "A full save breaks its signatures. Appending keeps them, and keeps what you removed in the file's earlier version, where anyone can recover it.",
-            ),
-            &[
-                gpui::PromptButton::new(rewrite),
-                gpui::PromptButton::ok("Append (earlier versions stay in the file)"),
-                gpui::PromptButton::cancel("Cancel"),
-            ],
-        );
-        cx.spawn(async move |this, cx| {
-            let how = match rx.await {
-                Ok(0) => save::Signed::Rewrite,
-                Ok(1) => save::Signed::Append,
-                _ => return,
-            };
-            this.update(cx, |v, cx| {
-                v.save_signed(path, how, if_changed, cx).detach()
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Ask what to do about a file another program changed since sheaf
-    /// read it: save it elsewhere, replace it anyway (losing that program's
-    /// changes) or leave it (M10.5 proposal 33).
-    fn ask_file_changed(
-        &mut self,
-        path: PathBuf,
-        signed: save::Signed,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let rx = sheaf_ui::prompts::ask(
-            window,
-            cx,
-            gpui::PromptLevel::Warning,
-            &format!("\"{}\" changed on disk", self.file_name()),
-            Some("Another program changed it since sheaf read it."),
-            &[
-                gpui::PromptButton::ok("Save As…"),
-                gpui::PromptButton::new("Overwrite"),
-                gpui::PromptButton::cancel("Cancel"),
-            ],
-        );
-        cx.spawn(async move |this, cx| {
-            let answer = rx.await;
-            this.update(cx, |v, cx| match answer {
-                Ok(0) => v.save_as(cx),
-                Ok(1) => v
-                    .save_signed(path, signed, save::IfChanged::Overwrite, cx)
-                    .detach(),
-                _ => {}
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// [`save_to`](Self::save_to), with a signed file treated as `signed`
-    /// says and a file changed on disk as `if_changed` says.
-    fn save_signed(
-        &mut self,
-        path: PathBuf,
-        signed: save::Signed,
-        if_changed: save::IfChanged,
-        cx: &mut Context<Self>,
-    ) -> Task<bool> {
         let State::Ready(doc) = &mut self.state else {
             return Task::ready(false);
         };
+        // A second save would write after the first's file: the reader
+        // saves again once it's written.
         if doc.saving {
             doc.notice = Some("Already saving…".into());
             cx.notify();
             return Task::ready(false);
         }
+        let input = match doc.model.save_input(doc.model.current_version()) {
+            Ok(input) => Arc::new(input),
+            Err(e) => {
+                doc.notice = Some(format!("Save failed: {e:#}"));
+                cx.notify();
+                return Task::ready(false);
+            }
+        };
         doc.saving = true;
         doc.notice = Some(format!("Saving {}…", path.display()));
-        let snapshot = doc.model.snapshot();
-        let store = doc.model.store().clone();
-        let password = self.password.clone();
-        let timing = self.timing;
+        let target = doc.model.save_target(&path);
+        // Agreed to once, for this window's session.
+        let answers = materialize::AskAnswers {
+            drop_xfa_values: doc.forms.xfa_values_dropped,
+            ..Default::default()
+        };
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let t = Instant::now();
-            let result = cx
+            let started = Instant::now();
+            let plan = cx
                 .background_executor()
                 .spawn({
-                    let path = path.clone();
+                    let (input, target) = (input.clone(), target.clone());
+                    async move { materialize::plan(&input, &target) }
+                })
+                .await;
+            let saving = Saving {
+                input,
+                target,
+                plan,
+                answers,
+                started,
+            };
+            match this.update(cx, |view, cx| view.go_on_saving(saving, cx)) {
+                Ok(written) => written.await,
+                Err(_) => false,
+            }
+        })
+    }
+
+    /// Ask what `saving`'s plan asks that the reader hasn't answered, next
+    /// frame; once nothing is left to ask, write its file in the
+    /// background. Resolves to whether it saved.
+    fn go_on_saving(&mut self, saving: Saving, cx: &mut Context<Self>) -> Task<bool> {
+        if let Some(ask) = materialize::unanswered(&saving.plan, &saving.answers) {
+            if let State::Ready(doc) = &mut self.state {
+                doc.notice = None;
+            }
+            self.pending_ask = Some((saving, ask));
+            cx.notify();
+            return Task::ready(false);
+        }
+        cx.spawn(async move |this, cx| {
+            let written = cx
+                .background_executor()
+                .spawn({
+                    let input = saving.input.clone();
+                    let (plan, target) = (saving.plan.clone(), saving.target.clone());
+                    let answers = saving.answers;
                     async move {
-                        let (strategy, notes) =
-                            save::save_to_path_noting(&snapshot, &path, signed, if_changed)?;
-                        // What was written, read back: the source the
-                        // document shows from now on. It's encrypted as the
-                        // file was, so it opens with the same password. What
-                        // its pages hold and its form are read here, not when
-                        // the document takes it (`rebase_to_saved`).
-                        let saved = SourceInfo::read(&store, &path, password.as_deref())?;
-                        saved.src.annots();
-                        saved.src.form();
-                        let handle = RenderHandle::open_bytes(saved.src.bytes().clone(), password)?;
-                        anyhow::Ok((saved, handle, strategy, notes))
+                        materialize::write_file(
+                            &input,
+                            &plan,
+                            target,
+                            &answers,
+                            &sheaf_ops::NoProgress,
+                        )
                     }
                 })
                 .await;
-            this.update(cx, |view, cx| {
-                let State::Ready(doc) = &mut view.state else {
-                    return false;
-                };
-                doc.saving = false;
-                let ok = match result {
-                    Ok((saved, handle, strategy, notes)) => {
-                        let page_count = saved.src.page_count();
-                        let sid = doc.model.rebase_to_saved(saved);
-                        // Our marks are now in the file; keep PDFium from drawing them.
-                        let pages = drawn_marks(doc.model.state());
-                        doc.drawn_marks = pages.clone();
-                        // A new engine: nothing of theirs is hidden in it.
-                        doc.foreign_hidden.retain(|(s, _, _)| *s != sid);
-                        if !pages.is_empty() {
-                            let rx = handle.hide_annots(pages);
-                            cx.spawn(async move |this, cx| {
-                                let _ = rx.await;
-                                this.update(cx, |view, cx| {
-                                    if let State::Ready(doc) = &mut view.state {
-                                        doc.invalidate_tiles();
-                                    }
-                                    cx.notify();
-                                })
-                                .ok();
-                            })
-                            .detach();
-                        }
-                        doc.handles.insert(sid, handle);
-                        sheaf_doc::recovery::discard(&view.path);
-                        sheaf_doc::recovery::discard(&path);
-                        view.autosave = None;
-                        view.autosave_since = None;
-                        view.path = path.clone();
-                        let saved_path = path.clone();
-                        cx.defer(move |cx| crate::recent::add(&saved_path, cx));
-                        doc.notice = Some(format!(
-                            "Saved {} ({strategy:?}) in {:?}{}",
-                            path.display(),
-                            t.elapsed(),
-                            notes.iter().map(|n| format!(" — {n}")).collect::<String>()
-                        ));
-                        if timing {
-                            eprintln!(
-                                "[timing] saved {} ({} pages, {strategy:?}) in {:?}",
-                                path.display(),
-                                page_count,
-                                t.elapsed()
-                            );
-                        }
-                        doc.touched();
-                        view.refresh_facts(cx);
-                        if let State::Ready(doc) = &view.state
-                            && doc.layers_changed()
-                        {
-                            view.apply_layers(cx);
-                        }
-                        cx.emit(DocEvent::Saved { path: path.clone() });
-                        true
-                    }
-                    Err(e) => {
-                        // Asked next frame.
-                        if let Some(broken) = e.downcast_ref::<save::WouldBreakSignatures>() {
-                            doc.notice = None;
-                            view.pending_signed = Some((path.clone(), broken.clone(), if_changed));
-                        } else if let Some(save::SaveStop::Ask(save::Ask::FileChanged { .. })) =
-                            e.downcast_ref::<save::SaveStop>()
-                        {
-                            doc.notice = None;
-                            view.pending_changed = Some((path.clone(), signed));
-                        } else {
-                            doc.notice = Some(format!("Save failed: {e:#}"));
-                            log::error!("save: {e:#}");
-                        }
-                        false
-                    }
-                };
-                cx.notify();
-                ok
-            })
-            .unwrap_or(false)
+            this.update(cx, |view, cx| view.finish_save(saving, written, cx))
+                .unwrap_or(false)
         })
+    }
+
+    /// Ask the reader what `ask`, from `saving`'s plan or its write, needs,
+    /// and go on saving as they choose; any other answer ends the save,
+    /// nothing written.
+    fn ask_before_saving(
+        &mut self,
+        mut saving: Saving,
+        ask: materialize::Ask,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui::PromptButton;
+        use materialize::Ask;
+        let name = self.file_name();
+        let (message, detail, buttons) = match &ask {
+            Ask::FileChanged { .. } => (
+                format!("\"{name}\" changed on disk"),
+                "Another program changed it since sheaf read it.",
+                vec![
+                    PromptButton::ok("Save As…"),
+                    PromptButton::new("Overwrite"),
+                    PromptButton::cancel("Cancel"),
+                ],
+            ),
+            Ask::Signatures { signatures: n, .. } => (
+                format!("\"{name}\" is signed"),
+                "Saving rewrites the whole file, which breaks its signatures.",
+                vec![
+                    PromptButton::new(format!(
+                        "Rewrite (breaks {n} signature{})",
+                        if *n == 1 { "" } else { "s" }
+                    )),
+                    PromptButton::cancel("Cancel"),
+                ],
+            ),
+            Ask::XfaHoldsValues { .. } => (
+                "Remove the form's XFA part?".to_string(),
+                "It holds values sheaf doesn't show, which Adobe Acrobat or Reader shows. \
+                 Saving the form as it is now removes it, and them.",
+                vec![
+                    PromptButton::new("Save and Remove It"),
+                    PromptButton::cancel("Cancel"),
+                ],
+            ),
+        };
+        let rx = sheaf_ui::prompts::ask(
+            window,
+            cx,
+            gpui::PromptLevel::Warning,
+            &message,
+            Some(detail),
+            &buttons,
+        );
+        cx.spawn(async move |this, cx| {
+            let answer = rx.await.ok();
+            this.update(cx, |view, cx| {
+                match (&ask, answer) {
+                    (Ask::FileChanged { .. }, Some(0)) => {
+                        view.abandon_save(saving, cx);
+                        view.save_as(cx);
+                        return;
+                    }
+                    (Ask::FileChanged { .. }, Some(1)) => saving.answers.overwrite = true,
+                    (Ask::Signatures { .. }, Some(0)) => saving.answers.break_signatures = true,
+                    (Ask::XfaHoldsValues { .. }, Some(0)) => {
+                        saving.answers.drop_xfa_values = true;
+                        if let State::Ready(doc) = &mut view.state {
+                            doc.forms.xfa_values_dropped = true;
+                        }
+                    }
+                    _ => {
+                        view.abandon_save(saving, cx);
+                        return;
+                    }
+                }
+                view.go_on_saving(saving, cx).detach();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `saving` ends with nothing written: its version is unsealed.
+    fn abandon_save(&mut self, saving: Saving, cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &mut self.state {
+            doc.model.abandon_save(saving.input.version);
+            doc.saving = false;
+        }
+        cx.notify();
+    }
+
+    /// `saving`'s write is done, `written` saying how. The file written,
+    /// its version is the saved one, with the file's record; a stop asks
+    /// the reader again (another program changed the file just before the
+    /// rename) or ends the save. Then the recovery sidecar follows the new
+    /// file. Whether it saved.
+    ///
+    /// The screen keeps what it shows: the pages, their renders and what
+    /// the engines hide are the document's, which a save doesn't change.
+    fn finish_save(
+        &mut self,
+        saving: Saving,
+        written: Result<materialize::Written, materialize::SaveStop>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let State::Ready(doc) = &mut self.state else {
+            return false;
+        };
+        let written = match written {
+            Ok(written) => written,
+            Err(materialize::SaveStop::Ask(ask)) => {
+                // Asked next frame.
+                doc.notice = None;
+                self.pending_ask = Some((saving, ask));
+                cx.notify();
+                return false;
+            }
+            Err(stop) => {
+                doc.notice = Some(match stop {
+                    materialize::SaveStop::Cancelled(_) => "Save cancelled".into(),
+                    stop => {
+                        log::error!("save: {stop}");
+                        format!("Save failed: {stop}")
+                    }
+                });
+                self.abandon_save(saving, cx);
+                return false;
+            }
+        };
+        let report = match doc.take_save(written) {
+            Ok(report) => report,
+            Err(e) => {
+                doc.notice = Some(format!("Save failed: {e:#}"));
+                cx.notify();
+                return false;
+            }
+        };
+        let path = report.path.to_path_buf();
+        let took = saving.started.elapsed();
+        doc.notice = Some(format!(
+            "Saved {} ({:?}) in {took:?}{}",
+            path.display(),
+            report.strategy,
+            report
+                .notes
+                .iter()
+                .map(|n| format!(" — {n}"))
+                .collect::<String>()
+        ));
+        if self.timing {
+            eprintln!(
+                "[timing] saved {} ({} pages, {:?}) in {took:?}",
+                path.display(),
+                doc.model.page_count(),
+                report.strategy,
+            );
+        }
+        if path != self.path {
+            // Save As: the file the document was is no longer its file, and
+            // keeps no sidecar of it.
+            sheaf_doc::recovery::discard(&self.path);
+            self.path = path.clone();
+        }
+        let saved_path = path.clone();
+        cx.defer(move |cx| crate::recent::add(&saved_path, cx));
+        // Against the file just written: none while the version saved is
+        // the current one, or else one at once, with the edits made since,
+        // written before the save is done (M10.5 D39): the sidecar from
+        // before is stale against the new file, and a crash before a
+        // sidecar of it would lose those edits.
+        self.sidecar_of = None;
+        self.write_recovery_now(cx);
+        cx.emit(DocEvent::Saved { path });
+        cx.notify();
+        true
     }
 
     /// Dev hook: rotate the first page and save to `path`, so the save path
@@ -2679,7 +2884,7 @@ impl DocView {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
-                    let info = SourceInfo::read(&store, &path, None)?;
+                    let (info, _) = SourceInfo::read(&store, &path, None)?;
                     // Pages sheaf made (blank, images) carry nothing more.
                     let incoming = if bookmarks {
                         Incoming::read(&info)
@@ -2718,7 +2923,6 @@ impl DocView {
                 let label = format!("Insert {name}");
                 let mut outcome = None;
                 let mixed = doc.model.scripts_mixed();
-                doc.model.set_source_renamed(sid, &incoming.annots.renamed);
                 match doc.model.apply(
                     Edit::InsertPages {
                         source: sid,
@@ -3589,8 +3793,14 @@ fn renamed_notice(n: usize) -> Option<String> {
 /// The model a file opens as in the app while its facts are read: its
 /// pages, as [`sheaf_doc::open::start`] makes them, with `author` on the
 /// marks made in it. [`take_facts`] opens it.
-pub(crate) fn opening_model(store: Arc<Store>, primary: SourceInfo, author: String) -> Document {
-    let mut model = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
+pub(crate) fn opening_model(
+    store: Arc<Store>,
+    primary: SourceInfo,
+    stamp: Option<FileStamp>,
+    author: String,
+) -> Document {
+    let mut model =
+        sheaf_doc::open::start(store, primary, stamp, sheaf_doc::history::default_policy());
     model.set_author(author);
     model
 }
@@ -3641,8 +3851,7 @@ pub(crate) fn failed(what: &str, e: &anyhow::Error) -> String {
 }
 
 /// The marks sheaf draws itself, as `/NM`s by page index, when `st`'s
-/// pages are the primary file's in order: as it opened, or as a save
-/// wrote it.
+/// pages are the primary file's in order, as it opened.
 fn drawn_marks(st: &sheaf_doc::DocState) -> Vec<(u32, Vec<String>)> {
     st.order()
         .iter()
@@ -4528,14 +4737,8 @@ impl Render for DocView {
         if let Some(rec) = self.pending_recovery.take() {
             self.offer_recovery(rec, window, cx);
         }
-        if let Some((path, signed, if_changed)) = self.pending_signed.take() {
-            self.ask_how_to_save_signed(path, signed, if_changed, window, cx);
-        }
-        if let Some((path, signed)) = self.pending_changed.take() {
-            self.ask_file_changed(path, signed, window, cx);
-        }
-        if let Some(path) = self.pending_xfa.take() {
-            self.ask_to_drop_xfa_values(path, window, cx);
+        if let Some((saving, ask)) = self.pending_ask.take() {
+            self.ask_before_saving(saving, ask, window, cx);
         }
         if let Some(page) = self.pending_edit_last.take() {
             self.start_annot_editor(page, window, cx);
@@ -5182,19 +5385,17 @@ impl Render for DragPreview {
     }
 }
 
-/// The unsaved header/footer on one page, in page-local logical px. Only
-/// without a view rotation: GPUI can't turn text, and the header/footer
-/// reads upright on the page as the document has it.
+/// The header/footer on one page, in page-local logical px, where the
+/// page's file doesn't draw it (`stamps::drawn_over`), as a save draws it
+/// there. Only without a view rotation: GPUI can't turn text, and the
+/// header/footer reads upright on the page as the document has it.
 fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
     let st = doc.model.state();
-    let Some(hf) = st.header_footer() else {
+    let Some(hf) = sheaf_doc::stamps::drawn_over(st, pl.pref.id) else {
         return Vec::new();
     };
     let own = st.geom(pl.pref.id);
-    if !doc.model.header_footer_dirty()
-        || !hf.covers(pl.pref.id)
-        || own.is_none_or(|g| g.rotate != pl.pref.geom.rotate)
-    {
+    if own.is_none_or(|g| g.rotate != pl.pref.geom.rotate) {
         return Vec::new();
     }
     let size = pl.pref.geom.shown();
@@ -5923,9 +6124,11 @@ mod tests {
         recovered: bool,
     ) -> anyhow::Result<(Document, sheaf_doc::open::ViewFacts)> {
         let store = Store::new();
-        let primary = SourceInfo::read(&store, path, None)?;
+        let (primary, stamp) = SourceInfo::read(&store, path, None)?;
         let (src, blob) = (primary.src.clone(), primary.src.id());
-        let mut model = opening_model(store, primary, "Me".into());
+        // As the app opens it: a recovered file has no record.
+        let stamp = (!recovered).then_some(stamp);
+        let mut model = opening_model(store, primary, stamp, "Me".into());
         let facts = sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
         let view = take_facts(&mut model, blob, facts, recovered).context("not taken")?;
         Ok((model, view))
@@ -5994,9 +6197,9 @@ mod tests {
         assert!(recovered.state() == headless.state());
         assert!(recovered.is_dirty() && !recovered.can_undo());
         let store = Store::new();
-        let primary = SourceInfo::read(&store, &path, None).unwrap();
+        let (primary, stamp) = SourceInfo::read(&store, &path, None).unwrap();
         let src = primary.src.clone();
-        let mut model = opening_model(store, primary, "Me".into());
+        let mut model = opening_model(store, primary, Some(stamp), "Me".into());
         let other = sheaf_doc::forms::fixture::every_kind().source();
         let facts = || sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
         assert!(take_facts(&mut model, other.id(), facts(), false).is_none());
@@ -6050,6 +6253,156 @@ mod tests {
                 .unwrap()
                 .starts_with("3 annotations shared an id")
         );
+    }
+
+    /// A save changes nothing the document shows, so it drops nothing
+    /// rendered: through the view's own end of a save (`finish_save`), the
+    /// tile counter doesn't move, and no tile or preview is dropped, by it
+    /// or page by page. Run in a headless app for the view's focus handle;
+    /// on Linux, where it needs no main thread. The file is in a `sheaf-`
+    /// temporary directory, which the recent files leave out.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_save_doesnt_move_the_tile_counter() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("every-fact.pdf");
+        std::fs::write(&path, sheaf_doc::forms::fixture::every_fact().bytes()).unwrap();
+        let (mut model, _) = as_the_view_opens(&path, false).unwrap();
+        let page = model.page(0).unwrap();
+        let turn = Edit::RotatePages {
+            ids: vec![page],
+            by: Rotation::R90,
+        };
+        model.apply(turn, "Rotate").unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let mut doc =
+                    Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                doc.invalidate_tiles();
+                doc.retired.clear();
+                let pixel = || {
+                    let pixel = image::Frame::new(image::RgbaImage::new(1, 1));
+                    Arc::new(RenderImage::new(smallvec::smallvec![pixel]))
+                };
+                doc.previews.insert((page, Rotation::R90), pixel());
+                let job = Job::Page {
+                    width: 100,
+                    rotation: Rotation::R90,
+                };
+                doc.tiles.insert((page, job), pixel());
+                let before = doc.tiles_invalidated;
+                // A save, as the view makes one: sealed, planned, written,
+                // then ended by the view, which records it.
+                let v = doc.model.current_version();
+                let input = doc.model.save_input(v).unwrap();
+                doc.saving = true;
+                let target = doc.model.save_target(&path);
+                let plan = materialize::plan(&input, &target);
+                let answers = materialize::AskAnswers::default();
+                let written = materialize::write_file(
+                    &input,
+                    &plan,
+                    target.clone(),
+                    &answers,
+                    &sheaf_ops::NoProgress,
+                );
+                let saving = Saving {
+                    input: Arc::new(input),
+                    target,
+                    plan,
+                    answers,
+                    started: Instant::now(),
+                };
+                let view = cx.new(|cx| {
+                    let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
+                    view.state = State::Ready(Box::new(doc));
+                    view
+                });
+                view.update(cx, |view, cx| {
+                    assert!(view.finish_save(saving, written, cx));
+                    let State::Ready(doc) = &view.state else {
+                        panic!("ready");
+                    };
+                    assert!(!doc.model.is_dirty() && !doc.saving);
+                    assert_eq!(doc.tiles_invalidated, before);
+                    assert_eq!((doc.previews.len(), doc.tiles.len()), (1, 1));
+                    assert!(doc.retired.is_empty());
+                });
+                ran.store(true, Ordering::Relaxed);
+                // Once the event loop runs: a stop before it starts is lost.
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A save with an edit made while it was written leaves the sidecar
+    /// of that edit, against the new file, by the time the view has ended
+    /// the save (M10.5 D39): the sidecar from before is stale against the
+    /// new file, and a crash before a new one would lose the edit.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_save_with_an_edit_since_leaves_its_sidecar_as_it_ends() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("every-fact.pdf");
+        std::fs::write(&path, sheaf_doc::forms::fixture::every_fact().bytes()).unwrap();
+        let (mut model, _) = as_the_view_opens(&path, false).unwrap();
+        let page = model.page(0).unwrap();
+        let turn = move || Edit::RotatePages {
+            ids: vec![page],
+            by: Rotation::R90,
+        };
+        model.apply(turn(), "Rotate").unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let mut doc =
+                    Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                let v = doc.model.current_version();
+                let input = doc.model.save_input(v).unwrap();
+                doc.saving = true;
+                let target = doc.model.save_target(&path);
+                let plan = materialize::plan(&input, &target);
+                let answers = materialize::AskAnswers::default();
+                let written = materialize::write_file(
+                    &input,
+                    &plan,
+                    target.clone(),
+                    &answers,
+                    &sheaf_ops::NoProgress,
+                );
+                // While it was written.
+                doc.model.apply(turn(), "Rotate").unwrap();
+                let saving = Saving {
+                    input: Arc::new(input),
+                    target,
+                    plan,
+                    answers,
+                    started: Instant::now(),
+                };
+                let view = cx.new(|cx| {
+                    let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
+                    view.state = State::Ready(Box::new(doc));
+                    view
+                });
+                view.update(cx, |view, cx| {
+                    assert!(view.finish_save(saving, written, cx));
+                    let State::Ready(doc) = &view.state else {
+                        panic!("ready");
+                    };
+                    assert!(doc.model.is_dirty());
+                });
+                assert!(sheaf_doc::recovery::find(&path).is_some());
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
     }
 
     #[test]

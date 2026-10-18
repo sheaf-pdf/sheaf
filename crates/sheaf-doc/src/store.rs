@@ -79,6 +79,15 @@ impl BlobKind {
         }
     }
 
+    /// A file restored after a crash, from its recovery sidecar, opened
+    /// with `password`.
+    pub fn recovered(password: Option<&str>) -> BlobKind {
+        BlobKind::Pdf {
+            password: password.map(|p| Zeroizing::new(p.to_owned())),
+            origin: Origin::Memory(MemoryKind::Recovered),
+        }
+    }
+
     /// A PDF read from the file at `path`, opened with `password`.
     pub fn file(path: &Path, password: Option<&str>) -> BlobKind {
         BlobKind::Pdf {
@@ -105,6 +114,10 @@ pub enum MemoryKind {
     /// A page stamp's one-page PDF, from the stamp library or made from a
     /// placed stamp's page, as one placed or pasted is.
     Library,
+    /// A file restored after a crash from its recovery sidecar (M10.5
+    /// §11.10): the whole file, while sidecars are Full (slice 10's are its
+    /// saved bytes with the sidecar's sections after them).
+    Recovered,
 }
 
 /// Two different byte strings with one [`BlobId`]: the second isn't

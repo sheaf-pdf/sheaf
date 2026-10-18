@@ -96,8 +96,8 @@ fn check(rotate: i64, by: Rotation) {
     let src = dir.join("src.pdf");
     blank_pdf(&src, rotate);
     let store = Store::new();
-    let primary = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, Some(stamp), &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap();
     if by != Rotation::R0 {
         model

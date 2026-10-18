@@ -874,8 +874,8 @@ impl<'a> Reader<'a> {
                 }
             })
             .collect();
-        let entries_filter_map = |(_, entry): (&_, &_)| -> Result<Option<(ObjectId, Object)>> {
-            if let XrefEntry::Normal { offset, .. } = *entry {
+        let entries_filter_map = |(&number, entry): (&u32, &_)| -> Result<Option<(ObjectId, Object)>> {
+            if let XrefEntry::Normal { offset, generation } = *entry {
                 // read_object now handles decryption internally
                 let offset = offset as usize;
                 let end = object_bound(
@@ -899,6 +899,16 @@ impl<'a> Reader<'a> {
                         return if self.strict { Err(e) } else { Ok(None) };
                     }
                 };
+                // sheaf: an object whose header names another number than its entry's, one the
+                // table places itself, isn't kept: the table's object of that number is. It was
+                // kept under its header's number, over the table's whenever its entry came later,
+                // so an earlier revision's object shadowed the current one where the lazy reader
+                // reads the table's.
+                if object_id != (number, generation) && self.document.reference_table.get(object_id.0).is_some() {
+                    warn!("Skipping object {object_id:?} at the offset of entry {number} {generation}");
+                    return Ok(None);
+                }
+
                 if let Some(filter_func) = filter_func
                     && filter_func(object_id, &mut object).is_none()
                 {

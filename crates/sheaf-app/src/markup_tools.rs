@@ -2089,7 +2089,7 @@ mod tests {
         let blank = || {
             let store = Store::new();
             let primary = SourceInfo::blank(&store, 1);
-            Document::new(store, primary, &[], Box::new(FixedCount(10)))
+            Document::new(store, primary, None, &[], Box::new(FixedCount(10)))
         };
         // Placed and attached, saved, and opened: the stamp's page is the
         // file's.

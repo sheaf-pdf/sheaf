@@ -806,6 +806,70 @@ pub fn mark_blobs(store: &Store) -> [Blob; 2] {
     [stamp.unwrap(), file.unwrap()]
 }
 
+/// `marks` written onto `page`, a page dictionary of `pdf`, after what its
+/// `/Annots` has, each as a save writes it ([`crate::annot::to_pdf_in`],
+/// over [`crate::annot::emission`]): its companions grouped under it
+/// (`/IRT`, `/RT /Group`), and a reply after what it replies to, with
+/// `/IRT` to it and its `/Rect` (one whose parent isn't on the page last,
+/// unthreaded). What they draw with is in `pdf` once.
+pub fn write_marks(pdf: &mut Pdf, page: &mut Dictionary, marks: &[Mark]) {
+    use crate::annot::{WriteCx, to_pdf_in};
+    let mut cx = WriteCx::new();
+    let mut list: Vec<Object> = (page.get(b"Annots").and_then(Object::as_array))
+        .cloned()
+        .unwrap_or_default();
+    let rect_of = |pdf: &Pdf, d: &Dictionary| {
+        (d.get(b"Rect").ok())
+            .and_then(|r| pdf.dereference(r).ok())
+            .map_or_else(
+                || Object::Array(vec![Object::Integer(0); 4]),
+                |(_, o)| o.clone(),
+            )
+    };
+    // What a reply may name: what's on the page, then each mark written.
+    let mut named: std::collections::HashMap<String, (ObjectId, Object)> = (list.iter())
+        .filter_map(|e| {
+            let id = e.as_reference().ok()?;
+            let d = pdf.get_dictionary(id).ok()?;
+            Some((crate::file::thread_name(d), (id, rect_of(pdf, d))))
+        })
+        .collect();
+    let (threads, marks): (Vec<&Mark>, Vec<&Mark>) =
+        (marks.iter()).partition(|m| m.annot.thread_parent().is_some());
+    for m in marks {
+        let written = to_pdf_in(m, pdf, &mut cx);
+        let rect = rect_of(pdf, &written.main);
+        let id = pdf.add_object(Object::Dictionary(written.main));
+        list.push(id.into());
+        named.insert(m.annot.name(), (id, rect));
+        for mut part in written.companions {
+            part.set("IRT", id);
+            part.set("RT", Object::Name(b"Group".to_vec()));
+            list.push(pdf.add_object(Object::Dictionary(part)).into());
+        }
+    }
+    let mut pending = threads;
+    while !pending.is_empty() {
+        let parent = |m: &Mark| m.annot.thread_parent().unwrap_or_default().to_string();
+        let (ready, waiting): (Vec<&Mark>, Vec<&Mark>) =
+            (pending.iter()).partition(|m| named.contains_key(&parent(m)));
+        let stuck = ready.is_empty();
+        for m in if stuck { &waiting } else { &ready } {
+            let mut main = to_pdf_in(m, pdf, &mut cx).main;
+            if let Some((irt, rect)) = named.get(&parent(m)).cloned() {
+                main.set("IRT", irt);
+                main.set("Rect", rect);
+            }
+            let rect = rect_of(pdf, &main);
+            let id = pdf.add_object(Object::Dictionary(main));
+            list.push(id.into());
+            named.insert(m.annot.name(), (id, rect));
+        }
+        pending = if stuck { Vec::new() } else { waiting };
+    }
+    page.set("Annots", list);
+}
+
 /// `marks` as a document holds them: a page stamp naming [`MARK_STAMP`]
 /// holding its page, and an attachment naming [`MARK_FILE`] its file.
 pub fn holding(marks: &[Annot]) -> Vec<Mark> {

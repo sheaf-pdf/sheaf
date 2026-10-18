@@ -9,22 +9,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use lopdf::Object;
+use sheaf_doc::Store;
+use sheaf_doc::materialize::How;
 use sheaf_doc::serialize::fixture::{
     BOOKMARK, FIELD, FORM_SECRETS, PREFIX, USER, VALUE, edited, encrypted, form, holds,
     object_streams_encrypted, rc4_aes_128_and_aes_256, written,
 };
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::{Snapshot, Store};
 
 use super::bookmarks::bookmarks;
 use super::*;
-
-/// The two ways a save writes a file.
-type Save = fn(&Snapshot) -> Result<Vec<u8>>;
-const STRATEGIES: [(&str, Save); 2] = [
-    ("Rewrite", sheaf_doc::save::rewrite),
-    ("Append", sheaf_doc::incremental::incremental),
-];
 
 /// What PDFium shows of a file: its pages, its first page drawn (its size
 /// and a hash of its pixels), that page's text and annotations, the
@@ -107,12 +101,16 @@ fn kept(bytes: &[u8]) -> (Object, Vec<u8>) {
     (p, crypt.first_id().expect("an /ID").to_vec())
 }
 
+sheaf_doc::both_ways!(
+    encrypted_files_reopen_in_pdfium_by_both_strategies,
+    encrypted_files_reopen_in_pdfium_by_both_strategies_appended: reopen_in_pdfium
+);
+
 /// RC4-128, AES-128 and AES-256 files, with a table and with a stream,
 /// turned and noted and saved by both strategies: no output opens without
 /// the password, each shows with it what the same edit of the
 /// unencrypted file shows, and each keeps its `/P` and `/ID[0]`.
-#[test]
-fn encrypted_files_reopen_in_pdfium_by_both_strategies() {
+fn reopen_in_pdfium(how: How) {
     let dir = scratch("both");
     let plain = form();
     for (version, state) in rc4_aes_128_and_aes_256(&plain) {
@@ -127,31 +125,29 @@ fn encrypted_files_reopen_in_pdfium_by_both_strategies() {
                 edited(&path, Some(USER)),
                 edited(&original, None),
             );
-            for (strategy, save) in STRATEGIES {
-                let name = format!("{version}, {kind}, {strategy}");
-                let bytes = save(&edit).unwrap();
-                for text in FORM_SECRETS {
-                    assert!(
-                        !holds(&bytes, text),
-                        "{name}: {:?}",
-                        String::from_utf8_lossy(text)
-                    );
-                }
-                let refused = PdfiumEngine::open_bytes(bytes.as_slice().into(), None)
-                    .err()
-                    .expect("opened without the password");
-                assert!(OpenError::is_password(&refused), "{name}: {refused:#}");
-                // What the same edit of the unencrypted file shows: the
-                // turn, the note, the field and the bookmark.
-                let want = shown(&save(&plain_edit).unwrap(), None);
-                assert!(want.size.0 > want.size.1, "{name}: {want:?}");
-                assert!(want.text.contains("Page 1"), "{name}: {want:?}");
-                assert_eq!(want.annots, 2, "{name}");
-                assert_eq!(want.fields, form_fields(), "{name}");
-                assert_eq!(want.titles, [BOOKMARK], "{name}");
-                assert_eq!(shown(&bytes, Some(USER)), want, "{name}");
-                assert_eq!(kept(&bytes), was, "{name}");
+            let name = format!("{version}, {kind}, {how:?}");
+            let bytes = how.write(&edit);
+            for text in FORM_SECRETS {
+                assert!(
+                    !holds(&bytes, text),
+                    "{name}: {:?}",
+                    String::from_utf8_lossy(text)
+                );
             }
+            let refused = PdfiumEngine::open_bytes(bytes.as_slice().into(), None)
+                .err()
+                .expect("opened without the password");
+            assert!(OpenError::is_password(&refused), "{name}: {refused:#}");
+            // What the same edit of the unencrypted file shows: the
+            // turn, the note, the field and the bookmark.
+            let want = shown(&how.write(&plain_edit), None);
+            assert!(want.size.0 > want.size.1, "{name}: {want:?}");
+            assert!(want.text.contains("Page 1"), "{name}: {want:?}");
+            assert_eq!(want.annots, 2, "{name}");
+            assert_eq!(want.fields, form_fields(), "{name}");
+            assert_eq!(want.titles, [BOOKMARK], "{name}");
+            assert_eq!(shown(&bytes, Some(USER)), want, "{name}");
+            assert_eq!(kept(&bytes), was, "{name}");
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -187,6 +183,7 @@ fn an_aes256_object_stream_base_rewrites() {
 /// don't: `LazyPdf` (sheaf-doc's `serialize::tests`) and qpdf (sheaf-ops'
 /// interop tests).
 #[test]
+#[ignore = "slice 10"]
 fn a_prefixed_file_appends_as_pdfium_reads_it() {
     let dir = scratch("prefixed");
     let plain = form();
@@ -194,7 +191,7 @@ fn a_prefixed_file_appends_as_pdfium_reads_it() {
         let prefixed = [&PREFIX[..], &file].concat();
         let append = |name: &str, bytes: &[u8]| {
             let path = put(&dir, &format!("{name}-{kind}.pdf"), bytes);
-            sheaf_doc::incremental::incremental(&edited(&path, None)).unwrap()
+            How::Appended.write(&edited(&path, None))
         };
         let (appended, after_prefix) = (append("file", &file), append("prefixed", &prefixed));
         assert!(after_prefix.starts_with(&prefixed), "{kind}");

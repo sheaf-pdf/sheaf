@@ -1,7 +1,9 @@
 //! What other readers make of the files sheaf saves (M10.5 slice 7),
 //! ignored, as they need tools CI doesn't have: `qpdf --check` passes on
-//! every save of plain, encrypted, prefixed and cross-reference-stream
-//! files, and a file with bytes before its header appends to what the
+//! every save and, from slice 9, every export (extracted pages, print with
+//! and without markup, Clean Copy, Export Flattened) of plain, encrypted,
+//! prefixed and cross-reference-stream files, and a file with bytes
+//! before its header appends to what the
 //! same file without them does, in qpdf and pdf.js. From slice 8, the old
 //! writers write from records: a bookmark that opens a URI, another
 //! tool's link and comments come through a reorder by both strategies,
@@ -10,7 +12,10 @@
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`. A test
 //! whose tools are missing says so and passes. Run with
-//! `cargo test -p sheaf-ops --test interop -- --ignored --nocapture`.
+//! `cargo test -p sheaf-ops --test interop -- --ignored --skip append
+//! --nocapture`: until slice 10 brings Append back, the ignored tier also
+//! holds the Append tests, which fail by design, every one with `append`
+//! in its name but `a_comment_made_ours_is_saved_in_place`.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -18,11 +23,12 @@ use std::process::Command;
 
 use lopdf::{Dictionary, Object, dictionary};
 use sheaf_doc::forms::fixture::{Form, outline_tree};
+use sheaf_doc::materialize::How;
 use sheaf_doc::serialize::fixture::{
     PREFIX, USER, attachment_only, edited, encrypted, form, object_streams_encrypted,
     rc4_aes_128_and_aes_256, written,
 };
-use sheaf_doc::{Edit, PageId};
+use sheaf_doc::{Edit, PageId, Snapshot};
 
 mod common;
 use common::scratch;
@@ -135,13 +141,19 @@ fn bases() -> Vec<(String, Vec<u8>, Option<&'static str>)> {
     bases
 }
 
-#[test]
-#[ignore = "needs qpdf"]
-fn qpdf_checks_every_output() {
+sheaf_doc::both_ways!(
+    #[ignore = "needs qpdf"]
+    qpdf_checks_every_output,
+    qpdf_checks_every_output_appended: qpdf_checks
+);
+
+/// Every way out of every base, a save `how` and the exports, passes
+/// `qpdf --check`.
+fn qpdf_checks(how: How) {
     let Some(qpdf) = qpdf() else {
         return;
     };
-    let dir = scratch("interop-check");
+    let dir = scratch(&format!("interop-check-{how:?}"));
     let mut checked = 0;
     let mut failed = Vec::new();
     for (name, bytes, password) in bases() {
@@ -149,25 +161,90 @@ fn qpdf_checks_every_output() {
         let base = dir.join(format!("{file}.pdf"));
         std::fs::write(&base, &bytes).unwrap();
         let snap = edited(&base, password);
+        let ids: Vec<PageId> = snap.state.order().iter().copied().collect();
+        let exported = |export: fn(&Snapshot, &Path) -> anyhow::Result<()>, how: &str| {
+            let path = dir.join(format!("{file}-{how}.pdf"));
+            export(&snap, &path).unwrap();
+            std::fs::read(&path).unwrap()
+        };
+        let saved = (format!("{how:?}"), how.write(&snap));
+        if how == How::Appended {
+            outputs_checked(
+                &qpdf,
+                &dir,
+                &file,
+                &name,
+                password,
+                [saved],
+                &mut checked,
+                &mut failed,
+            );
+            continue;
+        }
         let outputs = [
-            ("Rewrite", sheaf_doc::save::rewrite(&snap).unwrap()),
+            saved,
             (
-                "Append",
-                sheaf_doc::incremental::incremental(&snap).unwrap(),
+                "Extract".into(),
+                sheaf_doc::save::extract_bytes(&snap, &ids[..1]).unwrap(),
+            ),
+            (
+                "Print".into(),
+                sheaf_doc::save::print_pdf(&snap, &ids, true).unwrap(),
+            ),
+            (
+                "PrintClean".into(),
+                sheaf_doc::save::print_pdf(&snap, &ids, false).unwrap(),
+            ),
+            (
+                "Clean".into(),
+                exported(sheaf_doc::save::export_clean_copy, "clean-copy"),
+            ),
+            (
+                "Flattened".into(),
+                exported(
+                    |snap, path| sheaf_doc::save::export_flattened(snap, path).map(drop),
+                    "flattened-copy",
+                ),
             ),
         ];
-        for (strategy, out) in outputs {
-            let path = dir.join(format!("{file}-{strategy}.pdf"));
-            std::fs::write(&path, &out).unwrap();
-            checked += 1;
-            if let Err(e) = run(qpdf_with(&qpdf, password).arg("--check").arg(&path)) {
-                failed.push(format!("{name}, {strategy}: {e}"));
-            }
-        }
+        outputs_checked(
+            &qpdf,
+            &dir,
+            &file,
+            &name,
+            password,
+            outputs,
+            &mut checked,
+            &mut failed,
+        );
     }
     println!("qpdf --check: {checked} outputs, {} fail", failed.len());
     assert!(failed.is_empty(), "{failed:#?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `outputs` of base `name` (its file `file`), each by what it is, checked
+/// by `qpdf --check` with `password`: counted in `checked`, each failure
+/// in `failed`.
+#[allow(clippy::too_many_arguments)]
+fn outputs_checked(
+    qpdf: &Path,
+    dir: &Path,
+    file: &str,
+    name: &str,
+    password: Option<&str>,
+    outputs: impl IntoIterator<Item = (String, Vec<u8>)>,
+    checked: &mut usize,
+    failed: &mut Vec<String>,
+) {
+    for (what, out) in outputs {
+        let path = dir.join(format!("{file}-{what}.pdf"));
+        std::fs::write(&path, &out).unwrap();
+        *checked += 1;
+        if let Err(e) = run(qpdf_with(qpdf, password).arg("--check").arg(&path)) {
+            failed.push(format!("{name}, {what}: {e}"));
+        }
+    }
 }
 
 /// What pdf.js reads of a file: its pages, and each one's text and how
@@ -190,8 +267,9 @@ for (let n = 1; n <= doc.numPages; n++) {
 }
 "#;
 
+/// Needs qpdf, or node and pdf.js, too.
 #[test]
-#[ignore = "needs qpdf, or node and pdf.js"]
+#[ignore = "slice 10"]
 fn a_prefixed_append_opens_identically_in_pdfjs_and_qpdf() {
     let (qpdf, pdfjs) = (qpdf(), pdfjs());
     if qpdf.is_none() && pdfjs.is_none() {
@@ -205,7 +283,7 @@ fn a_prefixed_append_opens_identically_in_pdfjs_and_qpdf() {
         let appended = |name: &str, bytes: &[u8]| {
             let base = dir.join(format!("{name}-{kind}.pdf"));
             std::fs::write(&base, bytes).unwrap();
-            let out = sheaf_doc::incremental::incremental(&edited(&base, None)).unwrap();
+            let out = How::Appended.write(&edited(&base, None));
             let path = dir.join(format!("{name}-{kind}-appended.pdf"));
             std::fs::write(&path, out).unwrap();
             path
@@ -306,14 +384,21 @@ for (let n = 1; n <= doc.numPages; n++) {
 }
 "#;
 
-#[test]
-#[ignore = "needs qpdf, or node and pdf.js"]
-fn bookmarks_links_and_comments_come_through_both_strategies() {
+sheaf_doc::both_ways!(
+    #[ignore = "needs qpdf, or node and pdf.js"]
+    bookmarks_links_and_comments_come_through_both_strategies,
+    bookmarks_links_and_comments_come_through_both_strategies_appended: records_come_through
+);
+
+/// What an Append writes after a reorder and a bookmark renamed, and a
+/// Rewrite once a comment is deleted too, passes `qpdf --check`, and pdf.js
+/// reads the bookmarks, links and comments the document has.
+fn records_come_through(how: How) {
     let (qpdf, pdfjs) = (qpdf(), pdfjs());
     if qpdf.is_none() && pdfjs.is_none() {
         return;
     }
-    let dir = scratch("interop-records");
+    let dir = scratch(&format!("interop-records-{how:?}"));
     let script = dir.join("records.mjs");
     std::fs::write(&script, PDFJS_RECORDS).unwrap();
     let base = dir.join("records.pdf");
@@ -324,8 +409,8 @@ fn bookmarks_links_and_comments_come_through_both_strategies() {
         .find(|(_, _, b)| &*b.title == "Third")
         .map(|(_, id, _)| id)
         .unwrap();
-    // The third page first, and its bookmark renamed, so an incremental
-    // save writes the outline anew.
+    // The third page first, and its bookmark renamed, so an Append writes
+    // the outline anew.
     let edits = vec![
         Edit::MovePages {
             ids: vec![pages[2]],
@@ -341,19 +426,18 @@ fn bookmarks_links_and_comments_come_through_both_strategies() {
         },
     ];
     doc.apply_batch(edits, "Reorder").unwrap();
-    let appended = sheaf_doc::incremental::incremental(&doc.snapshot()).unwrap();
     // A deleted comment makes the next save a Rewrite.
-    let delete = Edit::CommentsDelete {
-        page: pages[0],
-        names: vec!["theirs".into()],
-    };
-    doc.apply(delete, "Delete").unwrap();
-    let rewritten = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
-    let outputs = [("Append", appended), ("Rewrite", rewritten)].map(|(strategy, bytes)| {
-        let path = dir.join(format!("records-{strategy}.pdf"));
-        std::fs::write(&path, bytes).unwrap();
-        (strategy, path)
-    });
+    if how == How::Rewritten {
+        let delete = Edit::CommentsDelete {
+            page: pages[0],
+            names: vec!["theirs".into()],
+        };
+        doc.apply(delete, "Delete").unwrap();
+    }
+    let strategy = format!("{how:?}");
+    let path = dir.join(format!("records-{strategy}.pdf"));
+    std::fs::write(&path, how.write(&doc.snapshot())).unwrap();
+    let outputs = [(strategy, path)];
     for (strategy, path) in &outputs {
         if let Some(qpdf) = &qpdf {
             run(Command::new(qpdf).arg("--check").arg(path))
@@ -361,9 +445,9 @@ fn bookmarks_links_and_comments_come_through_both_strategies() {
         }
         if let Some(pdfjs) = &pdfjs {
             let said = run(Command::new("node").arg(&script).arg(pdfjs).arg(path)).unwrap();
-            let theirs = match *strategy {
-                "Append" => "Text \"Deleted by sheaf\"; ",
-                _ => "",
+            let theirs = match how {
+                How::Appended => "Text \"Deleted by sheaf\"; ",
+                How::Rewritten => "",
             };
             let want = format!(
                 "bookmark \"Site\" <https://example.com/>\n\

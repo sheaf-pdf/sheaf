@@ -6,8 +6,9 @@
 //!
 //! What a source says about itself is a pure function of its bytes, read
 //! once: the page table when it opens; its conformance claims, what its
-//! pages hold beside their content, and its form, when first asked. Sources come
-//! from the [`Store`](crate::store::Store), one per distinct file.
+//! pages hold beside their content, its form, and the header and footer
+//! sheaf drew, when first asked. Sources come from the
+//! [`Store`](crate::store::Store), one per distinct file.
 
 mod conformance;
 #[doc(hidden)]
@@ -31,6 +32,7 @@ use crate::forms::FileForm;
 use crate::geom::Geom;
 use crate::open::FileAnnots;
 use crate::serialize::crypt::Crypt;
+use crate::stamps::HeaderFooter;
 use crate::store::{Blob, BlobCollision, BlobId, Src};
 
 pub use conformance::{Conformance, PdfA};
@@ -52,7 +54,12 @@ pub struct Source {
     conformance: OnceLock<Conformance>,
     annots: OnceLock<Arc<FileAnnots>>,
     form: OnceLock<Arc<FileForm>>,
+    header_footer: OnceLock<Option<StoredHeaderFooter>>,
 }
+
+/// A header and footer sheaf drew, as its file's catalog stores it, and
+/// the indexes of the pages it's on (None: every page).
+pub type StoredHeaderFooter = (HeaderFooter, Option<Vec<usize>>);
 
 /// An object of a source: what a record was read from, so what sheaf
 /// doesn't model of it survives (M10.5 §2, rule 1). It pins the source.
@@ -127,6 +134,7 @@ impl Source {
             conformance: OnceLock::new(),
             annots: OnceLock::new(),
             form: OnceLock::new(),
+            header_footer: OnceLock::new(),
         })
     }
 
@@ -181,6 +189,15 @@ impl Source {
     /// member.
     pub fn raw_span(&self, id: ObjectId) -> Option<Range<usize>> {
         self.pdf.raw_span(id)
+    }
+
+    /// [`raw_span`](Self::raw_span) of an object a writer may copy as it
+    /// is: None too for a stream whose `/Length` is a reference, whose
+    /// bytes name the object holding its length, which the object as read
+    /// doesn't, for one whose data its `/Length` doesn't fit, and for an
+    /// object without its `endobj`, whose copy would be as damaged.
+    pub fn raw_span_whole(&self, id: ObjectId) -> Option<Range<usize>> {
+        self.pdf.raw_span_whole(id)
     }
 
     pub fn page_count(&self) -> u32 {
@@ -267,6 +284,14 @@ impl Source {
     /// shows about it, read once (see [`crate::forms::read`]).
     pub fn form(&self) -> &Arc<FileForm> {
         self.form.get_or_init(|| Arc::new(crate::forms::read(self)))
+    }
+
+    /// The header and footer its catalog says sheaf drew on its pages
+    /// ([`crate::stamps::from_catalog`]), read once.
+    pub fn header_footer(&self) -> Option<&StoredHeaderFooter> {
+        (self.header_footer)
+            .get_or_init(|| crate::stamps::from_catalog(&self.pdf))
+            .as_ref()
     }
 
     /// What its XMP metadata claims it conforms to: PDF/A and PDF/UA.

@@ -153,7 +153,7 @@ fn doc(pages: u32) -> Document {
         name: "return.pdf".into(),
         ..SourceInfo::blank(&store, pages)
     };
-    Document::new(store, primary, &[], Box::new(FixedCount(50)))
+    Document::new(store, primary, None, &[], Box::new(FixedCount(50)))
 }
 
 /// The top-level bookmarks, in order.
@@ -178,9 +178,8 @@ fn turned_doc() -> Document {
         src: store.open(f.bytes().into(), kind).unwrap(),
         name: "turned.pdf".into(),
         derived: None,
-        stamp: None,
     };
-    Document::new(store, primary, &[], Box::new(FixedCount(50)))
+    Document::new(store, primary, None, &[], Box::new(FixedCount(50)))
 }
 
 /// Page `i`'s frame in the plugin API: its source page as the file shows

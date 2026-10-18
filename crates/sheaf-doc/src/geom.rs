@@ -352,6 +352,20 @@ mod tests {
         assert_eq!(upright.to_view().apply_axes(None, None), (None, None));
     }
 
+    /// The view starts at the crop box's corner, as viewers draw, and a
+    /// crop box outside the media box leaves nothing shown, as PDFium
+    /// reads it.
+    #[test]
+    fn geometry_follows_the_crop_box() {
+        let media = Some(Rect::new(0.0, 0.0, 612.0, 792.0));
+        let g = Geom::read(media, Some(Rect::new(100.0, 100.0, 400.0, 500.0)), 0);
+        assert_eq!(g.visible(), Rect::new(100.0, 100.0, 400.0, 500.0));
+        let u = g.from_view().apply(Pt { x: 10.0, y: 10.0 });
+        assert_eq!((u.x, u.y), (110.0, 490.0));
+        let outside = Geom::read(media, Some(Rect::new(700.0, 700.0, 800.0, 900.0)), 0);
+        assert!(outside.visible().is_empty());
+    }
+
     /// A box's image under a turn or a shear is bounded by its corners'.
     #[test]
     fn bounds_hold_every_corner() {

@@ -186,9 +186,8 @@ mod tests {
                     .unwrap(),
                 name: "t.pdf".into(),
                 derived: None,
-                stamp: None,
             };
-            let mut doc = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+            let mut doc = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
             let id = doc.state().order()[0];
             let rotate = Edit::RotatePages { ids: vec![id], by };
             doc.apply(rotate, "rotate").unwrap();

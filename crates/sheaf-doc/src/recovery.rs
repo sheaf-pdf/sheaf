@@ -1,19 +1,48 @@
-//! Crash recovery. Unsaved edits are kept as an incremental update section
-//! in a sidecar next to the file (`<name>.pdf.sheaf-recovery`); appending
-//! that section to the original yields a complete PDF with the edits
-//! applied. Writing it costs only the size of the edits, so it can run a
-//! few seconds after every change. The sidecar records the original's
-//! length so a file changed by something else is never patched.
+//! Crash recovery (M10.5 §11.10). A document's unsaved state is kept in a
+//! sidecar next to its file (`<name>.pdf.sheaf-recovery`), written a few
+//! seconds after edits stop and whenever a save leaves edits after it.
+//!
+//! The sidecar is format 2:
+//!
+//! ```text
+//! sheaf-recovery 2\nfull\n<base len>\n<base stamp hex>\n<flags>\n<bytes>
+//! ```
+//!
+//! - **The base** is the file as sheaf last read or wrote it
+//!   ([`Document::file`](crate::Document::file)): its length, and its
+//!   stamp ([`FileStamp`]) in hex, the tail's hash then the time. A sidecar
+//!   is found only while its base is still the file, so it never outlives
+//!   it.
+//! - **Full** is the whole document: the current version written as a save
+//!   writes it ([`Profile`] Keep and Stable), encrypted when the document
+//!   is, with save policy's form transforms (`forms::rules::plan`), so a
+//!   recovered fill of a hybrid form keeps no stale XFA. Slice 10 adds
+//!   Append sections against the saved file.
+//! - **Flags:** `removes`, set on every Full sidecar: a restored document
+//!   has no record of its file, so its first save is a Rewrite anyway.
+//!
+//! A restored document opens the bytes from memory
+//! ([`MemoryKind::Recovered`](crate::store::MemoryKind::Recovered)), with
+//! no record, and its file's base as the base its first save checks
+//! ([`Document::set_disk_base`](crate::Document::set_disk_base)).
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
+use in_progress::Progress;
 
-use crate::model::Snapshot;
-use crate::serialize::durable;
+use crate::materialize::{self, Profile, SaveInput, SaveTarget};
+use crate::model::SourceInfo;
+use crate::serialize::durable::{self, FileStamp};
+use crate::store::{BlobKind, Store};
 
-const MAGIC: &[u8] = b"sheaf-recovery 1\n";
+/// The first line of a sidecar in this format.
+const FORMAT: &[u8] = b"sheaf-recovery 2\n";
 pub const SUFFIX: &str = ".sheaf-recovery";
+
+/// The flag a sidecar whose edits take something out of its base carries.
+const REMOVES: &str = "removes";
 
 pub fn sidecar_path(pdf: &Path) -> PathBuf {
     let mut name = pdf
@@ -24,73 +53,139 @@ pub fn sidecar_path(pdf: &Path) -> PathBuf {
     pdf.with_file_name(name)
 }
 
-/// Write the sidecar for `snap`'s unsaved state. Returns the section size,
-/// or None (and no sidecar) when there's nothing to record.
-pub fn write(snap: &Snapshot) -> Result<Option<usize>> {
-    let info = snap
-        .source(snap.primary)
-        .context("primary source missing")?;
-    let (original_len, section) = crate::incremental::incremental_section(snap)?;
-    let sidecar = sidecar_path(&info.name);
-    if section.is_empty() {
-        let _ = std::fs::remove_file(&sidecar);
-        return Ok(None);
-    }
-    let mut bytes = Vec::with_capacity(MAGIC.len() + 24 + section.len());
-    bytes.extend_from_slice(MAGIC);
-    bytes.extend_from_slice(format!("{original_len}\n").as_bytes());
-    bytes.extend_from_slice(&section);
-    durable::write(&sidecar, &bytes, None)?;
-    Ok(Some(section.len()))
+/// Write the sidecar of `input`, a document's state ([`recovery_input`]),
+/// beside `file`, the document's file, which `base` stamps: the Full form,
+/// the version written whole. Returns its size.
+///
+/// [`recovery_input`]: crate::Document::recovery_input
+pub fn write(input: &SaveInput, file: &Path, base: &FileStamp, p: &dyn Progress) -> Result<usize> {
+    let stamp = stamp_hex(base).context("the file's time is before 1970")?;
+    let target = SaveTarget {
+        path: file.into(),
+        same_file: true,
+        profile: Profile::default(),
+        stamp: None,
+    };
+    // The plan for its transforms: a sidecar asks nothing, and is never
+    // the saved file.
+    let plan = materialize::plan(input, &target);
+    let out = materialize::materialize(input, &plan, target, p)?;
+    let head = format!("full\n{}\n{stamp}\n{REMOVES}\n", base.len);
+    let mut bytes = Vec::with_capacity(FORMAT.len() + head.len() + out.bytes.len());
+    bytes.extend_from_slice(FORMAT);
+    bytes.extend_from_slice(head.as_bytes());
+    bytes.extend_from_slice(&out.bytes);
+    durable::write(&sidecar_path(file), &bytes, None)?;
+    Ok(bytes.len())
 }
 
 /// Recovery data found next to a file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recovery {
     pub sidecar: PathBuf,
-    pub original_len: usize,
-    pub section: Vec<u8>,
+    /// The file it was written against, which it's found only beside.
+    pub base: FileStamp,
+    /// Its edits take something out of the base.
+    pub removes: bool,
+    /// The whole document.
+    pub bytes: Vec<u8>,
 }
 
-/// A usable sidecar for `pdf`: present, well-formed, and written against a
-/// file of the current size. A stale or malformed one is removed.
+/// A usable sidecar for `pdf`: present, well-formed, and written against
+/// the file as it still is (its length and stamp). A stale or malformed
+/// one is removed; one whose file can't be read now is left.
 pub fn find(pdf: &Path) -> Option<Recovery> {
     let sidecar = sidecar_path(pdf);
     let bytes = std::fs::read(&sidecar).ok()?;
-    let current_len = std::fs::metadata(pdf).map(|m| m.len() as usize).ok()?;
-    match parse(&bytes) {
-        Some((original_len, section)) if original_len == current_len && !section.is_empty() => {
-            Some(Recovery {
-                sidecar,
-                original_len,
-                section: section.to_vec(),
-            })
-        }
-        _ => {
+    let found = parse(&bytes).map(|(base, removes, body)| Recovery {
+        sidecar: sidecar.clone(),
+        base,
+        removes,
+        bytes: body.to_vec(),
+    });
+    match found.as_ref().map(|rec| rec.base.holds(pdf)) {
+        Some(Ok(true)) => found,
+        Some(Err(_)) => None,
+        Some(Ok(false)) | None => {
             let _ = std::fs::remove_file(&sidecar);
             None
         }
     }
 }
 
-fn parse(bytes: &[u8]) -> Option<(usize, &[u8])> {
-    let rest = bytes.strip_prefix(MAGIC)?;
-    let nl = rest.iter().position(|&b| b == b'\n')?;
-    let len: usize = std::str::from_utf8(&rest[..nl]).ok()?.parse().ok()?;
-    Some((len, &rest[nl + 1..]))
+/// The sidecar's base, flag and bytes, when it's this format's Full form
+/// and says nothing it doesn't know.
+fn parse(bytes: &[u8]) -> Option<(FileStamp, bool, &[u8])> {
+    let mut rest = bytes.strip_prefix(FORMAT)?;
+    let mut line = || {
+        let nl = rest.iter().position(|&b| b == b'\n')?;
+        let line = std::str::from_utf8(&rest[..nl]).ok()?;
+        rest = &rest[nl + 1..];
+        Some(line)
+    };
+    if line()? != "full" {
+        return None;
+    }
+    let len: u64 = line()?.parse().ok()?;
+    let base = parse_stamp(len, line()?)?;
+    let mut removes = false;
+    for flag in line()?.split_whitespace() {
+        match flag {
+            REMOVES => removes = true,
+            _ => return None,
+        }
+    }
+    (!rest.is_empty()).then_some((base, removes, rest))
 }
 
-/// Write `pdf` plus the recovered section as a complete PDF at `out`.
-pub fn materialize(pdf: &Path, rec: &Recovery, out: &Path) -> Result<()> {
-    let mut bytes = std::fs::read(pdf).with_context(|| format!("reading {}", pdf.display()))?;
-    if bytes.len() != rec.original_len {
+/// `stamp` as a sidecar says it: its tail's hash, then its time in
+/// nanoseconds since 1970, in 32 hex digits each. None for a time before.
+fn stamp_hex(stamp: &FileStamp) -> Option<String> {
+    let since = stamp.mtime.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    Some(format!("{:032x}{:032x}", stamp.tail, since.as_nanos()))
+}
+
+/// The stamp of a file `len` long that [`stamp_hex`] wrote as `hex`.
+fn parse_stamp(len: u64, hex: &str) -> Option<FileStamp> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        return None;
+    }
+    let (tail, nanos) = hex.split_at(32);
+    let nanos = u128::from_str_radix(nanos, 16).ok()?;
+    let secs = u64::try_from(nanos / 1_000_000_000).ok()?;
+    let mtime =
+        SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, (nanos % 1_000_000_000) as u32))?;
+    Some(FileStamp {
+        len,
+        mtime,
+        tail: u128::from_str_radix(tail, 16).ok()?,
+    })
+}
+
+/// The document `rec` recovers for `pdf`, opened from memory into `store`
+/// with `password` under the file's name, while the file is still its
+/// base. It has no record: its first save is a Rewrite, and checks the
+/// base ([`Document::set_disk_base`](crate::Document::set_disk_base)).
+pub fn restore(
+    store: &Store,
+    pdf: &Path,
+    rec: &Recovery,
+    password: Option<&str>,
+) -> Result<SourceInfo> {
+    let reading = || format!("reading {}", pdf.display());
+    if !rec.base.holds(pdf).with_context(reading)? {
         bail!(
             "{} changed since the recovery data was written",
             pdf.display()
         );
     }
-    bytes.extend_from_slice(&rec.section);
-    Ok(durable::write(out, &bytes, None)?)
+    let src = (store.open(rec.bytes.as_slice().into(), BlobKind::recovered(password)))
+        .with_context(|| format!("opening the recovery data of {}", pdf.display()))?;
+    Ok(SourceInfo {
+        src,
+        name: pdf.to_path_buf(),
+        derived: None,
+    })
 }
 
 /// Remove the sidecar, if any.
@@ -100,12 +195,27 @@ pub fn discard(pdf: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::history::FixedCount;
-    use crate::model::{Document, Edit, SourceInfo};
-    use crate::store::Store;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use in_progress::NoProgress;
     use lopdf::{Document as Pdf, Object, Stream, dictionary};
     use sheaf_core::Rotation;
+
+    use super::*;
+    use crate::model::{Document, Edit};
+    use crate::serialize::fixture::holds;
+    use crate::store::{MemoryKind, Origin};
+
+    /// An empty directory of the test's own.
+    fn scratch() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("sheaf-recovery-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     fn two_page_pdf(path: &Path) {
         let mut pdf = Pdf::with_version("1.7");
@@ -129,72 +239,148 @@ mod tests {
         pdf.save(path).unwrap();
     }
 
+    /// `doc`'s sidecar, written as the app writes it: beside its file,
+    /// against the file as sheaf last read or wrote it.
+    fn sidecar_of(doc: &Document) -> usize {
+        let (file, base) = doc.file().map(|(f, s)| (f.clone(), *s)).unwrap();
+        write(&doc.recovery_input(), &file, &base, &NoProgress).unwrap()
+    }
+
+    /// The document `rec` restores for `pdf`, opened as the app opens it.
+    fn restored(pdf: &Path, rec: &Recovery, password: Option<&str>) -> Document {
+        let store = Store::new();
+        let info = restore(&store, pdf, rec, password).unwrap();
+        let src = info.src.clone();
+        let mut doc = crate::open::start(store, info, None, crate::history::default_policy());
+        doc.ready(crate::open::finish(&src, &NoProgress)).unwrap();
+        doc.mark_unsaved();
+        doc.set_disk_base(pdf, rec.base);
+        doc
+    }
+
+    /// A sidecar holds the whole document, against its file: found while
+    /// the file is still that one, restored from memory with no record,
+    /// and stale once another program changed the file, when it goes. A
+    /// malformed one goes, and so does one of the format before.
     #[test]
     fn sidecar_round_trips_and_detects_staleness() {
-        let dir = std::env::temp_dir().join(format!("sheaf-recovery-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch();
         let pdf = dir.join("doc.pdf");
         two_page_pdf(&pdf);
-        let bytes = std::fs::metadata(&pdf).unwrap().len() as usize;
-        let store = Store::new();
-        let primary = SourceInfo::read(&store, &pdf, None).unwrap();
-        let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-        // Nothing unsaved: no sidecar.
-        assert_eq!(write(&model.snapshot()).unwrap(), None);
-        assert!(find(&pdf).is_none());
-
+        let original = std::fs::read(&pdf).unwrap();
+        let mut model = crate::open::file(&pdf, None).unwrap().doc;
         let p1 = model.page(1).unwrap();
+        let turn = Edit::RotatePages {
+            ids: vec![p1],
+            by: Rotation::R90,
+        };
+        model.apply(turn, "rot").unwrap();
+        let n = sidecar_of(&model);
+        assert_eq!(
+            std::fs::metadata(sidecar_path(&pdf)).unwrap().len() as usize,
+            n
+        );
+        // The original is untouched.
+        assert_eq!(std::fs::read(&pdf).unwrap(), original);
+
+        let rec = find(&pdf).expect("sidecar found");
+        assert_eq!(rec.base, FileStamp::read(&pdf).unwrap());
+        assert_eq!(rec.base.len, original.len() as u64);
+        assert!(rec.removes);
+        let recovered = restored(&pdf, &rec, None);
+        assert!(recovered.is_dirty() && recovered.saved_record().is_none());
+        let primary = recovered.source(recovered.primary()).unwrap();
+        assert_eq!(primary.name, pdf);
+        let origin = match primary.src.blob().kind() {
+            BlobKind::Pdf { origin, .. } => origin.clone(),
+            BlobKind::Attachment => unreachable!("a PDF"),
+        };
+        assert_eq!(origin, Origin::Memory(MemoryKind::Recovered));
+        assert_eq!(primary.src.geom(1).rotate, Rotation::R90);
+        assert_eq!(primary.src.geom(0).rotate, Rotation::R0);
+        assert_eq!(
+            recovered.geom(recovered.page(1).unwrap()).rotate,
+            Rotation::R90
+        );
+        // Nothing of it in a temp file of its own.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+
+        // The file changed underneath: the sidecar is stale and goes away.
+        std::fs::write(&pdf, [original.clone(), b"\n%extra\n".to_vec()].concat()).unwrap();
+        assert!(find(&pdf).is_none());
+        assert!(!sidecar_path(&pdf).exists());
+        // So does one whose file changed after it was found.
+        std::fs::write(&pdf, &original).unwrap();
+        model = crate::open::file(&pdf, None).unwrap().doc;
         model
             .apply(
                 Edit::RotatePages {
-                    ids: vec![p1],
+                    ids: vec![model.page(0).unwrap()],
                     by: Rotation::R90,
                 },
                 "rot",
             )
             .unwrap();
-        let n = write(&model.snapshot()).unwrap().unwrap();
-        assert!(n > 0);
-        assert!(sidecar_path(&pdf).exists());
-        // The original is untouched.
-        assert_eq!(std::fs::metadata(&pdf).unwrap().len() as usize, bytes);
+        sidecar_of(&model);
+        let rec = find(&pdf).unwrap();
+        std::fs::write(&pdf, [original.clone(), b"\n".to_vec()].concat()).unwrap();
+        let store = Store::new();
+        assert!(restore(&store, &pdf, &rec, None).is_err());
 
-        let rec = find(&pdf).expect("sidecar found");
-        assert_eq!(rec.original_len, bytes);
-        let out = dir.join("recovered.pdf");
-        materialize(&pdf, &rec, &out).unwrap();
-        let recovered = Pdf::load(&out).unwrap();
-        let pages = recovered.get_pages();
-        let p2 = recovered.get_dictionary(pages[&2]).unwrap();
-        assert_eq!(p2.get(b"Rotate").unwrap().as_i64().unwrap(), 90);
-        assert!(!recovered.get_dictionary(pages[&1]).unwrap().has(b"Rotate"));
+        // A malformed sidecar, or one of the format before, goes.
+        std::fs::write(&pdf, &original).unwrap();
+        let base = FileStamp::read(&pdf).unwrap();
+        let v1 = format!("sheaf-recovery 1\n{}\n%%section", original.len());
+        let head = |flags: &str| {
+            let stamp = stamp_hex(&base).unwrap();
+            format!(
+                "sheaf-recovery 2\nfull\n{}\n{stamp}\n{flags}\n%PDF-",
+                base.len
+            )
+        };
+        for bad in [
+            v1,
+            head("removes and more"),
+            head("removes")[..40].to_string(),
+        ] {
+            std::fs::write(sidecar_path(&pdf), bad.as_bytes()).unwrap();
+            assert!(find(&pdf).is_none(), "{bad}");
+            assert!(!sidecar_path(&pdf).exists(), "{bad}");
+        }
+        std::fs::write(sidecar_path(&pdf), head("removes").as_bytes()).unwrap();
+        assert!(find(&pdf).is_some_and(|rec| rec.removes && rec.bytes == b"%PDF-"));
 
-        // The file changed underneath: the sidecar is stale and goes away.
-        std::fs::write(
-            &pdf,
-            [std::fs::read(&pdf).unwrap(), b"\n%extra\n".to_vec()].concat(),
-        )
-        .unwrap();
-        assert!(find(&pdf).is_none());
-        assert!(!sidecar_path(&pdf).exists());
-
+        discard(&pdf);
         discard(&pdf); // no-op without a sidecar
+        assert!(!sidecar_path(&pdf).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stamp_reads_back_as_written() {
+        let stamp = FileStamp {
+            len: 12345,
+            mtime: SystemTime::UNIX_EPOCH + Duration::new(1_760_000_000, 123_456_789),
+            tail: 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
+        };
+        let hex = stamp_hex(&stamp).unwrap();
+        assert_eq!(parse_stamp(12345, &hex), Some(stamp));
+        assert_eq!(parse_stamp(12345, &hex[1..]), None);
+        let before = FileStamp {
+            mtime: SystemTime::UNIX_EPOCH - Duration::from_secs(1),
+            ..stamp
+        };
+        assert_eq!(stamp_hex(&before), None);
     }
 
     #[test]
     fn sidecar_carries_ocr_layers() {
         use crate::annot::Box2;
         use crate::text_layer::{OcrWord, TextLayer};
-        let dir = std::env::temp_dir().join(format!("sheaf-recovery-ocr-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch();
         let pdf = dir.join("doc.pdf");
         two_page_pdf(&pdf);
-        let store = Store::new();
-        let primary = SourceInfo::read(&store, &pdf, None).unwrap();
-        let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+        let mut model = crate::open::file(&pdf, None).unwrap().doc;
         let p1 = model.page(1).unwrap();
         let layer = TextLayer::from_engine(
             vec![OcrWord {
@@ -213,16 +399,14 @@ mod tests {
         model
             .apply(
                 Edit::SetTextLayers {
-                    layers: vec![(p1, std::sync::Arc::new(layer))],
+                    layers: vec![(p1, Arc::new(layer))],
                 },
                 "ocr",
             )
             .unwrap();
-        assert!(write(&model.snapshot()).unwrap().is_some());
+        sidecar_of(&model);
         let rec = find(&pdf).expect("sidecar found");
-        let out = dir.join("recovered.pdf");
-        materialize(&pdf, &rec, &out).unwrap();
-        let recovered = Pdf::load(&out).unwrap();
+        let recovered = Pdf::load_mem(&rec.bytes).unwrap();
         let pages = recovered.get_pages();
         let p2 = recovered.get_dictionary(pages[&2]).unwrap();
         let contents = recovered
@@ -241,25 +425,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A page deleted from a hybrid form changes its form, so a sidecar,
+    /// as any save, takes the XFA part out (save policy, `rules::plan`): a
+    /// recovered document has no stale XFA.
+    #[test]
+    fn a_page_delete_on_a_hybrid_form_gives_a_sidecar_with_no_xfa() {
+        use crate::forms::fixture::{Form, row};
+        let dir = scratch();
+        let pdf = dir.join("form.pdf");
+        let mut f = Form::new(2);
+        let x = f.text("x[0]", 0, row(0));
+        let y = f.text("y[0]", 1, row(0));
+        f.fill(x, "Ex");
+        f.fill(y, "Why");
+        f.group("form1[0]", &[x, y]);
+        f.xfa();
+        std::fs::write(&pdf, f.bytes()).unwrap();
+        let mut model = crate::open::file(&pdf, None).unwrap().doc;
+        assert!(model.state().form().xfa.present);
+        let second = model.page(1).unwrap();
+        model
+            .apply(Edit::DeletePages { ids: vec![second] }, "delete")
+            .unwrap();
+        sidecar_of(&model);
+        let sidecar = std::fs::read(sidecar_path(&pdf)).unwrap();
+        assert!(!holds(&sidecar, b"xfa-template"));
+        let rec = find(&pdf).unwrap();
+        let src = crate::forms::fixture::source(rec.bytes.clone());
+        assert!(!src.form().facts.xfa);
+        assert_eq!(src.form().fields.len(), 1);
+        let report = crate::forms::check(&rec.bytes, None).unwrap();
+        assert!(report.is_clean(), "{:?}", report.findings);
+        // The file itself keeps its XFA: a sidecar is never the file.
+        assert!(
+            crate::forms::fixture::source(std::fs::read(&pdf).unwrap())
+                .form()
+                .facts
+                .xfa
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sidecar of an encrypted file opened without a password is
+    /// encrypted as the file is: neither the page's string nor a mark's
+    /// note is in it in the clear, and it restores, encrypted, with both.
     #[test]
     fn an_encrypted_sidecar_holds_no_plaintext() {
         use std::collections::BTreeMap;
-        use std::sync::Arc;
 
         use lopdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
         use lopdf::{EncryptionState, EncryptionVersion, LazyPdf, Permissions, XrefKind};
 
-        use crate::serialize::fixture::holds;
-        use crate::serialize::fixture::{OWNER, encrypted};
-        use crate::serialize::full;
+        use crate::serialize::fixture::{OWNER, encrypted, whole};
         use crate::serialize::tests::{NOTE, mark, notes};
         use crate::source::Limits;
         use crate::source::lazy_tests::{PAGE_STRING, plaintext};
 
-        let dir =
-            std::env::temp_dir().join(format!("sheaf-recovery-encrypted-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch();
         let plain = plaintext();
         // Opened with its empty user password, as such files open.
         let state = EncryptionState::try_from(EncryptionVersion::V4 {
@@ -277,14 +499,11 @@ mod tests {
         })
         .unwrap();
         let [table, _] = encrypted(&plain, &state, |_| {});
-        let unencrypted =
-            full::write(&plain.objects, &plain.trailer, XrefKind::Table, "1.7", None).unwrap();
+        let unencrypted = whole(&plain.objects, &plain.trailer, XrefKind::Table, "1.7", None);
         for (encrypted, bytes) in [(false, unencrypted), (true, table)] {
             let pdf = dir.join(format!("encrypted-{encrypted}.pdf"));
             std::fs::write(&pdf, &bytes).unwrap();
-            let store = Store::new();
-            let primary = SourceInfo::read(&store, &pdf, None).unwrap();
-            let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+            let mut model = crate::open::file(&pdf, None).unwrap().doc;
             let p0 = model.page(0).unwrap();
             let turn = Edit::RotatePages {
                 ids: vec![p0],
@@ -292,7 +511,7 @@ mod tests {
             };
             model.apply(turn, "rot").unwrap();
             mark(&mut model);
-            write(&model.snapshot()).unwrap().unwrap();
+            sidecar_of(&model);
             // The page's string and the mark's note, in the clear only
             // when the file is.
             let sidecar = std::fs::read(sidecar_path(&pdf)).unwrap();
@@ -300,16 +519,14 @@ mod tests {
                 assert_eq!(holds(&sidecar, text), !encrypted, "{encrypted}");
             }
             let rec = find(&pdf).expect("sidecar found");
-            let out = dir.join(format!("recovered-{encrypted}.pdf"));
-            materialize(&pdf, &rec, &out).unwrap();
-            let bytes = sheaf_core::read_file(&out).unwrap();
+            let bytes: Arc<[u8]> = rec.bytes.as_slice().into();
             let lazy = LazyPdf::open(bytes, None, &Limits::DEFAULT.reader).unwrap();
             assert_eq!(lazy.is_encrypted(), encrypted);
             assert_eq!(notes(&lazy), [NOTE], "{encrypted}");
-            let recovered = crate::file::load_pdf(&out, None).unwrap();
-            let page = recovered.get_pages()[&1];
-            let page = recovered.get_dictionary(page).unwrap();
-            assert_eq!(page.get(b"Rotate").unwrap().as_i64().unwrap(), 90);
+            let recovered = restored(&pdf, &rec, None);
+            let page = recovered.page(0).unwrap();
+            assert_eq!(recovered.geom(page).rotate, Rotation::R90);
+            assert_eq!(recovered.state().marks_on(page).count(), 1);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

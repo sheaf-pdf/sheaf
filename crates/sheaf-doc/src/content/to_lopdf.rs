@@ -1,13 +1,15 @@
 //! What the old writers do with a [`ContentWriter`]'s
 //! [`ResourceNeeds`]: write each resource into the lopdf document being
 //! saved, once a save, and bind it in a resources dict. Transitional:
-//! slice 9's emitter names and writes resources itself (§11.5).
+//! slice 9's emitter names and writes resources itself, by key (§11.5),
+//! and the legacy installers reach these through
+//! [`sink::Lopdf`](super::sink::Lopdf).
 //!
 //! [`ContentWriter`]: super::ContentWriter
 
 use std::collections::HashMap;
 
-use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
+use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use super::res::{Res, ResBody, ResId};
 use super::writer::ResourceNeeds;
@@ -32,12 +34,6 @@ impl ResObjects {
         }
     }
 
-    /// A stream written once a save, however many pages it's on: the
-    /// isolating `q` the old writers put before a page's content.
-    pub fn stream(&mut self, pdf: &mut Document, dict: Dictionary, content: Vec<u8>) -> ObjectId {
-        self.object(pdf, &Res::of([Stream::new(dict, content).into()]))
-    }
-
     /// `needs` written into `pdf` and bound in `resources`, a resources
     /// dict about to be written: each under its name in its category. A
     /// category that's a reference is copied in first, so a dict other
@@ -55,16 +51,6 @@ impl ResObjects {
             resources.set(key, category);
         }
     }
-}
-
-/// `page`'s `/Resources`, a copy to change: a page shares its dict with
-/// others by reference.
-pub fn resources_of(pdf: &Document, page: &Dictionary) -> Dictionary {
-    page.get(b"Resources")
-        .ok()
-        .and_then(|o| pdf.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict().ok().cloned())
-        .unwrap_or_default()
 }
 
 /// `objects`, a resource's ([`ResBody::Objects`]), added to `pdf`, each

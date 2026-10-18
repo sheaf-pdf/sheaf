@@ -1,7 +1,7 @@
 //! The content writer: what each call writes, names bound at the end, and
 //! the same bytes from the same calls on any thread.
 
-use lopdf::{Dictionary, Document as Pdf, Object, dictionary};
+use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 
 use super::*;
 use crate::annot::{Box2, Pt};
@@ -423,8 +423,10 @@ fn needs_are_written_once_and_bound() {
             .any(|w| w == b"<0000> <FFFF> <0000>\n")
     );
     // A stream once a save.
-    let q = res.stream(&mut pdf, dictionary! {}, b"q\n".to_vec());
-    assert_eq!(res.stream(&mut pdf, dictionary! {}, b"q\n".to_vec()), q);
+    let q = || Res::of([Stream::new(dictionary! {}, b"q\n".to_vec()).into()]);
+    let q = (res.object(&mut pdf, &q()), res.object(&mut pdf, &q()));
+    assert_eq!(q.0, q.1);
+    let q = q.0;
     let q = pdf.get_object(q).unwrap().as_stream().unwrap();
     assert_eq!(q.content, b"q\n");
 }

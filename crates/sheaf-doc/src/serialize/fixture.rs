@@ -7,23 +7,29 @@
 //! share: the edit they save, the bytes some writers put before the
 //! header, and a search of the bytes written.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use in_progress::NoProgress;
 use lopdf::encryption;
 use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
 use lopdf::xref::XrefType;
 use lopdf::{
-    Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, Object, Permissions, Stream,
-    dictionary,
+    Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions,
+    Stream, XrefKind, dictionary,
 };
 
 use sheaf_core::Rotation;
 
+use super::crypt::Crypt;
 use super::{full, object};
 use crate::forms::fixture::{Form, note, outline_tree, row};
+use crate::materialize::ObjKey;
+use crate::materialize::emit::PdfVersion;
 use crate::model::{Edit, Snapshot};
+use crate::store::BlobId;
 
 pub const OWNER: &str = "owner";
 pub const USER: &str = "user";
@@ -201,6 +207,44 @@ pub fn written(pdf: &Pdf) -> [Vec<u8>; 2] {
         pdf.save_to(&mut bytes).unwrap();
         bytes
     })
+}
+
+/// `objects` as a whole file of `version` whose cross-references are
+/// `kind` and whose trailer is `base`'s but for its sections' own keys,
+/// through the writer saves use ([`full::write_bodies`]): each object
+/// written anew, keyed as a file's own at its number, encrypted with
+/// `crypt` when given, the `/Encrypt` dictionary after the last. What a
+/// full write leaves out (object streams, cross-reference streams, a
+/// linearization dictionary) is left out.
+pub fn whole(
+    objects: &BTreeMap<ObjectId, Object>,
+    base: &Dictionary,
+    kind: XrefKind,
+    version: &str,
+    crypt: Option<&Crypt>,
+) -> Vec<u8> {
+    let blob = BlobId { hash: 0, len: 0 };
+    let written: Vec<(&ObjectId, &Object)> = (objects.iter())
+        .filter(|(_, obj)| !full::left_out(obj))
+        .collect();
+    let past = written.iter().map(|(id, _)| id.0 + 1).max().unwrap_or(1);
+    let bodies = written.into_iter().map(|(&id, obj)| {
+        let key = ObjKey::Base {
+            blob,
+            obj: id,
+            copy: 0,
+        };
+        Ok((id, full::Body::Object(Cow::Borrowed(obj), key)))
+    });
+    let layout = full::Layout {
+        trailer: base,
+        kind,
+        version: PdfVersion::parse(version.as_bytes()).expect("a version"),
+        crypt,
+        encrypt_at: (past, 0),
+        xref_from: 1,
+    };
+    full::write_bodies(bodies, &layout, &NoProgress).unwrap().0
 }
 
 /// `pdf` encrypted with `state` the way a writer that packs objects into

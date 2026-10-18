@@ -149,7 +149,7 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 | Document edits | **lopdf** (or our own object layer) | PDFium's write API is limited (esp. outlines). Structural edits — page tree, bookmarks, annotations — are done on the raw object graph and saved incrementally. The renderer re-loads from the edited bytes. |
 | Rendering strategy | **Tiled, async, cached** | Viewport requests tiles at the current zoom; a worker pool renders them off the UI thread; LRU cache keyed by `(page, zoom, tile)`. Low-res preview tile first, then full-res. This is the single biggest "feels fast" lever. |
 | Text / OCR | PDFium text extraction. OCR is a **core feature** behind an `OcrEngine` trait with two engines compiled in by default: **Tesseract 5** (built from source, linked statically) and **PaddleOCR PP-OCRv5** on ONNX Runtime (`oar-ocr`, with Microsoft's runtime library loaded on demand from `ocr/lib`). | Both engines are native C/C++, so OCR can't live in a WASM plugin; the trait keeps engines swappable, and plugins get OCR as a host capability. Judged on scanned tax forms, not purity. |
-| Save model | Incremental update by default; "Save As (rewrite)" optional | Preserves originals, fast saves on large files. Clean rewrite available for size reduction / "Export Clean Copy". After anything is removed (a page, a mark, a reply, a bookmark, OCR text replaced) the next save is a full rewrite, so what was removed isn't left in an earlier revision; undoing back to what was saved goes back to incremental. A file another program changed since sheaf opened it is never overwritten unasked: Save As…, Overwrite or Cancel (not yet checked on the first save after recovering unsaved changes from a crash). No save or copy carries a page it doesn't keep: links, named destinations, the open action, form fields, tags and article threads that pointed at one are dropped or pruned. |
+| Save model | Incremental update by default; Save As is a save to another file. Until M10.5 slice 10 brings incremental updates back, every save rewrites the whole file | Preserves originals, fast saves on large files. Clean rewrite available for size reduction / "Export Clean Copy". A save is an output: it writes the version on screen and records what it wrote, and the document, its undo history and what the screen shows stay as they were. After anything is removed (a page, a mark, a reply, a bookmark, OCR text replaced) the next save is a full rewrite, so what was removed isn't left in an earlier revision (slice 10). A file another program changed since sheaf opened or last saved it is never overwritten unasked: Save As…, Overwrite or Cancel, and a document recovered after a crash is checked against its file the same way. Saving a signed file says the save breaks its signatures and asks Rewrite or Cancel (slice 10 adds an incremental update that keeps them). No save or copy carries a page it doesn't keep: links, named destinations, the open action, form fields, tags and article threads that pointed at one are dropped or pruned. |
 | Undo | A tree of versions, each with the edits that made it | Every edit is an `Edit` command. A version keeps a snapshot (cheap, structure-shared) and the commands from its parent; undo, redo and jumps move between versions, an edit after undo starts a branch instead of discarding, and a trimmed snapshot is rebuilt by replaying commands. Per-document. |
 
 ### Efficiency principles
@@ -618,11 +618,14 @@ Contexts: `DocView` (the page view), `Outline`, `Comments`, `Palette`,
 Plugin commands are `plugin::Run` with `{ "plugin": "<id>", "command": "<id>" }`.
 Bad entries are reported on stderr at startup and skipped.
 
-**Crash recovery.** A few seconds after each edit, sheaf writes the unsaved
-changes as an incremental update to `<name>.pdf.sheaf-recovery` next to the
-file (only the edits, so it's small and quick). The file itself is never
-touched until you save. If sheaf didn't exit cleanly, the next open offers to
-recover; saving, or choosing Don't Save, removes the sidecar.
+**Crash recovery.** A few seconds after each edit, sheaf writes the document
+as it stands to `<name>.pdf.sheaf-recovery` next to the file: for now the
+whole file (encrypted when the file is), and from M10.5 slice 10 only the
+edits. The file itself is never touched until you save. If sheaf didn't exit
+cleanly, the next open offers to recover, as long as the file is still the
+one the sidecar was written against, and the recovered document's first
+save checks the file again. Saving, or choosing Don't Save, removes the
+sidecar. Password-protected files get no sidecar yet.
 
 ## Name
 

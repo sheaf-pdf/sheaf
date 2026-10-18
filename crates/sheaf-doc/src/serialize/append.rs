@@ -7,12 +7,11 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use lopdf::{Dictionary, Object, ObjectId, XrefKind};
 
 use super::crypt::Crypt;
 use super::xref::{Entry, Section};
-use crate::source::Source;
 
 /// The file an update goes after, as its last section describes it.
 #[derive(Debug, Clone)]
@@ -36,38 +35,6 @@ pub struct Base {
     pub root: ObjectId,
     /// Its document information, as the trailer gives it.
     pub info: Option<Object>,
-}
-
-impl Base {
-    /// The file `src` was read from. A file that says it numbers objects
-    /// past the reader's cap (Annex C's 8,388,607), as only a hostile one
-    /// does, has no number left for an update to take.
-    pub fn of(src: &Source) -> Result<Base> {
-        let bytes = src.bytes();
-        let xref = src.xref();
-        let trailer = src.pdf().trailer();
-        let root = trailer
-            .get(b"Root")
-            .and_then(Object::as_reference)
-            .context("the trailer names no catalog")?;
-        let size = match xref.max_stream {
-            Some(number) => number.checked_add(1).map(|past| past.max(xref.size)),
-            None => Some(xref.size),
-        }
-        .filter(|&size| size <= src.limits().reader.max_objects)
-        .context("no object number left for an update")?;
-        Ok(Base {
-            len: bytes.len(),
-            ends_line: matches!(bytes.last(), Some(b'\n' | b'\r')),
-            header: xref.header_offset,
-            prev: xref.start,
-            size,
-            kind: xref.kind,
-            first_id: super::first_id(trailer),
-            root,
-            info: trailer.get(b"Info").ok().cloned(),
-        })
-    }
 }
 
 /// The update after `base` that writes `objects`, each as the id it's

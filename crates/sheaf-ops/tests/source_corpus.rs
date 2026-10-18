@@ -22,6 +22,7 @@ use sheaf_render::pdfium::PdfiumEngine;
 fn table_sizes(path: &Path) -> Result<Vec<PageSize>, String> {
     let src = SourceInfo::read(&Store::new(), path, None)
         .map_err(|e| format!("{e:#}"))?
+        .0
         .src;
     Ok((0..src.page_count()).map(|i| src.page_size(i)).collect())
 }

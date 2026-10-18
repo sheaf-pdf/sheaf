@@ -441,7 +441,8 @@ fn the_comments_panel_lists_what_the_file_holds() {
             }
         }
         let src = &doc.source(doc.primary()).unwrap().src;
-        let read = sheaf_doc::file::annots_in(src.pdf(), src.page_ids());
+        let pages = (src.pages().iter()).map(|page| (page.id, page.geom.rotate));
+        let read = sheaf_doc::file::annots_in(src.pdf(), pages);
         let mut held: BTreeMap<usize, Page> = BTreeMap::new();
         for (&index, list) in &read.pages {
             let ours: HashSet<String> = (list.iter())

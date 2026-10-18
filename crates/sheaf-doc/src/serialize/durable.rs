@@ -72,6 +72,15 @@ impl FileStamp {
     }
 }
 
+/// Whether `a` and `b` name one file: the same file once links and `..`
+/// are followed, or, when either isn't there to follow, the same path.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// Why a durable write left the file as it was.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {

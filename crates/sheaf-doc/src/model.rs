@@ -1,10 +1,10 @@
 //! Virtual document, edits, and snapshot history.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use im::Vector;
@@ -17,22 +17,21 @@ use crate::file::ForeignAnnot;
 use crate::forms::{FieldId, FileForm, full_name_of};
 use crate::geom::Geom;
 use crate::history::{HistoryPolicy, HistoryStats};
-use crate::open::{Facts, FileAnnot, FileAnnots, FileBody, Renamed, ViewFacts};
+use crate::materialize::{Profile, SaveInput, SaveNote, SaveRecord, SaveTarget, SavedSide};
+use crate::open::{Facts, FileAnnot, FileBody, ViewFacts};
 use crate::prim::{HeapSize, Key, Prim, Rec, Val, same};
-use crate::serialize::durable::FileStamp;
+use crate::serialize::durable::{self, FileStamp};
 use crate::source::ObjRef;
 use crate::store::{BlobId, BlobKind, BlobRef, Origin, Src, Store};
 use crate::text_layer::TextLayer;
 
-mod legacy;
 mod records;
 mod state;
 
-pub(crate) use legacy::{LegacyDocState, legacy_field};
 pub use records::{
     AnnotBody, AnnotRec, Bookmark, ContentStack, FieldNode, FieldProps, Foreign, FormDoc, FormInst,
     FormRef, GenId, GenSpec, Generator, Layer, Mark, PageBase, PageDef, ScriptState, Static,
-    Target, Terminal, Widget, WidgetProps,
+    Target, Terminal, Widget, WidgetProps, XfaState,
 };
 pub use state::{Builder, DocState, Invariant};
 
@@ -55,21 +54,16 @@ pub struct OutlineId(pub u64);
 pub struct SourceInfo {
     pub src: Src,
     /// The path the bytes came from, or a derived copy's original's name.
-    /// Form instances' names ([`FormDoc::names`]), notices, the recovery
-    /// sidecar and save's same-file check read it; it's never read for
-    /// bytes: after a save in place the path holds the new file, and a
-    /// version from before the save still means the old one.
+    /// Form instances' names ([`FormDoc::names`]) and notices read it; it's
+    /// never read for bytes: after a save in place the path holds the new
+    /// file, and the source still means the old one. The document's file
+    /// is [`Document::file`], never the primary's name.
     pub name: PathBuf,
     /// For a copy sheaf made of another source's pages (cropped,
     /// watermarked, a header/footer stripped): which pages. A save writes
     /// each as the page it was made from, with its annotations and form
     /// fields, and the copy's content (M10 bug 1).
     pub derived: Option<Derived>,
-    /// The file at `name` as the bytes were read from it: a save in place
-    /// writes only while it's still that file, and otherwise asks (M10.5
-    /// proposal 33). None for a source not read from a file: blank pages,
-    /// bytes in memory, a derived copy.
-    pub stamp: Option<FileStamp>,
 }
 
 /// Where a derived source's pages come from: its page `k` is a copy of page
@@ -82,22 +76,28 @@ pub struct Derived {
 
 impl SourceInfo {
     /// The file at `path`, read once, opened with `password` and parsed
-    /// into `store`, under its own path. A wrong or missing password is
+    /// into `store`, under its own path, and the file as it was read: what
+    /// the record a document opened on it starts from
+    /// ([`SaveRecord::opened`]). A wrong or missing password is
     /// [`OpenError::Password`](crate::source::OpenError::Password) in the
     /// chain.
-    pub fn read(store: &Store, path: &Path, password: Option<&str>) -> Result<SourceInfo> {
+    pub fn read(
+        store: &Store,
+        path: &Path,
+        password: Option<&str>,
+    ) -> Result<(SourceInfo, FileStamp)> {
         let reading = || format!("reading {}", path.display());
         let (bytes, metadata) = sheaf_core::read_file_and_metadata(path).with_context(reading)?;
         let stamp = FileStamp::of(&metadata, &bytes).with_context(reading)?;
         let src = store
             .open(bytes, BlobKind::file(path, password))
             .with_context(|| format!("opening {}", path.display()))?;
-        Ok(SourceInfo {
+        let info = SourceInfo {
             src,
             name: path.to_path_buf(),
             derived: None,
-            stamp: Some(stamp),
-        })
+        };
+        Ok((info, stamp))
     }
 
     /// For tests: `pages` blank Letter pages, named `a.pdf`, parsed into
@@ -111,7 +111,6 @@ impl SourceInfo {
             src: store.open(bytes.into(), kind).expect("blank pages open"),
             name: "a.pdf".into(),
             derived: None,
-            stamp: None,
         }
     }
 }
@@ -442,14 +441,6 @@ pub struct Damaged {
 #[error("the file is still opening")]
 pub struct NotReady;
 
-/// A save that wrote a version.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Saved {
-    pub path: PathBuf,
-    /// PDF date string.
-    pub at: String,
-}
-
 /// A node of the history tree: a version of the document, and the edits
 /// that made it from its parent (the edge into it). See `todos/m9.md`,
 /// decision 16.
@@ -483,8 +474,16 @@ struct Version {
     step_bytes: usize,
     /// The job that produced this version, if it may still amend it.
     job: Option<JobId>,
+    /// Saves of it in flight ([`Document::save_input`]): while there's
+    /// one, nothing amends it, and pruning never removes it.
+    sealed: u16,
+    /// The record of the file it's in (M10.5 §9.1), kept whole only while
+    /// it's the saved version: a save's, or the opened file's, synthesized
+    /// at open when the primary came from a file. An older one shrinks to
+    /// its note in `saves`.
+    record: Option<Arc<SaveRecord>>,
     /// Saves that wrote it, oldest first.
-    saves: Vec<Saved>,
+    saves: Vec<SaveNote>,
 }
 
 /// A version as the History panel shows it.
@@ -497,7 +496,7 @@ pub struct VersionView {
     pub at: String,
     /// What its edits did, a line each.
     pub edits: Vec<String>,
-    pub saves: Vec<Saved>,
+    pub saves: Vec<SaveNote>,
     pub current: bool,
     /// The version the file on disk holds.
     pub saved: bool,
@@ -516,40 +515,15 @@ pub struct VersionView {
 /// another thread while editing continues.
 #[derive(Clone)]
 pub struct Snapshot {
+    /// The version whose state it is.
+    pub version: VersionId,
     pub state: DocState,
     pub primary: SourceId,
     pub sources: HashMap<SourceId, Arc<SourceInfo>>,
-    /// The outline differs from what's in the primary file.
-    pub outline_dirty: bool,
-    /// The page labels differ from what's in the primary file.
-    pub labels_dirty: bool,
-    /// The header/footer differs from what's drawn in the primary file:
-    /// it's drawn over the pages on screen, and a save writes it.
-    pub header_footer_dirty: bool,
-    /// Pages whose markup differs from what's in the primary file.
-    pub annots_dirty: HashSet<PageId>,
-    /// Fields that differ from what's in the primary file (see
-    /// `Document::fields_dirty`).
-    pub fields_dirty: HashSet<FieldId>,
-    /// Something in the primary file is gone from the document (see
-    /// `Document::removes_content`): only a full rewrite takes it out of
-    /// the file.
-    pub removes_content: bool,
-    /// The form differs from the primary file's (see
-    /// `Document::form_changed`): a save takes out what described it as
-    /// it was, its XFA copy and usage rights (M10 proposals 6 and 7).
-    pub form_changed: bool,
-    /// Each source's marks the open gave new ids (see
-    /// `Document::set_source_renamed`).
-    pub(crate) renamed: HashMap<SourceId, Arc<Renames>>,
-    /// What the old writers read, built the first time one asks (see
-    /// [`legacy`](Self::legacy)).
-    pub(crate) legacy: OnceLock<Arc<LegacyDocState>>,
+    /// The document's file ([`Document::file`]), which an export never
+    /// replaces.
+    pub file: Option<Arc<Path>>,
 }
-
-/// A source's marks the open gave new ids ([`Renamed`]): by page index,
-/// the id each had, which the page's `/NM` says, and the one it has.
-pub(crate) type Renames = HashMap<u32, Vec<(AnnotId, AnnotId)>>;
 
 impl Snapshot {
     pub fn source(&self, id: SourceId) -> Option<&Arc<SourceInfo>> {
@@ -570,27 +544,14 @@ impl Snapshot {
     pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
         group_members_in(&self.state, group)
     }
-
-    /// The marks on page `index` of `source` the open gave new ids: the id
-    /// each had, which the page's `/NM` says, and the one it has.
-    pub(crate) fn renamed_on(&self, source: SourceId, index: u32) -> &[(AnnotId, AnnotId)] {
-        self.renamed
-            .get(&source)
-            .and_then(|r| r.get(&index))
-            .map_or(&[], Vec::as_slice)
-    }
-
-    /// The state in the shape the old writers read it (M10.5 slice 8's
-    /// legacy projection), built from the records on first use.
-    pub(crate) fn legacy(&self) -> &LegacyDocState {
-        self.legacy
-            .get_or_init(|| Arc::new(LegacyDocState::of(self)))
-    }
 }
 
 /// Every mark of `state` in `group`, in document order: by page, then
 /// down the page as it shows, then across.
-fn group_members_in(state: &DocState, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
+pub(crate) fn group_members_in(
+    state: &DocState,
+    group: &crate::annot::Group,
+) -> Vec<(usize, PageId, Annot)> {
     let in_group = |a: &&Annot| crate::annot::group_of(&a.kind).as_ref() == Some(group);
     let mut out = Vec::new();
     for (i, (id, _, geom)) in state.pages().enumerate() {
@@ -666,15 +627,10 @@ pub struct Document {
     next_source: u32,
     policy: Box<dyn HistoryPolicy>,
     next_job: u64,
-    /// What the primary file on disk holds: the opened version's state,
-    /// then each save's. The dirty flags compare the cursor's
-    /// annotations, form, bookmarks, page labels and header/footer (the
-    /// one the file has drawn) with it, until slice 9, whose saves know
-    /// what changed from the prims.
-    baseline: DocState,
-    /// Each source's marks the open gave new ids (`set_source_renamed`),
-    /// which its pages name by the old ones until a save writes them.
-    renamed: HashMap<SourceId, Arc<Renames>>,
+    /// A restored document's file and its stamp, the base its recovery
+    /// sidecar was written against, until a save records the file
+    /// ([`Document::set_disk_base`]).
+    disk_base: Option<(Arc<Path>, FileStamp)>,
     /// The reader has been told some text shows as `?` in the file
     /// ([`Document::unencodable_notice`]). Outside history: undo doesn't
     /// make it news again.
@@ -689,16 +645,18 @@ impl Document {
     /// entirety, with `outline`, what its pages hold beside their content
     /// (its source's [`annots`](crate::Source::annots)), and nothing else:
     /// a file sheaf has just made, which says nothing more about itself.
-    /// A file that's opened opens through [`crate::open`], which reads
-    /// what it says.
+    /// `stamp` is the file as [`SourceInfo::read`] read it, when it came
+    /// from one (see [`loading`](Self::loading)). A file that's opened
+    /// opens through [`crate::open`], which reads what it says.
     pub fn new(
         store: Arc<Store>,
         primary: SourceInfo,
+        stamp: Option<FileStamp>,
         outline: &[FlatOutlineItem],
         policy: Box<dyn HistoryPolicy>,
     ) -> Self {
         let annots = primary.src.annots().clone();
-        let mut doc = Self::loading(store, primary, policy);
+        let mut doc = Self::loading(store, primary, stamp, policy);
         let facts = Facts {
             annots,
             outline: outline.to_vec(),
@@ -716,10 +674,15 @@ impl Document {
 
     /// A document showing `primary` while it opens: its pages, from the
     /// page table its source read as it opened, and nothing else, until
-    /// [`ready`](Self::ready). See [`crate::open::start`].
+    /// [`ready`](Self::ready). See [`crate::open::start`]. When the
+    /// primary was read from a file, `stamp` is that file as it was read,
+    /// and the opened version gets the file's record
+    /// ([`SaveRecord::opened`]); a primary made in memory has none, so its
+    /// first save is a Rewrite.
     pub(crate) fn loading(
         store: Arc<Store>,
         primary: SourceInfo,
+        stamp: Option<FileStamp>,
         policy: Box<dyn HistoryPolicy>,
     ) -> Self {
         let source = SourceId(0);
@@ -738,8 +701,7 @@ impl Document {
             next_source: 1,
             policy,
             next_job: 1,
-            baseline: DocState::builder().build(),
-            renamed: HashMap::new(),
+            disk_base: None,
             told_unencodable: false,
             ready: false,
         };
@@ -760,7 +722,7 @@ impl Document {
             (doc.ids.page(), Arc::new(def), Arc::new(facts.geom))
         });
         let state = DocState::builder().pages(pages).build();
-        doc.baseline = state.clone();
+        let record = stamp.map(|stamp| Arc::new(SaveRecord::opened(VersionId(0), &primary, stamp)));
         doc.sources.insert(source, Arc::new(primary));
         doc.versions.insert(
             VersionId(0),
@@ -778,6 +740,8 @@ impl Document {
                 snapshot_bytes: 0,
                 step_bytes: 0,
                 job: None,
+                sealed: 0,
+                record,
                 saves: Vec::new(),
             },
         );
@@ -810,9 +774,8 @@ impl Document {
     }
 
     /// The opened version's state: its pages, and what `facts` say about
-    /// them, each page index mapped to its page once. That's what the
-    /// primary file holds, so the baseline is set from it. Gives back what
-    /// the state doesn't hold.
+    /// them, each page index mapped to its page once: what the primary
+    /// file holds. Gives back what the state doesn't hold.
     fn opened(&mut self, facts: Facts) -> (DocState, ViewFacts) {
         let loading = self.state().clone();
         let by_index: Vec<PageId> = loading.order().iter().copied().collect();
@@ -892,7 +855,6 @@ impl Document {
         let renamed: Vec<(PageId, AnnotId)> = (facts.annots.renamed.iter())
             .filter_map(|r| Some((at(r.page as usize)?, r.was)))
             .collect();
-        self.set_source_renamed(self.primary, &facts.annots.renamed);
         let view = ViewFacts {
             renamed,
             attachments: facts.attachments,
@@ -908,11 +870,7 @@ impl Document {
             true => im::OrdMap::new(),
             false => im::OrdMap::unit(inst, file_name(&self.sources[&self.primary])),
         };
-        let form_doc = FormDoc {
-            roots,
-            names,
-            scripts: ScriptState::On,
-        };
+        let form_doc = FormDoc::opened(roots, names, &form.facts);
         let pages = loading
             .pages()
             .map(|(id, def, geom)| (id, def.clone(), geom.clone()));
@@ -924,20 +882,6 @@ impl Document {
             .generators(generator)
             .form(fields, Arc::new(form_doc))
             .build();
-        // The file says other ids for the marks the open gave new ones:
-        // their pages are written at the next save, of either kind.
-        let mut baseline = state.clone();
-        for &(page, _) in &view.renamed {
-            for id in state.annot_ids_on(page).into_iter().flatten() {
-                baseline
-                    .set(&Key::Annot(*id), None)
-                    .expect("an annotation's key");
-            }
-            baseline
-                .set(&Key::PageAnnots(page), None)
-                .expect("a page's annotations' key");
-        }
-        self.baseline = baseline;
         debug_assert_eq!(state.check_invariants(), Ok(()));
         (state, view)
     }
@@ -983,14 +927,13 @@ impl Document {
         id
     }
 
-    /// Forget registrations whose version is gone, and their renamed
-    /// marks: a source goes with the last registration holding it, and an
-    /// engine opened on it keeps only its bytes, until slice 13's engine
-    /// pool. The primary stays while it is the primary.
+    /// Forget registrations whose version is gone: a source goes with the
+    /// last registration holding it, and an engine opened on it keeps only
+    /// its bytes, until slice 13's engine pool. The primary stays while it
+    /// is the primary.
     fn unregister(&mut self, ids: &[SourceId]) {
         for id in ids.iter().filter(|&&id| id != self.primary) {
             self.sources.remove(id);
-            self.renamed.remove(id);
         }
     }
 
@@ -1002,21 +945,6 @@ impl Document {
             "{} is in another store",
             info.name.display()
         );
-    }
-
-    /// Source `id`'s marks the open gave new ids, as `open::finish` read
-    /// them: its pages name them by their old ids until a save writes
-    /// them, and a save follows other tools' replies to them through these
-    /// (see `save::write_page_annots`). Call it before the edit that brings
-    /// its pages.
-    pub fn set_source_renamed(&mut self, id: SourceId, renamed: &[Renamed]) {
-        let mut by_page = Renames::new();
-        for r in renamed {
-            by_page.entry(r.page).or_default().push((r.was, r.id));
-        }
-        if !by_page.is_empty() {
-            self.renamed.insert(id, Arc::new(by_page));
-        }
     }
 
     /// Where page stamp `stem`'s page is, as an edit that brings a mark
@@ -1198,51 +1126,6 @@ impl Document {
         )
     }
 
-    /// The header/footer differs from what the primary file has drawn.
-    pub fn header_footer_dirty(&self) -> bool {
-        match (self.state().header_footer(), self.baseline.header_footer()) {
-            (Some(now), Some(drawn)) => !Arc::ptr_eq(now, drawn) && now != drawn,
-            (now, drawn) => now.is_some() || drawn.is_some(),
-        }
-    }
-
-    /// Terminal fields that differ from what's in the primary file:
-    /// changed, added or gone, as the old writers read them (their
-    /// widgets aside: a page's widgets gone isn't a field changed).
-    pub fn fields_dirty(&self) -> HashSet<FieldId> {
-        let (st, base) = (self.state(), &self.baseline);
-        (st.fields_changed_from(base).into_iter())
-            .filter(|&id| legacy_field(st, id) != legacy_field(base, id))
-            .collect()
-    }
-
-    /// Pages whose annotations differ from what's in the primary file
-    /// (`changed`, from [`DocState::annots_changed_from`]): a mark or
-    /// another tool's comment added, changed or gone, or the page's list
-    /// in another order.
-    fn annots_dirty_pages(&self, changed: &HashSet<PageId>) -> HashSet<PageId> {
-        let cur = self.state();
-        let mut dirty = changed.clone();
-        // A changed connector changes its group's cycle of /Dest: every
-        // page with one of its label is written again.
-        let label = |a: &Annot| match &a.kind {
-            AnnotKind::Connector { label, .. } => Some(label.clone()),
-            _ => None,
-        };
-        let labels: HashSet<String> = (dirty.iter())
-            .flat_map(|&page| cur.marks_on(page).chain(self.baseline.marks_on(page)))
-            .filter_map(label)
-            .collect();
-        if !labels.is_empty() {
-            dirty.extend(
-                cur.marks()
-                    .filter(|(_, a)| label(a).is_some_and(|l| labels.contains(&l)))
-                    .map(|(page, _)| page),
-            );
-        }
-        dirty
-    }
-
     pub fn state(&self) -> &DocState {
         self.versions[&self.cursor]
             .state
@@ -1250,214 +1133,16 @@ impl Document {
             .expect("the current version keeps its state")
     }
 
+    /// The current version, detached for another thread: its state and
+    /// registrations shared, nothing computed.
     pub fn snapshot(&self) -> Snapshot {
-        let st = self.state();
-        let changed = st.annots_changed_from(&self.baseline);
-        let fields_dirty = self.fields_dirty();
         Snapshot {
-            state: st.clone(),
+            version: self.cursor,
+            state: self.state().clone(),
             primary: self.primary,
             sources: self.sources.clone(),
-            outline_dirty: !st.outline_eq(&self.baseline),
-            labels_dirty: !st.labels_eq(&self.baseline),
-            header_footer_dirty: self.header_footer_dirty(),
-            annots_dirty: self.annots_dirty_pages(&changed),
-            form_changed: !fields_dirty.is_empty() || self.widgets_changed(&changed),
-            fields_dirty,
-            removes_content: self.removes_content(),
-            renamed: self.renamed.clone(),
-            legacy: OnceLock::new(),
+            file: self.file().map(|(path, _)| path.clone()),
         }
-    }
-
-    /// Whether the form differs from the primary file's: a field added,
-    /// removed or changed, or widgets of a page not as they were (it's
-    /// gone, or shows another file's page now). Then a save takes out what
-    /// described the form as it was: its XFA copy and Reader's usage rights
-    /// (M10 proposals 6 and 7).
-    pub fn form_changed(&self) -> bool {
-        !self.fields_dirty().is_empty()
-            || self.widgets_changed(&self.state().annots_changed_from(&self.baseline))
-    }
-
-    /// Whether a page of the primary file's with widgets hasn't them as
-    /// they were: of `changed`, the pages whose annotations aren't the
-    /// baseline's.
-    fn widgets_changed(&self, changed: &HashSet<PageId>) -> bool {
-        let (st, base) = (self.state(), &self.baseline);
-        changed
-            .iter()
-            .any(|&page| base.widgets_on(page).next().is_some() && !st.widgets_eq_on(base, page))
-    }
-
-    /// Whether something in the primary file is gone from the document: a
-    /// page (deleted, or shown from another source now, as a crop makes
-    /// it), a mark or reply, another tool's comment, a bookmark. An
-    /// incremental save would keep it in the file's earlier revision (M9
-    /// bug 14). Undoing back to what was saved clears it.
-    pub fn removes_content(&self) -> bool {
-        let st = self.state();
-        if let Some(primary) = self.sources.get(&self.primary) {
-            let shown: HashSet<u32> = st
-                .pages()
-                .filter(|(_, def, _)| def.base.source == self.primary)
-                .map(|(_, def, _)| def.base.index)
-                .collect();
-            if (0..primary.src.page_count()).any(|i| !shown.contains(&i)) {
-                return true;
-            }
-        }
-        !st.keeps_annots_of(&self.baseline) || !st.keeps_bookmarks_of(&self.baseline)
-    }
-
-    /// After a successful save of the current version to a file described by
-    /// `saved`: register it as a new source and make the current version an
-    /// identity mapping over it, keeping `PageId`s (and bookmarks) intact so
-    /// the view doesn't flicker. Older versions still reference the old
-    /// sources, so undo across a save keeps working. Each page is the saved
-    /// file's page at its position, its own object (copy 0), with its boxes
-    /// and `/Rotate` as the file has them, which are the page's. OCR text is
-    /// in the file now, so nothing is drawn over the pages. Each mark is the
-    /// object on its page with its `/NM`, each of the other tools'
-    /// annotations the one there with its name and subtype (copy 0), each
-    /// field the saved file's own, the node with its full name, each
-    /// widget the one at its place among its field's on its page, and each
-    /// bookmark the item at its place in pre-order, as the save wrote them;
-    /// another tool's annotation the save left out (a link to a page that
-    /// isn't there) goes, and a bookmark deeper than the file is read is
-    /// from no item; a page stamp draws the form the saved file holds for
-    /// it; the header/footer is drawn there now, and stays, as do scripts
-    /// off.
-    ///
-    /// The content is the same, so this isn't an edit and makes no step,
-    /// but the state is expressed anew, so the version gets a new id under
-    /// the same parent (see [`replace`](Self::replace)). Its steps still
-    /// lead to its state as it was before the save; it keeps its snapshot,
-    /// as do its children (see `keeps_snapshot`), so nothing is ever
-    /// replayed across a save. The new version holds the saved file's
-    /// registration. M10.5 slice 8 adapts it to the records; slice 9
-    /// deletes it.
-    pub fn rebase_to_saved(&mut self, saved: SourceInfo) -> SourceId {
-        debug_assert!(self.is_ready(), "a save of a file still opening");
-        let path = saved.name.clone();
-        let name = file_name(&saved);
-        let src = saved.src.clone();
-        let id = self.register_source(saved);
-        let replaced = std::mem::replace(&mut self.primary, id);
-        // Versions made from it before (and undone) were made from it as
-        // it was, so their prims don't fit it re-expressed: they keep their
-        // states (see `keeps_snapshot`). A damaged one stays out of reach.
-        for child in self.versions[&self.cursor].children.clone() {
-            let _ = self.ensure_state(child);
-        }
-        let old = self.cursor;
-        let mut v = self.versions.remove(&old).expect("current version");
-        v.sources.push(id);
-        v.saves.push(Saved {
-            path,
-            at: crate::annot::pdf_date_now(),
-        });
-        let st = v
-            .state
-            .as_mut()
-            .expect("the current version keeps its state");
-        for (index, page) in (0..).zip(st.order().clone()) {
-            let base = PageBase {
-                source: id,
-                src: src.clone(),
-                index,
-            };
-            let def = PageDef {
-                base,
-                copy: 0,
-                content: ContentStack::empty(),
-            };
-            let geom = Arc::new(src.geom(index));
-            st.set(&Key::Page(page), Some(Val::Page(Arc::new(def))))
-                .expect("a page key holds a page");
-            st.set(&Key::Geom(page), Some(Val::Geom(geom)))
-                .expect("a geom key holds a geom");
-        }
-        // The saved items as the reader lists them, with none deeper than
-        // it reads: a bookmark past that depth is from no item, and once
-        // one doesn't agree with its item, neither are the rest.
-        let items = crate::open::outline(&src);
-        let mut items = items.iter();
-        let mut agree = true;
-        let rebound: Vec<(OutlineId, Arc<Bookmark>)> = (st.bookmarks_preorder().into_iter())
-            .map(|(depth, id, b)| {
-                let item = (agree && depth <= crate::open::MAX_DEPTH)
-                    .then(|| items.next())
-                    .flatten();
-                if let Some(item) = item
-                    && (item.depth != depth || item.title != crate::open::shown_title(&b.title))
-                {
-                    log::warn!(
-                        "the saved file's bookmark {:?} isn't {:?}",
-                        item.title,
-                        b.title
-                    );
-                    agree = false;
-                }
-                let from = item.filter(|_| agree).and_then(|item| {
-                    Some(ObjRef {
-                        src: src.clone(),
-                        id: item.object?,
-                    })
-                });
-                let b = Bookmark {
-                    src: from,
-                    ..b.clone()
-                };
-                (id, Arc::new(b))
-            })
-            .collect();
-        for (id, b) in &rebound {
-            st.set(&Key::Bookmark(*id), Some(Val::Bookmark(b.clone())))
-                .expect("a bookmark key holds a bookmark");
-        }
-        let written = src.annots().clone();
-        let mut gone = Vec::new();
-        let mut annots = rebind_annots(st, &src, &written, &mut gone);
-        let fields = rebind_fields(st, id, &src, name, &mut annots);
-        debug_assert_eq!(st.check_invariants(), Ok(()));
-        // The pages, annotations, form, bookmarks and fields expressed
-        // anew are its snapshot's alone: their values, and the im nodes
-        // put to hold them.
-        let own = v.steps.iter().flat_map(|s| s.prims.iter().map(|p| p.key));
-        let anew = (st.order().iter())
-            .flat_map(|&page| [Key::Page(page), Key::Geom(page)])
-            .chain(annots.iter().map(|&(id, _)| Key::Annot(id)))
-            .chain((gone.iter()).flat_map(|&(page, id)| [Key::Annot(id), Key::PageAnnots(page)]))
-            .chain(rebound.iter().map(|&(id, _)| Key::Bookmark(id)))
-            .chain(fields.iter().map(|&(id, _)| Key::Field(id)));
-        v.snapshot_bytes = st.snapshot_bytes(own.chain(anew))
-            + st.pages()
-                .map(|(_, def, _)| size_of::<PageDef>() + def.heap_size() + size_of::<Geom>())
-                .sum::<usize>()
-            + annots.iter().map(|(_, a)| a.heap_size()).sum::<usize>()
-            + rebound
-                .iter()
-                .map(|(_, b)| size_of::<Bookmark>() + b.heap_size())
-                .sum::<usize>()
-            + (fields.iter())
-                .map(|(_, node)| size_of::<FieldNode>() + node.heap_size())
-                .sum::<usize>()
-            + size_of::<FormDoc>()
-            + st.form().heap_size();
-        let new = self.replace(old, v);
-        // The primary it replaces stayed only as the primary when pruning
-        // took the version that held it: nothing refers to it now.
-        let held = self
-            .versions
-            .values()
-            .any(|v| v.sources.contains(&replaced));
-        if !held {
-            self.unregister(&[replaced]);
-        }
-        self.baseline = self.state().clone();
-        self.saved = Some(new);
-        id
     }
 
     pub fn page_count(&self) -> usize {
@@ -1501,14 +1186,132 @@ impl Document {
         self.saved != Some(self.cursor)
     }
 
-    pub fn mark_saved(&mut self) {
-        self.saved = Some(self.cursor);
-    }
-
     /// Treat the current state as unsaved even though nothing was edited
-    /// (a recovered document: its primary source is a temporary file).
+    /// (a recovered document: restored from its sidecar, whose edits its
+    /// file hasn't got).
     pub fn mark_unsaved(&mut self) {
         self.saved = None;
+    }
+
+    /// What a save of version `v` writes from (M10.5 §9.1), and `v` sealed
+    /// until [`record_save`](Self::record_save) or
+    /// [`abandon_save`](Self::abandon_save) for it: an edit made during
+    /// the save, an OCR batch among them, makes a version after it rather
+    /// than amending it, and pruning keeps it. A version no longer kept,
+    /// or one that can't be rebuilt, is an error.
+    pub fn save_input(&mut self, v: VersionId) -> Result<SaveInput> {
+        if !self.versions.contains_key(&v) {
+            bail!("that version is no longer kept");
+        }
+        self.ensure_state(v)?;
+        let input = self.input(v);
+        self.versions.get_mut(&v).expect("version").sealed += 1;
+        Ok(input)
+    }
+
+    /// What a recovery sidecar of the current version writes from: as
+    /// [`save_input`](Self::save_input), but nothing is sealed, since the
+    /// sidecar is never the saved file.
+    pub fn recovery_input(&self) -> SaveInput {
+        self.input(self.cursor)
+    }
+
+    /// Version `v`'s save input, from its state, which it keeps.
+    fn input(&self, v: VersionId) -> SaveInput {
+        let saved = self.saved.and_then(|s| {
+            let at = &self.versions[&s];
+            Some(SavedSide {
+                state: at.state.clone()?,
+                record: at.record.clone()?,
+            })
+        });
+        SaveInput {
+            version: v,
+            target: (self.versions[&v].state.clone())
+                .expect("a version being saved keeps its state"),
+            primary: self.primary,
+            sources: self.sources.clone(),
+            saved,
+        }
+    }
+
+    /// A save of `rec.version` wrote `rec`'s file: that version is the
+    /// saved one now, and holds the record, the previous saved version's
+    /// shrinking to the note it has. It's noted among the version's saves
+    /// and unsealed. Nothing else changes: no version, state or source.
+    pub fn record_save(&mut self, rec: SaveRecord) -> Result<()> {
+        let v = rec.version;
+        if !self.versions.contains_key(&v) {
+            bail!("the saved version is no longer kept");
+        }
+        if let Some(was) = self.saved.filter(|&s| s != v)
+            && let Some(was) = self.versions.get_mut(&was)
+        {
+            was.record = None;
+        }
+        let version = self.versions.get_mut(&v).expect("version");
+        version.saves.push(rec.note());
+        version.record = Some(Arc::new(rec));
+        version.sealed = version.sealed.saturating_sub(1);
+        self.saved = Some(v);
+        // The record says what the file is now.
+        self.disk_base = None;
+        Ok(())
+    }
+
+    /// A save of version `v` failed or was canceled: it's unsealed, and
+    /// nothing else changes.
+    pub fn abandon_save(&mut self, v: VersionId) {
+        if let Some(version) = self.versions.get_mut(&v) {
+            version.sealed = version.sealed.saturating_sub(1);
+        }
+    }
+
+    /// How many saves of version `v` hold it sealed now.
+    #[cfg(test)]
+    pub(crate) fn sealed(&self, v: VersionId) -> u16 {
+        self.versions.get(&v).map_or(0, |version| version.sealed)
+    }
+
+    /// The saved version's record: what sheaf knows of the file on disk.
+    /// None when nothing is saved, or the saved version was made in
+    /// memory.
+    pub fn saved_record(&self) -> Option<&Arc<SaveRecord>> {
+        self.versions.get(&self.saved?)?.record.as_ref()
+    }
+
+    /// The document's file, and that file as sheaf last read or wrote it:
+    /// the saved record's, or a restored document's base
+    /// ([`set_disk_base`](Self::set_disk_base)) until its first save. Never
+    /// the primary's name: a Save As makes another file the document's,
+    /// and the primary stays the file it opened. None for a document no
+    /// file holds.
+    pub fn file(&self) -> Option<(&Arc<Path>, &FileStamp)> {
+        match self.saved_record() {
+            Some(rec) => Some((&rec.path, &rec.stamp)),
+            None => self.disk_base.as_ref().map(|(path, stamp)| (path, stamp)),
+        }
+    }
+
+    /// A document restored from a recovery sidecar is its file's, `path`,
+    /// as `stamp` says the sidecar found it: the base its first save checks
+    /// is still there (M10.5 §11.10), and its own sidecars are written
+    /// against. Its first save's record replaces it.
+    pub fn set_disk_base(&mut self, path: &Path, stamp: FileStamp) {
+        self.disk_base = Some((path.into(), stamp));
+    }
+
+    /// Where a save to `path` writes: the document's file
+    /// ([`file`](Self::file)) or another, and when it's the document's, the
+    /// stamp it must still have, for the plan's and the write's checks.
+    pub fn save_target(&self, path: &Path) -> SaveTarget {
+        let file = self.file().filter(|(at, _)| durable::same_file(at, path));
+        SaveTarget {
+            path: path.into(),
+            same_file: file.is_some(),
+            profile: Profile::default(),
+            stamp: file.map(|(_, stamp)| *stamp),
+        }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -1605,6 +1408,22 @@ impl Document {
         Ok(outcome)
     }
 
+    /// `val` put at `key` as a version of its own, labelled `label`: what
+    /// no edit sets yet (the form's owned keys), for tests of what a save
+    /// writes of it. Its step names `edit`, which it doesn't run.
+    #[cfg(test)]
+    pub(crate) fn put_for_test(&mut self, edit: Edit, key: Key, val: Option<Val>, label: &str) {
+        let mut rec = Rec::new(self.state().clone());
+        rec.put(key, val);
+        let (state, prims) = rec.finish();
+        let step = Step {
+            edit,
+            line: label.to_string(),
+            prims: prims.into(),
+        };
+        self.push(state, label.into(), vec![step], None);
+    }
+
     /// Apply several edits in order as one version, so one undo reverts them
     /// all. Each edit sees the result of the ones before it. If any edit
     /// fails, none are applied.
@@ -1646,14 +1465,15 @@ impl Document {
     }
 
     /// Like [`apply`](Self::apply), but when the current version was made
-    /// by `job`, has nothing after it, was never saved, and isn't the first
-    /// (pruning can make it so), the edit joins it instead of making a new
-    /// version. The first batch of a job makes a version; later batches
-    /// amend it, so the whole job is one undo step. An amend replaces the
-    /// version with a new id under the same parent, and when the job has
-    /// put back all it did, it leaves no version at all. A save, an undo or
-    /// an unrelated edit in between ends the chain, and the rest of the job
-    /// becomes another step.
+    /// by `job`, has nothing after it, was never saved, isn't being saved
+    /// (sealed), and isn't the first (pruning can make it so), the edit
+    /// joins it instead of making a new version. The first batch of a job
+    /// makes a version; later batches amend it, so the whole job is one
+    /// undo step. An amend replaces the version with a new id under the
+    /// same parent, and when the job has put back all it did, it leaves no
+    /// version at all. A save, an undo or an unrelated edit in between ends
+    /// the chain, and the rest of the job becomes another step; so does a
+    /// save in flight, whose version a later batch would change under it.
     pub fn apply_in_job(
         &mut self,
         job: JobId,
@@ -1670,6 +1490,7 @@ impl Document {
             && current.parent.is_some()
             && current.children.is_empty()
             && current.saves.is_empty()
+            && current.sealed == 0
             && self.saved != Some(self.cursor);
         if !amend {
             self.push(state, label.into(), vec![step], Some(job));
@@ -1826,6 +1647,8 @@ impl Document {
                 snapshot_bytes,
                 step_bytes,
                 job,
+                sealed: 0,
+                record: None,
                 saves: Vec::new(),
             },
         );
@@ -1838,10 +1661,13 @@ impl Document {
     /// `old`'s place among its parent's children and as its children's
     /// parent, and becomes the root, current or saved version where `old`
     /// was. The caller has taken `old` out of the tree, so it no longer
-    /// resolves.
-    fn replace(&mut self, old: VersionId, v: Version) -> VersionId {
+    /// resolves. Its record, if it has one, says it's the version `id`.
+    fn replace(&mut self, old: VersionId, mut v: Version) -> VersionId {
         let id = VersionId(self.next_version);
         self.next_version += 1;
+        if let Some(rec) = &mut v.record {
+            Arc::make_mut(rec).version = id;
+        }
         if let Some(p) = v.parent {
             let parent = self.versions.get_mut(&p).expect("parent");
             for c in parent.children.iter_mut().filter(|c| **c == old) {
@@ -1868,18 +1694,14 @@ impl Document {
     }
 
     /// Versions that must keep their snapshots: the opened one (every
-    /// replay starts somewhere), the current one, every saved one (a save
-    /// re-expressed it, so its steps don't lead to it), and the children
-    /// of saved ones (those made before the save can't be replayed from it
-    /// either).
+    /// replay starts somewhere), the current one, one being saved (its
+    /// save reads it) and the saved one (the next save's saved side). A
+    /// save changes no state, so every other version replays as any does.
     fn keeps_snapshot(&self, id: VersionId) -> bool {
-        let v = &self.versions[&id];
         id == self.root
             || id == self.cursor
             || Some(id) == self.saved
-            || !v.saves.is_empty()
-            || v.parent
-                .is_some_and(|p| !self.versions[&p].saves.is_empty())
+            || self.versions[&id].sealed > 0
     }
 
     /// The versions from the opened one to the current one.
@@ -1920,9 +1742,10 @@ impl Document {
     /// Keep the tree to [`crate::history::MAX_VERSIONS`]: drop versions on
     /// other branches, oldest first, then the oldest versions before the
     /// saved one. Edits back to the last save always stay (a later merge
-    /// replays them). A version dropped from a branch takes its
-    /// registrations with it; the first version's go to the next, whose
-    /// state was made over them.
+    /// replays them), and so does a version being saved, and the saved
+    /// one: a branch holding either stays whole. A version dropped from a
+    /// branch takes its registrations with it; the first version's go to
+    /// the next, whose state was made over them.
     fn prune(&mut self) {
         let max = crate::history::MAX_VERSIONS;
         while self.versions.len() > max {
@@ -1931,31 +1754,36 @@ impl Document {
                 .versions
                 .iter()
                 .filter(|(id, v)| {
-                    v.children.is_empty() && !line.contains(id) && Some(**id) != self.saved
+                    v.children.is_empty() && !line.contains(id) && !self.protected(**id)
                 })
                 .map(|(id, _)| *id)
                 .min();
             let Some(leaf) = leaf else { break };
-            self.remove_version(leaf);
+            if !self.remove_version(leaf) {
+                break;
+            }
         }
         // Then move the root forward along the line, up to the saved
-        // version (or the current one when the saved one is elsewhere).
+        // version or one being saved (or the current one when neither is
+        // on it), and never past a branch holding one.
         let line = self.line();
-        let stop = self
-            .saved
-            .and_then(|s| line.iter().position(|v| *v == s))
-            .unwrap_or(line.len() - 1);
+        let stop = (line.iter().position(|&v| self.protected(v))).unwrap_or(line.len() - 1);
         let mut i = 0;
         while self.versions.len() > max && i < stop {
             let next = line[i + 1];
+            let old = line[i];
+            let siblings: Vec<VersionId> = (self.versions[&old].children.iter())
+                .copied()
+                .filter(|&c| c != next)
+                .collect();
+            if siblings.iter().any(|&s| self.holds_protected(s)) {
+                break;
+            }
             if self.ensure_state(next).is_err() {
                 break;
             }
-            let old = line[i];
-            for sibling in self.versions[&old].children.clone() {
-                if sibling != next {
-                    self.remove_subtree(sibling);
-                }
+            for sibling in siblings {
+                self.remove_subtree(sibling);
             }
             let mut sources = self.versions.remove(&old).expect("old root").sources;
             let new_root = self.versions.get_mut(&next).expect("next");
@@ -1967,11 +1795,35 @@ impl Document {
         }
     }
 
+    /// Whether version `id` must stay in the tree: it's the saved version,
+    /// or a save of it is in flight.
+    fn protected(&self, id: VersionId) -> bool {
+        Some(id) == self.saved || self.versions.get(&id).is_some_and(|v| v.sealed > 0)
+    }
+
+    /// Whether version `id`, or a version after it, must stay.
+    fn holds_protected(&self, id: VersionId) -> bool {
+        let mut stack = vec![id];
+        while let Some(v) = stack.pop() {
+            if self.protected(v) {
+                return true;
+            }
+            if let Some(version) = self.versions.get(&v) {
+                stack.extend(version.children.iter().copied());
+            }
+        }
+        false
+    }
+
     /// Take version `id` out of the tree, and the registrations it holds
-    /// out of the document.
-    fn remove_version(&mut self, id: VersionId) {
+    /// out of the document. Not the saved version, or one being saved.
+    /// Whether it went.
+    fn remove_version(&mut self, id: VersionId) -> bool {
+        if self.protected(id) {
+            return false;
+        }
         let Some(v) = self.versions.remove(&id) else {
-            return;
+            return false;
         };
         if let Some(p) = v.parent
             && let Some(parent) = self.versions.get_mut(&p)
@@ -1981,13 +1833,17 @@ impl Document {
                 parent.redo_to = None;
             }
         }
-        if self.saved == Some(id) {
-            self.saved = None;
-        }
         self.unregister(&v.sources);
+        true
     }
 
+    /// Take version `id` and the versions after it out of the tree, unless
+    /// one of them must stay ([`holds_protected`](Self::holds_protected)):
+    /// then none goes.
     fn remove_subtree(&mut self, id: VersionId) {
+        if self.holds_protected(id) {
+            return;
+        }
         let mut stack = vec![id];
         while let Some(v) = stack.pop() {
             if let Some(version) = self.versions.get(&v) {
@@ -2207,6 +2063,12 @@ impl Document {
                 .map(|f| f.name.as_str());
             let under = name_apart(rec, &name, names);
             doc.names.insert(inst, name);
+            // What its form owns joins the document's: its fields that
+            // calculate after the rest, and whether it needs appearances.
+            let calculates = form.facts.calculation_order.iter();
+            doc.calc_order
+                .extend(calculates.filter_map(|f| ids.get(f)).copied());
+            doc.need_appearances |= form.facts.need_appearances;
             let top = under.as_deref().map(|under| {
                 let id = self.ids.field();
                 put_field(rec, id, sheaf_parent(under, inst));
@@ -2351,6 +2213,12 @@ impl Document {
             renamed.extend(under.map(|under| (under, orig.src)));
             let ids: HashMap<FieldId, FieldId> =
                 coming.iter().map(|&id| (id, self.ids.field())).collect();
+            // The copies of its fields that calculate, after the rest.
+            let calculates: Vec<FieldId> = (doc.calc_order.iter())
+                .filter_map(|f| ids.get(f))
+                .copied()
+                .collect();
+            doc.calc_order.extend(calculates);
             // Its widgets on the copies.
             let mut shows: HashMap<FieldId, Vector<AnnotId>> = HashMap::new();
             for &(page, copy, _) in copies {
@@ -3844,229 +3712,6 @@ fn copy_annots(
     put_page_annots(rec, copy, ids);
 }
 
-/// Each page's annotations in `st`, after a save wrote them to `src`, the
-/// page at its position there, whose annotations `saved` has: each mark
-/// is the object there with its `/NM`, a stamp's page the form it draws
-/// there, and each other tool's annotation the one there with its name
-/// and subtype (the k-th of them on the page the k-th there), copy 0. A
-/// mark the saved page hasn't got keeps its own as it was, with a log
-/// line: the save didn't write what the document has. Another tool's
-/// annotation it hasn't got goes, with a log line: the save left it out,
-/// as it does a link to a page that isn't there. The records put anew,
-/// by id; the ones gone, with their pages, into `gone`.
-fn rebind_annots(
-    st: &mut DocState,
-    src: &Src,
-    saved: &FileAnnots,
-    gone: &mut Vec<(PageId, AnnotId)>,
-) -> Vec<(AnnotId, AnnotRec)> {
-    type Named<'a> = HashMap<&'a str, VecDeque<(Option<ObjectId>, &'a Arc<ForeignAnnot>)>>;
-    let at = |id| ObjRef {
-        src: src.clone(),
-        id,
-    };
-    let mut out = Vec::new();
-    for (index, page) in (0..).zip(st.order().clone()) {
-        let objects: HashMap<String, (ObjectId, Option<ObjectId>)> = (saved.on(index).iter())
-            .filter_map(|a| match &a.body {
-                FileBody::Mark { annot, held } => Some((annot.name(), (a.object?, *held))),
-                FileBody::Foreign { .. } => None,
-            })
-            .collect();
-        // The saved page's other tools' annotations by name, each name's
-        // in `/Annots` order.
-        let mut theirs = Named::new();
-        for (_, object, read) in saved.foreign_on(index) {
-            (theirs.entry(&read.name).or_default()).push_back((object, read));
-        }
-        let annots: Vec<(AnnotId, AnnotRec)> =
-            st.annots_on(page).map(|(id, a)| (id, a.clone())).collect();
-        let mut left = Vector::new();
-        for (id, a) in annots {
-            let body = match &a.body {
-                AnnotBody::Mark(m) => {
-                    let name = m.annot.name();
-                    let Some(&(object, held)) = objects.get(&name) else {
-                        log::warn!("page {}: the saved file hasn't {name}", index + 1);
-                        left.push_back(id);
-                        continue;
-                    };
-                    let stamp = match held {
-                        Some(form) if m.stamp.is_some() => Some(FormRef::Base(at(form))),
-                        _ => m.stamp.clone(),
-                    };
-                    AnnotBody::Mark(Arc::new(Mark {
-                        src: Some(at(object)),
-                        stamp,
-                        ..Mark::clone(m)
-                    }))
-                }
-                AnnotBody::Foreign(f) => {
-                    let named = theirs.get_mut(f.summary.name.as_str());
-                    let first = named.and_then(|named| {
-                        let i = named
-                            .iter()
-                            .position(|(_, r)| r.subtype == f.summary.subtype)?;
-                        named.remove(i)
-                    });
-                    let Some((object, read)) = first else {
-                        log::warn!(
-                            "page {}: the saved file left out {} {}",
-                            index + 1,
-                            f.summary.subtype,
-                            f.summary.name
-                        );
-                        st.set(&Key::Annot(id), None)
-                            .expect("an annotation key holds an annotation");
-                        gone.push((page, id));
-                        continue;
-                    };
-                    let summary = if read.slot == f.summary.slot {
-                        f.summary.clone()
-                    } else {
-                        Arc::new(ForeignAnnot {
-                            slot: read.slot,
-                            ..ForeignAnnot::clone(&f.summary)
-                        })
-                    };
-                    AnnotBody::Foreign(Arc::new(Foreign {
-                        src: object.map(at),
-                        copy: 0,
-                        summary,
-                    }))
-                }
-                // The form's, with their fields (`rebind_fields`).
-                AnnotBody::Widget(_) => {
-                    left.push_back(id);
-                    continue;
-                }
-            };
-            left.push_back(id);
-            let a = AnnotRec { page, body };
-            st.set(&Key::Annot(id), Some(Val::Annot(a.clone())))
-                .expect("an annotation key holds an annotation");
-            out.push((id, a));
-        }
-        // Some went from this page: it lists the rest.
-        if gone.last().is_some_and(|&(p, _)| p == page) {
-            let list = (!left.is_empty()).then_some(Val::PageAnnots(left));
-            st.set(&Key::PageAnnots(page), list)
-                .expect("a page's annotations key holds a list");
-        }
-    }
-    out
-}
-
-/// The form in `st`, after a save wrote it to `src`, registration `id`,
-/// whose file is `name`: every node is the saved file's own instance's
-/// now (copy 0), the node there with its full name (the k-th of a name
-/// in tree order the k-th there, as forms repeat full names), and each
-/// widget the one there at its place among its field's on the page at
-/// its position, as the save wrote them. The saved instance is named for
-/// the file, and whether scripts run stays as it was. One the saved file
-/// hasn't got is from no object, with a log line: the save didn't write
-/// what the document has. The nodes put anew, by id; the widgets into
-/// `widgets`.
-fn rebind_fields(
-    st: &mut DocState,
-    id: SourceId,
-    src: &Src,
-    name: Arc<str>,
-    widgets: &mut Vec<(AnnotId, AnnotRec)>,
-) -> Vec<(FieldId, Arc<FieldNode>)> {
-    let saved = src.form().clone();
-    let inst = FormInst { src: id, copy: 0 };
-    let at = |id| ObjRef {
-        src: src.clone(),
-        id,
-    };
-    // The saved nodes by full name, each name's in tree order: a node
-    // comes after its parent.
-    let mut full: Vec<String> = Vec::with_capacity(saved.nodes.len());
-    for n in &saved.nodes {
-        let up = n.parent.map_or("", |p| full[p.0 as usize].as_str());
-        full.push(full_name_of(up, &n.partial));
-    }
-    let mut by_name: HashMap<&str, VecDeque<FieldId>> = HashMap::new();
-    for (i, name) in (0..).zip(&full) {
-        by_name.entry(name).or_default().push_back(FieldId(i));
-    }
-    // The document's nodes in tree order, each the saved node it is.
-    let mut next: Vec<(FieldId, String)> = (st.form().roots.iter().rev())
-        .filter_map(|&root| Some((root, full_name_of("", &st.field(root)?.partial))))
-        .collect();
-    let mut paired = HashMap::new();
-    let mut nodes = Vec::new();
-    while let Some((fid, name)) = next.pop().filter(|_| nodes.len() < st.field_count()) {
-        let Some(was) = st.field(fid).cloned() else {
-            continue;
-        };
-        next.extend(
-            (was.kids.iter().rev())
-                .filter_map(|&kid| Some((kid, full_name_of(&name, &st.field(kid)?.partial)))),
-        );
-        let to = by_name.get_mut(name.as_str()).and_then(VecDeque::pop_front);
-        match to {
-            Some(to) => {
-                paired.insert(fid, to);
-            }
-            None => log::warn!("the saved file hasn't the field {name}"),
-        }
-        let node = Arc::new(FieldNode {
-            src: to.map(|to| at(saved.nodes[to.0 as usize].object)),
-            inst,
-            ..FieldNode::clone(&was)
-        });
-        st.set(&Key::Field(fid), Some(Val::Field(node.clone())))
-            .expect("a field key holds a field node");
-        nodes.push((fid, node));
-    }
-    for (index, page) in (0..).zip(st.order().clone()) {
-        // The saved page's widgets, each field's in order.
-        let mut theirs: HashMap<FieldId, VecDeque<ObjectId>> = HashMap::new();
-        for w in saved.widgets.get(&index).into_iter().flatten() {
-            theirs.entry(w.field).or_default().push_back(w.object);
-        }
-        let ours: Vec<(AnnotId, Arc<Widget>)> =
-            st.widgets_on(page).map(|(id, w)| (id, w.clone())).collect();
-        for (wid, w) in ours {
-            let object = (paired.get(&w.field))
-                .and_then(|to| theirs.get_mut(to))
-                .and_then(VecDeque::pop_front);
-            if object.is_none() {
-                let field = st.full_name(w.field).unwrap_or_default();
-                log::warn!(
-                    "page {}: the saved file hasn't a widget of {field}",
-                    index + 1
-                );
-            }
-            let w = Widget {
-                src: object.map(at),
-                inst,
-                ..Widget::clone(&w)
-            };
-            let rec = AnnotRec {
-                page,
-                body: AnnotBody::Widget(Arc::new(w)),
-            };
-            st.set(&Key::Annot(wid), Some(Val::Annot(rec.clone())))
-                .expect("an annotation key holds an annotation");
-            widgets.push((wid, rec));
-        }
-    }
-    let names = match st.field_count() {
-        0 => im::OrdMap::new(),
-        _ => im::OrdMap::unit(inst, name),
-    };
-    let form = FormDoc {
-        names,
-        ..FormDoc::clone(st.form())
-    };
-    st.set(&Key::Form, Some(Val::Form(Arc::new(form))))
-        .expect("the form key holds the form");
-    nodes
-}
-
 /// A mark id no annotation in `st` has, and not in `taken` (ids handed
 /// out earlier in the same edit, which records this one). Random rather
 /// than counted, so two copies of a file never give different marks the
@@ -4221,6 +3866,8 @@ mod history_tests;
 mod tests {
     use super::*;
     use crate::history::FixedCount;
+    use crate::materialize::{How, StrategyKind};
+    use crate::open::FileAnnots;
 
     /// A document of `n` blank pages, in a store of its own.
     pub(super) fn new_doc(
@@ -4230,7 +3877,7 @@ mod tests {
     ) -> Document {
         let store = Store::new();
         let primary = SourceInfo::blank(&store, n);
-        Document::new(store, primary, outline, policy)
+        Document::new(store, primary, None, outline, policy)
     }
 
     /// `n` blank pages opened as a file opens, saying `facts`: started on
@@ -4238,7 +3885,7 @@ mod tests {
     pub(super) fn opened_doc(n: u32, facts: Facts, policy: Box<dyn HistoryPolicy>) -> Document {
         let store = Store::new();
         let primary = SourceInfo::blank(&store, n);
-        let mut d = crate::open::start(store, primary, policy);
+        let mut d = crate::open::start(store, primary, None, policy);
         d.ready(facts).unwrap();
         d
     }
@@ -4334,7 +3981,7 @@ mod tests {
     fn an_edit_before_ready_is_not_ready() {
         let store = Store::new();
         let primary = SourceInfo::blank(&store, 3);
-        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        let mut d = crate::open::start(store, primary, None, Box::new(FixedCount(10)));
         assert!(!d.is_ready());
         let page = id_at(&d, 0);
         let duplicate = || Edit::DuplicatePages { ids: vec![page] };
@@ -4380,7 +4027,7 @@ mod tests {
         let bytes = crate::forms::fixture::every_fact().bytes();
         let primary = file(&store, bytes, "facts.pdf");
         let src = primary.src.clone();
-        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        let mut d = crate::open::start(store, primary, None, Box::new(FixedCount(10)));
         let loading = d.current_version();
         let pages: Vec<PageId> = d.state().order().iter().copied().collect();
         let st = d.state();
@@ -4401,10 +4048,6 @@ mod tests {
         crate::open::tests::assert_every_fact(d.state());
         assert_eq!(view.form.fields, 1);
         assert!(!d.is_dirty() && !d.can_undo() && !d.can_redo());
-        let snap = d.snapshot();
-        assert!(!snap.outline_dirty && !snap.labels_dirty && !snap.header_footer_dirty);
-        assert!(snap.annots_dirty.is_empty() && snap.fields_dirty.is_empty());
-        assert!(!snap.removes_content && !snap.form_changed);
         // Facts that came again would be late: they're refused.
         assert!(
             d.ready(crate::open::finish(&src, &in_progress::NoProgress))
@@ -4447,7 +4090,6 @@ mod tests {
                 .sum()
         };
         assert_eq!(listed(&d), 10);
-        assert!(d.fields_dirty().is_empty() && d.snapshot().fields_dirty.is_empty());
         // A widget goes only with its page.
         let (widget, _) = d.state().widgets_on(p1).next().unwrap();
         let delete = Edit::AnnotDelete {
@@ -4493,93 +4135,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!((on(&d, p1), listed(&d)), (0, 4));
-        // Nothing changed a field, but the form isn't the file's.
-        assert!(d.fields_dirty().is_empty());
-        assert!(d.form_changed());
-    }
-
-    #[test]
-    fn fields_dirty_compares_with_the_saved_form() {
-        let facts = Facts {
-            form: every_kind_form(),
-            ..Default::default()
-        };
-        let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
-        let terms: Vec<FieldId> = d.state().terminals().map(|(id, ..)| id).collect();
-        // A field changed, one gone and one added in the state `ready` set,
-        // as edits will do; and one with its widgets gone, which changes no
-        // field.
-        let (changed, gone, fewer, added) = (terms[0], terms[1], terms[2], FieldId(99));
-        let root = d.root;
-        let st = d.versions.get_mut(&root).unwrap().state.as_mut().unwrap();
-        let node = |st: &DocState, id| FieldNode::clone(st.field(id).unwrap());
-        // Field `id` without its widgets, which go off their pages.
-        let unshown = |st: &mut DocState, id| {
-            let mut f = node(st, id);
-            let term = Arc::make_mut(f.term.as_mut().unwrap());
-            for w in std::mem::take(&mut term.widgets) {
-                let page = st.annot(w).unwrap().page;
-                let mut ids = st.annot_ids_on(page).unwrap().clone();
-                ids.retain(|&other| other != w);
-                st.set(&Key::Annot(w), None).unwrap();
-                let ids = (!ids.is_empty()).then_some(Val::PageAnnots(ids));
-                st.set(&Key::PageAnnots(page), ids).unwrap();
-            }
-            f
-        };
-        let mut f = node(st, changed);
-        Arc::make_mut(f.term.as_mut().unwrap()).value =
-            Some(crate::forms::Value::Text("Bo Ng".into()));
-        let mut new = f.clone();
-        Arc::make_mut(new.term.as_mut().unwrap()).widgets.clear();
-        let less = unshown(st, fewer);
-        unshown(st, gone);
-        let mut parent = node(st, f.parent.unwrap());
-        parent.kids.retain(|&kid| kid != gone);
-        parent.kids.push_back(added);
-        for (id, node) in [
-            (changed, Some(f.clone())),
-            (gone, None),
-            (added, Some(new)),
-            (fewer, Some(less)),
-            (f.parent.unwrap(), Some(parent)),
-        ] {
-            st.set(&Key::Field(id), node.map(|n| Val::Field(Arc::new(n))))
-                .unwrap();
-        }
-        assert_eq!(st.check_invariants(), Ok(()));
-        let want = HashSet::from([changed, gone, added]);
-        assert_eq!(d.fields_dirty(), want);
-        assert_eq!(d.snapshot().fields_dirty, want);
-
-        // A field of the file itself changed, then saved for real: each
-        // node is the saved file's own object, the projection reads each
-        // from there, and nothing is dirty.
-        let store = Store::new();
-        let primary = file(
-            &store,
-            crate::forms::fixture::every_kind().bytes(),
-            "form.pdf",
-        );
-        let facts = crate::open::finish(&primary.src, &in_progress::NoProgress);
-        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
-        d.ready(facts).unwrap();
-        let root = d.root;
-        let st = d.versions.get_mut(&root).unwrap().state.as_mut().unwrap();
-        let changed = st.terminals().next().unwrap().0;
-        let mut f = node(st, changed);
-        Arc::make_mut(f.term.as_mut().unwrap()).value =
-            Some(crate::forms::Value::Text("Bo Ng".into()));
-        st.set(&Key::Field(changed), Some(Val::Field(Arc::new(f))))
-            .unwrap();
-        assert_eq!(d.fields_dirty(), HashSet::from([changed]));
-        let saved = save_and_rebase(&mut d, false);
-        let st = d.state();
-        let ours = |node: &FieldNode| node.src.as_ref().is_some_and(|r| r.src == saved);
-        assert!(st.fields().all(|(_, node)| ours(node)));
-        let terms = st.terminals().count();
-        assert_eq!(d.snapshot().legacy().fields.len(), terms);
-        assert!(d.fields_dirty().is_empty() && d.snapshot().fields_dirty.is_empty());
     }
 
     /// Each rule a state's records keep (M10.5 §6.4), broken by puts no
@@ -4861,7 +4416,6 @@ mod tests {
                 src,
                 name: "form.pdf".into(),
                 derived: None,
-                stamp: None,
             });
             let out = d
                 .apply(
@@ -4976,16 +4530,17 @@ mod tests {
         f.bytes()
     }
 
-    /// Scripts brought in from a second file go off, and stay off when a
-    /// save makes the forms one file's; undo before the save turns them
-    /// on again. A duplicate of the second file's page is another
-    /// instance of its form, named as it is, renamed apart again.
+    /// Scripts brought in from a second file go off, and undo before the
+    /// insert turns them on again. A save leaves them off: it writes the
+    /// forms as one, but the document still holds both files'. A duplicate
+    /// of the second file's page is another instance of its form, named
+    /// as it is, renamed apart again.
     #[test]
     fn scripts_from_two_files_stay_off_after_a_save() {
         let store = Store::new();
         let primary = file(&store, scripted(), "a.pdf");
         let src = primary.src.clone();
-        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        let mut d = crate::open::start(store, primary, None, Box::new(FixedCount(10)));
         d.ready(crate::open::finish(&src, &in_progress::NoProgress))
             .unwrap();
         assert!(!d.scripts_mixed());
@@ -5029,11 +4584,13 @@ mod tests {
         let st = d.state();
         assert!(st.field_named("b_2.a").is_some());
 
-        save_and_rebase(&mut d, false);
-        assert!(d.scripts_mixed(), "one file's forms, scripts still off");
-        assert_eq!(d.script_sources(), [d.primary()]);
-        let names: Vec<&str> = d.state().form().names.values().map(|n| &**n).collect();
-        assert_eq!(names, ["saved.pdf"]);
+        let saved = saved(&mut d);
+        assert!(d.scripts_mixed(), "scripts still off");
+        assert_eq!(d.script_sources(), [d.primary(), sid]);
+        assert_eq!(d.state().form().names.len(), 3);
+        // The saved file's form is one, with both files' fields.
+        let form = saved.form();
+        assert!(form.fields.iter().any(|f| f.name == "b_2.a"));
     }
 
     #[test]
@@ -5243,7 +4800,7 @@ mod tests {
         let store = Store::new();
         let primary = file(&store, f.bytes(), "twice.pdf");
         let src = primary.src.clone();
-        let d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+        let d = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
         assert_eq!(copies(&d), [(0, 0), (1, 1)]);
         let object = |i| src.page(i).unwrap().id;
         assert_eq!(object(0), object(1), "one object, listed twice");
@@ -5626,8 +5183,10 @@ mod tests {
         assert_eq!(d.current_version(), current);
     }
 
+    /// A save is an output: the document keeps its pages, their sources
+    /// and ids, and its history, and the saved file has what it shows.
     #[test]
-    fn rebase_after_save_keeps_ids_and_history() {
+    fn a_save_keeps_ids_and_history() {
         let mut d = doc();
         let p5 = id_at(&d, 5);
         d.apply(
@@ -5646,23 +5205,24 @@ mod tests {
             "rotate",
         )
         .unwrap();
-        let old_primary = d.primary();
-        let saved = save_and_rebase(&mut d, false);
-        let new = d.primary();
-        assert_ne!(new, old_primary);
+        let (primary, version) = (d.primary(), d.current_version());
+        let saved = saved(&mut d);
+        assert_eq!((d.primary(), d.current_version()), (primary, version));
         assert!(!d.is_dirty());
         assert_eq!(d.page(0).unwrap(), p5);
-        assert_eq!(def_at(&d, 0).base.source, new);
-        assert_eq!(def_at(&d, 0).base.src, saved);
-        assert_eq!(order(&d), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(def_at(&d, 0).base.source, primary);
+        assert_eq!(order(&d), vec![5, 0, 1, 2, 3, 4]);
         // The rotation is the page's /Rotate, which a save writes as is.
         assert_eq!(rotation(&d, 0), Rotation::R90);
-        assert_eq!(d.render_delta(p5), Rotation::R0);
-        // Undo still reaches the pre-save version over the old source.
+        assert_eq!(saved.geom(0).rotate, Rotation::R90);
+        assert_eq!(saved.page_count(), 6);
+        // Undo reaches the version before, as it was.
         d.undo().unwrap();
-        assert_eq!(def_at(&d, 0).base.source, old_primary);
         assert_eq!(def_at(&d, 0).base.index, 5);
+        assert_eq!(rotation(&d, 0), Rotation::R0);
         assert!(d.is_dirty());
+        d.redo().unwrap();
+        assert!(!d.is_dirty());
     }
 
     /// One Letter page turned `degrees` by its `/Rotate`, or by its
@@ -5681,29 +5241,45 @@ mod tests {
             src: store.open(f.bytes().into(), kind).unwrap(),
             name: "turned.pdf".into(),
             derived: None,
-            stamp: None,
         }
     }
 
-    /// `d` saved, incrementally or by a rewrite, and rebased onto the
-    /// saved file, which it returns.
-    fn save_and_rebase(d: &mut Document, incremental: bool) -> Src {
-        let snap = d.snapshot();
-        let bytes = if incremental {
-            crate::incremental::incremental(&snap)
-        } else {
-            crate::save::rewrite(&snap)
-        }
-        .unwrap();
-        let kind = BlobKind::file(Path::new("saved.pdf"), None);
-        let src = d.store().open(bytes.into(), kind).unwrap();
-        d.rebase_to_saved(SourceInfo {
-            src: src.clone(),
-            name: "saved.pdf".into(),
-            derived: None,
-            stamp: None,
-        });
-        src
+    /// A directory of the test's own.
+    fn scratch() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("sheaf-model-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `d` saved to a file of its own (`materialize::save`, a Rewrite),
+    /// signatures and XFA values dropped as the reader agreed to, and the
+    /// file read back as a source. The document doesn't change: which
+    /// version is saved, its record, and nothing else.
+    fn saved(d: &mut Document) -> Src {
+        let path = scratch().join("saved.pdf");
+        let answers = crate::materialize::AskAnswers {
+            break_signatures: true,
+            drop_xfa_values: true,
+            ..Default::default()
+        };
+        crate::materialize::save(d, &path, &answers, &in_progress::NoProgress).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        d.store()
+            .open(bytes.into(), BlobKind::file(&path, None))
+            .unwrap()
+    }
+
+    /// As [`saved`], by an Append, which slice 10 brings back: until then
+    /// the write fails, and the tests that take it are ignored.
+    fn appended(d: &mut Document) -> Src {
+        let path = scratch().join("saved.pdf");
+        crate::materialize::save_appended(d, &path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        d.store()
+            .open(bytes.into(), BlobKind::file(&path, None))
+            .unwrap()
     }
 
     const LANDSCAPE: PageSize = PageSize {
@@ -5748,29 +5324,52 @@ mod tests {
     }
 
     /// A page's rotation is its `/Rotate`: a save writes it as it is, and
-    /// the document rebased onto the saved file keeps it, with no turn
-    /// left for PDFium to add.
+    /// the document, which a save doesn't change, still shows the page as
+    /// the file it opened has it, with the turn sheaf adds for PDFium.
     #[test]
     fn a_rotation_survives_a_save() {
-        for incremental in [false, true] {
-            let mut d = new_doc(2, &[], Box::new(FixedCount(10)));
-            rotate(&mut d, 0, "rotate");
-            let saved = save_and_rebase(&mut d, incremental);
-            assert_eq!(saved.geom(0).rotate, Rotation::R90, "{incremental}");
-            assert_eq!(saved.geom(1).rotate, Rotation::R0, "{incremental}");
-            let p = id_at(&d, 0);
-            assert_eq!(rotation(&d, 0), Rotation::R90, "{incremental}");
-            assert_eq!(d.render_delta(p), Rotation::R0, "{incremental}");
-            assert_eq!(d.page_size(p), LANDSCAPE, "{incremental}");
-        }
+        rotation_survives(false);
+    }
+
+    #[test]
+    #[ignore = "slice 10"]
+    fn a_rotation_survives_a_save_appended() {
+        rotation_survives(true);
+    }
+
+    fn rotation_survives(incremental: bool) {
+        let mut d = new_doc(2, &[], Box::new(FixedCount(10)));
+        rotate(&mut d, 0, "rotate");
+        let before = d.state().clone();
+        let saved = match incremental {
+            true => appended(&mut d),
+            false => saved(&mut d),
+        };
+        assert_eq!(saved.geom(0).rotate, Rotation::R90);
+        assert_eq!(saved.geom(1).rotate, Rotation::R0);
+        assert!(*d.state() == before && !d.is_dirty());
+        let p = id_at(&d, 0);
+        assert_eq!(rotation(&d, 0), Rotation::R90);
+        assert_eq!(d.render_delta(p), Rotation::R90);
+        assert_eq!(d.page_size(p), LANDSCAPE);
     }
 
     /// A page turned upright is upright in the saved file whatever its
-    /// parent's `/Rotate`: an incremental save leaves it under its parent,
+    /// parent's `/Rotate`: an Append leaves it under its parent,
     /// so it says 0. A page that's only marked keeps the `/Rotate` it has,
     /// its own or its parent's, a 135 too, which reads as 90.
     #[test]
     fn a_page_turned_upright_stays_upright_through_a_save() {
+        upright_through(false);
+    }
+
+    #[test]
+    #[ignore = "slice 10"]
+    fn a_page_turned_upright_stays_upright_through_a_save_appended() {
+        upright_through(true);
+    }
+
+    fn upright_through(incremental: bool) {
         let square = crate::annot::AnnotKind::Square {
             rect: crate::annot::Box2 {
                 x: 100.0,
@@ -5787,92 +5386,103 @@ mod tests {
             (Some(135), Some(180), None),
         ];
         for (own, parent, by) in cases {
-            for incremental in [false, true] {
-                let case = format!("{own:?} under {parent:?}, turned {by:?}, {incremental}");
-                let store = Store::new();
-                let primary = turned(&store, own, parent);
-                let mut d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-                let page = id_at(&d, 0);
-                let was = rotation(&d, 0);
-                let edit = match by {
-                    Some(by) => Edit::RotatePages {
-                        ids: vec![page],
-                        by,
-                    },
-                    None => Edit::AnnotAdd {
-                        page,
-                        annot: mark(0, square.clone()),
-                    },
-                };
-                d.apply(edit, "edit").unwrap();
-                let want = rotation(&d, 0);
-                assert_eq!(want, was.plus(by.unwrap_or(Rotation::R0)), "{case}");
-                let saved = save_and_rebase(&mut d, incremental);
-                assert_eq!(saved.geom(0).rotate, want, "{case}");
-                assert_eq!(rotation(&d, 0), want, "{case}");
-                if incremental && by.is_none() {
-                    let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
-                    let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
-                    let rotate = dict.get(b"Rotate").and_then(lopdf::Object::as_i64).ok();
-                    assert_eq!(rotate, own, "{case}: the page's own /Rotate");
-                }
+            let case = format!("{own:?} under {parent:?}, turned {by:?}");
+            let store = Store::new();
+            let primary = turned(&store, own, parent);
+            let mut d = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
+            let page = id_at(&d, 0);
+            let was = rotation(&d, 0);
+            let edit = match by {
+                Some(by) => Edit::RotatePages {
+                    ids: vec![page],
+                    by,
+                },
+                None => Edit::AnnotAdd {
+                    page,
+                    annot: mark(0, square.clone()),
+                },
+            };
+            d.apply(edit, "edit").unwrap();
+            let want = rotation(&d, 0);
+            assert_eq!(want, was.plus(by.unwrap_or(Rotation::R0)), "{case}");
+            let saved = match incremental {
+                true => appended(&mut d),
+                false => saved(&mut d),
+            };
+            assert_eq!(saved.geom(0).rotate, want, "{case}");
+            assert_eq!(rotation(&d, 0), want, "{case}");
+            if incremental && by.is_none() {
+                let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
+                let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
+                let rotate = dict.get(b"Rotate").and_then(lopdf::Object::as_i64).ok();
+                assert_eq!(rotate, own, "{case}: the page's own /Rotate");
             }
         }
     }
 
     /// A mark on a page sheaf turned shows where it did after a save, and
     /// the saved file has it where the model does: marks are in PageSpace,
-    /// which neither the save nor the rebase moves.
+    /// which a save doesn't move.
     #[test]
     fn a_mark_on_a_rotated_page_stays_put_through_a_save() {
+        mark_stays_put(false);
+    }
+
+    #[test]
+    #[ignore = "slice 10"]
+    fn a_mark_on_a_rotated_page_stays_put_through_a_save_appended() {
+        mark_stays_put(true);
+    }
+
+    fn mark_stays_put(incremental: bool) {
         let rect = crate::annot::Box2 {
             x: 100.0,
             y: 650.0,
             w: 50.0,
             h: 40.0,
         };
-        for incremental in [false, true] {
-            let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
-            rotate(&mut d, 0, "rotate");
-            let page = id_at(&d, 0);
-            let annot = mark(0, AnnotKind::Square { rect });
-            d.apply(Edit::AnnotAdd { page, annot }, "add").unwrap();
-            let shown = |d: &Document| {
-                let AnnotKind::Square { rect } = d.state().marks_on(page).next().unwrap().kind
-                else {
-                    unreachable!("the square");
-                };
-                d.geom(d.page(0).unwrap()).to_view().apply_box(rect)
+        let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+        rotate(&mut d, 0, "rotate");
+        let page = id_at(&d, 0);
+        let annot = mark(0, AnnotKind::Square { rect });
+        d.apply(Edit::AnnotAdd { page, annot }, "add").unwrap();
+        let shown = |d: &Document| {
+            let AnnotKind::Square { rect } = d.state().marks_on(page).next().unwrap().kind else {
+                unreachable!("the square");
             };
-            let before = shown(&d);
-            let saved = save_and_rebase(&mut d, incremental);
-            assert_eq!(shown(&d), before, "{incremental}");
-            let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
-            let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
-            let annots = dict.get(b"Annots").unwrap().as_array().unwrap();
-            let (_, annot) = pdf.dereference(&annots[0]).unwrap();
-            let r: Vec<f32> = annot
-                .as_dict()
-                .unwrap()
-                .get(b"Rect")
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_float().unwrap() as f32)
-                .collect();
-            let centre = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0);
-            let want = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
-            assert!(
-                (centre.0 - want.0).abs() < 1.0 / 64.0 && (centre.1 - want.1).abs() < 1.0 / 64.0,
-                "{incremental}: /Rect {r:?}"
-            );
-        }
+            d.geom(d.page(0).unwrap()).to_view().apply_box(rect)
+        };
+        let before = shown(&d);
+        let saved = match incremental {
+            true => appended(&mut d),
+            false => saved(&mut d),
+        };
+        assert_eq!(shown(&d), before, "{incremental}");
+        let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
+        let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
+        let annots = dict.get(b"Annots").unwrap().as_array().unwrap();
+        let (_, annot) = pdf.dereference(&annots[0]).unwrap();
+        let r: Vec<f32> = annot
+            .as_dict()
+            .unwrap()
+            .get(b"Rect")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_float().unwrap() as f32)
+            .collect();
+        let centre = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0);
+        let want = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        assert!(
+            (centre.0 - want.0).abs() < 1.0 / 64.0 && (centre.1 - want.1).abs() < 1.0 / 64.0,
+            "{incremental}: /Rect {r:?}"
+        );
     }
 
-    /// A save re-expresses the version it wrote, so the versions made from
-    /// it before (undone, then saved) keep their own states: their prims
-    /// are from it as it was.
+    /// A save changes no version, so the versions made from the one it
+    /// wrote before (undone, then saved) replay from it as before: their
+    /// prims are from it as it is.
     #[test]
     fn a_save_keeps_what_was_undone_before_it() {
         let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
@@ -5884,7 +5494,7 @@ mod tests {
         let (c, want_c) = (d.current_version(), d.state().clone());
         assert!(d.versions[&b].state.is_none(), "b's snapshot was dropped");
         d.undo().unwrap();
-        d.rebase_to_saved(SourceInfo::blank(d.store(), 3));
+        saved(&mut d);
         rotate(&mut d, 0, "d");
         d.jump(b).unwrap();
         assert_eq!(*d.state(), want_b);
@@ -6155,9 +5765,8 @@ mod tests {
             src,
             name: "a.pdf".into(),
             derived: None,
-            stamp: None,
         };
-        let d = Document::new(store, primary, &outline, Box::new(FixedCount(5)));
+        let d = Document::new(store, primary, None, &outline, Box::new(FixedCount(5)));
         let by = |t: &str| bookmark(&d, t);
         assert!(by("A").style.bold);
         assert_eq!(by("A1").color, Some([0, 0, 255]));
@@ -6197,12 +5806,16 @@ mod tests {
         assert_eq!(titles(&d)[1], (1, "First".into()));
     }
 
+    crate::both_ways!(
+        a_uri_bookmark_is_kept,
+        a_uri_bookmark_is_kept_appended: uri_bookmark_kept
+    );
+
     /// An item going somewhere sheaf doesn't model, a link, opens kept
     /// from the item it was read as. A Rewrite after a reorder writes its
     /// `/A` again, and the `/SE`s of the file's items; so does one after a
-    /// save, from the saved file's items (M10.5 bug 15).
-    #[test]
-    fn a_uri_bookmark_is_kept() {
+    /// save, which leaves it the file's item (M10.5 bug 15).
+    fn uri_bookmark_kept(how: How) {
         use crate::forms::fixture::{Form, outline_tree};
         use lopdf::{Object, dictionary};
         let mut f = Form::new(3);
@@ -6230,7 +5843,7 @@ mod tests {
                 (Some(items[1]), false, Some(2))
             ]
         );
-        let mut d = Document::new(store, primary, &read, Box::new(FixedCount(10)));
+        let mut d = Document::new(store, primary, None, &read, Box::new(FixedCount(10)));
         let site = bookmark(&d, "Site");
         assert_eq!(site.target, Some(Target::Kept));
         assert_eq!(site.src.as_ref().map(|r| r.id), Some(items[0]));
@@ -6267,7 +5880,7 @@ mod tests {
             written(crate::save::rewrite(&d.snapshot()).unwrap()),
             want(0)
         );
-        // An incremental save writes the outline anew once it changed.
+        // A save writes the outline anew once it changed.
         let rename = Edit::OutlineEdit {
             id: bm(&d, "Third"),
             title: Some("3".into()),
@@ -6277,12 +5890,11 @@ mod tests {
             style: None,
         };
         d.apply(rename, "Rename").unwrap();
-        let appended = crate::incremental::incremental(&d.snapshot()).unwrap();
-        assert_eq!(written(appended), want(0));
-        let saved = save_and_rebase(&mut d, false);
+        assert_eq!(written(how.write(&d.snapshot())), want(0));
+        saved(&mut d);
         let site = bookmark(&d, "Site");
         assert_eq!(site.target, Some(Target::Kept));
-        assert_eq!(site.src.as_ref().map(|r| r.src.id()), Some(saved.id()));
+        assert_eq!(site.src.as_ref().map(|r| r.id), Some(items[0]));
         let back = Edit::MovePages {
             ids: vec![last],
             before: None,
@@ -6294,10 +5906,9 @@ mod tests {
         );
     }
 
-    /// Bookmarks nested deeper than a file is read are from no item after a
-    /// save, and the ones after them in pre-order are still each from its
-    /// own: a link bookmark after a deep branch keeps its `/A` through a
-    /// second save.
+    /// Bookmarks nested deeper than a file is read (32) are written, and a
+    /// link bookmark after them in pre-order keeps its own item and its
+    /// `/A`, through one save and a second.
     #[test]
     fn a_bookmark_after_a_deep_branch_keeps_its_own_item() {
         use crate::forms::fixture::{Form, outline_tree};
@@ -6312,8 +5923,8 @@ mod tests {
         let store = Store::new();
         let primary = file(&store, f.bytes(), "deep.pdf");
         let read = crate::open::outline(&primary.src);
-        let mut d = Document::new(store, primary, &read, Box::new(FixedCount(10)));
-        let deepest = crate::open::MAX_DEPTH + 2;
+        let mut d = Document::new(store, primary, None, &read, Box::new(FixedCount(10)));
+        let deepest = 34;
         let items = (0..=deepest)
             .map(|depth| NewOutlineItem {
                 title: format!("d{depth}"),
@@ -6340,18 +5951,20 @@ mod tests {
             let action = pdf.get_dictionary(action).ok()?;
             Some(crate::file::pdf_text(action.get(b"URI").ok()?))
         };
-        let saved = save_and_rebase(&mut d, false);
-        for (depth, _, b) in d.state().bookmarks_preorder() {
-            let src = b.src.as_ref().map(|r| r.src.id());
-            match depth > crate::open::MAX_DEPTH {
-                true => assert_eq!(src, None, "{}", b.title),
-                false => assert_eq!(src, Some(saved.id()), "{}", b.title),
-            }
-        }
+        let first = saved(&mut d);
+        assert_eq!(
+            uri(first.bytes().to_vec()).as_deref(),
+            Some("https://example.com/")
+        );
         let site = bookmark(&d, "Site");
         assert_eq!(site.target, Some(Target::Kept));
-        let again = crate::save::rewrite(&d.snapshot()).unwrap();
-        assert_eq!(uri(again).as_deref(), Some("https://example.com/"));
+        let again = saved(&mut d);
+        assert_eq!(
+            uri(again.bytes().to_vec()).as_deref(),
+            Some("https://example.com/")
+        );
+        let titles = |src: &Src| crate::open::outline(src).len();
+        assert_eq!(titles(&again), titles(&first));
     }
 
     /// The header/footer sheaf drew opens as the generator that draws it,
@@ -6365,7 +5978,7 @@ mod tests {
         let bytes = crate::forms::fixture::every_fact().bytes();
         let primary = file(&store, bytes, "facts.pdf");
         let src = primary.src.clone();
-        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        let mut d = crate::open::start(store, primary, None, Box::new(FixedCount(10)));
         d.ready(crate::open::finish(&src, &in_progress::NoProgress))
             .unwrap();
         let pages: Vec<PageId> = d.state().order().iter().copied().collect();
@@ -6379,7 +5992,8 @@ mod tests {
             (hf.texts[0].as_str(), &hf.pages),
             ("Draft", &Some(vec![pages[2]]))
         );
-        assert!(!d.header_footer_dirty());
+        // The file draws it on its page: the screen draws nothing over it.
+        assert!(crate::stamps::drawn_over(d.state(), pages[2]).is_none());
         for text in ["Final", "Final, again"] {
             let mut hf = crate::stamps::HeaderFooter::clone(&hf);
             hf.texts[0] = text.into();
@@ -6390,7 +6004,7 @@ mod tests {
             assert_eq!(keys_put(&d), [Key::Generator(id)]);
             assert_eq!(only(&d).0, id, "{text}");
         }
-        assert!(d.header_footer_dirty());
+        assert!(crate::stamps::drawn_over(d.state(), pages[2]).is_some());
         let saved = crate::forms::fixture::source(crate::save::rewrite(&d.snapshot()).unwrap());
         let (written, scope) = crate::stamps::from_catalog(saved.pdf()).unwrap();
         assert_eq!(
@@ -6521,7 +6135,7 @@ mod tests {
         let store = Store::new();
         let info = file(&store, bytes, "saved.pdf");
         let src = info.src.clone();
-        let mut d = crate::open::start(store, info, Box::new(FixedCount(10)));
+        let mut d = crate::open::start(store, info, None, Box::new(FixedCount(10)));
         d.ready(crate::open::finish(&src, &in_progress::NoProgress))
             .unwrap();
         d
@@ -6652,13 +6266,14 @@ mod tests {
         assert_eq!(&**file_held(&other, id).unwrap().bytes(), MARK_FILE_BYTES);
     }
 
+    crate::both_ways!(blob_liveness, blob_liveness_appended: blobs_live);
+
     /// What marks hold lives as long as they do (M10.5 slice 8): a file
     /// attached and a library stamp placed, every blob the caller held
     /// dropped, the bytes stay through undo and redo, and both saves write
     /// them, the file reopened reading the same. The store counts them
     /// while a version holds the marks.
-    #[test]
-    fn blob_liveness() {
+    fn blobs_live(how: How) {
         use crate::forms::fixture::{self, MARK_FILE_BYTES};
         let every = fixture::every_mark_kind();
         let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
@@ -6706,14 +6321,8 @@ mod tests {
         d.redo().unwrap();
         d.redo().unwrap();
         check(&d, p0);
-        let snap = d.snapshot();
-        for saved in [
-            crate::save::rewrite(&snap).unwrap(),
-            crate::incremental::incremental(&snap).unwrap(),
-        ] {
-            let back = reopened(saved);
-            check(&back, back.page(0).unwrap());
-        }
+        let back = reopened(how.write(&d.snapshot()));
+        check(&back, back.page(0).unwrap());
     }
 
     #[test]
@@ -6765,7 +6374,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(d.state().marks_on(p1).next().unwrap().color, [0, 0, 255]);
-        assert_eq!(d.snapshot().annots_dirty.len(), 1);
         d.apply(Edit::DuplicatePages { ids: vec![p1] }, "dup")
             .unwrap();
         let p1_copy = id_at(&d, 2);
@@ -7042,7 +6650,9 @@ mod tests {
         )
         .unwrap();
         let n = d.stats().versions;
-        d.mark_saved();
+        let v = d.current_version();
+        d.save_input(v).unwrap();
+        d.record_save(record_for(&d, v)).unwrap();
         d.apply_in_job(
             job,
             Edit::SetTextLayers {
@@ -7148,36 +6758,43 @@ mod tests {
         assert_eq!(layer_texts(&d).len(), 2);
     }
 
-    /// A save expresses the version anew over the saved file, so it's
-    /// another version, in the same place. The opened one too.
+    /// A save is an output: the version it wrote keeps its id, and is the
+    /// saved one; the opened one too. Each save is noted on its version,
+    /// and undo and redo across them are exact.
     #[test]
-    fn a_save_gives_the_cursor_a_new_version() {
+    fn a_save_keeps_the_version_it_wrote() {
         let mut d = doc();
         let opened = d.current_version();
-        d.rebase_to_saved(SourceInfo::blank(d.store(), 6));
-        let root = d.current_version();
-        assert_ne!(root, opened);
-        assert!(d.jump(opened).is_err());
+        let before = d.state().clone();
+        saved(&mut d);
+        assert_eq!(d.current_version(), opened);
         rotate(&mut d, 0, "rotate");
-        let old = d.current_version();
-        d.rebase_to_saved(SourceInfo::blank(d.store(), 6));
-        let new = d.current_version();
-        assert_ne!(new, old);
-        assert!(d.jump(old).is_err(), "the old id doesn't resolve");
+        let v = d.current_version();
+        let after = d.state().clone();
+        saved(&mut d);
+        assert_eq!(d.current_version(), v);
         assert!(!d.is_dirty());
-        let saved: Vec<VersionId> = d
-            .timeline()
-            .iter()
+        let timeline = d.timeline();
+        let saved_ids: Vec<VersionId> = (timeline.iter())
             .filter(|view| view.saved)
             .map(|view| view.id)
             .collect();
-        assert_eq!(saved, [new]);
+        assert_eq!(saved_ids, [v]);
+        let saves = |id| {
+            timeline
+                .iter()
+                .find(|view| view.id == id)
+                .unwrap()
+                .saves
+                .len()
+        };
+        assert_eq!((saves(opened), saves(v)), (1, 1));
         assert_eq!(d.undo().unwrap(), Some("rotate"));
-        assert_eq!(d.current_version(), root);
-        assert!(d.is_dirty());
+        assert_eq!(d.current_version(), opened);
+        assert!(*d.state() == before && d.is_dirty());
         assert_eq!(d.redo().unwrap(), Some("rotate"));
-        assert_eq!(d.current_version(), new);
-        assert!(!d.is_dirty());
+        assert_eq!(d.current_version(), v);
+        assert!(*d.state() == after && !d.is_dirty());
     }
 
     /// A job whose batches put back all they did leaves no version: the
@@ -7245,16 +6862,20 @@ mod tests {
         assert_eq!(d.edge(v).unwrap().0.len(), 2, "no step added");
     }
 
-    /// Pruning past `MAX_VERSIONS` can make a job's version the first one,
-    /// with no parent to amend it under: the job's next batch makes a
-    /// version after it.
+    /// Pruning past `MAX_VERSIONS` never takes the saved version (M10.5
+    /// §9.1): its branch stays whole, and the root doesn't move past it,
+    /// so a job's version made off it keeps its parent, and the job's next
+    /// batch amends it.
     #[test]
-    fn a_job_s_version_pruned_to_the_first_is_not_amended() {
+    fn pruning_keeps_the_saved_branch_whole() {
+        let max = crate::history::MAX_VERSIONS;
         let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
-        for i in 1..crate::history::MAX_VERSIONS {
+        for i in 1..max {
             rotate(&mut d, i % 3, "rotate");
         }
-        d.rebase_to_saved(SourceInfo::blank(d.store(), 3));
+        let saved = d.current_version();
+        d.save_input(saved).unwrap();
+        d.record_save(record_for(&d, saved)).unwrap();
         let opened = d.timeline()[0].id;
         d.jump(opened).unwrap();
         let job = d.begin_job();
@@ -7268,32 +6889,40 @@ mod tests {
             )
             .unwrap();
         };
-        // One version too many: the saved branch goes, and the job's
-        // version becomes the first.
+        // One version too many, and none goes.
         ocr(&mut d, 0);
         let v = d.current_version();
-        assert_eq!(d.version_count(), 1);
-        assert!(!d.can_undo());
+        assert_eq!(d.version_count(), max + 1);
+        d.jump(saved).unwrap();
+        assert!(!d.is_dirty());
+        d.jump(v).unwrap();
+        assert!(d.can_undo());
         ocr(&mut d, 1);
         assert_ne!(d.current_version(), v);
+        assert_eq!(d.version_count(), max + 1, "amended");
+        assert_eq!(layer_texts(&d).len(), 2);
         assert_eq!(d.undo().unwrap(), Some("ocr"));
-        assert_eq!(d.current_version(), v);
-        assert_eq!(layer_texts(&d).len(), 1);
+        assert_eq!(d.current_version(), opened);
     }
 
+    /// A save keeps the text layers the document draws: the file has
+    /// them, and the pages still show the file it opened.
     #[test]
-    fn rebase_clears_text_layers() {
+    fn a_save_keeps_text_layers() {
         let mut d = doc();
         set(&mut d, &[0], "a");
-        d.rebase_to_saved(SourceInfo::blank(d.store(), 6));
-        assert!(layer_texts(&d).is_empty());
+        let file = saved(&mut d);
+        assert_eq!(layer_texts(&d).len(), 1);
         assert!(!d.is_dirty());
-        // The version before the save still carries its layer, so undoing
-        // across the save re-emits it against the old source.
+        assert!(crate::serialize::fixture::holds(
+            file.bytes(),
+            b"/SheafOcrLayer"
+        ));
         d.undo().unwrap();
         assert!(layer_texts(&d).is_empty(), "pre-OCR version");
         d.redo().unwrap();
-        assert!(layer_texts(&d).is_empty(), "rebased version");
+        assert_eq!(layer_texts(&d).len(), 1);
+        assert!(!d.is_dirty());
     }
 
     #[test]
@@ -7385,7 +7014,6 @@ mod tests {
             src: store.open(bytes.into(), kind).unwrap(),
             name: name.into(),
             derived: None,
-            stamp: None,
         }
     }
 
@@ -7512,28 +7140,300 @@ mod tests {
         assert_eq!(d.store().bytes(), bytes(d.primary()) + bytes(kept));
     }
 
-    /// A save's file stays while it's the primary, though pruning took the
-    /// version that held it, and goes when the next save replaces it.
+    /// A record of `d`'s primary for a save of version `v`, as a Rewrite
+    /// that wrote it would leave.
+    fn record_for(d: &Document, v: VersionId) -> SaveRecord {
+        let info = d.source(d.primary()).unwrap();
+        let stamp = FileStamp {
+            len: info.src.bytes().len() as u64,
+            mtime: std::time::SystemTime::UNIX_EPOCH,
+            tail: 0,
+        };
+        SaveRecord {
+            strategy: StrategyKind::Rewrite,
+            ..SaveRecord::opened(v, info, stamp)
+        }
+    }
+
+    /// An OCR batch for page `page` of `d`, in `job`.
+    fn ocr_in(d: &mut Document, job: JobId, page: usize) {
+        let layers = vec![(id_at(d, page), tl("a"))];
+        (d.apply_in_job(job, Edit::SetTextLayers { layers }, "ocr")).unwrap();
+    }
+
+    /// A save in flight seals its version (M10.5 §9.1): the job's next
+    /// batch, as an OCR flush sends it, makes a version after it rather
+    /// than amending what's being written, and that one stays dirty once
+    /// the save is recorded.
     #[test]
-    fn a_pruned_save_s_file_goes_when_the_next_save_replaces_it() {
+    fn an_amend_on_a_sealed_version_makes_a_child() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(10)));
+        let job = d.begin_job();
+        ocr_in(&mut d, job, 0);
+        let v = d.current_version();
+        let input = d.save_input(v).unwrap();
+        assert_eq!(input.version, v);
+        assert_eq!(Some(&input.target), d.versions[&v].state.as_ref());
+        ocr_in(&mut d, job, 1);
+        let child = d.current_version();
+        assert_ne!(child, v);
+        assert_eq!(d.versions[&child].parent, Some(v));
+        assert_eq!(d.edge(v).unwrap().0.len(), 1, "v is as it was sealed");
+        d.record_save(record_for(&d, v)).unwrap();
+        assert!(d.is_dirty());
+        assert_eq!(d.undo().unwrap(), Some("ocr"));
+        assert_eq!(d.current_version(), v);
+        assert!(!d.is_dirty());
+    }
+
+    /// `record_save` and `abandon_save` each end a save: the version is
+    /// unsealed, so a job's next batch amends it again (an abandoned save
+    /// leaves it unsaved). A recorded save makes it the saved version and
+    /// holds its record, noted among its saves, and the version saved
+    /// before keeps only its note.
+    #[test]
+    fn record_save_and_abandon_save_unseal() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(10)));
+        let job = d.begin_job();
+        ocr_in(&mut d, job, 0);
+        let v = d.current_version();
+        d.save_input(v).unwrap();
+        d.save_input(v).unwrap();
+        assert_eq!(d.versions[&v].sealed, 2);
+        d.abandon_save(v);
+        d.abandon_save(v);
+        assert_eq!(d.versions[&v].sealed, 0);
+        assert!(d.saved_record().is_none());
+        ocr_in(&mut d, job, 1);
+        let v = d.current_version();
+        assert_eq!(d.edge(v).unwrap().0.len(), 2, "amended");
+        d.save_input(v).unwrap();
+        d.record_save(record_for(&d, v)).unwrap();
+        assert_eq!(d.versions[&v].sealed, 0);
+        assert!(!d.is_dirty());
+        assert_eq!(d.saved_record().unwrap().version, v);
+        let notes = &d.versions[&v].saves;
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].strategy, StrategyKind::Rewrite);
+        assert_eq!(d.timeline().last().unwrap().saves, *notes);
+        // Saved again after another edit: the record moves on.
+        rotate(&mut d, 0, "rotate");
+        let w = d.current_version();
+        d.save_input(w).unwrap();
+        let input = d.save_input(w).unwrap();
+        assert_eq!(input.saved.unwrap().record.version, v);
+        d.abandon_save(w);
+        d.record_save(record_for(&d, w)).unwrap();
+        assert_eq!(d.saved_record().unwrap().version, w);
+        assert!(d.versions[&v].record.is_none());
+        assert_eq!(d.versions[&v].saves.len(), 1);
+    }
+
+    /// Pruning never takes a version being saved: a branch holding one
+    /// stays whole past `MAX_VERSIONS`, and the root stops short of it,
+    /// until the save ends.
+    #[test]
+    fn pruning_keeps_a_version_being_saved() {
+        let max = crate::history::MAX_VERSIONS;
         let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
-        for i in 1..crate::history::MAX_VERSIONS {
+        // Nothing saved, so nothing else holds the root back.
+        d.mark_unsaved();
+        rotate(&mut d, 0, "rotate");
+        let sealed = d.current_version();
+        d.save_input(sealed).unwrap();
+        d.undo().unwrap();
+        for i in 1..max {
             rotate(&mut d, i % 3, "rotate");
         }
-        let a4 = crate::generated::blank_pages(595.0, 842.0, 3).unwrap();
-        let saved = d.rebase_to_saved(file(d.store(), a4, "saved.pdf"));
-        let id = d.source(saved).unwrap().src.id();
-        // Back to the first version, and one edit too many: the saved
-        // branch goes.
-        let opened = d.timeline()[0].id;
-        d.jump(opened).unwrap();
-        rotate(&mut d, 0, "rotate");
-        assert_eq!(d.version_count(), 1);
-        assert_eq!(d.primary(), saved);
-        assert!(d.store().get(id).is_some());
-        d.rebase_to_saved(SourceInfo::blank(d.store(), 3));
-        assert!(d.source(saved).is_none());
-        assert!(d.store().get(id).is_none());
+        assert_eq!(d.version_count(), max + 1);
+        assert!(d.versions.contains_key(&sealed));
+        assert!(d.versions[&sealed].state.is_some(), "its snapshot is kept");
+        d.abandon_save(sealed);
+        rotate(&mut d, 1, "rotate");
+        assert_eq!(d.version_count(), max);
+        assert!(!d.versions.contains_key(&sealed));
+    }
+
+    /// A file of four pages under two nodes of two, with every root
+    /// object a save reads: an info dictionary, a form with XFA, an outline
+    /// root, page labels, names and an open action.
+    fn rooted() -> (Vec<u8>, BTreeMap<&'static str, ObjectId>) {
+        use lopdf::{Object, dictionary};
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let root = pdf.new_object_id();
+        let mut ids = BTreeMap::new();
+        let mut nodes = Vec::new();
+        for n in 0..2 {
+            let node = pdf.new_object_id();
+            let pages: Vec<Object> = (0..2)
+                .map(|_| {
+                    pdf.add_object(dictionary! {
+                        "Type" => "Page", "Parent" => node,
+                        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                    })
+                    .into()
+                })
+                .collect();
+            if n == 0 {
+                ids.insert("page", pages[0].as_reference().unwrap());
+            }
+            pdf.objects.insert(
+                node,
+                dictionary! { "Type" => "Pages", "Parent" => root, "Kids" => pages, "Count" => 2 }
+                    .into(),
+            );
+            nodes.push(Object::Reference(node));
+        }
+        ids.insert("node0", nodes[0].as_reference().unwrap());
+        ids.insert("node1", nodes[1].as_reference().unwrap());
+        pdf.objects.insert(
+            root,
+            dictionary! { "Type" => "Pages", "Kids" => nodes, "Count" => 4 }.into(),
+        );
+        let xfa = pdf.add_object(lopdf::Stream::new(dictionary! {}, b"<xdp/>".to_vec()));
+        let form = pdf.add_object(dictionary! {
+            "Fields" => Vec::<Object>::new(), "XFA" => xfa,
+            "DA" => Object::string_literal("/Helv 0 Tf 0 g"),
+        });
+        let outlines = pdf.add_object(dictionary! { "Type" => "Outlines", "Count" => 0 });
+        let labels = pdf.add_object(
+            dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => "r" }.into()] },
+        );
+        let names = pdf
+            .add_object(dictionary! { "Dests" => dictionary! { "Names" => Vec::<Object>::new() } });
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => "Catalog", "Pages" => root, "AcroForm" => form, "Outlines" => outlines,
+            "PageLabels" => labels, "Names" => names, "Lang" => Object::string_literal("en"),
+            "OpenAction" => vec![ids["page"].into(), "Fit".into()],
+        });
+        let info = pdf.add_object(dictionary! { "Title" => Object::string_literal("Rooted") });
+        pdf.trailer.set("Root", catalog);
+        pdf.trailer.set("Info", info);
+        ids.extend([
+            ("root", root),
+            ("form", form),
+            ("outlines", outlines),
+            ("labels", labels),
+            ("catalog", catalog),
+            ("info", info),
+        ]);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        (bytes, ids)
+    }
+
+    /// The opened file's record (M10.5 §9.1): its objects at their own
+    /// numbers, every number in use present, the root objects' keys the
+    /// state doesn't own, and the page tree as the file has it. It's the
+    /// opened version's, which `ready` replaced, and the saved one's.
+    #[test]
+    fn the_opened_record_is_the_file_s() {
+        use crate::materialize::ObjKey;
+        let (bytes, ids) = rooted();
+        let store = Store::new();
+        let primary = file(&store, bytes, "rooted.pdf");
+        let src = primary.src.clone();
+        let stamp = FileStamp {
+            len: src.bytes().len() as u64,
+            mtime: std::time::SystemTime::UNIX_EPOCH,
+            tail: 7,
+        };
+        let mut d = crate::open::start(store, primary, Some(stamp), Box::new(FixedCount(10)));
+        d.ready(crate::open::finish(&src, &in_progress::NoProgress))
+            .unwrap();
+        let rec = d.saved_record().unwrap().clone();
+        assert_eq!(rec.version, d.current_version());
+        assert_eq!(&*rec.path, Path::new("rooted.pdf"));
+        assert_eq!((rec.strategy, rec.stamp), (StrategyKind::Opened, stamp));
+        assert_eq!(rec.xref, *src.xref());
+        assert!(rec.crypt.is_none() && rec.drawn.is_empty() && rec.transforms.is_empty());
+        // The map: the root objects by key, and the rest by identity.
+        let map = &rec.map;
+        for (key, name) in [
+            (ObjKey::Catalog, "catalog"),
+            (ObjKey::Info, "info"),
+            (ObjKey::AcroForm, "form"),
+            (ObjKey::OutlinesRoot, "outlines"),
+            (ObjKey::Labels, "labels"),
+            (ObjKey::PagesNode(0), "root"),
+            (ObjKey::PagesNode(1), "node0"),
+            (ObjKey::PagesNode(2), "node1"),
+        ] {
+            assert_eq!(map.get(&key), Some(ids[name]), "{key:?}");
+        }
+        assert_eq!(map.get(&ObjKey::PagesNode(3)), None);
+        let base = |blob, copy| ObjKey::Base {
+            blob,
+            obj: ids["page"],
+            copy,
+        };
+        assert_eq!(map.get(&base(src.id(), 0)), Some(ids["page"]));
+        assert_eq!(map.get(&base(src.id(), 1)), None);
+        assert_eq!(map.get(&base(BlobId { hash: 1, len: 1 }, 0)), None);
+        // Present: the numbers in use, and no other.
+        let mut used: Vec<u32> = src.pdf().ids().map(|(n, _)| n).collect();
+        used.sort_unstable();
+        assert_eq!(rec.present.iter().collect::<Vec<_>>(), used);
+        assert_eq!(rec.present.len(), used.len());
+        let past = used.last().unwrap() + 1;
+        assert!(!rec.present.contains(0) && !rec.present.contains(past));
+        // Roots: the keys a save doesn't emit from the state.
+        fn keys(d: &lopdf::Dictionary) -> Vec<&[u8]> {
+            let mut keys: Vec<&[u8]> = d.iter().map(|(k, _)| k.as_slice()).collect();
+            keys.sort();
+            keys
+        }
+        let roots = &rec.roots;
+        let want: [&[u8]; 4] = [b"Lang", b"Names", b"OpenAction", b"Type"];
+        assert_eq!(keys(&roots.catalog), want);
+        assert_eq!(keys(roots.acroform.as_ref().unwrap()), [b"XFA".as_slice()]);
+        assert_eq!(keys(roots.outlines.as_ref().unwrap()), [b"Type".as_slice()]);
+        assert_eq!(keys(roots.names.as_ref().unwrap()), [b"Dests".as_slice()]);
+        // The tree, the root first, each node's kids in order.
+        let tree: Vec<(ObjectId, usize)> =
+            (rec.tree.nodes.iter()).map(|n| (n.id, n.size)).collect();
+        assert_eq!(
+            tree,
+            [(ids["root"], 2), (ids["node0"], 2), (ids["node1"], 2)]
+        );
+        assert_eq!(rec.tree.nodes[0].kids, [ids["node0"], ids["node1"]]);
+        let pages: Vec<ObjectId> = (rec.tree.nodes[1..].iter())
+            .flat_map(|n| n.kids.iter().copied())
+            .collect();
+        assert_eq!(pages, src.page_ids().collect::<Vec<_>>());
+        // A save's input after it holds it.
+        let input = d.save_input(d.current_version()).unwrap();
+        let saved = input.saved.unwrap();
+        assert!(Arc::ptr_eq(&saved.record, d.saved_record().unwrap()));
+        assert_eq!(saved.state, *d.state());
+    }
+
+    /// A primary made in memory, blank pages or a document `new` makes,
+    /// has no record: nothing says what a file of it would hold, so its
+    /// first save is a Rewrite.
+    #[test]
+    fn a_memory_primary_has_no_record() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(10)));
+        assert!(d.saved_record().is_none());
+        let v = d.current_version();
+        assert!(d.save_input(v).unwrap().saved.is_none());
+        assert!(d.recovery_input().saved.is_none());
+        let opened = opened_doc(2, Facts::default(), Box::new(FixedCount(10)));
+        assert!(opened.saved_record().is_none());
+    }
+
+    /// A recovery sidecar's input seals nothing: an OCR batch after it
+    /// still amends the job's version.
+    #[test]
+    fn a_recovery_input_seals_nothing() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(10)));
+        let job = d.begin_job();
+        ocr_in(&mut d, job, 0);
+        let v = d.current_version();
+        assert_eq!(d.recovery_input().version, v);
+        assert_eq!(d.versions[&v].sealed, 0);
+        ocr_in(&mut d, job, 1);
+        assert_eq!(d.edge(d.current_version()).unwrap().0.len(), 2, "amended");
     }
 
     #[test]

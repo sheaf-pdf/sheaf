@@ -190,7 +190,7 @@ fn doc(pages: u32, marks: HashMap<u32, Vec<Annot>>, theirs: Vec<(u32, ForeignAnn
         name: "big.pdf".into(),
         ..SourceInfo::blank(&store, pages)
     };
-    let mut d = sheaf_doc::open::start(store, primary, Box::new(FixedCount(10)));
+    let mut d = sheaf_doc::open::start(store, primary, None, Box::new(FixedCount(10)));
     let mut annots = FileAnnots::default();
     for (index, list) in marks {
         let marks = list.into_iter().map(|a| FileAnnot {

@@ -497,6 +497,7 @@ mod tests {
         let d = Document::new(
             store,
             primary,
+            None,
             &[
                 FlatOutlineItem {
                     title: "Cash".into(),

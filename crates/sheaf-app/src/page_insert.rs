@@ -167,7 +167,7 @@ impl DocView {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
-                    let info = SourceInfo::read(&store, &path, None)?;
+                    let (info, _) = SourceInfo::read(&store, &path, None)?;
                     let incoming = crate::docview::Incoming::read(&info);
                     let handle = RenderHandle::open_bytes(info.src.bytes().clone(), None)?;
                     anyhow::Ok((info, handle, incoming))
@@ -194,7 +194,6 @@ impl DocView {
                 let n = ids.len();
                 let label = format!("Replace {n} page{}", if n == 1 { "" } else { "s" });
                 let mixed = doc.model.scripts_mixed();
-                doc.model.set_source_renamed(sid, &incoming.annots.renamed);
                 match doc.model.apply(
                     Edit::ReplacePages {
                         ids,

@@ -113,46 +113,6 @@ impl DocView {
         self.attachment_rows().into_iter().map(|(a, _)| a).collect()
     }
 
-    /// Read the primary file's facts again (after a save rewrote it, so
-    /// attachments are addressed in the new file).
-    pub(crate) fn refresh_facts(&mut self, cx: &mut Context<Self>) {
-        let State::Ready(doc) = &self.state else {
-            return;
-        };
-        let Some(src) = doc.model.source(doc.model.primary()) else {
-            return;
-        };
-        let (src, sid) = (src.src.clone(), doc.model.primary());
-        cx.spawn(async move |this, cx| {
-            let (attachments, collection, layers) = cx
-                .background_executor()
-                .spawn(async move {
-                    let pdf = src.pdf();
-                    (
-                        sheaf_doc::attachments::attachments_in(pdf, src.page_ids()),
-                        sheaf_doc::portfolio::collection(pdf),
-                        sheaf_doc::layers::layers_in(pdf),
-                    )
-                })
-                .await;
-            this.update(cx, |v, cx| {
-                let State::Ready(doc) = &mut v.state else {
-                    return;
-                };
-                if doc.model.primary() == sid {
-                    doc.attachments = attachments;
-                    doc.collection = collection;
-                    doc.attachment_selected = None;
-                    // Same groups; keep what the user has hidden.
-                    doc.layers = layers;
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     fn select_attachment(&mut self, i: usize, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state {
             doc.attachment_selected = Some(i);

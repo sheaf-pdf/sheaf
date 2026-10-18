@@ -12,7 +12,7 @@ use lopdf::{Object, dictionary};
 use sheaf_core::Rotation;
 use sheaf_doc::forms::FormClass;
 use sheaf_doc::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
-use sheaf_doc::save::{Strategy, save_to_path};
+use sheaf_doc::materialize::{How, StrategyKind};
 use sheaf_doc::{Document, Edit, SourceInfo, Store};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{FormType, Renderer};
@@ -37,7 +37,7 @@ fn open(path: &Path) -> Document {
 
 /// What `path` says about itself when it opens, read from its source.
 fn facts_of(path: &Path) -> sheaf_doc::open::Facts {
-    let info = SourceInfo::read(&Store::new(), path, None).unwrap();
+    let (info, _) = SourceInfo::read(&Store::new(), path, None).unwrap();
     sheaf_doc::open::finish(&info.src, &sheaf_ops::NoProgress)
 }
 
@@ -148,12 +148,16 @@ fn forms_open_into_the_model() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn a_hybrid_reference_update_opens_and_saves_whole() {
+sheaf_doc::both_ways!(
+    a_hybrid_reference_update_opens_and_saves_whole,
+    a_hybrid_reference_update_opens_and_saves_whole_appended: hybrid_saves_whole
+);
+
+fn hybrid_saves_whole(how: How) {
     // The update's catalog and fields are only in its /XRefStm, and
     // `city` only in the first section's. A save that read either
     // revision alone would drop some of them.
-    let dir = scratch("hybrid");
+    let dir = scratch(&format!("hybrid-{how:?}"));
     let path = dir.join("hybrid.pdf");
     std::fs::write(&path, hybrid_update(&hybrid_reference())).unwrap();
     let names = |path: &Path| -> Vec<String> {
@@ -165,23 +169,24 @@ fn a_hybrid_reference_update_opens_and_saves_whole() {
     };
     assert_eq!(names(&path), ["name", "city", "sig"]);
 
-    let mut doc = open(&path);
-    let page = doc.state().order()[0];
-    let rotate = Edit::RotatePages {
-        ids: vec![page],
-        by: Rotation::R90,
+    let rotated = |path: &Path| -> Document {
+        let mut doc = open(path);
+        let page = doc.state().order()[0];
+        let rotate = Edit::RotatePages {
+            ids: vec![page],
+            by: Rotation::R90,
+        };
+        doc.apply(rotate, "rotate").unwrap();
+        doc
     };
-    doc.apply(rotate, "rotate").unwrap();
+    // Saved as another file, it's a Rewrite.
     let copy = dir.join("copy.pdf");
-    assert_eq!(
-        save_to_path(&doc.snapshot(), &copy).unwrap(),
-        Strategy::Rewrite
-    );
+    let report = How::Rewritten.save(&mut rotated(&path), &copy);
+    assert_eq!(report.strategy, StrategyKind::Rewrite);
     assert_eq!(names(&copy), ["name", "city", "sig"]);
-    assert_eq!(
-        save_to_path(&doc.snapshot(), &path).unwrap(),
-        Strategy::Incremental
-    );
+    // Saved in place.
+    let report = how.save(&mut rotated(&path), &path);
+    assert_eq!(report.strategy, how.strategy());
     assert_eq!(names(&path), ["name", "city", "sig"]);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -38,7 +38,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId};
+use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
 
 use super::field::{
     Action, Border, BorderStyle, Choice, Color, Field, FieldId, FieldKind, Mk, Trigger, Value,
@@ -46,8 +46,7 @@ use super::field::{
 };
 use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text_bytes;
-use crate::model::SourceId;
-use crate::source::{FormLimits, Limits, PageFacts, Source};
+use crate::source::{FormLimits, PageFacts, Source};
 
 /// The most of `/MaxLen` layout uses: comb cells and character limits.
 pub const MAX_LAYOUT_LEN: u32 = 1000;
@@ -364,16 +363,6 @@ pub fn read(src: &Source) -> FileForm {
     }
 }
 
-/// The terminal fields of `form`, an AcroForm in an eager document, as
-/// [`read`] reads them; None when its tree is damaged. For the old writers
-/// (`forms::rules`), which read the file they're writing: transitional
-/// (M10.5), gone with them in slice 9.
-pub(crate) fn fields_of(pdf: &Pdf, form: &Dictionary) -> Option<Vec<Field>> {
-    let mut r = Reader::new(pdf, &Limits::DEFAULT.forms);
-    r.tree(form);
-    r.damaged.is_none().then_some(r.fields)
-}
-
 /// Whether field `f` lacks `value`, which its XFA copy holds: text it
 /// doesn't have, or a box checked there and not here. A check box's XFA
 /// value is its state's number: `0` is off.
@@ -638,7 +627,6 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         let kind = FieldKind::of(here.ft, here.flags);
         self.fields.push(Field {
             id: me,
-            source: SourceId(0),
             object: id,
             name,
             kind,
@@ -651,8 +639,6 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             options: here.options.unwrap_or_else(|| Arc::from([])),
             tooltip: tooltip.map(|t| t.to_string()),
             actions,
-            copy: 0,
-            under: None,
             outside: 0,
         });
     }

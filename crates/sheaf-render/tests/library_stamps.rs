@@ -164,9 +164,8 @@ fn a_stamp_from_a_cropped_turned_page_lands_where_it_shows() {
             .unwrap(),
         name: "blank.pdf".into(),
         derived: None,
-        stamp: None,
     };
-    let mut doc = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+    let mut doc = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
     // Placed, as the stamps panel places one: held until it's added.
     let turned = (doc.store())
         .intern(stamp_bytes.as_slice().into(), BlobKind::stamp())

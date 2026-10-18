@@ -323,7 +323,14 @@ fn import(a: ImportArgs) -> anyhow::Result<()> {
         }
         drop(got.held);
     }
-    sheaf_doc::save::save_to_path(&doc.snapshot(), &output)
+    // A signed or hybrid file is rewritten, as the command line always
+    // has: it asks nothing.
+    let answers = sheaf_doc::materialize::AskAnswers {
+        break_signatures: true,
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    sheaf_doc::materialize::save(&mut doc, &output, &answers, &sheaf_ops::NoProgress)
         .with_context(|| format!("writing {}", output.display()))?;
     println!("{}", output.display());
     Ok(())

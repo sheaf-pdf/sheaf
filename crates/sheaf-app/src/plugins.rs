@@ -1572,7 +1572,7 @@ mod tests {
     fn opening() -> sheaf_doc::Document {
         let store = sheaf_doc::Store::new();
         let primary = sheaf_doc::SourceInfo::blank(&store, 1);
-        sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy())
+        sheaf_doc::open::start(store, primary, None, sheaf_doc::history::default_policy())
     }
 
     #[test]
@@ -1637,9 +1637,9 @@ mod tests {
         let path = dir.path().join("facts.pdf");
         std::fs::write(&path, sheaf_doc::forms::fixture::every_fact().bytes()).unwrap();
         let store = Store::new();
-        let primary = SourceInfo::read(&store, &path, None).unwrap();
+        let (primary, stamp) = SourceInfo::read(&store, &path, None).unwrap();
         let (src, blob) = (primary.src.clone(), primary.src.id());
-        let mut doc = crate::docview::opening_model(store, primary, "Me".into());
+        let mut doc = crate::docview::opening_model(store, primary, Some(stamp), "Me".into());
         let mut waiting = Waiting::default();
         let wants = || vec!["notes".to_string()];
         waiting.hold("tax", command("scan"));
@@ -1901,7 +1901,7 @@ mod tests {
         };
         let store = Store::new();
         let primary = SourceInfo::blank(&store, 1);
-        let mut d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+        let mut d = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
         let page = d.page(0).unwrap();
         let line = Annot {
             id: AnnotId(1),

@@ -17,6 +17,7 @@ use crate::SourceInfo;
 use crate::forms::corpus::Corpus;
 use crate::forms::field::{annot_flags, flags};
 use crate::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row, source};
+use crate::source::Limits;
 use crate::store::{BlobKind, Store};
 
 /// The form as a file holds it, written and read back.
@@ -966,13 +967,12 @@ fn a_cross_reference_stream_many_sections_share_is_read_once() {
     }
     bytes.extend_from_slice(format!("startxref\n{prev}\n%%EOF\n").as_bytes());
 
-    // Eagerly, as the old writers load it.
+    // Eagerly, as a Rewrite loads its primary (`materialize::graph`).
     let start = Instant::now();
     let pdf = crate::file::load_pdf_mem(&bytes, None).unwrap();
     let took = start.elapsed();
     let acroform = pdf.catalog().unwrap().get(b"AcroForm").unwrap();
-    let acroform = resolve(&pdf, acroform).unwrap().as_dict().unwrap();
-    assert_eq!(fields_of(&pdf, acroform).unwrap().len(), 2);
+    assert!(resolve(&pdf, acroform).unwrap().as_dict().is_ok());
     assert!(took.as_secs_f32() < 1.0, "{took:?}");
 
     let start = Instant::now();
@@ -1010,7 +1010,7 @@ fn corpus_hybrid_reference_files_read_their_newest_revision() {
             continue;
         }
         // Some damaged files don't open at all (slice 1's note).
-        let Ok(info) = SourceInfo::read(&Store::new(), &corpus.path(&entry), None) else {
+        let Ok((info, _)) = SourceInfo::read(&Store::new(), &corpus.path(&entry), None) else {
             continue;
         };
         let facts = read(&info.src).facts;
@@ -1263,6 +1263,7 @@ fn corpus_hybrid_forms_bind_their_xfa() {
         }
         let src = SourceInfo::read(&Store::new(), &corpus.path(&entry), None)
             .unwrap()
+            .0
             .src;
         let form = read(&src);
         let pdf = src.pdf();

@@ -15,19 +15,12 @@ use crate::docview::{DocView, State};
 impl crate::docview::Doc {
     /// Layers as the file has them, once its facts are read.
     pub(crate) fn set_layers(&mut self, layers: Vec<sheaf_doc::layers::Layer>) {
-        let hidden: HashSet<LayerId> = layers
+        self.layers_hidden = layers
             .iter()
             .filter(|l| !l.on)
             .filter_map(|l| l.id)
             .collect();
-        self.layers_default = hidden.clone();
-        self.layers_hidden = hidden;
         self.layers = layers;
-    }
-
-    /// The display differs from the file's own layer settings.
-    pub(crate) fn layers_changed(&self) -> bool {
-        self.layers_hidden != self.layers_default
     }
 }
 
@@ -88,7 +81,7 @@ impl DocView {
                 let State::Ready(doc) = &mut v.state else {
                     return;
                 };
-                // A newer change, or a save, superseded this one.
+                // A newer change superseded this one.
                 if doc.layers_generation != generation || doc.model.primary() != sid {
                     return;
                 }

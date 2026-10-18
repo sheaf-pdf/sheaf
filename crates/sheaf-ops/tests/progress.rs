@@ -18,7 +18,13 @@ fn scratch(name: &str) -> PathBuf {
 fn blank(pages: u32) -> Document {
     let store = sheaf_doc::Store::new();
     let primary = sheaf_doc::SourceInfo::blank(&store, pages);
-    Document::new(store, primary, &[], sheaf_doc::history::default_policy())
+    Document::new(
+        store,
+        primary,
+        None,
+        &[],
+        sheaf_doc::history::default_policy(),
+    )
 }
 
 /// "Stopped" and exit status 130, not "failed": however the op passed

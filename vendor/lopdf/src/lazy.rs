@@ -360,6 +360,25 @@ impl Resolve for Cx<'_> {
     }
 }
 
+/// sheaf: [`Cx`], but reading no indirect `/Length`, so a stream whose length is a
+/// reference parses with it still one, and strict, so a stream whose data its `/Length`
+/// doesn't fit doesn't parse ([`LazyPdf::raw_span_whole`]).
+struct NoLengths<'a, 'b>(&'a Cx<'b>);
+
+impl Resolve for NoLengths<'_, '_> {
+    fn strict(&self) -> bool {
+        true
+    }
+
+    fn max_decompressed_size(&self) -> Option<usize> {
+        self.0.max_decompressed_size()
+    }
+
+    fn length(&self, _: ObjectId, _: &mut HashSet<ObjectId>) -> Result<i64> {
+        Err(Error::ReferenceLimit)
+    }
+}
+
 /// The bytes from the header on, which the file's offsets count from.
 struct Body<'a> {
     bytes: &'a dyn ByteSource,
@@ -593,18 +612,43 @@ impl LazyPdf {
 
     /// Where the object `id` is in the bytes, from its header to after `endobj`. None for an
     /// object stream's member, for an object that can't be read, and for a stream whose data
-    /// has no length to end by, or no `endstream` after it.
+    /// has no length to end by, or no `endstream` after it. sheaf: the read that tells it can
+    /// be read isn't kept (as [`LazyPdf::object_unkept`]'s), so a save that copies a file's
+    /// objects as they are doesn't leave them all in memory.
     pub fn raw_span(&self, id: ObjectId) -> Option<Range<usize>> {
+        self.span(id, false)
+    }
+
+    /// [`LazyPdf::raw_span`], but None too for a stream whose `/Length` is a reference, or
+    /// whose data its `/Length` doesn't fit, and for an object without its `endobj`. sheaf: what a writer copies as it is (M10.5 slice
+    /// 9), whose bytes then say what the object as read says: the parser reads a referenced
+    /// length into the stream's dictionary, so a writer pruning what nothing names would drop
+    /// the object the copied bytes still name; and it reads a length the data doesn't fit
+    /// from where the data ends, which a copy elsewhere may not say.
+    pub fn raw_span_whole(&self, id: ObjectId) -> Option<Range<usize>> {
+        self.span(id, true)
+    }
+
+    fn span(&self, id: ObjectId, whole: bool) -> Option<Range<usize>> {
         let XrefEntry::Normal { offset, generation } = *self.xref.get(id.0)? else {
             return None;
         };
         if generation != id.1 {
             return None;
         }
-        self.get(id).ok()?;
+        self.object_unkept(id).ok()?;
         let (offset, cx, mut path) = (offset as usize, self.cx(), HashSet::new());
-        let parsed = self.parse_at(id, offset, &mut path, &cx).ok()?;
+        // The parser reads a referenced length into the dictionary it gives, and a length the
+        // data doesn't fit as the data's: parsed reading neither, such a stream's data is left
+        // to `read_content`, and one that doesn't fit doesn't parse.
+        let lengths = NoLengths(&cx);
+        let resolve: &dyn Resolve = if whole { &lengths } else { &cx };
+        let parsed = self.parse_at(id, offset, &mut path, resolve).ok()?;
         let end = match &parsed.object {
+            Object::Stream(Stream {
+                start_position: Some(_),
+                ..
+            }) if whole => return None,
             // The parser left the data to `read_content`: the object ends after it.
             Object::Stream(Stream {
                 dict,
@@ -616,6 +660,10 @@ impl LazyPdf {
             }
             _ => parsed.end,
         };
+        // sheaf: copied as it is, an object without its `endobj` would carry the damage on.
+        if whole && (end < 6 || self.body().read_at(offset + end - 6..offset + end).ok()?.as_ref() != b"endobj") {
+            return None;
+        }
         let start = offset + self.facts.header_offset;
         Some(start..start + end)
     }
@@ -720,7 +768,9 @@ impl LazyPdf {
 
     /// The object at `offset` as the parser reads it, its stream's position from `offset`. It's
     /// given at least a byte past where it can end, so a well-formed object takes one read.
-    fn parse_at(&self, id: ObjectId, offset: usize, path: &mut HashSet<ObjectId>, cx: &Cx) -> Result<parser::Parsed> {
+    fn parse_at(
+        &self, id: ObjectId, offset: usize, path: &mut HashSet<ObjectId>, cx: &dyn parser::Resolve,
+    ) -> Result<parser::Parsed> {
         let body = self.body();
         let bound = object_bound(&self.normal_offsets, self.facts.start, body.len(), offset);
         if offset > bound {

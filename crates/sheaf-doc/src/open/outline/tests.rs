@@ -83,9 +83,8 @@ fn rewritten(f: &mut Form, items: &[FlatOutlineItem]) -> Vec<u8> {
         src,
         name: "a.pdf".into(),
         derived: None,
-        stamp: None,
     };
-    let doc = Document::new(store, primary, items, Box::new(FixedCount(5)));
+    let doc = Document::new(store, primary, None, items, Box::new(FixedCount(5)));
     crate::save::rewrite(&doc.snapshot()).unwrap()
 }
 
@@ -240,7 +239,7 @@ fn a_page_listed_twice_is_its_first_index() {
 }
 
 /// An `/XYZ` position is in PageSpace, as the file has it, whatever the
-/// page's `/Rotate` and `/CropBox`, and `write_outline` writes it back so.
+/// page's `/Rotate` and `/CropBox`, and a save writes it back so.
 #[test]
 fn positions_are_in_page_space() {
     let mut f = Form::new(3);

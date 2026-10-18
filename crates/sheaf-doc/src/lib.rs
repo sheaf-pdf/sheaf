@@ -20,10 +20,10 @@ pub mod geom;
 pub mod history;
 pub mod images;
 pub mod import;
-pub mod incremental;
-pub(crate) mod kept;
+pub mod kept;
 pub mod labels;
 pub mod layers;
+pub mod materialize;
 pub mod measure;
 pub mod model;
 pub mod open;
@@ -49,8 +49,8 @@ pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
     AnnotBody, AnnotRec, Bookmark, ContentStack, Damaged, Derived, DocState, Document, Edit,
     EditOutcome, FlatOutlineItem, Foreign, FormRef, GenId, GenSpec, Generator, Invariant, JobId,
-    Layer, Mark, NewOutlineItem, NotReady, OutlineId, PageBase, PageDef, PageId, Rebase, Saved,
-    Snapshot, SourceId, SourceInfo, Static, Step, Target, TextStyle, VersionId, VersionView,
+    Layer, Mark, NewOutlineItem, NotReady, OutlineId, PageBase, PageDef, PageId, Rebase, Snapshot,
+    SourceId, SourceInfo, Static, Step, Target, TextStyle, VersionId, VersionView,
 };
 pub use page_chars::{Glyph, PageChars};
 pub use source::{ObjRef, Source};

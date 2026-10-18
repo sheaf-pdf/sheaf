@@ -15,7 +15,6 @@ use sheaf_core::PageIndex;
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::Form;
-use sheaf_doc::save::Strategy;
 use sheaf_doc::{Document, Edit, PageId};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::crop::{CropSpec, Margins};
@@ -66,9 +65,13 @@ fn rebase(doc: &mut Document, derived: Vec<sheaf_ops::derive::DerivedSource>, wh
     }
 }
 
-#[test]
-fn a_cropped_form_page_keeps_its_fields() {
-    let dir = scratch("crop");
+sheaf_doc::both_ways!(
+    a_cropped_form_page_keeps_its_fields,
+    a_cropped_form_page_keeps_its_fields_appended: a_cropped_form_page_keeps_its_fields_by
+);
+
+fn a_cropped_form_page_keeps_its_fields_by(how: How) {
+    let dir = scratch(&format!("crop-{how:?}"));
     let path = write(&dir, "form.pdf", &mut two_page_form());
     let mut doc = open(&path);
     let page: PageId = doc.state().order()[0];
@@ -111,42 +114,41 @@ fn a_cropped_form_page_keeps_its_fields() {
         "Crop",
     )
     .unwrap();
-    for (strategy, bytes) in written_both_ways(&doc) {
-        let what = format!("{strategy:?}");
-        let report = clean(&bytes, &what);
-        assert_eq!((report.fields, report.widgets), (4, 4), "{what}");
-        let v = values(&bytes);
-        assert_eq!(
-            (v["a"].as_str(), v["b"].as_str()),
-            ("Alpha", "Beta"),
-            "{what}"
-        );
-        assert_eq!(
-            crop_box(&bytes, 0),
-            vec![0.0, 100.0, 612.0, 792.0],
-            "{what}"
-        );
-        // Other viewers see the value: its appearance is on the page.
-        let r = render_appearances(&bytes, None, PageIndex(0), 612).unwrap();
-        assert!(
-            blue_in(&r, 0, 792.0) > HALF_A_ROW,
-            "{what}: the value shows"
-        );
-        // The copy's own widgets didn't come along: the page has its own.
-        let pdf = Pdf::load_mem(&bytes).unwrap();
-        let first = pdf.get_pages()[&1];
-        let annots = pdf.get_dictionary(first).unwrap().get(b"Annots").unwrap();
-        let annots = pdf.dereference(annots).unwrap().1.as_array().unwrap().len();
-        assert_eq!(annots, 3, "{what}");
-    }
+    let (strategy, bytes) = (how.strategy(), written(&doc, how));
+    let what = format!("{strategy:?}");
+    let report = clean(&bytes, &what);
+    assert_eq!((report.fields, report.widgets), (4, 4), "{what}");
+    let v = values(&bytes);
+    assert_eq!(
+        (v["a"].as_str(), v["b"].as_str()),
+        ("Alpha", "Beta"),
+        "{what}"
+    );
+    assert_eq!(
+        crop_box(&bytes, 0),
+        vec![0.0, 100.0, 612.0, 792.0],
+        "{what}"
+    );
+    // Other viewers see the value: its appearance is on the page.
+    let r = render_appearances(&bytes, None, PageIndex(0), 612).unwrap();
+    assert!(
+        blue_in(&r, 0, 792.0) > HALF_A_ROW,
+        "{what}: the value shows"
+    );
+    // The copy's own widgets didn't come along: the page has its own.
+    let pdf = Pdf::load_mem(&bytes).unwrap();
+    let first = pdf.get_pages()[&1];
+    let annots = pdf.get_dictionary(first).unwrap().get(b"Annots").unwrap();
+    let annots = pdf.dereference(annots).unwrap().1.as_array().unwrap().len();
+    assert_eq!(annots, 3, "{what}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A watermark on both pages, and with `remove`, taken off again (a
-/// copy of a copy), saved both ways.
-fn watermarked(remove: bool) {
+/// copy of a copy), written `how`.
+fn watermarked(remove: bool, how: How) {
     let name = if remove { "unmarked" } else { "marked" };
-    let dir = scratch(name);
+    let dir = scratch(&format!("{name}-{how:?}"));
     let path = write(&dir, "form.pdf", &mut two_page_form());
     let mut doc = open(&path);
     let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
@@ -185,33 +187,40 @@ fn watermarked(remove: bool) {
         .unwrap();
         rebase(&mut doc, derived, "Remove Watermark");
     }
-    for (strategy, bytes) in written_both_ways(&doc) {
-        let what = format!("{name}, {strategy:?}");
-        let report = clean(&bytes, &what);
-        assert_eq!((report.fields, report.widgets), (4, 4), "{what}");
-        let v = values(&bytes);
-        assert_eq!(
-            (v["a"].as_str(), v["b"].as_str()),
-            ("Alpha", "Beta"),
-            "{what}"
-        );
-        for page in 0..2 {
-            let r = render_appearances(&bytes, None, PageIndex(page), 612).unwrap();
-            assert!(blue_in(&r, 0, 792.0) > HALF_A_ROW, "{what}: page {page}");
-        }
-        assert_eq!(holds(&bytes, b"DRAFT"), !remove, "{what}");
+    let bytes = written(&doc, how);
+    let what = format!("{name}, {how:?}");
+    let report = clean(&bytes, &what);
+    assert_eq!((report.fields, report.widgets), (4, 4), "{what}");
+    let v = values(&bytes);
+    assert_eq!(
+        (v["a"].as_str(), v["b"].as_str()),
+        ("Alpha", "Beta"),
+        "{what}"
+    );
+    for page in 0..2 {
+        let r = render_appearances(&bytes, None, PageIndex(page), 612).unwrap();
+        assert!(blue_in(&r, 0, 792.0) > HALF_A_ROW, "{what}: page {page}");
     }
+    assert_eq!(holds(&bytes, b"DRAFT"), !remove, "{what}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn a_watermarked_form_keeps_its_fields() {
-    watermarked(false);
+sheaf_doc::both_ways!(
+    a_watermarked_form_keeps_its_fields,
+    a_watermarked_form_keeps_its_fields_appended: marked_by
+);
+
+fn marked_by(how: How) {
+    watermarked(false, how);
 }
 
-#[test]
-fn a_form_with_its_watermark_removed_keeps_its_fields() {
-    watermarked(true);
+sheaf_doc::both_ways!(
+    a_form_with_its_watermark_removed_keeps_its_fields,
+    a_form_with_its_watermark_removed_keeps_its_fields_appended: unmarked_by
+);
+
+fn unmarked_by(how: How) {
+    watermarked(true, how);
 }
 
 /// Tag `form` as Acrobat tags some forms: beside each widget's `/Form`
@@ -300,11 +309,9 @@ fn a_form_with_its_header_and_footer_removed_keeps_its_fields() {
         "Remove header & footer",
     )
     .unwrap();
-    // A header/footer change is only ever a rewrite: the incremental writer
-    // refuses it.
-    assert!(sheaf_doc::incremental::incremental(&doc.snapshot()).is_err());
-    let saved = saved_both_ways(&doc, &footed, &dir.join("rewritten.pdf"));
-    assert_eq!(saved[1].0, Strategy::Rewrite);
+    // The footer's gone from the file: a save is a Rewrite.
+    let saved = rewritten_and_saved(&mut doc, &footed);
+    assert_eq!(saved[1].0, StrategyKind::Rewrite);
     for (strategy, bytes) in saved {
         let what = format!("{strategy:?}");
         assert!(!holds(&bytes, b"SHEAFFOOTER"), "{what}");
@@ -409,7 +416,7 @@ fn a_deleted_pages_value_leaves_a_second_tree() {
     let second = doc.state().order()[1];
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
+    for (strategy, bytes) in rewritten_and_saved(&mut doc, &path) {
         let what = format!("{strategy:?}");
         assert!(!holds(&bytes, b"LEAKVALUE123"), "{what}: the value stayed");
         // What described the page went with it; the first page's stays.
@@ -438,9 +445,9 @@ fn a_deleted_pages_value_leaves_the_file() {
     let second = doc.state().order()[1];
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    let saved = saved_both_ways(&doc, &path, &dir.join("rewritten.pdf"));
-    // A removal is never incremental (M9 bug 14).
-    assert_eq!(saved[1].0, Strategy::Rewrite);
+    let saved = rewritten_and_saved(&mut doc, &path);
+    // A removal is never an Append (M9 bug 14).
+    assert_eq!(saved[1].0, StrategyKind::Rewrite);
     for (strategy, bytes) in saved {
         let what = format!("{strategy:?}");
         assert!(!holds(&bytes, b"LEAKVALUE123"), "{what}: the value stayed");
@@ -490,7 +497,7 @@ fn a_form_left_with_no_fields_goes() {
 
     doc.apply(Edit::DeletePages { ids: vec![first] }, "Delete")
         .unwrap();
-    for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
+    for (strategy, bytes) in rewritten_and_saved(&mut doc, &path) {
         let what = format!("{strategy:?}");
         assert_eq!(fields_of(&bytes), None, "{what}");
         assert!(!holds(&bytes, b"Alpha"), "{what}");
@@ -524,7 +531,7 @@ fn direct_object_fields_are_pruned() {
     let first = doc.state().order()[0];
     doc.apply(Edit::DeletePages { ids: vec![first] }, "Delete")
         .unwrap();
-    for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
+    for (strategy, bytes) in rewritten_and_saved(&mut doc, &path) {
         let what = format!("{strategy:?}");
         let fields = fields_of(&bytes).unwrap();
         assert_eq!(fields.len(), 1, "{what}: {fields:?}");
@@ -566,8 +573,12 @@ fn page_templates_stay() {
     let second = doc.state().order()[1];
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
-        let what = format!("{strategy:?}");
+    // The new writer's post-conditions count the template as a page the
+    // file keeps.
+    let saved = rewritten_and_saved(&mut doc, &path)
+        .into_iter()
+        .map(|(strategy, bytes)| (format!("{strategy:?}"), bytes));
+    for (what, bytes) in saved {
         let report = clean(&bytes, &what);
         assert_eq!((report.template_widgets, report.fields), (1, 4), "{what}");
         let pdf = Pdf::load_mem(&bytes).unwrap();
@@ -615,7 +626,7 @@ fn corpus_ca_540_leaks_no_removed_value() {
         "Delete",
     )
     .unwrap();
-    for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
+    for (strategy, bytes) in rewritten_and_saved(&mut doc, &path) {
         let what = format!("{strategy:?}");
         assert!(!holds(&bytes, b"LEAKVALUE123"), "{what}");
         assert_eq!(findings(&bytes), vec![], "{what}");
@@ -623,10 +634,14 @@ fn corpus_ca_540_leaks_no_removed_value() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+sheaf_doc::both_ways!(
+    corpus_cropped_forms_keep_their_fields,
+    corpus_cropped_forms_keep_their_fields_appended: corpus_cropped_forms_keep_their_fields_by
+);
+
 /// Bug 1 on real forms: the 1040's first page and the W-9's first page
 /// cropped, saved both ways, keep every field and its value.
-#[test]
-fn corpus_cropped_forms_keep_their_fields() {
+fn corpus_cropped_forms_keep_their_fields_by(how: How) {
     for (file, field) in [
         ("forms/irs/f1040.pdf", "topmostSubform[0].Page1[0].f1_14[0]"),
         ("forms/irs/fw9.pdf", "topmostSubform[0].Page1[0].f1_01[0]"),
@@ -634,7 +649,7 @@ fn corpus_cropped_forms_keep_their_fields() {
         let Some(form) = corpus_form(file) else {
             return;
         };
-        let dir = scratch("corpus-crop");
+        let dir = scratch(&format!("corpus-crop-{how:?}"));
         let path = dir.join("form.pdf");
         std::fs::write(&path, filled(&form, field, "Filled In")).unwrap();
         let input = std::fs::read(&path).unwrap();
@@ -668,17 +683,16 @@ fn corpus_cropped_forms_keep_their_fields() {
             "Crop",
         )
         .unwrap();
-        for (strategy, bytes) in written_both_ways(&doc) {
-            let what = format!("{file}, {strategy:?}");
-            let report = check(&bytes, None).unwrap();
-            assert_eq!(
-                (report.fields, report.widgets),
-                (before.fields, before.widgets),
-                "{what}"
-            );
-            assert_eq!(findings(&bytes), expected, "{what}");
-            assert_eq!(values(&bytes)[field], "Filled In", "{what}");
-        }
+        let (strategy, bytes) = (how.strategy(), written(&doc, how));
+        let what = format!("{file}, {strategy:?}");
+        let report = check(&bytes, None).unwrap();
+        assert_eq!(
+            (report.fields, report.widgets),
+            (before.fields, before.widgets),
+            "{what}"
+        );
+        assert_eq!(findings(&bytes), expected, "{what}");
+        assert_eq!(values(&bytes)[field], "Filled In", "{what}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,7 +2,9 @@
 //! edit, with batches, jobs, undo, redo, jumps, trims and saves, each version
 //! rebuilt from its prims is the state it was made as, and every file it
 //! refers to is still registered (slice 3). Every state on the way keeps
-//! the records' invariants (slice 8). Each kind's no-op makes no version.
+//! the records' invariants (slice 8), and a version being saved resolves
+//! to the state it was sealed with until its save ends (slice 9). Each
+//! kind's no-op makes no version.
 
 use std::collections::BTreeSet;
 
@@ -14,6 +16,8 @@ use super::*;
 use crate::forms::fixture::Form;
 use crate::history::FixedCount;
 use crate::labels::{LabelSpec, Style};
+use crate::materialize::StrategyKind;
+use crate::open::FileAnnots;
 use crate::stamps::HeaderFooter;
 
 /// A run's actions: below [`KINDS`], an edit of that kind, in [`Edit`]'s
@@ -26,7 +30,9 @@ const REDO: u8 = 24;
 const JUMP: u8 = 25;
 const TRIM: u8 = 26;
 const SAVE: u8 = 27;
-const ACTIONS: u8 = 28;
+const SEAL: u8 = 28;
+const UNSEAL: u8 = 29;
+const ACTIONS: u8 = 30;
 
 /// `edit`'s kind, by name.
 fn kind(edit: &Edit) -> &'static str {
@@ -67,6 +73,8 @@ struct Run {
     made: Vec<(VersionId, DocState)>,
     /// The kinds of edit that made a version.
     kinds: BTreeSet<&'static str>,
+    /// Versions being saved, with the state each was sealed with.
+    sealed: Vec<(VersionId, DocState)>,
 }
 
 /// Other tools' annotations on page `page` of `f`: a comment named
@@ -128,7 +136,6 @@ impl Run {
             src: d.store().open(bytes.into(), kind).unwrap(),
             name: "form.pdf".into(),
             derived: None,
-            stamp: None,
         };
         let other = d.add_source(other);
         // The opened version holds it, so any version may bring its pages
@@ -145,6 +152,7 @@ impl Run {
             job: None,
             made,
             kinds: BTreeSet::new(),
+            sealed: Vec::new(),
         }
     }
 
@@ -197,19 +205,52 @@ impl Run {
                 self.d.jump(ids[rng.usize(..ids.len())]).unwrap();
             }
             TRIM => self.d.trim(),
+            // A save of the current version, start to end: an output, which
+            // changes no version or state.
             SAVE => {
-                let pages = self.d.page_count() as u32;
-                self.d
-                    .rebase_to_saved(SourceInfo::blank(self.d.store(), pages));
-                // The current version, expressed anew over the saved file.
-                self.made.retain(|(id, _)| self.d.versions.contains_key(id));
-                self.made
-                    .push((self.d.current_version(), self.d.state().clone()));
+                let v = self.d.current_version();
+                self.d.save_input(v).unwrap();
+                self.saved(v);
+            }
+            SEAL => {
+                let v = self.d.current_version();
+                let input = self.d.save_input(v).unwrap();
+                self.sealed.push((v, input.target));
+            }
+            UNSEAL if self.sealed.is_empty() => {}
+            UNSEAL => {
+                let (v, _) = self.sealed.remove(rng.usize(..self.sealed.len()));
+                if rng.bool() {
+                    self.saved(v);
+                } else {
+                    self.d.abandon_save(v);
+                }
             }
             _ => unreachable!("action {action}"),
         }
         let st = self.d.state();
         assert_eq!(st.check_invariants(), Ok(()), "after action {action}");
+        for (v, st) in &self.sealed {
+            let kept = self.d.versions.get(v).and_then(|v| v.state.as_ref());
+            assert_eq!(kept, Some(st), "{v:?}, sealed, after action {action}");
+        }
+    }
+
+    /// A save of version `v`, sealed, wrote a file: `v` is the saved one,
+    /// with a record of it.
+    fn saved(&mut self, v: VersionId) {
+        let primary = self.d.source(self.d.primary()).unwrap();
+        let stamp = FileStamp {
+            len: 0,
+            mtime: std::time::SystemTime::UNIX_EPOCH,
+            tail: 0,
+        };
+        let rec = SaveRecord {
+            strategy: StrategyKind::Rewrite,
+            ..SaveRecord::opened(v, primary, stamp)
+        };
+        self.d.record_save(rec).unwrap();
+        assert_eq!(self.d.saved, Some(v));
     }
 
     /// Runs `apply`, an edit of `kinds`. When it made a version, or put a
@@ -558,8 +599,16 @@ impl Run {
                 assert!(registered.contains(&s), "{id:?} refers to {s:?}");
             }
         }
-        // Saved versions and their children keep their snapshots.
-        if d.version_count() > 2 && d.versions.values().all(|v| v.saves.is_empty()) {
+        // The opened, current and saved versions keep their snapshots, and
+        // so do versions being saved (`keeps_snapshot`): with any other
+        // version, snapshots were dropped.
+        let sealed = (d.versions.iter()).filter(|(_, v)| v.sealed > 0);
+        let kept: BTreeSet<VersionId> = [Some(d.root), Some(d.cursor), d.saved]
+            .into_iter()
+            .flatten()
+            .chain(sealed.map(|(&id, _)| id))
+            .collect();
+        if d.version_count() > kept.len() {
             assert!(
                 d.stats().versions < d.version_count(),
                 "snapshots were dropped"
@@ -650,9 +699,9 @@ proptest! {
     }
 }
 
-/// A long run, mostly edits, with saves on the way: pruning past
-/// `MAX_VERSIONS` moves the opened version forward, and every version
-/// left is still rebuilt.
+/// A long run, mostly edits, with saves on the way, old and new: pruning
+/// past `MAX_VERSIONS` moves the opened version forward, never past a
+/// version being saved, and every version left is still rebuilt.
 #[test]
 fn prims_rebuild_every_version_past_max_versions() {
     let rng = &mut fastrand::Rng::with_seed(0);
@@ -666,6 +715,8 @@ fn prims_rebuild_every_version_past_max_versions() {
                 2 => SAVE,
                 3 => JOB,
                 4 => BATCH,
+                5 => SEAL,
+                6 => UNSEAL,
                 _ => rng.u8(..KINDS),
             };
             (action, rng.u64(..))

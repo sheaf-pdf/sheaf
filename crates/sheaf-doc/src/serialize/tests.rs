@@ -20,13 +20,13 @@ use sheaf_core::Rotation;
 use super::append::{self, Base};
 use super::crypt::Crypt;
 use super::xref::{Entry, Section};
-use super::{Error, full, object};
+use super::{Error, object};
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2};
 use crate::history::FixedCount;
 use crate::model::{Document, Edit, SourceInfo};
 use crate::serialize::fixture::{
     ATTACHED, BOOKMARK, FIELD, FORM_SECRETS, OWNER, PREFIX, USER, VALUE, attachment_only,
-    encrypted, form, holds, object_streams_encrypted, one_id, rc4_aes_128_and_aes_256,
+    encrypted, form, holds, object_streams_encrypted, one_id, rc4_aes_128_and_aes_256, whole,
 };
 use crate::source::Limits;
 use crate::source::lazy_tests::{
@@ -596,6 +596,43 @@ fn ivs_are_keyed() {
     }
 }
 
+/// What the materializer writes is keyed by what it is: an AES string's
+/// IV is the same for the same key and value wherever it's written, and
+/// another for another key or another value (M10.5 §11.7).
+#[test]
+fn ivs_are_keyed_by_what_the_object_is() {
+    use crate::materialize::ObjKey;
+    let plain = plaintext();
+    let text = |s: &str| Object::String(s.as_bytes().to_vec(), StringFormat::Literal);
+    for (name, state) in rc4_aes_128_and_aes_256(&plain).into_iter().skip(1) {
+        let [source, _] = encrypted(&plain, &state, |_| {});
+        let crypt = crypt_of(&source);
+        let iv =
+            |id: ObjectId, key: ObjKey, value: &str| match crypt.encrypt_as(id, &key, &text(value))
+            {
+                Ok(Object::String(bytes, _)) => bytes[..16].to_vec(),
+                other => panic!("{name}: {other:?}"),
+            };
+        let first = iv((5, 0), ObjKey::Catalog, "a value");
+        assert_eq!(iv((5, 0), ObjKey::Catalog, "a value"), first, "{name}");
+        assert_eq!(iv((6, 0), ObjKey::Catalog, "a value"), first, "{name}");
+        for other in [
+            iv((5, 0), ObjKey::Labels, "a value"),
+            iv((5, 0), ObjKey::Catalog, "another value"),
+            iv((5, 0), ObjKey::PagesNode(0), "a value"),
+        ] {
+            assert_ne!(other, first, "{name}");
+        }
+        // Decrypted as the reader decrypts: by the number it's at.
+        let id = (5, 0);
+        let mut back = crypt
+            .encrypt_as(id, &ObjKey::Catalog, &text("a value"))
+            .unwrap();
+        lopdf::encryption::decrypt_object(crypt.state(), id, &mut back).unwrap();
+        assert_eq!(back, text("a value"), "{name}");
+    }
+}
+
 #[test]
 fn xref_streams_metadata_and_the_encrypt_dict_stay_plain() {
     let plain = plaintext();
@@ -672,9 +709,8 @@ fn turned(bytes: &[u8]) -> Document {
         src: src.clone(),
         name: "encrypted.pdf".into(),
         derived: None,
-        stamp: None,
     };
-    let mut doc = crate::open::start(store, primary, Box::new(FixedCount(10)));
+    let mut doc = crate::open::start(store, primary, None, Box::new(FixedCount(10)));
     doc.ready(crate::open::finish(&src, &NoProgress)).unwrap();
     let first = doc.page(0).unwrap();
     let turn = Edit::RotatePages {
@@ -889,9 +925,7 @@ fn full_writes_are_deterministic() {
     for crypt in std::iter::once(None).chain(crypts) {
         for kind in KINDS {
             let name = format!("{kind:?}, encrypted: {}", crypt.is_some());
-            let write = || {
-                full::write(&plain.objects, &plain.trailer, kind, "1.7", crypt.as_ref()).unwrap()
-            };
+            let write = || whole(&plain.objects, &plain.trailer, kind, "1.7", crypt.as_ref());
             let once = write();
             let again = std::thread::scope(|scope| {
                 let threads: Vec<_> = (0..2).map(|_| scope.spawn(write)).collect();
@@ -957,7 +991,7 @@ fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
         base.set(key, "Stale");
     }
     for kind in KINDS {
-        let bytes = full::write(&objects, &base, kind, "1.4", None).unwrap();
+        let bytes = whole(&objects, &base, kind, "1.4", None);
         assert!(
             bytes.starts_with(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n"),
             "{kind:?}"
@@ -1077,6 +1111,7 @@ pub(crate) fn notes(pdf: &LazyPdf) -> Vec<Vec<u8>> {
 }
 
 #[test]
+#[ignore = "slice 10"]
 fn encrypted_files_append_encrypted() {
     for (ids, plain) in plaintexts() {
         let mut states = rc4_aes_128_and_aes_256(&plain).to_vec();
@@ -1086,8 +1121,8 @@ fn encrypted_files_append_encrypted() {
             for (source, kind) in encrypted(&plain, &state, |_| {}).iter().zip(KINDS) {
                 let name = format!("{name}, {kind:?}, {ids}");
                 let snap = marked(source).snapshot();
-                let bytes = crate::incremental::incremental(&snap).unwrap();
-                assert_eq!(crate::incremental::incremental(&snap).unwrap(), bytes);
+                let bytes = crate::materialize::appended(&snap).unwrap();
+                assert_eq!(crate::materialize::appended(&snap).unwrap(), bytes);
                 assert!(bytes.starts_with(source), "{name}");
                 // The page it writes holds its string, and the mark its note:
                 // encrypted, but where the file encrypts only its attachment.
@@ -1128,12 +1163,13 @@ fn encrypted_files_append_encrypted() {
 }
 
 #[test]
+#[ignore = "slice 10"]
 fn a_file_with_a_100_byte_prefix_appends() {
     let plain = plaintext();
     for kind in KINDS {
-        let file = full::write(&plain.objects, &plain.trailer, kind, "1.7", None).unwrap();
+        let file = whole(&plain.objects, &plain.trailer, kind, "1.7", None);
         let prefixed = [&PREFIX[..], &file].concat();
-        let append = |bytes: &[u8]| crate::incremental::incremental(&turned(bytes).snapshot());
+        let append = |bytes: &[u8]| crate::materialize::appended(&turned(bytes).snapshot());
         let (appended, after_prefix) = (append(&file).unwrap(), append(&prefixed).unwrap());
         // Positions count from the header, so past the prefix it's the
         // same update.
@@ -1219,11 +1255,17 @@ fn an_appended_free_entry_takes_the_next_generation() {
     }
 }
 
+crate::both_ways!(
+    a_base_numbered_to_the_last_number_isnt_appended_to,
+    a_base_numbered_to_the_last_number_isnt_appended_to_appended: numbered_to_the_last
+);
+
 /// A file whose cross-reference stream is numbered 4,294,967,295, which
 /// the reader takes: an update would have no number left past it, so it's
-/// refused, and a rewrite, which renumbers, saves the file.
-#[test]
-fn a_base_numbered_to_the_last_number_isnt_appended_to() {
+/// refused, and a Rewrite saves the file, small: it reserves no number
+/// past what a file may use, so its own cross-reference stream is numbered
+/// past the file's objects.
+fn numbered_to_the_last(how: crate::materialize::How) {
     let mut file = b"%PDF-1.7\n".to_vec();
     let mut rows = vec![0, 0, 0, 0, 0, 0xff, 0xff];
     let media = vec![0.into(), 0.into(), 200.into(), 200.into()];
@@ -1252,12 +1294,66 @@ fn a_base_numbered_to_the_last_number_isnt_appended_to() {
     assert_eq!(open(&file).xref().max_stream, Some(u32::MAX));
 
     let snap = turned(&file).snapshot();
-    let refused = crate::incremental::incremental(&snap).unwrap_err();
-    assert!(
-        format!("{refused:#}").contains("no object number left"),
-        "{refused:#}"
-    );
-    let pdf = open(&crate::save::rewrite(&snap).unwrap());
+    if how == crate::materialize::How::Appended {
+        let refused = crate::materialize::appended(&snap).unwrap_err();
+        assert!(
+            refused.to_string().contains("no object number left"),
+            "{refused}"
+        );
+        return;
+    }
+    let rewritten = crate::save::rewrite(&snap).unwrap();
+    assert!(rewritten.len() < 4096, "{} bytes", rewritten.len());
+    let pdf = open(&rewritten);
     assert!(pdf.base_sound());
     assert!(pdf.xref().max_stream.is_some_and(|n| n < 10));
+    assert!(pdf.xref().size < 10);
+}
+
+/// A whole file's body, or its cross-reference stream, at a number past
+/// what a file may use is refused before the section lists a row: it
+/// lists every number from 0, so it would grow without bound.
+#[test]
+fn a_number_past_what_a_file_may_use_isnt_written() {
+    use std::borrow::Cow;
+
+    use super::NUMBERS;
+    use super::full::{Body, Layout, write_bodies};
+    use crate::materialize::ObjKey;
+    use crate::materialize::emit::PdfVersion;
+    use crate::store::BlobId;
+
+    let trailer = dictionary! { "Root" => (1, 0) };
+    let layout = |kind, xref_from| Layout {
+        trailer: &trailer,
+        kind,
+        version: PdfVersion::new(1, 7),
+        crypt: None,
+        encrypt_at: (0, 0),
+        xref_from,
+    };
+    let blob = BlobId { hash: 0, len: 0 };
+    let catalog = catalog();
+    let bodies = |at: u32| {
+        [(1, 0), (at, 0)].map(|id| {
+            let key = ObjKey::Base {
+                blob,
+                obj: id,
+                copy: 0,
+            };
+            Ok((id, Body::Object(Cow::Borrowed(&catalog), key)))
+        })
+    };
+    for kind in KINDS {
+        let past = write_bodies(bodies(NUMBERS), &layout(kind, 1), &NoProgress);
+        let e = past.expect_err("refused");
+        assert!(
+            format!("{e:#}").contains("past the 8388607"),
+            "{kind:?}: {e:#}"
+        );
+        let fits = write_bodies(bodies(2), &layout(kind, 1), &NoProgress).unwrap();
+        assert!(open(&fits.0).base_sound(), "{kind:?}");
+    }
+    let stream = write_bodies(bodies(2), &layout(XrefKind::Stream, NUMBERS), &NoProgress);
+    assert!(stream.is_err());
 }

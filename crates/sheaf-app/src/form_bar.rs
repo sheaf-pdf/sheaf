@@ -74,58 +74,6 @@ impl Doc {
 }
 
 impl DocView {
-    /// Whether a save of the form as it is would remove an XFA copy that
-    /// holds values sheaf doesn't show, and the user hasn't agreed to that
-    /// this session.
-    pub(crate) fn would_drop_xfa_values(&self) -> bool {
-        let State::Ready(doc) = &self.state else {
-            return false;
-        };
-        !doc.forms.xfa_values_dropped
-            && doc
-                .forms
-                .primary
-                .as_ref()
-                .is_some_and(|f| f.xfa && f.xfa_values > 0)
-            && doc.model.form_changed()
-    }
-
-    /// Ask before a save removes the XFA copy's values; save to `path` if
-    /// the user agrees.
-    pub(crate) fn ask_to_drop_xfa_values(
-        &mut self,
-        path: std::path::PathBuf,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) {
-        let rx = sheaf_ui::prompts::ask(
-            window,
-            cx,
-            gpui::PromptLevel::Warning,
-            "Remove the form's XFA part?",
-            Some(
-                "It holds values sheaf doesn't show, which Adobe Acrobat or Reader shows. \
-                 Saving the form as it is now removes it, and them.",
-            ),
-            &[
-                gpui::PromptButton::new("Save and Remove It"),
-                gpui::PromptButton::cancel("Cancel"),
-            ],
-        );
-        cx.spawn(async move |this, cx| {
-            if let Ok(0) = rx.await {
-                this.update(cx, |v, cx| {
-                    if let State::Ready(doc) = &mut v.state {
-                        doc.forms.xfa_values_dropped = true;
-                    }
-                    v.save_to(path, cx).detach();
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-
     /// The bar above the pages about the document's form.
     pub(crate) fn render_form_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let State::Ready(doc) = &self.state else {

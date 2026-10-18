@@ -82,6 +82,16 @@ impl Section {
         self.size = self.size.max(num.saturating_add(1));
     }
 
+    /// The trailer's `/Size`: past every number listed.
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+
+    /// Whether it lists object `num`.
+    pub fn lists(&self, num: u32) -> bool {
+        self.entries.contains_key(&num)
+    }
+
     /// The section as a table at file position `pos`, then `trailer` with
     /// its `/Size`, and `startxref`.
     pub fn table(

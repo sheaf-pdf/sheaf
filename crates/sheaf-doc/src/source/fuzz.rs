@@ -415,14 +415,7 @@ mod tests {
         let mut f = Form::new(1);
         let mut page = f.dict(f.pages[0]).clone();
         let marks = crate::forms::fixture::holding(&every_mark_kind());
-        crate::save::write_page_annots(
-            &mut f.pdf,
-            &mut page,
-            marks.iter(),
-            None,
-            &[],
-            &mut crate::annot::WriteCx::new(),
-        );
+        crate::forms::fixture::write_marks(&mut f.pdf, &mut page, &marks);
         let entries: Vec<ObjectId> = page
             .get(b"Annots")
             .and_then(Object::as_array)

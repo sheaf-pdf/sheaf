@@ -492,14 +492,6 @@ impl DocState {
         Some(crate::labels::resolve_specs(specs, &ids))
     }
 
-    /// Whether `other`'s page labels are these.
-    pub(crate) fn labels_eq(&self, other: &DocState) -> bool {
-        match (&self.labels, &other.labels) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
-            (a, b) => a.is_none() && b.is_none(),
-        }
-    }
-
     /// Every generator, by id.
     pub fn generators(&self) -> &im::OrdMap<GenId, Arc<Generator>> {
         &self.generators
@@ -732,104 +724,6 @@ impl DocState {
     /// them), in document order.
     pub fn bookmark_pages(&self, id: OutlineId) -> Option<Vec<PageId>> {
         bookmark_span(self, id)
-    }
-
-    /// Whether `other`'s bookmarks are these.
-    pub(crate) fn outline_eq(&self, other: &DocState) -> bool {
-        (self.outline_roots.ptr_eq(&other.outline_roots)
-            || self.outline_roots == other.outline_roots)
-            && (self.bookmarks.ptr_eq(&other.bookmarks) || self.bookmarks == other.bookmarks)
-    }
-
-    /// The pages whose annotations aren't `base`'s: an annotation added,
-    /// changed or gone, or the page's list in another order.
-    pub(crate) fn annots_changed_from(&self, base: &DocState) -> HashSet<PageId> {
-        let mut changed = HashSet::new();
-        let same_annots = self.annots.ptr_eq(&base.annots);
-        if same_annots && self.page_annots.ptr_eq(&base.page_annots) {
-            return changed;
-        }
-        let same = |id: &AnnotId| match (self.annots.get(id), base.annots.get(id)) {
-            (Some(a), Some(b)) => a.same(b),
-            _ => false,
-        };
-        for (&page, ids) in &self.page_annots {
-            let kept = base
-                .page_annots
-                .get(&page)
-                .is_some_and(|was| was.ptr_eq(ids) || was == ids);
-            if !kept || !(same_annots || ids.iter().all(same)) {
-                changed.insert(page);
-            }
-        }
-        changed
-            .extend((base.page_annots.keys()).filter(|page| !self.page_annots.contains_key(page)));
-        changed
-    }
-
-    /// Whether page `page`'s widgets are `base`'s: the same ones, in the
-    /// same order.
-    pub(crate) fn widgets_eq_on(&self, base: &DocState, page: PageId) -> bool {
-        let now: Vec<_> = self.widgets_on(page).collect();
-        let was: Vec<_> = base.widgets_on(page).collect();
-        now.len() == was.len()
-            && now
-                .iter()
-                .zip(&was)
-                .all(|((a, x), (b, y))| a == b && (Arc::ptr_eq(x, y) || x == y))
-    }
-
-    /// The field nodes that aren't `base`'s: added, changed or gone.
-    pub(crate) fn fields_changed_from(&self, base: &DocState) -> Vec<FieldId> {
-        if self.fields.ptr_eq(&base.fields) {
-            return Vec::new();
-        }
-        let mut changed: Vec<FieldId> = (self.fields.iter())
-            .filter(|(id, node)| {
-                (base.fields.get(id)).is_none_or(|was| !Arc::ptr_eq(was, node) && was != *node)
-            })
-            .map(|(&id, _)| id)
-            .collect();
-        changed.extend(
-            base.fields
-                .keys()
-                .filter(|id| !self.fields.contains_key(id)),
-        );
-        changed
-    }
-
-    /// Whether it has every annotation `base` has, or a mark in its place:
-    /// another tool's comment made ours (the mark is its object, or for
-    /// one written into `/Annots`, has its name) and the parts grouped
-    /// under it, which the mark draws.
-    pub(crate) fn keeps_annots_of(&self, base: &DocState) -> bool {
-        if self.annots.ptr_eq(&base.annots) {
-            return true;
-        }
-        (base.annots.iter())
-            .filter(|(id, _)| !self.annots.contains_key(id))
-            .all(|(_, was)| {
-                let Some(f) = was.foreign() else {
-                    return false;
-                };
-                let mut marks = self.mark_records_on(was.page);
-                match (&f.summary.parent, &f.src) {
-                    (Some(parent), _) if f.summary.grouped => {
-                        marks.any(|m| m.annot.name() == *parent)
-                    }
-                    (_, Some(src)) => marks.any(|m| m.src.as_ref() == Some(src)),
-                    (_, None) => marks.any(|m| m.annot.name() == f.summary.name),
-                }
-            })
-    }
-
-    /// Whether it has every bookmark `base` has.
-    pub(crate) fn keeps_bookmarks_of(&self, base: &DocState) -> bool {
-        self.bookmarks.ptr_eq(&base.bookmarks)
-            || base
-                .bookmarks
-                .keys()
-                .all(|id| self.bookmarks.contains_key(id))
     }
 }
 

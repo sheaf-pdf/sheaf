@@ -3,13 +3,13 @@
 //! In the model it's one [`HeaderFooter`] per document: six slots (left,
 //! center and right of the header and of the footer) whose text can use
 //! tokens for the page number, page count, date, file name and Bates
-//! number. On screen it's drawn over the pages until saved. A save
-//! writes it into each page's content as marked-content artifacts, as
-//! Acrobat marks its headers and footers, `<</Type /Pagination /Subtype
-//! /Header>>`, the list named in the page's `/Properties`:
-//! `/Artifact /Sh… BDC … EMC`. [`strip`] removes those again, and
-//! Acrobat's, so Update and Remove work on files Acrobat marked too; an
-//! author's own running heads stay (proposal 31).
+//! number. On screen it's drawn over each page whose file doesn't draw it
+//! ([`drawn_over`]). A save writes it into such a page's content as
+//! marked-content artifacts, as Acrobat marks its headers and footers,
+//! `<</Type /Pagination /Subtype /Header>>`, the list named in the page's
+//! `/Properties`: `/Artifact /Sh… BDC … EMC`. [`strip`] removes those
+//! again, and Acrobat's, so Update and Remove work on files Acrobat marked
+//! too; an author's own running heads stay (proposal 31).
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -20,13 +20,14 @@ use sheaf_core::PageSize;
 
 use crate::annot::Pt;
 use crate::attachments::Objects;
+use crate::content::sink::{self, Sink};
 use crate::content::{
     self, Color, ContentError, ContentWriter, DrawnForms, Font, PagOrigin, PageBlocks, PageContent,
-    Pagination, PaginationKind, ResCx, ResObjects, Reserved, ResourceNeeds, Std14,
+    Pagination, PaginationKind, Res, ResCx, Reserved, ResourceNeeds, Std14,
 };
 use crate::geom::{Affine, Geom};
-use crate::model::PageId;
-use crate::source::Limits;
+use crate::model::{DocState, PageId};
+use crate::source::{Limits, Source};
 
 /// Bates numbering: `<prefix><number, zero-padded to digits><suffix>`,
 /// counting pages in scope in document order from `start`.
@@ -294,40 +295,91 @@ pub fn to_content(
 }
 
 /// Draw `placed` on `page`, after its own content, as [`to_content`]
-/// lays it out: `/Contents` becomes `[q, original…, ours]`, the `q` and
-/// the resources written once a save through `res`.
+/// lays it out, read and written through `sink`: `/Contents` becomes
+/// `[q, original…, ours]`, the `q` and the resources written once a save.
 pub fn install(
-    pdf: &mut Pdf,
+    sink: &mut dyn Sink,
     page: &mut Dictionary,
     placed: &[Placed],
     color: [u8; 3],
     geom: &Geom,
-    res: &mut ResObjects,
 ) {
     if placed.is_empty() {
         return;
     }
-    let reserved = Reserved::read(pdf, page.get(b"Resources").ok());
+    let reserved = sink.reserved(page.get(b"Resources").ok());
     let (content, needs) = to_content(placed, color, geom, &reserved);
-    let q = res.stream(pdf, dictionary! {}, b"q\n".to_vec());
+    let q = sink.resource(&Res::of([
+        Stream::new(dictionary! {}, b"q\n".to_vec()).into()
+    ]));
     let mut stream = Stream::new(dictionary! {}, content);
     let _ = stream.compress();
-    let ours = pdf.add_object(stream);
+    let ours = sink.add(stream.into());
     let mut entries = vec![Object::Reference(q)];
-    match page.get(b"Contents").ok().cloned() {
-        None => {}
-        Some(Object::Array(a)) => entries.extend(a),
-        Some(Object::Reference(r)) => match pdf.get_object(r) {
-            Ok(Object::Array(a)) => entries.extend(a.iter().cloned()),
-            _ => entries.push(Object::Reference(r)),
-        },
-        Some(other) => entries.push(other),
-    }
+    entries.extend(sink::content_entries(sink, page));
     entries.push(Object::Reference(ours));
     page.set("Contents", Object::Array(entries));
-    let mut resources = content::resources_of(pdf, page);
-    res.bind(pdf, &needs, &mut resources);
+    let mut resources = sink::resources(sink, page);
+    sink::bind(sink, &needs, &mut resources);
     page.set("Resources", Object::Dictionary(resources));
+}
+
+/// The header and footer drawn over page `id` of `st`: the state's, when
+/// it covers the page and the page's base, which `id` shows, doesn't draw
+/// it already ([`base_draws`]). What a Rewrite draws into the page, and
+/// what the screen draws over it, since the screen shows the base until
+/// the file is opened again: after a save too, which doesn't change what
+/// the document shows (M10.5 §9.1).
+pub fn drawn_over(st: &DocState, id: PageId) -> Option<&Arc<HeaderFooter>> {
+    let hf = st.header_footer().filter(|hf| hf.covers(id))?;
+    let def = st.def(id)?;
+    (!base_draws(&def.base.src, def.base.index, hf)).then_some(hf)
+}
+
+/// Whether page `index` of `src` draws `hf` already: its file's catalog
+/// says sheaf drew these settings there ([`from_catalog`], read once a
+/// source). A page `hf` covers that doesn't gets it drawn when the
+/// document is rewritten, and shown over it until then (the legacy
+/// header and footer, until slice 17's generators). A derived copy says
+/// what it drew in its own catalog (`save::derived_copy`).
+pub fn base_draws(src: &Source, index: u32, hf: &HeaderFooter) -> bool {
+    let Some((drawn, scope)) = src.header_footer() else {
+        return false;
+    };
+    let on_page = scope
+        .as_ref()
+        .is_none_or(|scope| scope.contains(&(index as usize)));
+    on_page && same_settings(drawn, hf)
+}
+
+/// Whether `a` and `b` draw the same, whichever pages they're on.
+fn same_settings(a: &HeaderFooter, b: &HeaderFooter) -> bool {
+    let HeaderFooter {
+        texts,
+        font_size,
+        color,
+        top,
+        bottom,
+        left,
+        right,
+        first_page_number,
+        pages: _,
+        date,
+        file,
+        bates,
+    } = a;
+    (texts, font_size, color, top, bottom, left, right)
+        == (
+            &b.texts,
+            &b.font_size,
+            &b.color,
+            &b.top,
+            &b.bottom,
+            &b.left,
+            &b.right,
+        )
+        && (first_page_number, date, file, bates)
+            == (&b.first_page_number, &b.date, &b.file, &b.bates)
 }
 
 /// Pagination kinds, by what's removed together.
@@ -417,6 +469,12 @@ pub fn to_catalog(hf: &HeaderFooter, pages: &[PageId]) -> Object {
             .map(|(i, _)| i)
             .collect()
     });
+    stored(hf, page_indexes)
+}
+
+/// `hf`'s settings as stored, on the pages at `page_indexes` (None: every
+/// page).
+pub fn stored(hf: &HeaderFooter, page_indexes: Option<Vec<usize>>) -> Object {
     let stored = Stored {
         hf: HeaderFooter {
             pages: None,
@@ -445,7 +503,9 @@ mod tests {
     use lopdf::ObjectId;
 
     use super::*;
-    use crate::content::{Res, ResKind};
+    use crate::content::ResKind;
+    use crate::content::ResObjects;
+    use crate::content::sink::Lopdf;
 
     fn hf() -> HeaderFooter {
         HeaderFooter {
@@ -623,7 +683,11 @@ mod tests {
         let geom = Geom::read(None, None, 0);
         let mut res = ResObjects::default();
         for p in [&mut first, &mut second] {
-            install(&mut pdf, p, &[placed("Head")], [0; 3], &geom, &mut res);
+            let mut sink = Lopdf {
+                pdf: &mut pdf,
+                res: &mut res,
+            };
+            install(&mut sink, p, &[placed("Head")], [0; 3], &geom);
         }
         let entries = |p: &Dictionary| content::contents(p);
         let names = |p: &Dictionary, key: &[u8]| -> Vec<(Vec<u8>, Object)> {
@@ -663,14 +727,11 @@ mod tests {
 
         // Written again, the list keeps its name rather than being bumped.
         let before = names(&first, b"Properties");
-        install(
-            &mut pdf,
-            &mut first,
-            &[placed("Head")],
-            [0; 3],
-            &geom,
-            &mut res,
-        );
+        let mut sink = Lopdf {
+            pdf: &mut pdf,
+            res: &mut res,
+        };
+        install(&mut sink, &mut first, &[placed("Head")], [0; 3], &geom);
         assert_eq!(names(&first, b"Properties"), before);
     }
 

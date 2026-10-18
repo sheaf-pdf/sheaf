@@ -24,7 +24,7 @@ mod tests;
 
 /// How deep the walk goes: an item this deep is read, its children
 /// aren't. PDFium's walk stopped there too.
-pub(crate) const MAX_DEPTH: u16 = 32;
+const MAX_DEPTH: u16 = 32;
 /// How many items are read at most.
 const MAX_ITEMS: usize = 200_000;
 
@@ -43,22 +43,50 @@ pub fn outline(src: &Source) -> Vec<FlatOutlineItem> {
     let Some(first) = first else {
         return Vec::new();
     };
-    let mut pages = HashMap::new();
-    for (index, id) in src.page_ids().enumerate() {
-        // A page the tree lists twice is where it's first listed, as
-        // PDFium's page index has it.
-        pages.entry(id).or_insert(index as u32);
-    }
-    let mut walk = Walk {
-        src,
-        pdf,
-        pages,
-        names: None,
-        seen: HashSet::new(),
-        out: Vec::new(),
-    };
+    let mut walk = Walk::new(src);
     walk.level(Some(first), 0);
     walk.out
+}
+
+/// Where a source's outline items go, as [`outline`] reads them: what a
+/// save keeps an item's own destination by (M10.5 §11.3).
+pub(crate) struct Dests<'a> {
+    walk: Walk<'a>,
+}
+
+impl<'a> Dests<'a> {
+    pub(crate) fn new(src: &'a Source) -> Dests<'a> {
+        Dests {
+            walk: Walk::new(src),
+        }
+    }
+
+    /// The page object `item`, an outline item of the source, goes to and
+    /// where on it it lands, when its `/Dest`, else its GoTo's `/D`, names
+    /// the page by reference: None for one that goes elsewhere, nowhere or
+    /// to a page by its index.
+    pub(crate) fn page_of(&mut self, item: &'a Dictionary) -> Option<(ObjectId, Option<DestView>)> {
+        let walk = &mut self.walk;
+        let dest = (item.get(b"Dest").ok())
+            .and_then(|dest| walk.dest(dest))
+            .or_else(|| walk.goto(item))?;
+        let &Object::Reference(page) = dest.first()? else {
+            return None;
+        };
+        walk.pages
+            .contains_key(&page)
+            .then(|| (page, walk.view(dest)))
+    }
+
+    /// `item`'s title, as the bookmark it opens as has it.
+    pub(crate) fn title(&self, item: &Dictionary) -> String {
+        self.walk.title(item)
+    }
+
+    /// `item`'s color and style, as the bookmark it opens as has them.
+    pub(crate) fn style(&self, item: &Dictionary) -> (Option<[u8; 3]>, TextStyle) {
+        self.walk.style(item)
+    }
 }
 
 /// A title's text, as PDFium shows it: the text string's
@@ -69,7 +97,7 @@ fn title(bytes: &[u8]) -> String {
 
 /// Title `title` as the walk reads it back: control characters as
 /// spaces.
-pub(crate) fn shown_title(title: &str) -> String {
+fn shown_title(title: &str) -> String {
     title
         .chars()
         .map(|c| if c < ' ' { ' ' } else { c })
@@ -93,6 +121,23 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
+    fn new(src: &'a Source) -> Walk<'a> {
+        let mut pages = HashMap::new();
+        for (index, id) in src.page_ids().enumerate() {
+            // A page the tree lists twice is where it's first listed, as
+            // PDFium's page index has it.
+            pages.entry(id).or_insert(index as u32);
+        }
+        Walk {
+            src,
+            pdf: src.pdf(),
+            pages,
+            names: None,
+            seen: HashSet::new(),
+            out: Vec::new(),
+        }
+    }
+
     /// The run of siblings from `first`, each followed by its children.
     fn level(&mut self, first: Option<ObjectId>, depth: u16) {
         let mut next = first;
@@ -110,13 +155,7 @@ impl<'a> Walk<'a> {
                 .ok()
                 .and_then(|c| resolve(self.pdf, c))
                 .and_then(|c| c.as_i64().ok());
-            let title = item
-                .get(b"Title")
-                .ok()
-                .and_then(|t| resolve(self.pdf, t))
-                .and_then(|t| t.as_str().ok())
-                .map(title)
-                .unwrap_or_default();
+            let title = self.title(item);
             self.out.push(FlatOutlineItem {
                 title,
                 page,
@@ -133,6 +172,15 @@ impl<'a> Walk<'a> {
             }
             next = link(item, b"Next");
         }
+    }
+
+    /// `item`'s `/Title`, as shown.
+    fn title(&self, item: &Dictionary) -> String {
+        (item.get(b"Title").ok())
+            .and_then(|t| resolve(self.pdf, t))
+            .and_then(|t| t.as_str().ok())
+            .map(title)
+            .unwrap_or_default()
     }
 
     /// Where `item` goes: its `/Dest`, else its GoTo action's `/D`. No

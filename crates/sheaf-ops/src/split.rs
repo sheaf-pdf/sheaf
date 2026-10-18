@@ -264,7 +264,13 @@ mod tests {
             name: "x.pdf".into(),
             ..SourceInfo::blank(&store, n)
         };
-        Document::new(store, primary, &[], sheaf_doc::history::default_policy())
+        Document::new(
+            store,
+            primary,
+            None,
+            &[],
+            sheaf_doc::history::default_policy(),
+        )
     }
 
     fn sizes(parts: &[Part]) -> Vec<usize> {

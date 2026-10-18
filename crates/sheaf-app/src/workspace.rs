@@ -1297,7 +1297,7 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     sheaf_doc::SourceInfo::read(&sheaf_doc::Store::new(), &p, None)
-                        .map(|info| info.src.page_count())
+                        .map(|(info, _)| info.src.page_count())
                 })
                 .await;
             ws.update_in(cx, |ws, window, cx| {

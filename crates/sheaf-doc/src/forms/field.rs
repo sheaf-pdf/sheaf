@@ -1,8 +1,7 @@
 //! The field model's types (M10 proposal 8): a form's terminal fields and
-//! their widgets as [`super::read`] reads them from a file, and as the old
-//! writers read them (M10.5 slice 8's legacy projection, until slice 9).
-//! `DocState` holds a form as records: `FieldNode`s, their `Terminal`s,
-//! and `Widget` annotations on their pages.
+//! their widgets as [`super::read`] reads them from a file. `DocState`
+//! holds a form as records: `FieldNode`s, their `Terminal`s, and `Widget`
+//! annotations on their pages.
 //!
 //! A field has a sheaf id; its full name is data. Names from the file
 //! (`/AS` states, `/DR` fonts) are kept as Latin-1 text, one character per
@@ -11,8 +10,6 @@
 use std::sync::Arc;
 
 use lopdf::ObjectId;
-
-use crate::model::SourceId;
 
 /// A field's id in a document. Never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -173,9 +170,7 @@ impl Action {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub id: FieldId,
-    /// Where it's written: its source, and its dictionary there (the
-    /// widget's, when the two are merged).
-    pub source: SourceId,
+    /// Its dictionary in its file (the widget's, when the two are merged).
     pub object: ObjectId,
     /// The `/T`s from the root down, joined by dots.
     pub name: String,
@@ -201,15 +196,6 @@ pub struct Field {
     pub tooltip: Option<String>,
     /// Its own `/AA`: keystroke, format, validate and calculate.
     pub actions: Vec<(Trigger, Action)>,
-    /// Which copy of its source's form it's in (M10 proposal 5): 0 for the
-    /// form as the source has it, and another each time its pages come in
-    /// again (Duplicate Pages). A save writes each copy with field and
-    /// widget objects of its own.
-    pub copy: u32,
-    /// The parent field a save puts this copy's fields under, its `/T`,
-    /// when their names clashed with the document's (proposal 5). The
-    /// full name starts with it.
-    pub under: Option<Arc<str>>,
     /// Its widgets no page of the page tree lists: on page templates,
     /// which aren't pages until a script spawns one (M10.5 §3.7).
     pub outside: u16,

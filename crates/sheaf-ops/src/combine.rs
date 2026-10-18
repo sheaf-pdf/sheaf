@@ -125,7 +125,7 @@ pub fn build(
             .unwrap_or_default();
         let file = page_source(&item.path, params.image_page)
             .with_context(|| format!("reading {}", item.path.display()))?;
-        let info = SourceInfo::read(&store, &file, item.password.as_deref())
+        let (info, stamp) = SourceInfo::read(&store, &file, item.password.as_deref())
             .with_context(|| format!("opening {name}"))?;
         let count = info.src.page_count() as usize;
         let wanted: Vec<u32> = match &item.pages {
@@ -158,6 +158,7 @@ pub fn build(
                 let mut d = sheaf_doc::open::start(
                     store.clone(),
                     info,
+                    Some(stamp),
                     sheaf_doc::history::default_policy(),
                 );
                 d.ready(Facts {

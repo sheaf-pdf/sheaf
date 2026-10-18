@@ -67,7 +67,7 @@ fn every_form_opens_and_is_checked() {
                         .map_err(anyhow::Error::from)
                         .and_then(|bytes| {
                             let report = check(&bytes, None)?;
-                            let info = SourceInfo::read(&Store::new(), &path, None)?;
+                            let (info, _) = SourceInfo::read(&Store::new(), &path, None)?;
                             Ok((report, sheaf_doc::forms::read(&info.src).facts))
                         })
                         .map_err(|e| format!("{e:#}"));
@@ -256,7 +256,7 @@ fn every_form_reads_as_its_manifest_row() {
                     };
                     let info = SourceInfo::read(&Store::new(), &corpus.path(entry), None);
                     let info = match info {
-                        Ok(info) => info,
+                        Ok((info, _)) => info,
                         Err(e) => {
                             unread
                                 .lock()

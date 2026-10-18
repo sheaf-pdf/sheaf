@@ -134,8 +134,8 @@ fn check(rotate: i64) {
     }
     .rotated(Rotation::from_degrees(rotate as i32));
     let store = Store::new();
-    let primary = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, Some(stamp), &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap();
     let replaced = row(300.0);
     let red = red_stamp(&model);
@@ -379,8 +379,8 @@ fn tapes_draw_turned_and_from_old_text() {
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
     let store = Store::new();
-    let primary = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, Some(stamp), &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap();
     let mut tape = Tape {
         lines: vec![
@@ -487,8 +487,8 @@ fn clouds_and_callouts_draw() {
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
     let store = Store::new();
-    let primary = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, Some(stamp), &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap();
     let mut cloud = mark(
         AnnotKind::Square {
@@ -569,8 +569,8 @@ fn free_text_reads_back_from_its_appearance() {
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
     let store = Store::new();
-    let primary = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, Some(stamp), &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap();
     let text = "é € — “ ”";
     let mut note = mark(

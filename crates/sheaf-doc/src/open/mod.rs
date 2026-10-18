@@ -30,6 +30,7 @@ use crate::labels::LabelRange;
 use crate::layers::Layer;
 use crate::model::{FlatOutlineItem, PageId};
 use crate::portfolio::Collection;
+use crate::serialize::durable::FileStamp;
 use crate::stamps::HeaderFooter;
 use crate::{Document, PAGES, Source, SourceInfo, Store};
 
@@ -39,8 +40,8 @@ mod outline;
 pub(crate) mod tests;
 
 pub use annots::{FileAnnot, FileAnnots, FileBody};
+pub(crate) use outline::Dests;
 pub use outline::outline;
-pub(crate) use outline::{MAX_DEPTH, shown_title};
 
 /// What a file says about itself when it opens, every page by its index
 /// in the source's page table.
@@ -102,20 +103,32 @@ pub struct Opened {
 
 /// `primary` as a document while it opens: its pages, as the page table
 /// [`SourceInfo::read`] built has them, and nothing else, so the first
-/// page can paint at once. It reads nothing of its own. Edits are refused
-/// with [`NotReady`](crate::model::NotReady) until [`Document::ready`]
-/// takes [`finish`]'s facts.
-pub fn start(store: Arc<Store>, primary: SourceInfo, policy: Box<dyn HistoryPolicy>) -> Document {
-    Document::loading(store, primary, policy)
+/// page can paint at once. It reads nothing of its own. `stamp` is the
+/// file as `read` read it, which the opened version's record starts from;
+/// None for a primary made in memory. Edits are refused with
+/// [`NotReady`](crate::model::NotReady) until [`Document::ready`] takes
+/// [`finish`]'s facts.
+pub fn start(
+    store: Arc<Store>,
+    primary: SourceInfo,
+    stamp: Option<FileStamp>,
+    policy: Box<dyn HistoryPolicy>,
+) -> Document {
+    Document::loading(store, primary, stamp, policy)
 }
 
 /// `path` opened as the app opens it, with no window: [`start`],
 /// [`finish`] and [`Document::ready`] in a row, in a store of its own.
 pub fn file(path: &Path, password: Option<&str>) -> Result<Opened> {
     let store = Store::new();
-    let primary = SourceInfo::read(&store, path, password)?;
+    let (primary, stamp) = SourceInfo::read(&store, path, password)?;
     let src = primary.src.clone();
-    let mut doc = start(store, primary, crate::history::default_policy());
+    let mut doc = start(
+        store,
+        primary,
+        Some(stamp),
+        crate::history::default_policy(),
+    );
     let view = doc.ready(finish(&src, &NoProgress))?;
     Ok(Opened { doc, view })
 }
@@ -133,7 +146,7 @@ pub fn finish(src: &Source, p: &dyn Progress) -> Facts {
     Facts {
         annots: src.annots_counting(p).clone(),
         labels: crate::labels::label_ranges(pdf),
-        header_footer: crate::stamps::from_catalog(pdf),
+        header_footer: src.header_footer().cloned(),
         form: src.form().clone(),
         attachments: crate::attachments::attachments_in(pdf, src.page_ids()),
         collection: crate::portfolio::collection(pdf),
