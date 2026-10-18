@@ -356,6 +356,14 @@ where an app with dense keyboard shortcuts differs from kit's defaults.
 
 ## Ongoing cost
 
+**Since 2026-10-17** sheaf takes GPUI from gpui-pre itself (`=0.3.9`) and keeps no patches against
+Zed, with no fork plan ([prior art](prior-art/rust-ecosystem.md#gpui-and-zed)). "Our own GPUI
+patches" below and the conflict with the fork strategy under *Recommendation* no longer apply. What
+still does: the exact-version lock (sheaf's gpui-pre bumps would wait on kit releases), the build
+cost and the glue. gpui-pre is also near-verbatim rather than unmodified: its edits are marked
+`Modified for gpui-pre`, and one of them rewrites gpui paths in macro output for crates that depend
+on gpui-kit ([prior art](prior-art/rust-ecosystem.md#gpui-pre)).
+
 - **Version lock.** gpui-kit pins an exact gpui-pre (`=0.3.9` in 0.7.3).
   Every kit upgrade moves GPUI too, and sheaf can't take a newer Zed GPUI fix
   without a matching kit release. Both publish about weekly, and kit is
@@ -388,7 +396,7 @@ Against that:
 - a 45% slower clean build and +24% binary size for crates sheaf never calls;
 - GPUI locked to Longbridge's weekly snapshot, and our own GPUI patches
   become harder to carry, which conflicts with the fork strategy already
-  decided;
+  decided (superseded 2026-10-17; see *Ongoing cost*);
 - glue for nearly every component to keep sheaf's keyboard behavior (15
   gaps above), with no drag-and-drop tree for the outline panel.
 

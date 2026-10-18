@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::model::Snapshot;
+use crate::serialize::durable;
 
 const MAGIC: &[u8] = b"sheaf-recovery 1\n";
 pub const SUFFIX: &str = ".sheaf-recovery";
@@ -30,7 +31,7 @@ pub fn write(snap: &Snapshot) -> Result<Option<usize>> {
         .source(snap.primary)
         .context("primary source missing")?;
     let (original_len, section) = crate::incremental::incremental_section(snap)?;
-    let sidecar = sidecar_path(&info.path);
+    let sidecar = sidecar_path(&info.name);
     if section.is_empty() {
         let _ = std::fs::remove_file(&sidecar);
         return Ok(None);
@@ -39,7 +40,7 @@ pub fn write(snap: &Snapshot) -> Result<Option<usize>> {
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(format!("{original_len}\n").as_bytes());
     bytes.extend_from_slice(&section);
-    crate::save::write_atomic(&sidecar, &bytes)?;
+    durable::write(&sidecar, &bytes, None)?;
     Ok(Some(section.len()))
 }
 
@@ -89,7 +90,7 @@ pub fn materialize(pdf: &Path, rec: &Recovery, out: &Path) -> Result<()> {
         );
     }
     bytes.extend_from_slice(&rec.section);
-    crate::save::write_atomic(out, &bytes)
+    Ok(durable::write(out, &bytes, None)?)
 }
 
 /// Remove the sidecar, if any.
@@ -102,8 +103,9 @@ mod tests {
     use super::*;
     use crate::history::FixedCount;
     use crate::model::{Document, Edit, SourceInfo};
+    use crate::store::Store;
     use lopdf::{Document as Pdf, Object, Stream, dictionary};
-    use sheaf_core::{PageSize, Rotation};
+    use sheaf_core::Rotation;
 
     fn two_page_pdf(path: &Path) {
         let mut pdf = Pdf::with_version("1.7");
@@ -135,23 +137,9 @@ mod tests {
         let pdf = dir.join("doc.pdf");
         two_page_pdf(&pdf);
         let bytes = std::fs::metadata(&pdf).unwrap().len() as usize;
-        let mut model = Document::new(
-            SourceInfo {
-                path: pdf.clone(),
-                page_count: 2,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, &pdf, None).unwrap();
+        let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
         // Nothing unsaved: no sidecar.
         assert_eq!(write(&model.snapshot()).unwrap(), None);
         assert!(find(&pdf).is_none());
@@ -204,24 +192,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pdf = dir.join("doc.pdf");
         two_page_pdf(&pdf);
-        let bytes = std::fs::metadata(&pdf).unwrap().len() as usize;
-        let mut model = Document::new(
-            SourceInfo {
-                path: pdf.clone(),
-                page_count: 2,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, &pdf, None).unwrap();
+        let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
         let p1 = model.page(1).unwrap().id;
         let layer = TextLayer::from_engine(
             vec![OcrWord {
@@ -234,11 +207,7 @@ mod tests {
                 },
                 confidence: 1.0,
             }],
-            PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         );
         model
@@ -269,6 +238,79 @@ mod tests {
             text.contains("3 Tr") && text.contains("<00480065006C006C006F>"),
             "{text}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_encrypted_sidecar_holds_no_plaintext() {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use lopdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
+        use lopdf::{EncryptionState, EncryptionVersion, LazyPdf, Permissions, XrefKind};
+
+        use crate::serialize::fixture::holds;
+        use crate::serialize::fixture::{OWNER, encrypted};
+        use crate::serialize::full;
+        use crate::serialize::tests::{NOTE, mark, notes};
+        use crate::source::Limits;
+        use crate::source::lazy_tests::{PAGE_STRING, plaintext};
+
+        let dir =
+            std::env::temp_dir().join(format!("sheaf-recovery-encrypted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = plaintext();
+        // Opened with its empty user password, as such files open.
+        let state = EncryptionState::try_from(EncryptionVersion::V4 {
+            document: &plain,
+            encrypt_metadata: true,
+            crypt_filters: BTreeMap::from([(
+                b"StdCF".to_vec(),
+                Arc::new(Aes128CryptFilter) as Arc<dyn CryptFilter>,
+            )]),
+            stream_filter: b"StdCF".to_vec(),
+            string_filter: b"StdCF".to_vec(),
+            owner_password: OWNER,
+            user_password: "",
+            permissions: Permissions::all(),
+        })
+        .unwrap();
+        let [table, _] = encrypted(&plain, &state, |_| {});
+        let unencrypted =
+            full::write(&plain.objects, &plain.trailer, XrefKind::Table, "1.7", None).unwrap();
+        for (encrypted, bytes) in [(false, unencrypted), (true, table)] {
+            let pdf = dir.join(format!("encrypted-{encrypted}.pdf"));
+            std::fs::write(&pdf, &bytes).unwrap();
+            let store = Store::new();
+            let primary = SourceInfo::read(&store, &pdf, None).unwrap();
+            let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+            let p0 = model.page(0).unwrap().id;
+            let turn = Edit::RotatePages {
+                ids: vec![p0],
+                by: Rotation::R90,
+            };
+            model.apply(turn, "rot").unwrap();
+            mark(&mut model);
+            write(&model.snapshot()).unwrap().unwrap();
+            // The page's string and the mark's note, in the clear only
+            // when the file is.
+            let sidecar = std::fs::read(sidecar_path(&pdf)).unwrap();
+            for text in [PAGE_STRING, NOTE] {
+                assert_eq!(holds(&sidecar, text), !encrypted, "{encrypted}");
+            }
+            let rec = find(&pdf).expect("sidecar found");
+            let out = dir.join(format!("recovered-{encrypted}.pdf"));
+            materialize(&pdf, &rec, &out).unwrap();
+            let bytes = sheaf_core::read_file(&out).unwrap();
+            let lazy = LazyPdf::open(bytes, None, &Limits::DEFAULT.reader).unwrap();
+            assert_eq!(lazy.is_encrypted(), encrypted);
+            assert_eq!(notes(&lazy), [NOTE], "{encrypted}");
+            let recovered = crate::file::load_pdf(&out, None).unwrap();
+            let page = recovered.get_pages()[&1];
+            let page = recovered.get_dictionary(page).unwrap();
+            assert_eq!(page.get(b"Rotate").unwrap().as_i64().unwrap(), 90);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

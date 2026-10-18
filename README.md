@@ -121,8 +121,8 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 ├────────────────────────────┬────────────────────────────┤
 │  sheaf-cli (no GUI)        │  sheaf-ops: operations     │
 │  clap subcommands          │  shared by app and CLI;    │
-│                            │  sheaf-progress: progress  │
-│                            │  + cancel trait            │
+│                            │  progress + cancel: the    │
+│                            │  in-progress crate         │
 ├────────────────────────────┴────────────────────────────┤
 │  sheaf-ui           Reusable widgets: page canvas, tile  │
 │                     viewport, sidebars, command palette  │
@@ -144,12 +144,12 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| UI framework | **GPUI** (`gpui` + `gpui_platform`) | GPU-accelerated, retained-mode, proven in Zed. Pre-1.0 with breaking changes; pin versions. Linux backend is wgpu (Blade was removed Feb 2026). **Needs a spike** — see [Open questions](#open-questions). |
+| UI framework | **GPUI** (`gpui` + `gpui_platform`, from gpui-pre) | GPU-accelerated, retained-mode, proven in Zed. Pre-1.0 with breaking changes; pin versions ([Updating GPUI](#updating-gpui)). Linux backend is wgpu (Blade was removed Feb 2026). **Needs a spike** — see [Open questions](#open-questions). |
 | Rasterizer | **PDFium** via `pdfium-render` | Chrome's engine: fast, BSD-licensed, handles encrypted files, forms, broken PDFs. Hidden behind a `Renderer` trait so a pure-Rust engine (hayro) can replace it once mature. |
 | Document edits | **lopdf** (or our own object layer) | PDFium's write API is limited (esp. outlines). Structural edits — page tree, bookmarks, annotations — are done on the raw object graph and saved incrementally. The renderer re-loads from the edited bytes. |
 | Rendering strategy | **Tiled, async, cached** | Viewport requests tiles at the current zoom; a worker pool renders them off the UI thread; LRU cache keyed by `(page, zoom, tile)`. Low-res preview tile first, then full-res. This is the single biggest "feels fast" lever. |
 | Text / OCR | PDFium text extraction. OCR is a **core feature** behind an `OcrEngine` trait with two engines compiled in by default: **Tesseract 5** (built from source, linked statically) and **PaddleOCR PP-OCRv5** on ONNX Runtime (`oar-ocr`, with Microsoft's runtime library loaded on demand from `ocr/lib`). | Both engines are native C/C++, so OCR can't live in a WASM plugin; the trait keeps engines swappable, and plugins get OCR as a host capability. Judged on scanned tax forms, not purity. |
-| Save model | Incremental update by default; "Save As (rewrite)" optional | Preserves originals, fast saves on large files. Clean rewrite available for size reduction / "Export Clean Copy". After anything is removed (a page, a mark, a reply, a bookmark, OCR text replaced) the next save is a full rewrite, so what was removed isn't left in an earlier revision; undoing back to what was saved goes back to incremental. No save or copy carries a page it doesn't keep: links, named destinations, the open action, form fields, tags and article threads that pointed at one are dropped or pruned. |
+| Save model | Incremental update by default; "Save As (rewrite)" optional | Preserves originals, fast saves on large files. Clean rewrite available for size reduction / "Export Clean Copy". After anything is removed (a page, a mark, a reply, a bookmark, OCR text replaced) the next save is a full rewrite, so what was removed isn't left in an earlier revision; undoing back to what was saved goes back to incremental. A file another program changed since sheaf opened it is never overwritten unasked: Save As…, Overwrite or Cancel (not yet checked on the first save after recovering unsaved changes from a crash). No save or copy carries a page it doesn't keep: links, named destinations, the open action, form fields, tags and article threads that pointed at one are dropped or pruned. |
 | Undo | A tree of versions, each with the edits that made it | Every edit is an `Edit` command. A version keeps a snapshot (cheap, structure-shared) and the commands from its parent; undo, redo and jumps move between versions, an edit after undo starts a branch instead of discarding, and a trimmed snapshot is rebuilt by replaying commands. Per-document. |
 
 ### Efficiency principles
@@ -272,8 +272,8 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 ### Security
 | Feature | Status |
 |---|---|
-| Open password-protected PDFs | ✅ prompt on open; saves write a plain (unencrypted) file |
-| Set / remove passwords, permissions; preserve encryption on save | 📋 |
+| Open password-protected PDFs | ✅ prompt on open; saves, Save As and exports stay encrypted with the same password (printing doesn't) |
+| Set / remove passwords, permissions | 📋 |
 | Digital signatures (sign / verify) | 📋 |
 | Certificate encryption | ❓ |
 
@@ -334,7 +334,7 @@ M8 onward (viewing and output through v1.0 parity) is laid out in [ROADMAP.md](R
 - **GPUI risk.** Pre-1.0, API churn, and we'd be an early non-Zed user on Linux.
   The Linux spike passed first try (wgpu backend, Wayland via WSLg on
   llvmpipe), and Windows built and ran unmodified (DirectX 11, Intel UHD 620).
-  Remaining risk is API churn across rev bumps; fallback is still `iced` or
+  Remaining risk is API churn across GPUI bumps; fallback is still `iced` or
   `egui` if that bites. Open item: launch-to-first-pixels is 1.2–2 s on
   Windows (PDF open itself is ~10 ms) — investigate platform init.
 - **One parser or two?** PDFium for rendering + lopdf for editing means two
@@ -403,8 +403,56 @@ Visual Studio ships the CMake the Tesseract build needs; run the first
 build from a Developer PowerShell (or with `VSINSTALLDIR` set) so it uses
 the NMake generator.
 
-The toolchain is pinned in `rust-toolchain.toml` (tracks Zed's requirement,
-since GPUI is consumed as a git dependency at a pinned rev in `Cargo.toml`).
+The toolchain is pinned in `rust-toolchain.toml`. It has to be new enough
+for the pinned GPUI snapshot: gpui-pre publishes no `rust-version`, so Zed's
+own `rust-toolchain.toml` at the snapshot's commit is the guide.
+
+### Updating GPUI
+
+GPUI comes from [gpui-pre](https://crates.io/crates/gpui-pre): Longbridge's
+weekly crates.io snapshot of Zed main, its crates renamed `gpui-pre-*`. The
+sources are Zed's at the snapshot's commit plus a few packaging edits marked
+`Modified for gpui-pre`. sheaf keeps no patches against Zed and lets
+gpui-pre do the snapshotting. gpui-pre doesn't follow semver, so the root
+`Cargo.toml` pins one snapshot exactly, and moving to a newer one is a
+deliberate review (once a milestone or so):
+
+1. Find the newest version and the Zed commit it snapshots. Inside this
+   workspace `cargo info gpui-pre` describes the locked version and shows
+   the newest only as "(latest X)"; `cargo info gpui-pre@X` then ends its
+   description "snapshot of zed@<rev>" (the full rev is `zed-rev` under
+   `[package.metadata.gpui-pre]` in its `Cargo.toml`).
+2. Bump both exact pins (`gpui-pre` and `gpui-pre-platform` share a
+   version) and the rev in the comment above them.
+3. Read gpui-pre's own edits: `rg -l 'Modified for gpui-pre'
+   ~/.cargo/registry/src/*/gpui-pre*-<new>/` (after a `cargo fetch`), and
+   read each one that is new or changed. They are where gpui-pre's code
+   departs from Zed's, and they're written for gpui-kit; keep the list in
+   the `Cargo.toml` comment current.
+4. Keep `[patch.crates-io]` in step with Zed at that rev: the
+   `[patch.crates-io]` of Zed's `Cargo.toml` for the crates GPUI uses, and
+   for `xim-ctext` the xim-rs rev in Zed's `crates/gpui_linux/Cargo.toml`.
+   Published crates can't carry Zed's patches, so sheaf repeats them; drop
+   any that cargo warns are not used. If Zed now needs a newer Rust (its
+   `rust-toolchain.toml`), move ours with it.
+5. Read the `Cargo.lock` diff. Besides the `gpui-pre-*` versions, expect only
+   the crates gpui-pre's published manifests take from crates.io where Zed
+   builds from git (`zed-font-kit`, `zed-xim`, `zed-scap`, `wasm_thread`) and
+   their own dependencies (at 0.3.9 `xim-parser`, and `dirs` 5 where Zed has
+   6); explain anything else. Diff each crate swapped to crates.io, and each
+   of its dependencies that resolves differently, against the source at
+   Zed's git rev, and wherever the code differs in behavior add a
+   `[patch.crates-io]` to that rev, as for `xim-ctext`.
+   [Prior art](docs/prior-art/rust-ecosystem.md#gpui-pre) has what each
+   differed in last time.
+6. Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+   warnings` and `cargo test --workspace`, then a UI smoke test: open a
+   corpus PDF with `--timing --selftest-save out.pdf` and with
+   `--selftest-annot out.pdf` (a `--script` ending in `{"quit": true}`
+   closes the window), and look at the window. Put the timings in the
+   bump's commit message and compare them with the last bump's (`git log
+   -- Cargo.toml`). Fix what broke in the same change; Windows CI covers
+   the Windows backend.
 
 ### Packaging
 
@@ -457,7 +505,7 @@ configured in your **user-level** `~/.cargo/config.toml`, not in this repo, so
 nothing here forces them on anyone.
 
 **sccache** caches compiled dependency artifacts across `cargo clean`s,
-toolchain bumps, and GPUI rev bumps.
+toolchain bumps, and GPUI version bumps.
 
 ```sh
 cargo binstall sccache        # or: cargo install sccache
@@ -587,4 +635,6 @@ Dual-licensed under MIT or Apache-2.0, at your option. Third-party engines:
 PDFium (BSD-3), hayro (Apache-2.0/MIT), Tesseract and its glyphless `pdf.ttf`
 (Apache-2.0), Leptonica (BSD-2), ONNX Runtime (MIT), PaddleOCR models and
 `oar-ocr` (Apache-2.0); see `packaging/licenses/`. MuPDF is deliberately not
-used (AGPL). lopdf (MIT) is vendored with a patch in `vendor/lopdf`.
+used (AGPL). lopdf (MIT) is vendored with a patch in `vendor/lopdf`. Text in
+the standard 14 fonts is laid out with Adobe's Core 14 AFM metrics (Adobe's
+notice) and the Adobe Glyph List (BSD-3), in `crates/sheaf-doc/assets`.

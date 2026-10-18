@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use lopdf::Document as Pdf;
 use serde::{Deserialize, Serialize};
+use sheaf_doc::serialize::durable;
 use sheaf_doc::stamp_lib::{self, StampPage};
 
 /// A collection in the library.
@@ -145,16 +146,13 @@ fn pages(c: &Collection) -> Result<Vec<Page>> {
         .collect()
 }
 
-/// Write a collection anew (through a temporary file).
+/// Write a collection anew, durably.
 fn write(path: &Path, title: &str, stamps: &[Page]) -> Result<()> {
     let bytes = stamp_lib::build_collection(title, stamps)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    let tmp = path.with_extension("pdf.part");
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    Ok(durable::write(path, &bytes, None)?)
 }
 
 /// A file name for a new collection titled `title` in `dir`, not taken.

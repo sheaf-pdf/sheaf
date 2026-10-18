@@ -9,8 +9,8 @@ pdfplumber review that was only in a chat transcript until now.
 
 | Crate | What it is | Verdict |
 |---|---|---|
-| **gpui** (Zed, git) | The UI framework sheaf uses, pinned to Zed commit `93d7456` | Stay on it. Fork only when we need a fix, as a `sheaf/gpui` branch rebased each milestone, and send each fix upstream as a PR. |
-| **gpui-pre** | Longbridge's weekly, unmodified crates.io snapshot of Zed's gpui | Not needed on its own. Matters only because gpui-kit and gpui-pdf require it. |
+| **gpui** (Zed) | The UI framework sheaf uses, at Zed commit `93d7456` by way of gpui-pre | Stay on it. Since 2026-10-17, no patches against Zed and no fork: Zed takes little beyond bug fixes, so a patch would be ours to rebase forever. Send bug fixes upstream as PRs. |
+| **gpui-pre** | Longbridge's weekly crates.io snapshot of Zed's gpui: near-verbatim, its few packaging edits marked `Modified for gpui-pre` | **Adopted 2026-10-17**, pinned exactly (`=0.3.9`, zed@`93d7456`). With no patches of our own, it does the snapshotting for us; we review and bump it deliberately. |
 | **gpui-ce** | Community fork moving away from Zed (Parley text system, animation) | Watch it. Re-check around 2027-04. |
 | **gpui-kit** (formerly gpui-component) | Longbridge's component library: 75+ components, AccessKit | **Don't adopt; borrow selectively.** Spike measured and documented in [../gpui-kit-eval.md](../gpui-kit-eval.md). |
 | **gpui-pdf** | A small PDF *viewer* component on hayro, split out of the Zorite app | **Don't adopt; borrow** `forms.rs` (MIT) when forms work starts. |
@@ -38,17 +38,44 @@ pdfplumber review that was only in a chat transcript until now.
 - That work follows Zed's needs. 118 gpui PRs from outside contributors are
   still open, and features Zed doesn't need get closed as "not planned". Zed
   said in late 2025 that it was putting "major brakes" on gpui work for 2026.
-- **Decision:** no public sheaf fork of gpui. Stay on the pinned Zed commit.
-  When we first need a fix inside gpui, carry it on a `sheaf/gpui` branch of a
-  `zed-industries/zed` fork, rebase on purpose (e.g. once per milestone), and
-  submit each fix to Zed.
+- **Decision (2026-10-17):** no patches against Zed and no fork of gpui.
+  Zed is very unlikely to take anything but bug fixes, so a patch would be
+  ours to rebase forever. sheaf takes GPUI from gpui-pre (below), pinned to
+  one snapshot; bug fixes we need go to Zed as PRs and reach sheaf with a
+  later snapshot. This replaces the 2026-10-13 plan: a git dependency on the
+  pinned Zed commit, with fixes carried on a `sheaf/gpui` branch of a
+  `zed-industries/zed` fork, rebased once per milestone.
 
 ### gpui-pre
 
-- Longbridge (huacnlee) publishes an **unmodified** snapshot of Zed main to
+- Longbridge (huacnlee) publishes a **near-verbatim** snapshot of Zed main to
   crates.io about weekly, renamed `gpui-pre-*` (19 crates, one-to-one with
   Zed's). About 137k downloads in its first month.
-- It can't carry patches. Its 0.3.9 release is exactly our pinned commit.
+- Its edits to Zed's sources are marked `// Modified for gpui-pre`. At 0.3.9
+  there are three, and every other source file matches zed@`93d7456`:
+  - `actions!` derives `$crate::Action` instead of `gpui::Action`.
+  - Every proc-macro entry point in gpui-pre-macros passes its output through
+    `gpui_pre_facade_paths::rewrite` ("Injected by gpui-kit's
+    script/bump-gpui.ts"). On each expansion it looks up `gpui-kit` with
+    `proc_macro_crate::crate_name`, and when the calling crate depends on
+    gpui-kit it rewrites the `gpui::` and `gpui_platform::` paths in the
+    generated code to `gpui_kit::` and `gpui_kit::platform::`.
+  - gpui-pre-apple's `build.rs` reads copies of gpui sources under
+    `vendor/gpui`.
+
+  None of them changes sheaf today. Adding gpui-kit as a dependency
+  ([below](#gpui-kit)) would turn on the macro path rewrite in each crate
+  that adds it. Later snapshots can change these edits, so each bump reads
+  them (README, "Updating GPUI").
+- It can't carry patches. Its 0.3.9 release is exactly the Zed commit sheaf
+  had pinned, which made the switch free.
+- **sheaf uses it since 2026-10-17** (`gpui = { package = "gpui-pre",
+  version = "=0.3.9" }`), because sheaf keeps no patches against Zed. It
+  doesn't follow semver; bumping the exact pin is a deliberate review with a
+  compatibility check (README, "Updating GPUI"). The switch needed no source
+  changes: the Linux build graph stayed at 665 crates (`cargo tree -p
+  sheaf-app -e normal`, unique name and version), and the lockfile grew by 9
+  (a `windows-sys` 0.48 tree, below).
 - Switching to it is free at build time (measured in the gpui-kit spike: clean
   release build 210 s → 211 s, binary unchanged, startup unchanged).
 - The cost is the lock-in. Every crate built on gpui-pre (gpui-kit, gpui-pdf)
@@ -56,6 +83,36 @@ pdfplumber review that was only in a chat transcript until now.
   becomes yours. Carrying our own gpui patch would mean forking all 19
   `gpui-pre-*` crates at that version and `[patch.crates-io]`-ing them, and
   redoing it on every upgrade.
+- Its published manifests take crates.io releases where Zed builds from git.
+  At 0.3.9, each compared with the source at Zed's rev:
+  - `zed-font-kit`: same source, but asks for `dirs` 5 where Zed's rev has
+    6, which brings `dirs-sys` 0.4, `redox_users` 0.4 and a `windows-sys`
+    0.48 tree into the lockfile. dirs' Linux code is the same in 5 and 6,
+    and dirs-sys 0.4 and 0.5 differ only in Windows code. font-kit is only
+    in the Linux build, so nothing compiles that `windows-sys`.
+  - `zed-xim`: same source. Its `xim-parser` comes from crates.io as 0.2.2
+    instead of Zed's fork at 0.2.1; the two differ only in lint fixes
+    (`repeat_n`, an elided lifetime). Its `xim-ctext` differed in behavior,
+    so sheaf patches it (next bullet).
+  - `zed-scap` and `wasm_thread`: not built for sheaf.
+- **Patched to parity: `xim-ctext`.** The crates.io `zed-xim` resolves
+  `xim-ctext` 0.3.0 (2022), not Zed's fork of it at xim-rs `16f35a2` (the
+  rev in Zed's `crates/gpui_linux/Cargo.toml`). zed-xim offers the input
+  method only COMPOUND_TEXT and `expect`s the decode of every commit and
+  preedit, and 0.3.0 fails on most of what libX11 produces. The common case
+  is plain Latin-1: é, ñ or ü arrive as bare bytes with no escape, which
+  0.3.0 runs through `String::from_utf8`. It also rejects every ESC-designated
+  ISO-8859 part (€, Ł, Ω), GB2312 and KS C 5601 (so every Chinese and Korean
+  preedit update), and repeats text in longer Japanese strings. Each failure
+  panics sheaf under X11 whenever an XIM server is running: one dead-key or
+  Compose é through ibus (`XMODIFIERS=@im=ibus`) is enough. Wayland input
+  (text-input-v3) doesn't go through it. The fork decodes all of these
+  (unescaped bytes default to Latin-1), so sheaf's `[patch.crates-io]`
+  takes `xim-ctext` from `zed-industries/xim-rs` at Zed's rev: Zed's own
+  build, not a sheaf patch. Upstream `xim-ctext` 0.4 has the fork's
+  decoding (and also handles `ESC ( B` after a GB2312 part, which the fork
+  doesn't), so once a zed-xim release depends on it, a bug fix Zed could
+  take, the patch can go.
 
 ### gpui-ce
 
@@ -79,7 +136,8 @@ Full results: [../gpui-kit-eval.md](../gpui-kit-eval.md) (spike branch
   `gpui-component`). 17k stars, Apache-2.0 code, CC BY 4.0 docs. Longbridge
   ships it in their desktop app. 75+ components, AccessKit, headless UI tests.
   Weekly 0.x releases with breaking changes.
-- Pins an **exact** gpui-pre (`=0.3.9` in kit 0.7.3).
+- Pins an **exact** gpui-pre (`=0.3.9` in kit 0.7.3). Depending on it also
+  turns on gpui-pre's macro path rewrite in that crate ([above](#gpui-pre)).
 - Measured cost (baseline → six spike steps): clean release build +45%, peak
   build RSS +0.8 GB, incremental release build +27%, binary +24% (+8.9 MB), +66
   crates in the Linux graph (lsp-types, html5ever, ropey, a reqwest fork… none
@@ -152,8 +210,8 @@ Reviewed at 0.6.1 (2026-09-22) from the crates.io source.
 ### What to take
 
 1. **Don't adopt.** It covers roughly sheaf's M1 viewer with less in each area,
-   it replaces the tile pipeline sheaf is betting on for speed, and it forces
-   the gpui-pre switch we already turned down.
+   it replaces the tile pipeline sheaf is betting on for speed, and it pins
+   gpui-pre to its own release schedule.
 2. **Borrow `forms.rs`** (MIT) when forms work starts. It solves
    checkbox/radio appearance resolution and no-appearance text fields on
    lopdf, the same object layer sheaf uses, and is a reference for

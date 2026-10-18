@@ -17,6 +17,21 @@ pub trait CryptFilter: std::fmt::Debug + Send + Sync {
     fn compute_key(&self, key: &[u8], obj_id: ObjectId) -> Result<Vec<u8>, DecryptionError>;
     fn encrypt(&self, key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, DecryptionError>;
     fn decrypt(&self, key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, DecryptionError>;
+
+    /// sheaf: `plaintext` encrypted with the IV `iv` gives for it. Only a filter that takes an
+    /// IV (AES) asks for one; the others encrypt as `encrypt` does.
+    fn encrypt_with_iv(
+        &self, key: &[u8], plaintext: &[u8], _iv: &mut dyn FnMut(&[u8]) -> [u8; 16],
+    ) -> Result<Vec<u8>, DecryptionError> {
+        self.encrypt(key, plaintext)
+    }
+}
+
+/// sheaf: an IV of random numbers, as lopdf draws them.
+pub(crate) fn random_iv(_plaintext: &[u8]) -> [u8; 16] {
+    let mut iv = [0u8; 16];
+    rand::rng().fill(&mut iv);
+    iv
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -99,6 +114,14 @@ macro_rules! aes_cbc_crypt_filter {
             }
 
             fn encrypt(&self, key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, DecryptionError> {
+                // sheaf: through `encrypt_with_iv`, with random numbers for the initialization vector.
+                self.encrypt_with_iv(key, plaintext, &mut random_iv)
+            }
+
+            // sheaf: the initialization vector `iv` gives.
+            fn encrypt_with_iv(
+                &self, key: &[u8], plaintext: &[u8], iv: &mut dyn FnMut(&[u8]) -> [u8; 16],
+            ) -> Result<Vec<u8>, DecryptionError> {
                 let key: &[u8; $key_len] = key.try_into().map_err(|_| DecryptionError::InvalidKeyLength)?;
 
                 // The ciphertext needs to be a multiple of 16 bytes to include the padding.
@@ -108,10 +131,7 @@ macro_rules! aes_cbc_crypt_filter {
                 // combined.
                 let mut ciphertext = Vec::with_capacity(16 + ciphertext_len);
 
-                // Generate random numbers to populate the initialization vector.
-                let mut rng = rand::rng();
-                let mut iv = [0u8; 16];
-                rng.fill(&mut iv);
+                let iv = iv(plaintext);
 
                 // Combine the IV and the plaintext.
                 ciphertext.extend_from_slice(&iv);

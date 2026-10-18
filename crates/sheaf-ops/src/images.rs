@@ -2,11 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
+use in_progress::{Progress, Unit};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::images::PageFit;
+use sheaf_doc::serialize::durable;
 use sheaf_image::io::PageImage;
-use sheaf_progress::{Progress, Unit};
 
 /// Page size for pages made from images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -57,7 +58,7 @@ pub fn read_all(
     if inputs.is_empty() {
         bail!("no images given");
     }
-    progress.set_total(Some(inputs.len() as u64), Unit::Items);
+    progress.set_total(Some(inputs.len() as u64), Unit::ITEMS);
     let mut pages = Vec::new();
     for (i, path) in inputs.iter().enumerate() {
         progress.check()?;
@@ -83,16 +84,7 @@ pub fn images_to_pdf(
     let pages = read_all(inputs, params.dpi, &*progress.child("reading", 0.8))?;
     progress.check()?;
     let bytes = sheaf_doc::images::to_pdf(&pages, params.page.fit(params.margin))?;
-    write_atomic(out, &bytes)
-}
-
-/// Write beside `path` and rename, so a failure leaves no half file.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".part");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    Ok(durable::write(out, &bytes, None)?)
 }
 
 #[cfg(test)]
