@@ -1321,8 +1321,8 @@ tier's other tests (interop, the OCR engines, the replay property at
   Rewrite takes 146–147 ms on the synthetic and 770–791 ms on the heavy
   fixture, against 134 and 707 ms for slice 8's writer (1.09× and
   1.10×), and adds 50 and 252 MB against its 62 and 251 MB; the 7k
-  harness asserts at most 1.2× the time and 1.5× the memory added
-  (`rewrites_on_the_synthetic_and_heavy_7k`). Nearly a fifth of it is
+  harness asserts at most 1.3× the time (flagging past 1.2×) and 1.5×
+  the memory added (`rewrites_on_the_synthetic_and_heavy_7k`). Nearly a fifth of it is
   freeing: the primary's page dictionaries the emitted ones replace, and
   the graph at the end.
 - **Pruning's changes.** `kept::keep_only` is unchanged but for what it

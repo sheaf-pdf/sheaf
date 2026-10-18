@@ -224,7 +224,7 @@ const SCANNED: Baseline = Baseline {
 /// part. Timed beside `materialize` in one build while both writers were
 /// there, the old writer took 133 and 712 ms, so code placement (up to
 /// 1.46×, slice 2) moved it under 1% here. The new writer's Rewrite is
-/// held to 1.2× this time and 1.5× the RSS it adds.
+/// held to 1.3× this time (flagged past 1.2×) and 1.5× the RSS it adds.
 struct WriterBaseline {
     ms: f64,
     rss_mb: f64,
@@ -244,8 +244,11 @@ const SLICE8_REWRITE_HEAVY: WriterBaseline = WriterBaseline {
 };
 
 /// What the gate allows `materialize`'s Rewrite beside slice 8's writer:
-/// its time and the RSS it adds (M10.5 slice 9).
-const REWRITE_TIME_GATE: f64 = 1.2;
+/// its time and the RSS it adds (M10.5 slice 9). The plan's 1.2–1.3× for
+/// the time: past 1.2× is flagged, past 1.3× fails, so a check that makes
+/// saves sounder can cost a little time.
+const REWRITE_TIME_GATE: f64 = 1.3;
+const REWRITE_TIME_FLAG: f64 = 1.2;
 const REWRITE_ADDED_GATE: f64 = 1.5;
 
 /// Slice 1's history bench on slice 2's code, in milliseconds.
@@ -911,8 +914,9 @@ fn flatten(kind: Kind) {
 /// The Rewrite of the `kind` fixture as opened, by `materialize` from its
 /// plan, its post-conditions checked, in a process of its own: its time,
 /// peak and added RSS, beside slice 8's writer's ([`WriterBaseline`]),
-/// asserted within [`REWRITE_TIME_GATE`] of its time and
-/// [`REWRITE_ADDED_GATE`] of the RSS it added (slice 9).
+/// asserted within [`REWRITE_TIME_GATE`] of its time, flagged past
+/// [`REWRITE_TIME_FLAG`], and within [`REWRITE_ADDED_GATE`] of the RSS it
+/// added (slice 9).
 fn rewrite_part(kind: Kind) {
     let path = fixture(kind);
     let doc = sheaf_doc::open::file(&path, None).unwrap().doc;
@@ -936,6 +940,7 @@ fn rewrite_part(kind: Kind) {
     let base = kind.slice8_rewrite().expect("synthetic or heavy");
     let what = "Rewrite, materialize";
     let time_gate = REWRITE_TIME_GATE * base.ms;
+    let time_flag = REWRITE_TIME_FLAG * base.ms;
     let added_gate = REWRITE_ADDED_GATE * base.added_mb;
     print_table(
         &format!("{} 7k, {what} in a process of its own", kind.name()),
@@ -945,7 +950,10 @@ fn rewrite_part(kind: Kind) {
                 what,
                 time,
                 base.ms,
-                format!("≤ {REWRITE_TIME_GATE}× ({time_gate:.0} ms), asserted"),
+                format!(
+                    "≤ {REWRITE_TIME_GATE}× ({time_gate:.0} ms), asserted; flagged past \
+                     {REWRITE_TIME_FLAG}× ({time_flag:.0} ms)"
+                ),
             ),
             Row::peak(what, mem, base.rss_mb, ""),
             Row::added(
@@ -963,6 +971,12 @@ fn rewrite_part(kind: Kind) {
             },
         ],
     );
+    if ms(time) > time_flag {
+        println!(
+            "flag: the Rewrite took {time:?}, past {REWRITE_TIME_FLAG}× slice 8's {} ms",
+            base.ms
+        );
+    }
     assert!(
         ms(time) <= time_gate,
         "the Rewrite took {time:?}, over {REWRITE_TIME_GATE}× slice 8's {} ms",
