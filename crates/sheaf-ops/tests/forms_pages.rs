@@ -71,7 +71,7 @@ fn a_cropped_form_page_keeps_its_fields() {
     let dir = scratch("crop");
     let path = write(&dir, "form.pdf", &mut two_page_form());
     let mut doc = open(&path);
-    let page: PageId = doc.state().pages[0].id;
+    let page: PageId = doc.state().order()[0];
     // 100 pt off the bottom: the fields stay in view.
     let margins = Margins {
         top: 0.0,
@@ -149,7 +149,7 @@ fn watermarked(remove: bool) {
     let dir = scratch(name);
     let path = write(&dir, "form.pdf", &mut two_page_form());
     let mut doc = open(&path);
-    let pages: Vec<PageId> = doc.state().pages.iter().map(|p| p.id).collect();
+    let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
     let wm = sheaf_doc::watermark::Watermark::default();
     let snap = doc.snapshot();
     let derived = sheaf_ops::derive::watermark(
@@ -406,7 +406,7 @@ fn a_deleted_pages_value_leaves_a_second_tree() {
     tag_with_a_second_tree(&mut f);
     let path = write(&dir, "form.pdf", &mut f);
     let mut doc = open(&path);
-    let second = doc.state().pages[1].id;
+    let second = doc.state().order()[1];
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
     for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
@@ -435,7 +435,7 @@ fn a_deleted_pages_value_leaves_the_file() {
     let dir = scratch("delete");
     let path = write(&dir, "form.pdf", &mut leaky_form());
     let mut doc = open(&path);
-    let second = doc.state().pages[1].id;
+    let second = doc.state().order()[1];
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
     let saved = saved_both_ways(&doc, &path, &dir.join("rewritten.pdf"));
@@ -461,7 +461,7 @@ fn an_extracted_page_brings_no_other_pages_value() {
     let dir = scratch("extract");
     let path = write(&dir, "form.pdf", &mut leaky_form());
     let doc = open(&path);
-    let first = doc.state().pages[0].id;
+    let first = doc.state().order()[0];
     let bytes = sheaf_doc::save::extract_bytes(&doc.snapshot(), &[first]).unwrap();
     assert!(!holds(&bytes, b"LEAKVALUE123"));
     let report = clean(&bytes, "extracted");
@@ -481,7 +481,7 @@ fn a_form_left_with_no_fields_goes() {
     f.xfa();
     let path = write(&dir, "form.pdf", &mut f);
     let mut doc = open(&path);
-    let (first, second) = (doc.state().pages[0].id, doc.state().pages[1].id);
+    let (first, second) = (doc.state().order()[0], doc.state().order()[1]);
     let bytes = sheaf_doc::save::extract_bytes(&doc.snapshot(), &[second]).unwrap();
     assert_eq!(fields_of(&bytes), None, "extracted");
     assert!(!holds(&bytes, b"Alpha"), "extracted");
@@ -521,7 +521,7 @@ fn direct_object_fields_are_pruned() {
     );
     let path = write(&dir, "form.pdf", &mut f);
     let mut doc = open(&path);
-    let first = doc.state().pages[0].id;
+    let first = doc.state().order()[0];
     doc.apply(Edit::DeletePages { ids: vec![first] }, "Delete")
         .unwrap();
     for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
@@ -563,7 +563,7 @@ fn page_templates_stay() {
     );
     let path = write(&dir, "form.pdf", &mut f);
     let mut doc = open(&path);
-    let second = doc.state().pages[1].id;
+    let second = doc.state().order()[1];
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
     for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
@@ -603,7 +603,7 @@ fn corpus_ca_540_leaks_no_removed_value() {
     let path = dir.join("540.pdf");
     std::fs::write(&path, filled(&form, "540_form_5007", "LEAKVALUE123")).unwrap();
     let mut doc = open(&path);
-    let pages: Vec<PageId> = doc.state().pages.iter().map(|p| p.id).collect();
+    let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
     let extracted = sheaf_doc::save::extract_bytes(&doc.snapshot(), &[pages[5]]).unwrap();
     assert!(!holds(&extracted, b"LEAKVALUE123"), "extracted");
     assert_eq!(findings(&extracted), vec![], "extracted");
@@ -644,7 +644,7 @@ fn corpus_cropped_forms_keep_their_fields() {
             field.to_string(),
         ])];
         let mut doc = open(&path);
-        let page = doc.state().pages[0].id;
+        let page = doc.state().order()[0];
         let margins = Margins {
             top: 10.0,
             left: 10.0,
@@ -731,7 +731,7 @@ fn corpus_deleted_pages_leave_no_values() {
         let path = dir.join("form.pdf");
         pdf.save(&path).unwrap();
         let mut doc = open(&path);
-        let id = doc.state().pages[page as usize].id;
+        let id = doc.state().order()[page as usize];
         doc.apply(Edit::DeletePages { ids: vec![id] }, "Delete")
             .unwrap();
         let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();

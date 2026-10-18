@@ -14,13 +14,13 @@ impl crate::docview::DocView {
         };
         let st = doc.model.state();
         Some(crate::export_dialog::ExportContext {
-            page_count: st.pages.len(),
+            page_count: st.page_count(),
             current: doc.current_page(),
             selected: st
-                .pages
+                .order()
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| doc.selection.contains(&p.id))
+                .filter(|(_, p)| doc.selection.contains(p))
                 .map(|(i, _)| i)
                 .collect(),
         })
@@ -37,12 +37,7 @@ impl crate::docview::DocView {
             return;
         };
         let st = doc.model.state();
-        let pages: Vec<PageId> = spec
-            .pages
-            .iter()
-            .filter_map(|&i| st.pages.get(i))
-            .map(|p| p.id)
-            .collect();
+        let pages: Vec<PageId> = spec.pages.iter().filter_map(|&i| st.page_at(i)).collect();
         let job = ExportJob {
             pages,
             markup: spec.markup,

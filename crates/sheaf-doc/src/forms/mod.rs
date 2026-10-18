@@ -24,3 +24,15 @@ mod tests;
 pub use check::{Finding, Report, check, check_file};
 pub use field::{Field, FieldId, FieldKind, Value, Widget};
 pub use read::{FileForm, FormClass, FormFacts, read};
+
+/// The full name of a node named `partial` under one named `up`: the two
+/// joined by a dot, passing over an empty one, as PDFium's are. The
+/// reader names a file's nodes by it, and the document's full-name index
+/// its own.
+pub(crate) fn full_name_of(up: &str, partial: &str) -> String {
+    match (up, partial) {
+        (up, "") => up.to_string(),
+        ("", partial) => partial.to_string(),
+        (up, partial) => format!("{up}.{partial}"),
+    }
+}

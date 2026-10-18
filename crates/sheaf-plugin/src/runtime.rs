@@ -70,12 +70,13 @@ pub trait TextSource: Send + Sync {
 
 /// Runs OCR for plugins. The app implements it over `sheaf_ocr`.
 pub trait OcrSource: Send + Sync {
-    /// Recognize one page as it shows, `geom` (`Snapshot::geom`), rendered
-    /// turned `render` on top of its source page's own `/Rotate`
-    /// (`Snapshot::render_delta`).
+    /// Recognize `page`, which shows `base`, as it shows, `geom`
+    /// (`Snapshot::geom`), rendered turned `render` on top of its source
+    /// page's own `/Rotate` (`Snapshot::render_delta`).
     fn recognize(
         &self,
-        page: &sheaf_doc::PageRef,
+        page: PageId,
+        base: &sheaf_doc::PageBase,
         geom: &sheaf_doc::geom::Geom,
         render: sheaf_core::Rotation,
         language: Option<String>,
@@ -710,17 +711,15 @@ impl wasmtime_wasi_http::WasiHttpView for HostState {
 }
 
 impl HostState {
-    /// The page, for text calls.
-    pub(crate) fn page_ref(&self, page: u64) -> Result<(&DocContext, sheaf_doc::PageRef), String> {
+    /// The page, and the source page it shows, for text calls.
+    pub(crate) fn page_base(
+        &self,
+        page: u64,
+    ) -> Result<(&DocContext, PageId, &sheaf_doc::PageBase), String> {
         let d = self.doc().ok_or("no document is open")?;
-        let p = d
-            .snapshot
-            .state
-            .pages
-            .iter()
-            .find(|p| p.id == PageId(page))
-            .copied()
-            .ok_or_else(|| format!("no page {page}"))?;
-        Ok((d, p))
+        let id = PageId(page);
+        let def = d.snapshot.state.def(id);
+        let def = def.ok_or_else(|| format!("no page {page}"))?;
+        Ok((d, id, &def.base))
     }
 }

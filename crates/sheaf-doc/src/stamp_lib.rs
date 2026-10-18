@@ -6,10 +6,10 @@
 //! Acrobat stamp file reads the same way.
 //!
 //! A stamp placed in a document is its page alone, a one-page PDF named
-//! by content (`generated::store`), which the document keeps
-//! (`assets::MarkAssets`). Saved, its appearance draws that page as a
-//! Form XObject ([`page_form`]), which the file holds from then on;
-//! [`form_to_pdf`] makes a one-page PDF of it again, to show or copy.
+//! by content (`generated::store`), which the mark holds
+//! ([`FormRef`](crate::model::FormRef)). Saved, its appearance draws that
+//! page as a Form XObject ([`page_form`]), which the file holds from then
+//! on; [`form_to_pdf`] makes a one-page PDF of it again, to show or copy.
 
 use std::collections::HashMap;
 use std::path::Path;

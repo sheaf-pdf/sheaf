@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use gpui::{AnyElement, Context, ObjectFit, ScrollHandle, div, img, prelude::*, px};
-use sheaf_core::PageIndex;
+use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::{Edit, PageId};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::blank::{BlankParams, Candidate, Reason};
@@ -17,6 +17,7 @@ use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::{dialog, theme};
 
 use crate::docview::{DocView, State};
+use crate::pane::Shown;
 
 /// Thumbnail width in the review sheet.
 const THUMB: f32 = 120.0;
@@ -98,9 +99,9 @@ impl DocView {
         let ids: Vec<PageId> = doc
             .model
             .state()
-            .pages
+            .order()
             .iter()
-            .map(|p| p.id)
+            .copied()
             .filter(|id| review.checked.contains(id))
             .collect();
         if ids.is_empty() {
@@ -130,17 +131,16 @@ impl DocView {
         let rows: Vec<(usize, Candidate)> = review
             .candidates
             .iter()
-            .filter_map(|c| {
-                let at = st.pages.iter().position(|p| p.id == c.id)?;
-                Some((at, c.clone()))
-            })
+            .filter_map(|c| Some((st.pos_of(c.id)?, c.clone())))
             .collect();
         let mut wants = Vec::new();
         doc.review_keep.clear();
         let mut tiles = Vec::new();
         for (at, c) in &rows {
-            let pref = st.pages[*at];
-            let rotation = doc.model.render_delta(&pref);
+            let Some(pref) = Shown::of(st, st.order()[*at], Rotation::R0) else {
+                continue;
+            };
+            let rotation = pref.render;
             doc.review_keep.insert((pref.id, rotation));
             wants.push((
                 pref,
@@ -154,7 +154,7 @@ impl DocView {
                     priority: 3,
                 },
             ));
-            let size = doc.model.page_size(&pref);
+            let size = pref.geom.shown();
             let h = THUMB * size.height / size.width.max(1.0);
             let image = doc.previews.get(&(pref.id, rotation)).cloned();
             let checked = review.checked.contains(&c.id);

@@ -178,7 +178,7 @@ fn margins_crop_and_marks_follow() {
     let dir = scratch("margins");
     let src = pdf(&dir);
     let mut doc = open(&src);
-    let page = doc.state().pages[0].id;
+    let page = doc.state().order()[0];
     let over = Box2 {
         x: 325.0,
         y: 325.0,
@@ -194,12 +194,12 @@ fn margins_crop_and_marks_follow() {
         bottom: 0.0,
     };
     crop(&mut doc, page, m);
-    let p = doc.state().pages[0];
-    let size = doc.page_size(&p);
+    let p = doc.state().order()[0];
+    let size = doc.page_size(p);
     assert_eq!((size.width, size.height), (540.0, 720.0));
-    let kept = &doc.state().annots_on(page).unwrap()[0];
+    let kept = doc.state().marks_on(page).next().unwrap();
     assert_eq!(kept.kind, AnnotKind::Square { rect: over });
-    let shown = doc.geom(&p).to_view().apply_box(over);
+    let shown = doc.geom(p).to_view().apply_box(over);
     assert_eq!((shown.x, shown.y), (253.0, 345.0));
     // Saved, the page's crop box is the shown area.
     let out = dir.join("out.pdf");
@@ -220,7 +220,7 @@ fn margins_crop_and_marks_follow() {
     );
     // Undo puts it back.
     doc.undo().unwrap().unwrap();
-    assert_eq!(doc.page_size(&doc.state().pages[0]).width, 612.0);
+    assert_eq!(doc.page_size(doc.state().order()[0]).width, 612.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -234,9 +234,9 @@ fn a_cropped_rotated_highlight_still_covers_its_glyphs() {
     let dir = scratch("highlight");
     let src = text_pdf(&dir);
     let mut doc = open(&src);
-    let p = doc.state().pages[0];
+    let p = doc.state().order()[0];
     let engine = PdfiumEngine::open(&src, None).unwrap();
-    let chars = PageChars::from_engine(engine_chars(&engine), &doc.geom(&p));
+    let chars = PageChars::from_engine(engine_chars(&engine), &doc.geom(p));
     let words = chars.words();
     let (_, (a, b), _) = words.iter().find(|(w, ..)| w == "sheaf").unwrap();
     let rects = chars.rects(*a, *b);
@@ -247,15 +247,15 @@ fn a_cropped_rotated_highlight_still_covers_its_glyphs() {
             rects: rects.clone(),
         })
     };
-    doc.apply(Edit::AnnotAdd { page: p.id, annot }, "highlight")
+    doc.apply(Edit::AnnotAdd { page: p, annot }, "highlight")
         .unwrap();
-    crop(&mut doc, p.id, UNEVEN);
+    crop(&mut doc, p, UNEVEN);
     let turn = Edit::RotatePages {
-        ids: vec![p.id],
+        ids: vec![p],
         by: Rotation::R90,
     };
     doc.apply(turn, "rotate").unwrap();
-    let now = doc.geom(&doc.state().pages[0]);
+    let now = doc.geom(doc.state().order()[0]);
     let shown = (now.visible(), now.rotate);
     assert_eq!(shown.1, Rotation::R90);
     let snap = doc.snapshot();
@@ -270,10 +270,10 @@ fn a_cropped_rotated_highlight_still_covers_its_glyphs() {
         let out = dir.join(format!("{how}.pdf"));
         std::fs::write(&out, bytes).unwrap();
         let saved = open(&out);
-        let page = saved.state().pages[0];
-        let geom = saved.geom(&page);
+        let page = saved.state().order()[0];
+        let geom = saved.geom(page);
         assert_eq!((geom.visible(), geom.rotate), shown, "{how}");
-        let marks = saved.state().annots_on(page.id).unwrap();
+        let marks: Vec<&Annot> = saved.state().marks_on(page).collect();
         let AnnotKind::Highlight { rects: kept } = &marks[0].kind else {
             panic!("{how}: {:?}", marks[0].kind);
         };
@@ -304,7 +304,7 @@ fn trim_white_finds_the_content() {
     let dir = scratch("trim");
     let src = pdf(&dir);
     let doc = open(&src);
-    let page = doc.state().pages[0].id;
+    let page = doc.state().order()[0];
     let plan = sheaf_ops::crop::plan(
         doc.store(),
         &doc.snapshot(),
@@ -327,7 +327,7 @@ fn a_bookmark_on_a_cropped_page_lands_on_the_same_content() {
     let dir = scratch("bookmark");
     let src = pdf(&dir);
     let mut doc = open(&src);
-    let page = doc.state().pages[0].id;
+    let page = doc.state().order()[0];
     // The square's top-left in user space.
     let view = DestView::Xyz {
         left: Some(300.0),
@@ -346,11 +346,13 @@ fn a_bookmark_on_a_cropped_page_lands_on_the_same_content() {
     let out = dir.join("out.pdf");
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
     let saved = open(&out);
-    assert_eq!(saved.state().outline[0].view, Some(view));
-    let p = saved.state().pages[0];
-    let at = saved.geom(&p).to_view().apply(Pt { x: 300.0, y: 400.0 });
+    let st = saved.state();
+    let first = st.bookmark(st.outline_roots()[0]).unwrap();
+    assert_eq!(first.view(), Some(&view));
+    let p = saved.state().order()[0];
+    let at = saved.geom(p).to_view().apply(Pt { x: 300.0, y: 400.0 });
     // Where PDFium draws the square's top-left on the saved page.
-    let size = saved.page_size(&p);
+    let size = saved.page_size(p);
     let engine = PdfiumEngine::open(&out, None).unwrap();
     let job = Job::Page {
         width: size.width.round() as u32,
@@ -380,7 +382,7 @@ fn a_crop_leaves_ocr_text_on_its_words() {
     let dir = scratch("ocr");
     let src = pdf(&dir);
     let mut doc = open(&src);
-    let p = doc.state().pages[0];
+    let p = doc.state().order()[0];
     // A word along the square's top as shown.
     let word = OcrWord {
         text: "square".into(),
@@ -392,17 +394,17 @@ fn a_crop_leaves_ocr_text_on_its_words() {
         },
         confidence: 1.0,
     };
-    let layer = Arc::new(TextLayer::from_engine(vec![word], &doc.geom(&p), "test"));
+    let layer = Arc::new(TextLayer::from_engine(vec![word], &doc.geom(p), "test"));
     let set = Edit::SetTextLayers {
-        layers: vec![(p.id, layer.clone())],
+        layers: vec![(p, layer.clone())],
     };
     doc.apply(set, "ocr").unwrap();
-    crop(&mut doc, p.id, UNEVEN);
-    assert!(Arc::ptr_eq(doc.state().text_layer(p.id).unwrap(), &layer));
+    crop(&mut doc, p, UNEVEN);
+    assert!(Arc::ptr_eq(doc.state().ocr_text(p).unwrap(), &layer));
     let out = dir.join("out.pdf");
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
     let saved = open(&out);
-    let geom = saved.geom(&saved.state().pages[0]);
+    let geom = saved.geom(saved.state().order()[0]);
     let engine = PdfiumEngine::open(&out, None).unwrap();
     let hits = engine.search_page(PageIndex(0), "square", false).unwrap();
     assert_eq!(hits.len(), 1, "{hits:?}");

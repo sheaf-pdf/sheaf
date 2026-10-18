@@ -108,40 +108,48 @@ pub fn find(
     params: BlankParams,
     progress: &dyn Progress,
 ) -> Result<Vec<Candidate>> {
-    let pages = &snap.state.pages;
+    let st = &snap.state;
     let wanted: Vec<usize> = match indexes {
-        Some(ix) => ix.iter().copied().filter(|&i| i < pages.len()).collect(),
-        None => (0..pages.len()).collect(),
+        Some(ix) => ix
+            .iter()
+            .copied()
+            .filter(|&i| i < st.page_count())
+            .collect(),
+        None => (0..st.page_count()).collect(),
     };
     progress.set_total(Some(wanted.len() as u64), PAGES);
-    let mut by_source: BTreeMap<SourceId, Vec<usize>> = BTreeMap::new();
+    let pages: Vec<_> = st.pages().collect();
+    let mut by_source: BTreeMap<SourceId, Vec<(usize, PageId, u32)>> = BTreeMap::new();
     for &i in &wanted {
-        by_source.entry(pages[i].source).or_default().push(i);
+        let (id, def, _) = pages[i];
+        by_source
+            .entry(def.base.source)
+            .or_default()
+            .push((i, id, def.base.index));
     }
     let mut out = Vec::new();
     let mut done = 0;
     for (sid, list) in by_source {
         let info = snap.source(sid).context("unknown source")?;
         let engine = crate::engine_for(info)?;
-        for i in list {
+        for (i, id, index) in list {
             progress.check()?;
             done += 1;
             progress.set(done);
-            let p = pages[i];
             // sheaf's marks, others' annotations, links, fields.
-            if snap.state.annots_on(p.id).is_some_and(|a| !a.is_empty()) {
+            if st.annots_on(id).next().is_some() {
                 continue;
             }
             let has_annots = info
                 .src
-                .page(p.index)
+                .page(index)
                 .is_some_and(|page| !page.annots.is_empty());
             if has_annots {
                 continue;
             }
             // Text, from the file and any unsaved OCR.
-            let mut text = engine.page_text(PageIndex(p.index)).unwrap_or_default();
-            if let Some(layer) = snap.state.text_layers.get(&p.id) {
+            let mut text = engine.page_text(PageIndex(index)).unwrap_or_default();
+            if let Some(layer) = st.ocr_text(id) {
                 text.push(' ');
                 text.push_str(&layer.text());
             }
@@ -150,7 +158,7 @@ pub fn find(
                     if !params.keep_intentional {
                         out.push(Candidate {
                             index: i,
-                            id: p.id,
+                            id,
                             ink: 0.0,
                             reason: Reason::IntentionallyBlank,
                         });
@@ -160,9 +168,9 @@ pub fn find(
                 Says::Content => continue,
                 Says::Nothing => {}
             }
-            let size = info.src.page_size(p.index);
+            let size = info.src.page_size(index);
             let raster = engine.render(
-                PageIndex(p.index),
+                PageIndex(index),
                 Job::Page {
                     width: (size.width * 60.0 / 72.0).round().max(16.0) as u32,
                     rotation: Rotation::R0,
@@ -177,7 +185,7 @@ pub fn find(
             };
             out.push(Candidate {
                 index: i,
-                id: p.id,
+                id,
                 ink,
                 reason,
             });
@@ -201,9 +209,9 @@ pub fn write(
     let snap = doc.snapshot();
     let keep: Vec<PageId> = snap
         .state
-        .pages
+        .order()
         .iter()
-        .map(|p| p.id)
+        .copied()
         .filter(|id| !gone.contains(id))
         .collect();
     if keep.is_empty() {
@@ -214,11 +222,8 @@ pub fn write(
         return Ok(keep.len());
     };
     // The rejects' own bookmarks replace the document's.
-    let mut edits: Vec<Edit> = snap
-        .state
-        .outline
-        .iter()
-        .map(|n| Edit::OutlineDelete { id: n.id })
+    let mut edits: Vec<Edit> = (snap.state.outline_roots().iter())
+        .map(|&id| Edit::OutlineDelete { id })
         .collect();
     edits.push(Edit::DeletePages { ids: keep.clone() });
     edits.push(Edit::OutlineInsertTree {

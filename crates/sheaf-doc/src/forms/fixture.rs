@@ -13,15 +13,16 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
 use sheaf_core::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
-use crate::model::PageId;
+use crate::model::{FormRef, Mark, PageId};
 use crate::stamps::HeaderFooter;
-use crate::store::{BlobKind, Src, Store};
+use crate::store::{Blob, BlobId, BlobKind, Src, Store};
 
 /// A rectangle in page space: left, bottom, right, top.
 pub type Rect = [f32; 4];
@@ -761,22 +762,20 @@ pub fn note() -> Annot {
     }
 }
 
-/// The stem [`every_mark_kind`]'s page stamp names its page by: no name
-/// the generated cache gives, so writing and reading it never touches the
-/// cache. [`mark_assets`] holds it.
-pub const MARK_STAMP: &str = "fixture-stamp";
+/// The stem [`every_mark_kind`]'s page stamp names its page by, its
+/// blob's: [`mark_stamp_pdf`]'s.
+pub static MARK_STAMP: LazyLock<String> = LazyLock::new(|| BlobId::of(&mark_stamp_pdf()).stem());
 
-/// The stem [`every_mark_kind`]'s attachment names its file by, as
-/// [`MARK_STAMP`] is.
-pub const MARK_FILE: &str = "fixture-file";
+/// The stem [`every_mark_kind`]'s attachment names its file by,
+/// [`MARK_FILE_BYTES`]'s.
+pub static MARK_FILE: LazyLock<String> = LazyLock::new(|| BlobId::of(MARK_FILE_BYTES).stem());
 
 /// The bytes of [`every_mark_kind`]'s attachment.
 pub const MARK_FILE_BYTES: &[u8] = b"fixture notes\n";
 
-/// What [`every_mark_kind`]'s stamp and attachment name, as a document
-/// holds them: a page 100 by 50 points with a blue square in its corner
-/// and [`MARK_FILE_BYTES`].
-pub fn mark_assets() -> std::sync::Arc<crate::assets::MarkAssets> {
+/// The page [`every_mark_kind`]'s page stamp draws: a one-page PDF, its
+/// page 100 by 50 points with a blue square in its corner.
+pub fn mark_stamp_pdf() -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(
@@ -795,10 +794,36 @@ pub fn mark_assets() -> std::sync::Arc<crate::assets::MarkAssets> {
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
-    let assets = crate::assets::MarkAssets::new(Store::new());
-    assets.intern_stamp(MARK_STAMP, bytes.into());
-    assets.intern_file(MARK_FILE, MARK_FILE_BYTES.into());
-    std::sync::Arc::new(assets)
+    bytes
+}
+
+/// [`every_mark_kind`]'s stamp's page and attachment's file, interned in
+/// `store`: while they're held, an edit adding a mark that names them
+/// finds them there.
+pub fn mark_blobs(store: &Store) -> [Blob; 2] {
+    let stamp = store.intern(mark_stamp_pdf().into(), BlobKind::stamp());
+    let file = store.intern(MARK_FILE_BYTES.into(), BlobKind::Attachment);
+    [stamp.unwrap(), file.unwrap()]
+}
+
+/// `marks` as a document holds them: a page stamp naming [`MARK_STAMP`]
+/// holding its page, and an attachment naming [`MARK_FILE`] its file.
+pub fn holding(marks: &[Annot]) -> Vec<Mark> {
+    let [stamp, file] = mark_blobs(&Store::new());
+    let mark = |a: &Annot| {
+        let mut m = Mark::from(a.clone());
+        match &a.kind {
+            AnnotKind::PageStamp { stamp: s, .. } if *s == *MARK_STAMP => {
+                m.stamp = Some(FormRef::Blob(stamp.clone().into()));
+            }
+            AnnotKind::FileAttachment { file: f, .. } if *f == *MARK_FILE => {
+                m.file = Some(file.clone().into());
+            }
+            _ => {}
+        }
+        m
+    };
+    marks.iter().map(mark).collect()
 }
 
 /// One mark of every kind, not turned, in PageSpace within a visible box
@@ -806,7 +831,7 @@ pub fn mark_assets() -> std::sync::Arc<crate::assets::MarkAssets> {
 /// perimeter and an area, which a file holds as `/Vertices` where a
 /// distance is `/L`: ids from 1, the reply and the status in the note's
 /// thread, and the stamp and the attachment naming [`MARK_STAMP`] and
-/// [`MARK_FILE`], which [`mark_assets`] holds.
+/// [`MARK_FILE`] (see [`holding`]).
 pub fn every_mark_kind() -> Vec<Annot> {
     use crate::annot::{Box2, REVIEW};
     use crate::measure::{Measured, Scale};
@@ -892,7 +917,7 @@ pub fn every_mark_kind() -> Vec<Annot> {
         },
         AnnotKind::PageStamp {
             rect: b(60.0, 300.0, 100.0, 50.0),
-            stamp: MARK_STAMP.into(),
+            stamp: MARK_STAMP.clone(),
             name: "Approved".into(),
             text: Some("GE".into()),
         },
@@ -920,7 +945,7 @@ pub fn every_mark_kind() -> Vec<Annot> {
         AnnotKind::FileAttachment {
             pos: p(500.0, 700.0),
             icon: "Paperclip".into(),
-            file: MARK_FILE.into(),
+            file: MARK_FILE.clone(),
             name: "notes.txt".into(),
             size: MARK_FILE_BYTES.len() as u64,
         },

@@ -1,15 +1,17 @@
 //! History's proof (M10.5 slice 1): over random runs of every kind of
 //! edit, with batches, jobs, undo, redo, jumps, trims and saves, each version
 //! rebuilt from its prims is the state it was made as, and every file it
-//! refers to is still registered (slice 3). Each kind's no-op makes no
-//! version.
+//! refers to is still registered (slice 3). Every state on the way keeps
+//! the records' invariants (slice 8). Each kind's no-op makes no version.
 
 use std::collections::BTreeSet;
 
+use lopdf::{Object, dictionary};
 use proptest::prelude::*;
 
-use super::tests::{connector, flat, header, new_doc, opened_doc, square, tl};
+use super::tests::{connector, flat, header, opened_doc, square, tl};
 use super::*;
+use crate::forms::fixture::Form;
 use crate::history::FixedCount;
 use crate::labels::{LabelSpec, Style};
 use crate::stamps::HeaderFooter;
@@ -67,19 +69,68 @@ struct Run {
     kinds: BTreeSet<&'static str>,
 }
 
+/// Other tools' annotations on page `page` of `f`: a comment named
+/// `name`, Acrobat's replace-text edit (a Caret, its StrikeOut grouped
+/// under it), with a reply, and a link.
+fn with_theirs(f: &mut Form, page: usize, name: &str) {
+    let rect = |x: i64| vec![x.into(), 10.into(), (x + 20).into(), 30.into()];
+    let caret = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(10),
+        "NM" => Object::string_literal(name), "Contents" => Object::string_literal("the"),
+    });
+    let strike = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(30),
+        "QuadPoints" => vec![30.into(), 30.into(), 50.into(), 30.into(), 30.into(), 10.into(), 50.into(), 10.into()],
+        "IRT" => caret, "RT" => "Group", "NM" => Object::string_literal(format!("{name}-strike")),
+    });
+    let reply = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(10), "IRT" => caret,
+        "NM" => Object::string_literal(format!("{name}-reply")),
+        "Contents" => Object::string_literal("a reply"),
+    });
+    let link = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Link", "Rect" => rect(100),
+    });
+    let mut annots = f.annots(page);
+    annots.extend([caret, strike, reply, link]);
+    f.set_annots(page, &annots);
+}
+
+/// The annotations of a file of six pages, each with other tools'
+/// annotations ([`with_theirs`]), `theirs-1` on the first and every other
+/// one after, `theirs-2` on the rest.
+fn their_annots() -> Arc<FileAnnots> {
+    let mut f = Form::new(6);
+    for page in 0..6 {
+        with_theirs(&mut f, page, ["theirs-1", "theirs-2"][page % 2]);
+    }
+    crate::forms::fixture::source(f.bytes()).annots().clone()
+}
+
 impl Run {
-    /// Six pages with two bookmarks and a form, beside a file with the same
-    /// form, keeping no snapshot it may drop.
+    /// Six pages with two bookmarks, a form and other tools' comments and
+    /// links, beside a file with the same form, and their comments and
+    /// links on its two pages, keeping no snapshot it may drop.
     fn new() -> Self {
-        let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
+        let mut other = crate::forms::fixture::every_kind();
+        with_theirs(&mut other, 0, "theirs-1");
+        with_theirs(&mut other, 1, "theirs-2");
+        let bytes = other.bytes();
         let facts = Facts {
             outline: flat(&[("A", Some(0), 0), ("B", Some(3), 0)]),
-            form: form.clone(),
+            form: crate::forms::fixture::source(bytes.clone()).form().clone(),
+            annots: their_annots(),
             ..Default::default()
         };
         let mut d = opened_doc(6, facts, Box::new(FixedCount(1)));
-        let other = d.add_source(SourceInfo::blank(d.store(), 4));
-        d.set_source_form(other, form);
+        let kind = BlobKind::file(Path::new("form.pdf"), None);
+        let other = SourceInfo {
+            src: d.store().open(bytes.into(), kind).unwrap(),
+            name: "form.pdf".into(),
+            derived: None,
+            stamp: None,
+        };
+        let other = d.add_source(other);
         // The opened version holds it, so any version may bring its pages
         // in, as it may the opened file's. (The app registers a file for
         // each insert, and the version the insert made holds it.)
@@ -97,6 +148,8 @@ impl Run {
         }
     }
 
+    /// Runs `action`, its choices drawn from `seed`: the state it leaves
+    /// keeps the invariants.
     fn act(&mut self, (action, seed): (u8, u64)) {
         let rng = &mut fastrand::Rng::with_seed(seed);
         match action {
@@ -155,6 +208,8 @@ impl Run {
             }
             _ => unreachable!("action {action}"),
         }
+        let st = self.d.state();
+        assert_eq!(st.check_invariants(), Ok(()), "after action {action}");
     }
 
     /// Runs `apply`, an edit of `kinds`. When it made a version, or put a
@@ -183,21 +238,28 @@ impl Run {
     /// an AnnotUpdate with no mark adds one, and so on.
     fn edit(&self, kind: u8, rng: &mut fastrand::Rng) -> Edit {
         let st = self.d.state();
-        let pages: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
+        let pages: Vec<PageId> = st.order().iter().copied().collect();
         let marks: Vec<(PageId, &Annot)> = pages
             .iter()
-            .flat_map(|&p| st.annots_on(p).into_iter().flatten().map(move |a| (p, a)))
+            .flat_map(|&p| st.marks_on(p).map(move |a| (p, a)))
+            .collect();
+        let foreign: Vec<(PageId, AnnotId, &ForeignAnnot)> = pages
+            .iter()
+            .flat_map(|&p| st.foreign_on(p).map(move |(id, f)| (p, id, &*f.summary)))
             .collect();
         let layered: Vec<PageId> = pages
             .iter()
             .copied()
-            .filter(|&p| st.has_text_layer(p))
+            .filter(|&p| st.ocr_text(p).is_some())
             .collect();
-        let bookmarks: Vec<&OutlineNode> = st.outline_flat().into_iter().map(|(_, n)| n).collect();
+        let bookmarks: Vec<OutlineId> = (st.bookmarks_preorder().into_iter())
+            .map(|(_, id, _)| id)
+            .collect();
         let kind = match kind {
             2 if pages.len() <= 2 => 3,
             8..=10 if bookmarks.is_empty() => 6,
-            12 | 13 if marks.is_empty() => 11,
+            12 if marks.is_empty() => 11,
+            13 if marks.is_empty() && foreign.is_empty() => 11,
             17 if layered.is_empty() => 16,
             k => k,
         };
@@ -210,29 +272,26 @@ impl Run {
             ids
         };
         let mark = |rng: &mut fastrand::Rng| marks[rng.usize(..marks.len())];
-        let bookmark = |rng: &mut fastrand::Rng| bookmarks[rng.usize(..bookmarks.len())].id;
+        let bookmark = |rng: &mut fastrand::Rng| bookmarks[rng.usize(..bookmarks.len())];
         // Under a bookmark or at the top, first or after one there; for a
         // bookmark `moving`, outside it.
         let place = |rng: &mut fastrand::Rng, moving: Option<OutlineId>| {
-            let outside = |id: OutlineId| {
-                moving.is_none_or(|m| id != m && !subtree_contains(&st.outline, m, id))
-            };
-            let parents: Vec<&OutlineNode> = bookmarks
+            let outside = |id: OutlineId| moving.is_none_or(|m| !subtree(st, m).contains(&id));
+            let parents: Vec<OutlineId> = bookmarks
                 .iter()
                 .copied()
-                .filter(|n| outside(n.id))
+                .filter(|&id| outside(id))
                 .collect();
             let parent =
                 (!parents.is_empty() && rng.bool()).then(|| parents[rng.usize(..parents.len())]);
-            let siblings: Vec<OutlineId> = parent
-                .map_or(&st.outline, |n| &n.children)
-                .iter()
-                .map(|n| n.id)
+            let siblings: Vec<OutlineId> = kids_of(st, parent)
+                .expect("a bookmark")
+                .into_iter()
                 .filter(|&id| outside(id))
                 .collect();
             let after =
                 (!siblings.is_empty() && rng.bool()).then(|| siblings[rng.usize(..siblings.len())]);
-            (parent.map(|n| n.id), after)
+            (parent, after)
         };
         // A file pages come from, and its page count.
         let source = |rng: &mut fastrand::Rng| {
@@ -358,17 +417,25 @@ impl Run {
             11 => {
                 // Sometimes a reply, to one of ours on its page or to
                 // another tool's comment, which AnnotDelete and
-                // CommentsDelete take with them.
+                // CommentsDelete take with them; sometimes another tool's
+                // comment made ours, which takes its place.
                 let reply = |parent| Annot {
                     kind: AnnotKind::Reply { parent },
                     ..square(0)
                 };
-                let (page, annot) = match rng.u8(..3) {
+                let adoptable: Vec<(PageId, AnnotId, &Annot)> = (foreign.iter())
+                    .filter_map(|&(page, id, f)| Some((page, id, &**f.mark.as_ref()?)))
+                    .collect();
+                let (page, annot) = match rng.u8(..4) {
                     0 if !marks.is_empty() => {
                         let (page, a) = mark(rng);
                         (page, reply(a.name()))
                     }
                     1 => (page(rng), reply(theirs(rng))),
+                    2 if !adoptable.is_empty() => {
+                        let (page, id, mark) = adoptable[rng.usize(..adoptable.len())];
+                        (page, Annot { id, ..mark.clone() })
+                    }
                     _ => (page(rng), square(0)),
                 };
                 Edit::AnnotAdd { page, annot }
@@ -385,8 +452,22 @@ impl Run {
                 }
             }
             13 => {
-                let (page, a) = mark(rng);
-                Edit::AnnotDelete { page, id: a.id }
+                // Ours, or another tool's comment or link.
+                let (page, id) = match rng.bool() {
+                    true if !foreign.is_empty() => {
+                        let (page, id, _) = foreign[rng.usize(..foreign.len())];
+                        (page, id)
+                    }
+                    _ if !marks.is_empty() => {
+                        let (page, a) = mark(rng);
+                        (page, a.id)
+                    }
+                    _ => {
+                        let (page, id, _) = foreign[rng.usize(..foreign.len())];
+                        (page, id)
+                    }
+                };
+                Edit::AnnotDelete { page, id }
             }
             14 => Edit::CommentsDelete {
                 page: page(rng),
@@ -450,10 +531,10 @@ impl Run {
     /// Every version recorded, rebuilt from the opened version's state by
     /// its prims alone (unless a save is on the way), and reached by a jump
     /// with no snapshot kept that may be dropped: the state it was made as,
-    /// ids and all. Neither draws an id. Each registration is held once, by
-    /// a version or the next one to be made (the primary may be by none),
-    /// and what the versions refer to is registered. The kinds of edit that
-    /// made a version.
+    /// ids and all, which keeps the invariants. Neither draws an id. Each
+    /// registration is held once, by a version or the next one to be made
+    /// (the primary may be by none), and what the versions refer to is
+    /// registered. The kinds of edit that made a version.
     fn check(mut self) -> BTreeSet<&'static str> {
         let d = &mut self.d;
         d.trim();
@@ -467,10 +548,13 @@ impl Run {
         held.insert(d.primary);
         let registered: BTreeSet<SourceId> = d.sources.keys().copied().collect();
         assert_eq!(held, registered);
-        assert!(d.forms.keys().all(|s| registered.contains(s)));
         for (id, st) in &self.made {
-            let pages = st.pages.iter().map(|p| p.source);
-            for s in pages.chain(st.fields.values().map(|f| f.source)) {
+            assert_eq!(st.check_invariants(), Ok(()), "{id:?}");
+            let pages = st.pages().map(|(_, def, _)| def.base.source);
+            let fields = st.fields().map(|(_, node)| node.inst.src);
+            let widgets = (st.annots()).filter_map(|(_, a)| Some(a.widget()?.inst.src));
+            let instances = st.form().names.keys().map(|inst| inst.src);
+            for s in pages.chain(fields).chain(widgets).chain(instances) {
                 assert!(registered.contains(&s), "{id:?} refers to {s:?}");
             }
         }
@@ -488,6 +572,7 @@ impl Run {
         for (id, want) in &self.made {
             if let Some(st) = from_root(d, *id) {
                 assert_eq!(&st, want, "{id:?} from the opened version");
+                assert_eq!(st.check_invariants(), Ok(()), "{id:?} rebuilt");
             }
             d.trim();
             d.jump(*id).unwrap();
@@ -618,13 +703,14 @@ fn a_run_applies_every_kind() {
 /// have none: each always makes or removes something, or fails.
 #[test]
 fn each_kind_s_no_op_pushes_nothing() {
-    let mut d = new_doc(
-        6,
-        &flat(&[("A", Some(0), 0), ("A1", Some(1), 1), ("B", Some(3), 0)]),
-        Box::new(FixedCount(100)),
-    );
+    let facts = Facts {
+        outline: flat(&[("A", Some(0), 0), ("A1", Some(1), 1), ("B", Some(3), 0)]),
+        annots: their_annots(),
+        ..Default::default()
+    };
+    let mut d = opened_doc(6, facts, Box::new(FixedCount(100)));
     let other = d.add_source(SourceInfo::blank(d.store(), 4));
-    let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap().id);
+    let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap());
     let roman = || {
         vec![LabelSpec {
             start: p0,
@@ -641,7 +727,7 @@ fn each_kind_s_no_op_pushes_nothing() {
         },
         Edit::CommentsDelete {
             page: p1,
-            names: vec!["theirs".into()],
+            names: vec!["theirs-2".into()],
         },
         Edit::SetPageLabels { ranges: roman() },
         Edit::SetHeaderFooter {
@@ -650,15 +736,14 @@ fn each_kind_s_no_op_pushes_nothing() {
     ] {
         d.apply(edit, "before").unwrap();
     }
-    let mark = d.state().annots_on(p0).unwrap()[0].clone();
+    let mark = d.state().marks_on(p0).next().unwrap().clone();
     let [a, b] = ["A", "B"].map(|title| {
         d.state()
-            .outline_flat()
+            .bookmarks_preorder()
             .iter()
-            .find(|(_, n)| n.title == title)
+            .find(|(_, _, b)| &*b.title == title)
             .unwrap()
             .1
-            .id
     });
     let no_ops = vec![
         Edit::MovePages {
@@ -708,8 +793,11 @@ fn each_kind_s_no_op_pushes_nothing() {
             page: p0,
             annot: mark,
         },
-        // Names deleted already, and none: neither changes what a save
-        // leaves out.
+        // Names deleted already, of no comment on the page, and none.
+        Edit::CommentsDelete {
+            page: p1,
+            names: vec!["theirs-2".into()],
+        },
         Edit::CommentsDelete {
             page: p1,
             names: vec!["theirs".into()],

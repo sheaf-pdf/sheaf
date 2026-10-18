@@ -118,7 +118,7 @@ pub fn read(src: &Source) -> Properties {
         security: pdf.is_encrypted().then(|| security_of(pdf)),
         fonts,
         fonts_truncated,
-        form: crate::forms::read(src).facts,
+        form: src.form().facts.clone(),
     }
 }
 

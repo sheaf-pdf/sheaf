@@ -15,9 +15,8 @@ use sheaf_core::PageSize;
 use sheaf_doc::content::{
     Color, ContentWriter, Font, Paint, Res, ResObjects, Reserved, Std14, wrap_with,
 };
-use sheaf_doc::file::ForeignAnnot;
 use sheaf_doc::stamp_lib::PageForm;
-use sheaf_doc::{Box2, Pt, Snapshot, SourceId};
+use sheaf_doc::{Box2, Pt, Snapshot};
 
 use super::{CommentFilter, Listing, Sort, Thread, list, meta, numbers};
 
@@ -71,13 +70,12 @@ const FOOTER: f32 = 22.0;
 /// as a summary PDF titled `title`.
 pub fn summary_pdf(
     snap: &Snapshot,
-    foreign: &[(SourceId, ForeignAnnot)],
     cf: &CommentFilter,
     needle: &str,
     layout: Layout,
     title: &str,
 ) -> Result<Vec<u8>> {
-    let listing = list(&snap.state, foreign, cf, needle);
+    let listing = list(&snap.state, cf, needle);
     let labels = snap.state.page_labels();
     let mut w = Writer::new(layout);
     match layout {
@@ -185,7 +183,7 @@ fn pages(
         return Ok(());
     }
     let st = &snap.state;
-    let ids: Vec<_> = by_page.keys().map(|&p| st.pages[p].id).collect();
+    let ids: Vec<_> = by_page.keys().map(|&p| st.order()[p]).collect();
     // The pages as they print, every mark drawn in.
     let printed = Pdf::load_mem(&sheaf_doc::save::print_pdf(snap, &ids, true)?)
         .context("reading the pages back")?;

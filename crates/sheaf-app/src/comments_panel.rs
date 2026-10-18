@@ -17,7 +17,7 @@ use gpui::{
 };
 use sheaf_doc::annot::{MARKED, REVIEW, REVIEW_STATES};
 use sheaf_doc::geom::Affine;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, PageId, file::ForeignAnnot};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, DocState, PageId, file::ForeignAnnot};
 use sheaf_ops::comments::{
     self, Column, Comment, DataFormat, Layout, Sort, Summary, foreign_text, ours_text, parse_pages,
     status_words, subtype_label, thread_status, threads,
@@ -123,20 +123,20 @@ pub struct CommentView {
     pub types: BTreeSet<String>,
     pub authors: BTreeSet<String>,
     pub colors: BTreeSet<[u8; 3]>,
-    /// Comments the filter (or a deletion) hides on the page.
+    /// Comments the filter hides on the page, and other tools' one of our
+    /// marks took the place of.
     pub hidden_ours: HashSet<AnnotId>,
-    pub hidden_foreign: HashSet<usize>,
+    pub hidden_foreign: HashSet<AnnotId>,
 }
 
 /// When the view must be made again: the document's version, the
-/// third-party list's, the filter, the search text and the reply box.
-pub(crate) type ViewKey = (
-    u64,
-    u64,
-    CommentFilter,
-    String,
-    Option<(Item, Option<AnnotId>)>,
-);
+/// filter, the search text and the reply box.
+pub(crate) type ViewKey = (u64, CommentFilter, String, Option<(Item, Option<AnnotId>)>);
+
+/// Another tool's annotation `id`, as read.
+fn foreign_of(st: &DocState, id: AnnotId) -> Option<&ForeignAnnot> {
+    Some(&st.annot(id)?.foreign()?.summary)
+}
 
 #[derive(Clone)]
 enum Row {
@@ -196,15 +196,17 @@ impl DocView {
     }
 
     /// Scroll to a third-party comment.
-    fn reveal_foreign(&mut self, ix: usize, cx: &mut Context<Self>) {
+    fn reveal_foreign(&mut self, id: AnnotId, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some((source, f)) = doc.foreign_annots.get(ix).cloned() else {
+        let st = doc.model.state();
+        let Some(a) = st.annot(id) else {
             return;
         };
-        if let Some(index) = doc.index_of_page_in(source, f.page) {
-            doc.reveal(index, f.rect);
+        if let (Some(index), Some(f)) = (st.pos_of(a.page), a.foreign()) {
+            let rect = f.summary.rect;
+            doc.reveal(index, rect);
         }
         cx.notify();
     }
@@ -213,7 +215,7 @@ impl DocView {
     fn pick_item(&mut self, item: Item, root: Item, cx: &mut Context<Self>) {
         match root {
             Item::Ours(_, id) => self.jump_to_annot(id, cx),
-            Item::Foreign(ix) => self.reveal_foreign(ix, cx),
+            Item::Foreign(id) => self.reveal_foreign(id, cx),
         }
         let State::Ready(doc) = &mut self.state else {
             return;
@@ -223,9 +225,9 @@ impl DocView {
                 doc.selected_foreign = None;
                 doc.select_mark(Some((page, id)));
             }
-            Item::Foreign(ix) => {
+            Item::Foreign(id) => {
                 doc.selected_marks.clear();
-                doc.selected_foreign = Some(ix);
+                doc.selected_foreign = Some(id);
             }
         }
         cx.notify();
@@ -238,7 +240,7 @@ impl DocView {
         };
         match (doc.selected_marks.last(), doc.selected_foreign) {
             (Some(&(page, id)), _) => Some(Item::Ours(page, id)),
-            (None, Some(ix)) => Some(Item::Foreign(ix)),
+            (None, Some(id)) => Some(Item::Foreign(id)),
             _ => None,
         }
     }
@@ -248,23 +250,12 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        match item {
-            Item::Ours(page, id) => {
-                let a = doc
-                    .model
-                    .state()
-                    .annots_on(page)?
-                    .iter()
-                    .find(|a| a.id == id)?
-                    .clone();
-                Some((page, a.name()))
-            }
-            Item::Foreign(ix) => {
-                let (source, f) = doc.foreign_annots.get(ix)?;
-                let index = doc.index_of_page_in(*source, f.page)?;
-                Some((doc.page_ref(index)?.id, f.name.clone()))
-            }
-        }
+        let (page, id) = match item {
+            Item::Ours(page, id) => (Some(page), id),
+            Item::Foreign(id) => (None, id),
+        };
+        let a = doc.model.state().annot(id)?;
+        page.is_none_or(|p| p == a.page).then(|| (a.page, a.name()))
     }
 
     /// One of our marks by page and id.
@@ -272,12 +263,8 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        doc.model
-            .state()
-            .annots_on(page)?
-            .iter()
-            .find(|a| a.id == id)
-            .cloned()
+        let (on, a) = doc.model.state().find_annot(id)?;
+        (on == page).then(|| a.clone())
     }
 
     /// R: open the reply box under `item`'s thread (or, for one of our
@@ -427,31 +414,14 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return Vec::new();
         };
-        let Some(pref) = doc
-            .model
-            .state()
-            .pages
-            .iter()
-            .find(|p| p.id == page)
-            .copied()
-        else {
-            return Vec::new();
-        };
-        let foreign: Vec<usize> = doc
-            .foreign_annots
-            .iter()
-            .enumerate()
-            .filter(|(_, (source, f))| *source == pref.source && f.page == pref.index)
-            .map(|(i, _)| i)
-            .collect();
-        comments::comments_on(doc.model.state(), &doc.foreign_annots, &pref, &foreign).0
+        comments::comments_on(doc.model.state(), page).0
     }
 
     /// F2 / double-click: edit the selected mark's text in place (a
     /// reply's in the reply box).
     fn edit_selected_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Item::Foreign(ix)) = self.selected_item() {
-            self.edit_foreign(ix, window, cx);
+        if let Some(Item::Foreign(id)) = self.selected_item() {
+            self.edit_foreign(id, window, cx);
             return;
         }
         let State::Ready(doc) = &self.state else {
@@ -529,7 +499,6 @@ impl DocView {
         };
         let key: ViewKey = (
             doc.version,
-            doc.foreign_generation,
             doc.comment_filter.clone(),
             needle.clone(),
             reply,
@@ -541,7 +510,6 @@ impl DocView {
         }
         let view = Arc::new(build_view(
             doc.model.state(),
-            &doc.foreign_annots,
             &doc.comment_filter,
             &needle,
             reply,
@@ -555,9 +523,12 @@ impl DocView {
     }
 
     /// Hide on screen the other tools' comments that should be (filtered
-    /// out, deleted, or all with View > Hide Comments), and show again the
-    /// ones sheaf hid that shouldn't be any more. Never touches one the
-    /// file hides itself.
+    /// out, deleted or made ours, or all with View > Hide Comments), and
+    /// show again the ones sheaf hid that shouldn't be any more: of each
+    /// page's file, those the page has no comment by the name of that
+    /// shows. Never touches one the file hides itself, or a link. A copy
+    /// sheaf made of a page (a crop) isn't looked at: the comments on its
+    /// page show.
     pub(crate) fn sync_foreign_visibility(&mut self, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
@@ -567,13 +538,34 @@ impl DocView {
             .as_ref()
             .map(|(_, v)| v.hidden_foreign.clone())
             .unwrap_or_default();
-        let want: HashSet<(sheaf_doc::SourceId, u32, usize)> = doc
-            .foreign_annots
-            .iter()
-            .enumerate()
-            .filter(|(i, (_, f))| !f.hidden && (doc.comments_hidden || hidden_by_view.contains(i)))
-            .map(|(_, (source, f))| (*source, f.page, f.slot))
-            .collect();
+        let st = doc.model.state();
+        let mut want: HashSet<(sheaf_doc::SourceId, u32, usize)> = HashSet::new();
+        for (page, def, _) in st.pages() {
+            let base = &def.base;
+            let Some(info) = doc
+                .model
+                .source(base.source)
+                .filter(|s| s.derived.is_none())
+            else {
+                continue;
+            };
+            let in_file = info.src.annots().foreign_on(base.index);
+            let mut in_file = in_file
+                .filter(|(_, _, f)| !f.hidden && !f.is_link())
+                .peekable();
+            if in_file.peek().is_none() {
+                continue;
+            }
+            let shown: HashSet<&str> = (st.foreign_on(page))
+                .filter(|(id, _)| !doc.comments_hidden && !hidden_by_view.contains(id))
+                .map(|(_, f)| f.summary.name.as_str())
+                .collect();
+            want.extend(
+                in_file
+                    .filter(|(_, _, f)| !shown.contains(f.name.as_str()))
+                    .map(|(_, _, f)| (base.source, base.index, f.slot)),
+            );
+        }
         let hide: Vec<_> = want.difference(&doc.foreign_hidden).copied().collect();
         let show: Vec<_> = doc.foreign_hidden.difference(&want).copied().collect();
         if hide.is_empty() && show.is_empty() {
@@ -651,10 +643,10 @@ impl DocView {
     /// Delete the selected third-party comment (and its thread), as one
     /// undo step. False when none is selected.
     pub(crate) fn delete_selected_foreign(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(Item::Foreign(ix)) = self.selected_item() else {
+        let Some(Item::Foreign(id)) = self.selected_item() else {
             return false;
         };
-        let Some((page, name)) = self.item_page_and_name(Item::Foreign(ix)) else {
+        let Some((page, name)) = self.item_page_and_name(Item::Foreign(id)) else {
             return false;
         };
         if let State::Ready(doc) = &mut self.state {
@@ -729,30 +721,23 @@ impl DocView {
                 .clamp(1, MAX_TEXT_LINES)
         };
         let ours_of = |page: PageId, id: AnnotId| {
-            st.annots_on(page)
-                .and_then(|l| l.iter().find(|a| a.id == id))
-                .cloned()
+            let (on, a) = st.find_annot(id)?;
+            (on == page).then(|| a.clone())
         };
-        let layout = ListLayout::variable(rows.iter().map(|r| {
-            match *r {
-                Row::Header { .. } => HEADER_H,
-                Row::Status { .. } => STATUS_H,
-                Row::ReplyBox { .. } => REPLY_BOX_H,
-                Row::Comment {
-                    item: Item::Ours(page, id),
-                    depth,
-                    ..
-                } => row_h(ours_of(page, id).map_or(1, |a| text_lines(&ours_text(&a), depth))),
-                Row::Comment {
-                    item: Item::Foreign(ix),
-                    depth,
-                    ..
-                } => row_h(
-                    doc.foreign_annots
-                        .get(ix)
-                        .map_or(1, |(_, f)| text_lines(&foreign_text(f), depth)),
-                ),
-            }
+        let layout = ListLayout::variable(rows.iter().map(|r| match *r {
+            Row::Header { .. } => HEADER_H,
+            Row::Status { .. } => STATUS_H,
+            Row::ReplyBox { .. } => REPLY_BOX_H,
+            Row::Comment {
+                item: Item::Ours(page, id),
+                depth,
+                ..
+            } => row_h(ours_of(page, id).map_or(1, |a| text_lines(&ours_text(&a), depth))),
+            Row::Comment {
+                item: Item::Foreign(id),
+                depth,
+                ..
+            } => row_h(foreign_of(st, id).map_or(1, |f| text_lines(&foreign_text(f), depth))),
         }))
         .padded(0.0, 4.0);
 
@@ -760,7 +745,7 @@ impl DocView {
         let selected_foreign = doc.selected_foreign;
         let is_selected = |item: Item| match item {
             Item::Ours(page, id) => selected.contains(&(page, id)),
-            Item::Foreign(ix) => selected_foreign == Some(ix),
+            Item::Foreign(id) => selected_foreign == Some(id),
         };
         // A summary shows when each was applied.
         let applied = cf.summary.is_some();
@@ -842,8 +827,8 @@ impl DocView {
                             }
                             None => continue,
                         },
-                        Item::Foreign(ix) => match doc.foreign_annots.get(ix) {
-                            Some((_, f)) => {
+                        Item::Foreign(id) => match foreign_of(st, id) {
+                            Some(f) => {
                                 let state = f
                                     .state
                                     .as_ref()
@@ -895,8 +880,8 @@ impl DocView {
                                 !reply || mine,
                             )
                         }
-                        Item::Foreign(ix) => {
-                            let Some((_, f)) = doc.foreign_annots.get(ix) else {
+                        Item::Foreign(id) => {
+                            let Some(f) = foreign_of(st, id) else {
                                 continue;
                             };
                             let author = if f.author.is_empty() {
@@ -943,7 +928,7 @@ impl DocView {
                     };
                     let row_id = match item {
                         Item::Ours(_, id) => ("ours", id.0 as usize),
-                        Item::Foreign(ix) => ("foreign", ix),
+                        Item::Foreign(id) => ("foreign", id.0 as usize),
                     };
                     let mut row = comment_row(
                         layout.place(i),
@@ -973,7 +958,7 @@ impl DocView {
                     if deletable {
                         let del_id = match item {
                             Item::Ours(_, id) => ("del", id.0 as usize),
-                            Item::Foreign(ix) => ("del-foreign", ix),
+                            Item::Foreign(id) => ("del-foreign", id.0 as usize),
                         };
                         row = row.child(
                             div()
@@ -1478,7 +1463,6 @@ impl DocView {
             .collect();
         doc.notice = Some(format!("Writing comments to {}…", path.display()));
         let snapshot = doc.model.snapshot();
-        let foreign = doc.foreign_annots.clone();
         let cf = doc.comment_filter.clone();
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -1487,12 +1471,12 @@ impl DocView {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        let listing = comments::list(&snapshot.state, &foreign, &cf, &needle);
+                        let listing = comments::list(&snapshot.state, &cf, &needle);
                         let labels = snapshot.state.page_labels();
                         let bytes = match kind {
-                            ExportKind::Summary(layout) => comments::summary_pdf(
-                                &snapshot, &foreign, &cf, &needle, layout, &title,
-                            )?,
+                            ExportKind::Summary(layout) => {
+                                comments::summary_pdf(&snapshot, &cf, &needle, layout, &title)?
+                            }
                             ExportKind::Csv => {
                                 comments::csv(&listing, labels.as_deref(), &columns).into_bytes()
                             }
@@ -1506,7 +1490,7 @@ impl DocView {
                                 } else {
                                     comments::items(&listing)
                                 };
-                                comments::export_data(&snapshot, &foreign, &items, format)?
+                                comments::export_data(&snapshot, &items, format)?
                             }
                         };
                         std::fs::write(&path, bytes)
@@ -1571,8 +1555,7 @@ impl DocView {
             return;
         };
         doc.notice = Some(format!("Reading comments from {}…", path.display()));
-        let snapshot = doc.model.snapshot();
-        let foreign = doc.foreign_annots.clone();
+        let (snapshot, store) = (doc.model.snapshot(), doc.model.store().clone());
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -1581,7 +1564,7 @@ impl DocView {
                     let path = path.clone();
                     async move {
                         let bytes = std::fs::read(&path)?;
-                        comments::import_data(&snapshot, &foreign, &bytes, None)
+                        comments::import_data(&snapshot, &store, &bytes, None)
                     }
                 })
                 .await;
@@ -1593,6 +1576,7 @@ impl DocView {
                 match result {
                     Ok(got) => {
                         let summary = got.summary();
+                        // What the marks hold is held until they're added.
                         if !got.edits.is_empty() {
                             view.apply_batch(
                                 got.edits,
@@ -1600,6 +1584,7 @@ impl DocView {
                                 cx,
                             );
                         }
+                        drop(got.held);
                         view.set_notice(format!("Imported from {name}: {summary}"), cx);
                     }
                     Err(e) => view.set_notice(format!("Import failed: {e:#}"), cx),
@@ -1632,9 +1617,9 @@ impl DocView {
         ];
         // Another tool's comment that sheaf can hold: make it a mark, to
         // move, resize and restyle.
-        if let Item::Foreign(ix) = item
+        if let Item::Foreign(id) = item
             && self
-                .foreign_mark(ix)
+                .foreign_mark(id)
                 .is_some_and(|(_, m)| m.thread_parent().is_none())
         {
             items.push(
@@ -1643,7 +1628,7 @@ impl DocView {
                         if let Some(cm) = &mut v.comments {
                             cm.menu = None;
                         }
-                        v.adopt_foreign(ix, |_| {}, "Make comment editable", cx);
+                        v.adopt_foreign(id, |_| {}, "Make comment editable", cx);
                     }))
                     .into_any_element(),
             );
@@ -1719,13 +1704,12 @@ impl DocView {
 /// Make the panel's view of `doc` (see `CommentView`): the list, as
 /// rows, with the reply box where one is open.
 fn build_view(
-    st: &sheaf_doc::DocState,
-    foreign_all: &[(sheaf_doc::SourceId, ForeignAnnot)],
+    st: &DocState,
     cf: &CommentFilter,
     needle: &str,
     reply: Option<(Item, Option<AnnotId>)>,
 ) -> CommentView {
-    let listing = comments::list(st, foreign_all, cf, needle);
+    let listing = comments::list(st, cf, needle);
     let mut rows = Vec::new();
     for g in &listing.groups {
         rows.push(Row::Header {
@@ -1908,10 +1892,11 @@ pub(crate) fn foreign_outline(f: &ForeignAnnot, to_pane: &Affine, k: f32) -> Any
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_doc::{Box2, Document, FixedCount, SourceInfo, Store};
+    use sheaf_doc::{AnnotBody, Box2, Document, FixedCount, Foreign, SourceInfo, Store};
 
     /// The rows for a page with a thread (a; r in reply to it; rr in reply
-    /// to r) and a comment b, as short strings.
+    /// to r) and a comment b, other tools' comments 0 to 3, as short
+    /// strings.
     fn rows(reply: Option<(Item, Option<AnnotId>)>) -> Vec<String> {
         let store = Store::new();
         let primary = SourceInfo {
@@ -1919,50 +1904,59 @@ mod tests {
             ..SourceInfo::blank(&store, 1)
         };
         let d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-        let source = d.state().pages[0].source;
         let theirs = |name: &str, parent: Option<&str>, date: &str| {
-            (
-                source,
-                ForeignAnnot {
-                    page: 0,
-                    subtype: "Text".into(),
-                    author: "Ann".into(),
-                    contents: name.into(),
-                    modified: date.into(),
-                    rect: Box2 {
-                        x: 0.0,
-                        y: 0.0,
-                        w: 10.0,
-                        h: 10.0,
-                    },
-                    name: name.into(),
-                    parent: parent.map(str::to_string),
-                    grouped: false,
-                    state: None,
-                    created: String::new(),
-                    slot: 0,
-                    hidden: false,
-                    color: None,
-                    mark: None,
+            let summary = ForeignAnnot {
+                subtype: "Text".into(),
+                author: "Ann".into(),
+                contents: name.into(),
+                modified: date.into(),
+                rect: Box2 {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 10.0,
+                    h: 10.0,
                 },
-            )
+                name: name.into(),
+                parent: parent.map(str::to_string),
+                grouped: false,
+                state: None,
+                created: String::new(),
+                slot: 0,
+                hidden: false,
+                color: None,
+                mark: None,
+            };
+            AnnotBody::Foreign(Arc::new(Foreign {
+                src: None,
+                copy: 0,
+                summary: Arc::new(summary),
+            }))
         };
-        let foreign = vec![
+        let foreign = [
             theirs("a", None, "D:1"),
             theirs("r", Some("a"), "D:2"),
             theirs("rr", Some("r"), "D:3"),
             theirs("b", None, "D:4"),
         ];
-        let view = build_view(d.state(), &foreign, &CommentFilter::default(), "", reply);
+        let page = d.state().order()[0];
+        let st = DocState::builder()
+            .pages(
+                d.state()
+                    .pages()
+                    .map(|(id, def, geom)| (id, def.clone(), geom.clone())),
+            )
+            .annots([(page, (0..).map(AnnotId).zip(foreign).collect())])
+            .build();
+        let view = build_view(&st, &CommentFilter::default(), "", reply);
         view.rows
             .iter()
             .map(|r| match r {
                 Row::Header { label, count, .. } => format!("{label} ({count})"),
                 Row::Comment {
-                    item: Item::Foreign(i),
+                    item: Item::Foreign(id),
                     depth,
                     ..
-                } => format!("{} at {depth}", foreign[*i].1.name),
+                } => format!("{} at {depth}", foreign_of(&st, *id).unwrap().name),
                 Row::ReplyBox { depth } => format!("box at {depth}"),
                 _ => "?".into(),
             })
@@ -1977,7 +1971,7 @@ mod tests {
         );
         // A new reply to a comment goes under everything in reply to it.
         assert_eq!(
-            rows(Some((Item::Foreign(0), None))),
+            rows(Some((Item::Foreign(AnnotId(0)), None))),
             [
                 "Page 1 (2)",
                 "a at 0",
@@ -1988,7 +1982,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            rows(Some((Item::Foreign(1), None))),
+            rows(Some((Item::Foreign(AnnotId(1)), None))),
             [
                 "Page 1 (2)",
                 "a at 0",
@@ -2000,7 +1994,7 @@ mod tests {
         );
         // One being edited is replaced by the box.
         assert_eq!(
-            rows(Some((Item::Foreign(1), Some(AnnotId(9))))),
+            rows(Some((Item::Foreign(AnnotId(1)), Some(AnnotId(9))))),
             ["Page 1 (2)", "a at 0", "box at 1", "rr at 2", "b at 0"]
         );
     }

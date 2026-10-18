@@ -170,7 +170,7 @@ fn a_deleted_page_leaves_the_file_whatever_points_at_it() {
             page.set("Annots", a);
         });
         let mut model = opened(&path);
-        let third = model.page(2).unwrap().id;
+        let third = model.page(2).unwrap();
         model
             .apply(Edit::DeletePages { ids: vec![third] }, "del")
             .unwrap();
@@ -234,7 +234,7 @@ fn a_reply_keeps_no_comment_of_a_deleted_page() {
                 .set("Annots", vec![reply.into()]);
         });
         let mut model = opened(&path);
-        let second = model.page(1).unwrap().id;
+        let second = model.page(1).unwrap();
         model
             .apply(Edit::DeletePages { ids: vec![second] }, "del")
             .unwrap();
@@ -390,7 +390,7 @@ fn fields_tags_and_threads_let_go_of_a_deleted_page() {
         c.set("Threads", vec![Object::from(thread)]);
     });
     let mut model = opened(&path);
-    let third = model.page(2).unwrap().id;
+    let third = model.page(2).unwrap();
     model
         .apply(Edit::DeletePages { ids: vec![third] }, "del")
         .unwrap();
@@ -446,7 +446,7 @@ fn copies_hold_only_the_pages_copied() {
         link(pdf, p[0], p[1]);
     });
     let mut model = opened(&path);
-    let (p0, p1) = (model.page(0).unwrap().id, model.page(1).unwrap().id);
+    let (p0, p1) = (model.page(0).unwrap(), model.page(1).unwrap());
     // Extract pages 1 and 2: page 3 doesn't come, nor does the link to it.
     let bytes = crate::save::extract_bytes(&model.snapshot(), &[p0, p1]).unwrap();
     assert!(!says(&bytes, "MARK A 2") && says(&bytes, "MARK A 1"));
@@ -499,7 +499,7 @@ fn a_deleted_mark_is_gone_from_the_saved_bytes() {
     let dir = tempdir();
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
     let mut model = opened(&path);
-    let p0 = model.page(0).unwrap().id;
+    let p0 = model.page(0).unwrap();
     model
         .apply(
             Edit::AnnotAdd {
@@ -514,7 +514,7 @@ fn a_deleted_mark_is_gone_from_the_saved_bytes() {
         Strategy::Incremental
     );
     model.rebase_to_saved(SourceInfo::read(model.store(), &path, None).unwrap());
-    let id = model.state().annots_on(p0).unwrap()[0].id;
+    let id = model.state().marks_on(p0).next().unwrap().id;
     model
         .apply(Edit::AnnotDelete { page: p0, id }, "delete")
         .unwrap();
@@ -539,7 +539,7 @@ fn replacing_saved_ocr_text_takes_the_old_out() {
     let dir = tempdir();
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
     let mut model = opened(&path);
-    let p0 = model.page(0).unwrap().id;
+    let p0 = model.page(0).unwrap();
     let layer = |text: &str| {
         std::sync::Arc::new(TextLayer::from_engine(
             vec![OcrWord {

@@ -40,7 +40,6 @@ use lopdf::{Dictionary, Object, ObjectId};
 use sheaf_core::Rotation;
 
 use crate::annot::{Annot, AnnotKind, Box2, PART, Pt, from_json};
-use crate::assets::SourceAssets;
 use crate::attachments::Objects;
 use crate::geom::{Geom, Rect};
 use crate::import::{inset, numbers, points, quads, user_box};
@@ -133,15 +132,25 @@ pub(crate) fn sheaf_mark<'a, P: Objects + ?Sized>(
 }
 
 /// Whether `dict`, mark `a`'s, holds what the mark names: a page stamp
-/// its page ([`stamp_page`]) and an attachment its file
-/// ([`attached_file`]). Without it, the mark is drawn by its appearance
-/// alone, as another tool's comment is, and opens as one, as a stale mark
-/// does.
+/// its page and an attachment its file ([`held`]). Without it, the mark is
+/// drawn by its appearance alone, as another tool's comment is, and opens
+/// as one, as a stale mark does.
 fn holds<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, a: &Annot) -> bool {
     match a.kind {
-        AnnotKind::PageStamp { .. } => stamp_page(pdf, dict).is_some(),
-        AnnotKind::FileAttachment { .. } => attached_file(pdf, dict).is_some(),
+        AnnotKind::PageStamp { .. } | AnnotKind::FileAttachment { .. } => {
+            held(pdf, dict, a).is_some()
+        }
         _ => true,
+    }
+}
+
+/// What `dict`, mark `a`'s, holds of its own: a page stamp's page form
+/// ([`stamp_page`]) or an attachment's embedded file ([`attached_file`]).
+pub(crate) fn held<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, a: &Annot) -> Option<ObjectId> {
+    match a.kind {
+        AnnotKind::PageStamp { .. } => stamp_page(pdf, dict),
+        AnnotKind::FileAttachment { .. } => attached_file(pdf, dict),
+        _ => None,
     }
 }
 
@@ -366,13 +375,13 @@ fn text<P: Objects + ?Sized>(pdf: &P, o: &Object) -> String {
         .unwrap_or_default()
 }
 
-/// An annotation some other tool left in the file. Listed read-only in the
-/// Comments panel; PDFium draws it.
+/// An annotation some other tool left on a page of the file, a comment or
+/// a link, as read: what a [`Foreign`](crate::model::Foreign) record
+/// summarizes it by. A comment is listed read-only in the Comments panel;
+/// PDFium draws both.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForeignAnnot {
-    /// Page index in the file.
-    pub page: u32,
-    /// `/Subtype`, e.g. `Text`, `Highlight`.
+    /// `/Subtype`, e.g. `Text`, `Highlight`, `Link`.
     pub subtype: String,
     pub author: String,
     pub contents: String,
@@ -402,6 +411,13 @@ pub struct ForeignAnnot {
     /// What it is as one of our marks, when sheaf can hold it: what
     /// editing it makes it (M9 decision 5). Read when the file is.
     pub mark: Option<Box<Annot>>,
+}
+
+impl ForeignAnnot {
+    /// Whether it's a link, which isn't a comment.
+    pub fn is_link(&self) -> bool {
+        self.subtype == "Link"
+    }
 }
 
 /// The names deleting `removed` takes off a page: those, and every
@@ -471,13 +487,70 @@ pub fn thread_name(dict: &lopdf::Dictionary) -> String {
         .unwrap_or_else(|| anon_name(dict))
 }
 
-/// Everything annotation-shaped in a file: our marks (editable, keyed by
-/// page index) and everyone else's, and what our marks hold.
+/// Everything annotation-shaped in a file: on each page, our marks
+/// (editable), with what they hold, and everyone else's comments and
+/// links.
 #[derive(Debug, Default)]
 pub struct AnnotsInFile {
-    pub sheaf: HashMap<u32, Vec<Annot>>,
-    pub foreign: Vec<ForeignAnnot>,
-    pub assets: SourceAssets,
+    /// Each page's that has any, by index, in `/Annots` order.
+    pub pages: HashMap<u32, Vec<InFile>>,
+}
+
+/// An annotation as a page of the file has it, and the object it is:
+/// None for a dictionary written into the page's `/Annots`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InFile {
+    pub object: Option<ObjectId>,
+    /// Its place in the page's `/Annots`.
+    pub slot: usize,
+    pub found: Found,
+}
+
+/// What an annotation in a file is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Found {
+    /// One of sheaf's marks, fresh, and what it holds of its own: its page
+    /// stamp's page form or its attachment's embedded file.
+    Mark {
+        annot: Annot,
+        held: Option<ObjectId>,
+    },
+    /// Another tool's comment or link, a stale mark among them.
+    Foreign(ForeignAnnot),
+}
+
+impl AnnotsInFile {
+    /// sheaf's marks, by page index.
+    pub fn sheaf(&self) -> HashMap<u32, Vec<Annot>> {
+        (self.pages.iter())
+            .map(|(&page, list)| {
+                let marks = list.iter().filter_map(|a| match &a.found {
+                    Found::Mark { annot, .. } => Some(annot.clone()),
+                    Found::Foreign(_) => None,
+                });
+                (page, marks.collect::<Vec<_>>())
+            })
+            .filter(|(_, marks)| !marks.is_empty())
+            .collect()
+    }
+
+    /// Other tools' comments and links, by page index and then in
+    /// `/Annots` order, with their pages.
+    pub fn foreign(&self) -> Vec<(u32, &ForeignAnnot)> {
+        let mut pages: Vec<u32> = self.pages.keys().copied().collect();
+        pages.sort_unstable();
+        pages
+            .into_iter()
+            .flat_map(|page| {
+                self.pages[&page]
+                    .iter()
+                    .filter_map(move |a| match &a.found {
+                        Found::Foreign(f) => Some((page, f)),
+                        Found::Mark { .. } => None,
+                    })
+            })
+            .collect()
+    }
 }
 
 /// A source as lopdf sees it, decrypted as [`load_pdf`] does: its blob's
@@ -523,13 +596,13 @@ pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> 
 /// Annotations sheaf wrote into `path` earlier, keyed by page index.
 #[cfg(test)]
 pub(crate) fn read_sheaf_annots(path: impl AsRef<Path>) -> Result<HashMap<u32, Vec<Annot>>> {
-    Ok(read_annots(path, None)?.sheaf)
+    Ok(read_annots(path, None)?.sheaf())
 }
 
 /// Same as `read_sheaf_annots`, from bytes already in memory.
 #[cfg(test)]
 pub(crate) fn read_sheaf_annots_mem(bytes: &[u8]) -> Result<HashMap<u32, Vec<Annot>>> {
-    Ok(read_annots_mem(bytes)?.sheaf)
+    Ok(read_annots_mem(bytes)?.sheaf())
 }
 
 /// All annotations in a file's bytes.
@@ -612,13 +685,13 @@ pub fn pdf_text_bytes(bytes: &[u8]) -> String {
     }
 }
 
-/// Subtypes that aren't comments: links, form fields, and the popup
-/// windows that belong to other annotations.
-fn is_comment_subtype(s: &str) -> bool {
+/// Subtypes listed as other tools' annotations: comments, and links.
+/// Form fields, the popup windows that belong to other annotations, and
+/// what else is no comment are left to the page.
+fn is_listed_subtype(s: &str) -> bool {
     !matches!(
         s,
-        "Link"
-            | "Widget"
+        "Widget"
             | "Popup"
             | "Screen"
             | "PrinterMark"
@@ -631,9 +704,9 @@ fn is_comment_subtype(s: &str) -> bool {
     )
 }
 
-/// Every annotation on `pages`, the file's page objects by index, and
-/// what sheaf's marks there hold: each page stamp's page and each
-/// attachment's file, by the stem the mark names it by.
+/// Every mark, comment and link on `pages`, the file's page objects by
+/// index, each mark with what it holds: its page stamp's page or its
+/// attachment's file.
 pub fn annots_in<P: Objects + ?Sized>(
     pdf: &P,
     pages: impl IntoIterator<Item = lopdf::ObjectId>,
@@ -657,30 +730,22 @@ pub fn annots_in<P: Objects + ?Sized>(
         }
         let turn = page_geom(pdf, page_id).rotate;
         let entries = PageAnnots::new(list);
-        // This page's, and their dictionaries, to convert together.
-        let first = out.foreign.len();
-        let mut dicts: Vec<&lopdf::Dictionary> = Vec::new();
+        let mut found = Vec::new();
+        // Other tools', each by its place in `found`, and their
+        // dictionaries, to convert together.
+        let mut dicts: Vec<(usize, &lopdf::Dictionary)> = Vec::new();
         for (slot, entry) in list.iter().enumerate() {
-            let Ok((_, obj)) = pdf.dereference(entry) else {
+            let Ok((object, obj)) = pdf.dereference(entry) else {
                 continue;
             };
             let Ok(dict) = obj.as_dict() else { continue };
-            if let Some(a) = sheaf_mark(pdf, entry, turn, &entries) {
-                let assets = &mut out.assets;
-                match &a.kind {
-                    AnnotKind::PageStamp { stamp, .. } => {
-                        if let Some(form) = stamp_page(pdf, dict) {
-                            assets.stamps.entry(stamp.clone()).or_insert(form);
-                        }
-                    }
-                    AnnotKind::FileAttachment { file, .. } => {
-                        if let Some(stream) = attached_file(pdf, dict) {
-                            assets.files.entry(file.clone()).or_insert(stream);
-                        }
-                    }
-                    _ => {}
-                }
-                out.sheaf.entry(i as u32).or_default().push(a);
+            if let Some(annot) = sheaf_mark(pdf, entry, turn, &entries) {
+                let held = held(pdf, dict, &annot);
+                found.push(InFile {
+                    object,
+                    slot,
+                    found: Found::Mark { annot, held },
+                });
                 continue;
             }
             // A companion of one of ours is part of it. Anything else,
@@ -696,7 +761,7 @@ pub fn annots_in<P: Objects + ?Sized>(
                 .and_then(|o| o.as_name().ok())
                 .map(|n| String::from_utf8_lossy(n).into_owned())
                 .unwrap_or_default();
-            if subtype.is_empty() || !is_comment_subtype(&subtype) {
+            if subtype.is_empty() || !is_listed_subtype(&subtype) {
                 continue;
             }
             let rect: Vec<f32> = dict
@@ -724,9 +789,11 @@ pub fn annots_in<P: Objects + ?Sized>(
                 (m, s) if m.is_empty() => Some((crate::annot::REVIEW.to_string(), s)),
                 (m, s) => Some((m, s)),
             };
-            dicts.push(dict);
-            out.foreign.push(ForeignAnnot {
-                page: i as u32,
+            // A link is no mark sheaf can hold.
+            if subtype != "Link" {
+                dicts.push((found.len(), dict));
+            }
+            let foreign = ForeignAnnot {
                 subtype,
                 author: text(b"T"),
                 contents: text(b"Contents"),
@@ -769,13 +836,24 @@ pub fn annots_in<P: Objects + ?Sized>(
                         [v(0), v(1), v(2)]
                     }),
                 mark: None,
+            };
+            found.push(InFile {
+                object,
+                slot,
+                found: Found::Foreign(foreign),
             });
         }
         if !dicts.is_empty() {
+            let (at, dicts): (Vec<usize>, Vec<&lopdf::Dictionary>) = dicts.into_iter().unzip();
             let marks = crate::import::convert_page(pdf, &dicts, turn, Default::default());
-            for (f, m) in out.foreign[first..].iter_mut().zip(marks) {
-                f.mark = m.ok().map(Box::new);
+            for (i, m) in at.into_iter().zip(marks) {
+                if let Found::Foreign(f) = &mut found[i].found {
+                    f.mark = m.ok().map(Box::new);
+                }
             }
+        }
+        if !found.is_empty() {
+            out.pages.insert(i as u32, found);
         }
     }
     out
@@ -924,7 +1002,8 @@ mod tests {
         );
         let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
-        let found = annots_in(&pdf, pdf.page_iter()).foreign;
+        let read = annots_in(&pdf, pdf.page_iter());
+        let found: Vec<&ForeignAnnot> = read.foreign().into_iter().map(|(_, f)| f).collect();
         assert_eq!(found.len(), 4);
         assert_eq!(found[0].name, "p");
         assert_eq!(found[0].parent, None);
@@ -999,15 +1078,18 @@ mod tests {
         let mine: Vec<bool> = list.iter().map(|e| is_ours(&pdf, e, &page)).collect();
         assert_eq!(mine, vec![true, true, false, false]);
         let found = annots_in(&pdf, pdf.page_iter());
-        assert_eq!(found.sheaf[&0], vec![ours]);
+        assert_eq!(found.sheaf()[&0], vec![ours]);
         // The newer sheaf's mark and its companion are listed like another
         // tool's, and kept.
-        let subtypes: Vec<&str> = found.foreign.iter().map(|f| f.subtype.as_str()).collect();
+        let subtypes: Vec<&str> = (found.foreign().into_iter())
+            .map(|(_, f)| f.subtype.as_str())
+            .collect();
         assert_eq!(subtypes, vec!["StrikeOut", "Caret"]);
     }
 
-    /// One page carrying a third-party sticky note, a link (not a comment),
-    /// a popup (not a comment), and one of ours.
+    /// One page carrying a third-party sticky note, a link (another tool's,
+    /// not a comment), a popup (left to the page), and one of ours, each
+    /// with its object.
     #[test]
     fn reads_foreign_and_sheaf_annotations() {
         let mut pdf = lopdf::Document::with_version("1.7");
@@ -1068,9 +1150,14 @@ mod tests {
         pdf.trailer.set("Root", catalog);
 
         let found = annots_in(&pdf, pdf.page_iter());
-        assert_eq!(found.sheaf[&0], vec![ours]);
-        assert_eq!(found.foreign.len(), 1, "{:?}", found.foreign);
-        let f = &found.foreign[0];
+        assert_eq!(found.sheaf()[&0], vec![ours]);
+        let objects: Vec<Option<ObjectId>> = found.pages[&0].iter().map(|a| a.object).collect();
+        assert_eq!(objects, [Some(note), Some(link), Some(mine)]);
+        let foreign = found.foreign();
+        let subtypes: Vec<&str> = foreign.iter().map(|(_, f)| f.subtype.as_str()).collect();
+        assert_eq!(subtypes, ["Text", "Link"]);
+        assert!(foreign[1].1.is_link() && !foreign[0].1.is_link());
+        let f = foreign[0].1;
         assert_eq!(f.subtype, "Text");
         assert_eq!(f.author, "Reviewer");
         assert_eq!(f.contents, "Hi\u{2014}");
@@ -1163,14 +1250,14 @@ mod tests {
         let src = crate::open::tests::lazily(&mut pdf);
         let loaded = annots_in(&pdf, pdf.page_iter());
         let read = annots_in(src.pdf(), src.page_ids());
-        assert_eq!(read.sheaf, loaded.sheaf);
-        assert_eq!(read.foreign, loaded.foreign);
-        assert_eq!(loaded.sheaf[&0], vec![ours]);
-        let subtypes: Vec<&str> = loaded.foreign.iter().map(|f| f.subtype.as_str()).collect();
+        assert_eq!(read.pages, loaded.pages);
+        assert_eq!(loaded.sheaf()[&0], vec![ours]);
+        let foreign: Vec<&ForeignAnnot> = loaded.foreign().into_iter().map(|(_, f)| f).collect();
+        let subtypes: Vec<&str> = foreign.iter().map(|f| f.subtype.as_str()).collect();
         assert_eq!(subtypes, ["Text", "Text", "Stamp", "FileAttachment"]);
-        assert_eq!(loaded.foreign[1].parent.as_deref(), Some("n"));
+        assert_eq!(foreign[1].parent.as_deref(), Some("n"));
         assert!(matches!(
-            loaded.foreign[2].mark.as_deref(),
+            foreign[2].mark.as_deref(),
             Some(Annot {
                 kind: crate::annot::AnnotKind::PageStamp { .. },
                 ..

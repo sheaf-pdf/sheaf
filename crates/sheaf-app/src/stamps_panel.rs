@@ -15,6 +15,7 @@ use gpui::{
     AnchoredPositionMode, AnyElement, Context, Entity, Focusable, ObjectFit, Pixels, Point,
     ScrollHandle, Subscription, Window, anchored, deferred, div, img, prelude::*, px,
 };
+use sheaf_doc::store::BlobKind;
 use sheaf_doc::{AnnotKind, Box2, PageId, Pt};
 use sheaf_ops::stamps::{self as lib, Collection, PRESETS, StampRef};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
@@ -197,15 +198,18 @@ impl DocView {
             w,
             h,
         };
-        let kind = match choice.preset_template() {
+        // A library stamp's page, held until the mark that holds it is
+        // added.
+        let (kind, held) = match choice.preset_template() {
             Some(template) => {
                 let text = fill(template);
                 let (w, h) = sheaf_doc::annot::text_stamp_size(&text, height);
-                AnnotKind::TextStamp {
+                let kind = AnnotKind::TextStamp {
                     rect: centred(w, h),
                     text,
                     status: false,
-                }
+                };
+                (kind, None)
             }
             None => {
                 let library = self.stamps.as_ref().and_then(|s| s.library.clone());
@@ -219,23 +223,33 @@ impl DocView {
                     cx.notify();
                     return;
                 };
-                // The document keeps its page from now on.
-                doc.model
-                    .assets()
-                    .intern_stamp(&page.stem, page.pdf.clone());
+                let held = match doc
+                    .model
+                    .store()
+                    .intern(page.pdf.clone(), BlobKind::stamp())
+                {
+                    Ok(held) => held,
+                    Err(e) => {
+                        doc.notice = Some(format!("Stamp {}: {e}", choice.name));
+                        cx.notify();
+                        return;
+                    }
+                };
                 let page_size = c.stamps[i].size;
                 let w = height * page_size.width / page_size.height.max(1.0);
-                AnnotKind::PageStamp {
+                let kind = AnnotKind::PageStamp {
                     rect: centred(w, height),
-                    stamp: page.stem.clone(),
+                    stamp: held.id().stem(),
                     name: choice.name.clone(),
                     text: c.stamps[i].text.as_deref().map(fill),
-                }
+                };
+                (kind, Some(held))
             }
         };
         let color = crate::markup_tools::color_of(crate::markup_tools::Tool::Stamp, cx);
         let a = self.new_annot(kind, color, cx);
         self.add_annot(page, a, "Stamp", cx);
+        drop(held);
         crate::state::update(cx, |s| {
             s.recent_stamps.retain(|r| *r != choice);
             s.recent_stamps.insert(0, choice);

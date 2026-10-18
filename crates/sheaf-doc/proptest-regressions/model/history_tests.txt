@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc a9f5d00451797a55a1947191612b62e415321a5335941ba1cefb9afce220aad7 # shrinks to actions = [(21, 10870588150994152080)]
+cc 83b842e13103da988990b4c810f5da8aec51ddea0f80847278bb621c6c39161b # shrinks to actions = [(5, 13391071648808151668)]

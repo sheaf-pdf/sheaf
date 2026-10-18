@@ -175,6 +175,8 @@ fn positions_round_trip_through_pdfium_and_the_source() {
         color: None,
         style: Default::default(),
         open: true,
+        object: None,
+        kept: false,
     };
     let fit_h = Some(DestView::Other {
         kind: "FitH".into(),

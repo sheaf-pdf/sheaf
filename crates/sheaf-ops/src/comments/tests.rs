@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use super::*;
 use sheaf_core::Rotation;
 use sheaf_doc::annot::REVIEW;
+use sheaf_doc::open::{FileAnnot, FileAnnots, FileBody};
 use sheaf_doc::{FixedCount, Pt, SourceInfo, Store};
 
 #[test]
@@ -66,9 +69,9 @@ fn text_edits_read_as_what_they_suggest() {
     );
 }
 
-fn comment(i: usize, name: &str, parent: Option<&str>, date: &str) -> Comment {
+fn comment(i: u64, name: &str, parent: Option<&str>, date: &str) -> Comment {
     Comment {
-        item: Item::Foreign(i),
+        item: Item::Foreign(AnnotId(i)),
         name: name.into(),
         parent: parent.map(str::to_string),
         grouped: false,
@@ -178,53 +181,68 @@ fn the_filter_hides_by_each_facet() {
     assert_eq!(cf.describe(), "pages 4–6; Stamp Summary");
 }
 
-/// A file of `pages` blank pages opened, holding `marks`, sheaf's own.
-fn doc(pages: u32, marks: HashMap<u32, Vec<Annot>>) -> Document {
+/// A file of `pages` blank pages opened, holding `marks`, sheaf's own,
+/// and `theirs`, other tools' comments, by page index; theirs are
+/// numbered from 10,000.
+fn doc(pages: u32, marks: HashMap<u32, Vec<Annot>>, theirs: Vec<(u32, ForeignAnnot)>) -> Document {
     let store = Store::new();
     let primary = SourceInfo {
         name: "big.pdf".into(),
         ..SourceInfo::blank(&store, pages)
     };
     let mut d = sheaf_doc::open::start(store, primary, Box::new(FixedCount(10)));
+    let mut annots = FileAnnots::default();
+    for (index, list) in marks {
+        let marks = list.into_iter().map(|a| FileAnnot {
+            object: None,
+            slot: 0,
+            body: FileBody::Mark {
+                annot: Box::new(a),
+                held: None,
+            },
+        });
+        annots.pages.entry(index).or_default().extend(marks);
+    }
+    for (i, (index, f)) in (10_000..).zip(theirs) {
+        annots.pages.entry(index).or_default().push(FileAnnot {
+            object: None,
+            slot: f.slot,
+            body: FileBody::Foreign {
+                id: AnnotId(i),
+                summary: Arc::new(f),
+            },
+        });
+    }
     let facts = sheaf_doc::open::Facts {
-        marks,
+        annots: Arc::new(annots),
         ..Default::default()
     };
     d.ready(facts).unwrap();
     d
 }
 
-fn theirs(
-    source: SourceId,
-    page: u32,
-    name: &str,
-    parent: Option<&str>,
-) -> (SourceId, ForeignAnnot) {
-    (
-        source,
-        ForeignAnnot {
-            page,
-            subtype: "Text".into(),
-            author: "Ann".into(),
-            contents: format!("says {name}"),
-            modified: "D:20261001120000".into(),
-            rect: Box2 {
-                x: 0.0,
-                y: 0.0,
-                w: 10.0,
-                h: 10.0,
-            },
-            name: name.into(),
-            parent: parent.map(str::to_string),
-            grouped: false,
-            state: None,
-            created: String::new(),
-            slot: 0,
-            hidden: false,
-            color: Some([0, 0, 255]),
-            mark: None,
+fn theirs(name: &str, parent: Option<&str>) -> ForeignAnnot {
+    ForeignAnnot {
+        subtype: "Text".into(),
+        author: "Ann".into(),
+        contents: format!("says {name}"),
+        modified: "D:20261001120000".into(),
+        rect: Box2 {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
         },
-    )
+        name: name.into(),
+        parent: parent.map(str::to_string),
+        grouped: false,
+        state: None,
+        created: String::new(),
+        slot: 0,
+        hidden: false,
+        color: Some([0, 0, 255]),
+        mark: None,
+    }
 }
 
 /// The case Acrobat crawled on (acrobat.md §3.2): 1,000 comments over
@@ -258,25 +276,24 @@ fn a_thousand_comments_list_quickly() {
         a.modified = format!("D:2026101{}000000", i % 10);
         ours.entry(i * 3 % 900).or_default().push(a);
     }
-    let d = doc(900, ours);
-    let source = d.state().pages[0].source;
-    let foreign: Vec<(SourceId, ForeignAnnot)> = (0..400u32)
+    let foreign: Vec<(u32, ForeignAnnot)> = (0..400u32)
         .map(|i| {
-            let mut f = theirs(source, i * 2 % 900, &format!("t{i}"), None);
-            f.1.author = authors[i as usize % 3].into();
-            f.1.contents = format!("theirs {i}");
-            f
+            let mut f = theirs(&format!("t{i}"), None);
+            f.author = authors[i as usize % 3].into();
+            f.contents = format!("theirs {i}");
+            (i * 2 % 900, f)
         })
         .collect();
+    let d = doc(900, ours, foreign);
     let started = std::time::Instant::now();
-    let all = list(d.state(), &foreign, &CommentFilter::default(), "");
+    let all = list(d.state(), &CommentFilter::default(), "");
     assert_eq!(all.count, 1000);
     let mut cf = CommentFilter {
         sort: Sort::Author,
         ..Default::default()
     };
     cf.authors.insert("Lee".into());
-    let some = list(d.state(), &foreign, &cf, "comment");
+    let some = list(d.state(), &cf, "comment");
     let elapsed = started.elapsed();
     // Lee's are hidden on the page too; the rest are grouped by author.
     assert_eq!(some.filtered, 200 + 133);
@@ -285,7 +302,6 @@ fn a_thousand_comments_list_quickly() {
     assert_eq!(headings, ["Greg", "Pat"]);
     let summary = list(
         d.state(),
-        &foreign,
         &CommentFilter {
             summary: Some(Summary::Stamps),
             ..Default::default()
@@ -302,24 +318,17 @@ fn a_thousand_comments_list_quickly() {
 /// Two threads on page 2: one with a reply that has its own reply and a
 /// status, and one alone.
 fn two_threads() -> Listing {
-    let d = doc(3, HashMap::new());
-    let source = d.state().pages[0].source;
-    let mut status = theirs(source, 1, "st", Some("a"));
-    status.1.state = Some((REVIEW.into(), "Accepted".into()));
-    status.1.modified = "D:20261003".into();
-    let mut reply = theirs(source, 1, "r", Some("a"));
-    reply.1.contents = "Yes, \"quoted\", and, commas".into();
-    reply.1.modified = "D:20261002".into();
-    let mut deeper = theirs(source, 1, "rr", Some("r"));
-    deeper.1.modified = "D:20261004".into();
-    let foreign = vec![
-        theirs(source, 1, "a", None),
-        reply,
-        status,
-        deeper,
-        theirs(source, 1, "b", None),
-    ];
-    list(d.state(), &foreign, &CommentFilter::default(), "")
+    let mut status = theirs("st", Some("a"));
+    status.state = Some((REVIEW.into(), "Accepted".into()));
+    status.modified = "D:20261003".into();
+    let mut reply = theirs("r", Some("a"));
+    reply.contents = "Yes, \"quoted\", and, commas".into();
+    reply.modified = "D:20261002".into();
+    let mut deeper = theirs("rr", Some("r"));
+    deeper.modified = "D:20261004".into();
+    let foreign = [theirs("a", None), reply, status, deeper, theirs("b", None)];
+    let d = doc(3, HashMap::new(), foreign.map(|f| (1, f)).to_vec());
+    list(d.state(), &CommentFilter::default(), "")
 }
 
 #[test]

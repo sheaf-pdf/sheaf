@@ -48,12 +48,12 @@ pub fn parse(s: &str, page_count: usize) -> Result<Vec<usize>, String> {
 
 /// The pages a range picks in `snapshot`; `None` means all of them.
 pub fn ids(snapshot: &Snapshot, range: Option<&str>) -> Result<Vec<PageId>, String> {
-    let pages = &snapshot.state.pages;
+    let order = snapshot.state.order();
     Ok(match range {
-        None => pages.iter().map(|p| p.id).collect(),
-        Some(r) => parse(r, pages.len())?
+        None => order.iter().copied().collect(),
+        Some(r) => parse(r, order.len())?
             .into_iter()
-            .map(|i| pages[i].id)
+            .map(|i| order[i])
             .collect(),
     })
 }

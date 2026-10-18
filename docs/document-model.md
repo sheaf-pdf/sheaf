@@ -41,39 +41,127 @@ SourceInfo           { src: Src, name: PathBuf, derived: Option<Derived>,
                      11 makes the BlobId the identity): the same file inserted
                      twice is two registrations of one Src.
 
-PageRef              { id: PageId, source: SourceId, index: u32, rotation: Rotation }
-                     one page of the virtual document, pointing at a page of a source.
-                     PageId is a fresh, stable identity (never reused). rotation
-                     is the page's /Rotate, absolute, as a save writes it.
+PageDef              { base: PageBase { source, src, index }, copy: u32,
+                       content: Arc<ContentStack> }
+                     what one page of the virtual document shows: page index
+                     of a source (src, the bytes it pins; source, the
+                     registration render handles and the old writers key by,
+                     until M10.5 slice 11), which copy of it (0 for the page
+                     itself, fixed when the page is made: a duplicate is one
+                     past the highest copy its base has), and what sheaf draws
+                     over it. Its PageId is a fresh, stable identity (never
+                     reused); its boxes and absolute /Rotate are its Geom.
 
-DocState             { pages: im::Vector<PageRef>,
-                       outline: im::Vector<OutlineNode>,   // tree; targets are PageIds
-                       annots: im::HashMap<PageId, im::Vector<Annot>>,  // sheaf's marks
-                       removed_comments: ...,   // other tools' comments deleted, by /NM
-                       text_layers: ...,        // unsaved OCR text, by page
-                       labels, header_footer,
-                       fields: im::OrdMap<FieldId, Field>,   // the form
-                       widgets: ... }           // the fields' widgets, by page
-                     a complete, immutable snapshot of what the user sees.
+ContentStack         { over: im::Vector<Layer { body: Static }> }
+                     drawn over the page's own content, bottom first; the one
+                     layer so far is Static::OcrText(Arc<TextLayer>). Every
+                     page with nothing drawn over it shares one empty stack.
+
+AnnotRec             { page: PageId, body: Mark | Foreign | Widget }
+                     Mark    { annot: Annot, src: Option<ObjRef>,
+                               file: Option<BlobRef>, stamp: Option<FormRef> }
+                     Foreign { src: Option<ObjRef>, copy, summary }
+                     Widget  { field: FieldId, src, inst: FormInst, merged,
+                               rect, flags, mk, da, state, states, props }
+                     one annotation in one id space: sheaf's mark, holding its
+                     attachment's file and its stamp's page (Page content);
+                     another tool's comment or link, kept as the object it was
+                     read as (src: None for a dictionary written straight into
+                     /Annots, found by its slot); a field's widget.
+
+FieldNode            { parent, partial: Arc<str>, src: Option<ObjRef>,
+                       inst: FormInst { src: SourceId, copy }, kids,
+                       term: Option<Arc<Terminal>> }
+                     a node of the field tree. A terminal holds its kind,
+                     flags, value, default and props, its widgets by AnnotId,
+                     and outside, its widgets no page lists (page
+                     templates, which the old writers keep). A FormInst is one
+                     copy of a file's form: one per registration an insert
+                     brings, joined by that registration's later runs, and one
+                     per duplicate.
+
+FormDoc              { roots, names: im::OrdMap<FormInst, Arc<str>>,
+                       scripts: On | Off { instances } }
+                     the form as a whole: its top-level nodes, the name each
+                     instance is renamed apart under, and whether its scripts
+                     still run (off once scripted forms of two files meet).
+
+Bookmark             { title: Arc<str>, target: Option<Page { page, view } | Kept>,
+                       color, style, open, kids: im::Vector<OutlineId>,
+                       src: Option<ObjRef> }
+                     Kept: an action or destination sheaf doesn't model (a
+                     URI, another file), written from the item it was read as.
+
+LabelSpec            { start: PageId, style, prefix, first }
+                     a page-label range, anchored to the page it starts at.
+
+Generator            { id: GenId, spec: HeaderFooter(Arc<HeaderFooter>) }
+                     what sheaf draws on pages from one definition: until
+                     M10.5 slice 16, only the header and footer, read at open
+                     from /SheafHeaderFooter, with its own page scope and its
+                     Bates numbers counted at each Rewrite, as before.
+
+DocState             { order: im::Vector<PageId>,
+                       pages: im::HashMap<PageId, Arc<PageDef>>,
+                       geoms: im::HashMap<PageId, Arc<Geom>>,
+                       bookmarks: im::HashMap<OutlineId, Arc<Bookmark>>,  // kids by id
+                       outline_roots: im::Vector<OutlineId>,
+                       page_annots: im::HashMap<PageId, im::Vector<AnnotId>>,  // /Annots order
+                       annots: im::HashMap<AnnotId, AnnotRec>,  // sheaf's marks, others'
+                                                                // comments and links, and
+                                                                // the form's widgets
+                       fields: im::OrdMap<FieldId, Arc<FieldNode>>,  // the field tree, each
+                                                                // node in an instance of a
+                                                                // file's form (FormInst)
+                       form: Arc<FormDoc>,          // its roots, instances, scripts
+                       labels: Option<Arc<[LabelSpec]>>,
+                       generators: im::OrdMap<GenId, Arc<Generator>> }  // the header/footer
+                     a complete, immutable snapshot of what the user sees,
+                     made by DocState::builder() and read through accessors.
+                     Records hold Srcs and blobs, so a version keeps the bytes
+                     it shows alive. It keeps three indexes, never compared:
+                     each page's position (built the first time one is asked,
+                     shared by the clones of one order), every named
+                     annotation by page and /NM, and every field node by its
+                     full name; neither name need be unique in a file, so each
+                     holds every record it names. check_invariants says the
+                     tables and indexes agree (a debug build asserts it after
+                     every edit, at open and after a save).
 
 Document             { store: Arc<Store>,
                        sources: HashMap<SourceId, Arc<SourceInfo>>,
                        versions: HashMap<VersionId, Version>,  // a tree (see Undo/redo)
                        cursor: VersionId,            // which version is current
-                       saved: Option<VersionId> }    // which version is on disk
+                       saved: Option<VersionId>,     // which version is on disk
+                       baseline: DocState }          // what the primary file holds
+
+Snapshot             { state: DocState, primary, sources, the dirty flags,
+                       legacy: OnceLock<Arc<LegacyDocState>> }
+                     what saves, exports, print and plugins read, taken from
+                     the current version. The dirty flags compare its records
+                     with the baseline, the opened version's state and then
+                     each save's, pointers first. The old writers read the
+                     legacy projection (OCR text by page, the header/footer,
+                     the comments a page's file holds that it hasn't any more,
+                     and the fields in their old shape), built from the
+                     records the first time one asks, never when a snapshot
+                     is taken. Slice 9 deletes the projection and the
+                     baseline with the old writers.
 ```
 
 **Editing never touches a source or a lopdf object.** An edit is a pure
 function `DocState -> Result<DocState>` that builds a new snapshot sharing
-everything it didn't change. Reordering 7,000 pages clones one `Vec<PageRef>`
-(~110 KB) and nothing else.
+everything it didn't change. Reordering 7,000 pages puts one new order, an
+`im::Vector` that shares all but the paths the move changed, and no page's
+record.
 
-**Rendering never waits on an edit.** The viewer displays `state.pages` in
-order; a render request for display index *i* becomes
-`(sources[pages[i].source], pages[i].index, render_delta)`, the turn PDFium
-adds to the source page's own `/Rotate`. PDFium is never told about
-reorders, deletions, or insertions. Inserting a 400-page PDF means opening
-it as a second source and splicing 400 `PageRef`s — milliseconds.
+**Rendering never waits on an edit.** The viewer displays the pages in
+order; a render request for position *i* becomes the page's base (the
+registration's engine and its page index) and its `render_delta`, the turn
+PDFium adds to the source page's own `/Rotate`. PDFium is never told about
+reorders, deletions, or insertions. Inserting a 400-page PDF means
+registering it as a second source, splicing 400 ids into the order and
+adding their records — milliseconds.
 
 **Saving is a materialization.** Given a `DocState` and its sources, produce
 bytes. Two strategies, chosen per save (see below). The snapshot is
@@ -123,8 +211,8 @@ blob, and a source parses the blob in place:
 - **Bytes stay in memory.** PDFium opens the blob's own `Arc<[u8]>`
   (`RenderHandle::open_bytes`). A derived copy (cropped, watermarked, a
   header and footer stripped) is a memory blob, written nowhere; blank and
-  image pages, and a stamp or attachment nothing else holds (see Page
-  content), are read back from the generated cache once, into blobs.
+  image pages, and a library stamp nothing else holds (see Page content),
+  are read back from the generated cache once, into blobs.
   `LazyPdf` can also read a file by position (`FileBytes`).
 - **The open reads every fact from the source** (M10.5 slice 4; see
   Opening a file): its marks, other tools' comments, labels, header and
@@ -148,38 +236,61 @@ three steps in a row):
   the pages from the page table the source built as it opened, and
   nothing else, so the first page paints at once. It reads nothing of
   its own. (`Document::new` is for a file sheaf has just made, which says
-  nothing more about itself: it's complete at once, with only an
-  outline.)
-- **`finish` reads the rest, on any thread, from the source alone:**
-  sheaf's marks and other tools' comments in one pass over the page
-  table's annotations (a page stamp's page and an attachment's file are
-  found in the file, not in this machine's cache, and a mark whose file
-  doesn't hold them is another tool's comment; a mark another tool has
-  edited since sheaf wrote it, whose `/SheafAnnot` digest no longer
-  matches, is that tool's comment; copies of marks another program made,
-  which say ids earlier marks have, get new ones), the form, the page
-  labels, the header and footer sheaf drew, attachments, the portfolio
-  schema, layers, and the outline with its colors, styles and closed
-  state (`/C`, `/F`, a negative `/Count`). Of a page it reads the
-  dictionary and the annotations, never its content (`Source::blocks`
-  reads that when an op first asks; see Page content). Each reader
-  passes over what it can't read, so `finish` doesn't fail once the
-  source has opened, and reads a tree a node at a time however often the
-  file lists a node (a name or number tree, the layers' order, a
-  portfolio's folders, the outline), so it ends. It counts the pages of
-  its first pass to the progress it's given. The outline's destinations
-  (`/Dest`, named destinations, a GoTo action's `/D`) are found through
-  the page table, and their views are read as PDFium reads them, their
-  positions kept in PageSpace as the file has them; the renderer is
-  never asked for the outline.
+  nothing more about itself: it's complete at once, with its outline and
+  the annotations its file holds.)
+- **`finish` reads the rest, on any thread, from the source alone:** sheaf's
+  marks and other tools' comments and links in one pass over the page
+  table's annotations, read once a source (`Source::annots`, which an insert
+  reads too), each with its object and an id (a page stamp's page and an
+  attachment's file are found in the file, not in this machine's cache, and
+  a mark whose file doesn't hold them is another tool's comment; a mark
+  another tool has edited since sheaf wrote it, whose `/SheafAnnot` digest
+  no longer matches, is that tool's comment; copies of marks another program
+  made, which say ids earlier marks have, get new ones; other tools' get ids
+  no mark has, drawn from an rng the file's hash seeds, so the same bytes
+  open with the same ids), the form (`Source::form`, also read once a
+  source: every node of the field tree with the object it was read as, each
+  terminal's widgets by page, and those no page lists, a page template's),
+  the page labels, the header and footer sheaf drew (its settings in
+  `/SheafHeaderFooter`, read as written: no page's content is lexed to find
+  it), attachments, the portfolio schema, layers, and the outline with its
+  colors, styles and closed state (`/C`, `/F`, a negative `/Count`), each
+  item with its object and whether it holds an action or destination sheaf
+  doesn't model (`kept`). Of a page it reads the dictionary and the
+  annotations, never its content (`Source::blocks` reads that when an op
+  first asks; see Page content). Each reader passes over what it can't read,
+  so `finish` doesn't fail once the source has opened, and reads a tree a
+  node at a time however often the file lists a node (a name or number tree,
+  the layers' order, a portfolio's folders, the outline), so it ends. It
+  counts the pages of its first pass to the progress it's given. The
+  outline's destinations (`/Dest`, named destinations, a GoTo action's `/D`)
+  are found through the page table, and their views are read as PDFium reads
+  them, their positions kept in PageSpace as the file has them; the renderer
+  is never asked for the outline.
 - **`Document::ready(facts)` builds the complete opened version once**
   and puts it in the loading version's place under a new `VersionId`,
   the way a save or a job's amend does. The pages keep their ids, and the
   current and saved versions follow it, so the document isn't dirty and
-  there's nothing to undo. It gives back what the view shows beside the
-  model: other tools' comments, attachments, the portfolio, layers, what
-  sheaf says about the form, and the marks given new ids, whose pages the
-  next save writes. A second call is refused.
+  there's nothing to undo. It is records (M10.5 slice 8; see the Core
+  idea): each page a `PageDef` over its source page, copy 0 (a page the
+  tree lists twice is copies 0 and 1 of one object), its `Geom` the page
+  table's. Every annotation is a record: sheaf's marks, holding the stamp
+  and file their objects hold, other tools' comments and links, and the
+  form's widgets, each the object it was read as, in `/Annots` order;
+  other annotations (popups, screens and the rest sheaf doesn't model)
+  stay in the page's file, and the old writers pass them through. So is
+  every node of the form's field tree, numbered in tree order, a terminal
+  holding its value and its widgets by id, all in one instance of the
+  file's form; every bookmark, with the item it was read as, a `Kept`
+  target for one whose action sheaf doesn't model; the page labels; and
+  the header and footer, a `Generator`. Its `GenId`, then the widgets'
+  ids (none an id the file's annotations have), are drawn from the rng
+  the file's hash seeds, so the app's open and the command line's make
+  the same state. It gives back what the view shows beside the model:
+  attachments,
+  the portfolio, layers, what sheaf says about the form, and the marks
+  given new ids, whose pages the next save writes. A second call is
+  refused.
 - **Until then the document is loading.** `apply`, `apply_batch` and
   `apply_in_job` return `NotReady`, making no version and drawing no ids.
   The app greys out what edits the document or writes it out (saves,
@@ -199,9 +310,10 @@ three steps in a row):
   shown.
 
 On the heavy 7k fixture, ready (the source's open, `finish` and `ready`,
-`open::file` in the 7k gate harness) takes 391–406 ms against a gate of
-1 s, asserted; the scanned one's 539–545 ms and 514 MB at its peak, the
-474 MB file's bytes and little more.
+`open::file` in the 7k gate harness) takes 349–356 ms against a gate of
+1 s, asserted, its 21,000 annotations and widgets and its field nodes
+records (M10.5 slice 8); the scanned one's took 539–545 ms and 514 MB at
+its peak (slice 4), the 474 MB file's bytes and little more.
 
 ## Coordinates: PageSpace (M10.5 slice 5)
 
@@ -223,9 +335,10 @@ not what's stored.
   and `apply_axes` maps an `/XYZ` point whose missing coordinate stays
   missing. `save::geom_of` and `file::page_geom` read a dictionary's
   `Geom` for the old writers until slice 9; no other conversion is left.
-- **Rotation is absolute.** `PageRef.rotation` is the `/Rotate` a save
-  writes: a page starts with its source page's, and a save keeps it.
-  `Document::geom(page)` is the source page's boxes with that rotation.
+- **Rotation is absolute.** A page's `Geom.rotate` (`DocState::geom`) is
+  the `/Rotate` a save writes: a page starts with its source page's, and a
+  save keeps it. `Document::geom(page)` is the page's `Geom`: its source
+  page's boxes with that rotation.
   PDFium applies a source page's own `/Rotate` when it renders, so a
   render job takes `render_delta(page)`, the turn from the source page's
   rotation to the page's. A full rewrite writes the rotation in quarter
@@ -296,8 +409,8 @@ not what's stored.
   StrikeOut's, found through an index of the page's StrikeOuts made
   once), its `turn` is the page's `/Rotate`, and it's a mark while
   the JSON's `modified` is `/M`. A mark that fails either check was
-  edited by another tool, and opens as that tool's comment, in the list
-  other tools' comments are in: shown, deletable and adoptable, never
+  edited by another tool, and opens as that tool's comment, a record as
+  other tools' comments are: shown, deletable and adoptable, never
   reverted. `file::is_ours` asks the same reader, so the old writers keep
   its dictionary as the other tool wrote it.
 - **Copied marks get new ids.** `/NM` need only be unique on its page,
@@ -535,24 +648,27 @@ goes (the plan's lint ledger).
   as it is) and counted as NFC words, so the same text in two subsets
   with different codes gives equal bags. Slice 10's removal check
   compares them.
-- **Stamps and attachments come from the document** until slice 8 puts
-  them in the marks themselves. A mark still names its stamp's page and
-  its attachment's file by a stem, and the document's `MarkAssets`
-  (`assets.rs`, outside history, shared with its snapshots) says where
-  each is: the form a file's saved appearance draws, or the embedded file
-  it holds (what `file::annots_in` finds; registered at ready, for files
-  whose pages come in, and for the file a save wrote); a stamp placed
-  from the library or a mark pasted (the clipboard carries their bytes);
-  and last the generated cache by path, read once (a library stamp a
-  plugin names, until slice 19, and an attachment not yet saved, until
-  8). A stem names the same bytes wherever it's found, but nothing checks
-  that, so what's known stays: a file whose pages come in, a paste or a
-  placement can't put other bytes behind a stem the document knows. Only
-  the file a save wrote takes the place of what was known, since the
-  save wrote each from the table. Nothing is made again in the cache at
-  open, so a file opens with its stamps and attachments on a machine
-  that never saw them. A page
-  stamp whose appearance draws no page, or an attachment with no
+- **Marks hold their stamps and attachments** (M10.5 slice 8). A mark
+  names its stamp's page and its attachment's file by a stem, a blob's
+  name (`BlobId::stem`), and holds them: `Mark.stamp` is a `FormRef`,
+  the form a source's saved appearance draws (`Base`) or a one-page PDF
+  blob (`Blob`), and `Mark.file` a `BlobRef` to the file's bytes, an
+  `Attachment` blob. So a stamp or file lives as long as a version holds
+  its mark, and the store counts it. At ready, and for the marks of files
+  whose pages come in, each holds what its object holds there
+  (`FileAnnots`, from `file::annots_in`): the form, or the embedded file
+  decoded, no further than the mark says it's long. A mark added, or one
+  whose stem changes, finds what it names when the edit computes: the
+  store's blob of that name (a stamp placed, a file attached or a mark
+  pasted, interned and held by the caller until the edit), else what a
+  registered file's marks hold under it (the primary's first), else,
+  stamps only, the generated cache by path, until slice 19; else the
+  edit fails, naming it. A save writes each once (`annot::WriteCx`),
+  in place where the file it writes over holds it under the same stem,
+  and a save's rebase rebinds each stamp to the form the saved file
+  holds. Nothing is made again in the cache at open, so a file opens
+  with its stamps and attachments on a machine that never saw them. A
+  page stamp whose appearance draws no page, or an attachment with no
   embedded file, opens as another tool's comment, as a stale mark does,
   and a save keeps it so. The stamp library's page form bakes its page's
   rotation and visible box into the form's `/Matrix`, so a stamp from a
@@ -560,10 +676,9 @@ goes (the plan's lint ledger).
 - **Stamp and tape pictures are made in memory**: the app renders a
   stamp's page and a turned tape with PDFium, transparent where nothing
   is drawn, and keeps the pictures for the session, a stamp's by its
-  stem and a tape's by what it is. One that can't be made isn't asked
-  for again until it may be: from bytes given, never; from a document's
-  stamps, once what they know has changed (`MarkAssets::generation`).
-  Nothing is written to disk for them.
+  stem and a tape's by what it is, a stamp's from the page its mark
+  holds. One that can't be made isn't asked for again. Nothing is
+  written to disk for them.
 
 Every corpus page's content (24,256 pages, 575 MB, and the 5,273 forms
 they draw) reads, lexes into tokens that tile it, splices back to each
@@ -607,12 +722,15 @@ Prim      { key: Key, before: Option<Val>, after: Option<Val> }
 - **An edit records what it changed.** It reads the state and writes only
   through a recording context (`prim::Rec`), which makes a `Prim` for
   each slot it wrote: the slot (`key`), the value it held and the value it
-  holds now, `None` for absent. The keys are transitional, one per field
-  of `DocState` until M10.5 slice 8 replaces them with the records' keys:
-  `Pages`, `Outline`, `AnnotsOf(page)`, `TextLayer(page)`,
-  `RemovedOf(page)`, `Labels`, `HeaderFooter`, `Field(id)` and
-  `WidgetsOf(page)`. Before-values cost nothing: they are the parent's im
-  and `Arc` values.
+  holds now, `None` for absent. The keys are the records': `Order`,
+  `Page(id)`, `Geom(id)`, `PageAnnots(page)`, `Annot(id)`, `Field(id)`,
+  `Form`, `Bookmark(id)`, `OutlineRoots`, `Labels` and `Generator(id)`,
+  eleven kinds, one per table of the state (M10.5 slice 8; slice 1's nine
+  keys were the old state's fields). Before-values cost nothing: they are the
+  parent's im and `Arc` values. Setting a key keeps the indexes current:
+  a new order starts a new position index, an `Annot` moves its `/NM`
+  entry, and a `Field` whose partial name, parent or kids changed finds
+  the full names under it again.
 - **A no-op makes no version.** A slot written back to what it held makes
   no prim (the same im nodes or `Arc`, else equal), and a batch's or job's
   prims are coalesced per key into one, from the first before to the last
@@ -634,9 +752,11 @@ Prim      { key: Key, before: Option<Val>, after: Option<Val> }
   (`Document::ready`) each put a new version, with a new id, in the old
   one's place under the same parent, and the old id stops resolving.
 - **One `IdAlloc`.** Page, bookmark and field ids come from counters that
-  only go up, so an id is never handed out twice, whatever undo does. The
-  prims hold the ids an edit drew, so a replay draws none. Mark ids are
-  random below 2^53.
+  only go up, so an id is never handed out twice, whatever undo does (the
+  opened file's field nodes keep the ids its tree numbers them with). The
+  prims hold the ids an edit drew, so a replay draws none. Mark and
+  generator ids are random below 2^53; other tools' annotations' and the
+  form's widgets' at open come from an rng the file's hash seeds.
 - **Lines are made once.** describe runs at apply, against the state just
   before that edit, so the second edit of "move pages 3–4 before 1, then
   delete page 4" says "Delete page 4". The line is stored on the step, and
@@ -654,14 +774,22 @@ made as, ids included, and each kind's no-op pushes nothing.
 
 Costs and how they're bounded:
 
-- Per-version memory is proportional to what changed. `pages` is an
+- Per-version memory is proportional to what changed. The order is an
   `im::Vector`, so a reorder of 7,000 pages copies tree nodes, by one split
-  and two joins, not the list. Outline, marks, layers and fields are
-  persistent too (`im` crate), so per-page edits don't scale with document
-  size. At 7,000 pages and 20,000 marks, adding a mark takes 0.7 ms and
-  moving half the pages before the first 1 ms (release;
+  and two joins, not the list. Every other table is an `im` map of
+  records, each record its own key, so per-page edits don't scale with
+  document size, and nothing is found by a scan: a page's position, an
+  annotation by id or `/NM`, and a field by its full name are index
+  lookups. At 7,000 pages and 20,000 marks, adding a mark takes 0.015 ms
+  and moving half the pages before the first 0.74 ms (release;
   `history_at_7k_pages_and_20k_marks` in the 7k gate harness,
-  `crates/sheaf-ops/tests/gate_7k.rs`).
+  `crates/sheaf-ops/tests/gate_7k.rs`; 0.7 and 0.95 ms before M10.5 slice
+  8, when an add looked through every mark). 1,000 adds on the heavy 7k,
+  21,000 annotations held, cost what they cost on blank pages, about
+  0.15 ms each, most of it history's: a push walks the versions to trim
+  them, so it grows from 0.03 to 0.18 ms as history fills towards
+  `MAX_VERSIONS` (`mark_adds_on_the_heavy_7k`; slice 12 bounds history by
+  bytes).
 - Sources referenced only by undone versions are counted and freed. Each
   version owns the registrations made for it, and pruning a version
   drops them; a blob goes when its last registration does.
@@ -682,7 +810,8 @@ pub enum Edit {
     InsertPages { source: SourceId, range: Range<u32>, before: Option<PageId>, merge_outline: bool },
     DuplicatePages { ids: Vec<PageId> },
     // outline
-    OutlineInsert { parent: Option<OutlineId>, after: Option<OutlineId>, node: OutlineNode },
+    OutlineInsert { parent: Option<OutlineId>, after: Option<OutlineId>, title: String,
+                    target: Option<PageId>, view: Option<DestView> },
     OutlineMove { id: OutlineId, parent: Option<OutlineId>, after: Option<OutlineId>, with_pages: bool },
     OutlineEdit { id: OutlineId, title: Option<String>, target: Option<Option<PageId>>, color: Option<Option<Color>> },
     OutlineDelete { id: OutlineId },
@@ -736,8 +865,8 @@ written by sheaf-doc's own serializer (`serialize/`, below); lopdf only
 holds the object graph a Rewrite edits.
 
 **Rewrite** (M2 slice 3, first): load `sources[0]` in lopdf, rebuild the page
-tree from `state.pages` (copying page object subgraphs from other sources
-with renumbering), write each page's rotation as its `/Rotate`, rebuild
+tree from the pages in order (copying page object subgraphs from other
+sources with renumbering), write each page's rotation as its `/Rotate`, rebuild
 `/Outlines`, write sheaf's marks (`annot::to_pdf_in`, each with its
 appearance and, in `/SheafAnnot`, its PageSpace JSON and staleness digest:
 version 2, see Coordinates), then cut whatever still points at a page that
@@ -759,7 +888,8 @@ file being saved to and its cross-references read as they are
 (`base_sound()`); otherwise fall back to rewrite.
 Also a rewrite when anything in the file was removed since it was saved (a
 page, a mark, a bookmark, OCR text replaced: `Snapshot::removes_content`),
-since an incremental save would leave it in the earlier revision. It writes
+since an incremental save would leave it in the earlier revision; another
+tool's comment made ours isn't removed, as the mark takes its place. It writes
 a page's `/Rotate` only where the page's rotation isn't its source page's
 (then explicitly, 0 too), and marks as a rewrite writes them.
 
@@ -773,19 +903,47 @@ save whichever marks and pages use them (`annot::WriteCx`, with
 `content::ResObjects`; bug 19): one mark of every kind draws with three
 fonts and two graphics states between them. A page stamp's page is
 written once a save, as a form drawn under such a name (`/SheafStamp` is
-only read), and an attachment's file once, as its source stores it. Both
-come from the document's table, not this machine's cache, and the file
-being saved over keeps its own in place, so an incremental save doesn't
+only read), and an attachment's file once. Both come from what the marks
+hold (a form a source's mark draws is copied from it, a library stamp's
+page and an attached file are written from their blobs), not this
+machine's cache, and the file being saved over keeps its own in place,
+where it holds them under the same stem, so an incremental save doesn't
 append another copy. The header and footer's marked content names its
 property list in the page's `/Properties`.
 
-Either way the save runs on a background thread from a cloned snapshot. On
-completion the saved file is read back into the store as a fresh single
-source replacing all the others, and `saved = cursor`; each page keeps its
-rotation, now its saved page's own. History is kept (undo across a save
-works; the snapshots still reference the old sources, which stay registered
-until the versions holding them are pruned). An encrypted file is read
-back with the document's password, which the view keeps.
+**The old writers read records through a projection** (M10.5 slice 8,
+until slice 9's emitter writes from the records). Both still take the
+page tree, the marks and the bookmarks from the state itself (a
+bookmark read from the primary keeps its item's `/SE`, and a `Kept` one
+its `/A` or `/Dest`, copied as they are), and the rest from
+`Snapshot::legacy()`, built the first time one asks: each page's OCR
+text, the header and footer, each page's removed comments (the names of
+other tools' comments and links its file holds, through `save::origin`
+for a derived copy's page, less those the page still has a record of or
+a mark has taken the name of: a save leaves them out, with their
+threads), and the fields as `forms::Field`s, each its instance's copy
+of the field it was read as. A page's other annotations (popups,
+screens and the rest sheaf doesn't model) come through from its file.
+
+Either way the save runs on a background thread from a cloned snapshot;
+the app's reads the saved file's annotations and form there too, so the
+rebase after it reads nothing on the UI thread. On completion the saved
+file is registered as a fresh source, and `rebase_to_saved` re-expresses
+the current version over it (M10.5 slice 8 adapts it to the records;
+slice 9 deletes it): each page is the saved file's page at its position,
+copy 0, its `Geom` the saved page's, its OCR text dropped, since the
+file holds it now; each mark is rebound by `/NM` to its object, and its
+stamp to the form the file now holds; other tools' comments and links by
+name and subtype (one the save left out, such as a link to a page not
+kept, goes from the document too), fields by full name (the k-th of a
+name in tree order the k-th in the file, as forms repeat names), widgets
+by their place among their field's on the page, and bookmarks by
+pre-order, those deeper than the reader reads from no item. The baseline
+becomes that state, and `saved = cursor`. The page and mark ids stay, so
+the view doesn't flicker. History is kept (undo across a save works; the
+snapshots still reference the old sources, which stay registered until
+the versions holding them are pruned). An encrypted file is read back
+with the document's password, which the view keeps.
 
 ### One writer (M10.5 slice 7)
 
@@ -1258,20 +1416,25 @@ prints today's numbers on the three fixtures beside slice 2's baselines.
   name sources by registration, so source bytes are never step bytes.
   Snapshot and step bytes are computed when a version is made, from its
   prims and the sizes of the maps they changed. They are estimates, and
-  one is coarse: the pages, the outline and the labels are each one value,
-  and a prim that puts one counts all of it, walking it, though `im`
-  shares all but the changed path with the version before (about 170 KB to
-  rotate one page of 7,000, about 375 KB to rename one bookmark of 2,000).
-  So in a long session of such edits the steps alone can pass
-  `MemoryBudget`, which then drops every snapshot it may, and undo replays
-  from the nearest version that kept one. M10.5 slice 8's records leave
-  only the page order, the outline's top level and the labels counted this
-  way. Trimming frees snapshot bytes only; a version's step bytes, and the
-  registrations it holds, go when it is pruned (past `MAX_VERSIONS`, and
-  by bytes from M10.5 slice 12), and a blob goes with the last
-  registration holding it (an engine opened on it keeps its bytes until
-  M10.5 slice 13's engine pool closes it). A policy weighs undone
-  sources but not `blob_bytes`, so a large undone insert makes
+  one is coarse: the page order, the outline's top level and the form (its
+  top-level fields and its instances' names) are each one value, and a
+  prim that puts one counts all of it, though `im` shares all but the
+  changed path with the version before (about 56 KB for any change to the
+  order of 7,000 pages). So in a long session of such edits the steps
+  alone can pass `MemoryBudget`, which then drops every snapshot it may,
+  and undo replays from the nearest version that kept one. Every other
+  record is its own slot, counted once by pointer, with the path its map
+  copied (942 step bytes to rename one bookmark of 2,000, against 375 KB
+  before M10.5 slice 8). A value records share is counted once a version,
+  so a duplicate's page shares its original's content stack and its
+  fields their props without counting them twice there, but a version
+  that copies a page an earlier one recognized counts the stack again.
+  Trimming frees snapshot bytes only; a version's step bytes, and the
+  registrations it holds, go when it is pruned (past
+  `MAX_VERSIONS`, and by bytes from M10.5 slice 12), and a blob goes with
+  the last registration holding it (an engine opened on it keeps its
+  bytes until M10.5 slice 13's engine pool closes it). A policy weighs
+  undone sources but not `blob_bytes`, so a large undone insert makes
   `MemoryBudget` drop every snapshot it may until its branch is pruned.
   Default: `AllOf([FixedCount(200), MemoryBudget(256 MB)])`.
 - **Deleting pages cascades to bookmarks that target them**, with a
@@ -1287,8 +1450,9 @@ prints today's numbers on the three fixtures beside slice 2's baselines.
   bookmarks (the outline panel already greys them), so they need a fix path.
 - Thumbnails show a bookmark glyph on pages that are bookmark targets, so a
   cascade is visible before the delete.
-- `PageRef.rotation` is the page's `/Rotate`, **absolute**, as a save
-  writes it (M10.5 slice 5): a page starts with its source page's own, and
+- A page's rotation is its `/Rotate`, **absolute**, as a save
+  writes it (M10.5 slice 5; `Geom.rotate` from slice 8, a page's `Geom`
+  its own record): a page starts with its source page's own, and
   a save keeps it. A render takes `Document::render_delta`, the turn PDFium
   adds to the source page's own `/Rotate`. It was a delta over the source
   page until then, since reading the originals up front cost a page load
@@ -1302,22 +1466,31 @@ prints today's numbers on the three fixtures beside slice 2's baselines.
 Added in M5. An OCR run produces, per page, a `TextLayer`: words with boxes
 in PageSpace (M10.5 slice 5; see Coordinates), like marks, the frame the
 text reads upright in (`upright`, the page's absolute rotation when it was
-recognized) and the engine's name. It lives in
-`DocState.text_layers: im::HashMap<PageId, Arc<TextLayer>>`.
+recognized) and the engine's name. It is page content (M10.5 slice 8):
+an `OcrText` layer on the page's `ContentStack`, `DocState::ocr_text(page)`,
+put with the page's `PageDef`.
 
-- **Presence means unsaved.** A save writes every layer into its page as an
-  invisible text layer (text render mode 3 in `content::Glyphless`,
-  Tesseract's glyphless font embedded, each UTF-16 code unit of a word a
-  CID and the text read back through its ToUnicode, written by
-  `ContentWriter` under the legacy name `/SheafOcr`; `/Contents` turned
-  into `[q, original…, layer]`, the `q` and the layer marked
-  `/SheafOcrLayer`, until slice 18's blocks), and `rebase_to_saved` drops
-  them. The model never reads layers back: once
-  in the file, PDFium owns the text.
+- **Presence means unsaved, until slice 9.** A save writes every layer
+  into its page as an invisible text layer (text render mode 3 in
+  `content::Glyphless`, Tesseract's glyphless font embedded, each UTF-16
+  code unit of a word a CID and the text read back through its
+  ToUnicode, written by `ContentWriter` under the legacy name
+  `/SheafOcr`; `/Contents` turned into `[q, original…, layer]`, the `q`
+  and the layer marked `/SheafOcrLayer`, until slice 18's blocks; the old
+  writers read the layers from the legacy projection), and
+  `rebase_to_saved` drops them: each page it re-points to the saved
+  file's has the empty stack. The model never reads layers back: once in
+  the file, PDFium owns the text.
   Older versions keep their layers, so undo across a save still works.
-- **Edits**: `SetTextLayers` and `ClearTextLayers`. Delete removes a page's
-  layer, Duplicate shares it (same `Arc`), Replace drops it (the page shows
-  other content), Move, Rotate and Crop leave it alone.
+  From slice 9 a save is an output and nothing is rebased: the layer
+  stays in the page's content, and the emitter writes it in place of the
+  one its base already holds.
+- **Edits**: `SetTextLayers` and `ClearTextLayers`, which put the pages'
+  `PageDef`s and nothing else. Delete removes a page's layer with the
+  page, Duplicate shares it (the same `ContentStack`), Replace drops it
+  (the page shows other content, under the empty stack), Move and Rotate
+  leave it alone, and Crop re-points the page's base and keeps its
+  content.
 - **Coalesced undo.** Results arrive in batches over minutes, but a run is
   one undo step: `Document::begin_job` returns a `JobId`, and
   `apply_in_job` amends the newest version when that version belongs to
@@ -1329,10 +1502,11 @@ recognized) and the engine's name. It lives in
   steps. `job_is_undone` tells the runner to stop rather than put undone
   results back.
 - **Search.** PDFium can't see unsaved layers, so Find and Patterns run the
-  same literal/regex search over the model's layers
-  (`text_layer::search`, `pattern_search`) and merge the hits with PDFium's,
-  dropping PDFium's for any page that has a layer. Hits are addressed by
-  `PageId`, so inserted pages and reordered pages work too.
+  same literal/regex search over the pages' `OcrText` layers
+  (`text_layer::search`, `pattern_search`, until slice 14's text service)
+  and merge the hits with PDFium's, dropping PDFium's for any page that
+  has a layer. Hits are addressed by `PageId`, so inserted pages and
+  reordered pages work too.
 
 ## Open questions
 

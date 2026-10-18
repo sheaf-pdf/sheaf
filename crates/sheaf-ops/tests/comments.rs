@@ -108,14 +108,9 @@ fn placed(doc: &sheaf_doc::Document, i: usize, a: Annot) -> Annot {
 /// The file, with a red note of ours on page 1 at (100, 100) and a green
 /// tickmark on page 3 at (50, 60), as they show, and the other tools'
 /// comments in it.
-fn opened(
-    dir: &Path,
-) -> (
-    sheaf_doc::Document,
-    Vec<(sheaf_doc::SourceId, sheaf_doc::file::ForeignAnnot)>,
-) {
-    let (mut doc, foreign) = comments::open(&pdf(dir), None).unwrap();
-    let pages: Vec<_> = doc.state().pages.iter().map(|p| p.id).collect();
+fn opened(dir: &Path) -> sheaf_doc::Document {
+    let mut doc = comments::open(&pdf(dir), None).unwrap();
+    let pages: Vec<_> = doc.state().order().iter().copied().collect();
     let note = mark(
         AnnotKind::Note {
             pos: Pt { x: 100.0, y: 100.0 },
@@ -152,7 +147,7 @@ fn opened(
         "tick",
     )
     .unwrap();
-    (doc, foreign)
+    doc
 }
 
 fn engine(bytes: Vec<u8>) -> PdfiumEngine {
@@ -182,12 +177,11 @@ fn px(r: &Raster, x: f32, y: f32) -> [u8; 3] {
 #[test]
 fn the_summary_writes_the_same_pages_every_time() {
     let dir = scratch("same");
-    let (doc, foreign) = opened(&dir);
+    let doc = opened(&dir);
     let snap = doc.snapshot();
     let write = || {
         let bytes = comments::summary_pdf(
             &snap,
-            &foreign,
             &CommentFilter::default(),
             "",
             Layout::Pages,
@@ -214,10 +208,9 @@ fn the_summary_writes_the_same_pages_every_time() {
 #[test]
 fn the_summary_lists_every_comment_and_thread() {
     let dir = scratch("only");
-    let (doc, foreign) = opened(&dir);
+    let doc = opened(&dir);
     let bytes = comments::summary_pdf(
         &doc.snapshot(),
-        &foreign,
         &CommentFilter::default(),
         "",
         Layout::CommentsOnly,
@@ -247,15 +240,8 @@ fn the_summary_lists_every_comment_and_thread() {
         pages: Some((1, 1)),
         ..Default::default()
     };
-    let bytes = comments::summary_pdf(
-        &doc.snapshot(),
-        &foreign,
-        &cf,
-        "",
-        Layout::CommentsOnly,
-        "review.pdf",
-    )
-    .unwrap();
+    let bytes = comments::summary_pdf(&doc.snapshot(), &cf, "", Layout::CommentsOnly, "review.pdf")
+        .unwrap();
     let text = engine(bytes).page_text(PageIndex(0)).unwrap();
     assert!(
         text.contains("Filtered: page 2") && text.contains("Done"),
@@ -267,10 +253,9 @@ fn the_summary_lists_every_comment_and_thread() {
 #[test]
 fn the_pages_layout_draws_each_page_with_its_numbers() {
     let dir = scratch("pages");
-    let (doc, foreign) = opened(&dir);
+    let doc = opened(&dir);
     let bytes = comments::summary_pdf(
         &doc.snapshot(),
-        &foreign,
         &CommentFilter::default(),
         "",
         Layout::Pages,
@@ -321,8 +306,8 @@ fn the_pages_layout_draws_each_page_with_its_numbers() {
 #[test]
 fn the_csv_numbers_replies_under_their_comment() {
     let dir = scratch("csv");
-    let (doc, foreign) = opened(&dir);
-    let listing = comments::list(doc.state(), &foreign, &CommentFilter::default(), "");
+    let doc = opened(&dir);
+    let listing = comments::list(doc.state(), &CommentFilter::default(), "");
     let out = comments::csv(
         &listing,
         None,
@@ -351,8 +336,8 @@ fn the_csv_numbers_replies_under_their_comment() {
 fn a_measurement_shows_its_value_and_lists_it() {
     use sheaf_doc::measure::{Measured, Scale};
     let dir = scratch("measure");
-    let (mut doc, foreign) = opened(&dir);
-    let p0 = doc.state().pages[0].id;
+    let mut doc = opened(&dir);
+    let p0 = doc.state().order()[0];
     let feet = Scale {
         page: 1.0,
         page_unit: "in".into(),
@@ -375,11 +360,139 @@ fn a_measurement_shows_its_value_and_lists_it() {
     let printed = sheaf_doc::save::print_pdf(&doc.snapshot(), &[p0], true).unwrap();
     let text = engine(printed).page_text(PageIndex(0)).unwrap();
     assert!(text.contains("20.00 ft"), "{text}");
-    let listing = comments::list(doc.state(), &foreign, &CommentFilter::default(), "");
+    let listing = comments::list(doc.state(), &CommentFilter::default(), "");
     let out = comments::csv(
         &listing,
         None,
         &[Column::Type, Column::Measurement, Column::Scale],
     );
     assert!(out.contains("Distance,20.00 ft,1 in = 10 ft"), "{out}");
+}
+
+/// Another tool's link is one of the page's records, as its comments are,
+/// the object it is, but it's no comment: the panel doesn't list it, and
+/// a save keeps it.
+#[test]
+fn links_are_foreign_records() {
+    let dir = scratch("links");
+    let mut file = Pdf::load(pdf(&dir)).unwrap();
+    let page = file.page_iter().next().unwrap();
+    let link = file.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Link",
+        "Rect" => vec![300.into(), 300.into(), 400.into(), 400.into()],
+        "A" => dictionary! { "S" => "URI", "URI" => Object::string_literal("https://example.com") },
+    });
+    file.get_dictionary_mut(page)
+        .unwrap()
+        .set("Annots", vec![link.into()]);
+    let path = dir.join("linked.pdf");
+    file.save(&path).unwrap();
+    let doc = comments::open(&path, None).unwrap();
+    let st = doc.state();
+    let p0 = st.order()[0];
+    let theirs: Vec<(String, Option<lopdf::ObjectId>)> = (st.foreign_on(p0))
+        .map(|(_, f)| (f.summary.subtype.clone(), f.src.as_ref().map(|o| o.id)))
+        .collect();
+    assert_eq!(theirs, [("Link".to_string(), Some(link))]);
+    // Ann's note, with Bo's reply, on page 2: nothing of page 1's.
+    let listing = comments::list(st, &CommentFilter::default(), "");
+    let pages: Vec<usize> = listing.threads().map(|t| t.page).collect();
+    assert_eq!(pages, [1]);
+    let out = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+    let back = Pdf::load_mem(&out).unwrap();
+    let page = back.page_iter().next().unwrap();
+    let list = back.get_dictionary(page).unwrap().get(b"Annots").unwrap();
+    let kept = list.as_array().unwrap().iter().any(|e| {
+        let d = back.get_dictionary(e.as_reference().unwrap()).unwrap();
+        d.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Link".as_slice())
+    });
+    assert!(kept, "the link is kept");
+}
+
+/// Every corpus file's comments, as the panel lists them, are what the
+/// file holds, as `file::annots_in` reads it: on each page, sheaf's marks
+/// and other tools' comments, but for the parts grouped under a comment
+/// on the page and any of theirs a mark has the name of (made editable);
+/// their links aren't comments; and what it lists comes to the totals
+/// measured. Skips without the corpus.
+#[test]
+fn the_comments_panel_lists_what_the_file_holds() {
+    use std::collections::{BTreeMap, HashSet};
+
+    use sheaf_doc::file::Found;
+    use sheaf_doc::forms::corpus::{Corpus, each_entry};
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    // Each page's marks, by count, and other tools' comments, by name.
+    type Page = (usize, Vec<String>);
+    let entries = corpus.manifest().unwrap();
+    let outcomes = each_entry(&entries, |entry| {
+        let doc = comments::open(&corpus.path(entry), None).ok()?;
+        let mut listed: BTreeMap<usize, Page> = BTreeMap::new();
+        let listing = comments::list(doc.state(), &CommentFilter::default(), "");
+        for t in listing.threads() {
+            for e in &t.entries {
+                let page = listed.entry(t.page).or_default();
+                match e.comment.item {
+                    comments::Item::Ours(..) => page.0 += 1,
+                    comments::Item::Foreign(_) => page.1.push(e.comment.name.clone()),
+                }
+            }
+        }
+        let src = &doc.source(doc.primary()).unwrap().src;
+        let read = sheaf_doc::file::annots_in(src.pdf(), src.page_ids());
+        let mut held: BTreeMap<usize, Page> = BTreeMap::new();
+        for (&index, list) in &read.pages {
+            let ours: HashSet<String> = (list.iter())
+                .filter_map(|a| match &a.found {
+                    Found::Mark { annot, .. } => Some(annot.name()),
+                    Found::Foreign(_) => None,
+                })
+                .collect();
+            let theirs: Vec<_> = (list.iter())
+                .filter_map(|a| match &a.found {
+                    Found::Foreign(f) if !f.is_link() && !ours.contains(&f.name) => Some(f),
+                    _ => None,
+                })
+                .collect();
+            let names: HashSet<&str> = (ours.iter().map(String::as_str))
+                .chain(theirs.iter().map(|f| f.name.as_str()))
+                .collect();
+            let shown = (theirs.iter())
+                .filter(|f| !(f.grouped && f.parent.as_deref().is_some_and(|p| names.contains(p))));
+            let page = (ours.len(), shown.map(|f| f.name.clone()).collect());
+            if page != Page::default() {
+                held.insert(index as usize, page);
+            }
+        }
+        let comments = (listed.values())
+            .map(|(ours, theirs)| ours + theirs.len())
+            .sum();
+        for page in listed.values_mut().chain(held.values_mut()) {
+            page.1.sort();
+        }
+        Some((listed == held, listing.count, comments))
+    });
+    let opened: Vec<(bool, usize, usize)> = outcomes.iter().flatten().copied().collect();
+    let differ: Vec<&str> = (entries.iter().zip(&outcomes))
+        .filter(|(_, o)| o.is_some_and(|(same, ..)| !same))
+        .map(|(e, _)| e.path.as_str())
+        .collect();
+    assert!(differ.is_empty(), "{differ:#?}");
+    // What the frozen corpus lists, as measured at M10.5 slice 8, so a
+    // change in what the reader finds shows too: files, those that open,
+    // those with comments, threads and comments.
+    let totals = (
+        entries.len(),
+        opened.len(),
+        opened.iter().filter(|(_, threads, _)| *threads > 0).count(),
+        opened.iter().map(|(_, threads, _)| threads).sum::<usize>(),
+        opened.iter().map(|(.., comments)| comments).sum::<usize>(),
+    );
+    assert_eq!(
+        totals,
+        (4_392, 4_389, 233, 898, 943),
+        "a corpus with files added needs these measured again"
+    );
 }

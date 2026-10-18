@@ -125,10 +125,10 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
     let mut connectors = Vec::new();
     // OCR's font and its isolating `q`, and what the marks draw with and
     // embed, once a save; the original's where it has them.
-    let mut cx = crate::annot::WriteCx::new(snap.assets.clone()).owning(info.src.id());
+    let mut cx = crate::annot::WriteCx::new().owning(info.src.clone());
     if tree_changed {
         let pages_id = pdf.new_object_id();
-        let mut kids = Vec::with_capacity(snap.state.pages.len());
+        let mut kids = Vec::with_capacity(snap.state.page_count());
         let mut used = std::collections::HashSet::new();
         // Pages from other files get their ids first, so links among them
         // follow and links to their other pages don't copy those (bug 14),
@@ -153,22 +153,22 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
         {
             pristine = Some(pdf.clone());
         }
-        for pref in &snap.state.pages {
+        for (page_id, def, geom) in snap.state.pages() {
             // A derived copy's page is written as the page it was made
             // from: its object, annotations and form fields, with the
             // copy's content (M10 bug 1).
-            let origin = origins.get(&pref.id).copied();
-            let source = origin.map_or(pref.source, |(s, _)| s);
+            let origin = origins.get(&page_id).copied();
+            let source = origin.map_or(def.base.source, |(s, _)| s);
             let (src_page, inherited, mut dict) = if let Some((_, index)) = origin {
-                let shown = others.get(&pref.source).context("unknown source")?;
+                let shown = others.get(&def.base.source).context("unknown source")?;
                 let id = *shown
                     .pages
-                    .get(pref.index as usize)
+                    .get(def.base.index as usize)
                     .context("page index out of range")?;
-                let map = copy_maps.entry((pref.source, 0)).or_default();
+                let map = copy_maps.entry((def.base.source, 0)).or_default();
                 let mut dict =
                     crate::save::copy_derived_page(shown.pdf.as_ref().unwrap(), id, &mut pdf, map)?;
-                let own = own_objects.contains_key(&pref.id);
+                let own = own_objects.contains_key(&page_id);
                 let (src_page, annots) = if source == primary_id {
                     let page = *primary
                         .pages
@@ -201,10 +201,10 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
                     shown.inherited.get(&id).cloned().unwrap_or_default(),
                     dict,
                 )
-            } else if pref.source == primary_id {
+            } else if def.base.source == primary_id {
                 let id = *primary
                     .pages
-                    .get(pref.index as usize)
+                    .get(def.base.index as usize)
                     .context("page index out of range")?;
                 (
                     id,
@@ -212,14 +212,14 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
                     pdf.get_dictionary(id)?.clone(),
                 )
             } else {
-                let src = others.get(&pref.source).context("unknown source")?;
+                let src = others.get(&def.base.source).context("unknown source")?;
                 let id = *src
                     .pages
-                    .get(pref.index as usize)
+                    .get(def.base.index as usize)
                     .context("page index out of range")?;
-                let map = copy_maps.entry((pref.source, 0)).or_default();
+                let map = copy_maps.entry((def.base.source, 0)).or_default();
                 let src_pdf = src.pdf.as_ref().unwrap();
-                let mut dict = if own_objects.contains_key(&pref.id) {
+                let mut dict = if own_objects.contains_key(&page_id) {
                     crate::save::copy_derived_page(src_pdf, id, &mut pdf, map)?
                 } else {
                     copy_page_dict(src_pdf, id, &mut pdf, map)?
@@ -231,9 +231,9 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
                     dict,
                 )
             };
-            if own_objects.contains_key(&pref.id) {
+            if own_objects.contains_key(&page_id) {
                 // A copy of a form: its annotations are its own (M10 bug 4).
-                let form = crate::save::copy_of(snap, &origins, pref.id);
+                let form = crate::save::copy_of(snap, &origins, page_id);
                 let from = if form.0 == primary_id {
                     pristine.as_ref()
                 } else {
@@ -253,14 +253,11 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
                     dict.set(k.clone(), v.clone());
                 }
             }
-            match (
-                snap.state.annots.get(&pref.id),
-                snap.state.removed_comments.get(&pref.id),
-            ) {
+            let mut marks = snap.state.mark_records_on(page_id).peekable();
+            match (marks.peek(), snap.legacy().removed_comments.get(&page_id)) {
                 (None, None) => strip_sheaf_annots(&pdf, &mut dict),
-                (list, removed) => {
-                    let marks = list.into_iter().flatten();
-                    let index = origin.map_or(pref.index, |(_, i)| i);
+                (_, removed) => {
+                    let index = origin.map_or(def.base.index, |(_, i)| i);
                     let renamed = snap.renamed_on(source, index);
                     let w =
                         write_page_annots(&mut pdf, &mut dict, marks, removed, renamed, &mut cx);
@@ -270,7 +267,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
                     }
                 }
             }
-            if let Some(layer) = snap.state.text_layers.get(&pref.id) {
+            if let Some(layer) = snap.legacy().text_layers.get(&page_id) {
                 if mode == Mode::Save && text_layer::has_layer(&pdf, &dict) {
                     bail!(
                         "a page's OCR text is replaced: a full save takes the old out of the file"
@@ -279,15 +276,15 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
                 text_layer::install(&mut pdf, &mut dict, layer, &mut cx.res);
             }
             // The new tree's root has no /Rotate for it to inherit.
-            if pref.rotation == Rotation::R0 {
+            if geom.rotate == Rotation::R0 {
                 dict.remove(b"Rotate");
             } else {
-                dict.set("Rotate", pref.rotation.degrees());
+                dict.set("Rotate", geom.rotate.degrees());
             }
             dict.set("Parent", pages_id);
             dict.set("Type", Object::Name(b"Page".to_vec()));
-            let first = !own_objects.contains_key(&pref.id) && used.insert((source, src_page));
-            let id = if let Some(&id) = own_objects.get(&pref.id) {
+            let first = !own_objects.contains_key(&page_id) && used.insert((source, src_page));
+            let id = if let Some(&id) = own_objects.get(&page_id) {
                 id
             } else if source == primary_id && first {
                 src_page
@@ -299,22 +296,22 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
             };
             changed.insert(id, Object::Dictionary(dict));
             kids.push(Object::Reference(id));
-            page_obj.insert(pref.id, id);
+            page_obj.insert(page_id, id);
         }
         changed.insert(
             pages_id,
-            Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => snap.state.pages.len() as i64 }),
+            Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => snap.state.page_count() as i64 }),
         );
         catalog.set("Pages", pages_id);
         catalog.remove(b"PageLabels");
         catalog_changed = true;
     } else {
-        for pref in &snap.state.pages {
-            let id = primary.pages[pref.index as usize];
-            page_obj.insert(pref.id, id);
-            let layer = snap.state.text_layers.get(&pref.id);
-            let turned = snap.render_delta(pref) != Rotation::R0;
-            if turned || snap.annots_dirty.contains(&pref.id) || layer.is_some() {
+        for (page_id, def, geom) in snap.state.pages() {
+            let id = primary.pages[def.base.index as usize];
+            page_obj.insert(page_id, id);
+            let layer = snap.legacy().text_layers.get(&page_id);
+            let turned = snap.render_delta(page_id) != Rotation::R0;
+            if turned || snap.annots_dirty.contains(&page_id) || layer.is_some() {
                 let mut dict = pdf.get_dictionary(id)?.clone();
                 // The rewritten dict stands alone: pull down what it
                 // inherited (a layer inlines Resources, which would
@@ -334,20 +331,17 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
                     }
                     text_layer::install(&mut pdf, &mut dict, layer, &mut cx.res);
                 }
-                if snap.annots_dirty.contains(&pref.id) {
-                    match (
-                        snap.state.annots.get(&pref.id),
-                        snap.state.removed_comments.get(&pref.id),
-                    ) {
+                if snap.annots_dirty.contains(&page_id) {
+                    let mut marks = snap.state.mark_records_on(page_id).peekable();
+                    match (marks.peek(), snap.legacy().removed_comments.get(&page_id)) {
                         (None, None) => strip_sheaf_annots(&pdf, &mut dict),
-                        (list, removed) => {
-                            let marks = list.into_iter().flatten();
+                        (_, removed) => {
                             let w = write_page_annots(
                                 &mut pdf,
                                 &mut dict,
                                 marks,
                                 removed,
-                                snap.renamed_on(primary_id, pref.index),
+                                snap.renamed_on(primary_id, def.base.index),
                                 &mut cx,
                             );
                             connectors.extend(w.connectors);
@@ -361,7 +355,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
                 // its parents, any of which may have a /Rotate. Any other
                 // keeps the one it has, its own or the one pulled down.
                 if turned {
-                    dict.set("Rotate", pref.rotation.degrees());
+                    dict.set("Rotate", geom.rotate.degrees());
                 }
                 changed.insert(id, Object::Dictionary(dict));
             }
@@ -385,8 +379,8 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<Vec<u8>> {
     }
     if snap.outline_dirty {
         catalog.remove(b"Outlines");
-        if !snap.state.outline.is_empty() {
-            let outlines_id = write_outline(&mut pdf, &snap.state.outline, &page_obj);
+        if !snap.state.outline_roots().is_empty() {
+            let outlines_id = write_outline(&mut pdf, &snap.state, &page_obj, info.src.id());
             catalog.set("Outlines", outlines_id);
         }
         catalog_changed = true;

@@ -294,10 +294,7 @@ impl DocView {
             return;
         };
         let st = doc.model.state();
-        let ids: Vec<PageId> = pages
-            .iter()
-            .filter_map(|&i| st.pages.get(i).map(|p| p.id))
-            .collect();
+        let ids: Vec<PageId> = pages.iter().filter_map(|&i| st.page_at(i)).collect();
         let depth = u16::from(parent.is_some());
         let mut items: Vec<NewOutlineItem> = Vec::new();
         if let Some(title) = parent {
@@ -319,7 +316,7 @@ impl DocView {
                 depth,
             });
         }
-        let after = st.outline.last().map(|o| o.id);
+        let after = st.outline_roots().last().copied();
         let n = ids.len();
         self.apply_batch(
             vec![Edit::OutlineInsertTree {
@@ -345,12 +342,12 @@ impl DocView {
         let edits: Vec<Edit> = doc
             .model
             .state()
-            .outline_flat()
+            .bookmarks_preorder()
             .into_iter()
-            .filter_map(|(depth, n)| {
+            .filter_map(|(depth, id, b)| {
                 let want = colors[(depth as usize).min(LEVELS - 1)];
-                (n.color != want).then_some(Edit::OutlineEdit {
-                    id: n.id,
+                (b.color != want).then_some(Edit::OutlineEdit {
+                    id,
                     title: None,
                     target: None,
                     color: Some(want),

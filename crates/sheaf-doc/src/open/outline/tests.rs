@@ -46,6 +46,10 @@ fn titles(items: &[FlatOutlineItem]) -> Vec<&str> {
     items.iter().map(|i| i.title.as_str()).collect()
 }
 
+fn kept(items: &[FlatOutlineItem]) -> Vec<bool> {
+    items.iter().map(|i| i.kept).collect()
+}
+
 fn at(left: Option<f32>, top: Option<f32>, zoom: Option<f32>) -> Option<DestView> {
     Some(DestView::Xyz { left, top, zoom })
 }
@@ -101,6 +105,9 @@ fn an_explicit_dest_names_its_page() {
     );
     let got = outline(&f.source());
     assert_eq!(pages(&got), [Some(1), Some(2), None, None]);
+    // A destination that isn't a page here is kept as read; no
+    // destination at all is a heading.
+    assert_eq!(kept(&got), [false, false, true, false]);
     let fit = Some(DestView::Other {
         kind: "Fit".into(),
         params: vec![],
@@ -185,6 +192,9 @@ fn a_goto_action_is_followed() {
     );
     let got = outline(&f.source());
     assert_eq!(pages(&got), [Some(1), Some(2), None, Some(0)]);
+    // The link is kept as read, each item with its object.
+    assert_eq!(kept(&got), [false, false, true, false]);
+    assert!(got.iter().all(|i| i.object.is_some()));
 }
 
 #[test]
@@ -308,6 +318,8 @@ fn positions_sheaf_writes_come_back() {
         color: None,
         style: TextStyle::default(),
         open: true,
+        object: None,
+        kept: false,
     };
     let items = [
         put("Upright", 0, at(Some(36.0), Some(100.0), None)),

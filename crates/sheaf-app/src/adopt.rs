@@ -14,15 +14,14 @@ impl DocView {
     /// The other tool's comment under `p` (in the page's edit frame) on
     /// `page_id` that sheaf can make its own, topmost first: shown, and not
     /// a reply or status (those are edited from the panel).
-    pub(crate) fn foreign_at(&self, page_id: PageId, p: Pt, tolerance: f32) -> Option<usize> {
+    pub(crate) fn foreign_at(&self, page_id: PageId, p: Pt, tolerance: f32) -> Option<AnnotId> {
         let State::Ready(doc) = &self.state else {
             return None;
         };
         if doc.comments_hidden {
             return None;
         }
-        let pref = doc.model.state().pages.iter().find(|r| r.id == page_id)?;
-        let to_edit = doc.model.geom(pref).to_view();
+        let to_edit = doc.model.geom(page_id).to_view();
         let under = |rect: Box2| {
             let r = to_edit.apply_box(rect);
             p.x >= r.x - tolerance
@@ -31,65 +30,61 @@ impl DocView {
                 && p.y <= r.bottom() + tolerance
         };
         let hidden = doc.comment_view.as_ref().map(|(_, v)| &v.hidden_foreign);
-        doc.foreign_annots
-            .iter()
-            .enumerate()
+        let theirs: Vec<_> = doc.model.state().foreign_on(page_id).collect();
+        theirs
+            .into_iter()
             .rev()
-            .find(|(i, (source, f))| {
-                *source == pref.source
-                    && f.page == pref.index
+            .find(|(id, f)| {
+                let f = &f.summary;
+                !f.is_link()
                     && !f.hidden
-                    && !hidden.is_some_and(|h| h.contains(i))
+                    && !hidden.is_some_and(|h| h.contains(id))
                     && f.mark.as_ref().is_some_and(|m| {
                         !matches!(m.kind, AnnotKind::Reply { .. } | AnnotKind::Status { .. })
                     })
                     && under(f.rect)
             })
-            .map(|(i, _)| i)
+            .map(|(id, _)| id)
     }
 
-    /// The page another tool's comment `ix` is on, and the mark it becomes.
-    pub(crate) fn foreign_mark(&self, ix: usize) -> Option<(PageId, Annot)> {
+    /// The page another tool's comment `id` is on, and the mark it becomes.
+    pub(crate) fn foreign_mark(&self, id: AnnotId) -> Option<(PageId, Annot)> {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        let (source, f) = doc.foreign_annots.get(ix)?;
-        let page = doc
-            .model
-            .state()
-            .pages
-            .iter()
-            .find(|r| r.source == *source && r.index == f.page)?
-            .id;
-        Some((page, (**f.mark.as_ref()?).clone()))
+        let a = doc.model.state().annot(id)?;
+        Some((a.page, (**a.foreign()?.summary.mark.as_ref()?).clone()))
     }
 
-    /// Make another tool's comment `ix` one of our marks (`changed` says
+    /// Make another tool's comment `id` one of our marks (`changed` says
     /// how, if it's being changed too), as one undo step called `label`,
     /// and select it. Its page and id, or None when sheaf can't hold it.
     pub(crate) fn adopt_foreign(
         &mut self,
-        ix: usize,
+        id: AnnotId,
         changed: impl FnOnce(&mut Annot),
         label: &str,
         cx: &mut Context<Self>,
     ) -> Option<(PageId, AnnotId)> {
-        let Some((page, mut mark)) = self.foreign_mark(ix) else {
+        let Some((page, mut mark)) = self.foreign_mark(id) else {
             self.set_notice("sheaf can't edit that kind of comment", cx);
             return None;
         };
         changed(&mut mark);
+        // It takes this comment's place, of any named alike.
+        mark.id = id;
         let name = mark.name.clone();
         self.apply(Edit::AnnotAdd { page, annot: mark }, label, cx);
         let State::Ready(doc) = &mut self.state else {
             return None;
         };
+        // The newest of the marks named so: it comes after the others.
         let id = doc
             .model
             .state()
-            .annots_on(page)?
-            .iter()
-            .find(|a| a.name == name)?
+            .marks_on(page)
+            .filter(|a| a.name == name)
+            .last()?
             .id;
         doc.selected_foreign = None;
         doc.select_mark(Some((page, id)));
@@ -99,17 +94,21 @@ impl DocView {
 
     /// F2 or a double-click on another tool's comment: make it ours, then
     /// edit its text (a reply's in the reply box).
-    pub(crate) fn edit_foreign(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((page, id)) = self.adopt_foreign(ix, |_| {}, "Make comment editable", cx) else {
+    pub(crate) fn edit_foreign(
+        &mut self,
+        id: AnnotId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((page, id)) = self.adopt_foreign(id, |_| {}, "Make comment editable", cx) else {
             return;
         };
         let kind = match &self.state {
             State::Ready(doc) => doc
                 .model
                 .state()
-                .annots_on(page)
-                .and_then(|l| l.iter().find(|a| a.id == id))
-                .map(|a| a.kind.clone()),
+                .find_annot(id)
+                .map(|(_, a)| a.kind.clone()),
             _ => None,
         };
         match kind {

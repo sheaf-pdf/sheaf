@@ -167,8 +167,10 @@ fn a_stamp_from_a_cropped_turned_page_lands_where_it_shows() {
         stamp: None,
     };
     let mut doc = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-    doc.assets()
-        .intern_stamp("turned", stamp_bytes.as_slice().into());
+    // Placed, as the stamps panel places one: held until it's added.
+    let turned = (doc.store())
+        .intern(stamp_bytes.as_slice().into(), BlobKind::stamp())
+        .unwrap();
     let annot = Annot {
         id: AnnotId(0),
         kind: AnnotKind::PageStamp {
@@ -178,7 +180,7 @@ fn a_stamp_from_a_cropped_turned_page_lands_where_it_shows() {
                 w: 100.0,
                 h: 200.0,
             },
-            stamp: "turned".into(),
+            stamp: turned.id().stem(),
             name: "Turned".into(),
             text: None,
         },
@@ -195,7 +197,7 @@ fn a_stamp_from_a_cropped_turned_page_lands_where_it_shows() {
         turn: Rotation::R0,
         name: String::new(),
     };
-    let page = doc.page(0).unwrap().id;
+    let page = doc.page(0).unwrap();
     doc.apply(Edit::AnnotAdd { page, annot }, "Stamp").unwrap();
     let saved = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
 

@@ -7,11 +7,9 @@
 //! form (`/NeedsRendering`), and from the field model's class once it's
 //! read, which also catches a static XFA form with no AcroForm fields.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{AnyElement, Context, div, prelude::*, px};
-use sheaf_doc::SourceId;
 use sheaf_doc::forms::{FormClass, FormFacts};
 use sheaf_render::FormType;
 use sheaf_ui::button::Button;
@@ -29,10 +27,9 @@ pub(crate) const XFA_VALUES: &str = "This form's XFA part holds values sheaf doe
 /// What the view knows about the forms in a document's files.
 #[derive(Default)]
 pub(crate) struct Forms {
-    /// The primary file's, once read.
+    /// The primary file's, once read. Inserted files' are their sources'
+    /// (`Source::form`).
     pub(crate) primary: Option<Arc<FormFacts>>,
-    /// Inserted files', by source. Their fields come in with M10 slice 4.
-    pub(crate) incoming: HashMap<SourceId, Arc<FormFacts>>,
     /// The bar was dismissed, for this window's session.
     pub(crate) bar_dismissed: bool,
     /// The user agreed to a save removing an XFA copy that holds values

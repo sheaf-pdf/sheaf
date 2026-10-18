@@ -1,8 +1,6 @@
 use super::*;
 use crate::annot::{Annot, AnnotKind, Pt};
-use crate::history::FixedCount;
-use crate::model::{Document, SourceInfo};
-use crate::store::Store;
+use crate::model::Document;
 use lopdf::{Stream, dictionary};
 use sheaf_core::Rotation;
 
@@ -194,11 +192,10 @@ fn pdf_with_square(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
-fn opened(path: &std::path::Path) -> (Document, Vec<(SourceId, ForeignAnnot)>) {
-    let found = crate::file::read_annots(path, None).unwrap();
-    let store = Store::new();
-    let primary = SourceInfo::read(&store, path, None).unwrap();
-    let mut doc = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+/// `path` opened, with a note of ours on its first page, and the other
+/// tools' comments in it.
+fn opened(path: &std::path::Path) -> (Document, Vec<AnnotId>) {
+    let mut doc = crate::open::file(path, None).unwrap().doc;
     let note = Annot {
         id: AnnotId(0),
         kind: AnnotKind::Note {
@@ -217,7 +214,7 @@ fn opened(path: &std::path::Path) -> (Document, Vec<(SourceId, ForeignAnnot)>) {
         turn: Rotation::R0,
         name: String::new(),
     };
-    let p0 = doc.page(0).unwrap().id;
+    let p0 = doc.page(0).unwrap();
     doc.apply(
         Edit::AnnotAdd {
             page: p0,
@@ -226,11 +223,11 @@ fn opened(path: &std::path::Path) -> (Document, Vec<(SourceId, ForeignAnnot)>) {
         "note",
     )
     .unwrap();
-    let primary = doc.primary();
-    (
-        doc,
-        found.foreign.into_iter().map(|f| (primary, f)).collect(),
-    )
+    let st = doc.state();
+    let theirs = (st.order().iter())
+        .flat_map(|&page| st.foreign_on(page).map(|(id, _)| id))
+        .collect();
+    (doc, theirs)
 }
 
 #[test]
@@ -240,8 +237,8 @@ fn imports_match_by_name_and_report_the_rest() {
     let path = pdf_with_square(&dir);
     let (doc, foreign) = opened(&path);
     let snap = doc.snapshot();
-    let p0 = doc.page(0).unwrap().id;
-    let ours = doc.state().annots_on(p0).unwrap()[0].clone();
+    let p0 = doc.page(0).unwrap();
+    let ours = doc.state().marks_on(p0).next().unwrap().clone();
 
     let mut c = Comments::new();
     let mut add = |page: u32, d: Dictionary| {
@@ -266,7 +263,7 @@ fn imports_match_by_name_and_report_the_rest() {
     add(1, dictionary! { "Subtype" => "Sound", "Rect" => r() });
     add(1, dictionary! { "Subtype" => "Popup", "Rect" => r() });
     add(5, dictionary! { "Subtype" => "Text", "Rect" => r() });
-    let got = import(&snap, &foreign, &c);
+    let got = import(&snap, doc.store(), &c);
     assert_eq!((got.added, got.updated, got.off_the_end), (1, 2, 1));
     assert_eq!(got.skipped, BTreeMap::from([("Sound".to_string(), 1)]));
     assert_eq!(
@@ -283,8 +280,7 @@ fn imports_match_by_name_and_report_the_rest() {
     assert!(matches!(&got.edits[1], Edit::AnnotAdd { annot, .. } if annot.name == "sq"));
 
     // All of it, ours and theirs, out and back.
-    let ix: Vec<usize> = (0..foreign.len()).collect();
-    let out = gather(&snap, &foreign, &[(p0, ours.id)], &ix).unwrap();
+    let out = gather(&snap, &[ours.id], &foreign).unwrap();
     assert_eq!(out.file.as_deref(), Some("two.pdf"));
     let back = read(&fdf::write(&out).unwrap(), None).unwrap();
     let names: Vec<(u32, String)> = (0..back.len())
@@ -292,13 +288,15 @@ fn imports_match_by_name_and_report_the_rest() {
         .collect();
     assert_eq!(names, [(0, ours.name()), (0, "sq".to_string())]);
     // Ours come back exactly, from /SheafAnnot.
-    let again = import(&snap, &foreign, &back);
+    let again = import(&snap, doc.store(), &back);
     assert_eq!((again.added, again.updated), (0, 2));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A page stamp's page and an attachment's file go out with our marks in
-/// an FDF and come back with them into a document that has neither.
+/// an FDF and come back with them into a document that has neither: the
+/// file's bytes as they were, the stamp's page made a one-page PDF of the
+/// form the FDF holds, and named by it.
 #[test]
 fn our_marks_bring_their_stamps_and_files() {
     use crate::forms::fixture::{MARK_FILE, MARK_FILE_BYTES, MARK_STAMP, every_mark_kind};
@@ -309,36 +307,43 @@ fn our_marks_bring_their_stamps_and_files() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let path = pdf_with_square(&dir);
-    let (mut doc, foreign) = opened(&path);
-    let held = crate::forms::fixture::mark_assets();
-    let assets = doc.assets();
-    assets.intern_stamp(MARK_STAMP, held.stamp_pdf(MARK_STAMP).unwrap());
-    assets.intern_file(MARK_FILE, held.file_bytes(MARK_FILE).unwrap());
-    let p0 = doc.page(0).unwrap().id;
+    let (mut doc, _) = opened(&path);
+    let held = crate::forms::fixture::mark_blobs(doc.store());
+    let p0 = doc.page(0).unwrap();
     let every = every_mark_kind();
     for annot in [every[17].clone(), every[23].clone()] {
         doc.apply(Edit::AnnotAdd { page: p0, annot }, "mark")
             .unwrap();
     }
+    drop(held);
     // After the note.
-    let ours: Vec<(PageId, AnnotId)> = doc
-        .state()
-        .annots_on(p0)
-        .unwrap()
-        .iter()
-        .skip(1)
-        .map(|a| (p0, a.id))
-        .collect();
-    let out = gather(&doc.snapshot(), &foreign, &ours, &[]).unwrap();
+    let ours: Vec<AnnotId> = doc.state().marks_on(p0).skip(1).map(|a| a.id).collect();
+    let out = gather(&doc.snapshot(), &ours, &[]).unwrap();
     let back = read(&fdf::write(&out).unwrap(), None).unwrap();
-    let (other, foreign) = opened(&path);
-    assert!(other.assets().stamp(MARK_STAMP).is_none());
-    let got = import(&other.snapshot(), &foreign, &back);
-    assert_eq!(got.added, 2);
-    assert!(other.assets().stamp_pdf(MARK_STAMP).is_some());
-    assert_eq!(
-        &*other.assets().file_bytes(MARK_FILE).unwrap(),
-        MARK_FILE_BYTES
+    let (mut other, _) = opened(&path);
+    assert!(other.find_stamp(&MARK_STAMP).is_none());
+    assert!(
+        other
+            .find_file(&MARK_FILE, MARK_FILE_BYTES.len() as u64)
+            .is_none()
     );
+    let got = import(&other.snapshot(), other.store(), &back);
+    assert_eq!(got.added, 2);
+    other.apply_batch(got.edits, "Import").unwrap();
+    drop(got.held);
+    let marks: Vec<&crate::model::Mark> = other.state().mark_records_on(p0).skip(1).collect();
+    let AnnotKind::PageStamp { stamp, .. } = &marks[0].annot.kind else {
+        panic!("a page stamp")
+    };
+    let page = marks[0].stamp.as_ref().unwrap().to_pdf().unwrap();
+    assert_eq!(*stamp, crate::store::BlobId::of(&page).stem());
+    assert_eq!(
+        lopdf::Document::load_mem(&page).unwrap().get_pages().len(),
+        1
+    );
+    assert!(
+        matches!(&marks[1].annot.kind, AnnotKind::FileAttachment { file, .. } if *file == *MARK_FILE)
+    );
+    assert_eq!(&**marks[1].file.as_ref().unwrap().bytes(), MARK_FILE_BYTES);
     let _ = std::fs::remove_dir_all(&dir);
 }

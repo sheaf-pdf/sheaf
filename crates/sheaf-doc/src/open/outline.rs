@@ -1,6 +1,7 @@
 //! The bookmarks, read from the source (M10.5 §3.8): each item's title,
-//! the page it goes to and where on it, its color and style, and whether
-//! the file shows it closed, flattened in pre-order with its depth.
+//! the page it goes to and where on it, or whether it goes somewhere else
+//! sheaf keeps as the file has it, its color and style, whether the file
+//! shows it closed, and its object, flattened in pre-order with its depth.
 //!
 //! Positions are PageSpace (M10.5 §5), as the file has them, so a
 //! bookmark sheaf saved is read back where it was put, and a crop or a
@@ -23,7 +24,7 @@ mod tests;
 
 /// How deep the walk goes: an item this deep is read, its children
 /// aren't. PDFium's walk stopped there too.
-const MAX_DEPTH: u16 = 32;
+pub(crate) const MAX_DEPTH: u16 = 32;
 /// How many items are read at most.
 const MAX_ITEMS: usize = 200_000;
 
@@ -63,7 +64,13 @@ pub fn outline(src: &Source) -> Vec<FlatOutlineItem> {
 /// A title's text, as PDFium shows it: the text string's
 /// ([`text_string`]), control characters as spaces.
 fn title(bytes: &[u8]) -> String {
-    text_string(bytes)
+    shown_title(&text_string(bytes))
+}
+
+/// Title `title` as the walk reads it back: control characters as
+/// spaces.
+pub(crate) fn shown_title(title: &str) -> String {
+    title
         .chars()
         .map(|c| if c < ' ' { ' ' } else { c })
         .collect()
@@ -96,7 +103,7 @@ impl<'a> Walk<'a> {
             let Ok(item) = self.pdf.get_dictionary(id) else {
                 return;
             };
-            let (page, view) = self.target(item);
+            let (page, view, kept) = self.target(item);
             let (color, style) = self.style(item);
             let count = item
                 .get(b"Count")
@@ -118,6 +125,8 @@ impl<'a> Walk<'a> {
                 color,
                 style,
                 open: count.is_none_or(|n| n >= 0),
+                object: Some(id),
+                kept,
             });
             if depth < MAX_DEPTH {
                 self.level(link(item, b"First"), depth + 1);
@@ -127,19 +136,18 @@ impl<'a> Walk<'a> {
     }
 
     /// Where `item` goes: its `/Dest`, else its GoTo action's `/D`. No
-    /// page, no position.
-    fn target(&mut self, item: &'a Dictionary) -> (Option<u32>, Option<DestView>) {
-        let dest = match item.get(b"Dest") {
-            Ok(dest) => self.dest(dest),
-            Err(_) => None,
+    /// page, no position; and then whether it has a `/Dest` or an `/A`,
+    /// which go somewhere else, kept as read.
+    fn target(&mut self, item: &'a Dictionary) -> (Option<u32>, Option<DestView>, bool) {
+        let explicit = item.get(b"Dest").ok();
+        let dest = explicit.and_then(|dest| self.dest(dest));
+        let Some((page, dest)) = dest
+            .or_else(|| self.goto(item))
+            .and_then(|dest| Some((self.page(dest)?, dest)))
+        else {
+            return (None, None, explicit.is_some() || item.has(b"A"));
         };
-        let Some(dest) = dest.or_else(|| self.goto(item)) else {
-            return (None, None);
-        };
-        let Some(page) = self.page(dest) else {
-            return (None, None);
-        };
-        (Some(page), self.view(dest))
+        (Some(page), self.view(dest), false)
     }
 
     /// The destination of `item`'s `/A`, when it's a GoTo.

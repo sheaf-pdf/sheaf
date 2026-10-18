@@ -676,7 +676,7 @@ fn turned(bytes: &[u8]) -> Document {
     };
     let mut doc = crate::open::start(store, primary, Box::new(FixedCount(10)));
     doc.ready(crate::open::finish(&src, &NoProgress)).unwrap();
-    let first = doc.page(0).unwrap().id;
+    let first = doc.page(0).unwrap();
     let turn = Edit::RotatePages {
         ids: vec![first],
         by: Rotation::R90,
@@ -1005,7 +1005,7 @@ fn print_is_unencrypted() {
     for (name, state) in rc4_aes_128_and_aes_256(&plain) {
         let [source, _] = encrypted(&plain, &state, |_| {});
         let snap = turned(&source).snapshot();
-        let ids: Vec<_> = snap.state.pages.iter().map(|p| p.id).collect();
+        let ids: Vec<_> = snap.state.order().iter().copied().collect();
         for markup in [true, false] {
             let bytes = crate::save::print_pdf(&snap, &ids, markup).unwrap();
             let pdf = open(&bytes);
@@ -1021,7 +1021,7 @@ pub(crate) const NOTE: &[u8] = b"a mark's note";
 
 /// `doc`'s first page with a square marked on it, saying [`NOTE`].
 pub(crate) fn mark(doc: &mut Document) {
-    let page = doc.page(0).unwrap().id;
+    let page = doc.page(0).unwrap();
     let square = Annot {
         id: AnnotId(0),
         kind: AnnotKind::Square {

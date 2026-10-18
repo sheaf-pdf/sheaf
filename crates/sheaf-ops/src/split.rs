@@ -33,7 +33,7 @@ pub struct Part {
 /// The parts `by` makes of `snap`, named after `stem`. Size splits need
 /// to measure, so they're planned by [`split`] instead.
 pub fn plan(snap: &Snapshot, by: &SplitBy, stem: &str) -> Result<Vec<Part>> {
-    let pages: Vec<PageId> = snap.state.pages.iter().map(|p| p.id).collect();
+    let pages: Vec<PageId> = snap.state.order().iter().copied().collect();
     if pages.is_empty() {
         bail!("the document has no pages");
     }
@@ -73,13 +73,12 @@ pub fn plan(snap: &Snapshot, by: &SplitBy, stem: &str) -> Result<Vec<Part>> {
 
 fn by_bookmarks(snap: &Snapshot, pages: &[PageId], stem: &str) -> Result<Vec<Part>> {
     // (first page index, title) per top-level bookmark with a target.
-    let mut starts: Vec<(usize, String)> = snap
-        .state
-        .outline
-        .iter()
-        .filter_map(|o| {
-            let at = pages.iter().position(|p| Some(*p) == o.target)?;
-            Some((at, o.title.clone()))
+    let st = &snap.state;
+    let mut starts: Vec<(usize, String)> = (st.outline_roots().iter())
+        .filter_map(|&id| {
+            let b = st.bookmark(id)?;
+            let at = pages.iter().position(|p| Some(*p) == b.page())?;
+            Some((at, b.title.to_string()))
         })
         .collect();
     starts.sort_by_key(|(at, _)| *at);
@@ -173,7 +172,7 @@ pub fn split(
 /// fit, found by doubling then bisecting. A page too big on its own is a
 /// part by itself, with a warning.
 fn by_size(snap: &Snapshot, max: u64, stem: &str, progress: &dyn Progress) -> Result<Vec<Part>> {
-    let pages: Vec<PageId> = snap.state.pages.iter().map(|p| p.id).collect();
+    let pages: Vec<PageId> = snap.state.order().iter().copied().collect();
     if pages.is_empty() {
         bail!("the document has no pages");
     }
@@ -294,9 +293,9 @@ mod tests {
     #[test]
     fn top_bookmarks() {
         let mut d = doc(6);
-        let ids: Vec<_> = d.state().pages.iter().map(|p| p.id).collect();
+        let ids: Vec<_> = d.state().order().iter().copied().collect();
         for (title, page) in [("Form 1040", 1), ("Schedule A/B", 3), ("Form 1040", 4)] {
-            let after = d.state().outline.last().map(|o| o.id);
+            let after = d.state().outline_roots().last().copied();
             d.apply(
                 Edit::OutlineInsert {
                     parent: None,

@@ -50,11 +50,14 @@
 //! every page, cold, to find an old header to strip. Slice 7's are the
 //! incremental save of one mark and the Rewrite again on an AES-256 copy
 //! of the synthetic and heavy fixtures, made by lopdf beside them, with
-//! neither a baseline nor a gate. So far slice 1's
-//! history bench, slice 3's geometry walk, slice 4's ready and slice 5's
-//! ready on 20,000 of sheaf's marks assert, after their tables print. The
-//! 200 OCR versions take about 5 GB until slice 12 bounds history, and
-//! skip with less memory available.
+//! neither a baseline nor a gate. Slice 8's is 1,000 mark adds on the
+//! heavy 7k, whose annotations and widgets are records from then on,
+//! beside slice 1's AnnotAdd and the same adds on blank pages, so an add
+//! that scans the records shows. So far slice 1's history bench, slice 3's
+//! geometry walk, slice 4's ready, slice 5's ready on 20,000 of sheaf's
+//! marks and slice 8's mark adds assert, after their tables print. The 200
+//! OCR versions take about 5 GB until slice 12 bounds history, and skip
+//! with less memory available.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -64,7 +67,7 @@ use std::time::{Duration, Instant};
 
 use lopdf::Object;
 use sheaf_core::{PageIndex, Rotation};
-use sheaf_doc::open::Facts;
+use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
 use sheaf_doc::save::Strategy;
 use sheaf_doc::serialize::fixture::{USER, encrypt_dict, rc4_aes_128_and_aes_256};
 use sheaf_doc::stamps::{Bates, HeaderFooter};
@@ -476,7 +479,7 @@ fn gates(kind: Kind) {
 
     // An incremental save of one mark, as the app saves to the file it
     // opened: the file with the section appended, written over it.
-    let middle_id = doc.page(middle as usize).unwrap().id;
+    let middle_id = doc.page(middle as usize).unwrap();
     doc.apply(
         Edit::AnnotAdd {
             page: middle_id,
@@ -551,7 +554,7 @@ fn gates(kind: Kind) {
     // Crop every page by half an inch a side, as the app does: the cropped
     // copy made in memory and interned, an engine opened on its bytes, then
     // the edit onto it.
-    let ids: Vec<PageId> = doc.state().pages.iter().map(|p| p.id).collect();
+    let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
     let half_inch = CropSpec::Margins(Margins {
         top: 36.0,
         right: 36.0,
@@ -665,7 +668,7 @@ fn aes_256_rows(kind: Kind, fixture: &Path) -> [Row; 2] {
     let snap = doc.snapshot();
     let primary = snap.source(snap.primary).unwrap();
     assert!(primary.src.crypt().is_some(), "the copy isn't encrypted");
-    let page = doc.page(PAGES as usize / 2).unwrap().id;
+    let page = doc.page(PAGES as usize / 2).unwrap();
     doc.apply(
         Edit::AnnotAdd {
             page,
@@ -768,24 +771,10 @@ fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) -> Vec<RenderHandle>
 #[test]
 #[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
 fn history_at_7k_pages_and_20k_marks() {
-    let mut marks: HashMap<u32, Vec<Annot>> = HashMap::new();
-    for i in 0..20_000 {
-        marks
-            .entry(i % PAGES)
-            .or_default()
-            .push(square(u64::from(i) + 1));
-    }
-    let store = Store::new();
-    let primary = SourceInfo::blank(&store, PAGES);
-    let mut d = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
-    d.ready(Facts {
-        marks,
-        ..Default::default()
-    })
-    .unwrap();
+    let mut d = marked(square);
     let mut adds = Vec::new();
     for i in 0..21 {
-        let page = d.page(i * 333).unwrap().id;
+        let page = d.page(i * 333).unwrap();
         let start = Instant::now();
         d.apply(
             Edit::AnnotAdd {
@@ -802,12 +791,12 @@ fn history_at_7k_pages_and_20k_marks() {
         // The second half before the first page: every page moves.
         let ids = d
             .state()
-            .pages
+            .order()
             .iter()
             .skip(PAGES as usize / 2)
-            .map(|p| p.id)
+            .copied()
             .collect();
-        let before = Some(d.page(0).unwrap().id);
+        let before = Some(d.page(0).unwrap());
         let start = Instant::now();
         d.apply(Edit::MovePages { ids, before }, "reorder").unwrap();
         reorders.push(start.elapsed());
@@ -833,21 +822,124 @@ fn history_at_7k_pages_and_20k_marks() {
     );
 }
 
-/// Ready on the history bench's 7,000 pages and 20,000 marks saved by a
-/// Rewrite, so they're sheaf's own in the file, the last 10,000 copies
-/// that say the first 10,000's ids on other pages: each mark's payload
-/// read and its digest checked, and the copies given new ids (M10.5 slice
-/// 5). The file is written to the gate directory each run, by today's
-/// writer. Under the ready gate, 1 s.
+/// 1,000 AnnotAdds spread over the heavy 7k's pages, opened as the app
+/// opens it, its annotations and widgets records, and the same adds on
+/// 7,000 blank pages, which hold none: the heavy's median add under 1 ms,
+/// and its medians, over all the adds and over the last 100, within twice
+/// the blank's, so no add scans the records (M10.5 slice 8). Each add is
+/// a version, and pushing one costs more as history grows towards
+/// `MAX_VERSIONS` (it walks the versions to trim them, until slice 12),
+/// which both documents pay alike. The baseline is slice 1's AnnotAdd on
+/// blank pages.
+#[test]
+#[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
+fn mark_adds_on_the_heavy_7k() {
+    let path = fixture(Kind::Heavy);
+    let mut heavy = sheaf_doc::open::file(&path, None).unwrap().doc;
+    let held = heavy.state().annot_count();
+    // A scan shows only against a large table.
+    assert!(held >= 20_000, "the heavy 7k holds {held} annotations");
+    let heavy = Adds::on(&mut heavy);
+    let blank = Adds::on(&mut blank(PAGES));
+    let rows = |what: &str, adds: &Adds, gates: [&str; 2]| {
+        [
+            Row::time(what, adds.median, MARKS_7K.add_ms, gates[0]),
+            Row::time(
+                &format!("{what}, the first {ENDS}"),
+                adds.first,
+                MARKS_7K.add_ms,
+                "",
+            ),
+            Row::time(
+                &format!("{what}, the last {ENDS}"),
+                adds.last,
+                MARKS_7K.add_ms,
+                gates[1],
+            ),
+        ]
+    };
+    let twice = "≤ 2× the blank's, asserted";
+    let mut table = Vec::from(rows(
+        &format!("AnnotAdd, heavy ({held} held)"),
+        &heavy,
+        ["< 1 ms and ≤ 2× the blank's, asserted", twice],
+    ));
+    table.extend(rows("AnnotAdd, blank (none held)", &blank, ["", ""]));
+    print_table(
+        &format!("history: {ADDS} AnnotAdds on the heavy 7k and on 7,000 blank pages"),
+        "slice 2",
+        &table,
+    );
+    let add = heavy.median;
+    assert!(add < Duration::from_millis(1), "AnnotAdd took {add:?}");
+    assert!(
+        add <= blank.median * 2,
+        "AnnotAdd took {add:?} on the heavy 7k, {:?} on blank pages",
+        blank.median
+    );
+    assert!(
+        heavy.last <= blank.last * 2,
+        "the last {ENDS} adds took {:?} on the heavy 7k, {:?} on blank pages",
+        heavy.last,
+        blank.last
+    );
+}
+
+/// The AnnotAdds [`mark_adds_on_the_heavy_7k`] makes on each document,
+/// and how many at either end it takes a median of.
+const ADDS: usize = 1000;
+const ENDS: usize = 100;
+
+/// What [`ADDS`] AnnotAdds took: the median of all, of the first
+/// [`ENDS`] and of the last.
+struct Adds {
+    median: Duration,
+    first: Duration,
+    last: Duration,
+}
+
+impl Adds {
+    /// [`ADDS`] squares added to `d`, each its own version, on pages
+    /// spread over the document.
+    fn on(d: &mut Document) -> Adds {
+        let held = d.state().annot_count();
+        let step = d.state().page_count() / ADDS;
+        let mut adds = Vec::with_capacity(ADDS);
+        for i in 0..ADDS {
+            let page = d.page(i * step).unwrap();
+            let start = Instant::now();
+            d.apply(
+                Edit::AnnotAdd {
+                    page,
+                    annot: square(0),
+                },
+                "mark",
+            )
+            .unwrap();
+            adds.push(start.elapsed());
+        }
+        assert_eq!(d.state().annot_count(), held + ADDS);
+        Adds {
+            first: median(adds[..ENDS].to_vec()),
+            last: median(adds[ADDS - ENDS..].to_vec()),
+            median: median(adds),
+        }
+    }
+}
+
+/// Ready on the history bench's 7,000 pages and 20,000 marks written as
+/// sheaf writes them, so they're sheaf's own in the file, the last 10,000
+/// copies that say the first 10,000's ids on other pages: each mark's
+/// payload read and its digest checked, and the copies given new ids
+/// (M10.5 slice 5). The file is written to the gate directory each run,
+/// by today's writer. Under the ready gate, 1 s.
 #[test]
 #[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
 fn ready_at_7k_pages_and_20k_sheaf_marks() {
-    let d = sheaf_marks(square);
     let dir = gate_dir();
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("marks-{PAGES}.pdf"));
-    std::fs::write(&path, sheaf_doc::save::rewrite(&d.snapshot()).unwrap()).unwrap();
-    drop(d);
+    std::fs::write(&path, sheaf_marks(square)).unwrap();
     let mut opened = None;
     let (ready, _) = measure(RUNS, || {
         drop(opened.take());
@@ -856,7 +948,7 @@ fn ready_at_7k_pages_and_20k_sheaf_marks() {
         t
     });
     let opened = opened.expect("opened above");
-    let read: usize = opened.doc.state().annots.values().map(|l| l.len()).sum();
+    let read = opened.doc.state().marks().count();
     assert_eq!(read, SHEAF_MARKS as usize, "every mark is sheaf's");
     assert_eq!(opened.view.renamed.len(), SHEAF_COPIES as usize);
     print_table(
@@ -875,15 +967,15 @@ fn ready_at_7k_pages_and_20k_sheaf_marks() {
     assert!(ready < Duration::from_secs(1), "ready took {ready:?}");
 }
 
-/// A Rewrite of the history bench's 7,000 pages and 20,000 marks, ready's
-/// above with every fifth a FreeText and every fifth a text stamp, so the
-/// writer draws text as well as squares: each mark's appearance written.
-/// The baseline is slice 6's writer before marks were drawn through the
+/// A Rewrite of the history bench's 7,000 pages and 20,000 marks, with
+/// every fifth a FreeText and every fifth a text stamp, so the writer
+/// draws text as well as squares: each mark's appearance written. The
+/// baseline is slice 6's writer before marks were drawn through the
 /// content toolkit; nothing is asserted.
 #[test]
 #[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
 fn rewrite_of_7k_pages_and_20k_sheaf_marks() {
-    let d = sheaf_marks(|id| match id % 5 {
+    let d = marked(|id| match id % 5 {
         1 => free_text(id),
         2 => text_stamp(id),
         _ => square(id),
@@ -912,27 +1004,53 @@ fn rewrite_of_7k_pages_and_20k_sheaf_marks() {
     );
 }
 
-/// The history bench's marks on [`PAGES`] blank pages, ready: [`SHEAF_MARKS`]
-/// of them, each `mark(id)`, the last [`SHEAF_COPIES`] saying the first
-/// ones' ids.
-fn sheaf_marks(mark: impl Fn(u64) -> Annot) -> Document {
-    let mut marks: HashMap<u32, Vec<Annot>> = HashMap::new();
+/// The history bench: [`PAGES`] blank pages, ready, with [`SHEAF_MARKS`]
+/// marks on them in turn, each `mark(id)` under an id of its own.
+fn marked(mark: impl Fn(u64) -> Annot) -> Document {
+    let mut annots = FileAnnots::default();
     for i in 0..SHEAF_MARKS {
-        let id = i % (SHEAF_MARKS - SHEAF_COPIES);
-        marks
-            .entry(i % PAGES)
-            .or_default()
-            .push(mark(u64::from(id) + 1));
+        annots.pages.entry(i % PAGES).or_default().push(FileAnnot {
+            object: None,
+            slot: 0,
+            body: FileBody::Mark {
+                annot: Box::new(mark(u64::from(i) + 1)),
+                held: None,
+            },
+        });
     }
     let store = Store::new();
     let primary = SourceInfo::blank(&store, PAGES);
     let mut d = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
     d.ready(Facts {
-        marks,
+        annots: Arc::new(annots),
         ..Default::default()
     })
     .unwrap();
     d
+}
+
+/// The history bench's marks on [`PAGES`] blank pages, as a file: each
+/// `mark(id)` as sheaf writes it, [`SHEAF_MARKS`] of them, the last
+/// [`SHEAF_COPIES`] copies on other pages that say the first ones' ids,
+/// as Acrobat's Insert Pages copies them.
+fn sheaf_marks(mark: impl Fn(u64) -> Annot) -> Vec<u8> {
+    let blank = SourceInfo::blank(&Store::new(), PAGES);
+    let mut pdf = lopdf::Document::load_mem(blank.src.bytes()).unwrap();
+    let pages: Vec<lopdf::ObjectId> = pdf.page_iter().collect();
+    let mut annots: HashMap<lopdf::ObjectId, Vec<Object>> = HashMap::new();
+    for i in 0..SHEAF_MARKS {
+        let id = i % (SHEAF_MARKS - SHEAF_COPIES);
+        let written = sheaf_doc::annot::to_pdf(&mark(u64::from(id) + 1), &mut pdf);
+        let main = pdf.add_object(written.main);
+        let page = pages[(i % PAGES) as usize];
+        annots.entry(page).or_default().push(main.into());
+    }
+    for (page, list) in annots {
+        pdf.get_dictionary_mut(page).unwrap().set("Annots", list);
+    }
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
 }
 
 /// 200 OCR runs over a 1,000-page scan, each a version: what history
@@ -954,7 +1072,7 @@ fn history_of_200_ocr_versions_at_1000_pages() {
         return;
     }
     let mut d = blank(1000);
-    let ids: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
+    let ids: Vec<PageId> = d.state().order().iter().copied().collect();
     let ((), mem) = with_mem(|| {
         for run in 0..200 {
             let layers = ids

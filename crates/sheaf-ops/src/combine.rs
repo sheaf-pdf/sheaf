@@ -140,8 +140,7 @@ pub fn build(
         // Its marks and what they hold, its form (M10 slice 4) and its
         // bookmarks; an image's page has none.
         let Facts {
-            marks,
-            assets,
+            annots,
             form,
             outline,
             ..
@@ -162,12 +161,11 @@ pub fn build(
                     sheaf_doc::history::default_policy(),
                 );
                 d.ready(Facts {
-                    marks,
-                    assets,
+                    annots,
                     form,
                     ..Default::default()
                 })?;
-                let all: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
+                let all: Vec<PageId> = d.state().order().iter().copied().collect();
                 let drop: Vec<PageId> = all
                     .iter()
                     .enumerate()
@@ -183,11 +181,9 @@ pub fn build(
             }
             Some(d) => {
                 let sid = d.add_source(info);
-                d.set_source_form(sid, form);
-                d.set_source_assets(sid, &assets);
                 let ids = insert_runs(d, sid, &wanted, &mut renamed, &mut signed)?;
                 for &(index, id) in &ids {
-                    for annot in marks.get(&index).into_iter().flatten() {
+                    for annot in annots.marks_on(index) {
                         d.apply(
                             Edit::AnnotAdd {
                                 page: id,
@@ -239,7 +235,7 @@ fn insert_runs(
         while j < wanted.len() && wanted[j] == wanted[j - 1] + 1 {
             j += 1;
         }
-        let before = d.state().pages.len();
+        let before = d.page_count();
         let done = d.apply(
             Edit::InsertPages {
                 source: sid,
@@ -253,11 +249,11 @@ fn insert_runs(
         )?;
         renamed.extend(done.forms_renamed);
         signed.extend(done.signatures_in);
-        let pages = &d.state().pages;
+        let order = d.state().order();
         out.extend(
-            (before..pages.len())
+            (before..order.len())
                 .zip(wanted[i]..)
-                .map(|(at, index)| (index, pages[at].id)),
+                .map(|(at, index)| (index, order[at])),
         );
         i = j;
     }
@@ -317,7 +313,7 @@ fn add_bookmarks(
         return Ok(0);
     }
     let n = items.len();
-    let after = d.state().outline.last().map(|o| o.id);
+    let after = d.state().outline_roots().last().copied();
     d.apply(
         Edit::OutlineInsertTree {
             parent: None,
@@ -351,10 +347,9 @@ mod tests {
     /// has, and writes them, and every mark reopens as sheaf's.
     #[test]
     fn marks_bring_what_they_hold() {
-        use sheaf_doc::AnnotKind;
         use sheaf_doc::annot::{WriteCx, to_pdf_in};
-        use sheaf_doc::assets::Stamp;
         use sheaf_doc::forms::fixture::{self, Form};
+        use sheaf_doc::{AnnotKind, BlobId, FormRef, Mark};
         let dir = std::env::temp_dir().join(format!(
             "sheaf-combine-{}-{:x}",
             std::process::id(),
@@ -362,23 +357,25 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let every = fixture::every_mark_kind();
-        let held = fixture::mark_assets();
-        let pdf = held.stamp_pdf(fixture::MARK_STAMP).unwrap();
-        let file = held.file_bytes(fixture::MARK_FILE).unwrap();
+        let held = fixture::holding(&[every[17].clone(), every[23].clone()]);
         // The page stamp and the attachment, each file's named its own.
         let items = ["a", "b"].map(|name| {
-            let (stamp, attached) = (format!("{name}-stamp"), format!("{name}-file"));
-            held.intern_stamp(&stamp, pdf.clone());
-            held.intern_file(&attached, file.clone());
-            let mut marks = [every[17].clone(), every[23].clone()];
-            if let AnnotKind::PageStamp { stamp: s, .. } = &mut marks[0].kind {
-                *s = stamp;
+            let mut marks = held.clone();
+            let file = format!("{name} notes").into_bytes();
+            if let AnnotKind::PageStamp { stamp, .. } = &mut marks[0].annot.kind {
+                *stamp = format!("{name}-stamp");
             }
-            if let AnnotKind::FileAttachment { file: f, .. } = &mut marks[1].kind {
-                *f = attached;
+            if let AnnotKind::FileAttachment {
+                file: stem, size, ..
+            } = &mut marks[1].annot.kind
+            {
+                (*stem, *size) = (BlobId::of(&file).stem(), file.len() as u64);
             }
+            let store = sheaf_doc::Store::new();
+            let blob = store.intern(file.into(), sheaf_doc::store::BlobKind::Attachment);
+            marks[1].file = Some(blob.unwrap().into());
             let mut f = Form::new(1);
-            let mut cx = WriteCx::new(held.clone());
+            let mut cx = WriteCx::new();
             let mut annots = Vec::new();
             for a in &marks {
                 let main = to_pdf_in(a, &mut f.pdf, &mut cx).main;
@@ -395,20 +392,25 @@ mod tests {
             }
         });
         let (doc, _) = build(&items, &CombineParams::default(), &NoProgress).unwrap();
-        let assets = doc.assets();
-        for name in ["a", "b"] {
-            let stamp = assets.stamp(&format!("{name}-stamp"));
-            assert!(matches!(stamp, Some(Stamp::Form { .. })), "{name}");
-            let file = assets.file_bytes(&format!("{name}-file")).unwrap();
-            assert_eq!(&*file, fixture::MARK_FILE_BYTES, "{name}");
+        let st = doc.state();
+        for (name, &p) in ["a", "b"].iter().zip(st.order()) {
+            let marks: Vec<&Mark> = st.mark_records_on(p).collect();
+            let stamp = marks[0].stamp.as_ref();
+            assert!(matches!(stamp, Some(FormRef::Base(_))), "{name}");
+            let file = marks[1].file.as_ref().unwrap();
+            assert_eq!(
+                **file.bytes(),
+                *format!("{name} notes").as_bytes(),
+                "{name}"
+            );
         }
         let out = dir.join("combined.pdf");
         sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
         let back = sheaf_doc::open::file(&out, None).unwrap();
-        assert!(back.view.foreign.is_empty(), "{:?}", back.view.foreign);
         let st = back.doc.state();
-        for p in st.pages.iter() {
-            assert_eq!(st.annots_on(p.id).map(|l| l.len()), Some(2));
+        for &p in st.order() {
+            let marks: Vec<bool> = st.annots_on(p).map(|(_, a)| a.mark().is_some()).collect();
+            assert_eq!(marks, [true, true], "two marks, none another tool's");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

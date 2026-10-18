@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(write(&model.snapshot()).unwrap(), None);
         assert!(find(&pdf).is_none());
 
-        let p1 = model.page(1).unwrap().id;
+        let p1 = model.page(1).unwrap();
         model
             .apply(
                 Edit::RotatePages {
@@ -195,7 +195,7 @@ mod tests {
         let store = Store::new();
         let primary = SourceInfo::read(&store, &pdf, None).unwrap();
         let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-        let p1 = model.page(1).unwrap().id;
+        let p1 = model.page(1).unwrap();
         let layer = TextLayer::from_engine(
             vec![OcrWord {
                 text: "Hello".into(),
@@ -285,7 +285,7 @@ mod tests {
             let store = Store::new();
             let primary = SourceInfo::read(&store, &pdf, None).unwrap();
             let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-            let p0 = model.page(0).unwrap().id;
+            let p0 = model.page(0).unwrap();
             let turn = Edit::RotatePages {
                 ids: vec![p0],
                 by: Rotation::R90,

@@ -56,18 +56,13 @@ pub fn plan(
     // Pages grouped by the source they show now, each with its geometry as
     // it shows and the turn PDFium adds to its source page's.
     let mut by_source: BTreeMap<SourceId, Vec<(PageId, u32, Geom, Rotation)>> = BTreeMap::new();
-    for id in ids {
-        let p = snap
-            .state
-            .pages
-            .iter()
-            .find(|p| p.id == *id)
-            .context("page not found")?;
-        by_source.entry(p.source).or_default().push((
-            p.id,
-            p.index,
-            snap.geom(p),
-            snap.render_delta(p),
+    for &id in ids {
+        let base = &snap.state.def(id).context("page not found")?.base;
+        by_source.entry(base.source).or_default().push((
+            id,
+            base.index,
+            snap.geom(id),
+            snap.render_delta(id),
         ));
     }
     let mut out = Vec::new();
@@ -194,10 +189,10 @@ mod tests {
                 stamp: None,
             };
             let mut doc = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-            let id = doc.state().pages[0].id;
+            let id = doc.state().order()[0];
             let rotate = Edit::RotatePages { ids: vec![id], by };
             doc.apply(rotate, "rotate").unwrap();
-            let shown = doc.page_size(&doc.state().pages[0]);
+            let shown = doc.page_size(doc.state().order()[0]);
             let plan = plan(
                 doc.store(),
                 &doc.snapshot(),
@@ -208,7 +203,7 @@ mod tests {
             .unwrap();
             let cropped = plan[0].info.src.geom(0);
             assert_eq!(cropped.crop, want, "{by:?}");
-            let left = doc.geom(&doc.state().pages[0]);
+            let left = doc.geom(doc.state().order()[0]);
             let size = Geom { crop: want, ..left }.shown();
             assert_eq!(size.width, shown.width - 60.0, "{by:?}");
             assert_eq!(size.height, shown.height - 40.0, "{by:?}");

@@ -1,11 +1,12 @@
 //! The Attach File tool (Shift+J from Stamp): click where the icon goes,
-//! then pick the file. Its bytes wait in the cache until a save embeds them
-//! (`sheaf_doc::generated::store_blob`). Double-click the icon, or use the
-//! Attachments panel, to open or save the file; the properties bar picks
-//! the icon (push pin, paperclip, graph or tag).
+//! then pick the file. Its bytes go into the document's store, and the
+//! mark holds them until a save embeds them. Double-click the icon, or use
+//! the Attachments panel, to open or save the file; the properties bar
+//! picks the icon (push pin, paperclip, graph or tag).
 
 use gpui::{Context, Window};
 use sheaf_doc::attachments::{Attachment, AttachmentRef};
+use sheaf_doc::store::BlobKind;
 use sheaf_doc::{AnnotKind, PageId, Pt};
 
 use crate::docview::{DocView, State};
@@ -14,6 +15,10 @@ use crate::markup_tools::Tool;
 impl DocView {
     /// Attach File: ask for the file, then put it at `p` on `page`.
     pub(crate) fn attach_file_at(&mut self, page: PageId, p: Pt, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let store = doc.model.store().clone();
         let rx = crate::file_dialog::open_filtered(
             cx,
             gpui::PathPromptOptions {
@@ -31,14 +36,14 @@ impl DocView {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
+            // Read and interned, and held until the mark is added.
             let read = cx
                 .background_executor()
                 .spawn({
                     let path = path.clone();
                     async move {
-                        let bytes = std::fs::read(&path)?;
-                        let stem = sheaf_doc::generated::store_blob(&bytes)?;
-                        anyhow::Ok((stem, bytes.len() as u64))
+                        let bytes = sheaf_core::read_file(&path)?;
+                        anyhow::Ok(store.intern(bytes, BlobKind::Attachment)?)
                     }
                 })
                 .await;
@@ -48,16 +53,16 @@ impl DocView {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "attachment".into());
                 match read {
-                    Ok((stem, size)) => {
+                    Ok(held) => {
                         let kind = AnnotKind::FileAttachment {
                             pos: Pt {
                                 x: p.x - sheaf_doc::annot::NOTE_SIZE / 2.0,
                                 y: p.y - sheaf_doc::annot::NOTE_SIZE / 2.0,
                             },
                             icon: v.attach_icon.clone(),
-                            file: stem,
+                            file: held.id().stem(),
                             name: name.clone(),
-                            size,
+                            size: held.len() as u64,
                         };
                         let color = crate::markup_tools::color_of(
                             crate::markup_tools::Tool::AttachFile,
@@ -65,6 +70,7 @@ impl DocView {
                         );
                         let a = v.new_annot(kind, color, cx);
                         v.add_annot(page, a, &format!("Attach {name}"), cx);
+                        drop(held);
                     }
                     Err(e) => v.set_notice(format!("Couldn't attach {name}: {e:#}"), cx),
                 }
@@ -86,14 +92,13 @@ impl DocView {
             State::Ready(doc) => doc
                 .model
                 .state()
-                .annots_on(page)
-                .and_then(|l| l.iter().find(|a| a.id == id).cloned()),
+                .find_annot(id)
+                .filter(|(on, _)| *on == page)
+                .map(|(_, a)| a.clone()),
             _ => None,
         };
         let Some(sheaf_doc::Annot {
-            kind: AnnotKind::FileAttachment {
-                file, name, size, ..
-            },
+            kind: AnnotKind::FileAttachment { name, size, .. },
             modified,
             created,
             ..
@@ -103,7 +108,7 @@ impl DocView {
         };
         self.open_attachment_item(
             Attachment {
-                at: AttachmentRef::Cached(file),
+                at: AttachmentRef::Mark(id),
                 name,
                 description: String::new(),
                 size: Some(size),

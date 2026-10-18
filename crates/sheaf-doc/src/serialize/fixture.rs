@@ -299,7 +299,7 @@ pub fn holds(bytes: &[u8], text: &[u8]) -> bool {
 /// turned a quarter and a note put on it.
 pub fn edited(path: &Path, password: Option<&str>) -> Snapshot {
     let mut doc = crate::open::file(path, password).unwrap().doc;
-    let page = doc.page(0).unwrap().id;
+    let page = doc.page(0).unwrap();
     let turn = Edit::RotatePages {
         ids: vec![page],
         by: Rotation::R90,

@@ -414,14 +414,14 @@ mod tests {
     fn mark_fixtures() -> Vec<Vec<u8>> {
         let mut f = Form::new(1);
         let mut page = f.dict(f.pages[0]).clone();
-        let marks = every_mark_kind();
+        let marks = crate::forms::fixture::holding(&every_mark_kind());
         crate::save::write_page_annots(
             &mut f.pdf,
             &mut page,
             marks.iter(),
             None,
             &[],
-            &mut crate::annot::WriteCx::new(crate::forms::fixture::mark_assets()),
+            &mut crate::annot::WriteCx::new(),
         );
         let entries: Vec<ObjectId> = page
             .get(b"Annots")

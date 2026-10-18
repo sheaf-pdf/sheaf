@@ -98,7 +98,7 @@ fn check(rotate: i64, by: Rotation) {
     let store = Store::new();
     let primary = SourceInfo::read(&store, &src, None).unwrap();
     let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-    let page = model.page(0).unwrap().id;
+    let page = model.page(0).unwrap();
     if by != Rotation::R0 {
         model
             .apply(
@@ -112,7 +112,7 @@ fn check(rotate: i64, by: Rotation) {
     }
     // Two words on a line, as the engine would report them in the frame
     // the page was shown in.
-    let shown = model.geom(&model.state().pages[0]);
+    let shown = model.geom(model.state().order()[0]);
     let hello = Box2 {
         x: 72.0,
         y: 100.0,

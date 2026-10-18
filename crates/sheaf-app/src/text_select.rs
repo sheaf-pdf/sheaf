@@ -79,11 +79,11 @@ impl DocView {
             return None;
         };
         let st = doc.model.state();
-        if let Some(layer) = st.text_layer(page) {
+        if let Some(layer) = st.ocr_text(page) {
             return Some(CharsKey::Layer(layer.clone()));
         }
-        let p = st.pages.iter().find(|p| p.id == page)?;
-        Some(CharsKey::Engine(p.source, p.index))
+        let base = &st.def(page)?.base;
+        Some(CharsKey::Engine(base.source, base.index))
     }
 
     /// Page `page`'s characters, if they've been read and are current.

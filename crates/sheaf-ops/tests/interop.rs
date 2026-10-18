@@ -2,7 +2,10 @@
 //! ignored, as they need tools CI doesn't have: `qpdf --check` passes on
 //! every save of plain, encrypted, prefixed and cross-reference-stream
 //! files, and a file with bytes before its header appends to what the
-//! same file without them does, in qpdf and pdf.js.
+//! same file without them does, in qpdf and pdf.js. From slice 8, the old
+//! writers write from records: a bookmark that opens a URI, another
+//! tool's link and comments come through a reorder by both strategies,
+//! and a comment sheaf deleted doesn't.
 //!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`. A test
@@ -13,10 +16,13 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use lopdf::{Dictionary, Object, dictionary};
+use sheaf_doc::forms::fixture::{Form, outline_tree};
 use sheaf_doc::serialize::fixture::{
     PREFIX, USER, attachment_only, edited, encrypted, form, object_streams_encrypted,
     rc4_aes_128_and_aes_256, written,
 };
+use sheaf_doc::{Edit, PageId};
 
 mod common;
 use common::scratch;
@@ -223,6 +229,155 @@ fn a_prefixed_append_opens_identically_in_pdfjs_and_qpdf() {
             assert_eq!(got, want, "{kind}: pdf.js");
             println!("pdf.js, {kind}: {want}");
         }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file of three pages whose first has another tool's link and two of
+/// its comments, `/NM` `theirs` and `kept`, and whose outline has a
+/// bookmark that opens a URI, a structure element its `/SE`, and one to
+/// the third page.
+fn records_base() -> Vec<u8> {
+    fn text(s: &str) -> Object {
+        Object::string_literal(s)
+    }
+    let mut f = Form::new(3);
+    let rect = |y: i64| Object::from(vec![72.into(), y.into(), 144.into(), (y + 24).into()]);
+    let mut uri = |url: &str| {
+        f.pdf
+            .add_object(dictionary! { "S" => "URI", "URI" => text(url) })
+    };
+    let (site_url, link_url) = (uri("https://example.com/"), uri("https://example.org/"));
+    let section = f
+        .pdf
+        .add_object(dictionary! { "Type" => "StructElem", "S" => "Sect" });
+    let site = dictionary! { "Title" => text("Site"), "A" => site_url, "SE" => section };
+    let third = dictionary! {
+        "Title" => text("Third"),
+        "Dest" => vec![f.pages[2].into(), "Fit".into()],
+    };
+    outline_tree(&mut f, vec![(0, site), (0, third)]);
+    let annot = |subtype: &str, y, more: Dictionary| {
+        let mut d = dictionary! { "Type" => "Annot", "Subtype" => subtype, "Rect" => rect(y) };
+        d.extend(&more);
+        d
+    };
+    let link = annot("Link", 72, dictionary! { "A" => link_url });
+    let comment = |name: &str, said: &str, y| {
+        let about =
+            dictionary! { "NM" => text(name), "Contents" => text(said), "T" => text("Ann") };
+        annot("Text", y, about)
+    };
+    let annots = [
+        link,
+        comment("theirs", "Deleted by sheaf", 144),
+        comment("kept", "Kept by sheaf", 216),
+    ]
+    .map(|a| f.pdf.add_object(a));
+    f.set_annots(0, &annots);
+    f.bytes()
+}
+
+/// What pdf.js reads of a file's records: each bookmark's title and the
+/// URI it opens or the page it goes to, and each page's annotations, a
+/// link by its URI and a comment by what it says.
+const PDFJS_RECORDS: &str = r#"
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const [lib, file] = process.argv.slice(2);
+const pdfjs = await import(pathToFileURL(lib).href);
+const data = new Uint8Array(readFileSync(file));
+const doc = await pdfjs.getDocument({ data, verbosity: 0 }).promise;
+for (const item of (await doc.getOutline()) ?? []) {
+  const to = Array.isArray(item.dest)
+    ? `page ${(await doc.getPageIndex(item.dest[0])) + 1}`
+    : `<${item.url ?? item.unsafeUrl}>`;
+  console.log(`bookmark ${JSON.stringify(item.title)} ${to}`);
+}
+for (let n = 1; n <= doc.numPages; n++) {
+  const page = await doc.getPage(n);
+  const said = (await page.getAnnotations()).map((a) =>
+    a.subtype === "Link"
+      ? `Link <${a.url ?? a.unsafeUrl}>`
+      : `${a.subtype} ${JSON.stringify(a.contentsObj?.str ?? a.contents)}`,
+  );
+  console.log(`page ${n}: ${said.join("; ")}`);
+}
+"#;
+
+#[test]
+#[ignore = "needs qpdf, or node and pdf.js"]
+fn bookmarks_links_and_comments_come_through_both_strategies() {
+    let (qpdf, pdfjs) = (qpdf(), pdfjs());
+    if qpdf.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch("interop-records");
+    let script = dir.join("records.mjs");
+    std::fs::write(&script, PDFJS_RECORDS).unwrap();
+    let base = dir.join("records.pdf");
+    std::fs::write(&base, records_base()).unwrap();
+    let mut doc = sheaf_doc::open::file(&base, None).unwrap().doc;
+    let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
+    let third = (doc.state().bookmarks_preorder().into_iter())
+        .find(|(_, _, b)| &*b.title == "Third")
+        .map(|(_, id, _)| id)
+        .unwrap();
+    // The third page first, and its bookmark renamed, so an incremental
+    // save writes the outline anew.
+    let edits = vec![
+        Edit::MovePages {
+            ids: vec![pages[2]],
+            before: Some(pages[0]),
+        },
+        Edit::OutlineEdit {
+            id: third,
+            title: Some("3".into()),
+            target: None,
+            color: None,
+            view: None,
+            style: None,
+        },
+    ];
+    doc.apply_batch(edits, "Reorder").unwrap();
+    let appended = sheaf_doc::incremental::incremental(&doc.snapshot()).unwrap();
+    // A deleted comment makes the next save a Rewrite.
+    let delete = Edit::CommentsDelete {
+        page: pages[0],
+        names: vec!["theirs".into()],
+    };
+    doc.apply(delete, "Delete").unwrap();
+    let rewritten = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+    let outputs = [("Append", appended), ("Rewrite", rewritten)].map(|(strategy, bytes)| {
+        let path = dir.join(format!("records-{strategy}.pdf"));
+        std::fs::write(&path, bytes).unwrap();
+        (strategy, path)
+    });
+    for (strategy, path) in &outputs {
+        if let Some(qpdf) = &qpdf {
+            run(Command::new(qpdf).arg("--check").arg(path))
+                .unwrap_or_else(|e| panic!("qpdf --check, {strategy}: {e}"));
+        }
+        if let Some(pdfjs) = &pdfjs {
+            let said = run(Command::new("node").arg(&script).arg(pdfjs).arg(path)).unwrap();
+            let theirs = match *strategy {
+                "Append" => "Text \"Deleted by sheaf\"; ",
+                _ => "",
+            };
+            let want = format!(
+                "bookmark \"Site\" <https://example.com/>\n\
+                 bookmark \"3\" page 1\n\
+                 page 1: \n\
+                 page 2: Link <https://example.org/>; {theirs}Text \"Kept by sheaf\"\n\
+                 page 3: \n"
+            );
+            assert_eq!(said, want, "pdf.js, {strategy}");
+            println!("pdf.js, {strategy}:\n{said}");
+        }
+    }
+    if qpdf.is_some() {
+        println!("qpdf --check: {} outputs, 0 fail", outputs.len());
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

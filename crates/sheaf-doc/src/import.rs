@@ -6,20 +6,65 @@
 //! The mark keeps the annotation's `/NM` ([`Annot::name`]), so replies to
 //! it still find it, and a save puts the mark where the annotation was.
 
+use std::cell::RefCell;
+use std::sync::Arc;
+
 use lopdf::{Dictionary, Object};
 use sheaf_core::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt, REVIEW};
 use crate::attachments::Objects;
 use crate::file::{pdf_text, thread_name};
+use crate::store::{Blob, BlobKind, Store};
 
 /// What a conversion may do beyond reading the dictionary.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Options {
-    /// Copy an attachment's embedded file into the cache (and so make it
-    /// a mark). Off when converting a whole file ahead of need, where
-    /// copying every attachment would be waste.
-    pub files: bool,
+#[derive(Clone, Copy, Default)]
+pub struct Options<'a> {
+    /// Where an attachment's embedded file is kept, which makes it a mark.
+    /// None when converting a whole file ahead of need, where copying every
+    /// attachment would be waste.
+    pub files: Option<&'a Interned<'a>>,
+}
+
+/// Blobs interned into a document's store for the marks an edit will add:
+/// held until it's applied and the marks hold them, as the store keeps
+/// none.
+pub struct Interned<'a> {
+    store: &'a Store,
+    held: RefCell<Vec<Blob>>,
+}
+
+impl<'a> Interned<'a> {
+    pub fn new(store: &'a Store) -> Interned<'a> {
+        Interned {
+            store,
+            held: RefCell::default(),
+        }
+    }
+
+    /// `bytes` interned as `kind`, and held; None, said, when other bytes
+    /// have their checksum.
+    pub fn intern(&self, bytes: Arc<[u8]>, kind: BlobKind) -> Option<Blob> {
+        let blob = self.store.intern(bytes, kind);
+        let blob = blob.inspect_err(|e| log::warn!("{e}")).ok()?;
+        self.hold(blob.clone());
+        Some(blob)
+    }
+
+    /// `blob`, held too.
+    pub fn hold(&self, blob: Blob) {
+        self.held.borrow_mut().push(blob);
+    }
+
+    /// The store they're interned into.
+    pub fn store(&self) -> &'a Store {
+        self.store
+    }
+
+    /// What's held, for the caller to keep until the edit is applied.
+    pub fn into_held(self) -> Vec<Blob> {
+        self.held.into_inner()
+    }
 }
 
 /// Why an annotation didn't become a mark.
@@ -42,7 +87,7 @@ pub fn convert_page<P: Objects + ?Sized>(
     pdf: &P,
     dicts: &[&Dictionary],
     turn: Rotation,
-    opts: Options,
+    opts: Options<'_>,
 ) -> Vec<Result<Annot, NotAMark>> {
     let names: Vec<String> = dicts.iter().map(|d| thread_name(d)).collect();
     // Grouped parts, by the name of what they're grouped under.
@@ -95,7 +140,7 @@ pub fn convert<P: Objects + ?Sized>(
     pdf: &P,
     dict: &Dictionary,
     turn: Rotation,
-    opts: Options,
+    opts: Options<'_>,
 ) -> Result<Annot, NotAMark> {
     let sub = subtype(dict);
     if matches!(
@@ -218,7 +263,10 @@ pub fn convert<P: Objects + ?Sized>(
         }
         "Caret" => AnnotKind::Insert { at: within(0.0) },
         "Stamp" => stamp(pdf, dict, rect),
-        "FileAttachment" if opts.files => attachment(pdf, dict, rect).ok_or_else(unsupported)?,
+        "FileAttachment" => match opts.files {
+            Some(files) => attachment(pdf, dict, rect, files).ok_or_else(unsupported)?,
+            None => return Err(unsupported()),
+        },
         _ => return Err(unsupported()),
     };
     // A dimension with a scale is a measurement (decision 9). Its value
@@ -350,8 +398,13 @@ fn stamp<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> AnnotKi
     }
 }
 
-/// An attachment, its embedded file copied into the cache.
-fn attachment<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> Option<AnnotKind> {
+/// An attachment, its embedded file interned through `files`.
+fn attachment<P: Objects + ?Sized>(
+    pdf: &P,
+    dict: &Dictionary,
+    rect: Box2,
+    files: &Interned<'_>,
+) -> Option<AnnotKind> {
     let deref_dict = |o: &Object| pdf.dereference(o).ok()?.1.as_dict().ok().cloned();
     let fs = deref_dict(dict.get(b"FS").ok()?)?;
     let ef = deref_dict(fs.get(b"EF").ok()?)?;
@@ -367,7 +420,11 @@ fn attachment<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> Op
     let bytes = s
         .decompressed_content()
         .unwrap_or_else(|_| s.content.clone());
-    let stem = crate::generated::store_blob(&bytes).ok()?;
+    let size = bytes.len() as u64;
+    let stem = files
+        .intern(bytes.into(), BlobKind::Attachment)?
+        .id()
+        .stem();
     let name = [b"UF".as_slice(), b"F"]
         .iter()
         .find_map(|k| fs.get(k).ok().map(pdf_text).filter(|n| !n.is_empty()))
@@ -384,7 +441,7 @@ fn attachment<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> Op
         icon,
         file: stem,
         name,
-        size: bytes.len() as u64,
+        size,
     })
 }
 

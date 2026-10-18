@@ -9,7 +9,6 @@
 //! other crates.
 
 pub mod annot;
-pub mod assets;
 pub mod attachments;
 pub mod content;
 pub mod describe;
@@ -48,13 +47,14 @@ pub use sheaf_core::DestView;
 pub use annot::{Annot, AnnotId, AnnotKind, Box2, Pt, default_author, pdf_date_now};
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
-    Damaged, Derived, DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId,
-    NewOutlineItem, NotReady, OutlineId, OutlineNode, PageId, PageRef, Rebase, Saved, Snapshot,
-    SourceId, SourceInfo, Step, TextStyle, VersionId, VersionView,
+    AnnotBody, AnnotRec, Bookmark, ContentStack, Damaged, Derived, DocState, Document, Edit,
+    EditOutcome, FlatOutlineItem, Foreign, FormRef, GenId, GenSpec, Generator, Invariant, JobId,
+    Layer, Mark, NewOutlineItem, NotReady, OutlineId, PageBase, PageDef, PageId, Rebase, Saved,
+    Snapshot, SourceId, SourceInfo, Static, Step, Target, TextStyle, VersionId, VersionView,
 };
 pub use page_chars::{Glyph, PageChars};
-pub use source::Source;
-pub use store::{Blob, BlobId, Src, Store};
+pub use source::{ObjRef, Source};
+pub use store::{Blob, BlobId, BlobRef, Src, Store};
 pub use text_layer::{OcrWord, TextHit, TextLayer};
 
 /// What sheaf counts pages in, for progress. One spelling everywhere:

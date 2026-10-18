@@ -1,26 +1,40 @@
 //! Virtual document, edits, and snapshot history.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use im::Vector;
+use lopdf::ObjectId;
 use serde::{Deserialize, Serialize};
 use sheaf_core::{DestView, PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
-use crate::assets::{MarkAssets, SourceAssets};
-use crate::forms::{Field, FieldId, FileForm, Widget};
+use crate::file::ForeignAnnot;
+use crate::forms::{FieldId, FileForm, full_name_of};
 use crate::geom::Geom;
 use crate::history::{HistoryPolicy, HistoryStats};
-use crate::open::{Facts, Renamed, ViewFacts};
+use crate::open::{Facts, FileAnnot, FileAnnots, FileBody, Renamed, ViewFacts};
 use crate::prim::{HeapSize, Key, Prim, Rec, Val, same};
 use crate::serialize::durable::FileStamp;
-use crate::store::{BlobKind, Src, Store};
+use crate::source::ObjRef;
+use crate::store::{BlobId, BlobKind, BlobRef, Origin, Src, Store};
 use crate::text_layer::TextLayer;
+
+mod legacy;
+mod records;
+mod state;
+
+pub(crate) use legacy::{LegacyDocState, legacy_field};
+pub use records::{
+    AnnotBody, AnnotRec, Bookmark, ContentStack, FieldNode, FieldProps, Foreign, FormDoc, FormInst,
+    FormRef, GenId, GenSpec, Generator, Layer, Mark, PageBase, PageDef, ScriptState, Static,
+    Target, Terminal, Widget, WidgetProps,
+};
+pub use state::{Builder, DocState, Invariant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SourceId(pub u32);
@@ -41,7 +55,7 @@ pub struct OutlineId(pub u64);
 pub struct SourceInfo {
     pub src: Src,
     /// The path the bytes came from, or a derived copy's original's name.
-    /// Notices, rename stems (`name_apart`), `form_notice`, the recovery
+    /// Form instances' names ([`FormDoc::names`]), notices, the recovery
     /// sidecar and save's same-file check read it; it's never read for
     /// bytes: after a save in place the path holds the new file, and a
     /// version from before the save still means the old one.
@@ -102,32 +116,6 @@ impl SourceInfo {
     }
 }
 
-/// One page of the virtual document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PageRef {
-    pub id: PageId,
-    pub source: SourceId,
-    pub index: u32,
-    /// The page's `/Rotate`, absolute, as a save writes it: its source
-    /// page's own until it's rotated.
-    pub rotation: Rotation,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct OutlineNode {
-    pub id: OutlineId,
-    pub title: String,
-    pub target: Option<PageId>,
-    /// Where on `target` it lands; None is the top of the page.
-    pub view: Option<DestView>,
-    pub color: Option<[u8; 3]>,
-    pub style: TextStyle,
-    /// Whether its children show, as the file has it: a save writes a
-    /// closed one's `/Count` negative.
-    pub open: bool,
-    pub children: Vector<OutlineNode>,
-}
-
 /// How a bookmark's title is drawn (its `/F`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextStyle {
@@ -149,7 +137,8 @@ pub struct FlatOutlineItem {
     pub title: String,
     pub page: Option<u32>,
     pub depth: u16,
-    /// Where on `page` it lands (see [`OutlineNode::view`]).
+    /// Where on `page` it lands, in PageSpace; None is the top of the
+    /// page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<DestView>,
     /// `/C` and `/F`.
@@ -157,9 +146,18 @@ pub struct FlatOutlineItem {
     pub color: Option<[u8; 3]>,
     #[serde(default, skip_serializing_if = "TextStyle::is_plain")]
     pub style: TextStyle,
-    /// Its `/Count` isn't negative (see [`OutlineNode::open`]).
+    /// Its `/Count` isn't negative (see [`Bookmark::open`]).
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub open: bool,
+    /// The item's object in its file, which its bookmark keeps as its
+    /// [`Bookmark::src`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<lopdf::ObjectId>,
+    /// It goes somewhere sheaf keeps as read ([`Target::Kept`]): an action
+    /// other than a GoTo to a page here, or a destination that isn't a
+    /// page here. `page` is None.
+    #[serde(default, skip_serializing_if = "is_no")]
+    pub kept: bool,
 }
 
 fn yes() -> bool {
@@ -168,6 +166,10 @@ fn yes() -> bool {
 
 fn is_yes(b: &bool) -> bool {
     *b
+}
+
+fn is_no(b: &bool) -> bool {
+    !*b
 }
 
 /// One bookmark of a subtree inserted by [`Edit::OutlineInsertTree`], in
@@ -180,148 +182,6 @@ pub struct NewOutlineItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<DestView>,
     pub depth: u16,
-}
-
-/// One immutable snapshot of the document. Only tests compare whole
-/// states; history knows what an edit changed from its prims.
-#[derive(Debug, Clone)]
-#[cfg_attr(any(test, feature = "fixtures"), derive(PartialEq))]
-pub struct DocState {
-    pub pages: Vector<PageRef>,
-    pub outline: Vector<OutlineNode>,
-    /// Our markup, per page. Annotations already in a source file are not
-    /// here unless they were written by sheaf (see `annot`).
-    pub annots: im::HashMap<PageId, Vector<Annot>>,
-    /// OCR text not yet written to a file. A save bakes these into the
-    /// page content and `rebase_to_saved` drops them, so presence here
-    /// means unsaved (see `text_layer`).
-    pub text_layers: im::HashMap<PageId, Arc<TextLayer>>,
-    /// Page labels, anchored to the pages ranges start at. None: the file
-    /// has none, or they haven't been read.
-    pub labels: Option<Vector<crate::labels::LabelSpec>>,
-    /// The header/footer (with Bates numbers) sheaf draws on pages.
-    pub header_footer: Option<Arc<crate::stamps::HeaderFooter>>,
-    /// Other tools' comments deleted in sheaf, by page and name
-    /// (`ForeignAnnot::name`). A save leaves them, and their own replies,
-    /// out of the file.
-    pub removed_comments: im::HashMap<PageId, im::OrdSet<String>>,
-    /// The form's terminal fields (M10 proposal 8): the primary file's,
-    /// read at open. Inserted files' come in with M10 slice 4.
-    pub fields: im::OrdMap<FieldId, Field>,
-    /// Their widgets, per page, each page's in `/Annots` order: they move
-    /// and go with their page.
-    pub widgets: im::HashMap<PageId, Vector<Widget>>,
-}
-
-impl DocState {
-    /// Every page's label, when the document has page labels.
-    pub fn page_labels(&self) -> Option<Vec<String>> {
-        let specs = self.labels.as_ref()?;
-        let ids: Vec<PageId> = self.pages.iter().map(|p| p.id).collect();
-        let ranges = crate::labels::resolve_specs(&specs.iter().cloned().collect::<Vec<_>>(), &ids);
-        if ranges.is_empty() {
-            return None;
-        }
-        Some(crate::labels::labels_for(&ranges, ids.len() as u32))
-    }
-
-    /// The label ranges by page position, when there are labels.
-    pub fn label_ranges(&self) -> Option<Vec<crate::labels::LabelRange>> {
-        let specs = self.labels.as_ref()?;
-        let ids: Vec<PageId> = self.pages.iter().map(|p| p.id).collect();
-        Some(crate::labels::resolve_specs(
-            &specs.iter().cloned().collect::<Vec<_>>(),
-            &ids,
-        ))
-    }
-
-    pub fn annots_on(&self, page: PageId) -> Option<&Vector<Annot>> {
-        self.annots.get(&page)
-    }
-
-    pub fn widgets_on(&self, page: PageId) -> Option<&Vector<Widget>> {
-        self.widgets.get(&page)
-    }
-
-    pub fn text_layer(&self, page: PageId) -> Option<&Arc<TextLayer>> {
-        self.text_layers.get(&page)
-    }
-
-    pub fn has_text_layer(&self, page: PageId) -> bool {
-        self.text_layers.contains_key(&page)
-    }
-
-    /// Locate an annotation by id on any page.
-    pub fn find_annot(&self, id: AnnotId) -> Option<(PageId, &Annot)> {
-        self.annots
-            .iter()
-            .find_map(|(page, list)| list.iter().find(|a| a.id == id).map(|a| (*page, a)))
-    }
-
-    /// The first connector label (1–50, then A–ZZ) no connector uses yet;
-    /// past those, one more than the highest number.
-    pub fn next_connector_label(&self) -> String {
-        let used: HashSet<&str> = self
-            .annots
-            .values()
-            .flatten()
-            .filter_map(|a| match &a.kind {
-                AnnotKind::Connector { label, .. } => Some(label.as_str()),
-                _ => None,
-            })
-            .collect();
-        if let Some(free) = crate::annot::connector_labels().find(|l| !used.contains(l.as_str())) {
-            return free;
-        }
-        let max = used
-            .iter()
-            .filter_map(|l| l.trim().parse::<u32>().ok())
-            .max()
-            .unwrap_or(0);
-        (max + 1).to_string()
-    }
-
-    pub fn index_of(&self, id: PageId) -> Option<usize> {
-        self.pages.iter().position(|p| p.id == id)
-    }
-
-    /// Pre-order walk of the outline with depth.
-    /// The pages bookmark `id` owns (as moving it with its pages takes
-    /// them), in document order.
-    pub fn bookmark_pages(&self, id: OutlineId) -> Option<Vec<PageId>> {
-        let flat = self.outline_flat();
-        let (_, node) = flat.iter().find(|(_, n)| n.id == id)?;
-        Some(
-            bookmark_span(self, node)?
-                .into_iter()
-                .map(|p| p.id)
-                .collect(),
-        )
-    }
-
-    pub fn outline_flat(&self) -> Vec<(u16, &OutlineNode)> {
-        fn walk<'a>(
-            nodes: &'a Vector<OutlineNode>,
-            depth: u16,
-            out: &mut Vec<(u16, &'a OutlineNode)>,
-        ) {
-            for n in nodes {
-                out.push((depth, n));
-                walk(&n.children, depth + 1, out);
-            }
-        }
-        let mut out = Vec::new();
-        walk(&self.outline, 0, &mut out);
-        out
-    }
-
-    fn page_positions(&self) -> HashMap<PageId, usize> {
-        self.pages
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.id, i))
-            .collect()
-    }
 }
 
 /// One change to the document. Serializable so plugins can submit edits
@@ -352,7 +212,9 @@ pub enum Edit {
         before: Option<PageId>,
         outline: Option<Vec<FlatOutlineItem>>,
         /// sheaf's own marks in the file, by source page index. They come
-        /// in on the new pages with fresh ids (see `import_marks`).
+        /// in on the new pages with fresh ids, after the file's other
+        /// annotations there, which come from its source (see
+        /// `bring_annots`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         annots: Vec<(u32, Vec<Annot>)>,
     },
@@ -368,7 +230,9 @@ pub enum Edit {
         source: SourceId,
         range: Range<u32>,
         /// sheaf's own marks on the replacement pages, by source page
-        /// index; added beside the marks the kept pages already have.
+        /// index; added beside the marks the kept pages already have, and
+        /// the replacements' other annotations, from their source, in
+        /// place of the kept pages' (see `bring_annots`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         annots: Vec<(u32, Vec<Annot>)>,
     },
@@ -429,6 +293,8 @@ pub enum Edit {
         id: OutlineId,
     },
     /// Add markup to a page. The annotation's id is assigned by the document.
+    /// One named as another tool's comment on the page takes its place (M9
+    /// decision 5): of two named so, the one whose id the annotation's is.
     AnnotAdd {
         page: PageId,
         annot: Annot,
@@ -438,14 +304,16 @@ pub enum Edit {
         page: PageId,
         annot: Annot,
     },
-    /// Delete an annotation. Deleting one end of a connector pair deletes
-    /// the other end too.
+    /// Delete an annotation, and its thread: replies and statuses, ours
+    /// and other tools'. A connector's others stay (M9 decision 8). A
+    /// form's widget isn't deleted on its own: it goes with its page.
     AnnotDelete {
         page: PageId,
         id: AnnotId,
     },
     /// Delete other tools' comments from a page, by name; a save leaves
-    /// them out. Our replies and statuses in their threads go too.
+    /// them out. Their threads go too: replies and statuses, ours and
+    /// other tools'.
     CommentsDelete {
         page: PageId,
         names: Vec<String>,
@@ -674,9 +542,9 @@ pub struct Snapshot {
     /// Each source's marks the open gave new ids (see
     /// `Document::set_source_renamed`).
     pub(crate) renamed: HashMap<SourceId, Arc<Renames>>,
-    /// The stamps and attachments the marks name (see
-    /// [`Document::assets`]).
-    pub assets: Arc<MarkAssets>,
+    /// What the old writers read, built the first time one asks (see
+    /// [`legacy`](Self::legacy)).
+    pub(crate) legacy: OnceLock<Arc<LegacyDocState>>,
 }
 
 /// A source's marks the open gave new ids ([`Renamed`]): by page index,
@@ -689,18 +557,18 @@ impl Snapshot {
     }
 
     /// [`Document::geom`].
-    pub fn geom(&self, page: &PageRef) -> Geom {
-        geom_in(&self.sources, page)
+    pub fn geom(&self, page: PageId) -> Geom {
+        geom_in(&self.state, page)
     }
 
     /// [`Document::render_delta`].
-    pub fn render_delta(&self, page: &PageRef) -> Rotation {
-        render_delta_in(&self.sources, page)
+    pub fn render_delta(&self, page: PageId) -> Rotation {
+        self.state.render_delta(page).unwrap_or(Rotation::R0)
     }
 
     /// [`Document::group_members`].
     pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
-        group_members_in(&self.state, &self.sources, group)
+        group_members_in(&self.state, group)
     }
 
     /// The marks on page `index` of `source` the open gave new ids: the id
@@ -711,55 +579,42 @@ impl Snapshot {
             .and_then(|r| r.get(&index))
             .map_or(&[], Vec::as_slice)
     }
+
+    /// The state in the shape the old writers read it (M10.5 slice 8's
+    /// legacy projection), built from the records on first use.
+    pub(crate) fn legacy(&self) -> &LegacyDocState {
+        self.legacy
+            .get_or_init(|| Arc::new(LegacyDocState::of(self)))
+    }
 }
 
 /// Every mark of `state` in `group`, in document order: by page, then
 /// down the page as it shows, then across.
-fn group_members_in(
-    state: &DocState,
-    sources: &HashMap<SourceId, Arc<SourceInfo>>,
-    group: &crate::annot::Group,
-) -> Vec<(usize, PageId, Annot)> {
+fn group_members_in(state: &DocState, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
     let in_group = |a: &&Annot| crate::annot::group_of(&a.kind).as_ref() == Some(group);
     let mut out = Vec::new();
-    for (i, p) in state.pages.iter().enumerate() {
-        let on_page: Vec<&Annot> = state
-            .annots_on(p.id)
-            .into_iter()
-            .flatten()
-            .filter(in_group)
-            .collect();
+    for (i, (id, _, geom)) in state.pages().enumerate() {
+        let on_page: Vec<&Annot> = state.marks_on(id).filter(in_group).collect();
         if on_page.is_empty() {
             continue;
         }
-        let to_view = geom_in(sources, p).to_view();
+        let to_view = geom.to_view();
         let mut shown: Vec<(crate::annot::Box2, &Annot)> = on_page
             .into_iter()
             .map(|a| (to_view.apply_box(a.page_bounds()), a))
             .collect();
         shown.sort_by(|(a, _), (b, _)| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
-        out.extend(shown.into_iter().map(|(_, a)| (i, p.id, a.clone())));
+        out.extend(shown.into_iter().map(|(_, a)| (i, id, a.clone())));
     }
     out
 }
 
-/// Page `page`'s source page's boxes and `/Rotate`: a Letter page's when
-/// its source isn't in `sources`.
-fn source_geom(sources: &HashMap<SourceId, Arc<SourceInfo>>, page: &PageRef) -> Geom {
-    sources
-        .get(&page.source)
-        .map_or_else(|| Geom::read(None, None, 0), |s| s.src.geom(page.index))
-}
-
-fn geom_in(sources: &HashMap<SourceId, Arc<SourceInfo>>, page: &PageRef) -> Geom {
-    Geom {
-        rotate: page.rotation,
-        ..source_geom(sources, page)
-    }
-}
-
-fn render_delta_in(sources: &HashMap<SourceId, Arc<SourceInfo>>, page: &PageRef) -> Rotation {
-    page.rotation.minus(source_geom(sources, page).rotate)
+/// Page `page`'s boxes and `/Rotate`: a Letter page's when `state` hasn't
+/// got it.
+fn geom_in(state: &DocState, page: PageId) -> Geom {
+    state
+        .geom(page)
+        .map_or_else(|| Geom::read(None, None, 0), |g| **g)
 }
 
 /// Where page, bookmark and field ids come from. The counters only go up,
@@ -811,28 +666,15 @@ pub struct Document {
     next_source: u32,
     policy: Box<dyn HistoryPolicy>,
     next_job: u64,
-    /// Outline as it exists in the primary file on disk.
-    saved_outline: Vector<OutlineNode>,
-    saved_labels: Option<Vector<crate::labels::LabelSpec>>,
-    saved_removed: im::HashMap<PageId, im::OrdSet<String>>,
-    /// The header/footer already drawn into the primary file's pages.
-    baked_header_footer: Option<Arc<crate::stamps::HeaderFooter>>,
-    /// Markup as it exists in the primary file on disk.
-    saved_annots: im::HashMap<PageId, Vector<Annot>>,
-    /// Fields as they are in the primary file on disk: their values for
-    /// dirty tracking.
-    saved_fields: im::OrdMap<FieldId, Field>,
-    /// Each source's form as read (`set_source_form`), for the fields that
-    /// come in with its pages.
-    forms: HashMap<SourceId, Arc<FileForm>>,
+    /// What the primary file on disk holds: the opened version's state,
+    /// then each save's. The dirty flags compare the cursor's
+    /// annotations, form, bookmarks, page labels and header/footer (the
+    /// one the file has drawn) with it, until slice 9, whose saves know
+    /// what changed from the prims.
+    baseline: DocState,
     /// Each source's marks the open gave new ids (`set_source_renamed`),
     /// which its pages name by the old ones until a save writes them.
     renamed: HashMap<SourceId, Arc<Renames>>,
-    /// The stamps and attachments the marks name, outside history.
-    assets: Arc<MarkAssets>,
-    /// A save made one form of forms whose scripts came from more than one
-    /// file (see [`Document::scripts_mixed`]).
-    scripts_mixed: bool,
     /// The reader has been told some text shows as `?` in the file
     /// ([`Document::unencodable_notice`]). Outside history: undo doesn't
     /// make it news again.
@@ -844,17 +686,21 @@ pub struct Document {
 
 impl Document {
     /// A document showing `primary`, a source in `store`, in its
-    /// entirety, with `outline` and nothing else: a file sheaf has just
-    /// made, which says nothing more about itself. A file that's opened
-    /// opens through [`crate::open`], which reads what it says.
+    /// entirety, with `outline`, what its pages hold beside their content
+    /// (its source's [`annots`](crate::Source::annots)), and nothing else:
+    /// a file sheaf has just made, which says nothing more about itself.
+    /// A file that's opened opens through [`crate::open`], which reads
+    /// what it says.
     pub fn new(
         store: Arc<Store>,
         primary: SourceInfo,
         outline: &[FlatOutlineItem],
         policy: Box<dyn HistoryPolicy>,
     ) -> Self {
+        let annots = primary.src.annots().clone();
         let mut doc = Self::loading(store, primary, policy);
         let facts = Facts {
+            annots,
             outline: outline.to_vec(),
             ..Default::default()
         };
@@ -878,7 +724,6 @@ impl Document {
     ) -> Self {
         let source = SourceId(0);
         let mut doc = Self {
-            assets: Arc::new(MarkAssets::new(store.clone())),
             store,
             sources: HashMap::new(),
             primary: source,
@@ -893,27 +738,29 @@ impl Document {
             next_source: 1,
             policy,
             next_job: 1,
-            saved_outline: Vector::new(),
-            saved_labels: None,
-            saved_removed: im::HashMap::new(),
-            baked_header_footer: None,
-            saved_annots: im::HashMap::new(),
-            saved_fields: im::OrdMap::new(),
-            forms: HashMap::new(),
+            baseline: DocState::builder().build(),
             renamed: HashMap::new(),
-            scripts_mixed: false,
             told_unencodable: false,
             ready: false,
         };
         doc.debug_assert_ours(&primary);
-        let pages: Vector<PageRef> = (0..primary.src.page_count())
-            .map(|index| PageRef {
-                id: doc.ids.page(),
+        // A page the tree lists again is a copy of the first.
+        let src = &primary.src;
+        let pages = src.pages().iter().zip(0..).map(|(facts, index)| {
+            let base = PageBase {
                 source,
+                src: src.clone(),
                 index,
-                rotation: primary.src.geom(index).rotate,
-            })
-            .collect();
+            };
+            let def = PageDef {
+                base,
+                copy: facts.repeat,
+                content: ContentStack::empty(),
+            };
+            (doc.ids.page(), Arc::new(def), Arc::new(facts.geom))
+        });
+        let state = DocState::builder().pages(pages).build();
+        doc.baseline = state.clone();
         doc.sources.insert(source, Arc::new(primary));
         doc.versions.insert(
             VersionId(0),
@@ -926,17 +773,7 @@ impl Document {
                 at: crate::annot::pdf_date_now(),
                 steps: Vec::new(),
                 sources: vec![source],
-                state: Some(DocState {
-                    pages,
-                    outline: Vector::new(),
-                    annots: im::HashMap::new(),
-                    text_layers: im::HashMap::new(),
-                    removed_comments: im::HashMap::new(),
-                    labels: None,
-                    header_footer: None,
-                    fields: im::OrdMap::new(),
-                    widgets: im::HashMap::new(),
-                }),
+                state: Some(state),
                 damaged: false,
                 snapshot_bytes: 0,
                 step_bytes: 0,
@@ -974,89 +811,134 @@ impl Document {
 
     /// The opened version's state: its pages, and what `facts` say about
     /// them, each page index mapped to its page once. That's what the
-    /// primary file holds, so the `saved_*` baselines, the header/footer
-    /// drawn into the file and the primary's form are set from it. Gives
-    /// back what the state doesn't hold.
+    /// primary file holds, so the baseline is set from it. Gives back what
+    /// the state doesn't hold.
     fn opened(&mut self, facts: Facts) -> (DocState, ViewFacts) {
-        let pages = self.state().pages.clone();
-        let by_index: Vec<PageId> = pages.iter().map(|p| p.id).collect();
+        let loading = self.state().clone();
+        let by_index: Vec<PageId> = loading.order().iter().copied().collect();
         let at = |index: usize| by_index.get(index).copied();
-        let outline = self.outline_from_flat(&facts.outline, &by_index);
-        let annots: im::HashMap<PageId, Vector<Annot>> = facts
-            .marks
+        let src = self.sources[&self.primary].src.clone();
+        let (roots_outline, bookmarks) =
+            self.outline_from_flat(&facts.outline, |index| at(index as usize), &src);
+        let bookmarks = bookmarks
             .into_iter()
-            .filter_map(|(index, list)| Some((at(index as usize)?, list.into_iter().collect())))
+            .map(|(id, b)| (id, Arc::new(b)))
             .collect();
-        let labels = facts
-            .labels
-            .map(|ranges| -> Vector<_> {
-                crate::labels::to_specs(&ranges, &by_index)
-                    .into_iter()
-                    .collect()
-            })
-            .filter(|specs| !specs.is_empty());
-        let header_footer = facts.header_footer.map(|(mut hf, scope)| {
-            hf.pages = scope.map(|ix| ix.into_iter().filter_map(at).collect());
-            Arc::new(hf)
-        });
-        let form = facts.form;
-        let fields: im::OrdMap<FieldId, Field> = form
-            .fields
-            .iter()
-            .map(|f| {
-                let mut f = f.clone();
-                f.source = self.primary;
-                (f.id, f)
-            })
-            .collect();
-        let widgets = form
-            .widgets
+        // Each page's annotations as records, each the object it was read
+        // as, by their places in its `/Annots`; a page the tree lists again
+        // holds copies of the first listing's.
+        let store = &self.store;
+        let mut annots: HashMap<PageId, Vec<(usize, AnnotId, AnnotBody)>> = (facts.annots.pages)
             .iter()
             .filter_map(|(&index, list)| {
-                Some((at(index as usize)?, list.iter().cloned().collect()))
+                let page = at(index as usize)?;
+                let copy = loading.def(page)?.copy;
+                let list = list.iter().map(|a| {
+                    let (id, body) = record_of(store, a, &src, copy);
+                    (a.slot, id, body)
+                });
+                Some((page, list.collect()))
             })
             .collect();
-        self.ids
-            .fields_from(fields.keys().next_back().map_or(0, |id| id.0 + 1));
-        let renamed: Vec<(PageId, AnnotId)> = facts
-            .renamed
-            .iter()
+        let labels: Option<Arc<[crate::labels::LabelSpec]>> = facts
+            .labels
+            .map(|ranges| crate::labels::to_specs(&ranges, &by_index).into())
+            .filter(|specs: &Arc<[_]>| !specs.is_empty());
+        // The header/footer sheaf drew, as the generator that draws it, its
+        // id drawn from the file's hash, so the same bytes open the same.
+        let hash = src.id().hash;
+        let mut rng = fastrand::Rng::with_seed(hash as u64 ^ (hash >> 64) as u64);
+        let generator = facts.header_footer.map(|(mut hf, scope)| {
+            hf.pages = scope.map(|ix| ix.into_iter().filter_map(at).collect());
+            Arc::new(Generator {
+                id: GenId::draw(&mut rng, |_| false),
+                spec: GenSpec::HeaderFooter(Arc::new(hf)),
+            })
+        });
+        // The form: its nodes as the file numbers them, and its widgets,
+        // their ids drawn on from the same rng, none another annotation's.
+        let form = &facts.form;
+        let inst = FormInst {
+            src: self.primary,
+            copy: 0,
+        };
+        let mut taken: HashSet<AnnotId> =
+            (annots.values().flatten()).map(|&(_, id, _)| id).collect();
+        let mut shows: HashMap<FieldId, Vector<AnnotId>> = HashMap::new();
+        for (&index, list) in &form.widgets {
+            let Some(page) = at(index as usize) else {
+                continue;
+            };
+            for w in list {
+                let id = crate::open::annots::draw(&mut rng, &mut taken);
+                shows.entry(w.field).or_default().push_back(id);
+                let src = Some(ObjRef {
+                    src: src.clone(),
+                    id: w.object,
+                });
+                let body = AnnotBody::Widget(Arc::new(Widget::read(w, w.field, src, inst)));
+                annots.entry(page).or_default().push((w.slot, id, body));
+            }
+        }
+        let fields = nodes_of(form, &src, inst, shows);
+        self.ids.fields_from(form.nodes.len() as u64);
+        let annots = annots.into_iter().map(|(page, mut list)| {
+            list.sort_by_key(|&(slot, _, _)| slot);
+            (
+                page,
+                list.into_iter().map(|(_, id, body)| (id, body)).collect(),
+            )
+        });
+        let renamed: Vec<(PageId, AnnotId)> = (facts.annots.renamed.iter())
             .filter_map(|r| Some((at(r.page as usize)?, r.was)))
             .collect();
-        self.set_source_renamed(self.primary, &facts.renamed);
-        self.set_source_assets(self.primary, &facts.assets);
-        self.saved_outline = outline.clone();
-        self.saved_labels = labels.clone();
-        self.baked_header_footer = header_footer.clone();
-        self.saved_annots = annots.clone();
-        // The file says other ids for the marks the open gave new ones:
-        // their pages are written at the next save, of either kind.
-        for (page, _) in &renamed {
-            self.saved_annots.remove(page);
-        }
-        self.saved_fields = fields.clone();
+        self.set_source_renamed(self.primary, &facts.annots.renamed);
         let view = ViewFacts {
             renamed,
-            foreign: facts.foreign,
             attachments: facts.attachments,
             collection: facts.collection,
             layers: facts.layers,
             form: form.facts.clone(),
         };
-        if !form.fields.is_empty() {
-            self.forms.insert(self.primary, Arc::new(form));
-        }
-        let state = DocState {
-            pages,
-            outline,
-            annots,
-            text_layers: im::HashMap::new(),
-            removed_comments: im::HashMap::new(),
-            labels,
-            header_footer,
-            fields,
-            widgets,
+        let roots = (fields.iter())
+            .filter(|(_, node)| node.parent.is_none())
+            .map(|&(id, _)| id)
+            .collect();
+        let names = match fields.is_empty() {
+            true => im::OrdMap::new(),
+            false => im::OrdMap::unit(inst, file_name(&self.sources[&self.primary])),
         };
+        let form_doc = FormDoc {
+            roots,
+            names,
+            scripts: ScriptState::On,
+        };
+        let pages = loading
+            .pages()
+            .map(|(id, def, geom)| (id, def.clone(), geom.clone()));
+        let state = DocState::builder()
+            .pages(pages)
+            .outline(roots_outline, bookmarks)
+            .annots(annots)
+            .labels(labels)
+            .generators(generator)
+            .form(fields, Arc::new(form_doc))
+            .build();
+        // The file says other ids for the marks the open gave new ones:
+        // their pages are written at the next save, of either kind.
+        let mut baseline = state.clone();
+        for &(page, _) in &view.renamed {
+            for id in state.annot_ids_on(page).into_iter().flatten() {
+                baseline
+                    .set(&Key::Annot(*id), None)
+                    .expect("an annotation's key");
+            }
+            baseline
+                .set(&Key::PageAnnots(page), None)
+                .expect("a page's annotations' key");
+        }
+        self.baseline = baseline;
+        debug_assert_eq!(state.check_invariants(), Ok(()));
         (state, view)
     }
 
@@ -1101,15 +983,13 @@ impl Document {
         id
     }
 
-    /// Forget registrations whose version is gone, and their forms and
-    /// renamed marks: a
-    /// source goes with the last registration holding it, and an engine
-    /// opened on it keeps only its bytes, until slice 13's engine pool. The
-    /// primary stays while it is the primary.
+    /// Forget registrations whose version is gone, and their renamed
+    /// marks: a source goes with the last registration holding it, and an
+    /// engine opened on it keeps only its bytes, until slice 13's engine
+    /// pool. The primary stays while it is the primary.
     fn unregister(&mut self, ids: &[SourceId]) {
         for id in ids.iter().filter(|&&id| id != self.primary) {
             self.sources.remove(id);
-            self.forms.remove(id);
             self.renamed.remove(id);
         }
     }
@@ -1122,15 +1002,6 @@ impl Document {
             "{} is in another store",
             info.name.display()
         );
-    }
-
-    /// Source `id`'s form, as `forms::read` read it: the fields that come
-    /// in with its pages when they're inserted or replace others. Call it
-    /// before the edit that brings them.
-    pub fn set_source_form(&mut self, id: SourceId, form: FileForm) {
-        if !form.fields.is_empty() {
-            self.forms.insert(id, Arc::new(form));
-        }
     }
 
     /// Source `id`'s marks the open gave new ids, as `open::finish` read
@@ -1148,65 +1019,106 @@ impl Document {
         }
     }
 
-    /// What source `id`'s marks hold, as `open::finish` read it: their
-    /// stamps' pages and attachments' files, which marks naming them draw
-    /// and embed from now on where the document didn't know them. Call it
-    /// before the edit that brings its pages.
-    pub fn set_source_assets(&self, id: SourceId, assets: &SourceAssets) {
-        if let Some(info) = self.sources.get(&id) {
-            self.assets.register(&info.src, assets);
+    /// Where page stamp `stem`'s page is, as an edit that brings a mark
+    /// naming it finds it: the store's blob of that name, held by whoever
+    /// placed or pasted it; else the form a registered file's marks draw it
+    /// with, the primary's first; else, until slice 19, the generated
+    /// cache's file of that name, read into the store.
+    pub fn find_stamp(&self, stem: &str) -> Option<FormRef> {
+        find_stamp(&self.store, &self.sources, self.primary, stem)
+    }
+
+    /// Where attachment `stem`'s file is, `size` bytes long, as an edit
+    /// that brings a mark naming it finds it: the store's blob of that
+    /// name, held by whoever attached or pasted it; else the file a
+    /// registered file's marks embed under it, the primary's first,
+    /// decoded into the store.
+    pub fn find_file(&self, stem: &str, size: u64) -> Option<BlobRef> {
+        find_file(&self.store, &self.sources, self.primary, stem, size)
+    }
+
+    /// `annot` as a mark, `src` the object it was read as, holding what it
+    /// names by stem: its page stamp's page or its attachment's file, as
+    /// [`find_stamp`](Self::find_stamp) and [`find_file`](Self::find_file)
+    /// find them. One that can't be found is an error.
+    fn mark(&self, annot: Annot, src: Option<ObjRef>) -> Result<Mark> {
+        let mut mark = Mark {
+            src,
+            ..Mark::from(annot)
+        };
+        match &mark.annot.kind {
+            AnnotKind::PageStamp { stamp, name, .. } => {
+                let form = self.find_stamp(stamp);
+                let missing =
+                    || format!("the stamp {name} isn't in the document or on this machine");
+                mark.stamp = Some(form.with_context(missing)?);
+            }
+            AnnotKind::FileAttachment {
+                file, name, size, ..
+            } => {
+                let found = self.find_file(file, *size);
+                let missing = || format!("the attached file {name} isn't in the document");
+                mark.file = Some(found.with_context(missing)?);
+            }
+            _ => {}
         }
+        Ok(mark)
     }
 
-    /// What source `id`, the file a save wrote, holds for the marks: what
-    /// they draw and embed from now on, in place of what the save took
-    /// them from.
-    pub fn set_saved_assets(&self, id: SourceId, assets: &SourceAssets) {
-        if let Some(info) = self.sources.get(&id) {
-            self.assets.register_saved(&info.src, assets);
-        }
-    }
-
-    /// The stamps and attachments the marks name: those the document's
-    /// files hold, those placed or pasted since, and, failing those, the
-    /// generated cache's. Outside history: a stamp placed and undone is
-    /// still known, and every version's marks find theirs here.
-    pub fn assets(&self) -> &Arc<MarkAssets> {
-        &self.assets
-    }
-
-    /// Sources whose fields in the document, or the document scripts
-    /// beside them, have scripts. More than one, and scripts are off by
-    /// default (M10 proposal 5): document scripts share one scope.
+    /// The registrations whose form instances in the document have
+    /// scripts: their fields' or widgets', or document scripts beside
+    /// them. More than one, and scripts are off by default (M10 proposal
+    /// 5): document scripts share one scope.
     pub fn script_sources(&self) -> Vec<SourceId> {
-        let st = self.state();
-        let mut widgets: HashMap<FieldId, Vec<&Widget>> = HashMap::new();
-        for w in st.widgets.values().flatten() {
-            widgets.entry(w.field).or_default().push(w);
-        }
-        let mut out: Vec<SourceId> = Vec::new();
-        for f in st.fields.values() {
-            if out.contains(&f.source) {
-                continue;
+        let scripted = self.scripted(self.state());
+        let files: BTreeSet<SourceId> = scripted.iter().map(|inst| inst.src).collect();
+        files.into_iter().collect()
+    }
+
+    /// The form instances in `st` with scripts: a field's own, a
+    /// widget's, or document scripts in the file it came from.
+    fn scripted(&self, st: &DocState) -> BTreeSet<FormInst> {
+        let mut out: BTreeSet<FormInst> = (st.form().names.keys())
+            .filter(|inst| {
+                (self.sources.get(&inst.src))
+                    .is_some_and(|s| s.src.form().facts.document_scripts > 0)
+            })
+            .copied()
+            .collect();
+        for (_, node, term) in st.terminals() {
+            let mut widgets = term.widgets.iter().filter_map(|&w| st.annot(w)?.widget());
+            if !out.contains(&node.inst) && (term.has_scripts() || widgets.any(|w| w.has_scripts()))
+            {
+                out.insert(node.inst);
             }
-            let documents = self
-                .forms
-                .get(&f.source)
-                .is_some_and(|form| form.facts.document_scripts > 0);
-            let own = widgets.get(&f.id).map_or(&[][..], |w| &w[..]);
-            if documents || f.has_scripts(own) {
-                out.push(f.source);
-            }
         }
-        out.sort();
         out
     }
 
-    /// Whether the document's scripts came from more than one file, now
-    /// or before a save this session: then they're off by default (M10
-    /// proposal 5).
+    /// Scripts off, when the form's came in from more than one file now
+    /// (M10 proposal 5): they share one scope. Once off they stay off,
+    /// across saves too, until undo takes back what brought them.
+    fn scripts_apart(&self, rec: &mut Rec) {
+        if rec.form().scripts != ScriptState::On {
+            return;
+        }
+        let scripted = self.scripted(rec);
+        let files: BTreeSet<SourceId> = scripted.iter().map(|inst| inst.src).collect();
+        if files.len() > 1 {
+            let form = FormDoc {
+                scripts: ScriptState::Off {
+                    instances: scripted.into_iter().collect(),
+                },
+                ..FormDoc::clone(rec.form())
+            };
+            rec.put(Key::Form, Some(Val::Form(Arc::new(form))));
+        }
+    }
+
+    /// Whether the document's scripts came from more than one file: then
+    /// they're off by default (M10 proposal 5).
     pub fn scripts_mixed(&self) -> bool {
-        self.scripts_mixed || self.script_sources().len() > 1
+        self.state().form().scripts != ScriptState::On
     }
 
     /// What to tell the reader about the forms an edit brought: fields put
@@ -1225,17 +1137,15 @@ impl Document {
             let file = self
                 .sources
                 .get(sid)
-                .and_then(|s| s.name.file_name())
-                .map(|n| n.to_string_lossy().to_string())
+                .map(|s| file_name(s))
                 .unwrap_or_default();
-            let scripted = st.fields.values().any(|f| {
-                f.under.as_deref() == Some(under.as_str())
-                    && (f.has_scripts(&[])
-                        || self
-                            .forms
-                            .get(sid)
-                            .is_some_and(|form| form.facts.document_scripts > 0))
-            });
+            let documents =
+                (self.sources.get(sid)).is_some_and(|s| s.src.form().facts.document_scripts > 0);
+            // The fields under the new parent, and their own scripts.
+            let scripted = (st.field_named(under).into_iter())
+                .flat_map(|top| field_subtree(st, top))
+                .filter_map(|id| st.field(id)?.term.clone())
+                .any(|t| documents || t.has_scripts());
             let mut part = if copies {
                 format!("the copies' fields are under “{under}”, apart from the originals")
             } else {
@@ -1250,8 +1160,7 @@ impl Document {
             let file = self
                 .sources
                 .get(sid)
-                .and_then(|s| s.name.file_name())
-                .map(|n| n.to_string_lossy().to_string())
+                .map(|s| file_name(s))
                 .unwrap_or_default();
             parts.push(format!("the signature from {file} is no longer valid here"));
         }
@@ -1291,64 +1200,45 @@ impl Document {
 
     /// The header/footer differs from what the primary file has drawn.
     pub fn header_footer_dirty(&self) -> bool {
-        self.state().header_footer != self.baked_header_footer
+        match (self.state().header_footer(), self.baseline.header_footer()) {
+            (Some(now), Some(drawn)) => !Arc::ptr_eq(now, drawn) && now != drawn,
+            (now, drawn) => now.is_some() || drawn.is_some(),
+        }
     }
 
-    /// Fields that differ from what's in the primary file: changed, added
-    /// or gone.
+    /// Terminal fields that differ from what's in the primary file:
+    /// changed, added or gone, as the old writers read them (their
+    /// widgets aside: a page's widgets gone isn't a field changed).
     pub fn fields_dirty(&self) -> HashSet<FieldId> {
-        let cur = &self.state().fields;
-        if cur.ptr_eq(&self.saved_fields) {
-            return HashSet::new();
-        }
-        let mut dirty: HashSet<FieldId> = cur
-            .iter()
-            .filter(|(id, f)| self.saved_fields.get(id) != Some(f))
-            .map(|(id, _)| *id)
-            .collect();
-        dirty.extend(self.saved_fields.keys().filter(|id| !cur.contains_key(id)));
-        dirty
+        let (st, base) = (self.state(), &self.baseline);
+        (st.fields_changed_from(base).into_iter())
+            .filter(|&id| legacy_field(st, id) != legacy_field(base, id))
+            .collect()
     }
 
-    fn annots_dirty_pages(&self) -> HashSet<PageId> {
-        let cur = &self.state().annots;
-        let mut dirty = HashSet::new();
-        for (pid, list) in cur.iter() {
-            if self.saved_annots.get(pid) != Some(list) {
-                dirty.insert(*pid);
-            }
-        }
-        for pid in self.saved_annots.keys() {
-            if !cur.contains_key(pid) {
-                dirty.insert(*pid);
-            }
-        }
+    /// Pages whose annotations differ from what's in the primary file
+    /// (`changed`, from [`DocState::annots_changed_from`]): a mark or
+    /// another tool's comment added, changed or gone, or the page's list
+    /// in another order.
+    fn annots_dirty_pages(&self, changed: &HashSet<PageId>) -> HashSet<PageId> {
+        let cur = self.state();
+        let mut dirty = changed.clone();
         // A changed connector changes its group's cycle of /Dest: every
         // page with one of its label is written again.
-        let labels: HashSet<&str> = dirty
-            .iter()
-            .flat_map(|pid| cur.get(pid).into_iter().chain(self.saved_annots.get(pid)))
-            .flatten()
-            .filter_map(|a| match &a.kind {
-                AnnotKind::Connector { label, .. } => Some(label.as_str()),
-                _ => None,
-            })
+        let label = |a: &Annot| match &a.kind {
+            AnnotKind::Connector { label, .. } => Some(label.clone()),
+            _ => None,
+        };
+        let labels: HashSet<String> = (dirty.iter())
+            .flat_map(|&page| cur.marks_on(page).chain(self.baseline.marks_on(page)))
+            .filter_map(label)
             .collect();
         if !labels.is_empty() {
-            for (pid, list) in cur.iter() {
-                if list.iter().any(|a| {
-                    matches!(&a.kind, AnnotKind::Connector { label, .. } if labels.contains(label.as_str()))
-                }) {
-                    dirty.insert(*pid);
-                }
-            }
-        }
-        // Other tools' comments deleted (or brought back) since.
-        let removed = &self.state().removed_comments;
-        for pid in removed.keys().chain(self.saved_removed.keys()) {
-            if removed.get(pid) != self.saved_removed.get(pid) {
-                dirty.insert(*pid);
-            }
+            dirty.extend(
+                cur.marks()
+                    .filter(|(_, a)| label(a).is_some_and(|l| labels.contains(&l)))
+                    .map(|(page, _)| page),
+            );
         }
         dirty
     }
@@ -1361,19 +1251,22 @@ impl Document {
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        let st = self.state();
+        let changed = st.annots_changed_from(&self.baseline);
+        let fields_dirty = self.fields_dirty();
         Snapshot {
-            state: self.state().clone(),
+            state: st.clone(),
             primary: self.primary,
             sources: self.sources.clone(),
-            outline_dirty: self.state().outline != self.saved_outline,
-            labels_dirty: self.state().labels != self.saved_labels,
+            outline_dirty: !st.outline_eq(&self.baseline),
+            labels_dirty: !st.labels_eq(&self.baseline),
             header_footer_dirty: self.header_footer_dirty(),
-            annots_dirty: self.annots_dirty_pages(),
-            fields_dirty: self.fields_dirty(),
+            annots_dirty: self.annots_dirty_pages(&changed),
+            form_changed: !fields_dirty.is_empty() || self.widgets_changed(&changed),
+            fields_dirty,
             removes_content: self.removes_content(),
-            form_changed: self.form_changed(),
             renamed: self.renamed.clone(),
-            assets: self.assets.clone(),
+            legacy: OnceLock::new(),
         }
     }
 
@@ -1383,22 +1276,18 @@ impl Document {
     /// described the form as it was: its XFA copy and Reader's usage rights
     /// (M10 proposals 6 and 7).
     pub fn form_changed(&self) -> bool {
-        if !self.fields_dirty().is_empty() {
-            return true;
-        }
-        let Some(saved) = self
-            .saved
-            .and_then(|v| self.versions.get(&v))
-            .and_then(|v| v.state.as_ref())
-        else {
-            return false;
-        };
-        let now = &self.state().widgets;
-        !saved.widgets.ptr_eq(now)
-            && saved
-                .widgets
-                .iter()
-                .any(|(page, list)| now.get(page) != Some(list))
+        !self.fields_dirty().is_empty()
+            || self.widgets_changed(&self.state().annots_changed_from(&self.baseline))
+    }
+
+    /// Whether a page of the primary file's with widgets hasn't them as
+    /// they were: of `changed`, the pages whose annotations aren't the
+    /// baseline's.
+    fn widgets_changed(&self, changed: &HashSet<PageId>) -> bool {
+        let (st, base) = (self.state(), &self.baseline);
+        changed
+            .iter()
+            .any(|&page| base.widgets_on(page).next().is_some() && !st.widgets_eq_on(base, page))
     }
 
     /// Whether something in the primary file is gone from the document: a
@@ -1410,50 +1299,35 @@ impl Document {
         let st = self.state();
         if let Some(primary) = self.sources.get(&self.primary) {
             let shown: HashSet<u32> = st
-                .pages
-                .iter()
-                .filter(|p| p.source == self.primary)
-                .map(|p| p.index)
+                .pages()
+                .filter(|(_, def, _)| def.base.source == self.primary)
+                .map(|(_, def, _)| def.base.index)
                 .collect();
             if (0..primary.src.page_count()).any(|i| !shown.contains(&i)) {
                 return true;
             }
         }
-        let marks: HashSet<AnnotId> = st.annots.values().flatten().map(|a| a.id).collect();
-        if self
-            .saved_annots
-            .values()
-            .flatten()
-            .any(|a| !marks.contains(&a.id))
-        {
-            return true;
-        }
-        let deleted_since = st.removed_comments.iter().any(|(pid, names)| {
-            let before = self.saved_removed.get(pid);
-            names.iter().any(|n| !before.is_some_and(|b| b.contains(n)))
-        });
-        if deleted_since {
-            return true;
-        }
-        fn ids(nodes: &Vector<OutlineNode>, out: &mut HashSet<OutlineId>) {
-            for n in nodes {
-                out.insert(n.id);
-                ids(&n.children, out);
-            }
-        }
-        let (mut now, mut before) = (HashSet::new(), HashSet::new());
-        ids(&st.outline, &mut now);
-        ids(&self.saved_outline, &mut before);
-        before.iter().any(|id| !now.contains(id))
+        !st.keeps_annots_of(&self.baseline) || !st.keeps_bookmarks_of(&self.baseline)
     }
 
     /// After a successful save of the current version to a file described by
     /// `saved`: register it as a new source and make the current version an
     /// identity mapping over it, keeping `PageId`s (and bookmarks) intact so
     /// the view doesn't flicker. Older versions still reference the old
-    /// sources, so undo across a save keeps working. OCR layers are now
-    /// baked into the file, so they reset to nothing; a page's rotation is
-    /// the saved file's `/Rotate`, so it stays.
+    /// sources, so undo across a save keeps working. Each page is the saved
+    /// file's page at its position, its own object (copy 0), with its boxes
+    /// and `/Rotate` as the file has them, which are the page's. OCR text is
+    /// in the file now, so nothing is drawn over the pages. Each mark is the
+    /// object on its page with its `/NM`, each of the other tools'
+    /// annotations the one there with its name and subtype (copy 0), each
+    /// field the saved file's own, the node with its full name, each
+    /// widget the one at its place among its field's on its page, and each
+    /// bookmark the item at its place in pre-order, as the save wrote them;
+    /// another tool's annotation the save left out (a link to a page that
+    /// isn't there) goes, and a bookmark deeper than the file is read is
+    /// from no item; a page stamp draws the form the saved file holds for
+    /// it; the header/footer is drawn there now, and stays, as do scripts
+    /// off.
     ///
     /// The content is the same, so this isn't an edit and makes no step,
     /// but the state is expressed anew, so the version gets a new id under
@@ -1461,13 +1335,13 @@ impl Document {
     /// lead to its state as it was before the save; it keeps its snapshot,
     /// as do its children (see `keeps_snapshot`), so nothing is ever
     /// replayed across a save. The new version holds the saved file's
-    /// registration. M10.5 slice 9 deletes this.
+    /// registration. M10.5 slice 8 adapts it to the records; slice 9
+    /// deletes it.
     pub fn rebase_to_saved(&mut self, saved: SourceInfo) -> SourceId {
         debug_assert!(self.is_ready(), "a save of a file still opening");
-        // The forms it was made of are one now; whether their scripts
-        // were from more than one is the session's to remember.
-        self.scripts_mixed |= self.script_sources().len() > 1;
         let path = saved.name.clone();
+        let name = file_name(&saved);
+        let src = saved.src.clone();
         let id = self.register_source(saved);
         let replaced = std::mem::replace(&mut self.primary, id);
         // Versions made from it before (and undone) were made from it as
@@ -1487,40 +1361,90 @@ impl Document {
             .state
             .as_mut()
             .expect("the current version keeps its state");
-        st.text_layers = im::HashMap::new();
-        st.pages = st
-            .pages
-            .iter()
-            .enumerate()
-            .map(|(i, p)| PageRef {
-                id: p.id,
+        for (index, page) in (0..).zip(st.order().clone()) {
+            let base = PageBase {
                 source: id,
-                index: i as u32,
-                rotation: p.rotation,
-            })
-            .collect();
-        // Every field is the saved file's own now, under the name it was
-        // saved with. (Their objects there are slice 9's to find.)
-        st.fields = st
-            .fields
-            .iter()
-            .map(|(fid, f)| {
-                let f = Field {
-                    source: id,
-                    copy: 0,
-                    under: None,
-                    ..f.clone()
+                src: src.clone(),
+                index,
+            };
+            let def = PageDef {
+                base,
+                copy: 0,
+                content: ContentStack::empty(),
+            };
+            let geom = Arc::new(src.geom(index));
+            st.set(&Key::Page(page), Some(Val::Page(Arc::new(def))))
+                .expect("a page key holds a page");
+            st.set(&Key::Geom(page), Some(Val::Geom(geom)))
+                .expect("a geom key holds a geom");
+        }
+        // The saved items as the reader lists them, with none deeper than
+        // it reads: a bookmark past that depth is from no item, and once
+        // one doesn't agree with its item, neither are the rest.
+        let items = crate::open::outline(&src);
+        let mut items = items.iter();
+        let mut agree = true;
+        let rebound: Vec<(OutlineId, Arc<Bookmark>)> = (st.bookmarks_preorder().into_iter())
+            .map(|(depth, id, b)| {
+                let item = (agree && depth <= crate::open::MAX_DEPTH)
+                    .then(|| items.next())
+                    .flatten();
+                if let Some(item) = item
+                    && (item.depth != depth || item.title != crate::open::shown_title(&b.title))
+                {
+                    log::warn!(
+                        "the saved file's bookmark {:?} isn't {:?}",
+                        item.title,
+                        b.title
+                    );
+                    agree = false;
+                }
+                let from = item.filter(|_| agree).and_then(|item| {
+                    Some(ObjRef {
+                        src: src.clone(),
+                        id: item.object?,
+                    })
+                });
+                let b = Bookmark {
+                    src: from,
+                    ..b.clone()
                 };
-                (*fid, f)
+                (id, Arc::new(b))
             })
             .collect();
-        // The pages and fields expressed anew are its snapshot's alone.
-        v.snapshot_bytes = accounting(&v.steps, st).0
-            + st.pages.heap_size()
-            + st.fields
-                .values()
-                .map(|f| size_of::<(FieldId, Field)>() + f.heap_size())
-                .sum::<usize>();
+        for (id, b) in &rebound {
+            st.set(&Key::Bookmark(*id), Some(Val::Bookmark(b.clone())))
+                .expect("a bookmark key holds a bookmark");
+        }
+        let written = src.annots().clone();
+        let mut gone = Vec::new();
+        let mut annots = rebind_annots(st, &src, &written, &mut gone);
+        let fields = rebind_fields(st, id, &src, name, &mut annots);
+        debug_assert_eq!(st.check_invariants(), Ok(()));
+        // The pages, annotations, form, bookmarks and fields expressed
+        // anew are its snapshot's alone: their values, and the im nodes
+        // put to hold them.
+        let own = v.steps.iter().flat_map(|s| s.prims.iter().map(|p| p.key));
+        let anew = (st.order().iter())
+            .flat_map(|&page| [Key::Page(page), Key::Geom(page)])
+            .chain(annots.iter().map(|&(id, _)| Key::Annot(id)))
+            .chain((gone.iter()).flat_map(|&(page, id)| [Key::Annot(id), Key::PageAnnots(page)]))
+            .chain(rebound.iter().map(|&(id, _)| Key::Bookmark(id)))
+            .chain(fields.iter().map(|&(id, _)| Key::Field(id)));
+        v.snapshot_bytes = st.snapshot_bytes(own.chain(anew))
+            + st.pages()
+                .map(|(_, def, _)| size_of::<PageDef>() + def.heap_size() + size_of::<Geom>())
+                .sum::<usize>()
+            + annots.iter().map(|(_, a)| a.heap_size()).sum::<usize>()
+            + rebound
+                .iter()
+                .map(|(_, b)| size_of::<Bookmark>() + b.heap_size())
+                .sum::<usize>()
+            + (fields.iter())
+                .map(|(_, node)| size_of::<FieldNode>() + node.heap_size())
+                .sum::<usize>()
+            + size_of::<FormDoc>()
+            + st.form().heap_size();
         let new = self.replace(old, v);
         // The primary it replaces stayed only as the primary when pruning
         // took the version that held it: nothing refers to it now.
@@ -1531,50 +1455,46 @@ impl Document {
         if !held {
             self.unregister(&[replaced]);
         }
-        let st = self.state().clone();
-        self.saved_outline = st.outline;
-        self.saved_annots = st.annots;
-        self.saved_fields = st.fields;
-        self.saved_removed = st.removed_comments;
-        self.saved_labels = st.labels;
-        self.baked_header_footer = st.header_footer;
+        self.baseline = self.state().clone();
         self.saved = Some(new);
         id
     }
 
     pub fn page_count(&self) -> usize {
-        self.state().pages.len()
+        self.state().page_count()
     }
 
-    pub fn page(&self, index: usize) -> Option<&PageRef> {
-        self.state().pages.get(index)
+    /// The page at position `index`.
+    pub fn page(&self, index: usize) -> Option<PageId> {
+        self.state().page_at(index)
     }
 
     pub fn index_of(&self, id: PageId) -> Option<usize> {
-        self.state().index_of(id)
+        self.state().pos_of(id)
     }
 
-    /// A page's boxes, its source page's, with its rotation.
-    pub fn geom(&self, page: &PageRef) -> Geom {
-        geom_in(&self.sources, page)
+    /// Page `id`'s boxes and `/Rotate`: a Letter page's for a page the
+    /// document hasn't got.
+    pub fn geom(&self, id: PageId) -> Geom {
+        geom_in(self.state(), id)
     }
 
-    /// The turn PDFium adds to the source page's own `/Rotate`: what a
-    /// render `Job` takes.
-    pub fn render_delta(&self, page: &PageRef) -> Rotation {
-        render_delta_in(&self.sources, page)
+    /// The turn PDFium adds to page `id`'s source page's own `/Rotate`:
+    /// what a render `Job` takes.
+    pub fn render_delta(&self, id: PageId) -> Rotation {
+        self.state().render_delta(id).unwrap_or(Rotation::R0)
     }
 
-    /// A page's size as shown.
-    pub fn page_size(&self, page: &PageRef) -> PageSize {
-        self.geom(page).shown()
+    /// Page `id`'s size as shown.
+    pub fn page_size(&self, id: PageId) -> PageSize {
+        self.geom(id).shown()
     }
 
     /// Every mark in `group` (see `annot::group_of`), in document order:
     /// by page, then down the page as it shows, then across. With each,
     /// its page's position.
     pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
-        group_members_in(self.state(), &self.sources, group)
+        group_members_in(self.state(), group)
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -1820,6 +1740,7 @@ impl Document {
         let mut rec = Rec::new(state);
         let out = self.compute(&mut rec, edit.clone())?;
         let (state, prims) = rec.finish();
+        debug_assert_eq!(state.check_invariants(), Ok(()), "{line}");
         let prims = prims.into();
         Ok((state, out, Step { edit, line, prims }))
     }
@@ -2204,214 +2125,301 @@ impl Document {
         out
     }
 
-    /// Source `source`'s fields with widgets on the pages coming in
-    /// (`shown`: each page's index in the source, and the page showing it),
-    /// and its fields with no widget at all, into `rec` as a copy of their
-    /// own (M10 proposal 5). Only widgets on those pages come along. When
-    /// any of their names clashes with a field in the document, or a parent
-    /// of one, they all go under a new parent field named for the file:
-    /// its name. Pages of a file whose form is here already (a run of its
-    /// pages after another, as Combine inserts them) join that form.
+    /// The form of registration `source` that comes in with its pages
+    /// (`shown`: each page's index in the source, and the page showing
+    /// it), into `rec` as an instance of its own (M10 proposal 5): its
+    /// fields with widgets on those pages, its fields with no widget at
+    /// all, and the nodes above them, each with a new id, and their
+    /// widgets on those pages. When any of their full names, or a parent
+    /// of one, is a node's in the document, the instance goes under a new
+    /// parent named for the file: its name, given back. Pages of a file
+    /// whose form is here already (a run of its pages after another, as
+    /// Combine inserts them) join that instance. The widgets, by page
+    /// index, each with its place in its page's `/Annots`, which
+    /// [`bring_annots`](Self::bring_annots) puts them at.
     fn take_in_fields(
         &self,
         rec: &mut Rec,
         source: SourceId,
         shown: &[(u32, PageId)],
-    ) -> Option<String> {
-        let form = self.forms.get(&source)?.clone();
-        let on_pages: HashSet<FieldId> = shown
-            .iter()
+    ) -> (Option<String>, Placed) {
+        let Some(info) = self.sources.get(&source) else {
+            return (None, Placed::new());
+        };
+        let form = info.src.form().clone();
+        let on_pages: HashSet<FieldId> = (shown.iter())
             .flat_map(|(index, _)| form.widgets.get(index).into_iter().flatten())
             .map(|w| w.field)
             .collect();
         if on_pages.is_empty() {
-            return None;
+            return (None, Placed::new());
         }
         let with_widgets: HashSet<FieldId> =
             form.widgets.values().flatten().map(|w| w.field).collect();
-        let fields: Vec<&Field> = form
-            .fields
-            .iter()
-            .filter(|f| on_pages.contains(&f.id) || !with_widgets.contains(&f.id))
-            .collect();
-        // The form as it's here already, by object: each field's id, and
-        // the parent they're all under.
-        let here: HashMap<lopdf::ObjectId, (FieldId, Option<Arc<str>>)> = rec
-            .fields
-            .values()
-            .filter(|f| f.source == source && f.copy == 0)
-            .map(|f| (f.object, (f.id, f.under.clone())))
-            .collect();
-        let (under, ids) = match here.values().next() {
-            Some((_, joined)) => {
-                let joined = joined.as_deref().map(str::to_string);
-                let mut ids = HashMap::new();
-                let mut new = Vec::new();
-                for f in fields {
-                    match here.get(&f.object) {
-                        Some((id, _)) => {
-                            ids.insert(f.id, *id);
-                        }
-                        None => new.push(f),
-                    }
+        // The nodes that come in, by the file's ids, in its tree's order:
+        // those fields, and every node above one.
+        let mut coming = BTreeSet::new();
+        for f in &form.fields {
+            if on_pages.contains(&f.id) || !with_widgets.contains(&f.id) {
+                let mut at = Some(f.id);
+                while let Some(id) = at.filter(|&id| coming.insert(id)) {
+                    at = form.nodes[id.0 as usize].parent;
                 }
-                ids.extend(self.bring_fields(rec, source, 0, new, joined));
-                (None, ids)
             }
-            None => {
-                let under = self.name_apart(rec, source, fields.iter().map(|f| f.name.as_str()));
-                let copy = next_copy(rec, source);
-                (
-                    under.clone(),
-                    self.bring_fields(rec, source, copy, fields, under),
-                )
-            }
+        }
+        // The instance a run of its pages before brought, if one did, and
+        // its nodes by object.
+        let joined = FormInst {
+            src: source,
+            copy: 0,
         };
+        let mut doc = FormDoc::clone(rec.form());
+        let join = doc.names.contains_key(&joined);
+        let here: HashMap<ObjectId, FieldId> = match join {
+            true => (rec.fields())
+                .filter(|(_, node)| node.inst == joined)
+                .filter_map(|(id, node)| Some((node.src.as_ref()?.id, id)))
+                .collect(),
+            false => HashMap::new(),
+        };
+        let ids: HashMap<FieldId, FieldId> = (coming.iter())
+            .map(|&n| {
+                let here = here.get(&form.nodes[n.0 as usize].object);
+                (n, here.copied().unwrap_or_else(|| self.ids.field()))
+            })
+            .collect();
+        // The node its roots go under, if any: the one its first run went
+        // under, or one named apart now.
+        let (inst, under, top) = if join {
+            let top = (doc.roots.iter().copied()).find(|&r| {
+                rec.field(r)
+                    .is_some_and(|n| n.inst == joined && n.src.is_none())
+            });
+            (joined, None, top)
+        } else {
+            let inst = FormInst {
+                src: source,
+                copy: next_copy(&doc, source),
+            };
+            let name = file_name(info);
+            let names = (form.fields.iter())
+                .filter(|f| coming.contains(&f.id))
+                .map(|f| f.name.as_str());
+            let under = name_apart(rec, &name, names);
+            doc.names.insert(inst, name);
+            let top = under.as_deref().map(|under| {
+                let id = self.ids.field();
+                put_field(rec, id, sheaf_parent(under, inst));
+                doc.roots.push_back(id);
+                id
+            });
+            (inst, under, top)
+        };
+        // The widgets on the pages coming in, each with a new id.
+        let mut shows: HashMap<FieldId, Vector<AnnotId>> = HashMap::new();
+        let mut placed = Placed::new();
+        let mut taken = HashSet::new();
         for &(index, page) in shown {
-            let list: Vector<Widget> = form
-                .widgets
-                .get(&index)
-                .into_iter()
-                .flatten()
-                .filter_map(|w| {
-                    Some(Widget {
-                        field: *ids.get(&w.field)?,
-                        ..w.clone()
-                    })
-                })
-                .collect();
-            if !list.is_empty() {
-                rec.put(Key::WidgetsOf(page), Some(Val::Widgets(list)));
+            for w in form.widgets.get(&index).into_iter().flatten() {
+                let Some(&field) = ids.get(&w.field) else {
+                    continue;
+                };
+                let id = fresh_annot_id(rec, &mut taken);
+                let src = Some(ObjRef {
+                    src: info.src.clone(),
+                    id: w.object,
+                });
+                let body = AnnotBody::Widget(Arc::new(Widget::read(w, field, src, inst)));
+                rec.put(Key::Annot(id), Some(Val::Annot(AnnotRec { page, body })));
+                shows.entry(field).or_default().push_back(id);
+                placed.entry(index).or_default().push((w.slot, id));
             }
         }
-        under
-    }
-
-    /// Duplicate Pages: each copy's widgets get fields of their own, a new
-    /// copy of each form the pages show, renamed by
-    /// [`take_in_fields`](Self::take_in_fields)'s rule, so filling one never
-    /// fills the other (M10 bug 4). `copies` pairs each page with its copy.
-    fn copy_fields(&self, rec: &mut Rec, copies: &[(PageId, PageId)]) -> Vec<(String, SourceId)> {
-        // The forms the pages show, and their fields there, in order.
-        let mut forms: BTreeMap<(SourceId, u32), BTreeSet<FieldId>> = BTreeMap::new();
-        for (page, _) in copies {
-            for w in rec.widgets.get(page).into_iter().flatten() {
-                if let Some(f) = rec.fields.get(&w.field) {
-                    forms.entry((f.source, f.copy)).or_default().insert(f.id);
+        let terms: HashMap<FieldId, &crate::forms::Field> =
+            form.fields.iter().map(|f| (f.id, f)).collect();
+        // New kids of nodes that were here, and of the new parent.
+        let mut more: BTreeMap<FieldId, Vector<FieldId>> = BTreeMap::new();
+        for &n in &coming {
+            let node = &form.nodes[n.0 as usize];
+            let id = ids[&n];
+            if here.contains_key(&node.object) {
+                // It was here: its widgets on these pages join its own.
+                if let Some(widgets) = shows.remove(&id) {
+                    let was = rec.field(id).expect("a node here").clone();
+                    let mut term =
+                        Terminal::clone(was.term.as_ref().expect("a field with widgets"));
+                    term.widgets.append(widgets);
+                    let node = FieldNode {
+                        term: Some(Arc::new(term)),
+                        ..FieldNode::clone(&was)
+                    };
+                    put_field(rec, id, node);
                 }
+                continue;
             }
-        }
-        let mut renamed = Vec::new();
-        let mut ids = HashMap::new();
-        for ((source, _), fields) in forms {
-            let fields: Vec<Field> = fields.iter().map(|id| rec.fields[id].clone()).collect();
-            let under = self.name_apart(rec, source, fields.iter().map(|f| f.source_name()));
-            renamed.extend(under.clone().map(|u| (u, source)));
-            let copy = next_copy(rec, source);
-            ids.extend(self.bring_fields(rec, source, copy, fields.iter(), under));
-        }
-        for &(page, copy) in copies {
-            let list: Vector<Widget> = rec
-                .widgets
-                .get(&page)
-                .into_iter()
-                .flatten()
-                .filter_map(|w| {
-                    Some(Widget {
-                        field: *ids.get(&w.field)?,
-                        ..w.clone()
-                    })
-                })
-                .collect();
-            if !list.is_empty() {
-                rec.put(Key::WidgetsOf(copy), Some(Val::Widgets(list)));
+            let parent = node.parent.map(|p| ids[&p]).or(top);
+            let listed = node
+                .parent
+                .is_some_and(|p| !here.contains_key(&form.nodes[p.0 as usize].object));
+            match parent {
+                _ if listed => {}
+                Some(p) => more.entry(p).or_default().push_back(id),
+                None => doc.roots.push_back(id),
             }
+            let term = (terms.get(&n))
+                .map(|f| Arc::new(Terminal::read(f, shows.remove(&id).unwrap_or_default())));
+            let node = FieldNode {
+                parent,
+                partial: node.partial.clone(),
+                src: Some(ObjRef {
+                    src: info.src.clone(),
+                    id: node.object,
+                }),
+                inst,
+                kids: node
+                    .kids
+                    .iter()
+                    .filter_map(|k| ids.get(k))
+                    .copied()
+                    .collect(),
+                term,
+            };
+            put_field(rec, id, node);
         }
-        renamed
+        for (p, kids) in more {
+            let mut node = FieldNode::clone(rec.field(p).expect("a node they came under"));
+            node.kids.append(kids);
+            put_field(rec, p, node);
+        }
+        rec.put(Key::Form, Some(Val::Form(Arc::new(doc))));
+        (under, placed)
     }
 
-    /// `fields` of `source` into `rec` with new ids, as copy `copy` of its
-    /// form, under `under` when given. Each old id, and its new one.
-    fn bring_fields<'a>(
+    /// Duplicate Pages: each copy's widgets get fields of their own (M10
+    /// bug 4), so filling one never fills the other. For each instance of
+    /// a form the pages show, a new one, named as it is in
+    /// [`FormDoc::names`], of its fields with widgets on them and the
+    /// nodes above those that were read from it (not a parent sheaf made),
+    /// renamed apart by [`take_in_fields`](Self::take_in_fields)' rule;
+    /// its widgets on the copies have new ids. `copies` gives each page
+    /// and its copy. The parents the copies' fields went under, with their
+    /// files, and each widget's copy, by the id of the one it's a copy of.
+    fn copy_fields(
         &self,
         rec: &mut Rec,
-        source: SourceId,
-        copy: u32,
-        fields: impl IntoIterator<Item = &'a Field>,
-        under: Option<String>,
-    ) -> HashMap<FieldId, FieldId> {
-        let under: Option<Arc<str>> = under.map(Arc::from);
-        let mut ids = HashMap::new();
-        for f in fields {
-            let id = self.ids.field();
-            let name = match &under {
-                Some(u) => format!("{u}.{}", f.source_name()),
-                None => f.source_name().to_string(),
-            };
-            let field = Field {
-                id,
-                source,
-                copy,
-                under: under.clone(),
-                name,
-                ..f.clone()
-            };
-            rec.put(Key::Field(id), Some(Val::Field(Box::new(field))));
-            ids.insert(f.id, id);
+        copies: &[(PageId, PageId, u32)],
+    ) -> (Vec<(String, SourceId)>, HashMap<AnnotId, AnnotId>) {
+        let mut shown: BTreeMap<FormInst, BTreeSet<FieldId>> = BTreeMap::new();
+        for &(page, ..) in copies {
+            for (_, w) in rec.widgets_on(page) {
+                shown.entry(w.inst).or_default().insert(w.field);
+            }
         }
-        ids
-    }
-
-    /// The parent field `names` (full names, as their source has them) go
-    /// under, when any of them, or a parent of one, is a field or parent
-    /// in `st` already: the file's name, or with `_2`, `_3`… when that's
-    /// taken. None when nothing clashes.
-    fn name_apart<'a>(
-        &self,
-        st: &DocState,
-        source: SourceId,
-        names: impl IntoIterator<Item = &'a str>,
-    ) -> Option<String> {
-        let existing = field_nodes(st.fields.values().map(|f| f.name.as_str()));
-        if !field_nodes(names).iter().any(|n| existing.contains(n)) {
-            return None;
-        }
-        // A dot would make it two names.
-        let stem = self
-            .sources
-            .get(&source)
-            .and_then(|s| s.name.file_stem())
-            .map(|s| s.to_string_lossy().replace('.', "_"))
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "form".to_string());
-        (1..)
-            .map(|n| {
-                if n == 1 {
-                    stem.clone()
-                } else {
-                    format!("{stem}_{n}")
-                }
-            })
-            .find(|name| !existing.contains(name.as_str()))
-    }
-
-    /// Nodes for [`Edit::OutlineInsertTree`]: pre-order items with depths
-    /// that start at 0 and go down at most one level at a time.
-    fn tree_from_items(&self, items: &[NewOutlineItem]) -> Result<Vec<OutlineNode>> {
-        let mut roots: Vec<OutlineNode> = Vec::new();
-        // Open path: (depth, node) from the current root down.
-        let mut stack: Vec<(u16, OutlineNode)> = Vec::new();
-        let close = |stack: &mut Vec<(u16, OutlineNode)>, roots: &mut Vec<OutlineNode>, d: u16| {
-            while let Some((top, _)) = stack.last()
-                && *top >= d
-            {
-                let (_, node) = stack.pop().unwrap();
-                match stack.last_mut() {
-                    Some((_, parent)) => parent.children.push_back(node),
-                    None => roots.push(node),
+        let mut doc = FormDoc::clone(rec.form());
+        let mut renamed = Vec::new();
+        let mut copied = HashMap::new();
+        let mut taken = HashSet::new();
+        for (orig, fields) in shown {
+            let inst = FormInst {
+                src: orig.src,
+                copy: next_copy(&doc, orig.src),
+            };
+            let name = doc.names.get(&orig).cloned().unwrap_or_default();
+            doc.names.insert(inst, name.clone());
+            let mut coming = BTreeSet::new();
+            for &f in &fields {
+                coming.insert(f);
+                let mut at = rec.field(f).and_then(|n| n.parent);
+                while let Some(id) = at {
+                    let Some(node) = rec.field(id).filter(|n| n.src.is_some()) else {
+                        break;
+                    };
+                    if !coming.insert(id) {
+                        break;
+                    }
+                    at = node.parent;
                 }
             }
-        };
+            let names: Vec<String> = fields.iter().map(|&f| inst_name(rec, f)).collect();
+            let under = name_apart(rec, &name, names.iter().map(String::as_str));
+            let top = under.as_deref().map(|under| {
+                let id = self.ids.field();
+                put_field(rec, id, sheaf_parent(under, inst));
+                doc.roots.push_back(id);
+                id
+            });
+            renamed.extend(under.map(|under| (under, orig.src)));
+            let ids: HashMap<FieldId, FieldId> =
+                coming.iter().map(|&id| (id, self.ids.field())).collect();
+            // Its widgets on the copies.
+            let mut shows: HashMap<FieldId, Vector<AnnotId>> = HashMap::new();
+            for &(page, copy, _) in copies {
+                let theirs: Vec<(AnnotId, Arc<Widget>)> = (rec.widgets_on(page))
+                    .filter(|(_, w)| w.inst == orig)
+                    .map(|(id, w)| (id, w.clone()))
+                    .collect();
+                for (was, w) in theirs {
+                    let id = fresh_annot_id(rec, &mut taken);
+                    let field = ids[&w.field];
+                    let w = Widget {
+                        field,
+                        inst,
+                        ..Widget::clone(&w)
+                    };
+                    let widget = AnnotRec {
+                        page: copy,
+                        body: AnnotBody::Widget(Arc::new(w)),
+                    };
+                    rec.put(Key::Annot(id), Some(Val::Annot(widget)));
+                    shows.entry(field).or_default().push_back(id);
+                    copied.insert(was, id);
+                }
+            }
+            let mut roots = Vector::new();
+            for &old in &coming {
+                let was = FieldNode::clone(rec.field(old).expect("a node shown"));
+                let id = ids[&old];
+                let parent = was.parent.and_then(|p| ids.get(&p).copied());
+                if parent.is_none() {
+                    roots.push_back(id);
+                }
+                let term = was.term.as_ref().map(|t| {
+                    let widgets = shows.remove(&id).unwrap_or_default();
+                    Arc::new(Terminal {
+                        widgets,
+                        ..Terminal::clone(t)
+                    })
+                });
+                let node = FieldNode {
+                    parent: parent.or(top),
+                    kids: was
+                        .kids
+                        .iter()
+                        .filter_map(|k| ids.get(k))
+                        .copied()
+                        .collect(),
+                    inst,
+                    term,
+                    ..was
+                };
+                put_field(rec, id, node);
+            }
+            match top {
+                Some(top) => {
+                    let mut node = FieldNode::clone(rec.field(top).expect("the new parent"));
+                    node.kids = roots;
+                    put_field(rec, top, node);
+                }
+                None => doc.roots.append(roots),
+            }
+        }
+        rec.put(Key::Form, Some(Val::Form(Arc::new(doc))));
+        (renamed, copied)
+    }
+
+    /// Bookmarks for [`Edit::OutlineInsertTree`]: pre-order items with
+    /// depths that start at 0 and go down at most one level at a time.
+    fn tree_from_items(&self, items: &[NewOutlineItem]) -> Result<Nested> {
         let mut prev: Option<u16> = None;
         for item in items {
             match prev {
@@ -2422,62 +2430,191 @@ impl Document {
                 _ => {}
             }
             prev = Some(item.depth);
-            close(&mut stack, &mut roots, item.depth);
-            let node = OutlineNode {
-                id: self.ids.outline(),
-                title: item.title.clone(),
-                target: item.target,
-                view: item.target.and(item.view.clone()),
+        }
+        Ok(self.nest(items.iter().map(|item| {
+            let b = Bookmark {
+                title: item.title.as_str().into(),
+                target: item.target.map(|page| Target::Page {
+                    page,
+                    view: item.view.clone(),
+                }),
                 color: None,
                 style: TextStyle::default(),
                 open: true,
-                children: Vector::new(),
+                kids: Vector::new(),
+                src: None,
             };
-            stack.push((item.depth, node));
-        }
-        close(&mut stack, &mut roots, 0);
-        Ok(roots)
+            (item.depth, b)
+        })))
     }
 
+    /// Bookmarks of a file's items, as [`crate::open::outline`] read them
+    /// from `src`: `page` gives the page that shows each page of the file,
+    /// and an item going to one none shows goes nowhere.
     fn outline_from_flat(
         &self,
         items: &[FlatOutlineItem],
-        by_index: &[PageId],
-    ) -> Vector<OutlineNode> {
-        // Build with a stack of (depth, node) and attach children on pop.
-        let mut roots: Vec<OutlineNode> = Vec::new();
-        let mut stack: Vec<(u16, OutlineNode)> = Vec::new();
-        let flush =
-            |stack: &mut Vec<(u16, OutlineNode)>, roots: &mut Vec<OutlineNode>, depth: u16| {
-                while let Some((d, _)) = stack.last()
-                    && *d >= depth
-                {
-                    let (_, node) = stack.pop().unwrap();
-                    match stack.last_mut() {
-                        Some((_, parent)) => parent.children.push_back(node),
-                        None => roots.push(node),
-                    }
-                }
+        page: impl Fn(u32) -> Option<PageId>,
+        src: &Src,
+    ) -> Nested {
+        self.nest(items.iter().map(|item| {
+            let target = if item.kept {
+                Some(Target::Kept)
+            } else {
+                item.page.and_then(&page).map(|page| Target::Page {
+                    page,
+                    view: item.view.clone(),
+                })
             };
-        for item in items {
-            flush(&mut stack, &mut roots, item.depth);
-            let node = OutlineNode {
-                id: self.ids.outline(),
-                title: item.title.clone(),
-                target: item.page.and_then(|p| by_index.get(p as usize).copied()),
-                view: item.view.clone(),
+            let b = Bookmark {
+                title: item.title.as_str().into(),
+                target,
                 color: item.color,
                 style: item.style,
                 open: item.open,
-                children: Vector::new(),
+                kids: Vector::new(),
+                src: item.object.map(|id| ObjRef {
+                    src: src.clone(),
+                    id,
+                }),
             };
-            stack.push((item.depth, node));
+            (item.depth, b)
+        }))
+    }
+
+    /// `items`, bookmarks in pre-order with their depths, under one
+    /// another, each with a new id: one deeper than the one before is its
+    /// kid, and one as deep or less a sibling of the last one less deep.
+    fn nest(&self, items: impl IntoIterator<Item = (u16, Bookmark)>) -> Nested {
+        let mut roots = Vector::new();
+        let mut out: Vec<(OutlineId, Bookmark)> = Vec::new();
+        // The path down to the last one: each one's depth and place in
+        // `out`.
+        let mut path: Vec<(u16, usize)> = Vec::new();
+        for (depth, b) in items {
+            while path.last().is_some_and(|&(d, _)| d >= depth) {
+                path.pop();
+            }
+            let id = self.ids.outline();
+            match path.last() {
+                Some(&(_, parent)) => out[parent].1.kids.push_back(id),
+                None => roots.push_back(id),
+            }
+            path.push((depth, out.len()));
+            out.push((id, b));
         }
-        flush(&mut stack, &mut roots, 0);
-        roots.into_iter().collect()
+        (roots, out)
     }
 
     // ----- edits ------------------------------------------------------------
+
+    /// What pages that came in from `src` hold beside their content
+    /// (`shown`: each page's index in `src`, and the page showing it): the
+    /// other tools' comments and links its fact has on each, with the
+    /// form's widgets [`take_in_fields`](Self::take_in_fields) `placed`
+    /// among them as the file has them, and then sheaf's marks, `marks`, by
+    /// index, as the edit carries them. Each gets a fresh id (the file's
+    /// could clash with ours), and goes after what its page has. A mark is
+    /// the object the fact has under its id, holding
+    /// what that holds while it names the same, else what
+    /// [`mark`](Self::mark) finds; a connector keeps its partner only if
+    /// the partner came too; and a reply to a mark, ours or another
+    /// tool's, follows it to its new name. Whether any mark draws text the
+    /// built-in fonts can't ([`Annot::unencodable`]).
+    fn bring_annots(
+        &self,
+        rec: &mut Rec,
+        src: &Src,
+        shown: &[(u32, PageId)],
+        marks: Vec<(u32, Vec<Annot>)>,
+        placed: &Placed,
+    ) -> Result<bool> {
+        let fact = src.annots().clone();
+        let mut marks: HashMap<u32, Vec<Annot>> = marks.into_iter().collect();
+        let incoming: Vec<(u32, PageId, Vec<Annot>)> = (shown.iter())
+            .map(|&(index, page)| (index, page, marks.remove(&index).unwrap_or_default()))
+            .collect();
+        let unencodable = (incoming.iter())
+            .flat_map(|(_, _, list)| list)
+            .any(Annot::unencodable);
+        let mut taken = HashSet::new();
+        let mut ids = HashMap::new();
+        for a in incoming.iter().flat_map(|(_, _, list)| list) {
+            ids.insert(a.id, fresh_annot_id(rec, &mut taken));
+        }
+        let at = |id| ObjRef {
+            src: src.clone(),
+            id,
+        };
+        for (index, page, list) in incoming {
+            let copy = rec.def(page).map_or(0, |def| def.copy);
+            // The names of the marks sheaf made, which change with their ids.
+            let names: HashMap<String, String> = (list.iter())
+                .filter(|a| a.name.is_empty())
+                .map(|a| {
+                    let ([was, _], [now, _]) = (a.id.sheaf_names(), ids[&a.id].sheaf_names());
+                    (was, now)
+                })
+                .collect();
+            let mut on_page = rec.annot_ids_on(page).cloned().unwrap_or_default();
+            let mut theirs = placed.get(&index).cloned().unwrap_or_default();
+            for (_, object, summary) in fact.foreign_on(index) {
+                let id = fresh_annot_id(rec, &mut taken);
+                let parent = (summary.parent.as_ref()).and_then(|p| names.get(p));
+                let summary = match parent {
+                    Some(now) => Arc::new(ForeignAnnot {
+                        parent: Some(now.clone()),
+                        ..ForeignAnnot::clone(summary)
+                    }),
+                    None => summary.clone(),
+                };
+                theirs.push((summary.slot, id));
+                let src = object.map(at);
+                let body = AnnotBody::Foreign(Arc::new(Foreign { src, copy, summary }));
+                rec.put(Key::Annot(id), Some(Val::Annot(AnnotRec { page, body })));
+            }
+            theirs.sort_by_key(|&(slot, _)| slot);
+            on_page.extend(theirs.into_iter().map(|(_, id)| id));
+            for mut a in list {
+                let read = (fact.on(index).iter()).find_map(|f| match &f.body {
+                    FileBody::Mark { annot, held } if annot.id == a.id => {
+                        Some((f.object, holds_same(&annot.kind, &a.kind).then_some(*held)))
+                    }
+                    _ => None,
+                });
+                let (object, held) = read.unwrap_or_default();
+                let object = object.filter(|_| copy == 0).map(at);
+                a.id = ids[&a.id];
+                match &mut a.kind {
+                    AnnotKind::Connector { partner, .. } => {
+                        *partner = partner.and_then(|p| ids.get(&p).copied());
+                    }
+                    AnnotKind::Reply { parent } | AnnotKind::Status { parent, .. } => {
+                        if let Some(now) = names.get(parent) {
+                            *parent = now.clone();
+                        }
+                    }
+                    _ => {}
+                }
+                let id = a.id;
+                let mark = match held {
+                    Some(held) => {
+                        let mark = Mark {
+                            src: object,
+                            ..Mark::from(a)
+                        };
+                        holding(mark, &self.store, src, held)
+                    }
+                    None => self.mark(a, object)?,
+                };
+                let body = AnnotBody::Mark(Arc::new(mark));
+                rec.put(Key::Annot(id), Some(Val::Annot(AnnotRec { page, body })));
+                on_page.push_back(id);
+            }
+            put_page_annots(rec, page, on_page);
+        }
+        Ok(unencodable)
+    }
 
     fn compute(&self, rec: &mut Rec, edit: Edit) -> Result<EditOutcome> {
         let mut out = EditOutcome::default();
@@ -2489,64 +2626,45 @@ impl Document {
                 {
                     bail!("cannot move pages before one of themselves");
                 }
-                let moving: Vec<PageRef> = rec
-                    .pages
-                    .iter()
-                    .filter(|p| set.contains(&p.id))
-                    .copied()
-                    .collect();
-                let rest: Vector<PageRef> = rec
-                    .pages
-                    .iter()
-                    .filter(|p| !set.contains(&p.id))
-                    .copied()
-                    .collect();
+                let (moving, rest): (Vector<PageId>, Vector<PageId>) =
+                    rec.order().iter().copied().partition(|id| set.contains(id));
                 let at = match before {
                     Some(b) => rest
                         .iter()
-                        .position(|p| p.id == b)
+                        .position(|&id| id == b)
                         .context("destination page not found")?,
                     None => rest.len(),
                 };
-                rec.put(Key::Pages, Some(Val::Pages(splice(&rest, at, moving))));
+                rec.put(Key::Order, Some(Val::Order(splice(&rest, at, moving))));
             }
             Edit::RotatePages { ids, by } => {
                 let set: HashSet<PageId> = ids.into_iter().collect();
-                let pages = rec
-                    .pages
-                    .iter()
-                    .map(|p| {
-                        if set.contains(&p.id) {
-                            PageRef {
-                                rotation: p.rotation.plus(by),
-                                ..*p
-                            }
-                        } else {
-                            *p
-                        }
-                    })
-                    .collect();
-                rec.put(Key::Pages, Some(Val::Pages(pages)));
+                for id in set {
+                    if let Some(geom) = rec.geom(id) {
+                        let geom = Geom {
+                            rotate: geom.rotate.plus(by),
+                            ..**geom
+                        };
+                        rec.put(Key::Geom(id), Some(Val::Geom(Arc::new(geom))));
+                    }
+                }
             }
             Edit::DeletePages { ids } => {
                 let set: HashSet<PageId> = ids.into_iter().collect();
-                let pages: Vector<PageRef> = rec
-                    .pages
+                let order: Vector<PageId> = rec
+                    .order()
                     .iter()
-                    .filter(|p| !set.contains(&p.id))
+                    .filter(|id| !set.contains(id))
                     .copied()
                     .collect();
-                out.pages_removed = rec.pages.len() - pages.len();
-                rec.put(Key::Pages, Some(Val::Pages(pages)));
+                out.pages_removed = rec.page_count() - order.len();
+                rec.put(Key::Order, Some(Val::Order(order)));
                 for &id in &set {
-                    rec.put(Key::AnnotsOf(id), None);
-                    rec.put(Key::TextLayer(id), None);
-                    rec.put(Key::RemovedOf(id), None);
-                    rec.put(Key::WidgetsOf(id), None);
+                    rec.put(Key::Page(id), None);
+                    rec.put(Key::Geom(id), None);
+                    drop_annots(rec, id, |_, _| true);
                 }
-                let (outline, removed) = cascade_delete(&rec.outline, &set);
-                rec.put(Key::Outline, Some(Val::Outline(outline)));
-                out.bookmarks_removed = removed;
+                out.bookmarks_removed = cascade_delete(rec, &set);
             }
             Edit::InsertPages {
                 source,
@@ -2560,84 +2678,78 @@ impl Document {
                     bail!("range exceeds source page count");
                 }
                 let at = match before {
-                    Some(b) => rec.index_of(b).context("destination page not found")?,
-                    None => rec.pages.len(),
+                    Some(b) => rec.pos_of(b).context("destination page not found")?,
+                    None => rec.page_count(),
                 };
-                let new: Vec<PageRef> = range
-                    .clone()
-                    .map(|index| PageRef {
-                        id: self.ids.page(),
-                        source,
-                        index,
-                        rotation: info.src.geom(index).rotate,
-                    })
-                    .collect();
-                out.pages_added = new.len();
-                // Map source index -> new PageId for bookmark targets.
+                let mut copies = NextCopy::of(rec);
+                // Source index -> new PageId, for bookmark targets.
                 let mut by_index = vec![PageId(u64::MAX); info.src.page_count() as usize];
-                for p in &new {
-                    by_index[p.index as usize] = p.id;
+                for index in range.clone() {
+                    let id = self.ids.page();
+                    let (def, geom) = copies.page(source, &info.src, index);
+                    rec.put(Key::Page(id), Some(Val::Page(def)));
+                    rec.put(Key::Geom(id), Some(Val::Geom(geom)));
+                    by_index[index as usize] = id;
                 }
-                let pages = splice(&rec.pages, at, new);
-                rec.put(Key::Pages, Some(Val::Pages(pages)));
+                out.pages_added = range.len();
+                let new = range.clone().map(|index| by_index[index as usize]);
+                let order = splice(rec.order(), at, new);
+                rec.put(Key::Order, Some(Val::Order(order)));
                 if let Some(items) = outline {
-                    let valid: Vec<PageId> = by_index.to_vec();
-                    let incoming = self.outline_from_flat(&items, &valid);
-                    // Targets outside the inserted range resolve to a sentinel; drop them.
-                    let incoming = strip_targets(&incoming, PageId(u64::MAX));
-                    let (merged, added) = merge_outline(&rec.outline, &incoming);
-                    rec.put(Key::Outline, Some(Val::Outline(merged)));
-                    out.bookmarks_added = added;
+                    // Pages outside the inserted range are the sentinel's:
+                    // bookmarks to them go nowhere.
+                    let page = |index: u32| {
+                        let id = by_index.get(index as usize).copied();
+                        id.filter(|&id| id != PageId(u64::MAX))
+                    };
+                    let incoming = self.outline_from_flat(&items, page, &info.src);
+                    out.bookmarks_added = merge_outline(rec, incoming);
                 }
-                let incoming = annots
-                    .into_iter()
-                    .filter_map(|(index, list)| {
-                        let page = *by_index.get(index as usize)?;
-                        (page != PageId(u64::MAX)).then_some((page, list))
-                    })
-                    .collect();
-                out.unencodable = import_marks(rec, incoming);
                 let shown: Vec<(u32, PageId)> = range.map(|i| (i, by_index[i as usize])).collect();
-                if let Some(under) = self.take_in_fields(rec, source, &shown) {
-                    out.forms_renamed.push((under, source));
-                }
+                let (under, placed) = self.take_in_fields(rec, source, &shown);
+                out.forms_renamed.extend(under.map(|under| (under, source)));
+                out.unencodable = self.bring_annots(rec, &info.src, &shown, annots, &placed)?;
                 if signed_from(rec, source) {
                     out.signatures_in.push(source);
                 }
+                self.scripts_apart(rec);
             }
             Edit::DuplicatePages { ids } => {
                 let set: HashSet<PageId> = ids.into_iter().collect();
-                let mut pages = Vector::new();
-                // (page, its copy), for their fields.
-                let mut copies = Vec::new();
-                for p in rec.pages.clone() {
-                    pages.push_back(p);
-                    if set.contains(&p.id) {
-                        let copy = self.ids.page();
-                        if let Some(list) = rec.annots.get(&p.id).cloned() {
-                            let mut taken = HashSet::new();
-                            let list: Vector<Annot> = list
-                                .into_iter()
-                                .map(|mut a| {
-                                    a.id = fresh_annot_id(rec, &mut taken);
-                                    // The copy isn't the comment replies
-                                    // elsewhere are to.
-                                    a.name.clear();
-                                    a
-                                })
-                                .collect();
-                            rec.put(Key::AnnotsOf(copy), Some(Val::Annots(list)));
-                        }
-                        if let Some(layer) = rec.text_layers.get(&p.id).cloned() {
-                            rec.put(Key::TextLayer(copy), Some(Val::TextLayer(layer)));
-                        }
-                        copies.push((p.id, copy));
-                        pages.push_back(PageRef { id: copy, ..p });
-                        out.pages_added += 1;
+                let mut copies = NextCopy::of(rec);
+                let pages: Vec<(PageId, Arc<PageDef>, Arc<Geom>)> = rec
+                    .pages()
+                    .map(|(id, def, geom)| (id, def.clone(), geom.clone()))
+                    .collect();
+                let mut order = Vector::new();
+                // Each page, its copy and the copy's number.
+                let mut pairs = Vec::new();
+                for (id, def, geom) in pages {
+                    order.push_back(id);
+                    if !set.contains(&id) {
+                        continue;
                     }
+                    let copy = self.ids.page();
+                    // The next copy of the same page, with the same text
+                    // over it, shared (M10.5 §6.5), and the same boxes.
+                    let def = PageDef {
+                        copy: copies.take(&def.base),
+                        ..PageDef::clone(&def)
+                    };
+                    let n = def.copy;
+                    rec.put(Key::Page(copy), Some(Val::Page(Arc::new(def))));
+                    rec.put(Key::Geom(copy), Some(Val::Geom(geom)));
+                    pairs.push((id, copy, n));
+                    order.push_back(copy);
+                    out.pages_added += 1;
                 }
-                rec.put(Key::Pages, Some(Val::Pages(pages)));
-                out.forms_renamed = self.copy_fields(rec, &copies);
+                rec.put(Key::Order, Some(Val::Order(order)));
+                let (renamed, widgets) = self.copy_fields(rec, &pairs);
+                out.forms_renamed = renamed;
+                for &(page, copy, n) in &pairs {
+                    copy_annots(rec, page, copy, n, &widgets);
+                }
+                self.scripts_apart(rec);
             }
             Edit::ReplacePages {
                 ids,
@@ -2649,83 +2761,71 @@ impl Document {
                 if range.end > info.src.page_count() {
                     bail!("range exceeds source page count");
                 }
+                let mut copies = NextCopy::of(rec);
                 let mut replacements = range.clone();
                 let mut last_pos = None;
                 let mut extra_old = HashSet::new();
                 // Which page now shows each replacement, for its marks.
                 let mut shown_by: HashMap<u32, PageId> = HashMap::new();
-                let pos = rec.page_positions();
-                let mut pages = rec.pages.clone();
-                for id in &ids {
-                    let i = *pos.get(id).context("page to replace not found")?;
-                    // The page shows different content now; its OCR is
-                    // stale, and its widgets aren't on it.
-                    rec.put(Key::TextLayer(*id), None);
-                    rec.put(Key::WidgetsOf(*id), None);
+                // A page listed again is replaced once.
+                let mut listed = HashSet::new();
+                for &id in ids.iter().filter(|&&id| listed.insert(id)) {
+                    let i = rec.pos_of(id).context("page to replace not found")?;
+                    // The page shows different content now; its widgets
+                    // and other tools' annotations aren't on it. Its marks
+                    // stay, as do the widgets' fields.
+                    drop_annots(rec, id, |_, a| a.mark().is_none());
                     match replacements.next() {
                         Some(index) => {
-                            pages.set(
-                                i,
-                                PageRef {
-                                    id: *id,
-                                    source,
-                                    index,
-                                    rotation: info.src.geom(index).rotate,
-                                },
-                            );
-                            shown_by.insert(index, *id);
+                            // Its OCR was of the page it showed.
+                            let (def, geom) = copies.page(source, &info.src, index);
+                            rec.put(Key::Page(id), Some(Val::Page(def)));
+                            rec.put(Key::Geom(id), Some(Val::Geom(geom)));
+                            shown_by.insert(index, id);
                             last_pos = Some(i);
                         }
                         None => {
-                            extra_old.insert(*id);
+                            extra_old.insert(id);
                         }
                     }
                 }
                 // Extra replacements go after the last replaced page.
-                let at = last_pos.map(|i| i + 1).unwrap_or(pages.len());
-                let extra: Vec<PageRef> = replacements
-                    .map(|index| {
-                        let id = self.ids.page();
-                        shown_by.insert(index, id);
-                        PageRef {
-                            id,
-                            source,
-                            index,
-                            rotation: info.src.geom(index).rotate,
-                        }
-                    })
-                    .collect();
+                let at = last_pos.map_or(rec.page_count(), |i| i + 1);
+                let mut extra = Vec::new();
+                for index in replacements {
+                    let id = self.ids.page();
+                    let (def, geom) = copies.page(source, &info.src, index);
+                    rec.put(Key::Page(id), Some(Val::Page(def)));
+                    rec.put(Key::Geom(id), Some(Val::Geom(geom)));
+                    shown_by.insert(index, id);
+                    extra.push(id);
+                }
                 out.pages_added += extra.len();
-                pages = splice(&pages, at, extra);
+                if !extra.is_empty() || !extra_old.is_empty() {
+                    let order: Vector<PageId> = splice(rec.order(), at, extra)
+                        .into_iter()
+                        .filter(|id| !extra_old.contains(id))
+                        .collect();
+                    rec.put(Key::Order, Some(Val::Order(order)));
+                }
                 if !extra_old.is_empty() {
                     out.pages_removed = extra_old.len();
-                    pages = pages
-                        .iter()
-                        .filter(|p| !extra_old.contains(&p.id))
-                        .copied()
-                        .collect();
                     for &id in &extra_old {
-                        rec.put(Key::AnnotsOf(id), None);
-                        rec.put(Key::TextLayer(id), None);
+                        rec.put(Key::Page(id), None);
+                        rec.put(Key::Geom(id), None);
+                        drop_annots(rec, id, |_, _| true);
                     }
-                    let (outline, removed) = cascade_delete(&rec.outline, &extra_old);
-                    rec.put(Key::Outline, Some(Val::Outline(outline)));
-                    out.bookmarks_removed = removed;
+                    out.bookmarks_removed = cascade_delete(rec, &extra_old);
                 }
-                rec.put(Key::Pages, Some(Val::Pages(pages)));
-                let incoming = annots
-                    .into_iter()
-                    .filter_map(|(index, list)| Some((*shown_by.get(&index)?, list)))
-                    .collect();
-                out.unencodable = import_marks(rec, incoming);
                 let mut shown: Vec<(u32, PageId)> = shown_by.into_iter().collect();
                 shown.sort();
-                if let Some(under) = self.take_in_fields(rec, source, &shown) {
-                    out.forms_renamed.push((under, source));
-                }
+                let (under, placed) = self.take_in_fields(rec, source, &shown);
+                out.forms_renamed.extend(under.map(|under| (under, source)));
+                out.unencodable = self.bring_annots(rec, &info.src, &shown, annots, &placed)?;
                 if signed_from(rec, source) {
                     out.signatures_in.push(source);
                 }
+                self.scripts_apart(rec);
             }
             Edit::OutlineInsert {
                 parent,
@@ -2734,18 +2834,22 @@ impl Document {
                 target,
                 view,
             } => {
-                let node = OutlineNode {
-                    id: self.ids.outline(),
-                    title,
-                    view: target.and(view),
-                    target,
+                // A bookmark goes to a page there is.
+                if target.is_some_and(|page| rec.def(page).is_none()) {
+                    bail!("page not found");
+                }
+                let id = self.ids.outline();
+                let b = Bookmark {
+                    title: title.into(),
+                    target: target.map(|page| Target::Page { page, view }),
                     color: None,
                     style: TextStyle::default(),
                     open: true,
-                    children: Vector::new(),
+                    kids: Vector::new(),
+                    src: None,
                 };
-                let outline = outline_insert(&rec.outline, parent, after, node)?;
-                rec.put(Key::Outline, Some(Val::Outline(outline)));
+                rec.put(Key::Bookmark(id), Some(Val::Bookmark(Arc::new(b))));
+                outline_insert(rec, parent, after, id)?;
                 out.bookmarks_added = 1;
             }
             Edit::OutlineInsertTree {
@@ -2753,16 +2857,20 @@ impl Document {
                 after,
                 items,
             } => {
-                let roots = self.tree_from_items(&items)?;
+                let mut targets = items.iter().filter_map(|item| item.target);
+                if targets.any(|page| rec.def(page).is_none()) {
+                    bail!("page not found");
+                }
+                let (roots, made) = self.tree_from_items(&items)?;
                 out.bookmarks_added = items.len();
-                let mut outline = rec.outline.clone();
+                for (id, b) in made {
+                    rec.put(Key::Bookmark(id), Some(Val::Bookmark(Arc::new(b))));
+                }
                 let mut after = after;
-                for node in roots {
-                    let id = node.id;
-                    outline = outline_insert(&outline, parent, after, node)?;
+                for id in roots {
+                    outline_insert(rec, parent, after, id)?;
                     after = Some(id);
                 }
-                rec.put(Key::Outline, Some(Val::Outline(outline)));
             }
             Edit::OutlineMove {
                 id,
@@ -2770,65 +2878,47 @@ impl Document {
                 after,
                 with_pages,
             } => {
-                if parent == Some(id) || outline_find(&rec.outline, id).is_none() {
+                if parent == Some(id) || rec.bookmark(id).is_none() {
                     bail!("bookmark not found or moved into itself");
                 }
                 if let Some(p) = parent
-                    && subtree_contains(&rec.outline, id, p)
+                    && subtree(rec, id).contains(&p)
                 {
                     bail!("cannot move a bookmark under its own descendant");
                 }
-                let (without, node) = outline_remove(&rec.outline, id);
-                let node = node.context("bookmark not found")?;
-                let span = with_pages.then(|| bookmark_span(rec, &node)).flatten();
-                let outline = outline_insert(&without, parent, after, node.clone())?;
-                rec.put(Key::Outline, Some(Val::Outline(outline)));
+                let span = with_pages.then(|| bookmark_span(rec, id)).flatten();
+                outline_unlink(rec, id).context("bookmark not found")?;
+                outline_insert(rec, parent, after, id)?;
                 if let Some(span) = span {
                     // Destination: right after the span of whatever precedes the
                     // moved node in the new pre-order (or the start).
-                    let flat = rec.outline_flat();
-                    let my_pos = flat.iter().position(|(_, n)| n.id == id).unwrap();
-                    let moving: Vec<PageId> = span.iter().map(|p| p.id).collect();
-                    let moving_set: HashSet<PageId> = moving.iter().copied().collect();
-                    let rest: Vector<PageRef> = rec
-                        .pages
+                    let flat = rec.bookmarks_preorder();
+                    let my_pos = flat.iter().position(|&(_, at, _)| at == id).unwrap();
+                    let moving: HashSet<PageId> = span.iter().copied().collect();
+                    let rest: Vector<PageId> = rec
+                        .order()
                         .iter()
-                        .filter(|p| !moving_set.contains(&p.id))
+                        .filter(|id| !moving.contains(id))
                         .copied()
                         .collect();
-                    let dest = match flat[..my_pos].iter().rev().find_map(|(_, n)| n.target) {
-                        Some(prev_target) => {
+                    let prev = flat[..my_pos]
+                        .iter()
+                        .rev()
+                        .find(|(_, _, b)| b.page().is_some());
+                    let dest = match prev {
+                        Some(&(_, prev, b)) => {
                             // End of the previous bookmark's span, in `rest`.
-                            let rest_state = DocState {
-                                pages: rest.clone(),
-                                outline: rec.outline.clone(),
-                                annots: rec.annots.clone(),
-                                text_layers: rec.text_layers.clone(),
-                                labels: rec.labels.clone(),
-                                header_footer: rec.header_footer.clone(),
-                                removed_comments: rec.removed_comments.clone(),
-                                fields: rec.fields.clone(),
-                                widgets: rec.widgets.clone(),
-                            };
-                            let prev_node = flat[..my_pos]
-                                .iter()
-                                .rev()
-                                .find(|(_, n)| n.target.is_some())
-                                .unwrap()
-                                .1;
-                            match bookmark_span(&rest_state, prev_node) {
-                                Some(s) => rest_state
-                                    .index_of(s.last().unwrap().id)
-                                    .map(|i| i + 1)
-                                    .unwrap_or(0),
-                                None => {
-                                    rest_state.index_of(prev_target).map(|i| i + 1).unwrap_or(0)
-                                }
+                            let at: HashMap<PageId, usize> =
+                                rest.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+                            let pos = |id| at.get(&id).copied();
+                            match span_at(&flat, prev, rest.len(), pos) {
+                                Some(owned) => owned.end,
+                                None => b.page().and_then(pos).map_or(0, |i| i + 1),
                             }
                         }
                         None => 0,
                     };
-                    rec.put(Key::Pages, Some(Val::Pages(splice(&rest, dest, span))));
+                    rec.put(Key::Order, Some(Val::Order(splice(&rest, dest, span))));
                 }
             }
             Edit::OutlineEdit {
@@ -2839,122 +2929,106 @@ impl Document {
                 view,
                 style,
             } => {
-                let updated = outline_update(&rec.outline, id, |n| {
-                    if let Some(t) = &title {
-                        n.title = t.clone();
-                    }
-                    if let Some(t) = target {
-                        n.target = t;
-                        // A new page: the old position meant the old page.
-                        if view.is_none() {
-                            n.view = None;
-                        }
-                    }
-                    if let Some(v) = &view {
-                        n.view = v.clone();
-                    }
-                    if n.target.is_none() {
-                        n.view = None;
-                    }
-                    if let Some(c) = color {
-                        n.color = c;
-                    }
-                    if let Some(s) = style {
-                        n.style = s;
-                    }
-                });
-                let outline = updated.context("bookmark not found")?;
-                rec.put(Key::Outline, Some(Val::Outline(outline)));
-            }
-            Edit::OutlineDelete { id } => {
-                let (without, node) = outline_remove(&rec.outline, id);
-                let node = node.context("bookmark not found")?;
-                out.bookmarks_removed = 1 + count_nodes(&node.children);
-                rec.put(Key::Outline, Some(Val::Outline(without)));
-            }
-            Edit::AnnotAdd { page, mut annot } => {
-                if rec.index_of(page).is_none() {
+                let mut b = Bookmark::clone(rec.bookmark(id).context("bookmark not found")?);
+                if let Some(Some(page)) = target
+                    && rec.def(page).is_none()
+                {
                     bail!("page not found");
                 }
+                if let Some(t) = title {
+                    b.title = t.into();
+                }
+                if let Some(t) = target {
+                    // A new page: the old position meant the old page.
+                    b.target = t.map(|page| Target::Page { page, view: None });
+                }
+                if let Some(v) = view
+                    && let Some(Target::Page { view, .. }) = &mut b.target
+                {
+                    *view = v;
+                }
+                if let Some(c) = color {
+                    b.color = c;
+                }
+                if let Some(s) = style {
+                    b.style = s;
+                }
+                rec.put(Key::Bookmark(id), Some(Val::Bookmark(Arc::new(b))));
+            }
+            Edit::OutlineDelete { id } => {
+                outline_unlink(rec, id).context("bookmark not found")?;
+                let gone = subtree(rec, id);
+                for &id in &gone {
+                    rec.put(Key::Bookmark(id), None);
+                }
+                out.bookmarks_removed = gone.len();
+            }
+            Edit::AnnotAdd { page, mut annot } => {
+                if rec.def(page).is_none() {
+                    bail!("page not found");
+                }
+                let from = annot.id;
                 annot.id = fresh_annot_id(rec, &mut HashSet::new());
                 out.unencodable = annot.unencodable();
-                let mut list = rec.annots.get(&page).cloned().unwrap_or_default();
-                list.push_back(annot);
-                rec.put(Key::AnnotsOf(page), Some(Val::Annots(list)));
+                let src = adopt(rec, page, &annot.name, from);
+                add_annot(rec, page, self.mark(annot, src)?);
             }
             Edit::AnnotUpdate { page, annot } => {
-                let mut list = rec
-                    .annots
-                    .get(&page)
-                    .cloned()
-                    .context("page has no annotations")?;
-                let i = list
-                    .iter()
-                    .position(|a| a.id == annot.id)
-                    .context("annotation not found")?;
+                let id = annot.id;
+                let was = (rec.annot(id))
+                    .filter(|a| a.page == page)
+                    .and_then(AnnotRec::mark_record)
+                    .context("annotation not found")?
+                    .clone();
                 out.unencodable = annot.unencodable();
-                list.set(i, annot);
-                rec.put(Key::AnnotsOf(page), Some(Val::Annots(list)));
+                // What it holds stays while it names the same.
+                let mark = if holds_same(&was.annot.kind, &annot.kind) {
+                    Mark {
+                        annot,
+                        ..Mark::clone(&was)
+                    }
+                } else {
+                    self.mark(annot, was.src.clone())?
+                };
+                let body = AnnotBody::Mark(Arc::new(mark));
+                rec.put(Key::Annot(id), Some(Val::Annot(AnnotRec { page, body })));
             }
             Edit::AnnotDelete { page, id } => {
-                let mut list = rec
-                    .annots
-                    .get(&page)
-                    .cloned()
-                    .context("page has no annotations")?;
-                let i = list
-                    .iter()
-                    .position(|a| a.id == id)
+                let a = (rec.annot(id))
+                    .filter(|a| a.page == page)
                     .context("annotation not found")?;
-                let removed = list.remove(i);
-                // Its thread goes with it: replies and statuses, and theirs.
-                let mut gone = vec![removed.name()];
-                while let Some(name) = gone.pop() {
-                    let (thread, rest): (Vector<Annot>, Vector<Annot>) = list
-                        .into_iter()
-                        .partition(|a| a.thread_parent() == Some(name.as_str()));
-                    gone.extend(thread.iter().map(Annot::name));
-                    list = rest;
+                if a.widget().is_some() {
+                    bail!("a field's widget goes only with its page");
                 }
-                rec.put(
-                    Key::AnnotsOf(page),
-                    (!list.is_empty()).then_some(Val::Annots(list)),
-                );
+                let name = a.name();
+                // Its thread goes with it: replies and statuses, and
+                // theirs, ours and other tools'.
+                let mut gone = thread_of(rec, page, HashSet::from([name]));
+                gone.insert(id);
+                drop_annots(rec, page, |id, _| gone.contains(&id));
                 // A connector is one of a group by label: the others stay
                 // (M9 decision 8).
             }
             Edit::CommentsDelete { page, names } => {
-                if rec.index_of(page).is_none() {
+                if rec.def(page).is_none() {
                     bail!("page not found");
                 }
-                // Only names not deleted yet change what a save leaves out.
-                let mut set = rec.removed_comments.get(&page).cloned().unwrap_or_default();
-                let had = set.len();
-                set.extend(names.iter().cloned());
-                if set.len() > had {
-                    rec.put(Key::RemovedOf(page), Some(Val::Removed(set)));
-                }
-                // Our replies and statuses to them, and to those.
-                if let Some(mut list) = rec.annots.get(&page).cloned() {
-                    let mut gone = names;
-                    while let Some(name) = gone.pop() {
-                        let (thread, rest): (Vector<Annot>, Vector<Annot>) = list
-                            .into_iter()
-                            .partition(|a| a.thread_parent() == Some(name.as_str()));
-                        gone.extend(thread.iter().map(Annot::name));
-                        list = rest;
-                    }
-                    rec.put(
-                        Key::AnnotsOf(page),
-                        (!list.is_empty()).then_some(Val::Annots(list)),
-                    );
-                }
+                // Every comment of another tool's on the page by those
+                // names (a file may name two alike), and their threads:
+                // replies and statuses, and theirs, ours and other tools'.
+                let names: HashSet<String> = names.into_iter().collect();
+                let mut gone: HashSet<AnnotId> = (rec.foreign_on(page))
+                    .filter(|(_, f)| names.contains(&f.summary.name))
+                    .map(|(id, _)| id)
+                    .collect();
+                gone.extend(thread_of(rec, page, names));
+                drop_annots(rec, page, |id, _| gone.contains(&id));
             }
             Edit::ConnectorAdd {
                 a: (page_a, mut a),
                 b: (page_b, mut b),
             } => {
-                if rec.index_of(page_a).is_none() || rec.index_of(page_b).is_none() {
+                if rec.def(page_a).is_none() || rec.def(page_b).is_none() {
                     bail!("page not found");
                 }
                 let mut taken = HashSet::new();
@@ -2968,59 +3042,81 @@ impl Document {
                 }
                 out.unencodable = a.unencodable() || b.unencodable();
                 for (page, annot) in [(page_a, a), (page_b, b)] {
-                    let mut list = rec.annots.get(&page).cloned().unwrap_or_default();
-                    list.push_back(annot);
-                    rec.put(Key::AnnotsOf(page), Some(Val::Annots(list)));
+                    add_annot(rec, page, Mark::from(annot));
                 }
             }
             Edit::SetTextLayers { layers } => {
-                let pos = rec.page_positions();
                 for (id, layer) in layers {
-                    if !pos.contains_key(&id) {
-                        bail!("page not found");
-                    }
-                    rec.put(Key::TextLayer(id), Some(Val::TextLayer(layer)));
+                    let def = rec.def(id).context("page not found")?;
+                    let def = PageDef {
+                        content: def.content.with_ocr_text(Some(layer)),
+                        ..PageDef::clone(def)
+                    };
+                    rec.put(Key::Page(id), Some(Val::Page(Arc::new(def))));
                 }
             }
             Edit::ClearTextLayers { ids } => {
                 for id in ids {
-                    rec.put(Key::TextLayer(id), None);
+                    let Some(def) = rec.def(id).filter(|d| d.content.ocr_text().is_some()) else {
+                        continue;
+                    };
+                    let def = PageDef {
+                        content: def.content.with_ocr_text(None),
+                        ..PageDef::clone(def)
+                    };
+                    rec.put(Key::Page(id), Some(Val::Page(Arc::new(def))));
                 }
             }
             Edit::SetHeaderFooter { header_footer } => {
                 let hf = header_footer.filter(|h| !h.is_empty());
                 out.unencodable = hf.as_ref().is_some_and(|h| h.unencodable());
-                rec.put(
-                    Key::HeaderFooter,
-                    hf.map(|h| Val::HeaderFooter(Arc::new(h))),
-                );
+                // The generator that draws it: set again, it keeps its id.
+                let drawn = (rec.generators().values())
+                    .find(|g| g.spec.header_footer().is_some())
+                    .map(|g| g.id);
+                match (hf, drawn) {
+                    (Some(hf), id) => {
+                        let id = id.unwrap_or_else(|| {
+                            GenId::draw(&mut fastrand::Rng::new(), |id| {
+                                rec.generators().contains_key(&id)
+                            })
+                        });
+                        let spec = GenSpec::HeaderFooter(Arc::new(hf));
+                        let g = Arc::new(Generator { id, spec });
+                        rec.put(Key::Generator(id), Some(Val::Generator(g)));
+                    }
+                    (None, Some(id)) => rec.put(Key::Generator(id), None),
+                    (None, None) => {}
+                }
             }
             Edit::SetPageLabels { ranges } => {
-                let labels =
-                    (!ranges.is_empty()).then(|| Val::Labels(ranges.into_iter().collect()));
+                let labels = (!ranges.is_empty()).then(|| Val::Labels(ranges.into()));
                 rec.put(Key::Labels, labels);
             }
             Edit::RebasePages { pages: rebases } => {
-                let pos = rec.page_positions();
-                let mut pages = rec.pages.clone();
+                let mut copies = NextCopy::of(rec);
                 for r in rebases {
-                    let i = *pos.get(&r.id).context("page to rebase not found")?;
+                    let def = rec.def(r.id).context("page to rebase not found")?;
                     let info = self.sources.get(&r.source).context("unknown source")?;
                     if r.index >= info.src.page_count() {
                         bail!("page {} isn't in the source", r.index);
                     }
-                    let old = pages[i];
-                    pages.set(
-                        i,
-                        PageRef {
-                            id: r.id,
-                            source: r.source,
-                            index: r.index,
-                            rotation: old.rotation,
-                        },
-                    );
+                    if def.base.source == r.source && def.base.index == r.index {
+                        continue;
+                    }
+                    // Its text over it and its turn stay: they're in
+                    // PageSpace, which a copy keeps.
+                    let content = def.content.clone();
+                    let rotate = rec.geom(r.id).context("page to rebase not found")?.rotate;
+                    let (new, geom) = copies.page(r.source, &info.src, r.index);
+                    let def = PageDef {
+                        content,
+                        ..PageDef::clone(&new)
+                    };
+                    let geom = Geom { rotate, ..*geom };
+                    rec.put(Key::Page(r.id), Some(Val::Page(Arc::new(def))));
+                    rec.put(Key::Geom(r.id), Some(Val::Geom(Arc::new(geom))));
                 }
-                rec.put(Key::Pages, Some(Val::Pages(pages)));
             }
         }
         Ok(out)
@@ -3071,225 +3167,914 @@ fn coalesce(steps: &mut [Step]) {
 ///
 /// A step's before-values are its parent's after-values, so each value is
 /// counted once, by the version that made it, and an `Arc` once however
-/// many of the version's prims put it. Those values are the snapshot's
-/// too, so the snapshot adds only the im nodes it copied to change them:
-/// for each slot it changed in a per-page or per-field map, a path down
-/// from the root. A whole value (the pages, the outline, the labels)
-/// counts in full, though im shares all but its changed path with the
-/// parent's: an over-count M10.5 slice 8's records narrow.
+/// many of the version's prims hold it: a page's definition, its boxes,
+/// its content stack (a duplicate shares its original's), an
+/// annotation's body, another tool's annotation's summary and a widget's
+/// props (their copies share them), a field node and its terminal's
+/// props (unless the node it replaces has them), a bookmark, the labels,
+/// the form, a generator. A source's bytes and a blob's aren't a
+/// value's: the store counts them. The values are the snapshot's too, so
+/// the snapshot adds only the im nodes it copied to put them
+/// ([`DocState::snapshot_bytes`]). The order, a page's annotations, the
+/// top-level bookmarks and the form count in full, though im shares all
+/// but the changed paths of the order, the top-level bookmarks and the
+/// form's roots and names with the parent's: an over-count.
 fn accounting(steps: &[Step], state: &DocState) -> (usize, usize) {
-    // im's HashMap is a tree of 32 entries a node; its OrdMap, of 64.
-    const HAMT: usize = 32;
-    const BTREE: usize = 64;
     let mut step_bytes = 0;
     let mut arcs = HashSet::new();
-    let (mut annots, mut layers, mut removed, mut fields, mut widgets) = (0, 0, 0, 0, 0);
-    // `DocState` holds fields by value, so its copy is its own.
-    let mut field_copies = 0;
+    let mut once = |arc: *const ()| arcs.insert(arc);
     for s in steps {
         step_bytes += size_of::<Step>() + s.edit.heap_size() + s.line.heap_size();
         for p in s.prims.iter() {
-            let counted = match &p.after {
-                Some(Val::TextLayer(l)) => arcs.insert(Arc::as_ptr(l).cast::<()>()),
-                Some(Val::HeaderFooter(h)) => arcs.insert(Arc::as_ptr(h).cast::<()>()),
-                _ => true,
-            };
-            step_bytes += size_of::<Prim>();
-            if counted {
-                step_bytes += p.after.heap_size();
-            }
-            match p.key {
-                Key::Pages | Key::Outline | Key::Labels | Key::HeaderFooter => {}
-                Key::AnnotsOf(_) => annots += 1,
-                Key::TextLayer(_) => layers += 1,
-                Key::RemovedOf(_) => removed += 1,
-                Key::Field(_) => {
-                    fields += 1;
-                    if let Some(Val::Field(f)) = &p.after {
-                        field_copies += Field::heap_size(f);
+            let after = match p.key {
+                Key::Order | Key::OutlineRoots | Key::PageAnnots(_) => p.after.heap_size(),
+                Key::Page(_) => match &p.after {
+                    Some(Val::Page(def)) if once(Arc::as_ptr(def).cast()) => {
+                        // Its stack counts once too: a duplicate shares it.
+                        let stack = once(Arc::as_ptr(&def.content).cast());
+                        size_of::<PageDef>() + if stack { def.heap_size() } else { 0 }
                     }
-                }
-                Key::WidgetsOf(_) => widgets += 1,
-            }
+                    _ => 0,
+                },
+                Key::Geom(_) => match &p.after {
+                    Some(Val::Geom(g)) if once(Arc::as_ptr(g).cast()) => size_of::<Geom>(),
+                    _ => 0,
+                },
+                Key::Bookmark(_) => match &p.after {
+                    Some(Val::Bookmark(b)) if once(Arc::as_ptr(b).cast()) => {
+                        size_of::<Bookmark>() + b.heap_size()
+                    }
+                    _ => 0,
+                },
+                Key::Annot(_) => match &p.after {
+                    Some(Val::Annot(a)) => match &a.body {
+                        AnnotBody::Mark(m) if once(Arc::as_ptr(m).cast()) => {
+                            size_of::<Mark>() + m.heap_size()
+                        }
+                        AnnotBody::Foreign(f) if once(Arc::as_ptr(f).cast()) => {
+                            // Its summary counts once too: a copy shares it.
+                            let summary = once(Arc::as_ptr(&f.summary).cast());
+                            size_of::<Foreign>() + if summary { f.heap_size() } else { 0 }
+                        }
+                        AnnotBody::Widget(w) if once(Arc::as_ptr(w).cast()) => {
+                            // Its props count once too: a copy shares them.
+                            let props = once(Arc::as_ptr(&w.props).cast());
+                            size_of::<Widget>() + w.heap_size() - if props { 0 } else { w.shared() }
+                        }
+                        AnnotBody::Mark(_) | AnnotBody::Foreign(_) | AnnotBody::Widget(_) => 0,
+                    },
+                    _ => 0,
+                },
+                Key::Field(_) => match &p.after {
+                    Some(Val::Field(node)) if once(Arc::as_ptr(node).cast()) => {
+                        // Its terminal's props count once too, and not when
+                        // the node it replaces has them: a copy shares them,
+                        // and a field whose widgets went keeps them.
+                        let had = |props: &Arc<FieldProps>| match &p.before {
+                            Some(Val::Field(was)) => {
+                                (was.term.as_ref()).is_some_and(|t| Arc::ptr_eq(&t.props, props))
+                            }
+                            _ => false,
+                        };
+                        let props = (node.term.as_ref())
+                            .is_none_or(|t| !had(&t.props) && once(Arc::as_ptr(&t.props).cast()));
+                        size_of::<FieldNode>() + node.heap_size()
+                            - if props { 0 } else { node.shared() }
+                    }
+                    _ => 0,
+                },
+                Key::Form => match &p.after {
+                    Some(Val::Form(form)) if once(Arc::as_ptr(form).cast()) => {
+                        size_of::<FormDoc>() + form.heap_size()
+                    }
+                    _ => 0,
+                },
+                Key::Labels => match &p.after {
+                    Some(Val::Labels(labels)) if once(Arc::as_ptr(labels).cast()) => {
+                        labels.heap_size()
+                    }
+                    _ => 0,
+                },
+                Key::Generator(_) => match &p.after {
+                    Some(Val::Generator(g)) if once(Arc::as_ptr(g).cast()) => {
+                        size_of::<Generator>() + g.heap_size()
+                    }
+                    _ => 0,
+                },
+            };
+            step_bytes += size_of::<Prim>() + after;
         }
     }
-    let snapshot_bytes = size_of::<DocState>()
-        + field_copies
-        + path_copies::<(PageId, Vector<Annot>)>(annots, state.annots.len(), HAMT)
-        + path_copies::<(PageId, Arc<TextLayer>)>(layers, state.text_layers.len(), HAMT)
-        + path_copies::<(PageId, im::OrdSet<String>)>(removed, state.removed_comments.len(), HAMT)
-        + path_copies::<(FieldId, Field)>(fields, state.fields.len(), BTREE)
-        + path_copies::<(PageId, Vector<Widget>)>(widgets, state.widgets.len(), HAMT);
-    (snapshot_bytes, step_bytes)
+    let keys = steps.iter().flat_map(|s| s.prims.iter().map(|p| p.key));
+    (state.snapshot_bytes(keys), step_bytes)
 }
 
-/// The bytes of the im nodes copied to change `touched` of a map's `len`
-/// entries, at `fanout` entries `E` a node: a path down from the root to
-/// each, sharing the nodes near the root.
-fn path_copies<E>(touched: usize, len: usize, fanout: usize) -> usize {
-    if touched == 0 {
-        return 0;
-    }
-    let (mut nodes, mut level, mut reach) = (0, 1, fanout);
-    loop {
-        nodes += touched.min(level);
-        if reach >= len {
-            return nodes * fanout * size_of::<E>();
-        }
-        level *= fanout;
-        reach *= fanout;
-    }
-}
-
-/// `pages` with `new` put in at position `at`, by one split and two joins:
-/// inserting them one by one edits the tree once a page (189 ms for half
-/// of 7,000 pages, against half a millisecond).
+/// `order` with `new` put in at position `at`, by one split and two
+/// joins: inserting them one by one edits the tree once a page (189 ms for
+/// half of 7,000 pages, against half a millisecond).
 fn splice(
-    pages: &Vector<PageRef>,
+    order: &Vector<PageId>,
     at: usize,
-    new: impl IntoIterator<Item = PageRef>,
-) -> Vector<PageRef> {
-    let mut out = pages.clone();
+    new: impl IntoIterator<Item = PageId>,
+) -> Vector<PageId> {
+    let mut out = order.clone();
     let tail = out.split_off(at);
     out.extend(new);
     out.append(tail);
     out
 }
 
-// ----- outline helpers (path-copying over im::Vector) ---------------------
+/// The copy of each source page a page made next takes (M10.5 §3.3): one
+/// past the highest any page holds, by the source's bytes and the page,
+/// whichever registration brought it. Counted once an edit.
+struct NextCopy(HashMap<(crate::store::BlobId, u32), u32>);
 
-fn count_nodes(nodes: &Vector<OutlineNode>) -> usize {
-    nodes.iter().map(|n| 1 + count_nodes(&n.children)).sum()
-}
+impl NextCopy {
+    fn of(st: &DocState) -> NextCopy {
+        let mut next = HashMap::new();
+        for (_, def, _) in st.pages() {
+            let n = next.entry((def.base.src.id(), def.base.index)).or_insert(0);
+            *n = (*n).max(def.copy + 1);
+        }
+        NextCopy(next)
+    }
 
-/// Path of child indices to `id`.
-fn outline_find(nodes: &Vector<OutlineNode>, id: OutlineId) -> Option<Vec<usize>> {
-    for (i, n) in nodes.iter().enumerate() {
-        if n.id == id {
-            return Some(vec![i]);
-        }
-        if let Some(mut path) = outline_find(&n.children, id) {
-            path.insert(0, i);
-            return Some(path);
-        }
+    /// The copy a page showing `base` takes.
+    fn take(&mut self, base: &PageBase) -> u32 {
+        let n = self.0.entry((base.src.id(), base.index)).or_insert(0);
+        *n += 1;
+        *n - 1
     }
-    None
-}
 
-fn subtree_contains(nodes: &Vector<OutlineNode>, root: OutlineId, needle: OutlineId) -> bool {
-    fn get<'a>(nodes: &'a Vector<OutlineNode>, path: &[usize]) -> &'a OutlineNode {
-        let n = &nodes[path[0]];
-        if path.len() == 1 {
-            n
-        } else {
-            get(&n.children, &path[1..])
-        }
-    }
-    match outline_find(nodes, root) {
-        Some(path) => outline_find(&get(nodes, &path).children, needle).is_some(),
-        None => false,
-    }
-}
-
-fn outline_update(
-    nodes: &Vector<OutlineNode>,
-    id: OutlineId,
-    f: impl FnOnce(&mut OutlineNode),
-) -> Option<Vector<OutlineNode>> {
-    fn go(
-        nodes: &Vector<OutlineNode>,
-        path: &[usize],
-        f: Box<dyn FnOnce(&mut OutlineNode) + '_>,
-    ) -> Vector<OutlineNode> {
-        let mut nodes = nodes.clone();
-        let mut node = nodes[path[0]].clone();
-        if path.len() == 1 {
-            f(&mut node);
-        } else {
-            node.children = go(&node.children, &path[1..], f);
-        }
-        nodes.set(path[0], node);
-        nodes
-    }
-    let path = outline_find(nodes, id)?;
-    Some(go(nodes, &path, Box::new(f)))
-}
-
-fn outline_remove(
-    nodes: &Vector<OutlineNode>,
-    id: OutlineId,
-) -> (Vector<OutlineNode>, Option<OutlineNode>) {
-    fn go(nodes: &Vector<OutlineNode>, path: &[usize]) -> (Vector<OutlineNode>, OutlineNode) {
-        let mut nodes = nodes.clone();
-        if path.len() == 1 {
-            let removed = nodes.remove(path[0]);
-            (nodes, removed)
-        } else {
-            let mut node = nodes[path[0]].clone();
-            let (children, removed) = go(&node.children, &path[1..]);
-            node.children = children;
-            nodes.set(path[0], node);
-            (nodes, removed)
-        }
-    }
-    match outline_find(nodes, id) {
-        Some(path) => {
-            let (n, r) = go(nodes, &path);
-            (n, Some(r))
-        }
-        None => (nodes.clone(), None),
+    /// A new page showing page `index` of registration `source`, as its
+    /// next copy: nothing drawn over it, and the page's own boxes.
+    fn page(&mut self, source: SourceId, src: &Src, index: u32) -> (Arc<PageDef>, Arc<Geom>) {
+        let base = PageBase {
+            source,
+            src: src.clone(),
+            index,
+        };
+        let def = PageDef {
+            copy: self.take(&base),
+            base,
+            content: ContentStack::empty(),
+        };
+        (Arc::new(def), Arc::new(src.geom(index)))
     }
 }
 
+// ----- outline helpers: bookmarks are records, their kids by id ----------
+
+/// Bookmarks nested by depth, with new ids: the top-level ones' ids in
+/// order, and every one in pre-order.
+type Nested = (Vector<OutlineId>, Vec<(OutlineId, Bookmark)>);
+
+/// The bookmarks under `parent`, or at the top level: None when there's
+/// no such bookmark.
+fn kids_of(st: &DocState, parent: Option<OutlineId>) -> Option<Vector<OutlineId>> {
+    match parent {
+        None => Some(st.outline_roots().clone()),
+        Some(p) => Some(st.bookmark(p)?.kids.clone()),
+    }
+}
+
+/// Puts `kids` under `parent`, a bookmark there is, or at the top level.
+fn put_kids(rec: &mut Rec, parent: Option<OutlineId>, kids: Vector<OutlineId>) {
+    match parent {
+        None => rec.put(Key::OutlineRoots, Some(Val::OutlineRoots(kids))),
+        Some(p) => {
+            let parent = rec.bookmark(p).expect("a parent in the outline");
+            let b = Bookmark {
+                kids,
+                ..Bookmark::clone(parent)
+            };
+            rec.put(Key::Bookmark(p), Some(Val::Bookmark(Arc::new(b))));
+        }
+    }
+}
+
+/// Puts bookmark `id` under `parent` (or at the top level), after `after`
+/// there, or first.
 fn outline_insert(
-    nodes: &Vector<OutlineNode>,
+    rec: &mut Rec,
     parent: Option<OutlineId>,
     after: Option<OutlineId>,
-    node: OutlineNode,
-) -> Result<Vector<OutlineNode>> {
-    fn insert_in(
-        siblings: &Vector<OutlineNode>,
-        after: Option<OutlineId>,
-        node: OutlineNode,
-    ) -> Result<Vector<OutlineNode>> {
-        let mut s = siblings.clone();
-        let at = match after {
-            Some(a) => {
-                s.iter()
-                    .position(|n| n.id == a)
-                    .context("'after' bookmark not among siblings")?
-                    + 1
-            }
-            None => 0,
-        };
-        s.insert(at, node);
-        Ok(s)
+    id: OutlineId,
+) -> Result<()> {
+    let mut kids = kids_of(rec, parent).context("parent bookmark not found")?;
+    let at = match after {
+        Some(a) => {
+            kids.index_of(&a)
+                .context("'after' bookmark not among siblings")?
+                + 1
+        }
+        None => 0,
+    };
+    kids.insert(at, id);
+    put_kids(rec, parent, kids);
+    Ok(())
+}
+
+/// Takes bookmark `id` from under its parent, or from the top level; its
+/// record and those under it stay. None when it isn't in the outline.
+fn outline_unlink(rec: &mut Rec, id: OutlineId) -> Option<()> {
+    let (parent, _) = rec.bookmark_place(id)?;
+    let mut kids = kids_of(rec, parent)?;
+    kids.retain(|&k| k != id);
+    put_kids(rec, parent, kids);
+    Some(())
+}
+
+/// Bookmark `id` and every one under it, in pre-order.
+fn subtree(st: &DocState, id: OutlineId) -> Vec<OutlineId> {
+    let mut out = Vec::new();
+    let mut next = vec![id];
+    while let Some(id) = next.pop() {
+        out.push(id);
+        if let Some(b) = st.bookmark(id) {
+            next.extend(b.kids.iter().rev());
+        }
     }
-    match parent {
-        None => insert_in(nodes, after, node),
-        Some(p) => {
-            let mut err = None;
-            let updated = outline_update(nodes, p, |n| match insert_in(&n.children, after, node) {
-                Ok(c) => n.children = c,
-                Err(e) => err = Some(e),
-            })
-            .context("parent bookmark not found")?;
-            match err {
-                Some(e) => Err(e),
-                None => Ok(updated),
+    out
+}
+
+/// Takes the bookmarks going to pages in `gone` out of the outline, each
+/// one's kids in its place. Puts the bookmarks whose kids change, and the
+/// top level when it does. How many went.
+fn cascade_delete(rec: &mut Rec, gone: &HashSet<PageId>) -> usize {
+    /// `kids` with each one going to a page in `gone` replaced by its own
+    /// kids, so treated; the ones replaced into `removed`, and those whose
+    /// kids change, with their new kids, into `changed`.
+    fn kept(
+        st: &DocState,
+        kids: &Vector<OutlineId>,
+        gone: &HashSet<PageId>,
+        removed: &mut Vec<OutlineId>,
+        changed: &mut Vec<(OutlineId, Vector<OutlineId>)>,
+    ) -> Vector<OutlineId> {
+        let mut out = Vector::new();
+        for &id in kids {
+            let Some(b) = st.bookmark(id) else {
+                out.push_back(id);
+                continue;
+            };
+            let below = kept(st, &b.kids, gone, removed, changed);
+            if b.page().is_some_and(|p| gone.contains(&p)) {
+                removed.push(id);
+                out.append(below);
+            } else {
+                if below != b.kids {
+                    changed.push((id, below));
+                }
+                out.push_back(id);
             }
+        }
+        out
+    }
+    let (mut removed, mut changed) = (Vec::new(), Vec::new());
+    let st: &DocState = rec;
+    let roots = kept(st, st.outline_roots(), gone, &mut removed, &mut changed);
+    if removed.is_empty() {
+        return 0;
+    }
+    for (id, kids) in changed {
+        put_kids(rec, Some(id), kids);
+    }
+    for &id in &removed {
+        rec.put(Key::Bookmark(id), None);
+    }
+    rec.put(Key::OutlineRoots, Some(Val::OutlineRoots(roots)));
+    removed.len()
+}
+
+/// Bookmarks that came with pages, into the outline PDFlyer's way: one at
+/// the top level titled as one there already gives that one its kids, and
+/// the others go at the end. How many came in.
+fn merge_outline(rec: &mut Rec, (roots, made): Nested) -> usize {
+    let mut made: HashMap<OutlineId, Bookmark> = made.into_iter().collect();
+    let mut top = rec.outline_roots().clone();
+    for id in roots {
+        let title = made[&id].title.clone();
+        let same = top.iter().copied().find(|t| match made.get(t) {
+            Some(b) => b.title == title,
+            None => rec.bookmark(*t).is_some_and(|b| b.title == title),
+        });
+        let Some(same) = same else {
+            top.push_back(id);
+            continue;
+        };
+        let kids = made.remove(&id).expect("one that came in").kids;
+        match made.get_mut(&same) {
+            Some(b) => b.kids.append(kids),
+            None => {
+                let mut b = Bookmark::clone(rec.bookmark(same).expect("a top-level bookmark"));
+                b.kids.append(kids);
+                rec.put(Key::Bookmark(same), Some(Val::Bookmark(Arc::new(b))));
+            }
+        }
+    }
+    let added = made.len();
+    for (id, b) in made {
+        rec.put(Key::Bookmark(id), Some(Val::Bookmark(Arc::new(b))));
+    }
+    rec.put(Key::OutlineRoots, Some(Val::OutlineRoots(top)));
+    added
+}
+
+/// The pages a bookmark "owns": from its first target (in document order)
+/// up to, but not including, the first page targeted by a bookmark outside
+/// its subtree that comes after it in reading order.
+fn bookmark_span(st: &DocState, id: OutlineId) -> Option<Vec<PageId>> {
+    let flat = st.bookmarks_preorder();
+    let owned = span_at(&flat, id, st.page_count(), |p| st.pos_of(p))?;
+    Some(
+        st.order()
+            .iter()
+            .skip(owned.start)
+            .take(owned.len())
+            .copied()
+            .collect(),
+    )
+}
+
+/// The positions [`bookmark_span`] gives bookmark `id`, of `count` pages
+/// whose positions `pos` gives, under the outline `flat` (in pre-order,
+/// where a bookmark's subtree follows it).
+fn span_at(
+    flat: &[(u16, OutlineId, &Bookmark)],
+    id: OutlineId,
+    count: usize,
+    pos: impl Fn(PageId) -> Option<usize>,
+) -> Option<Range<usize>> {
+    let at = flat.iter().position(|&(_, other, _)| other == id)?;
+    let depth = flat[at].0;
+    let len = 1 + flat[at + 1..]
+        .iter()
+        .take_while(|(d, _, _)| *d > depth)
+        .count();
+    let page = |&(_, _, b): &(u16, OutlineId, &Bookmark)| b.page().and_then(&pos);
+    let start = flat[at..at + len].iter().filter_map(page).min()?;
+    let end = (flat[..at].iter().chain(&flat[at + len..]))
+        .filter_map(page)
+        .filter(|&i| i > start)
+        .min()
+        .unwrap_or(count);
+    Some(start..end)
+}
+
+// ----- annotation helpers: records, each page's by id ---------------------
+
+/// Annotation `a` of a source page as a record of a page showing copy
+/// `copy` of it, under the id the source's fact gives it: the object it
+/// is in `src`, as a mark is only on copy 0, and a mark holding what it
+/// holds there, its file decoded into `store`.
+fn record_of(store: &Store, a: &FileAnnot, src: &Src, copy: u32) -> (AnnotId, AnnotBody) {
+    let object = a.object.map(|id| ObjRef {
+        src: src.clone(),
+        id,
+    });
+    let body = match &a.body {
+        FileBody::Mark { annot, held } => {
+            let mark = Mark {
+                src: object.filter(|_| copy == 0),
+                ..Mark::from(Annot::clone(annot))
+            };
+            AnnotBody::Mark(Arc::new(holding(mark, store, src, *held)))
+        }
+        FileBody::Foreign { summary, .. } => AnnotBody::Foreign(Arc::new(Foreign {
+            src: object,
+            copy,
+            summary: summary.clone(),
+        })),
+    };
+    (a.id(), body)
+}
+
+/// `mark`, read from `src`, where it holds `held` (see [`FileBody::Mark`]),
+/// with what that is: its page stamp's form, or its attachment's file
+/// decoded into `store`. A file that can't be read is said, and the mark
+/// holds none.
+fn holding(mut mark: Mark, store: &Store, src: &Src, held: Option<ObjectId>) -> Mark {
+    let Some(object) = held else {
+        return mark;
+    };
+    match &mark.annot.kind {
+        AnnotKind::PageStamp { .. } => {
+            mark.stamp = Some(FormRef::Base(ObjRef {
+                src: src.clone(),
+                id: object,
+            }));
+        }
+        AnnotKind::FileAttachment { name, size, .. } => {
+            mark.file = file_in(store, src, object, *size)
+                .inspect_err(|e| log::warn!("attachment {name}: {e:#}"))
+                .ok();
+        }
+        _ => {}
+    }
+    mark
+}
+
+/// Whether marks of kinds `a` and `b` hold the same: they name the same
+/// stamp's page or the same attachment's file, or neither holds anything.
+fn holds_same(a: &AnnotKind, b: &AnnotKind) -> bool {
+    match (a, b) {
+        (AnnotKind::PageStamp { stamp: x, .. }, AnnotKind::PageStamp { stamp: y, .. })
+        | (AnnotKind::FileAttachment { file: x, .. }, AnnotKind::FileAttachment { file: y, .. }) => {
+            x == y
+        }
+        (AnnotKind::PageStamp { .. } | AnnotKind::FileAttachment { .. }, _)
+        | (_, AnnotKind::PageStamp { .. } | AnnotKind::FileAttachment { .. }) => false,
+        _ => true,
+    }
+}
+
+/// [`Document::find_stamp`] in a document whose blobs are in `store` and
+/// whose files are `sources`, `primary` among them: a snapshot's, too.
+pub(crate) fn find_stamp(
+    store: &Store,
+    sources: &HashMap<SourceId, Arc<SourceInfo>>,
+    primary: SourceId,
+    stem: &str,
+) -> Option<FormRef> {
+    let named = || store.get(BlobId::from_stem(stem)?);
+    let held = || {
+        registered(sources, primary).find_map(|src| {
+            let id = src.annots().stamp(stem)?;
+            Some(FormRef::Base(ObjRef {
+                src: src.clone(),
+                id,
+            }))
+        })
+    };
+    let cached = || {
+        let path = crate::generated::path_of(stem)?;
+        let bytes = sheaf_core::read_file(&path).ok()?;
+        let kind = BlobKind::Pdf {
+            password: None,
+            origin: Origin::File(path.into()),
+        };
+        let blob = store.intern(bytes, kind);
+        blob.inspect_err(|e| log::warn!("stamp {stem}: {e}")).ok()
+    };
+    (named().map(|pdf| FormRef::Blob(pdf.into())))
+        .or_else(held)
+        .or_else(|| cached().map(|pdf| FormRef::Blob(pdf.into())))
+}
+
+/// [`Document::find_file`] in a document whose blobs are in `store` and
+/// whose files are `sources`, `primary` among them: a snapshot's, too.
+pub(crate) fn find_file(
+    store: &Store,
+    sources: &HashMap<SourceId, Arc<SourceInfo>>,
+    primary: SourceId,
+    stem: &str,
+    size: u64,
+) -> Option<BlobRef> {
+    if let Some(file) = BlobId::from_stem(stem).and_then(|id| store.get(id)) {
+        return Some(file.into());
+    }
+    registered(sources, primary).find_map(|src| {
+        let stream = src.annots().file(stem)?;
+        let file = file_in(store, src, stream, size);
+        file.inspect_err(|e| log::warn!("attachment {stem}: {e:#}"))
+            .ok()
+    })
+}
+
+/// The registered files, the primary first and then as they came: where
+/// a stem is looked for.
+fn registered(
+    sources: &HashMap<SourceId, Arc<SourceInfo>>,
+    primary: SourceId,
+) -> impl Iterator<Item = &Src> {
+    let mut ids: Vec<SourceId> = sources
+        .keys()
+        .copied()
+        .filter(|&id| id != primary)
+        .collect();
+    ids.sort_unstable();
+    std::iter::once(primary)
+        .chain(ids)
+        .filter_map(|id| Some(&sources.get(&id)?.src))
+}
+
+/// Embedded file `stream` of `src`, which an attachment mark saying its
+/// file is `size` bytes holds, decoded into `store`.
+fn file_in(store: &Store, src: &Src, stream: ObjectId, size: u64) -> Result<BlobRef> {
+    use crate::content::ReadObjects;
+    let bytes = src
+        .pdf()
+        .read(stream, |o| match o {
+            lopdf::Object::Stream(s) => crate::attachments::mark_file_bytes(s, size),
+            _ => bail!("the embedded file isn't a stream"),
+        })
+        .context("reading the embedded file")??;
+    Ok(store.intern(bytes.into(), BlobKind::Attachment)?.into())
+}
+
+/// Puts `ids` as page `page`'s annotations: none when it's empty.
+fn put_page_annots(rec: &mut Rec, page: PageId, ids: Vector<AnnotId>) {
+    let val = (!ids.is_empty()).then_some(Val::PageAnnots(ids));
+    rec.put(Key::PageAnnots(page), val);
+}
+
+/// Adds `mark` after page `page`'s others.
+fn add_annot(rec: &mut Rec, page: PageId, mark: Mark) {
+    let id = mark.annot.id;
+    let body = AnnotBody::Mark(Arc::new(mark));
+    rec.put(Key::Annot(id), Some(Val::Annot(AnnotRec { page, body })));
+    let mut ids = rec.annot_ids_on(page).cloned().unwrap_or_default();
+    ids.push_back(id);
+    put_page_annots(rec, page, ids);
+}
+
+/// Takes page `page`'s annotations that `gone` says go off it. A widget
+/// that goes leaves its field's list; the field stays, as it does in a
+/// save, which keeps it while another widget does (the `widget.field`
+/// cascade, which takes a field with no widget left, is slice 11's).
+fn drop_annots(rec: &mut Rec, page: PageId, gone: impl Fn(AnnotId, &AnnotRec) -> bool) {
+    let dropped: HashMap<AnnotId, Option<FieldId>> = (rec.annots_on(page))
+        .filter(|&(id, a)| gone(id, a))
+        .map(|(id, a)| (id, a.widget().map(|w| w.field)))
+        .collect();
+    if dropped.is_empty() {
+        return;
+    }
+    for &id in dropped.keys() {
+        rec.put(Key::Annot(id), None);
+    }
+    let mut ids = rec.annot_ids_on(page).cloned().unwrap_or_default();
+    ids.retain(|id| !dropped.contains_key(id));
+    put_page_annots(rec, page, ids);
+    let fields: BTreeSet<FieldId> = dropped.values().flatten().copied().collect();
+    for field in fields {
+        let Some(was) = rec.field(field) else {
+            continue;
+        };
+        let mut node = FieldNode::clone(was);
+        if let Some(term) = &mut node.term {
+            Arc::make_mut(term)
+                .widgets
+                .retain(|w| !dropped.contains_key(w));
+        }
+        put_field(rec, field, node);
+    }
+}
+
+/// Puts `node` as field node `id`.
+fn put_field(rec: &mut Rec, id: FieldId, node: FieldNode) {
+    rec.put(Key::Field(id), Some(Val::Field(Arc::new(node))));
+}
+
+/// A parent named `under` that sheaf makes for instance `inst`'s fields,
+/// whose names clashed with the document's.
+fn sheaf_parent(under: &str, inst: FormInst) -> FieldNode {
+    FieldNode {
+        parent: None,
+        partial: under.into(),
+        src: None,
+        inst,
+        kids: Vector::new(),
+        term: None,
+    }
+}
+
+/// The annotations on page `page` in the threads of the comments named
+/// `names`: replies and statuses to them, and to those, ours and other
+/// tools'.
+fn thread_of(st: &DocState, page: PageId, mut names: HashSet<String>) -> HashSet<AnnotId> {
+    let mut thread = HashSet::new();
+    loop {
+        let more: Vec<(AnnotId, String)> = (st.annots_on(page))
+            .filter(|(id, a)| !thread.contains(id) && a.parent().is_some_and(|p| names.contains(p)))
+            .map(|(id, a)| (id, a.name()))
+            .collect();
+        if more.is_empty() {
+            return thread;
+        }
+        for (id, name) in more {
+            thread.insert(id);
+            names.insert(name);
         }
     }
 }
 
-/// A mark id no mark in `st` has, and not in `taken` (ids handed out
-/// earlier in the same edit, which records this one). Random rather than
-/// counted, so two copies of a file never give different marks the same
-/// `/NM`; 53 bits, so the JSON is exact in any reader.
+/// Another tool's comment on page `page` a mark named `name` takes the
+/// place of, made editable or imported over it (M9 decision 5): of those
+/// named so, the one whose id is `from` (the one the mark was made from),
+/// else the first. It goes, with the parts grouped under it (`/RT
+/// /Group`), which the mark draws itself, and the mark is the object it
+/// was. Its replies stay, in the mark's thread.
+fn adopt(rec: &mut Rec, page: PageId, name: &str, from: AnnotId) -> Option<ObjRef> {
+    if name.is_empty() {
+        return None;
+    }
+    let theirs: Vec<AnnotId> = (rec.annots_named(page, name))
+        .filter(|&id| rec.annot(id).is_some_and(|a| a.foreign().is_some()))
+        .collect();
+    let id = (theirs.iter().copied())
+        .find(|&id| id == from)
+        .or(theirs.first().copied())?;
+    let src = rec.annot(id)?.foreign()?.src.clone();
+    drop_annots(rec, page, |other, a| {
+        other == id
+            || a.foreign()
+                .is_some_and(|f| f.summary.grouped && f.summary.parent.as_deref() == Some(name))
+    });
+    src
+}
+
+/// Page `page`'s annotations onto page `copy`, copy `n` of the same page:
+/// each with a fresh id. A mark is a mark of its own, with no name taken
+/// from another tool (the copy isn't the comment replies elsewhere are
+/// to) and no object, holding what the original holds; another tool's
+/// annotation is copy `n` of its object, so one deleted from the page
+/// isn't on the copy either (M10.5 bug 12). A widget's copy is in
+/// `widgets`, by the original's id: [`copy_fields`](Document::copy_fields)
+/// made it.
+fn copy_annots(
+    rec: &mut Rec,
+    page: PageId,
+    copy: PageId,
+    n: u32,
+    widgets: &HashMap<AnnotId, AnnotId>,
+) {
+    let annots: Vec<(AnnotId, AnnotBody)> = rec
+        .annots_on(page)
+        .map(|(id, a)| (id, a.body.clone()))
+        .collect();
+    let mut taken = HashSet::new();
+    let mut ids = Vector::new();
+    for (was, body) in annots {
+        let (id, body) = match body {
+            AnnotBody::Mark(m) => {
+                let id = fresh_annot_id(rec, &mut taken);
+                let mut annot = m.annot.clone();
+                annot.id = id;
+                annot.name.clear();
+                let mark = Mark {
+                    annot,
+                    src: None,
+                    ..Mark::clone(&m)
+                };
+                (id, AnnotBody::Mark(Arc::new(mark)))
+            }
+            AnnotBody::Foreign(f) => {
+                let f = Foreign {
+                    copy: n,
+                    ..Foreign::clone(&f)
+                };
+                (
+                    fresh_annot_id(rec, &mut taken),
+                    AnnotBody::Foreign(Arc::new(f)),
+                )
+            }
+            AnnotBody::Widget(_) => {
+                ids.extend(widgets.get(&was).copied());
+                continue;
+            }
+        };
+        rec.put(
+            Key::Annot(id),
+            Some(Val::Annot(AnnotRec { page: copy, body })),
+        );
+        ids.push_back(id);
+    }
+    put_page_annots(rec, copy, ids);
+}
+
+/// Each page's annotations in `st`, after a save wrote them to `src`, the
+/// page at its position there, whose annotations `saved` has: each mark
+/// is the object there with its `/NM`, a stamp's page the form it draws
+/// there, and each other tool's annotation the one there with its name
+/// and subtype (the k-th of them on the page the k-th there), copy 0. A
+/// mark the saved page hasn't got keeps its own as it was, with a log
+/// line: the save didn't write what the document has. Another tool's
+/// annotation it hasn't got goes, with a log line: the save left it out,
+/// as it does a link to a page that isn't there. The records put anew,
+/// by id; the ones gone, with their pages, into `gone`.
+fn rebind_annots(
+    st: &mut DocState,
+    src: &Src,
+    saved: &FileAnnots,
+    gone: &mut Vec<(PageId, AnnotId)>,
+) -> Vec<(AnnotId, AnnotRec)> {
+    type Named<'a> = HashMap<&'a str, VecDeque<(Option<ObjectId>, &'a Arc<ForeignAnnot>)>>;
+    let at = |id| ObjRef {
+        src: src.clone(),
+        id,
+    };
+    let mut out = Vec::new();
+    for (index, page) in (0..).zip(st.order().clone()) {
+        let objects: HashMap<String, (ObjectId, Option<ObjectId>)> = (saved.on(index).iter())
+            .filter_map(|a| match &a.body {
+                FileBody::Mark { annot, held } => Some((annot.name(), (a.object?, *held))),
+                FileBody::Foreign { .. } => None,
+            })
+            .collect();
+        // The saved page's other tools' annotations by name, each name's
+        // in `/Annots` order.
+        let mut theirs = Named::new();
+        for (_, object, read) in saved.foreign_on(index) {
+            (theirs.entry(&read.name).or_default()).push_back((object, read));
+        }
+        let annots: Vec<(AnnotId, AnnotRec)> =
+            st.annots_on(page).map(|(id, a)| (id, a.clone())).collect();
+        let mut left = Vector::new();
+        for (id, a) in annots {
+            let body = match &a.body {
+                AnnotBody::Mark(m) => {
+                    let name = m.annot.name();
+                    let Some(&(object, held)) = objects.get(&name) else {
+                        log::warn!("page {}: the saved file hasn't {name}", index + 1);
+                        left.push_back(id);
+                        continue;
+                    };
+                    let stamp = match held {
+                        Some(form) if m.stamp.is_some() => Some(FormRef::Base(at(form))),
+                        _ => m.stamp.clone(),
+                    };
+                    AnnotBody::Mark(Arc::new(Mark {
+                        src: Some(at(object)),
+                        stamp,
+                        ..Mark::clone(m)
+                    }))
+                }
+                AnnotBody::Foreign(f) => {
+                    let named = theirs.get_mut(f.summary.name.as_str());
+                    let first = named.and_then(|named| {
+                        let i = named
+                            .iter()
+                            .position(|(_, r)| r.subtype == f.summary.subtype)?;
+                        named.remove(i)
+                    });
+                    let Some((object, read)) = first else {
+                        log::warn!(
+                            "page {}: the saved file left out {} {}",
+                            index + 1,
+                            f.summary.subtype,
+                            f.summary.name
+                        );
+                        st.set(&Key::Annot(id), None)
+                            .expect("an annotation key holds an annotation");
+                        gone.push((page, id));
+                        continue;
+                    };
+                    let summary = if read.slot == f.summary.slot {
+                        f.summary.clone()
+                    } else {
+                        Arc::new(ForeignAnnot {
+                            slot: read.slot,
+                            ..ForeignAnnot::clone(&f.summary)
+                        })
+                    };
+                    AnnotBody::Foreign(Arc::new(Foreign {
+                        src: object.map(at),
+                        copy: 0,
+                        summary,
+                    }))
+                }
+                // The form's, with their fields (`rebind_fields`).
+                AnnotBody::Widget(_) => {
+                    left.push_back(id);
+                    continue;
+                }
+            };
+            left.push_back(id);
+            let a = AnnotRec { page, body };
+            st.set(&Key::Annot(id), Some(Val::Annot(a.clone())))
+                .expect("an annotation key holds an annotation");
+            out.push((id, a));
+        }
+        // Some went from this page: it lists the rest.
+        if gone.last().is_some_and(|&(p, _)| p == page) {
+            let list = (!left.is_empty()).then_some(Val::PageAnnots(left));
+            st.set(&Key::PageAnnots(page), list)
+                .expect("a page's annotations key holds a list");
+        }
+    }
+    out
+}
+
+/// The form in `st`, after a save wrote it to `src`, registration `id`,
+/// whose file is `name`: every node is the saved file's own instance's
+/// now (copy 0), the node there with its full name (the k-th of a name
+/// in tree order the k-th there, as forms repeat full names), and each
+/// widget the one there at its place among its field's on the page at
+/// its position, as the save wrote them. The saved instance is named for
+/// the file, and whether scripts run stays as it was. One the saved file
+/// hasn't got is from no object, with a log line: the save didn't write
+/// what the document has. The nodes put anew, by id; the widgets into
+/// `widgets`.
+fn rebind_fields(
+    st: &mut DocState,
+    id: SourceId,
+    src: &Src,
+    name: Arc<str>,
+    widgets: &mut Vec<(AnnotId, AnnotRec)>,
+) -> Vec<(FieldId, Arc<FieldNode>)> {
+    let saved = src.form().clone();
+    let inst = FormInst { src: id, copy: 0 };
+    let at = |id| ObjRef {
+        src: src.clone(),
+        id,
+    };
+    // The saved nodes by full name, each name's in tree order: a node
+    // comes after its parent.
+    let mut full: Vec<String> = Vec::with_capacity(saved.nodes.len());
+    for n in &saved.nodes {
+        let up = n.parent.map_or("", |p| full[p.0 as usize].as_str());
+        full.push(full_name_of(up, &n.partial));
+    }
+    let mut by_name: HashMap<&str, VecDeque<FieldId>> = HashMap::new();
+    for (i, name) in (0..).zip(&full) {
+        by_name.entry(name).or_default().push_back(FieldId(i));
+    }
+    // The document's nodes in tree order, each the saved node it is.
+    let mut next: Vec<(FieldId, String)> = (st.form().roots.iter().rev())
+        .filter_map(|&root| Some((root, full_name_of("", &st.field(root)?.partial))))
+        .collect();
+    let mut paired = HashMap::new();
+    let mut nodes = Vec::new();
+    while let Some((fid, name)) = next.pop().filter(|_| nodes.len() < st.field_count()) {
+        let Some(was) = st.field(fid).cloned() else {
+            continue;
+        };
+        next.extend(
+            (was.kids.iter().rev())
+                .filter_map(|&kid| Some((kid, full_name_of(&name, &st.field(kid)?.partial)))),
+        );
+        let to = by_name.get_mut(name.as_str()).and_then(VecDeque::pop_front);
+        match to {
+            Some(to) => {
+                paired.insert(fid, to);
+            }
+            None => log::warn!("the saved file hasn't the field {name}"),
+        }
+        let node = Arc::new(FieldNode {
+            src: to.map(|to| at(saved.nodes[to.0 as usize].object)),
+            inst,
+            ..FieldNode::clone(&was)
+        });
+        st.set(&Key::Field(fid), Some(Val::Field(node.clone())))
+            .expect("a field key holds a field node");
+        nodes.push((fid, node));
+    }
+    for (index, page) in (0..).zip(st.order().clone()) {
+        // The saved page's widgets, each field's in order.
+        let mut theirs: HashMap<FieldId, VecDeque<ObjectId>> = HashMap::new();
+        for w in saved.widgets.get(&index).into_iter().flatten() {
+            theirs.entry(w.field).or_default().push_back(w.object);
+        }
+        let ours: Vec<(AnnotId, Arc<Widget>)> =
+            st.widgets_on(page).map(|(id, w)| (id, w.clone())).collect();
+        for (wid, w) in ours {
+            let object = (paired.get(&w.field))
+                .and_then(|to| theirs.get_mut(to))
+                .and_then(VecDeque::pop_front);
+            if object.is_none() {
+                let field = st.full_name(w.field).unwrap_or_default();
+                log::warn!(
+                    "page {}: the saved file hasn't a widget of {field}",
+                    index + 1
+                );
+            }
+            let w = Widget {
+                src: object.map(at),
+                inst,
+                ..Widget::clone(&w)
+            };
+            let rec = AnnotRec {
+                page,
+                body: AnnotBody::Widget(Arc::new(w)),
+            };
+            st.set(&Key::Annot(wid), Some(Val::Annot(rec.clone())))
+                .expect("an annotation key holds an annotation");
+            widgets.push((wid, rec));
+        }
+    }
+    let names = match st.field_count() {
+        0 => im::OrdMap::new(),
+        _ => im::OrdMap::unit(inst, name),
+    };
+    let form = FormDoc {
+        names,
+        ..FormDoc::clone(st.form())
+    };
+    st.set(&Key::Form, Some(Val::Form(Arc::new(form))))
+        .expect("the form key holds the form");
+    nodes
+}
+
+/// A mark id no annotation in `st` has, and not in `taken` (ids handed
+/// out earlier in the same edit, which records this one). Random rather
+/// than counted, so two copies of a file never give different marks the
+/// same `/NM`; 53 bits, so the JSON is exact in any reader.
 fn fresh_annot_id(st: &DocState, taken: &mut HashSet<AnnotId>) -> AnnotId {
     loop {
         let id = AnnotId(fastrand::u64(1..1 << 53));
-        if !taken.contains(&id) && st.find_annot(id).is_none() {
+        if !taken.contains(&id) && !st.has_annot(id) {
             taken.insert(id);
             return id;
         }
@@ -3299,20 +4084,121 @@ fn fresh_annot_id(st: &DocState, taken: &mut HashSet<AnnotId>) -> AnnotId {
 /// Whether `st` has signed fields from `source` (another file's: they're
 /// kept, and their signatures don't cover this one).
 fn signed_from(st: &DocState, source: SourceId) -> bool {
-    st.fields
-        .values()
-        .any(|f| f.source == source && f.value == Some(crate::forms::Value::Signed))
+    st.terminals().any(|(_, node, term)| {
+        node.inst.src == source && term.value == Some(crate::forms::Value::Signed)
+    })
 }
 
-/// The copy of `source`'s form fields brought in next take: one past the
-/// last one `st` has, or 0.
-fn next_copy(st: &DocState, source: SourceId) -> u32 {
-    st.fields
-        .values()
-        .filter(|f| f.source == source)
-        .map(|f| f.copy + 1)
+/// The copy of `source`'s form an instance brought in next takes: one
+/// past the last `form` has, or 0.
+fn next_copy(form: &FormDoc, source: SourceId) -> u32 {
+    (form.names.keys())
+        .filter(|inst| inst.src == source)
+        .map(|inst| inst.copy + 1)
         .max()
         .unwrap_or(0)
+}
+
+/// Each page index's widgets that came in, with their places in its
+/// `/Annots` (see `Document::take_in_fields`).
+type Placed = HashMap<u32, Vec<(usize, AnnotId)>>;
+
+/// The nodes of `form`, read from `src`, as instance `inst`'s: each under
+/// the id the file's tree numbers it with, a terminal showing in the
+/// widgets `shows` gives it.
+fn nodes_of(
+    form: &FileForm,
+    src: &Src,
+    inst: FormInst,
+    mut shows: HashMap<FieldId, Vector<AnnotId>>,
+) -> Vec<(FieldId, Arc<FieldNode>)> {
+    let terms: HashMap<FieldId, &crate::forms::Field> =
+        form.fields.iter().map(|f| (f.id, f)).collect();
+    (form.nodes.iter().zip(0..))
+        .map(|(n, i)| {
+            let id = FieldId(i);
+            let term = (terms.get(&id))
+                .map(|f| Arc::new(Terminal::read(f, shows.remove(&id).unwrap_or_default())));
+            let node = FieldNode {
+                parent: n.parent,
+                partial: n.partial.clone(),
+                src: Some(ObjRef {
+                    src: src.clone(),
+                    id: n.object,
+                }),
+                inst,
+                kids: n.kids.iter().copied().collect(),
+                term,
+            };
+            (id, Arc::new(node))
+        })
+        .collect()
+}
+
+/// The name of the file a registration came from, as the reader knows it.
+fn file_name(info: &SourceInfo) -> Arc<str> {
+    info.name
+        .file_name()
+        .map_or_else(|| "".into(), |n| n.to_string_lossy().into())
+}
+
+/// The parent fields named `names` (full names, as their file has them)
+/// go under, when any of them, or a parent of one, is a node's full name
+/// in `st` already: the stem of `file`, or with `_2`, `_3`… when that's
+/// taken. None when nothing clashes.
+fn name_apart<'a>(
+    st: &DocState,
+    file: &str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    if !field_nodes(names)
+        .iter()
+        .any(|n| st.field_named(n).is_some())
+    {
+        return None;
+    }
+    // A dot would make it two names.
+    let stem = Path::new(file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().replace('.', "_"))
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "form".to_string());
+    (1..)
+        .map(|n| match n {
+            1 => stem.clone(),
+            n => format!("{stem}_{n}"),
+        })
+        .find(|name| st.field_named(name).is_none())
+}
+
+/// Field `id`'s full name in its instance's form, as its file has it: up
+/// to a parent sheaf made for it.
+fn inst_name(st: &DocState, id: FieldId) -> String {
+    let Some(node) = st.field(id) else {
+        return String::new();
+    };
+    let mut partials = vec![&*node.partial];
+    let mut at = node.parent.and_then(|p| st.field(p));
+    while let Some(up) = at.filter(|n| n.src.is_some() && partials.len() <= st.field_count()) {
+        partials.push(&*up.partial);
+        at = up.parent.and_then(|p| st.field(p));
+    }
+    (partials.iter().rev()).fold(String::new(), |up, p| full_name_of(&up, p))
+}
+
+/// Field node `top` and every one under it.
+fn field_subtree(st: &DocState, top: FieldId) -> Vec<FieldId> {
+    let mut out = Vec::new();
+    let mut next = vec![top];
+    while let Some(id) = next.pop().filter(|_| out.len() <= st.field_count()) {
+        out.push(id);
+        next.extend(
+            st.field(id)
+                .into_iter()
+                .flat_map(|n| n.kids.iter().copied()),
+        );
+    }
+    out
 }
 
 /// Every node of a field tree with these full names: each name, and the
@@ -3326,144 +4212,6 @@ fn field_nodes<'a>(names: impl IntoIterator<Item = &'a str>) -> HashSet<&'a str>
         }
     }
     out
-}
-
-/// Marks that came with pages from another file, onto their new pages in
-/// `rec`. They get fresh ids (the file's could clash with ours), and a
-/// connector keeps its partner only if the partner came too. Whether any
-/// draws text the built-in fonts can't ([`Annot::unencodable`]).
-fn import_marks(rec: &mut Rec, incoming: Vec<(PageId, Vec<Annot>)>) -> bool {
-    let unencodable = incoming.iter().flat_map(|(_, l)| l).any(Annot::unencodable);
-    let mut taken = HashSet::new();
-    let mut ids = HashMap::new();
-    for (_, list) in &incoming {
-        for a in list {
-            ids.insert(a.id, fresh_annot_id(rec, &mut taken));
-        }
-    }
-    for (page, list) in incoming {
-        let mut on_page = rec.annots.get(&page).cloned().unwrap_or_default();
-        for mut a in list {
-            a.id = ids[&a.id];
-            if let AnnotKind::Connector { partner, .. } = &mut a.kind {
-                *partner = partner.and_then(|p| ids.get(&p).copied());
-            }
-            on_page.push_back(a);
-        }
-        if !on_page.is_empty() {
-            rec.put(Key::AnnotsOf(page), Some(Val::Annots(on_page)));
-        }
-    }
-    unencodable
-}
-
-/// Remove nodes targeting deleted pages, promoting their children.
-fn cascade_delete(
-    nodes: &Vector<OutlineNode>,
-    gone: &HashSet<PageId>,
-) -> (Vector<OutlineNode>, usize) {
-    let mut out = Vector::new();
-    let mut removed = 0;
-    for n in nodes {
-        let (children, r) = cascade_delete(&n.children, gone);
-        removed += r;
-        if n.target.is_some_and(|t| gone.contains(&t)) {
-            removed += 1;
-            out.append(children);
-        } else {
-            let mut n = n.clone();
-            n.children = children;
-            out.push_back(n);
-        }
-    }
-    (out, removed)
-}
-
-fn strip_targets(nodes: &Vector<OutlineNode>, sentinel: PageId) -> Vector<OutlineNode> {
-    nodes
-        .iter()
-        .map(|n| {
-            let mut n = n.clone();
-            if n.target == Some(sentinel) {
-                n.target = None;
-                n.view = None;
-            }
-            n.children = strip_targets(&n.children, sentinel);
-            n
-        })
-        .collect()
-}
-
-/// PDFlyer-style merge: incoming top-level nodes with a matching title fold
-/// their children into the existing node; others are appended.
-fn merge_outline(
-    existing: &Vector<OutlineNode>,
-    incoming: &Vector<OutlineNode>,
-) -> (Vector<OutlineNode>, usize) {
-    let mut out = existing.clone();
-    let mut added = 0;
-    for inc in incoming {
-        match out.iter().position(|e| e.title == inc.title) {
-            Some(i) => {
-                let mut e = out[i].clone();
-                added += count_nodes(&inc.children);
-                e.children.append(inc.children.clone());
-                out.set(i, e);
-            }
-            None => {
-                added += 1 + count_nodes(&inc.children);
-                out.push_back(inc.clone());
-            }
-        }
-    }
-    (out, added)
-}
-
-/// The pages a bookmark "owns": from its first target (in document order)
-/// up to, but not including, the first page targeted by a bookmark outside
-/// its subtree that comes after it in reading order.
-fn bookmark_span(st: &DocState, node: &OutlineNode) -> Option<Vec<PageRef>> {
-    let pos = st.page_positions();
-    let mut subtree = Vec::new();
-    collect_targets(node, &mut subtree);
-    let start = subtree.iter().filter_map(|t| pos.get(t)).min().copied()?;
-    let subtree_ids: HashSet<OutlineId> = {
-        let mut ids = HashSet::new();
-        collect_ids(node, &mut ids);
-        ids
-    };
-    let end = st
-        .outline_flat()
-        .iter()
-        .filter(|(_, n)| !subtree_ids.contains(&n.id))
-        .filter_map(|(_, n)| n.target.and_then(|t| pos.get(&t)).copied())
-        .filter(|&i| i > start)
-        .min()
-        .unwrap_or(st.pages.len());
-    Some(
-        st.pages
-            .iter()
-            .skip(start)
-            .take(end - start)
-            .copied()
-            .collect(),
-    )
-}
-
-fn collect_targets(node: &OutlineNode, out: &mut Vec<PageId>) {
-    if let Some(t) = node.target {
-        out.push(t);
-    }
-    for c in &node.children {
-        collect_targets(c, out);
-    }
-}
-
-fn collect_ids(node: &OutlineNode, out: &mut HashSet<OutlineId>) {
-    out.insert(node.id);
-    for c in &node.children {
-        collect_ids(c, out);
-    }
 }
 
 #[cfg(test)]
@@ -3506,6 +4254,8 @@ mod tests {
                 color: None,
                 style: Default::default(),
                 open: true,
+                object: None,
+                kept: false,
             })
             .collect()
     }
@@ -3536,29 +4286,46 @@ mod tests {
     }
 
     fn order(d: &Document) -> Vec<u32> {
-        d.state().pages.iter().map(|p| p.index).collect()
+        d.state()
+            .pages()
+            .map(|(_, def, _)| def.base.index)
+            .collect()
+    }
+
+    /// What the page at `i` shows.
+    fn def_at(d: &Document, i: usize) -> Arc<PageDef> {
+        d.state().def(id_at(d, i)).unwrap().clone()
+    }
+
+    /// The `/Rotate` of the page at `i`.
+    fn rotation(d: &Document, i: usize) -> Rotation {
+        d.geom(id_at(d, i)).rotate
     }
 
     fn titles(d: &Document) -> Vec<(u16, String)> {
         d.state()
-            .outline_flat()
+            .bookmarks_preorder()
             .iter()
-            .map(|(depth, n)| (*depth, n.title.clone()))
+            .map(|(depth, _, b)| (*depth, b.title.to_string()))
             .collect()
     }
 
     fn id_at(d: &Document, i: usize) -> PageId {
-        d.page(i).unwrap().id
+        d.page(i).unwrap()
     }
 
     fn bm(d: &Document, title: &str) -> OutlineId {
         d.state()
-            .outline_flat()
+            .bookmarks_preorder()
             .iter()
-            .find(|(_, n)| n.title == title)
+            .find(|(_, _, b)| &*b.title == title)
             .unwrap()
             .1
-            .id
+    }
+
+    /// The bookmark titled `title`.
+    fn bookmark(d: &Document, title: &str) -> Arc<Bookmark> {
+        d.state().bookmark(bm(d, title)).unwrap().clone()
     }
 
     /// While the file opens, every edit is refused before it draws an id
@@ -3599,7 +4366,7 @@ mod tests {
         d.apply_batch(vec![duplicate(), bookmark()], "Both")
             .unwrap();
         d.apply_in_job(job, bookmark(), "Bookmark").unwrap();
-        assert_eq!((d.page_count(), d.state().outline.len()), (5, 2));
+        assert_eq!((d.page_count(), d.state().outline_roots().len()), (5, 2));
         assert_eq!(d.versions.len(), 4);
     }
 
@@ -3615,11 +4382,11 @@ mod tests {
         let src = primary.src.clone();
         let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
         let loading = d.current_version();
-        let pages: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
+        let pages: Vec<PageId> = d.state().order().iter().copied().collect();
         let st = d.state();
         assert_eq!(pages.len(), 3);
-        assert!(st.outline.is_empty() && st.annots.is_empty() && st.fields.is_empty());
-        assert!(st.labels.is_none() && st.header_footer.is_none());
+        assert!(st.bookmark_count() == 0 && st.annot_count() == 0 && st.field_count() == 0);
+        assert!(st.labels().is_none() && st.header_footer().is_none());
         let view = d
             .ready(crate::open::finish(&src, &in_progress::NoProgress))
             .unwrap();
@@ -3629,7 +4396,7 @@ mod tests {
         assert!(!d.versions.contains_key(&loading));
         assert!(d.jump(loading).is_err());
         assert_eq!((d.root, d.saved), (opened, Some(opened)));
-        let now: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
+        let now: Vec<PageId> = d.state().order().iter().copied().collect();
         assert_eq!(now, pages);
         crate::open::tests::assert_every_fact(d.state());
         assert_eq!(view.form.fields, 1);
@@ -3647,21 +4414,47 @@ mod tests {
         crate::open::tests::assert_every_fact(d.state());
     }
 
+    /// The form `every_kind` has, as a file's form reads.
+    fn every_kind_form() -> Arc<FileForm> {
+        crate::forms::fixture::every_kind().source().form().clone()
+    }
+
     #[test]
     fn form_fields_follow_their_pages() {
-        let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
         let facts = Facts {
-            form,
+            form: every_kind_form(),
             ..Default::default()
         };
         let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
         let (p1, p2) = (id_at(&d, 0), id_at(&d, 1));
         let st = d.state();
-        assert_eq!(st.fields.len(), 9);
-        assert!(st.fields.values().all(|f| f.source == d.primary()));
-        let on = |d: &Document, p: PageId| d.state().widgets_on(p).map_or(0, |w| w.len());
+        assert_eq!((st.field_count(), st.terminals().count()), (10, 9));
+        let inst = FormInst {
+            src: d.primary(),
+            copy: 0,
+        };
+        assert!(st.fields().all(|(_, node)| node.inst == inst));
+        assert_eq!(
+            st.full_name(FieldId(1)).as_deref(),
+            Some("form1[0].name[0]")
+        );
+        assert_eq!(st.field_named("form1[0].pick[0]"), Some(FieldId(5)));
+        let on = |d: &Document, p: PageId| d.state().widgets_on(p).count();
         assert_eq!((on(&d, p1), on(&d, p2)), (6, 4));
+        let listed = |d: &Document| -> usize {
+            (d.state().terminals())
+                .map(|(_, _, t)| t.widgets.len())
+                .sum()
+        };
+        assert_eq!(listed(&d), 10);
         assert!(d.fields_dirty().is_empty() && d.snapshot().fields_dirty.is_empty());
+        // A widget goes only with its page.
+        let (widget, _) = d.state().widgets_on(p1).next().unwrap();
+        let delete = Edit::AnnotDelete {
+            page: p1,
+            id: widget,
+        };
+        assert!(d.apply(delete, "delete").is_err());
         // Moving a page carries its widgets; deleting it takes them, and
         // undo brings them back.
         d.apply(
@@ -3674,17 +4467,19 @@ mod tests {
         .unwrap();
         assert_eq!(on(&d, p2), 4);
         // The file's facts came once: none come after.
-        let again = crate::forms::read(&crate::forms::fixture::every_kind().source());
         let late = Facts {
-            form: again,
+            form: every_kind_form(),
             ..Default::default()
         };
         assert!(d.ready(late).is_err());
         d.apply(Edit::DeletePages { ids: vec![p2] }, "delete")
             .unwrap();
-        assert_eq!((on(&d, p2), d.state().fields.len()), (0, 9));
+        // The fields stay, their widgets there gone from their lists (a
+        // field with none left goes with slice 11's `widget.field` rule).
+        assert_eq!((on(&d, p2), d.state().terminals().count()), (0, 9));
+        assert_eq!(listed(&d), 6);
         d.undo().unwrap();
-        assert_eq!(on(&d, p2), 4);
+        assert_eq!((on(&d, p2), listed(&d)), (4, 10));
         // A replaced page shows another page, without them.
         let other = d.add_source(SourceInfo::blank(d.store(), 1));
         d.apply(
@@ -3697,36 +4492,356 @@ mod tests {
             "replace",
         )
         .unwrap();
-        assert_eq!(on(&d, p1), 0);
-        // Nothing changed a field.
+        assert_eq!((on(&d, p1), listed(&d)), (0, 4));
+        // Nothing changed a field, but the form isn't the file's.
         assert!(d.fields_dirty().is_empty());
+        assert!(d.form_changed());
     }
 
     #[test]
     fn fields_dirty_compares_with_the_saved_form() {
-        let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
         let facts = Facts {
-            form,
+            form: every_kind_form(),
             ..Default::default()
         };
         let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
+        let terms: Vec<FieldId> = d.state().terminals().map(|(id, ..)| id).collect();
         // A field changed, one gone and one added in the state `ready` set,
-        // as edits will do.
-        let (changed, gone, added) = (FieldId(0), FieldId(1), FieldId(99));
+        // as edits will do; and one with its widgets gone, which changes no
+        // field.
+        let (changed, gone, fewer, added) = (terms[0], terms[1], terms[2], FieldId(99));
         let root = d.root;
         let st = d.versions.get_mut(&root).unwrap().state.as_mut().unwrap();
-        let mut f = st.fields.get(&changed).unwrap().clone();
-        f.value = Some(crate::forms::Value::Text("Bo Ng".into()));
-        st.fields.insert(changed, f.clone());
-        st.fields.remove(&gone);
-        f.id = added;
-        st.fields.insert(added, f);
+        let node = |st: &DocState, id| FieldNode::clone(st.field(id).unwrap());
+        // Field `id` without its widgets, which go off their pages.
+        let unshown = |st: &mut DocState, id| {
+            let mut f = node(st, id);
+            let term = Arc::make_mut(f.term.as_mut().unwrap());
+            for w in std::mem::take(&mut term.widgets) {
+                let page = st.annot(w).unwrap().page;
+                let mut ids = st.annot_ids_on(page).unwrap().clone();
+                ids.retain(|&other| other != w);
+                st.set(&Key::Annot(w), None).unwrap();
+                let ids = (!ids.is_empty()).then_some(Val::PageAnnots(ids));
+                st.set(&Key::PageAnnots(page), ids).unwrap();
+            }
+            f
+        };
+        let mut f = node(st, changed);
+        Arc::make_mut(f.term.as_mut().unwrap()).value =
+            Some(crate::forms::Value::Text("Bo Ng".into()));
+        let mut new = f.clone();
+        Arc::make_mut(new.term.as_mut().unwrap()).widgets.clear();
+        let less = unshown(st, fewer);
+        unshown(st, gone);
+        let mut parent = node(st, f.parent.unwrap());
+        parent.kids.retain(|&kid| kid != gone);
+        parent.kids.push_back(added);
+        for (id, node) in [
+            (changed, Some(f.clone())),
+            (gone, None),
+            (added, Some(new)),
+            (fewer, Some(less)),
+            (f.parent.unwrap(), Some(parent)),
+        ] {
+            st.set(&Key::Field(id), node.map(|n| Val::Field(Arc::new(n))))
+                .unwrap();
+        }
+        assert_eq!(st.check_invariants(), Ok(()));
         let want = HashSet::from([changed, gone, added]);
         assert_eq!(d.fields_dirty(), want);
         assert_eq!(d.snapshot().fields_dirty, want);
-        // Saved, they're what's in the file.
-        d.rebase_to_saved(SourceInfo::blank(d.store(), 2));
+
+        // A field of the file itself changed, then saved for real: each
+        // node is the saved file's own object, the projection reads each
+        // from there, and nothing is dirty.
+        let store = Store::new();
+        let primary = file(
+            &store,
+            crate::forms::fixture::every_kind().bytes(),
+            "form.pdf",
+        );
+        let facts = crate::open::finish(&primary.src, &in_progress::NoProgress);
+        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        d.ready(facts).unwrap();
+        let root = d.root;
+        let st = d.versions.get_mut(&root).unwrap().state.as_mut().unwrap();
+        let changed = st.terminals().next().unwrap().0;
+        let mut f = node(st, changed);
+        Arc::make_mut(f.term.as_mut().unwrap()).value =
+            Some(crate::forms::Value::Text("Bo Ng".into()));
+        st.set(&Key::Field(changed), Some(Val::Field(Arc::new(f))))
+            .unwrap();
+        assert_eq!(d.fields_dirty(), HashSet::from([changed]));
+        let saved = save_and_rebase(&mut d, false);
+        let st = d.state();
+        let ours = |node: &FieldNode| node.src.as_ref().is_some_and(|r| r.src == saved);
+        assert!(st.fields().all(|(_, node)| ours(node)));
+        let terms = st.terminals().count();
+        assert_eq!(d.snapshot().legacy().fields.len(), terms);
         assert!(d.fields_dirty().is_empty() && d.snapshot().fields_dirty.is_empty());
+    }
+
+    /// Each rule a state's records keep (M10.5 §6.4), broken by puts no
+    /// edit makes, is found, as the rule it is; and an edit naming a page
+    /// there isn't for a bookmark is refused, so none makes one. The
+    /// indexes' rules are `state`'s tests'.
+    #[test]
+    fn the_invariants_find_each_rule_broken() {
+        let facts = Facts {
+            form: every_kind_form(),
+            outline: flat(&[("A", Some(0), 0), ("A1", Some(1), 1)]),
+            ..Default::default()
+        };
+        let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
+        let [p0, p1] = [0, 1].map(|i| id_at(&d, i));
+        let a = bm(&d, "A");
+        let header = Some(header("Draft".into()));
+        d.apply(
+            Edit::SetHeaderFooter {
+                header_footer: header,
+            },
+            "header",
+        )
+        .unwrap();
+        d.apply(
+            Edit::AnnotAdd {
+                page: p0,
+                annot: square(0),
+            },
+            "add",
+        )
+        .unwrap();
+        let to_no_page = [
+            Edit::OutlineInsert {
+                parent: None,
+                after: None,
+                title: "B".into(),
+                target: Some(PageId(99)),
+                view: None,
+            },
+            Edit::OutlineInsertTree {
+                parent: None,
+                after: None,
+                items: vec![NewOutlineItem {
+                    title: "B".into(),
+                    target: Some(PageId(99)),
+                    view: None,
+                    depth: 0,
+                }],
+            },
+            Edit::OutlineEdit {
+                id: a,
+                title: None,
+                target: Some(Some(PageId(99))),
+                color: None,
+                view: None,
+                style: None,
+            },
+        ];
+        for edit in to_no_page {
+            assert!(d.apply(edit, "to page 99").is_err(), "there's no page 99");
+        }
+        let st = d.state().clone();
+        assert_eq!(st.check_invariants(), Ok(()));
+        let broken = |key: Key, val: Option<Val>| {
+            let mut st = st.clone();
+            st.set(&key, val).unwrap();
+            st.check_invariants().unwrap_err()
+        };
+        let (mark, rec) = (st.annots_on(p0))
+            .find(|(_, a)| a.mark().is_some())
+            .map(|(id, a)| (id, a.clone()))
+            .unwrap();
+        let (widget, shown) = (st.annots_on(p0))
+            .find(|(_, a)| a.widget().is_some())
+            .map(|(id, a)| (id, a.clone()))
+            .unwrap();
+        let (field, node, _) = (st.terminals())
+            .find(|(.., t)| !t.widgets.is_empty())
+            .unwrap();
+        let top = st.form().roots[0];
+        let field_with = |node: &FieldNode, widgets: &dyn Fn(&mut Vector<AnnotId>)| {
+            let mut node = node.clone();
+            widgets(&mut Arc::make_mut(node.term.as_mut().unwrap()).widgets);
+            Some(Val::Field(Arc::new(node)))
+        };
+        let unshown = field_with(node, &|w| w.clear());
+        let top_with = |change: &dyn Fn(&mut FieldNode)| {
+            let mut node = FieldNode::clone(st.field(top).unwrap());
+            change(&mut node);
+            Some(Val::Field(Arc::new(node)))
+        };
+        let other_inst = FormInst {
+            copy: 5,
+            ..node.inst
+        };
+        let def = |change: &dyn Fn(&mut PageDef)| {
+            let mut def = PageDef::clone(st.def(p1).unwrap());
+            change(&mut def);
+            Some(Val::Page(Arc::new(def)))
+        };
+        let a_with = |change: &dyn Fn(&mut Bookmark)| {
+            let mut b = Bookmark::clone(st.bookmark(a).unwrap());
+            change(&mut b);
+            Some(Val::Bookmark(Arc::new(b)))
+        };
+        let gen_with = |id: u64| {
+            let g = Generator {
+                id: GenId(id),
+                ..Generator::clone(st.generators().values().next().unwrap())
+            };
+            Some(Val::Generator(Arc::new(g)))
+        };
+        let mut twice = st.annot_ids_on(p0).unwrap().clone();
+        twice.push_back(mark);
+        let mut roots = st.form().roots.clone();
+        roots.push_back(FieldId(99));
+        let form = FormDoc {
+            roots,
+            ..FormDoc::clone(st.form())
+        };
+        let elsewhere = AnnotBody::Widget(Arc::new(Widget {
+            inst: other_inst,
+            ..Widget::clone(shown.widget().unwrap())
+        }));
+        let cases = [
+            (
+                Key::Order,
+                Some(Val::Order(vec![p0, p0, p1].into())),
+                "pages: PageId(0) is in the order twice",
+            ),
+            (
+                Key::Page(PageId(99)),
+                def(&|_| ()),
+                "pages: the pages aren't the order's",
+            ),
+            (Key::Geom(p1), None, "pages: the pages with boxes aren't"),
+            (
+                Key::Page(p1),
+                def(&|d| d.base.index = 99),
+                "pages: PageId(1) shows page 100 of 2",
+            ),
+            (
+                Key::Page(p1),
+                st.get(&Key::Page(p0)),
+                "pages: PageId(1) is copy 0 of a page",
+            ),
+            (
+                Key::PageAnnots(PageId(99)),
+                Some(Val::PageAnnots(Vector::unit(mark))),
+                "annotations: PageId(99) isn't a page",
+            ),
+            (
+                Key::PageAnnots(p1),
+                Some(Val::PageAnnots(Vector::new())),
+                "annotations: PageId(1) lists none",
+            ),
+            (
+                Key::PageAnnots(p0),
+                Some(Val::PageAnnots(twice)),
+                "is listed twice",
+            ),
+            (
+                Key::Annot(mark),
+                Some(Val::Annot(AnnotRec {
+                    page: p1,
+                    ..rec.clone()
+                })),
+                "which isn't on it",
+            ),
+            (
+                Key::Annot(AnnotId(7)),
+                Some(Val::Annot(rec)),
+                "annotations: 1 aren't listed",
+            ),
+            (Key::Field(field), unshown.clone(), "isn't one of"),
+            (
+                Key::Annot(widget),
+                Some(Val::Annot(AnnotRec {
+                    body: elsewhere,
+                    ..shown
+                })),
+                "isn't in",
+            ),
+            (
+                Key::Field(field),
+                field_with(node, &|w| w.push_back(mark)),
+                "which isn't its widget",
+            ),
+            (
+                Key::Field(field),
+                field_with(node, &|w| w.push_back(widget)),
+                "the form: the fields list",
+            ),
+            (
+                Key::Form,
+                Some(Val::Form(Arc::new(form))),
+                "the form: FieldId(99), under None, isn't a node",
+            ),
+            (
+                Key::Field(field),
+                Some(Val::Field(Arc::new(FieldNode {
+                    parent: None,
+                    ..node.clone()
+                }))),
+                "is under Some",
+            ),
+            (
+                Key::Field(top),
+                top_with(&|n| n.kids.push_back(n.kids[0])),
+                "is in the tree twice",
+            ),
+            (
+                Key::Field(top),
+                top_with(&|n| n.inst = other_inst),
+                "has no name",
+            ),
+            (
+                Key::Field(FieldId(99)),
+                unshown,
+                "the form: 1 nodes aren't in the tree",
+            ),
+            (
+                Key::Bookmark(a),
+                a_with(&|b| b.kids.push_back(OutlineId(99))),
+                "bookmarks: OutlineId(99) isn't a bookmark",
+            ),
+            (
+                Key::Bookmark(a),
+                a_with(&|b| b.kids = Vector::unit(a)),
+                "is in the outline twice",
+            ),
+            (
+                Key::Bookmark(a),
+                a_with(&|b| {
+                    b.target = Some(Target::Page {
+                        page: PageId(99),
+                        view: None,
+                    })
+                }),
+                "goes to PageId(99), which isn't a page",
+            ),
+            (
+                Key::Bookmark(OutlineId(99)),
+                a_with(&|_| ()),
+                "bookmarks: 1 bookmarks aren't in the outline",
+            ),
+            (
+                Key::Generator(GenId(8)),
+                gen_with(7),
+                "generators: GenId(7) is under GenId(8)",
+            ),
+            (
+                Key::Generator(GenId(7)),
+                gen_with(7),
+                "generators: 2 draw a header/footer",
+            ),
+        ];
+        for (key, val, says) in cases {
+            let why = broken(key, val).to_string();
+            assert!(why.contains(says), "{key:?}: {why}");
+        }
     }
 
     /// One file's bytes, interned twice, are one source; each insert still
@@ -3742,14 +4857,12 @@ mod tests {
         for _ in 0..2 {
             let kind = BlobKind::file(Path::new("form.pdf"), None);
             let src = d.store().open(bytes.clone(), kind).unwrap();
-            let form = crate::forms::read(&src);
             let sid = d.add_source(SourceInfo {
                 src,
                 name: "form.pdf".into(),
                 derived: None,
                 stamp: None,
             });
-            d.set_source_form(sid, form);
             let out = d
                 .apply(
                     Edit::InsertPages {
@@ -3774,13 +4887,13 @@ mod tests {
             d.store().bytes(),
             first.bytes().len() + d.source(d.primary()).unwrap().src.bytes().len()
         );
-        // Two forms: the second's fields are under a name of their own.
+        // Two forms, an instance each: the second's fields are under a
+        // name of their own.
         let st = d.state();
-        let names = |sid| -> BTreeSet<&str> {
-            st.fields
-                .values()
-                .filter(|f| f.source == sid)
-                .map(|f| f.name.as_str())
+        let names = |sid| -> BTreeSet<String> {
+            (st.terminals())
+                .filter(|(_, node, _)| node.inst.src == sid)
+                .map(|(id, _, _)| st.full_name(id).unwrap())
                 .collect()
         };
         let (of_a, of_b) = (names(a), names(b));
@@ -3788,6 +4901,139 @@ mod tests {
         assert!(of_a.is_disjoint(&of_b), "{of_a:?} {of_b:?}");
         assert!(of_b.iter().all(|n| n.starts_with("form.")), "{of_b:?}");
         assert_eq!(renamed, [vec![], vec![("form".to_string(), b)]]);
+        let instances: Vec<(FormInst, &str)> =
+            (st.form().names.iter()).map(|(i, n)| (*i, &**n)).collect();
+        let inst = |src| FormInst { src, copy: 0 };
+        assert_eq!(instances, [(inst(a), "form.pdf"), (inst(b), "form.pdf")]);
+        // Every widget is its field's, and in its field's instance.
+        for (id, node, term) in st.terminals() {
+            for w in &term.widgets {
+                let w = st.annot(*w).unwrap().widget().unwrap();
+                assert_eq!((w.field, w.inst), (id, node.inst));
+            }
+        }
+    }
+
+    /// Every node is found by its full name, in the state an edit made and
+    /// in that state rebuilt from the edit's prims, which put a new parent
+    /// after the nodes under it; undo takes the names away.
+    #[test]
+    fn fields_are_found_by_their_full_names() {
+        let facts = Facts {
+            form: every_kind_form(),
+            ..Default::default()
+        };
+        let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
+        let opened = d.state().clone();
+        let bytes = crate::forms::fixture::every_kind().bytes();
+        let sid = d.add_source(file(d.store(), bytes, "form.pdf"));
+        d.apply(
+            Edit::InsertPages {
+                source: sid,
+                range: 0..2,
+                before: None,
+                outline: None,
+                annots: Vec::new(),
+            },
+            "insert",
+        )
+        .unwrap();
+        let found = |st: &DocState| {
+            for (id, _) in st.fields() {
+                let name = st.full_name(id).unwrap();
+                assert_eq!(st.field_named(&name), Some(id), "{name}");
+            }
+        };
+        let st = d.state();
+        assert_eq!(st.field_named("form1[0].name[0]"), Some(FieldId(1)));
+        let top = st.field_named("form").unwrap();
+        assert!(st.field(top).unwrap().src.is_none());
+        let renamed = st.field_named("form.form1[0].name[0]").unwrap();
+        // Its id is drawn after theirs: a replay puts it after them.
+        assert!(top > renamed);
+        found(st);
+        let (steps, _) = d.edge(d.current_version()).unwrap();
+        let mut replayed = opened;
+        for p in steps.iter().flat_map(|s| s.prims.iter()) {
+            replayed.apply(p).unwrap();
+        }
+        found(&replayed);
+        assert_eq!(replayed.field_named("form.form1[0].name[0]"), Some(renamed));
+        d.undo().unwrap();
+        assert_eq!(d.state().field_named("form.form1[0].name[0]"), None);
+        assert_eq!(d.state().field_named("form"), None);
+    }
+
+    /// A form of one page, its field `a` with a keystroke script.
+    fn scripted() -> Vec<u8> {
+        use lopdf::{Object, dictionary};
+        let mut f = crate::forms::fixture::Form::new(1);
+        let a = f.text("a", 0, crate::forms::fixture::row(0));
+        let js = dictionary! {
+            "S" => "JavaScript", "JS" => Object::string_literal("event.rc = true;"),
+        };
+        f.dict(a).set("AA", dictionary! { "K" => js });
+        f.bytes()
+    }
+
+    /// Scripts brought in from a second file go off, and stay off when a
+    /// save makes the forms one file's; undo before the save turns them
+    /// on again. A duplicate of the second file's page is another
+    /// instance of its form, named as it is, renamed apart again.
+    #[test]
+    fn scripts_from_two_files_stay_off_after_a_save() {
+        let store = Store::new();
+        let primary = file(&store, scripted(), "a.pdf");
+        let src = primary.src.clone();
+        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        d.ready(crate::open::finish(&src, &in_progress::NoProgress))
+            .unwrap();
+        assert!(!d.scripts_mixed());
+        let sid = d.add_source(file(d.store(), scripted(), "b.pdf"));
+        let insert = Edit::InsertPages {
+            source: sid,
+            range: 0..1,
+            before: None,
+            outline: None,
+            annots: Vec::new(),
+        };
+        let out = d.apply(insert, "insert").unwrap();
+        assert_eq!(out.forms_renamed, [("b".to_string(), sid)]);
+        assert!(d.scripts_mixed());
+        assert_eq!(d.script_sources(), [d.primary(), sid]);
+        let ScriptState::Off { instances } = &d.state().form().scripts else {
+            panic!("scripts on");
+        };
+        let inst = |src, copy| FormInst { src, copy };
+        assert_eq!(**instances, [inst(d.primary(), 0), inst(sid, 0)]);
+        d.undo().unwrap();
+        assert!(!d.scripts_mixed());
+        d.redo().unwrap();
+
+        let page = id_at(&d, 1);
+        let out = d
+            .apply(Edit::DuplicatePages { ids: vec![page] }, "duplicate")
+            .unwrap();
+        assert_eq!(out.forms_renamed, [("b_2".to_string(), sid)]);
+        let names: Vec<(FormInst, &str)> = (d.state().form().names.iter())
+            .map(|(i, n)| (*i, &**n))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (inst(d.primary(), 0), "a.pdf"),
+                (inst(sid, 0), "b.pdf"),
+                (inst(sid, 1), "b.pdf")
+            ]
+        );
+        let st = d.state();
+        assert!(st.field_named("b_2.a").is_some());
+
+        save_and_rebase(&mut d, false);
+        assert!(d.scripts_mixed(), "one file's forms, scripts still off");
+        assert_eq!(d.script_sources(), [d.primary()]);
+        let names: Vec<&str> = d.state().form().names.values().map(|n| &**n).collect();
+        assert_eq!(names, ["saved.pdf"]);
     }
 
     #[test]
@@ -3828,11 +5074,11 @@ mod tests {
             "rotate",
         )
         .unwrap();
-        assert_eq!(d.page(0).unwrap().rotation, Rotation::R90);
+        assert_eq!(rotation(&d, 0), Rotation::R90);
         assert_eq!(d.page_size(d.page(0).unwrap()).width, 792.0);
         assert!(d.is_dirty());
         assert_eq!(d.undo(), Ok(Some("rotate")));
-        assert_eq!(d.page(0).unwrap().rotation, Rotation::R0);
+        assert_eq!(rotation(&d, 0), Rotation::R0);
         assert_eq!(d.undo(), Ok(Some("move")));
         assert_eq!(order(&d), vec![0, 1, 2, 3, 4, 5]);
         assert!(!d.is_dirty());
@@ -3897,7 +5143,7 @@ mod tests {
         assert_eq!(out.pages_added, 3);
         assert_eq!(out.bookmarks_added, 2);
         assert_eq!(order(&d), vec![0, 1, 2, 0, 1, 2, 3, 4, 5]);
-        assert_eq!(d.page(3).unwrap().source, s);
+        assert_eq!(def_at(&d, 3).base.source, s);
         // "A" merged: A3 joined A's children; "D" appended.
         assert_eq!(
             titles(&d),
@@ -3912,15 +5158,7 @@ mod tests {
             ]
         );
         // A3 targets the inserted page with source index 1.
-        let a3 = d
-            .state()
-            .outline_flat()
-            .iter()
-            .find(|(_, n)| n.title == "A3")
-            .unwrap()
-            .1
-            .target
-            .unwrap();
+        let a3 = bookmark(&d, "A3").page().unwrap();
         assert_eq!(d.index_of(a3), Some(4));
     }
 
@@ -3942,18 +5180,33 @@ mod tests {
             "replace",
         )
         .unwrap();
-        assert_eq!(d.page(3).unwrap().id, p3);
-        assert_eq!(d.page(3).unwrap().source, s);
-        assert_eq!(d.page(4).unwrap().source, s);
+        assert_eq!(d.page(3).unwrap(), p3);
+        assert_eq!(def_at(&d, 3).base.source, s);
+        assert_eq!(def_at(&d, 4).base.source, s);
         assert_eq!(order(&d), vec![0, 1, 2, 0, 1, 4, 5]);
-        let b = d
-            .state()
-            .outline_flat()
-            .iter()
-            .find(|(_, n)| n.title == "B")
-            .unwrap()
-            .1;
-        assert_eq!(b.target, Some(p3));
+        assert_eq!(bookmark(&d, "B").page(), Some(p3));
+    }
+
+    /// A page listed twice is replaced once, and stays with the marks that
+    /// come to it.
+    #[test]
+    fn a_page_listed_twice_is_replaced_once() {
+        let mut d = doc();
+        let s = d.add_source(SourceInfo::blank(d.store(), 1));
+        let p3 = id_at(&d, 3);
+        d.apply(
+            Edit::ReplacePages {
+                ids: vec![p3, p3],
+                source: s,
+                range: 0..1,
+                annots: vec![(0, vec![square(0)])],
+            },
+            "replace",
+        )
+        .unwrap();
+        assert_eq!(d.page_count(), 6);
+        assert_eq!(def_at(&d, 3).base.source, s);
+        assert_eq!(d.state().marks_on(p3).count(), 1);
     }
 
     #[test]
@@ -3968,6 +5221,122 @@ mod tests {
         .unwrap();
         assert_eq!(order(&d), vec![0, 1, 1, 2, 3, 4, 5]);
         assert_ne!(id_at(&d, 1), id_at(&d, 2));
+    }
+
+    /// Each page's base page and copy, by position.
+    fn copies(d: &Document) -> Vec<(u32, u32)> {
+        let pages = d.state().pages();
+        pages
+            .map(|(_, def, _)| (def.base.index, def.copy))
+            .collect()
+    }
+
+    /// A page the file's tree lists twice (invalid, but real) opens as two
+    /// pages over its one object: the object itself, copy 0, then copy 1.
+    #[test]
+    fn a_page_listed_twice_opens_as_copy_0_and_copy_1() {
+        let mut f = crate::forms::fixture::Form::new(1);
+        let page = f.pages[0];
+        let root = f.dict(page).get(b"Parent").unwrap().as_reference().unwrap();
+        f.dict(root).set("Kids", vec![page.into(), page.into()]);
+        f.dict(root).set("Count", 2);
+        let store = Store::new();
+        let primary = file(&store, f.bytes(), "twice.pdf");
+        let src = primary.src.clone();
+        let d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+        assert_eq!(copies(&d), [(0, 0), (1, 1)]);
+        let object = |i| src.page(i).unwrap().id;
+        assert_eq!(object(0), object(1), "one object, listed twice");
+        assert!(!d.is_dirty());
+    }
+
+    /// A page made from a base page takes the copy after the highest any
+    /// page holds of it: a duplicate, a duplicate of a duplicate, and the
+    /// same bytes inserted again under another registration.
+    #[test]
+    fn copies_take_the_next_copy_of_their_base() {
+        let mut d = new_doc(2, &[], Box::new(FixedCount(10)));
+        let dup = |d: &mut Document, i| {
+            let ids = vec![id_at(d, i)];
+            d.apply(Edit::DuplicatePages { ids }, "dup").unwrap();
+        };
+        dup(&mut d, 0);
+        dup(&mut d, 0);
+        assert_eq!(copies(&d), [(0, 0), (0, 2), (0, 1), (1, 0)]);
+        // A copy's copy is the next of the same base, and shows it.
+        dup(&mut d, 2);
+        assert_eq!(copies(&d)[3], (0, 3));
+        let other = SourceInfo::blank(d.store(), 1);
+        let first = insert_all(&mut d, other.clone());
+        let again = insert_all(&mut d, other);
+        assert_ne!(first, again, "two registrations");
+        let inserted: Vec<(SourceId, u32)> = (d.state().pages().skip(5))
+            .map(|(_, def, _)| (def.base.source, def.copy))
+            .collect();
+        assert_eq!(inserted, [(first, 0), (again, 1)]);
+        // A page replaced by one the document shows is another copy of it.
+        let last = id_at(&d, 6);
+        let edit = Edit::ReplacePages {
+            ids: vec![last],
+            source: first,
+            range: 0..1,
+            annots: Vec::new(),
+        };
+        d.apply(edit, "replace").unwrap();
+        assert_eq!(d.state().def(last).unwrap().copy, 2);
+    }
+
+    /// Moving pages changes the order and nothing else: one prim, and the
+    /// new positions are there at once.
+    #[test]
+    fn a_reorder_puts_only_the_order() {
+        let mut d = doc();
+        let p5 = id_at(&d, 5);
+        assert_eq!(d.index_of(p5), Some(5));
+        d.apply(
+            Edit::MovePages {
+                ids: vec![p5],
+                before: Some(id_at(&d, 0)),
+            },
+            "move",
+        )
+        .unwrap();
+        let keys: Vec<Key> = d.versions[&d.cursor].steps[0]
+            .prims
+            .iter()
+            .map(|p| p.key)
+            .collect();
+        assert_eq!(keys, [Key::Order]);
+        assert_eq!(d.index_of(p5), Some(0));
+        assert_eq!(d.index_of(id_at(&d, 1)), Some(1));
+    }
+
+    /// Recognized text is what's drawn over the page: setting it puts the
+    /// page's record and nothing else, and a duplicate shows the same
+    /// text, the one `Arc`.
+    #[test]
+    fn ocr_text_is_the_page_s_content() {
+        let mut d = doc();
+        let page = id_at(&d, 1);
+        set(&mut d, &[1], "a");
+        let keys: Vec<Key> = d.versions[&d.cursor].steps[0]
+            .prims
+            .iter()
+            .map(|p| p.key)
+            .collect();
+        assert_eq!(keys, [Key::Page(page)]);
+        let def = d.state().def(page).unwrap().clone();
+        assert_eq!(def.content.over.len(), 1);
+        d.apply(Edit::DuplicatePages { ids: vec![page] }, "dup")
+            .unwrap();
+        let copy = d.state().def(id_at(&d, 2)).unwrap();
+        assert!(Arc::ptr_eq(&copy.content, &def.content));
+        assert_eq!((copy.base.index, copy.copy), (1, 1));
+        // Cleared, the page holds the stack untouched pages share.
+        let ids = vec![page];
+        d.apply(Edit::ClearTextLayers { ids }, "clear").unwrap();
+        let cleared = &d.state().def(page).unwrap().content;
+        assert!(ContentStack::is_shared_empty(cleared));
     }
 
     #[test]
@@ -4095,8 +5464,8 @@ mod tests {
             vec!["b", "c"]
         );
         d.jump(b).unwrap();
-        assert_eq!(d.page(1).unwrap().rotation, Rotation::R90);
-        assert_eq!(d.page(3).unwrap().rotation, Rotation::R0);
+        assert_eq!(rotation(&d, 1), Rotation::R90);
+        assert_eq!(rotation(&d, 3), Rotation::R0);
         assert_eq!(d.redo(), Ok(Some("c")));
         // Undo to a, and redo now follows the branch last visited.
         d.undo().unwrap();
@@ -4150,14 +5519,14 @@ mod tests {
         // Undo goes all the way back, replaying what was dropped.
         for i in (0..5).rev() {
             assert_eq!(d.undo(), Ok(Some(format!("r{i}").as_str())));
-            assert_eq!(d.page(0).unwrap().rotation.degrees(), (i * 90) % 360);
+            assert_eq!(rotation(&d, 0).degrees(), (i * 90) % 360);
         }
         assert!(!d.can_undo());
         assert!(!d.is_dirty(), "the opened version is the saved one");
         for _ in 0..5 {
             d.redo().unwrap();
         }
-        assert_eq!(d.page(0).unwrap().rotation, Rotation::R90);
+        assert_eq!(rotation(&d, 0), Rotation::R90);
     }
 
     /// Three rotations, keeping only the snapshots that must stay (the
@@ -4172,16 +5541,20 @@ mod tests {
         (d, ids)
     }
 
-    /// Version `v`'s Pages prim, made to say the pages were in another
-    /// order before: the prim, as it is now.
-    fn damage_pages_before(d: &mut Document, v: VersionId) -> Prim {
+    /// Version `v`'s rotation, made to say the page was turned another way
+    /// before: the prim, as it is now.
+    fn damage_turn_before(d: &mut Document, v: VersionId) -> Prim {
         let step = &mut d.versions.get_mut(&v).unwrap().steps[0];
         let mut prims = step.prims.to_vec();
-        let p = prims.iter_mut().find(|p| p.key == Key::Pages).unwrap();
-        let Some(Val::Pages(pages)) = &p.before else {
-            panic!("pages hold a value");
+        let p = prims
+            .iter_mut()
+            .find(|p| matches!(p.key, Key::Geom(_)))
+            .unwrap();
+        let Some(Val::Geom(geom)) = &p.before else {
+            panic!("a page has its boxes");
         };
-        p.before = Some(Val::Pages(pages.iter().rev().copied().collect()));
+        let rotate = geom.rotate.plus(Rotation::R180);
+        p.before = Some(Val::Geom(Arc::new(Geom { rotate, ..**geom })));
         let damaged = p.clone();
         step.prims = prims.into();
         damaged
@@ -4213,10 +5586,10 @@ mod tests {
         let (mut d, ids) = trimmed_history();
         let (parent, v) = (ids[1], ids[2]);
         assert!(d.versions[&v].state.is_none(), "its snapshot was dropped");
-        let p = damage_pages_before(&mut d, v);
+        let p = damage_turn_before(&mut d, v);
         assert_eq!(d.replay(v), Err(Damaged { version: v }));
         let mut st = d.replay(parent).unwrap();
-        assert_eq!(st.apply(&p), Err(crate::prim::Mismatch { key: Key::Pages }));
+        assert_eq!(st.apply(&p), Err(crate::prim::Mismatch { key: p.key }));
     }
 
     /// `f`'s result in a release build. A debug build stops at damage in
@@ -4232,7 +5605,7 @@ mod tests {
         let (mut d, ids) = trimmed_history();
         let (v, current) = (ids[2], ids[3]);
         let prims = d.versions[&v].steps[0].prims.clone();
-        damage_pages_before(&mut d, v);
+        damage_turn_before(&mut d, v);
         if let Some(undone) = unless_debug(|| d.undo().map(|l| l.map(str::to_owned))) {
             assert_eq!(undone, Err(Damaged { version: v }));
         }
@@ -4274,21 +5647,21 @@ mod tests {
         )
         .unwrap();
         let old_primary = d.primary();
-        let new = d.rebase_to_saved(SourceInfo {
-            name: "saved.pdf".into(),
-            ..SourceInfo::blank(d.store(), 6)
-        });
+        let saved = save_and_rebase(&mut d, false);
+        let new = d.primary();
         assert_ne!(new, old_primary);
         assert!(!d.is_dirty());
-        assert_eq!(d.page(0).unwrap().id, p5);
-        assert_eq!(d.page(0).unwrap().source, new);
+        assert_eq!(d.page(0).unwrap(), p5);
+        assert_eq!(def_at(&d, 0).base.source, new);
+        assert_eq!(def_at(&d, 0).base.src, saved);
         assert_eq!(order(&d), vec![0, 1, 2, 3, 4, 5]);
         // The rotation is the page's /Rotate, which a save writes as is.
-        assert_eq!(d.page(0).unwrap().rotation, Rotation::R90);
+        assert_eq!(rotation(&d, 0), Rotation::R90);
+        assert_eq!(d.render_delta(p5), Rotation::R0);
         // Undo still reaches the pre-save version over the old source.
         d.undo().unwrap();
-        assert_eq!(d.page(0).unwrap().source, old_primary);
-        assert_eq!(d.page(0).unwrap().index, 5);
+        assert_eq!(def_at(&d, 0).base.source, old_primary);
+        assert_eq!(def_at(&d, 0).base.index, 5);
         assert!(d.is_dirty());
     }
 
@@ -4355,25 +5728,23 @@ mod tests {
             "insert",
         )
         .unwrap();
-        let p = *d.page(1).unwrap();
-        assert_eq!(p.rotation, Rotation::R90);
-        assert_eq!(d.render_delta(&p), Rotation::R0);
-        assert_eq!(d.page_size(&p), LANDSCAPE);
-        assert_eq!(d.geom(&p).rotate, Rotation::R90);
+        let p = id_at(&d, 1);
+        assert_eq!(d.render_delta(p), Rotation::R0);
+        assert_eq!(d.page_size(p), LANDSCAPE);
+        assert_eq!(d.geom(p).rotate, Rotation::R90);
         // Turned again, it's turned from there, and PDFium adds the turn.
         d.apply(
             Edit::RotatePages {
-                ids: vec![p.id],
+                ids: vec![p],
                 by: Rotation::R90,
             },
             "rotate",
         )
         .unwrap();
-        let p = *d.page(1).unwrap();
-        assert_eq!(p.rotation, Rotation::R180);
-        assert_eq!(d.render_delta(&p), Rotation::R90);
-        assert_eq!(d.snapshot().render_delta(&p), Rotation::R90);
-        assert_eq!(d.page_size(&p).width, 612.0);
+        assert_eq!(rotation(&d, 1), Rotation::R180);
+        assert_eq!(d.render_delta(p), Rotation::R90);
+        assert_eq!(d.snapshot().render_delta(p), Rotation::R90);
+        assert_eq!(d.page_size(p).width, 612.0);
     }
 
     /// A page's rotation is its `/Rotate`: a save writes it as it is, and
@@ -4387,10 +5758,10 @@ mod tests {
             let saved = save_and_rebase(&mut d, incremental);
             assert_eq!(saved.geom(0).rotate, Rotation::R90, "{incremental}");
             assert_eq!(saved.geom(1).rotate, Rotation::R0, "{incremental}");
-            let p = *d.page(0).unwrap();
-            assert_eq!(p.rotation, Rotation::R90, "{incremental}");
-            assert_eq!(d.render_delta(&p), Rotation::R0, "{incremental}");
-            assert_eq!(d.page_size(&p), LANDSCAPE, "{incremental}");
+            let p = id_at(&d, 0);
+            assert_eq!(rotation(&d, 0), Rotation::R90, "{incremental}");
+            assert_eq!(d.render_delta(p), Rotation::R0, "{incremental}");
+            assert_eq!(d.page_size(p), LANDSCAPE, "{incremental}");
         }
     }
 
@@ -4422,7 +5793,7 @@ mod tests {
                 let primary = turned(&store, own, parent);
                 let mut d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
                 let page = id_at(&d, 0);
-                let was = d.page(0).unwrap().rotation;
+                let was = rotation(&d, 0);
                 let edit = match by {
                     Some(by) => Edit::RotatePages {
                         ids: vec![page],
@@ -4434,11 +5805,11 @@ mod tests {
                     },
                 };
                 d.apply(edit, "edit").unwrap();
-                let want = d.page(0).unwrap().rotation;
+                let want = rotation(&d, 0);
                 assert_eq!(want, was.plus(by.unwrap_or(Rotation::R0)), "{case}");
                 let saved = save_and_rebase(&mut d, incremental);
                 assert_eq!(saved.geom(0).rotate, want, "{case}");
-                assert_eq!(d.page(0).unwrap().rotation, want, "{case}");
+                assert_eq!(rotation(&d, 0), want, "{case}");
                 if incremental && by.is_none() {
                     let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
                     let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
@@ -4467,7 +5838,8 @@ mod tests {
             let annot = mark(0, AnnotKind::Square { rect });
             d.apply(Edit::AnnotAdd { page, annot }, "add").unwrap();
             let shown = |d: &Document| {
-                let AnnotKind::Square { rect } = d.state().annots[&page][0].kind else {
+                let AnnotKind::Square { rect } = d.state().marks_on(page).next().unwrap().kind
+                else {
                     unreachable!("the square");
                 };
                 d.geom(d.page(0).unwrap()).to_view().apply_box(rect)
@@ -4559,8 +5931,8 @@ mod tests {
             "c",
         )
         .unwrap();
-        let a = d.state().annots_on(p0).unwrap()[0].clone();
-        let b = d.state().annots_on(p2).unwrap()[0].clone();
+        let a = d.state().marks_on(p0).next().unwrap().clone();
+        let b = d.state().marks_on(p2).next().unwrap().clone();
         assert_eq!(a.partner(), Some(b.id));
         assert_eq!(b.partner(), Some(a.id));
         assert_eq!(d.state().find_annot(b.id).map(|(p, _)| p), Some(p2));
@@ -4568,18 +5940,18 @@ mod tests {
         // Deleting one end leaves the other: a group of one (decision 8).
         d.apply(Edit::AnnotDelete { page: p2, id: b.id }, "rm")
             .unwrap();
-        assert_eq!(d.state().annots_on(p0).unwrap().len(), 1);
-        assert!(d.state().annots_on(p2).is_none());
+        assert_eq!(d.state().marks_on(p0).count(), 1);
+        assert!(d.state().marks_on(p2).next().is_none());
         d.undo().unwrap();
-        assert_eq!(d.state().annots_on(p0).unwrap().len(), 1);
-        assert_eq!(d.state().annots_on(p2).unwrap().len(), 1);
+        assert_eq!(d.state().marks_on(p0).count(), 1);
+        assert_eq!(d.state().marks_on(p2).count(), 1);
     }
 
     #[test]
     fn a_group_runs_by_page_then_down_the_page_as_it_shows() {
         use crate::annot::{AnnotKind, Box2, Group};
         let mut d = doc();
-        let (p0, p1) = (d.page(0).unwrap().id, d.page(1).unwrap().id);
+        let (p0, p1) = (d.page(0).unwrap(), d.page(1).unwrap());
         let tick = |glyph: &str, y: f32| {
             mark(
                 0,
@@ -4689,7 +6061,7 @@ mod tests {
         let plain = add(&mut d, square(0));
         assert!(!plain.unencodable);
 
-        let written = &d.state().annots[&page][0];
+        let written = &d.state().marks_on(page).next().unwrap();
         let mut pdf = lopdf::Document::with_version("1.7");
         let main = crate::annot::to_pdf(written, &mut pdf).main;
         let utf16: Vec<u8> = [0xFE, 0xFF]
@@ -4786,8 +6158,7 @@ mod tests {
             stamp: None,
         };
         let d = Document::new(store, primary, &outline, Box::new(FixedCount(5)));
-        let flat = d.state().outline_flat();
-        let by = |t: &str| flat.iter().find(|(_, n)| n.title == t).unwrap().1.clone();
+        let by = |t: &str| bookmark(&d, t);
         assert!(by("A").style.bold);
         assert_eq!(by("A1").color, Some([0, 0, 255]));
         assert_eq!(by("A2").color, None);
@@ -4795,6 +6166,254 @@ mod tests {
         assert!(by("C").color.is_none() && by("C").style.is_plain());
         // Read, not edited: nothing to save.
         assert!(!d.is_dirty());
+    }
+
+    /// The keys `d`'s current version put, in order.
+    fn keys_put(d: &Document) -> Vec<Key> {
+        let (steps, _) = d.edge(d.current_version()).unwrap();
+        (steps.iter())
+            .flat_map(|s| s.prims.iter().map(|p| p.key))
+            .collect()
+    }
+
+    /// Editing a bookmark puts that bookmark alone: not its parent, the
+    /// top level or the bookmarks beside it (M10.5 §3.2).
+    #[test]
+    fn a_bookmark_edit_puts_one_bookmark() {
+        let mut d = doc();
+        let (a1, p4) = (bm(&d, "A1"), id_at(&d, 4));
+        let edit = Edit::OutlineEdit {
+            id: a1,
+            title: Some("First".into()),
+            target: Some(Some(p4)),
+            color: Some(Some([0, 0, 255])),
+            view: None,
+            style: None,
+        };
+        d.apply(edit, "Edit bookmark").unwrap();
+        assert_eq!(keys_put(&d), [Key::Bookmark(a1)]);
+        let b = bookmark(&d, "First");
+        assert_eq!((b.page(), b.color), (Some(p4), Some([0, 0, 255])));
+        assert_eq!(titles(&d)[1], (1, "First".into()));
+    }
+
+    /// An item going somewhere sheaf doesn't model, a link, opens kept
+    /// from the item it was read as. A Rewrite after a reorder writes its
+    /// `/A` again, and the `/SE`s of the file's items; so does one after a
+    /// save, from the saved file's items (M10.5 bug 15).
+    #[test]
+    fn a_uri_bookmark_is_kept() {
+        use crate::forms::fixture::{Form, outline_tree};
+        use lopdf::{Object, dictionary};
+        let mut f = Form::new(3);
+        let pages = f.pages.clone();
+        let link = f.pdf.add_object(dictionary! {
+            "S" => "URI",
+            "URI" => Object::string_literal("https://example.com/"),
+        });
+        let section = f
+            .pdf
+            .add_object(dictionary! { "Type" => "StructElem", "S" => "Sect" });
+        let title = Object::string_literal;
+        let site = dictionary! { "Title" => title("Site"), "A" => link, "SE" => section };
+        let mut third = dictionary! { "Title" => title("Third"), "SE" => section };
+        third.set("Dest", vec![pages[2].into(), "Fit".into()]);
+        let items = outline_tree(&mut f, vec![(0, site), (0, third)]);
+        let store = Store::new();
+        let primary = file(&store, f.bytes(), "links.pdf");
+        let read = crate::open::outline(&primary.src);
+        let facts: Vec<_> = read.iter().map(|i| (i.object, i.kept, i.page)).collect();
+        assert_eq!(
+            facts,
+            [
+                (Some(items[0]), true, None),
+                (Some(items[1]), false, Some(2))
+            ]
+        );
+        let mut d = Document::new(store, primary, &read, Box::new(FixedCount(10)));
+        let site = bookmark(&d, "Site");
+        assert_eq!(site.target, Some(Target::Kept));
+        assert_eq!(site.src.as_ref().map(|r| r.id), Some(items[0]));
+        // What a file's items say: each one's page, the URI its `/A`
+        // opens, and whether it has an `/SE`.
+        let written = |bytes: Vec<u8>| -> Vec<(Option<u32>, Option<String>, bool)> {
+            let src = crate::forms::fixture::source(bytes.clone());
+            let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+            let uri = |id| {
+                let item = pdf.get_dictionary(id).ok()?;
+                let action = pdf.get_dictionary(item.get(b"A").ok()?.as_reference().ok()?);
+                Some(crate::file::pdf_text(action.ok()?.get(b"URI").ok()?))
+            };
+            (crate::open::outline(&src).into_iter())
+                .map(|i| {
+                    let item = pdf.get_dictionary(i.object.unwrap()).unwrap();
+                    (i.page, uri(i.object.unwrap()), item.has(b"SE"))
+                })
+                .collect()
+        };
+        let want = |third| {
+            [
+                (None, Some("https://example.com/".to_string()), true),
+                (Some(third), None, true),
+            ]
+        };
+        let (first, last) = (id_at(&d, 0), id_at(&d, 2));
+        let to_front = Edit::MovePages {
+            ids: vec![last],
+            before: Some(first),
+        };
+        d.apply(to_front, "Move").unwrap();
+        assert_eq!(
+            written(crate::save::rewrite(&d.snapshot()).unwrap()),
+            want(0)
+        );
+        // An incremental save writes the outline anew once it changed.
+        let rename = Edit::OutlineEdit {
+            id: bm(&d, "Third"),
+            title: Some("3".into()),
+            target: None,
+            color: None,
+            view: None,
+            style: None,
+        };
+        d.apply(rename, "Rename").unwrap();
+        let appended = crate::incremental::incremental(&d.snapshot()).unwrap();
+        assert_eq!(written(appended), want(0));
+        let saved = save_and_rebase(&mut d, false);
+        let site = bookmark(&d, "Site");
+        assert_eq!(site.target, Some(Target::Kept));
+        assert_eq!(site.src.as_ref().map(|r| r.src.id()), Some(saved.id()));
+        let back = Edit::MovePages {
+            ids: vec![last],
+            before: None,
+        };
+        d.apply(back, "Move").unwrap();
+        assert_eq!(
+            written(crate::save::rewrite(&d.snapshot()).unwrap()),
+            want(2)
+        );
+    }
+
+    /// Bookmarks nested deeper than a file is read are from no item after a
+    /// save, and the ones after them in pre-order are still each from its
+    /// own: a link bookmark after a deep branch keeps its `/A` through a
+    /// second save.
+    #[test]
+    fn a_bookmark_after_a_deep_branch_keeps_its_own_item() {
+        use crate::forms::fixture::{Form, outline_tree};
+        use lopdf::{Object, dictionary};
+        let mut f = Form::new(2);
+        let link = f.pdf.add_object(dictionary! {
+            "S" => "URI",
+            "URI" => Object::string_literal("https://example.com/"),
+        });
+        let site = dictionary! { "Title" => Object::string_literal("Site"), "A" => link };
+        outline_tree(&mut f, vec![(0, site)]);
+        let store = Store::new();
+        let primary = file(&store, f.bytes(), "deep.pdf");
+        let read = crate::open::outline(&primary.src);
+        let mut d = Document::new(store, primary, &read, Box::new(FixedCount(10)));
+        let deepest = crate::open::MAX_DEPTH + 2;
+        let items = (0..=deepest)
+            .map(|depth| NewOutlineItem {
+                title: format!("d{depth}"),
+                target: Some(id_at(&d, 0)),
+                view: None,
+                depth,
+            })
+            .collect();
+        let deep = Edit::OutlineInsertTree {
+            parent: None,
+            after: None,
+            items,
+        };
+        d.apply(deep, "Deep").unwrap();
+        // Where the saved file's "Site" sends a reader.
+        let uri = |bytes: Vec<u8>| {
+            let src = crate::forms::fixture::source(bytes.clone());
+            let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+            let item = (crate::open::outline(&src).into_iter())
+                .find(|i| i.title == "Site")
+                .unwrap();
+            let item = pdf.get_dictionary(item.object.unwrap()).unwrap();
+            let action = item.get(b"A").ok()?.as_reference().ok()?;
+            let action = pdf.get_dictionary(action).ok()?;
+            Some(crate::file::pdf_text(action.get(b"URI").ok()?))
+        };
+        let saved = save_and_rebase(&mut d, false);
+        for (depth, _, b) in d.state().bookmarks_preorder() {
+            let src = b.src.as_ref().map(|r| r.src.id());
+            match depth > crate::open::MAX_DEPTH {
+                true => assert_eq!(src, None, "{}", b.title),
+                false => assert_eq!(src, Some(saved.id()), "{}", b.title),
+            }
+        }
+        let site = bookmark(&d, "Site");
+        assert_eq!(site.target, Some(Target::Kept));
+        let again = crate::save::rewrite(&d.snapshot()).unwrap();
+        assert_eq!(uri(again).as_deref(), Some("https://example.com/"));
+    }
+
+    /// The header/footer sheaf drew opens as the generator that draws it,
+    /// on the pages it's on. Set again, it's the same generator, its id
+    /// kept, and a Rewrite draws it and writes its settings (M10.5 slice
+    /// 8's legacy generator).
+    #[test]
+    fn the_header_footer_is_a_generator() {
+        use crate::content::{PagOrigin, PaginationKind};
+        let store = Store::new();
+        let bytes = crate::forms::fixture::every_fact().bytes();
+        let primary = file(&store, bytes, "facts.pdf");
+        let src = primary.src.clone();
+        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        d.ready(crate::open::finish(&src, &in_progress::NoProgress))
+            .unwrap();
+        let pages: Vec<PageId> = d.state().order().iter().copied().collect();
+        let only = |d: &Document| {
+            let gens: Vec<Arc<Generator>> = d.state().generators().values().cloned().collect();
+            assert_eq!(gens.len(), 1);
+            (gens[0].id, gens[0].spec.header_footer().unwrap().clone())
+        };
+        let (id, hf) = only(&d);
+        assert_eq!(
+            (hf.texts[0].as_str(), &hf.pages),
+            ("Draft", &Some(vec![pages[2]]))
+        );
+        assert!(!d.header_footer_dirty());
+        for text in ["Final", "Final, again"] {
+            let mut hf = crate::stamps::HeaderFooter::clone(&hf);
+            hf.texts[0] = text.into();
+            let set = Edit::SetHeaderFooter {
+                header_footer: Some(hf),
+            };
+            d.apply(set, "Header & footer").unwrap();
+            assert_eq!(keys_put(&d), [Key::Generator(id)]);
+            assert_eq!(only(&d).0, id, "{text}");
+        }
+        assert!(d.header_footer_dirty());
+        let saved = crate::forms::fixture::source(crate::save::rewrite(&d.snapshot()).unwrap());
+        let (written, scope) = crate::stamps::from_catalog(saved.pdf()).unwrap();
+        assert_eq!(
+            (written.texts[0].as_str(), scope),
+            ("Final, again", Some(vec![2]))
+        );
+        let drawn: Vec<Vec<(PaginationKind, PagOrigin)>> = (0..3)
+            .map(|i| {
+                let blocks = saved.blocks(i).unwrap();
+                blocks
+                    .pagination
+                    .iter()
+                    .map(|p| (p.kind, p.origin))
+                    .collect()
+            })
+            .collect();
+        let header = (PaginationKind::Header, PagOrigin::SheafLegacy);
+        assert_eq!(drawn, [vec![], vec![], vec![header]]);
+        let remove = Edit::SetHeaderFooter {
+            header_footer: None,
+        };
+        d.apply(remove, "Remove header & footer").unwrap();
+        assert!(d.state().generators().is_empty());
     }
 
     #[test]
@@ -4827,8 +6446,8 @@ mod tests {
         )
         .unwrap();
         let (new0, new1) = (id_at(&d, 6), id_at(&d, 7));
-        let on0 = d.state().annots_on(new0).unwrap().clone();
-        let on1 = d.state().annots_on(new1).unwrap().clone();
+        let on0 = d.state().marks_on(new0).cloned().collect::<Vec<_>>();
+        let on1 = d.state().marks_on(new1).cloned().collect::<Vec<_>>();
         assert_eq!((on0.len(), on1.len()), (2, 2));
         let all: Vec<AnnotId> = on0.iter().chain(on1.iter()).map(|a| a.id).collect();
         // Fresh ids, none of the file's, all distinct.
@@ -4841,7 +6460,7 @@ mod tests {
         assert_eq!(on1[1].partner(), None);
         // Undo takes them away with the pages.
         d.undo().unwrap();
-        assert!(d.state().annots_on(new0).is_none());
+        assert!(d.state().marks_on(new0).next().is_none());
     }
 
     #[test]
@@ -4871,8 +6490,8 @@ mod tests {
         .unwrap();
         // p1 keeps its mark and gains the replacement's; p2 is gone, and so
         // are its marks.
-        assert_eq!(d.state().annots_on(p1).unwrap().len(), 2);
-        assert!(d.state().annots.get(&p2).is_none());
+        assert_eq!(d.state().marks_on(p1).count(), 2);
+        assert!(d.state().marks_on(p2).next().is_none());
     }
 
     #[test]
@@ -4889,18 +6508,212 @@ mod tests {
             )
             .unwrap();
         }
-        let ids: Vec<u64> = d
-            .state()
-            .annots_on(p)
-            .unwrap()
-            .iter()
-            .map(|a| a.id.0)
-            .collect();
+        let ids: Vec<u64> = d.state().marks_on(p).map(|a| a.id.0).collect();
         let unique: HashSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), 50);
         assert!(ids.iter().all(|&id| id > 0 && id < 1 << 53));
         // Not handed out in order, as two copies of a file would.
         assert_ne!(ids, (ids[0]..ids[0] + 50).collect::<Vec<_>>());
+    }
+
+    /// `bytes` opened as a file opens, in a store of its own.
+    fn reopened(bytes: Vec<u8>) -> Document {
+        let store = Store::new();
+        let info = file(&store, bytes, "saved.pdf");
+        let src = info.src.clone();
+        let mut d = crate::open::start(store, info, Box::new(FixedCount(10)));
+        d.ready(crate::open::finish(&src, &in_progress::NoProgress))
+            .unwrap();
+        d
+    }
+
+    /// The page stamp mark `id` of `d` holds.
+    fn stamp_held(d: &Document, id: AnnotId) -> Option<FormRef> {
+        d.state().annot(id)?.mark_record()?.stamp.clone()
+    }
+
+    /// A page stamp's mark finds its page when it's added: in the store,
+    /// placed and held; else in a registered file whose marks draw it, the
+    /// primary's first; else in the generated cache, read into the store;
+    /// else nowhere, and the edit fails, naming it. An update that names
+    /// the same stamp keeps what it holds.
+    #[test]
+    fn a_stamp_resolves_from_the_store_a_source_or_the_cache() {
+        use crate::forms::fixture::{self, MARK_STAMP};
+        let stamp = fixture::every_mark_kind()[17].clone();
+        let add = |d: &mut Document, annot: Annot| {
+            let page = d.page(0).unwrap();
+            let out = d.apply(Edit::AnnotAdd { page, annot }, "stamp");
+            out.map(|_| d.state().marks_on(page).last().unwrap().id)
+        };
+        // Placed: the store's, held until it's added.
+        let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+        let held = fixture::mark_blobs(d.store());
+        let id = add(&mut d, stamp.clone()).unwrap();
+        drop(held);
+        let placed = stamp_held(&d, id);
+        assert!(matches!(&placed, Some(FormRef::Blob(b)) if b.id().stem() == *MARK_STAMP));
+        let mut a = d.state().find_annot(id).unwrap().1.clone();
+        a.contents = "edited".into();
+        let page = d.page(0).unwrap();
+        d.apply(Edit::AnnotUpdate { page, annot: a }, "edit")
+            .unwrap();
+        assert_eq!(stamp_held(&d, id), placed);
+        let saved = crate::save::rewrite(&d.snapshot()).unwrap();
+
+        // Nowhere: the edit fails, and says which.
+        let mut other = new_doc(1, &[], Box::new(FixedCount(10)));
+        let err = add(&mut other, stamp.clone()).unwrap_err();
+        assert!(format!("{err:#}").contains("Approved"), "{err:#}");
+        // A file whose pages came in holds it.
+        let info = file(other.store(), saved.clone(), "stamped.pdf");
+        let came = info.src.clone();
+        insert_all(&mut other, info);
+        let id = add(&mut other, stamp.clone()).unwrap();
+        assert!(matches!(stamp_held(&other, id), Some(FormRef::Base(at)) if at.src == came));
+        // The primary holds it.
+        let mut opened = reopened(saved);
+        let primary = opened.source(opened.primary()).unwrap().src.clone();
+        let id = add(&mut opened, stamp.clone()).unwrap();
+        assert!(matches!(stamp_held(&opened, id), Some(FormRef::Base(at)) if at.src == primary));
+
+        // The generated cache has it: read into the store.
+        let pdf = crate::generated::blank_pdf(fastrand::u16(300..10_000).into(), 50.0).unwrap();
+        let path = crate::generated::store(&pdf).unwrap();
+        let cached = Annot {
+            kind: AnnotKind::PageStamp {
+                rect: crate::annot::Box2 {
+                    x: 10.0,
+                    y: 10.0,
+                    w: 100.0,
+                    h: 50.0,
+                },
+                stamp: crate::generated::stem_of(&path),
+                name: "Cached".into(),
+                text: None,
+            },
+            ..stamp
+        };
+        let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+        let id = add(&mut d, cached).unwrap();
+        let Some(FormRef::Blob(b)) = stamp_held(&d, id) else {
+            panic!("the cache's")
+        };
+        assert_eq!(**b.bytes(), *pdf);
+        let origin = Origin::File(path.clone().into());
+        assert!(matches!(b.blob().kind(), BlobKind::Pdf { origin: o, .. } if *o == origin));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An attachment's mark finds its file when it's added: in the store,
+    /// attached and held; else in a registered file whose marks embed it,
+    /// decoded into the store. Never in the generated cache: one nothing
+    /// holds isn't found, and the edit fails, naming it.
+    #[test]
+    fn an_attachment_is_a_blob_never_a_cache_file() {
+        use crate::forms::fixture::{self, MARK_FILE, MARK_FILE_BYTES};
+        let attach = fixture::every_mark_kind()[23].clone();
+        let add = |d: &mut Document| {
+            let page = d.page(0).unwrap();
+            let out = d.apply(
+                Edit::AnnotAdd {
+                    page,
+                    annot: attach.clone(),
+                },
+                "attach",
+            );
+            out.map(|_| d.state().marks_on(page).last().unwrap().id)
+        };
+        let file_held = |d: &Document, id: AnnotId| {
+            let file = d.state().annot(id)?.mark_record()?.file.clone()?;
+            assert!(matches!(file.blob().kind(), BlobKind::Attachment));
+            Some(file)
+        };
+        // Attached: the store's, held until it's added, then the mark's.
+        let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+        let held = fixture::mark_blobs(d.store());
+        let id = add(&mut d).unwrap();
+        drop(held);
+        let attached = file_held(&d, id).unwrap();
+        assert_eq!(
+            (&**attached.bytes(), attached.id().stem()),
+            (MARK_FILE_BYTES, MARK_FILE.clone())
+        );
+        let saved = crate::save::rewrite(&d.snapshot()).unwrap();
+
+        // Nowhere: the edit fails, and says which.
+        let mut other = new_doc(1, &[], Box::new(FixedCount(10)));
+        let err = add(&mut other).unwrap_err();
+        assert!(format!("{err:#}").contains("notes.txt"), "{err:#}");
+        // A file whose pages came in embeds it.
+        let info = file(other.store(), saved, "attached.pdf");
+        insert_all(&mut other, info);
+        let id = add(&mut other).unwrap();
+        assert_eq!(&**file_held(&other, id).unwrap().bytes(), MARK_FILE_BYTES);
+    }
+
+    /// What marks hold lives as long as they do (M10.5 slice 8): a file
+    /// attached and a library stamp placed, every blob the caller held
+    /// dropped, the bytes stay through undo and redo, and both saves write
+    /// them, the file reopened reading the same. The store counts them
+    /// while a version holds the marks.
+    #[test]
+    fn blob_liveness() {
+        use crate::forms::fixture::{self, MARK_FILE_BYTES};
+        let every = fixture::every_mark_kind();
+        let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+        let p0 = d.page(0).unwrap();
+        let before = d.store().bytes();
+        let [stamp, file] = fixture::mark_blobs(d.store());
+        let held = stamp.len() + file.len();
+        for annot in [every[17].clone(), every[23].clone()] {
+            d.apply(Edit::AnnotAdd { page: p0, annot }, "add").unwrap();
+        }
+        drop((stamp, file));
+        assert_eq!(d.store().bytes(), before + held);
+        // The stamp's page draws its square, whichever PDF holds it.
+        let square = |form: &FormRef| {
+            let pdf = lopdf::Document::load_mem(&form.to_pdf().unwrap()).unwrap();
+            let drawn = pdf.objects.values().filter_map(|o| o.as_stream().ok());
+            let drawn: Vec<Vec<u8>> = drawn
+                .map(|s| {
+                    s.decompressed_content()
+                        .unwrap_or_else(|_| s.content.clone())
+                })
+                .collect();
+            let square = b"0 0 20 20 re";
+            assert!(
+                drawn
+                    .iter()
+                    .any(|c| c.windows(square.len()).any(|w| w == square))
+            );
+        };
+        let check = |d: &Document, page: PageId| {
+            let marks: Vec<&Mark> = d.state().mark_records_on(page).collect();
+            assert_eq!(marks.len(), 2);
+            square(marks[0].stamp.as_ref().unwrap());
+            assert_eq!(&**marks[1].file.as_ref().unwrap().bytes(), MARK_FILE_BYTES);
+        };
+        check(&d, p0);
+        d.undo().unwrap();
+        d.undo().unwrap();
+        assert!(d.state().mark_records_on(p0).next().is_none());
+        assert_eq!(
+            d.store().bytes(),
+            before + held,
+            "the undone versions hold them"
+        );
+        d.redo().unwrap();
+        d.redo().unwrap();
+        check(&d, p0);
+        let snap = d.snapshot();
+        for saved in [
+            crate::save::rewrite(&snap).unwrap(),
+            crate::incremental::incremental(&snap).unwrap(),
+        ] {
+            let back = reopened(saved);
+            check(&back, back.page(0).unwrap());
+        }
     }
 
     #[test]
@@ -4939,7 +6752,7 @@ mod tests {
             "add",
         )
         .unwrap();
-        let stored = d.state().annots_on(p1).unwrap()[0].clone();
+        let stored = d.state().marks_on(p1).next().unwrap().clone();
         assert_ne!(stored.id, AnnotId(0), "id assigned by the document");
         let mut upd = stored.clone();
         upd.color = [0, 0, 255];
@@ -4951,15 +6764,15 @@ mod tests {
             "upd",
         )
         .unwrap();
-        assert_eq!(d.state().annots_on(p1).unwrap()[0].color, [0, 0, 255]);
+        assert_eq!(d.state().marks_on(p1).next().unwrap().color, [0, 0, 255]);
         assert_eq!(d.snapshot().annots_dirty.len(), 1);
         d.apply(Edit::DuplicatePages { ids: vec![p1] }, "dup")
             .unwrap();
         let p1_copy = id_at(&d, 2);
-        assert_ne!(d.state().annots_on(p1_copy).unwrap()[0].id, stored.id);
+        assert_ne!(d.state().marks_on(p1_copy).next().unwrap().id, stored.id);
         d.apply(Edit::DeletePages { ids: vec![p1_copy] }, "del")
             .unwrap();
-        assert!(d.state().annots_on(p1_copy).is_none());
+        assert!(d.state().marks_on(p1_copy).next().is_none());
         d.apply(
             Edit::AnnotDelete {
                 page: p1,
@@ -4968,9 +6781,9 @@ mod tests {
             "rm",
         )
         .unwrap();
-        assert!(d.state().annots_on(p1).is_none());
+        assert!(d.state().marks_on(p1).next().is_none());
         d.undo().unwrap();
-        assert_eq!(d.state().annots_on(p1).unwrap().len(), 1);
+        assert_eq!(d.state().marks_on(p1).count(), 1);
     }
 
     #[test]
@@ -5022,12 +6835,13 @@ mod tests {
     #[test]
     fn a_batch_keeps_each_slot_s_change_on_its_last_step() {
         let mut d = doc();
-        let before = d.state().pages.clone();
-        let rotate = |d: &Document, i| Edit::RotatePages {
-            ids: vec![id_at(d, i)],
+        let page = id_at(&d, 0);
+        let before = d.state().get(&Key::Geom(page));
+        let rotate = Edit::RotatePages {
+            ids: vec![page],
             by: Rotation::R90,
         };
-        d.apply_batch(vec![rotate(&d, 0), rotate(&d, 1)], "rotate two")
+        d.apply_batch(vec![rotate.clone(), rotate], "rotate twice")
             .unwrap();
         let steps = &d.versions[&d.cursor].steps;
         assert_eq!(steps.len(), 2, "each edit stays");
@@ -5035,9 +6849,10 @@ mod tests {
         let [p] = &steps[1].prims[..] else {
             panic!("one prim: {:?}", steps[1].prims)
         };
-        assert_eq!(p.key, Key::Pages);
-        assert!(same(p.before.as_ref(), Some(&Val::Pages(before))));
-        assert!(same(p.after.as_ref(), d.state().get(&Key::Pages).as_ref()));
+        assert_eq!(p.key, Key::Geom(page));
+        assert!(same(p.before.as_ref(), before.as_ref()));
+        assert!(same(p.after.as_ref(), d.state().get(&p.key).as_ref()));
+        assert_eq!(rotation(&d, 0), Rotation::R180);
     }
 
     #[test]
@@ -5084,15 +6899,11 @@ mod tests {
         d.apply(Edit::SetTextLayers { layers }, "ocr").unwrap();
     }
 
+    /// Each page's recognized text, by position.
     fn layer_texts(d: &Document) -> Vec<(usize, String)> {
-        let mut v: Vec<(usize, String)> = d
-            .state()
-            .text_layers
-            .iter()
-            .map(|(id, l)| (d.index_of(*id).unwrap(), l.words[0].text.clone()))
-            .collect();
-        v.sort();
-        v
+        (d.state().pages().enumerate())
+            .filter_map(|(i, (_, def, _))| Some((i, def.content.ocr_text()?.words[0].text.clone())))
+            .collect()
     }
 
     #[test]
@@ -5100,10 +6911,10 @@ mod tests {
         let mut d = doc();
         set(&mut d, &[1, 3], "a");
         assert_eq!(layer_texts(&d), vec![(1, "a".into()), (3, "a".into())]);
-        assert!(d.state().has_text_layer(id_at(&d, 1)));
+        assert!(d.state().ocr_text(id_at(&d, 1)).is_some());
         assert!(d.is_dirty());
         d.undo().unwrap();
-        assert!(d.state().text_layers.is_empty());
+        assert!(layer_texts(&d).is_empty());
         d.redo().unwrap();
         assert_eq!(layer_texts(&d).len(), 2);
         // Replacing a page's layer is a new version.
@@ -5172,8 +6983,8 @@ mod tests {
         );
         let copy = id_at(&d, 2);
         assert!(Arc::ptr_eq(
-            d.state().text_layer(dup).unwrap(),
-            d.state().text_layer(copy).unwrap()
+            d.state().ocr_text(dup).unwrap(),
+            d.state().ocr_text(copy).unwrap()
         ));
         // Replacing a page's content makes its OCR stale.
         let other = d.add_source(SourceInfo::blank(d.store(), 2));
@@ -5210,7 +7021,7 @@ mod tests {
         assert_eq!(layer_texts(&d).len(), 3);
         assert_eq!(d.undo_label(), Some("OCR batch 2"));
         d.undo().unwrap();
-        assert!(d.state().text_layers.is_empty());
+        assert!(layer_texts(&d).is_empty());
         assert!(!d.job_is_current(job));
         assert!(d.job_is_undone(job));
         d.redo().unwrap();
@@ -5283,7 +7094,7 @@ mod tests {
         // Undo peels the second batch, then the rotation, then the first.
         d.undo().unwrap();
         assert_eq!(layer_texts(&d).len(), 1);
-        assert_eq!(d.page(5).unwrap().rotation, Rotation::R90);
+        assert_eq!(rotation(&d, 5), Rotation::R90);
     }
 
     #[test]
@@ -5475,14 +7286,14 @@ mod tests {
         let mut d = doc();
         set(&mut d, &[0], "a");
         d.rebase_to_saved(SourceInfo::blank(d.store(), 6));
-        assert!(d.state().text_layers.is_empty());
+        assert!(layer_texts(&d).is_empty());
         assert!(!d.is_dirty());
         // The version before the save still carries its layer, so undoing
         // across the save re-emits it against the old source.
         d.undo().unwrap();
-        assert!(d.state().text_layers.is_empty(), "pre-OCR version");
+        assert!(layer_texts(&d).is_empty(), "pre-OCR version");
         d.redo().unwrap();
-        assert!(d.state().text_layers.is_empty(), "rebased version");
+        assert!(layer_texts(&d).is_empty(), "rebased version");
     }
 
     #[test]
@@ -5509,11 +7320,20 @@ mod tests {
 
     #[test]
     fn an_added_mark_costs_its_page_not_the_document() {
-        let marks = (0..2000u32)
-            .map(|i| (i, (1..=10).map(|j| square(u64::from(i) * 10 + j)).collect()))
+        let mark = |id| FileAnnot {
+            object: None,
+            slot: 0,
+            body: FileBody::Mark {
+                annot: Box::new(square(id)),
+                held: None,
+            },
+        };
+        let mut annots = FileAnnots::default();
+        annots.pages = (0..2000u32)
+            .map(|i| (i, (1..=10).map(|j| mark(u64::from(i) * 10 + j)).collect()))
             .collect();
         let facts = Facts {
-            marks,
+            annots: Arc::new(annots),
             ..Default::default()
         };
         let mut d = opened_doc(2000, facts, Box::new(FixedCount(10)));
@@ -5531,6 +7351,31 @@ mod tests {
         assert!(stats.step_bytes < 4 << 10, "{}", stats.step_bytes);
         let snapshot = *stats.snapshot_bytes.last().unwrap();
         assert!(snapshot < 16 << 10, "{snapshot}");
+    }
+
+    /// Renaming one bookmark of 2,000 costs it, not the outline: 375,627
+    /// bytes of steps while the outline was one value.
+    #[test]
+    fn renaming_a_bookmark_costs_it_not_the_outline() {
+        let titles: Vec<String> = (0..2000).map(|i| format!("b{i}")).collect();
+        let items: Vec<(&str, Option<u32>, u16)> = (titles.iter().enumerate())
+            .map(|(i, t)| (t.as_str(), Some(i as u32 % 10), u16::from(i % 10 != 0)))
+            .collect();
+        let mut d = new_doc(10, &flat(&items), Box::new(FixedCount(10)));
+        let id = d.state().bookmarks_preorder()[1001].1;
+        let rename = Edit::OutlineEdit {
+            id,
+            title: Some("Renamed".into()),
+            target: None,
+            color: None,
+            view: None,
+            style: None,
+        };
+        d.apply(rename, "Rename").unwrap();
+        let stats = d.stats();
+        assert!(stats.step_bytes < 2 << 10, "{}", stats.step_bytes);
+        let snapshot = *stats.snapshot_bytes.last().unwrap();
+        assert!(snapshot < 4 << 10, "{snapshot}");
     }
 
     /// `bytes` as the file `name`, parsed into `store`.
@@ -5656,7 +7501,13 @@ mod tests {
         assert_eq!(first.sources, [d.primary(), kept]);
         assert!(d.source(gone).is_none(), "its branch was pruned");
         assert_eq!(d.page_count(), 5);
-        assert!(d.state().pages.iter().all(|p| d.source(p.source).is_some()));
+        let shown = d.state().pages().map(|(_, def, _)| def.base.source);
+        assert!(
+            shown
+                .collect::<Vec<_>>()
+                .iter()
+                .all(|&s| d.source(s).is_some())
+        );
         let bytes = |sid| d.source(sid).unwrap().src.bytes().len();
         assert_eq!(d.store().bytes(), bytes(d.primary()) + bytes(kept));
     }
@@ -5715,7 +7566,10 @@ mod tests {
             "Plugin edits",
         )
         .unwrap();
-        assert_eq!(d.state().outline.len(), before.outline.len() + 2);
+        assert_eq!(
+            d.state().outline_roots().len(),
+            before.outline_roots().len() + 2
+        );
         assert_eq!(d.undo_label(), Some("Plugin edits"));
         d.undo().unwrap();
         assert_eq!(*d.state(), before);
@@ -5763,7 +7617,7 @@ mod tests {
     fn insert_tree_nests_in_one_step() {
         let mut d = doc();
         let (p0, p3) = (id_at(&d, 0), id_at(&d, 3));
-        let first_top = d.state().outline[0].id;
+        let first_top = d.state().outline_roots()[0];
         let item = |title: &str, target, depth| NewOutlineItem {
             title: title.into(),
             target,
@@ -5784,11 +7638,8 @@ mod tests {
             "Bookmark matches",
         )
         .unwrap();
-        let titles: Vec<(u16, String)> = d
-            .state()
-            .outline_flat()
+        let titles: Vec<(u16, String)> = titles(&d)
             .into_iter()
-            .map(|(depth, n)| (depth, n.title.clone()))
             .filter(|(_, t)| {
                 ["Accounts", "…4821", "…9930", "Loose", "A", "B"].contains(&t.as_str())
             })
@@ -5806,7 +7657,7 @@ mod tests {
         );
         assert_eq!(d.undo_label(), Some("Bookmark matches"));
         d.undo().unwrap();
-        assert_eq!(d.state().outline.len(), 3);
+        assert_eq!(d.state().outline_roots().len(), 3);
         // Depths must nest properly.
         let bad = d.apply(
             Edit::OutlineInsertTree {

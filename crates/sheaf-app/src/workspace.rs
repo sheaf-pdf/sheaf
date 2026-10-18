@@ -1462,7 +1462,7 @@ impl Workspace {
         let Some(snapshot) = doc.read(cx).model_snapshot() else {
             return;
         };
-        let page_count = snapshot.state.pages.len();
+        let page_count = snapshot.state.page_count();
         cx.spawn_in(window, async move |ws, cx| {
             let current = cx
                 .background_executor()

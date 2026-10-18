@@ -30,7 +30,7 @@ impl Region {
 impl DocView {
     fn page_id_at(&self, index: usize) -> Option<PageId> {
         match &self.state {
-            State::Ready(doc) => doc.page_ref(index).map(|p| p.id),
+            State::Ready(doc) => doc.page_id(index),
             _ => None,
         }
     }

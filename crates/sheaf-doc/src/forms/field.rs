@@ -1,12 +1,12 @@
 //! The field model's types (M10 proposal 8): a form's terminal fields and
-//! their widgets, as `DocState` holds them. [`super::read`] makes them from
-//! a file.
+//! their widgets as [`super::read`] reads them from a file, and as the old
+//! writers read them (M10.5 slice 8's legacy projection, until slice 9).
+//! `DocState` holds a form as records: `FieldNode`s, their `Terminal`s,
+//! and `Widget` annotations on their pages.
 //!
-//! A field has a sheaf id; its full name is data. Widgets are kept by page
-//! (`DocState::widgets`), so moving or deleting a page carries them. Names
-//! from the file (`/AS` states, `/DR` fonts) are kept as Latin-1 text, one
-//! character per byte, so nothing is lost and they compare as the bytes
-//! did.
+//! A field has a sheaf id; its full name is data. Names from the file
+//! (`/AS` states, `/DR` fonts) are kept as Latin-1 text, one character per
+//! byte, so nothing is lost and they compare as the bytes did.
 
 use std::sync::Arc;
 
@@ -210,28 +210,9 @@ pub struct Field {
     /// when their names clashed with the document's (proposal 5). The
     /// full name starts with it.
     pub under: Option<Arc<str>>,
-}
-
-impl Field {
-    /// The full name in its source's form: without [`Field::under`].
-    pub fn source_name(&self) -> &str {
-        match &self.under {
-            Some(u) => self
-                .name
-                .strip_prefix(&**u)
-                .and_then(|n| n.strip_prefix('.'))
-                .unwrap_or(&self.name),
-            None => &self.name,
-        }
-    }
-
-    /// Whether any of its own actions, or its widgets', is a script.
-    pub fn has_scripts(&self, widgets: &[&Widget]) -> bool {
-        self.actions.iter().any(|(_, a)| a.has_script())
-            || widgets
-                .iter()
-                .any(|w| w.actions.iter().any(|(_, a)| a.has_script()))
-    }
+    /// Its widgets no page of the page tree lists: on page templates,
+    /// which aren't pages until a script spawns one (M10.5 §3.7).
+    pub outside: u16,
 }
 
 impl Field {
@@ -259,6 +240,8 @@ impl Field {
 pub struct Widget {
     pub field: FieldId,
     pub object: ObjectId,
+    /// Its dictionary is its field's: one object, field and widget.
+    pub merged: bool,
     /// Its place in its page's `/Annots`, which is how PDFium counts
     /// annotations.
     pub slot: usize,

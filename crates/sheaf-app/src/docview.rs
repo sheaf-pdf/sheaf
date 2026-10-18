@@ -5,9 +5,9 @@
 //! share its render handles and caches.
 //!
 //! The page sequence comes from `sheaf_doc::Document` (see
-//! docs/document-model.md): a virtual list of `PageRef`s over one or more
-//! source files, each with its own render worker. Caches key by `PageId`, so
-//! reordering pages costs nothing visually.
+//! docs/document-model.md): an order of pages, each showing a page of one
+//! of its source files, each file with its own render worker. Caches key by
+//! `PageId`, so reordering pages costs nothing visually.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -21,10 +21,9 @@ use gpui::{
     img, point, prelude::*, px, relative, rgb, rgba,
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
-use sheaf_doc::assets::MarkAssets;
 use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::save;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, FormRef, Pt};
 use sheaf_ui::button::Button;
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_area::{TextArea, TextAreaEvent};
@@ -33,11 +32,9 @@ use sheaf_ui::theme;
 
 use crate::markup_tools::{Drag, Tool, arrow_head, stroke_canvas, stroke_canvas_dashed};
 pub(crate) use crate::pane::Zoom;
-use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
+use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Shown, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
-use sheaf_doc::{
-    Document, Edit, EditOutcome, OutlineId, PageId, PageRef, SourceId, SourceInfo, Store,
-};
+use sheaf_doc::{Document, Edit, EditOutcome, OutlineId, PageId, SourceId, SourceInfo, Store};
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::{Job, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit};
 
@@ -173,8 +170,6 @@ pub(crate) struct Doc {
     /// Other tools' comments sheaf has hidden in the engines: (source, page
     /// in it, slot in its /Annots).
     pub(crate) foreign_hidden: HashSet<(SourceId, u32, usize)>,
-    /// Bumped when `foreign_annots` changes.
-    pub(crate) foreign_generation: u64,
     /// Text selected with the Select tool (see text_select.rs).
     pub(crate) text_sel: Option<crate::text_select::TextSel>,
     pub(crate) text_drag: Option<crate::text_select::TextDrag>,
@@ -194,12 +189,10 @@ pub(crate) struct Doc {
     pub(crate) group_list: Option<crate::groups::GroupList>,
     /// The right-click menu on a mark, where it was opened.
     pub(crate) mark_menu: Option<gpui::Point<gpui::Pixels>>,
-    /// Comments other tools left in the files the pages come from
-    /// (read-only), with the source each is in.
-    pub(crate) foreign_annots: Vec<(SourceId, sheaf_doc::file::ForeignAnnot)>,
-    pub(crate) selected_foreign: Option<usize>,
+    /// Another tool's comment selected, here or in the Comments panel.
+    pub(crate) selected_foreign: Option<AnnotId>,
     /// Another tool's comment being dragged, made ours when it's let go.
-    pub(crate) adopting: Option<usize>,
+    pub(crate) adopting: Option<AnnotId>,
     /// Files embedded in the primary file, and its portfolio schema if it
     /// is one (see attachments_panel.rs), once the file has opened.
     pub(crate) attachments: Vec<sheaf_doc::attachments::Attachment>,
@@ -225,19 +218,15 @@ pub(crate) struct Doc {
 }
 
 /// What an inserted or replacing file brings besides its pages, read on
-/// a background thread: sheaf's own marks (which the edit carries in) and
-/// what they hold, other tools' comments, its bookmarks, and its form.
+/// a background thread: what its pages hold (sheaf's own marks, which the
+/// edit carries in, and what they hold; the marks given new ids as the
+/// file was read; other tools' comments and links, which the edit takes
+/// from the source), and its bookmarks. Its form is read there too, into
+/// its source, which the edit takes it from.
 #[derive(Default)]
 pub(crate) struct Incoming {
-    pub marks: HashMap<u32, Vec<sheaf_doc::Annot>>,
-    /// The marks given new ids as the file was read, with the ids their
-    /// `/NM`s still say.
-    pub renamed: Vec<sheaf_doc::open::Renamed>,
-    /// The marks' stamps' pages and attachments' files.
-    pub assets: sheaf_doc::assets::SourceAssets,
-    pub foreign: Vec<sheaf_doc::file::ForeignAnnot>,
+    pub annots: Arc<sheaf_doc::open::FileAnnots>,
     pub outline: Vec<sheaf_doc::FlatOutlineItem>,
-    pub form: sheaf_doc::forms::FileForm,
 }
 
 impl Incoming {
@@ -245,18 +234,14 @@ impl Incoming {
     pub(crate) fn read(info: &SourceInfo) -> Incoming {
         let facts = sheaf_doc::open::finish(&info.src, &sheaf_ops::NoProgress);
         Incoming {
-            marks: facts.marks,
-            renamed: facts.renamed,
-            assets: facts.assets,
-            foreign: facts.foreign,
+            annots: facts.annots,
             outline: facts.outline,
-            form: facts.form,
         }
     }
 
     /// The marks, as `Edit::InsertPages` and `ReplacePages` carry them.
     pub(crate) fn edit_marks(&self) -> Vec<(u32, Vec<sheaf_doc::Annot>)> {
-        self.marks.iter().map(|(i, l)| (*i, l.clone())).collect()
+        self.annots.marks().into_iter().collect()
     }
 }
 
@@ -287,34 +272,30 @@ impl Doc {
         self.selected_marks
             .iter()
             .filter_map(|(p, id)| {
-                let a = st.annots_on(*p)?.iter().find(|a| a.id == *id)?.clone();
+                let a = st.find_annot(*id).filter(|(on, _)| on == p)?.1.clone();
                 Some((*p, a))
             })
             .collect()
     }
 
     /// After `source`'s pages came in with `incoming`: PDFium stops drawing
-    /// the marks sheaf now draws, and the file's other comments are listed.
+    /// the marks sheaf now draws.
     pub(crate) fn take_in(&mut self, source: SourceId, incoming: Incoming) {
-        if !incoming.marks.is_empty()
+        let marks = incoming.annots.marks();
+        if !marks.is_empty()
             && let Some(handle) = self.handles.get(&source)
         {
-            let renamed = incoming.renamed.iter().map(|r| (r.page, r.was));
-            drop(handle.hide_annots(marks_by_page(&incoming.marks, renamed)));
+            let renamed = incoming.annots.renamed.iter().map(|r| (r.page, r.was));
+            drop(handle.hide_annots(marks_by_page(&marks, renamed)));
         }
-        self.foreign_annots
-            .extend(incoming.foreign.into_iter().map(|f| (source, f)));
-        self.foreign_generation += 1;
-        self.forms
-            .incoming
-            .insert(source, Arc::new(incoming.form.facts));
     }
     pub(crate) fn primary(&self) -> &RenderHandle {
         &self.handles[&self.model.primary()]
     }
 
-    pub(crate) fn page_ref(&self, index: usize) -> Option<PageRef> {
-        self.model.page(index).copied()
+    /// The page at position `index`.
+    pub(crate) fn page_id(&self, index: usize) -> Option<PageId> {
+        self.model.page(index)
     }
 
     pub(crate) fn pane(&self) -> &Pane {
@@ -332,8 +313,9 @@ impl Doc {
 
     /// Page `index` as the active pane shows it (with rotate view): for
     /// mapping between page and screen, never for edits.
-    pub(crate) fn shown_ref(&self, index: usize) -> Option<PageRef> {
-        self.page_ref(index).map(|p| self.pane().shown(p))
+    pub(crate) fn shown_ref(&self, index: usize) -> Option<Shown> {
+        let st = self.model.state();
+        self.pane().shown(st, st.page_at(index)?)
     }
 
     /// Page `index` as the active pane draws it (M10.5 §5): its boxes,
@@ -341,14 +323,14 @@ impl Doc {
     /// takes PageSpace to the page as drawn, in points from its top-left
     /// (times the zoom's px per point), and `shown` is the size drawn.
     pub(crate) fn pane_geom(&self, index: usize) -> Option<Geom> {
-        self.shown_ref(index).map(|p| self.model.geom(&p))
+        self.shown_ref(index).map(|p| p.geom)
     }
 
     /// Page `index`'s edit frame: the page as it shows without rotate
     /// view, in points from its top-left, y down, which is where gestures
     /// build and edit marks. Its `from_view` takes them to PageSpace.
     pub(crate) fn edit_geom(&self, index: usize) -> Option<Geom> {
-        self.page_ref(index).map(|p| self.model.geom(&p))
+        self.page_id(index).map(|p| self.model.geom(p))
     }
 
     /// Bring `b`, a box in PageSpace on page `index`, into the active
@@ -373,22 +355,10 @@ impl Doc {
 
     /// Display index of the primary source's page `index`, if it's still in
     /// the document (search hits are reported in source pages).
-    /// Where page `index` of `source` is shown, if it is.
-    pub(crate) fn index_of_page_in(&self, source: SourceId, index: u32) -> Option<usize> {
-        self.model
-            .state()
-            .pages
-            .iter()
-            .position(|p| p.source == source && p.index == index)
-    }
-
     pub(crate) fn index_of_source_page(&self, index: u32) -> Option<usize> {
         let primary = self.model.primary();
-        self.model
-            .state()
-            .pages
-            .iter()
-            .position(|p| p.source == primary && p.index == index)
+        (self.model.state().pages())
+            .position(|(_, def, _)| def.base.source == primary && def.base.index == index)
     }
 
     /// Matches in unsaved OCR layers, which PDFium can't see, in document
@@ -399,13 +369,13 @@ impl Doc {
     ) -> Vec<Hit> {
         let state = self.model.state();
         let mut out = Vec::new();
-        for (order, p) in state.pages.iter().enumerate() {
-            let Some(layer) = state.text_layer(p.id) else {
+        for (order, (page, def, _)) in state.pages().enumerate() {
+            let Some(layer) = def.content.ocr_text() else {
                 continue;
             };
             for h in find(layer) {
                 out.push(Hit {
-                    page: p.id,
+                    page,
                     order,
                     rects: h.rects,
                     text: h.text,
@@ -430,8 +400,8 @@ impl Doc {
             let Some(order) = self.index_of_source_page(h.page) else {
                 continue;
             };
-            let page = state.pages[order].id;
-            if state.has_text_layer(page) {
+            let page = state.order()[order];
+            if state.ocr_text(page).is_some() {
                 continue;
             }
             let from_view = primary.src.geom(h.page).from_view();
@@ -470,12 +440,12 @@ impl Doc {
     /// Forget images of pages that now show a different source page.
     fn drop_stale_images(&mut self) {
         let mut stale: HashSet<PageId> = HashSet::new();
-        for p in self.model.state().pages.iter() {
-            let now = (p.source, p.index);
-            if let Some(was) = self.shown.insert(p.id, now)
+        for (id, def, _) in self.model.state().pages() {
+            let now = (def.base.source, def.base.index);
+            if let Some(was) = self.shown.insert(id, now)
                 && was != now
             {
-                stale.insert(p.id);
+                stale.insert(id);
             }
         }
         if stale.is_empty() {
@@ -956,7 +926,6 @@ impl DocView {
             comment_view: None,
             hidden_marks: HashSet::new(),
             foreign_hidden: HashSet::new(),
-            foreign_generation: 0,
             text_sel: None,
             text_drag: None,
             page_chars: HashMap::new(),
@@ -970,7 +939,6 @@ impl DocView {
             calibrate: Default::default(),
             group_list: None,
             mark_menu: None,
-            foreign_annots: Vec::new(),
             selected_foreign: None,
             adopting: None,
             labels: std::cell::RefCell::new((u64::MAX, None)),
@@ -1200,13 +1168,10 @@ impl DocView {
         let Some(view) = take_facts(&mut doc.model, blob, facts, recovered) else {
             return;
         };
-        let primary = doc.model.primary();
         doc.reading = None;
         if doc.notice.as_deref() == Some(STILL_OPENING) {
             doc.notice = None;
         }
-        doc.foreign_annots = view.foreign.into_iter().map(|f| (primary, f)).collect();
-        doc.foreign_generation += 1;
         doc.attachments = view.attachments;
         doc.collection = view.collection;
         doc.set_layers(view.layers);
@@ -1220,28 +1185,25 @@ impl DocView {
         }
         let st = doc.model.state();
         // Start with the top level expanded where the file leaves it open.
-        doc.outline_expanded = st.outline.iter().filter(|n| n.open).map(|n| n.id).collect();
+        doc.outline_expanded = (st.outline_roots().iter())
+            .filter(|&&id| st.bookmark(id).is_some_and(|b| b.open))
+            .copied()
+            .collect();
         if self.timing {
             eprintln!(
                 "[timing] ready: {} sheaf annotations, {} third-party, {} bookmarks, {} fields \
                  in {:?}, {:?} since launch",
-                st.annots.values().map(|l| l.len()).sum::<usize>(),
-                doc.foreign_annots.len(),
-                st.outline_flat().len(),
-                st.fields.len(),
+                st.marks().count(),
+                st.annots().filter(|(_, a)| a.foreign().is_some()).count(),
+                st.bookmark_count(),
+                st.terminals().count(),
                 started.elapsed(),
                 self.launched.elapsed()
             );
         }
         let mut drawn = drawn_marks(st);
         if !view.renamed.is_empty() {
-            let index: HashMap<PageId, u32> = st
-                .pages
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.id, i as u32))
-                .collect();
-            let at = |&(page, id): &(PageId, AnnotId)| Some((*index.get(&page)?, id));
+            let at = |&(page, id): &(PageId, AnnotId)| Some((st.pos_of(page)? as u32, id));
             hide_renamed(&mut drawn, view.renamed.iter().filter_map(at));
         }
         if doc.notice.is_none() {
@@ -1340,17 +1302,15 @@ impl DocView {
         let before: HashSet<OutlineId> = doc
             .model
             .state()
-            .outline_flat()
+            .bookmarks_preorder()
             .iter()
-            .map(|(_, n)| n.id)
+            .map(|&(_, id, _)| id)
             .collect();
         let result = doc.model.apply_batch(edits, label);
         if result.is_ok() {
-            reveal_new_bookmarks(
-                &doc.model.state().outline,
-                &before,
-                &mut doc.outline_expanded,
-            );
+            let rows = (doc.model.state().bookmarks_preorder().into_iter())
+                .map(|(depth, id, b)| (depth, id, !b.kids.is_empty()));
+            reveal_new_bookmarks(rows, &before, &mut doc.outline_expanded);
         }
         self.finish_edit(label, result, cx);
     }
@@ -1454,16 +1414,16 @@ impl DocView {
         let selection = doc
             .model
             .state()
-            .pages
+            .order()
             .iter()
-            .filter(|p| doc.selection.contains(&p.id))
-            .map(|p| p.id)
+            .filter(|p| doc.selection.contains(p))
+            .copied()
             .collect();
         Some(sheaf_plugin::DocContext {
             path: self.path.clone(),
             snapshot: doc.model.snapshot(),
             selection,
-            current_page: doc.page_ref(doc.current_page()).map(|p| p.id),
+            current_page: doc.page_id(doc.current_page()),
             text: crate::plugins::text_source(&doc.handles),
             ocr: Some(crate::plugins::ocr_source(&doc.handles, ocr)),
             render: Some(crate::plugins::render_source(&doc.handles)),
@@ -1476,18 +1436,15 @@ impl DocView {
             return Vec::new();
         };
         if doc.selection.is_empty() {
-            return doc
-                .page_ref(doc.current_page())
-                .map(|p| vec![p.id])
-                .unwrap_or_default();
+            return doc.page_id(doc.current_page()).into_iter().collect();
         }
         // Keep document order so the label and any insertion are predictable.
         doc.model
             .state()
-            .pages
+            .order()
             .iter()
-            .filter(|p| doc.selection.contains(&p.id))
-            .map(|p| p.id)
+            .filter(|p| doc.selection.contains(p))
+            .copied()
             .collect()
     }
 
@@ -1527,7 +1484,7 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        doc.selection = doc.model.state().pages.iter().map(|p| p.id).collect();
+        doc.selection = doc.model.state().order().iter().copied().collect();
         cx.emit(DocEvent::SelectionChanged);
         cx.notify();
     }
@@ -1550,11 +1507,12 @@ impl DocView {
             return false;
         };
         let st = doc.model.state().clone();
-        doc.selected_marks.retain(|(pid, aid)| {
-            st.annots_on(*pid)
-                .is_some_and(|l| l.iter().any(|a| a.id == *aid))
-        });
-        let live: HashSet<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
+        doc.selected_marks
+            .retain(|(pid, aid)| st.find_annot(*aid).is_some_and(|(on, _)| on == *pid));
+        if doc.selected_foreign.is_some_and(|id| !st.has_annot(id)) {
+            doc.selected_foreign = None;
+        }
+        let live: HashSet<PageId> = doc.model.state().order().iter().copied().collect();
         if doc.text_sel.is_some_and(|s| !live.contains(&s.page)) {
             doc.text_sel = None;
         }
@@ -1570,7 +1528,7 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let refs: Vec<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
+        let refs: Vec<PageId> = doc.model.state().order().iter().copied().collect();
         let Some(&id) = refs.get(index) else { return };
         if modifiers.shift {
             let anchor = doc
@@ -1613,11 +1571,11 @@ impl DocView {
         let before = doc
             .model
             .state()
-            .pages
+            .order()
             .iter()
             .skip(at)
-            .find(|p| !moving.contains(&p.id))
-            .map(|p| p.id);
+            .find(|p| !moving.contains(p))
+            .copied();
         let n = ids.len();
         let label = self.label("Move", n);
         self.apply(Edit::MovePages { ids, before }, &label, cx);
@@ -1847,8 +1805,12 @@ impl DocView {
                             save::save_to_path_noting(&snapshot, &path, signed, if_changed)?;
                         // What was written, read back: the source the
                         // document shows from now on. It's encrypted as the
-                        // file was, so it opens with the same password.
+                        // file was, so it opens with the same password. What
+                        // its pages hold and its form are read here, not when
+                        // the document takes it (`rebase_to_saved`).
                         let saved = SourceInfo::read(&store, &path, password.as_deref())?;
+                        saved.src.annots();
+                        saved.src.form();
                         let handle = RenderHandle::open_bytes(saved.src.bytes().clone(), password)?;
                         anyhow::Ok((saved, handle, strategy, notes))
                     }
@@ -1862,18 +1824,12 @@ impl DocView {
                 let ok = match result {
                     Ok((saved, handle, strategy, notes)) => {
                         let page_count = saved.src.page_count();
-                        let saved_src = saved.src.clone();
                         let sid = doc.model.rebase_to_saved(saved);
                         // Our marks are now in the file; keep PDFium from drawing them.
                         let pages = drawn_marks(doc.model.state());
                         doc.drawn_marks = pages.clone();
-                        // The saved file's third-party comments, at their
-                        // new page numbers.
-                        doc.foreign_annots.clear();
-                        doc.foreign_generation += 1;
                         // A new engine: nothing of theirs is hidden in it.
                         doc.foreign_hidden.retain(|(s, _, _)| *s != sid);
-                        reread_foreign(sid, saved_src, cx);
                         if !pages.is_empty() {
                             let rx = handle.hide_annots(pages);
                             cx.spawn(async move |this, cx| {
@@ -1950,10 +1906,10 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        if let Some(p) = doc.page_ref(0) {
+        if let Some(p) = doc.page_id(0) {
             self.apply(
                 Edit::RotatePages {
-                    ids: vec![p.id],
+                    ids: vec![p],
                     by: Rotation::R90,
                 },
                 "Rotate page",
@@ -2019,7 +1975,7 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let count = |v: &Self| match &v.state {
-            State::Ready(doc) => doc.model.state().annots_on(page).map_or(0, |l| l.len()),
+            State::Ready(doc) => doc.model.state().marks_on(page).count(),
             _ => 0,
         };
         let before = count(self);
@@ -2028,11 +1984,7 @@ impl DocView {
         // straight away.
         if count(self) > before
             && let State::Ready(doc) = &mut self.state
-            && let Some(id) = doc
-                .model
-                .state()
-                .annots_on(page)
-                .and_then(|l| l.last().map(|a| a.id))
+            && let Some(id) = doc.model.state().marks_on(page).last().map(|a| a.id)
         {
             doc.select_mark(Some((page, id)));
         }
@@ -2043,7 +1995,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let Some(p0) = doc.page_ref(0).map(|p| p.id) else {
+        let Some(p0) = doc.page_id(0) else {
             return;
         };
         let mut hl = self.new_annot(
@@ -2155,7 +2107,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let p1 = doc.page_ref(1).map(|p| p.id).unwrap_or(p0);
+        let p1 = doc.page_id(1).unwrap_or(p0);
         let mk = |rect: Box2| {
             self.new_annot(
                 AnnotKind::Connector {
@@ -2227,7 +2179,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let Some(p0) = doc.page_ref(0).map(|p| p.id) else {
+        let Some(p0) = doc.page_id(0) else {
             return;
         };
         let mut note = self.new_annot(
@@ -2260,14 +2212,14 @@ impl DocView {
     #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     pub(crate) fn page_ids(&self) -> Vec<PageId> {
         match &self.state {
-            State::Ready(doc) => doc.model.state().pages.iter().map(|p| p.id).collect(),
+            State::Ready(doc) => doc.model.state().order().iter().copied().collect(),
             _ => Vec::new(),
         }
     }
 
     fn doc_page_id(&self, index: usize) -> Option<PageId> {
         match &self.state {
-            State::Ready(doc) => doc.page_ref(index).map(|p| p.id),
+            State::Ready(doc) => doc.page_id(index),
             _ => None,
         }
     }
@@ -2420,12 +2372,8 @@ impl DocView {
         let snapshot = doc.model.snapshot();
         // Flattening keeps an attachment's icon and drops its file, as
         // Acrobat does: say so.
-        let files = snapshot
-            .state
-            .annots
-            .values()
-            .flatten()
-            .filter(|a| matches!(a.kind, AnnotKind::FileAttachment { .. }))
+        let files = (snapshot.state.marks())
+            .filter(|(_, a)| matches!(a.kind, AnnotKind::FileAttachment { .. }))
             .count()
             + doc
                 .attachments
@@ -2552,11 +2500,7 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let last = match &self.state {
-            State::Ready(doc) => doc
-                .model
-                .state()
-                .annots_on(page)
-                .and_then(|l| l.last().map(|a| a.id)),
+            State::Ready(doc) => doc.model.state().marks_on(page).last().map(|a| a.id),
             _ => None,
         };
         if let Some(id) = last {
@@ -2575,14 +2519,11 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(annot) = doc
-            .model
-            .state()
-            .annots_on(page)
-            .and_then(|l| l.iter().find(|a| a.id == id).cloned())
+        let Some((_, annot)) = (doc.model.state().find_annot(id)).filter(|(on, _)| *on == page)
         else {
             return;
         };
+        let annot = annot.clone();
         let hint = match annot.kind {
             AnnotKind::Replace { .. } => "Type the replacement; Ctrl+Enter or click away when done",
             AnnotKind::Insert { .. } => {
@@ -2627,11 +2568,7 @@ impl DocView {
         let text = ed.input.read(cx).text().to_string();
         // An insertion with nothing to insert isn't one.
         if text.trim().is_empty()
-            && let Some(cur) = doc
-                .model
-                .state()
-                .annots_on(ed.page)
-                .and_then(|l| l.iter().find(|a| a.id == ed.id))
+            && let Some((_, cur)) = doc.model.state().find_annot(ed.id)
             && matches!(cur.kind, AnnotKind::Insert { .. })
         {
             self.apply(
@@ -2648,14 +2585,10 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        if let Some(cur) = doc
-            .model
-            .state()
-            .annots_on(ed.page)
-            .and_then(|l| l.iter().find(|a| a.id == ed.id).cloned())
+        if let Some((_, cur)) = doc.model.state().find_annot(ed.id)
             && cur.contents != text
         {
-            let mut upd = cur;
+            let mut upd = cur.clone();
             upd.contents = text;
             upd.modified = sheaf_doc::pdf_date_now();
             self.apply(
@@ -2705,7 +2638,7 @@ impl DocView {
             return None;
         };
         let last_target = targets.last().and_then(|id| doc.model.index_of(*id));
-        last_target.and_then(|i| doc.page_ref(i + 1)).map(|p| p.id)
+        last_target.and_then(|i| doc.page_id(i + 1))
     }
 
     /// Insert every page of `path` after the current page (or after the
@@ -2785,9 +2718,7 @@ impl DocView {
                 let label = format!("Insert {name}");
                 let mut outcome = None;
                 let mixed = doc.model.scripts_mixed();
-                doc.model.set_source_form(sid, incoming.form.clone());
-                doc.model.set_source_renamed(sid, &incoming.renamed);
-                doc.model.set_source_assets(sid, &incoming.assets);
+                doc.model.set_source_renamed(sid, &incoming.annots.renamed);
                 match doc.model.apply(
                     Edit::InsertPages {
                         source: sid,
@@ -3358,7 +3289,7 @@ impl DocView {
 
     pub(crate) fn ensure_rendered(
         &mut self,
-        pref: PageRef,
+        pref: Shown,
         want: RenderRequest,
         cx: &mut Context<Self>,
     ) {
@@ -3452,22 +3383,18 @@ impl DocView {
         };
         let st = doc.model.state();
         let selected: Vec<usize> = st
-            .pages
+            .order()
             .iter()
             .enumerate()
-            .filter(|(_, p)| doc.selection.contains(&p.id))
+            .filter(|(_, p)| doc.selection.contains(p))
             .map(|(i, _)| i)
             .collect();
         let bookmark = doc.outline_selected.and_then(|id| {
-            let title = st
-                .outline_flat()
-                .into_iter()
-                .find(|(_, n)| n.id == id)
-                .map(|(_, n)| n.title.clone())?;
+            let title = st.bookmark(id)?.title.to_string();
             let pages = st
                 .bookmark_pages(id)?
                 .into_iter()
-                .filter_map(|p| st.index_of(p))
+                .filter_map(|p| st.pos_of(p))
                 .collect();
             Some((title, pages))
         });
@@ -3588,7 +3515,7 @@ impl DocView {
             source: src.src.clone(),
             page_size: doc
                 .shown_ref(doc.current_page())
-                .map(|p| doc.model.page_size(&p))
+                .map(|p| p.geom.shown())
                 .map(|s| (s.width, s.height)),
             dirty: doc.model.is_dirty(),
         })
@@ -3717,43 +3644,14 @@ pub(crate) fn failed(what: &str, e: &anyhow::Error) -> String {
 /// pages are the primary file's in order: as it opened, or as a save
 /// wrote it.
 fn drawn_marks(st: &sheaf_doc::DocState) -> Vec<(u32, Vec<String>)> {
-    st.pages
+    st.order()
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| {
-            let list = st.annots.get(&p.id)?;
-            Some((i as u32, list.iter().flat_map(|a| a.pdf_names()).collect()))
+        .filter_map(|(i, &p)| {
+            let names: Vec<String> = st.marks_on(p).flat_map(|a| a.pdf_names()).collect();
+            (!names.is_empty()).then_some((i as u32, names))
         })
         .collect()
-}
-
-/// Read the third-party comments in `src`, the file a save wrote, in the
-/// background and list them as `source`'s (after a save, the file's pages
-/// have new numbers), and what sheaf's marks hold in it, which is where
-/// they're found from then on: a file attached since the last save is the
-/// saved file's.
-fn reread_foreign(source: SourceId, src: sheaf_doc::Src, cx: &mut Context<DocView>) {
-    cx.spawn(async move |this, cx| {
-        let found = cx
-            .background_executor()
-            .spawn(async move { sheaf_doc::file::annots_in(src.pdf(), src.page_ids()) })
-            .await;
-        this.update(cx, |view, cx| {
-            if let State::Ready(doc) = &mut view.state
-                && doc.model.primary() == source
-            {
-                let foreign = found.foreign;
-                doc.model.set_saved_assets(source, &found.assets);
-                doc.foreign_annots.retain(|(s, _)| *s != source);
-                doc.foreign_annots
-                    .extend(foreign.into_iter().map(|f| (source, f)));
-                doc.foreign_generation += 1;
-                cx.notify();
-            }
-        })
-        .ok();
-    })
-    .detach();
 }
 
 /// Wrap a BGRA raster as a GPUI image without copying the pixel data.
@@ -3776,7 +3674,7 @@ impl Focusable for DocView {
 struct PagePlan {
     index: usize,
     /// As the pane shows it (rotate view included).
-    pref: PageRef,
+    pref: Shown,
     left: f32,
     top: f32,
     w: f32,
@@ -3792,7 +3690,7 @@ struct PaneFrame {
     /// Pages near the viewport whose images stay cached, with the rotation
     /// this pane draws them at.
     keep: Vec<(PageId, Rotation)>,
-    wants: Vec<(PageRef, RenderRequest)>,
+    wants: Vec<(Shown, RenderRequest)>,
 }
 
 /// In a non-continuous mode, pick the row a queued scroll lands on before
@@ -3987,12 +3885,12 @@ fn plan_pane(
     let fetch = visible.start.saturating_sub(PREFETCH)..(visible.end + PREFETCH).min(count);
     for i in visible.start.saturating_sub(KEEP)..(visible.end + KEEP).min(count) {
         let pref = &layout.refs[i];
-        frame.keep.push((pref.id, doc.model.render_delta(pref)));
+        frame.keep.push((pref.id, pref.render));
     }
     for i in fetch {
         let Some(r) = layout.rect(i) else { continue };
         let pref = layout.refs[i];
-        let rotation = doc.model.render_delta(&pref);
+        let rotation = pref.render;
         let (left, top, w, h) = (r.left, r.top, r.w, r.h);
         let dev_w = (w * scale).round().max(1.0) as u32;
         let dev_h = (h * scale).round().max(1.0) as u32;
@@ -4171,7 +4069,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         .bg(theme::PAGE)
         .shadow_md();
     // The turn the page's images were rendered with.
-    let rot = doc.model.render_delta(&pl.pref);
+    let rot = pl.pref.render;
     if let Some(prev) = doc.previews.get(&(pl.pref.id, rot)) {
         page_div = page_div.child(
             div()
@@ -4218,7 +4116,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     }
     // Hit rects, text and marks are in PageSpace; the pane frame puts them
     // on the page as drawn.
-    let pane = doc.model.geom(&pl.pref);
+    let pane = pl.pref.geom;
     let to_pane = pane.to_view();
     let size = pane.shown();
     let k = pl.w / size.width.max(1.0);
@@ -4284,12 +4182,11 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     page_div = page_div.children(header_footer_elements(doc, pl, k));
     // Our markup, drawn over the page as the pane shows it, less what the
     // comment filter or View > Hide Comments hides.
-    if let Some(list) = doc.model.state().annots_on(pl.pref.id)
-        && !doc.comments_hidden
-    {
-        let assets = doc.model.assets();
-        for a in list.iter().filter(|a| !doc.hidden_marks.contains(&a.id)) {
-            page_div = page_div.children(annot_elements(a, assets, &to_pane, size, k));
+    if !doc.comments_hidden {
+        let marks = doc.model.state().mark_records_on(pl.pref.id);
+        for m in marks.filter(|m| !doc.hidden_marks.contains(&m.annot.id)) {
+            let elements = annot_elements(&m.annot, m.stamp.as_ref(), &to_pane, size, k);
+            page_div = page_div.children(elements);
         }
     }
     // Selection outlines; handles when one mark is selected and nothing is
@@ -4341,11 +4238,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     }
     if let Some(ed) = &doc.annot_editor
         && ed.page == pl.pref.id
-        && let Some(a) = doc
-            .model
-            .state()
-            .annots_on(ed.page)
-            .and_then(|l| l.iter().find(|a| a.id == ed.id))
+        && let Some((_, a)) = doc.model.state().find_annot(ed.id)
     {
         // Under the mark as shown (a callout's: under its box).
         let b = match &a.kind {
@@ -4362,11 +4255,14 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 .child(ed.input.clone()),
         );
     }
-    if let Some((source, f)) = doc.selected_foreign.and_then(|i| doc.foreign_annots.get(i))
-        && pl.pref.source == *source
-        && f.page == pl.pref.index
+    if let Some(a) = doc
+        .selected_foreign
+        .and_then(|id| doc.model.state().annot(id))
+        && a.page == pl.pref.id
+        && let Some(f) = a.foreign()
     {
-        page_div = page_div.child(crate::comments_panel::foreign_outline(f, &to_pane, k));
+        let outline = crate::comments_panel::foreign_outline(&f.summary, &to_pane, k);
+        page_div = page_div.child(outline);
     }
     if let Some(overlay) = crate::region::overlay(ov.region, pl.pref.id, &to_pane, k) {
         page_div = page_div.child(overlay);
@@ -4597,7 +4493,7 @@ impl DocView {
         };
         let size = doc
             .shown_ref(doc.current_page())
-            .map(|p| doc.model.page_size(&p))
+            .map(|p| p.geom.shown())
             .map(|s| format!("{:.0}×{:.0} pt", s.width, s.height))
             .unwrap_or_default();
         let mut view_mode = String::new();
@@ -5048,7 +4944,9 @@ impl DocView {
         if !cx.has_active_drag() {
             doc.drop_target = None;
         }
-        let refs: Vec<PageRef> = doc.model.state().pages.iter().copied().collect();
+        let refs: Vec<Shown> = (doc.model.state().pages())
+            .map(|(id, def, geom)| Shown::new(id, def, geom, Rotation::R0))
+            .collect();
         let count = refs.len();
         if count == 0 {
             doc.thumb_keep.clear();
@@ -5063,7 +4961,7 @@ impl DocView {
         let thumb_w = (panel_w - 2.0 * THUMB_PAD).clamp(40.0, THUMB_W);
 
         // Item geometry. Cumulative tops are cheap enough per frame.
-        let sizes: Vec<PageSize> = refs.iter().map(|r| doc.model.page_size(r)).collect();
+        let sizes: Vec<PageSize> = refs.iter().map(|r| r.geom.shown()).collect();
         let item_h = |i: usize| {
             thumb_w * sizes[i].height / sizes[i].width.max(1.0) + THUMB_LABEL_H + THUMB_PAD
         };
@@ -5094,16 +4992,16 @@ impl DocView {
 
         let visible = layout.visible_in(scroll_y, view_h);
         doc.thumb_keep = (visible.start.saturating_sub(2)..(visible.end + 2).min(count))
-            .map(|i| (refs[i].id, doc.model.render_delta(&refs[i])))
+            .map(|i| (refs[i].id, refs[i].render))
             .collect();
 
         // Pages that are bookmark targets get a marker (a delete would cascade).
         let targets: HashSet<PageId> = doc
             .model
             .state()
-            .outline_flat()
+            .bookmarks_preorder()
             .iter()
-            .filter_map(|(_, n)| n.target)
+            .filter_map(|(_, _, b)| b.page())
             .collect();
         let selection = doc.selection.clone();
         let labels: Vec<String> = visible.clone().map(|i| doc.page_label(i)).collect();
@@ -5113,7 +5011,7 @@ impl DocView {
         let mut items = Vec::new();
         for i in visible {
             let pref = &refs[i];
-            let rotation = doc.model.render_delta(pref);
+            let rotation = pref.render;
             wants.push((
                 *pref,
                 RenderRequest {
@@ -5289,26 +5187,26 @@ impl Render for DragPreview {
 /// reads upright on the page as the document has it.
 fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
     let st = doc.model.state();
-    let Some(hf) = &st.header_footer else {
+    let Some(hf) = st.header_footer() else {
         return Vec::new();
     };
-    let own = st.pages.get(pl.index);
+    let own = st.geom(pl.pref.id);
     if !doc.model.header_footer_dirty()
         || !hf.covers(pl.pref.id)
-        || own.is_none_or(|p| p.rotation != pl.pref.rotation)
+        || own.is_none_or(|g| g.rotate != pl.pref.geom.rotate)
     {
         return Vec::new();
     }
-    let size = doc.model.page_size(&pl.pref);
+    let size = pl.pref.geom.shown();
     let bates = if hf.bates.is_some() {
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
+        let ids: Vec<PageId> = st.order().iter().copied().collect();
         hf.bates_numbers(&ids).get(pl.index).copied().flatten()
     } else {
         None
     };
     let facts = sheaf_doc::stamps::PageFacts {
         index: pl.index,
-        count: st.pages.len(),
+        count: st.page_count(),
         bates,
     };
     let [r, g, b] = hf.color;
@@ -5421,14 +5319,19 @@ fn caret_element(at: Box2, color: gpui::Rgba, m: &Affine, shown: PageSize, k: f3
     crate::markup_tools::fill_canvas(vec![tri], color, shown, k)
 }
 
+/// The page mark `id` of `st` holds, if it's a page stamp.
+pub(crate) fn stamp_of(st: &DocState, id: AnnotId) -> Option<&FormRef> {
+    st.annot(id)?.mark_record()?.stamp.as_ref()
+}
+
 /// GPUI elements for one mark, positioned in page-local logical px:
 /// `to_pane` takes PageSpace onto the page as drawn, `shown` in size, at
 /// `k` logical px a point. The mark is laid out as it reads (upright),
-/// then turned onto the page, as the file draws it; a page stamp's page
-/// is one of `assets`, its document's.
+/// then turned onto the page, as the file draws it; a page stamp draws
+/// `held`, the page it holds.
 pub(crate) fn annot_elements(
     a: &Annot,
-    assets: &Arc<MarkAssets>,
+    held: Option<&FormRef>,
     to_pane: &Affine,
     shown: PageSize,
     k: f32,
@@ -5778,7 +5681,7 @@ pub(crate) fn annot_elements(
             name,
             text,
         } => {
-            let el = match crate::stamp_preview::picture(stamp, assets) {
+            let el = match crate::stamp_preview::picture(stamp, held) {
                 Some(image) => place(*rect)
                     .opacity(a.opacity.clamp(0.0, 1.0))
                     .child(img(image).size_full().object_fit(ObjectFit::Fill)),
@@ -5964,65 +5867,49 @@ fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) ->
 
 /// Expand what's needed to see bookmarks a batch added: their parents,
 /// and new headings with children of their own. Everything else keeps its
-/// expanded or collapsed state.
+/// expanded or collapsed state. `rows` is the outline in pre-order: each
+/// bookmark's depth, id, and whether it has kids.
 fn reveal_new_bookmarks(
-    tree: &im::Vector<sheaf_doc::OutlineNode>,
+    rows: impl IntoIterator<Item = (u16, OutlineId, bool)>,
     before: &HashSet<OutlineId>,
     expanded: &mut HashSet<OutlineId>,
 ) {
-    fn walk(
-        nodes: &im::Vector<sheaf_doc::OutlineNode>,
-        path: &mut Vec<OutlineId>,
-        before: &HashSet<OutlineId>,
-        expanded: &mut HashSet<OutlineId>,
-    ) {
-        for n in nodes {
-            if !before.contains(&n.id) {
-                expanded.extend(path.iter().copied());
-                if !n.children.is_empty() {
-                    expanded.insert(n.id);
-                }
+    // The bookmarks above the one at hand.
+    let mut path: Vec<OutlineId> = Vec::new();
+    for (depth, id, kids) in rows {
+        path.truncate(depth.into());
+        if !before.contains(&id) {
+            expanded.extend(path.iter().copied());
+            if kids {
+                expanded.insert(id);
             }
-            path.push(n.id);
-            walk(&n.children, path, before, expanded);
-            path.pop();
         }
+        path.push(id);
     }
-    walk(tree, &mut Vec::new(), before, expanded);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::Context as _;
-    use sheaf_doc::OutlineNode;
-
-    fn node(id: u64, children: Vec<OutlineNode>) -> OutlineNode {
-        OutlineNode {
-            id: OutlineId(id),
-            title: id.to_string(),
-            target: None,
-            view: None,
-            color: None,
-            style: Default::default(),
-            open: true,
-            children: children.into(),
-        }
-    }
 
     #[test]
     fn new_bookmarks_are_revealed() {
         // 1 (old, collapsed) > 2 (old) > 3 (new); 4 (new heading) > 5 (new);
         // 6 (old, collapsed, untouched) > 7 (old).
-        let tree: im::Vector<OutlineNode> = vec![
-            node(1, vec![node(2, vec![node(3, vec![])])]),
-            node(4, vec![node(5, vec![])]),
-            node(6, vec![node(7, vec![])]),
+        let rows = [
+            (0, 1, true),
+            (1, 2, true),
+            (2, 3, false),
+            (0, 4, true),
+            (1, 5, false),
+            (0, 6, true),
+            (1, 7, false),
         ]
-        .into();
+        .map(|(depth, id, kids)| (depth, OutlineId(id), kids));
         let before: HashSet<OutlineId> = [1, 2, 6, 7].map(OutlineId).into();
         let mut expanded = HashSet::new();
-        reveal_new_bookmarks(&tree, &before, &mut expanded);
+        reveal_new_bookmarks(rows, &before, &mut expanded);
         let mut got: Vec<u64> = expanded.iter().map(|i| i.0).collect();
         got.sort();
         assert_eq!(got, [1, 2, 4]);
@@ -6068,10 +5955,12 @@ mod tests {
         if version(&a) != version(&h) {
             return Err("the version");
         }
-        // A copy of a page draws a page id, and a field id for each field
-        // on it.
+        // A copy of a page draws an annotation id for each annotation on
+        // it from the thread's rng, seeded alike for both, and a page id
+        // and a field id for each field from counters that start alike.
         let duplicate = |d: &mut Document| {
-            let ids = vec![d.page(0).expect("a source has pages").id];
+            fastrand::seed(8);
+            let ids = vec![d.page(0).expect("a source has pages")];
             d.apply(Edit::DuplicatePages { ids }, "Duplicate")
                 .map(|_| ())
                 .map_err(|e| format!("{e:#}"))

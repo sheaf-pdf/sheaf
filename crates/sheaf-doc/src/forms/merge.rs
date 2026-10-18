@@ -3,9 +3,11 @@
 //!
 //! Pages from other files bring their widgets, and through them their
 //! fields; Duplicate Pages copies a page's widgets. The document model
-//! says which fields each page's widgets are in (`Field::copy`,
-//! `Field::under`). Both writers copy a page's annotations by the copy of
-//! the form they're in ([`page_copy`]), then [`merge`] puts those fields in
+//! says which instance of which form each page's widgets are in, and the
+//! parent sheaf made for an instance whose names clashed (the legacy
+//! projection's `Field::copy` and `Field::under`). Both writers copy a
+//! page's annotations by the copy of the form they're in ([`page_copy`]),
+//! then [`merge`] puts those fields in
 //! the saved file's form: their roots in `/Fields` (under a new parent
 //! field when their names clashed), with what they need from their own
 //! form (`/DR` fonts, `/DA` and `/Q`, `/CO`, `NeedAppearances`, document
@@ -23,7 +25,8 @@ use crate::model::{DocState, PageId, Snapshot, SourceId};
 use crate::save::{copy_object, remap};
 use crate::source::Limits;
 
-/// A copy of a source's form: its source, and `Field::copy`.
+/// A copy of a source's form: its registration, and which copy (a
+/// `FormInst`).
 pub(crate) type FormCopy = (SourceId, u32);
 
 /// Objects copied into the saved file, by the copy of a form they're for:
@@ -36,9 +39,8 @@ const MAX_SCRIPTS: usize = Limits::DEFAULT.forms.scripts;
 
 /// The copy of a form `page`'s widgets are in, when they're in one.
 pub(crate) fn page_copy(state: &DocState, page: PageId) -> Option<FormCopy> {
-    let w = state.widgets_on(page)?.front()?;
-    let f = state.fields.get(&w.field)?;
-    Some((f.source, f.copy))
+    let (_, w) = state.widgets_on(page).next()?;
+    Some((w.inst.src, w.inst.copy))
 }
 
 /// `page`'s annotations in `src`, copied into `dst` through `map`: what a
@@ -88,7 +90,7 @@ pub(crate) fn merge<'a>(
     on_pages: &HashSet<ObjectId>,
 ) -> Result<Vec<ObjectId>> {
     let mut copies: BTreeMap<FormCopy, Vec<&Field>> = BTreeMap::new();
-    for f in model.state.fields.values() {
+    for f in model.legacy().fields.values() {
         if (f.source, f.copy) != (model.primary, 0) {
             copies.entry((f.source, f.copy)).or_default().push(f);
         }

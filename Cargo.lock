@@ -6552,6 +6552,7 @@ dependencies = [
  "chrono",
  "embed-resource",
  "env_logger",
+ "fastrand",
  "futures",
  "gpui-pre",
  "gpui-pre-platform",

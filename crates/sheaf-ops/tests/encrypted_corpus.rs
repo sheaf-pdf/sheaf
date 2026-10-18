@@ -227,7 +227,7 @@ fn save_encrypted(path: &Path) -> Outcome {
     let opened = doc
         .ready(sheaf_doc::open::finish(&src, &NoProgress))
         .is_ok();
-    let turned = match doc.page(0).map(|p| p.id) {
+    let turned = match doc.page(0) {
         Some(first) if opened => {
             let turn = Edit::RotatePages {
                 ids: vec![first],

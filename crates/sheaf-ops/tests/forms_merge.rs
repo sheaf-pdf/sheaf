@@ -34,9 +34,7 @@ fn insert(
 ) -> EditOutcome {
     let info = SourceInfo::read(doc.store(), path, None).unwrap();
     let range = range.unwrap_or(0..info.src.page_count());
-    let form = sheaf_doc::forms::read(&info.src);
     let sid = doc.add_source(info);
-    doc.set_source_form(sid, form);
     doc.apply(
         Edit::InsertPages {
             source: sid,
@@ -127,10 +125,9 @@ fn da_of(bytes: &[u8], name: &str) -> String {
 
 /// The full names of the fields in the model.
 fn names(doc: &Document) -> Vec<String> {
-    doc.state()
-        .fields
-        .values()
-        .map(|f| f.name.clone())
+    let st = doc.state();
+    (st.terminals())
+        .map(|(id, _, _)| st.full_name(id).unwrap())
         .collect()
 }
 
@@ -288,7 +285,7 @@ fn a_duplicated_page_gets_fields_of_its_own() {
     let dir = scratch("merge-duplicate");
     let path = write(&dir, "form.pdf", &mut form_a());
     let mut doc = open(&path);
-    let first = doc.state().pages[0].id;
+    let first = doc.state().order()[0];
     let out = doc
         .apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
         .unwrap();
@@ -323,7 +320,7 @@ fn saving_twice_writes_each_field_once() {
     let path = write(&dir, "form.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = open(&path);
-    let first = doc.state().pages[0].id;
+    let first = doc.state().order()[0];
     doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
         .unwrap();
     insert(&mut doc, &b, None, None);
@@ -332,7 +329,7 @@ fn saving_twice_writes_each_field_once() {
     let report = clean(&once, "first save");
     assert_eq!((report.fields, report.widgets), (5, 6));
     // Then a page turned, and saved again both ways.
-    let last = doc.state().pages[4].id;
+    let last = doc.state().order()[4];
     doc.apply(
         Edit::RotatePages {
             ids: vec![last],
@@ -358,10 +355,10 @@ fn duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own() {
     insert(&mut doc, &b, None, None);
     // B's first page, duplicated; then form.pdf's first page cropped and
     // duplicated.
-    let b_first = doc.state().pages[2].id;
+    let b_first = doc.state().order()[2];
     doc.apply(Edit::DuplicatePages { ids: vec![b_first] }, "Duplicate")
         .unwrap();
-    let first = doc.state().pages[0].id;
+    let first = doc.state().order()[0];
     let plan = sheaf_ops::crop::plan(
         doc.store(),
         &doc.snapshot(),
@@ -416,11 +413,9 @@ fn replaced_pages_bring_their_form() {
     let a = write(&dir, "a.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = open(&a);
-    let second = doc.state().pages[1].id;
+    let second = doc.state().order()[1];
     let info = SourceInfo::read(doc.store(), &b, None).unwrap();
-    let form = sheaf_doc::forms::read(&info.src);
     let sid = doc.add_source(info);
-    doc.set_source_form(sid, form);
     doc.apply(
         Edit::ReplacePages {
             ids: vec![second],
@@ -664,12 +659,11 @@ fn corpus_the_1040_and_two_schedules_combine_with_unique_names() {
     let paths = [f1040, s1, sb];
     let (doc, bytes) = combined(&paths);
     // Every IRS form's root is `topmostSubform[0]`: the schedules are
-    // renamed for their files.
-    let renamed: Vec<&str> = doc
-        .state()
-        .fields
-        .values()
-        .filter_map(|f| f.under.as_deref())
+    // renamed for their files, under parents sheaf made.
+    let st = doc.state();
+    let renamed: Vec<&str> = (st.form().roots.iter())
+        .filter_map(|&root| st.field(root).filter(|n| n.src.is_none()))
+        .map(|n| &*n.partial)
         .collect();
     assert!(renamed.contains(&"f1040s1") && renamed.contains(&"f1040sb"));
     let want = paths
@@ -722,8 +716,8 @@ fn corpus_a_duplicated_page_is_a_form_of_its_own() {
         return;
     };
     let mut doc = open(&f1040);
-    let first = doc.state().pages[0].id;
-    let on_first = doc.state().widgets_on(first).map_or(0, |w| w.len());
+    let first = doc.state().order()[0];
+    let on_first = doc.state().widgets_on(first).count();
     doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
         .unwrap();
     let (fields, widgets) = counts(&f1040);

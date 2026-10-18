@@ -292,13 +292,9 @@ fn add_text(
     let mut doc = Document::new(store, info, &[], sheaf_doc::history::default_policy());
     let layers = doc
         .state()
-        .pages
-        .iter()
+        .pages()
         .zip(words)
-        .map(|(p, w)| {
-            let layer = TextLayer::from_engine(w, &doc.geom(p), engine);
-            (p.id, Arc::new(layer))
-        })
+        .map(|((id, _, geom), w)| (id, Arc::new(TextLayer::from_engine(w, geom, engine))))
         .collect();
     doc.apply(Edit::SetTextLayers { layers }, "Recognize Text")?;
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), out)

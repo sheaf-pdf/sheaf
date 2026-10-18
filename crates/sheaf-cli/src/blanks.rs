@@ -66,7 +66,7 @@ pub fn run(args: BlanksArgs, quiet: bool) -> anyhow::Result<()> {
     let snap = doc.snapshot();
     let pages = match &args.pages {
         Some(r) => Some(
-            sheaf_ops::pages::parse(r, snap.state.pages.len())
+            sheaf_ops::pages::parse(r, snap.state.page_count())
                 .map_err(|e| anyhow::anyhow!("--pages: {e}"))?,
         ),
         None => None,
