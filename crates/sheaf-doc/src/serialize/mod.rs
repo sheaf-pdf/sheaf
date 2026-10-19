@@ -118,7 +118,7 @@ fn file_id(kept: Option<Vec<u8>>, encrypted: bool, written: &[u8]) -> Option<Obj
     if kept.is_none() && !encrypted {
         return None;
     }
-    let written = sheaf_core::checksum(written).to_be_bytes().to_vec();
+    let written = sheaf_util::checksum(written).to_be_bytes().to_vec();
     let first = kept.unwrap_or_else(|| written.clone());
     Some(Object::Array(vec![
         Object::String(first, StringFormat::Hexadecimal),

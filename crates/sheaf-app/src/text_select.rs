@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use gpui::{ClipboardItem, Context};
-use sheaf_core::Rotation;
 use sheaf_doc::{AnnotKind, Box2, PageChars, PageId, Pt, SourceId, TextLayer};
+use sheaf_edit::Rotation;
 
 use crate::docview::{DocView, State};
 use crate::markup_tools::Tool;
@@ -83,7 +83,7 @@ impl DocView {
             return Some(CharsKey::Layer(layer.clone()));
         }
         let base = &st.def(page)?.base;
-        Some(CharsKey::Engine(base.source, base.index))
+        Some(CharsKey::Engine(base.src.id(), base.index))
     }
 
     /// Page `page`'s characters, if they've been read and are current.
@@ -129,7 +129,9 @@ impl DocView {
                 f(self, Some(chars), cx)
             }
             CharsKey::Engine(source, index) => {
-                let base = doc.model.source(source).map(|s| s.src.geom(index));
+                let base = (doc.model.state().def(page))
+                    .filter(|def| def.base.src.id() == source)
+                    .map(|def| def.base.src.geom(index));
                 let (Some(handle), Some(base)) = (doc.handles.get(&source).cloned(), base) else {
                     return f(self, None, cx);
                 };
@@ -473,7 +475,7 @@ impl DocView {
             Tool::Squiggly => AnnotKind::Squiggly { rects },
             _ => return,
         };
-        let mut a = self.new_annot(kind, crate::markup_tools::color_of(tool, cx), cx);
+        let mut a = self.new_annot(kind, crate::markup_tools::color_of(tool, cx));
         a.turn = turn;
         if tool == Tool::Highlight {
             a.opacity = 0.6;
@@ -500,12 +502,12 @@ impl DocView {
         };
         let kind = AnnotKind::Replace { rects, struck, at };
         let color = crate::markup_tools::color_of(Tool::TextEdit, cx);
-        let mut a = self.new_annot(kind, color, cx);
+        let mut a = self.new_annot(kind, color);
         // The caret stands as the text reads.
         a.turn = turn;
-        self.add_page_annot(page, a, "Replace text", cx);
+        let made = self.add_page_annot(page, a, "Replace text", cx);
         self.clear_text_sel(cx);
-        self.pending_edit_last = Some(page);
+        self.pending_edit = made.map(|id| (page, id));
         cx.notify();
     }
 
@@ -519,10 +521,10 @@ impl DocView {
             return;
         };
         let color = crate::markup_tools::color_of(Tool::TextEdit, cx);
-        let mut a = self.new_annot(AnnotKind::Insert { at }, color, cx);
+        let mut a = self.new_annot(AnnotKind::Insert { at }, color);
         a.turn = turn;
-        self.add_page_annot(page, a, "Insert text", cx);
-        self.pending_edit_last = Some(page);
+        let made = self.add_page_annot(page, a, "Insert text", cx);
+        self.pending_edit = made.map(|id| (page, id));
         cx.notify();
     }
 }

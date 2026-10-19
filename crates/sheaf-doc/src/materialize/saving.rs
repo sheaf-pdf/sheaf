@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use in_progress::Progress;
-use sheaf_core::Checksum;
+use sheaf_util::Checksum;
 
 use super::plan::{
     Ask, AskAnswers, Note, Onto, SavePlan, SaveStop, SaveTarget, Strategy, StrategyKind, Why,
@@ -167,7 +167,7 @@ pub fn appended(doc: &Document) -> Result<Vec<u8>, SaveStop> {
             .with_context(|| format!("reading {}", record.path.display()))
             .map_err(failed)?
             .into(),
-        None => input.sources[&input.primary].src.bytes().clone(),
+        None => input.primary.bytes().clone(),
     };
     if base.len() as u64 != saved.record.stamp.len {
         return Err(SaveStop::Ask(Ask::FileChanged {

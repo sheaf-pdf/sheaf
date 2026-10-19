@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context, Result};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use sheaf_core::Rotation;
 use sheaf_doc::geom::Geom;
 use sheaf_doc::{PageId, SourceId, TextLayer};
+use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_render::{Job, RenderHandle, RenderRequest};
 
@@ -67,7 +67,7 @@ impl PageSource for RenderHandle {
 
     fn render(&self, page: u32, width_px: u32, rotation: Rotation) -> Result<Raster> {
         let rendered = futures::executor::block_on(self.render(RenderRequest {
-            page: sheaf_core::PageIndex(page),
+            page: sheaf_render::PageIndex(page),
             job: Job::Page {
                 width: width_px,
                 rotation,
@@ -432,7 +432,7 @@ mod tests {
     fn page(i: u32, width: f32) -> OcrPage {
         OcrPage {
             id: PageId(i as u64),
-            source: SourceId(0),
+            source: SourceId { hash: 0, len: 0 },
             index: i,
             geom: Geom::read(Some(Rect::new(0.0, 0.0, width, 792.0)), None, 0),
             render: Rotation::R0,
@@ -455,7 +455,7 @@ mod tests {
             },
         };
         let mut sources: HashMap<SourceId, Arc<dyn PageSource>> = HashMap::new();
-        sources.insert(SourceId(0), Arc::new(FakeSource { text }));
+        sources.insert(SourceId { hash: 0, len: 0 }, Arc::new(FakeSource { text }));
         let factory: EngineFactory = Arc::new(move || Ok(Box::new(MockEngine { delay }) as _));
         let (handle, rx) = start_with(req, sources, factory, 2);
         let mut events = Vec::new();
@@ -589,7 +589,10 @@ mod tests {
             },
         };
         let mut sources: HashMap<SourceId, Arc<dyn PageSource>> = HashMap::new();
-        sources.insert(SourceId(0), Arc::new(FakeSource { text: vec![0] }));
+        sources.insert(
+            SourceId { hash: 0, len: 0 },
+            Arc::new(FakeSource { text: vec![0] }),
+        );
         let factory: EngineFactory = Arc::new(|| {
             Ok(Box::new(MockEngine {
                 delay: Duration::ZERO,

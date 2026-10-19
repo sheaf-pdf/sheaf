@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::channel::oneshot;
-use sheaf_doc::{Edit, PageId, Snapshot, SourceId};
+use sheaf_doc::{Actor, Document, EditError, Grant, PageId, Snapshot, SourceId, Tx};
+use sheaf_edit::Op;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -78,7 +79,7 @@ pub trait OcrSource: Send + Sync {
         page: PageId,
         base: &sheaf_doc::PageBase,
         geom: &sheaf_doc::geom::Geom,
-        render: sheaf_core::Rotation,
+        render: sheaf_edit::Rotation,
         language: Option<String>,
         dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer>;
@@ -200,11 +201,60 @@ pub struct DocContext {
     pub render: Option<Arc<dyn crate::render::RenderSource>>,
 }
 
-/// Edits one `edits.submit` asked for: one undo step.
+/// What one `edits.submit` asked for, as ops: one undo step, called
+/// `label`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditBatch {
     pub label: String,
-    pub edits: Vec<Edit>,
+    pub ops: Vec<Op>,
+    /// What the ops' marks hold, by the stems the plugin named them by:
+    /// what `BlobSel::Asset(n)` names is the `n`th, which the host finds
+    /// ([`lowered`](Self::lowered)).
+    pub held: Vec<Held>,
+    /// An edit no op says (a bookmark tree whose depths skip a level): the
+    /// batch fails with it.
+    pub invalid: Option<EditError>,
+}
+
+/// What a plugin's mark holds, by the stem its API names it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Held {
+    /// A page stamp's page.
+    Stamp(String),
+    /// An attached file, `size` bytes long.
+    File { stem: String, size: u64 },
+}
+
+impl EditBatch {
+    /// The batch's ops lowered in one transaction of `actor`'s on `doc`'s
+    /// current version, what they hold found where the host finds it:
+    /// all of them, or none and why.
+    pub fn lowered(self, doc: &Document, actor: Actor) -> Result<Tx, EditError> {
+        if let Some(e) = self.invalid {
+            return Err(e);
+        }
+        let missing = |what: String| EditError::NotFound {
+            op: "add-mark",
+            what,
+        };
+        let mut tx = doc.tx(actor);
+        for held in self.held {
+            let grant = match held {
+                Held::Stamp(stem) => {
+                    let form = doc.find_stamp(&stem);
+                    let form = form.ok_or_else(|| missing(format!("the stamp {stem}")))?;
+                    Grant::Stamp { stem, form }
+                }
+                Held::File { stem, size } => {
+                    let file = doc.find_file(&stem, size);
+                    Grant::Blob(file.ok_or_else(|| missing(format!("the attached file {stem}")))?)
+                }
+            };
+            tx.grant(grant);
+        }
+        tx.apply_batch(self.ops, &in_progress::NoProgress)?;
+        Ok(tx)
+    }
 }
 
 #[derive(Debug, Default)]

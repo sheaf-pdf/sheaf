@@ -21,8 +21,8 @@
 //! - **Copy 0 of a primary page owns the page's object** (bug 3): numbering
 //!   writes it at its own number, wherever the page moved (claimed before
 //!   anything is emitted, `emit::claim`).
-//! - **A derived copy's page** (a crop, a header stripped, a watermark: the
-//!   registration's `derived` record) is written as the page it was made
+//! - **A derived copy's page** (a crop, a header stripped, a watermark: its
+//!   [`Derived`](crate::Derived) record) is written as the page it was made
 //!   from ([`Shown`]): that page's object, keys and annotations, with the
 //!   copy's `/Contents` and `/Resources` copied in (M10 bug 1), until slice
 //!   17's content stack.

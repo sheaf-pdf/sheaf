@@ -30,6 +30,17 @@ pub struct Prefs {
 }
 
 impl Prefs {
+    /// Who the user is, as a document fills marks in (M10.5 §6.8): the
+    /// name and initials, and how dynamic stamps write the date and time.
+    pub fn doc_identity(&self) -> sheaf_doc::Identity {
+        sheaf_doc::Identity {
+            person: self.identity.name().into(),
+            initials: self.identity.initials().into(),
+            date_format: self.stamps.date_format().into(),
+            time_format: self.stamps.time_format().into(),
+        }
+    }
+
     /// Plugin `id`'s section as JSON, "{}" when it has none.
     pub fn plugin_json(&self, id: &str) -> String {
         self.plugins
@@ -176,12 +187,7 @@ impl Identity {
 }
 
 /// "Pat Q. Smith" → "PQS".
-pub fn initials_of(name: &str) -> String {
-    name.split_whitespace()
-        .filter_map(|w| w.chars().find(|c| c.is_alphanumeric()))
-        .flat_map(char::to_uppercase)
-        .collect()
-}
+pub use sheaf_doc::annot::initials_of;
 
 /// Something wrong in the file, and the line it's on when that's known.
 #[derive(Debug, Clone, PartialEq)]

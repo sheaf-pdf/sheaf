@@ -6,7 +6,7 @@ use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
     Subscription, Window, div, prelude::*, px,
 };
-use sheaf_core::PageSize;
+use sheaf_edit::PageSize;
 use sheaf_ops::crop::{CropSpec, Margins};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};

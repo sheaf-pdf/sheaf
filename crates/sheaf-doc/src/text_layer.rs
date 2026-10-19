@@ -22,111 +22,53 @@ use std::cmp::Ordering;
 use std::ops::Range;
 
 use lopdf::{Dictionary, Object, Stream, dictionary};
-use serde::{Deserialize, Serialize};
-use sheaf_core::Rotation;
 
 use crate::annot::{Box2, Pt};
 use crate::content::sink::{self, Sink};
 use crate::content::{ContentWriter, Font, Glyphless, Res, Reserved, ResourceNeeds, TextMode};
 use crate::geom::{Affine, Geom};
 
-/// One recognized word.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OcrWord {
-    pub text: String,
-    /// PageSpace.
-    pub rect: Box2,
-    /// 0 to 1.
-    pub confidence: f32,
+pub use sheaf_edit::{OcrWord, TextLayer};
+
+/// A layer from words as the engine saw them: in points, in the view frame
+/// of `geom`, the page as it was rendered. Words are grouped into lines
+/// there, then stored in PageSpace.
+pub fn from_engine(words: Vec<OcrWord>, geom: &Geom, engine: &str) -> TextLayer {
+    let mut words: Vec<OcrWord> = words
+        .into_iter()
+        .filter(|w| !w.text.trim().is_empty() && w.rect.w > 0.0 && w.rect.h > 0.0)
+        .collect();
+    let lines = group_lines(&mut words);
+    let from_view = geom.from_view();
+    for w in &mut words {
+        w.rect = from_view.apply_box(w.rect);
+    }
+    TextLayer {
+        words,
+        lines,
+        upright: geom.rotate,
+        engine: engine.to_string(),
+    }
 }
 
-/// The OCR result for one page.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TextLayer {
-    /// Sorted by line (top to bottom in the upright frame), then left to right.
-    pub words: Vec<OcrWord>,
-    /// Index ranges into `words`, one per line.
-    pub lines: Vec<Range<usize>>,
-    /// The frame the text reads upright in: the page's rotation, absolute,
-    /// when it was recognized.
-    pub upright: Rotation,
-    /// Which engine produced it, e.g. "tesseract 5.5.2".
-    pub engine: String,
+/// A word's box in the layer's upright frame (y down; where on the page
+/// doesn't matter, only which way the text runs).
+pub(crate) fn upright_box(layer: &TextLayer, w: &OcrWord) -> Box2 {
+    Affine::upright(layer.upright).apply_box(w.rect)
 }
 
-impl TextLayer {
-    /// Build a layer from words as the engine saw them: in points, in the
-    /// view frame of `geom`, the page as it was rendered. Words are grouped
-    /// into lines there, then stored in PageSpace.
-    pub fn from_engine(words: Vec<OcrWord>, geom: &Geom, engine: &str) -> Self {
-        let mut words: Vec<OcrWord> = words
-            .into_iter()
-            .filter(|w| !w.text.trim().is_empty() && w.rect.w > 0.0 && w.rect.h > 0.0)
-            .collect();
-        let lines = group_lines(&mut words);
-        let from_view = geom.from_view();
-        for w in &mut words {
-            w.rect = from_view.apply_box(w.rect);
-        }
-        Self {
-            words,
-            lines,
-            upright: geom.rotate,
-            engine: engine.to_string(),
-        }
-    }
+/// An upright-frame box back in PageSpace.
+pub(crate) fn unrotate_from_upright(layer: &TextLayer, b: Box2) -> Box2 {
+    Affine::upright(layer.upright).inverse().apply_box(b)
+}
 
-    pub fn is_empty(&self) -> bool {
-        self.words.is_empty()
-    }
-
-    /// The recognized text: words joined by spaces, lines by newlines.
-    pub fn text(&self) -> String {
-        page_text(self).s
-    }
-
-    /// Rough heap bytes, for the history memory policy.
-    pub fn byte_estimate(&self) -> usize {
-        self.words.iter().map(|w| 64 + w.text.len()).sum::<usize>() + 16 * self.lines.len()
-    }
-
-    /// Boxes of the words whose centre lies inside `rect`, merged per line
-    /// (the shape the highlight tool wants). PageSpace.
-    pub fn boxes_in_rect(&self, rect: Box2) -> Vec<Box2> {
-        let mut out = Vec::new();
-        for line in &self.lines {
-            let mut merged: Option<Box2> = None;
-            for w in &self.words[line.clone()] {
-                let c = Pt {
-                    x: w.rect.x + w.rect.w / 2.0,
-                    y: w.rect.y + w.rect.h / 2.0,
-                };
-                if rect.contains(c) {
-                    merged = Some(merged.map_or(w.rect, |m| m.union(w.rect)));
-                }
-            }
-            out.extend(merged);
-        }
-        out
-    }
-
-    /// A word's box in the upright frame (y down; where on the page
-    /// doesn't matter, only which way the text runs).
-    pub(crate) fn upright_box(&self, w: &OcrWord) -> Box2 {
-        Affine::upright(self.upright).apply_box(w.rect)
-    }
-
-    /// An upright-frame box back in PageSpace.
-    pub(crate) fn unrotate_from_upright(&self, b: Box2) -> Box2 {
-        Affine::upright(self.upright).inverse().apply_box(b)
-    }
-
-    fn line_of(&self, word: usize) -> usize {
-        self.lines
-            .iter()
-            .position(|l| l.contains(&word))
-            .unwrap_or(0)
-    }
+/// The line word `word` is on.
+fn line_of(layer: &TextLayer, word: usize) -> usize {
+    layer
+        .lines
+        .iter()
+        .position(|l| l.contains(&word))
+        .unwrap_or(0)
 }
 
 /// Order `words` into lines (top to bottom, then left to right) and return
@@ -301,15 +243,15 @@ fn hit_from_span(layer: &TextLayer, t: &PageText, start: usize, end: usize) -> O
     for (wi, c0, c1) in spans {
         let w = &layer.words[wi];
         let n = w.text.chars().count().max(1) as f32;
-        let up = layer.upright_box(w);
+        let up = upright_box(layer, w);
         let slice = Box2 {
             x: up.x + up.w * c0 as f32 / n,
             y: up.y,
             w: up.w * (c1 - c0) as f32 / n,
             h: up.h,
         };
-        let r = layer.unrotate_from_upright(slice);
-        let line = layer.line_of(wi);
+        let r = unrotate_from_upright(layer, slice);
+        let line = line_of(layer, wi);
         match rects.last_mut() {
             Some((l, prev)) if *l == line => *prev = prev.union(r),
             _ => rects.push((line, r)),
@@ -357,7 +299,7 @@ pub(crate) fn to_content(layer: &TextLayer) -> (Vec<u8>, ResourceNeeds) {
     for line in &layer.lines {
         let mut prev_right: Option<f32> = None;
         for word in &layer.words[line.clone()] {
-            let r = layer.upright_box(word);
+            let r = upright_box(layer, word);
             let n = word.text.encode_utf16().count();
             if n == 0 || r.h < 0.1 || r.w <= 0.0 {
                 prev_right = None;
@@ -469,6 +411,7 @@ fn layer_entries(sink: &mut dyn Sink, page: &Dictionary) -> Option<(Vec<Object>,
 #[cfg(test)]
 mod tests {
     use lopdf::Document as Pdf;
+    use sheaf_edit::Rotation;
 
     use super::*;
     use crate::content::sink::Lopdf;
@@ -493,7 +436,7 @@ mod tests {
     /// A layer of `words` as the engine saw them on a Letter page turned
     /// `upright`.
     fn layer(words: Vec<OcrWord>, upright: Rotation) -> TextLayer {
-        TextLayer::from_engine(words, &letter(upright), "test")
+        from_engine(words, &letter(upright), "test")
     }
 
     fn two_lines() -> TextLayer {
@@ -545,7 +488,7 @@ mod tests {
         let crop = Rect::new(-17.0, 62.0, 555.0, 824.0);
         for r in ROTATIONS {
             let geom = Geom::read(Some(media), Some(crop), r.degrees() as i64);
-            let l = TextLayer::from_engine(
+            let l = from_engine(
                 vec![word("w", seen.x, seen.y, seen.w, seen.h)],
                 &geom,
                 "test",
@@ -560,12 +503,12 @@ mod tests {
             ] {
                 assert!((got - want).abs() < 1e-3, "{r:?}: {back:?}");
             }
-            let up = l.upright_box(&l.words[0]);
+            let up = upright_box(&l, &l.words[0]);
             assert!(
                 (up.w - seen.w).abs() < 1e-3 && (up.h - seen.h).abs() < 1e-3,
                 "{r:?}: {up:?}"
             );
-            assert_eq!(l.unrotate_from_upright(up), l.words[0].rect, "{r:?}");
+            assert_eq!(unrotate_from_upright(&l, up), l.words[0].rect, "{r:?}");
         }
         // On a Letter page turned 90°, the top-left as shown is PageSpace's
         // bottom-left.
@@ -735,7 +678,7 @@ mod tests {
     #[test]
     fn content_turns_with_the_upright_frame() {
         let matrix = |geom: Geom| {
-            let l = TextLayer::from_engine(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], &geom, "t");
+            let l = from_engine(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], &geom, "t");
             let c = String::from_utf8(to_content(&l).0).unwrap();
             let tm = c.lines().find(|l| l.ends_with(" Tm")).unwrap();
             tm.trim_end_matches(" Tm").to_string()

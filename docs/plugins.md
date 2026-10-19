@@ -184,14 +184,20 @@ free-text and callout, square, ellipse, line (with `arrow-start`),
 polygon, polyline and ink, tickmark, connector, page-stamp, text-stamp
 and page-border, file-attachment, measure (distance, perimeter or area
 with its scale), and tape. Each has its `fill`, `dashed`, `cloudy`,
-`created`, `modified` and `name` (its `/NM`). Dates and the name are the
-host's: they're ignored when you add or update a mark. An update replaces
-what you send, so read a mark, change it and send it back.
+`created`, `modified` and `name` (its `/NM`). Dates, the name and the
+author are the host's: they're ignored when you add or update a mark. An
+update sets what the record shows (its shape, look and text) and keeps
+the rest, such as a tape's rows and, under 0.2, the fields 0.2 can't
+show; so read a mark, change it and send it back. A page stamp or an
+attachment names its page or file by `stamp` or `file`, which the host
+finds; a reply or status is in the thread of the comment its `parent`
+names on its page.
 
-A mark's author is the user when you leave it empty, and `<<name>>`,
-`<<initials>>`, `<<date>>` and `<<time>>` in its text (and in a text
-stamp's) are filled in as dynamic stamps fill them: write
-`"Reviewed <<initials>> <<date>>"` and never ask who the user is.
+A mark you add is your plugin's: its author is your plugin's id, whatever
+you send. `<<date>>` and `<<time>>` in its text (and in a text stamp's)
+are filled in as dynamic stamps fill them; `<<name>>` and `<<initials>>`
+stay as you wrote them, since a plugin never learns who the user is
+(sheaf fills them in only in what the user makes).
 
 **`text`**: `page-text`, `pattern-search(page, regex)`,
 `search(page, query, match-case)`, `text-boxes(page, rect)` and
@@ -206,7 +212,9 @@ unrotated user space now, and converts at the API's edge.
 labelled `label`. Batches are applied in order **after your call returns**,
 so ids of things a batch creates (bookmarks, annotations) aren't known during
 the call. If any edit in a batch fails (a page that's gone, say), that whole
-batch is skipped and the user sees why. The edits mirror sheaf's own: move,
+batch is skipped and the user sees why. A batch is your plugin's own: what
+needs the user's approval, such as deleting another tool's comment (which
+`annotations` never lists), is refused. The edits mirror sheaf's own: move,
 rotate, delete and duplicate pages; insert, move, edit and delete bookmarks;
 add, update and delete annotations; add a connector pair. Bookmarks can land
 at a position on their page (`dest-view`: `/XYZ` with a point and zoom, or

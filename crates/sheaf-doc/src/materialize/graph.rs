@@ -19,15 +19,11 @@ use super::number::Numbers;
 use crate::source::Source;
 use crate::store::BlobId;
 
-/// A source as lopdf sees it, decrypted as [`crate::file::load_pdf`]
-/// does: its blob's bytes, opened with its password, so a file replaced
-/// since (by a save in place) doesn't matter. A save that writes it
-/// encrypts with the source's [`crypt`](crate::source::Source::crypt).
-pub fn load(info: &crate::SourceInfo) -> Result<Pdf> {
-    eager(&info.src).with_context(|| format!("loading {}", info.name.display()))
-}
-
-/// [`load`]: `src`, loaded eagerly.
+/// A source as lopdf sees it, loaded eagerly and decrypted as
+/// [`crate::file::load_pdf`] does: its blob's bytes, opened with its
+/// password, so a file replaced since (by a save in place) doesn't
+/// matter. A save that writes it encrypts with the source's
+/// [`crypt`](crate::source::Source::crypt).
 pub fn eager(src: &Source) -> Result<Pdf> {
     crate::file::load_pdf_mem(src.bytes(), src.password())
 }

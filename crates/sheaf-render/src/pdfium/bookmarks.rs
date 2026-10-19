@@ -7,10 +7,10 @@
 use std::path::Path;
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
-use sheaf_core::DestView;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::{Document, FixedCount, FlatOutlineItem, SourceInfo, Store};
+use sheaf_doc::{Document, FixedCount, FlatOutlineItem, Store};
+use sheaf_edit::DestView;
 
 use super::*;
 
@@ -189,14 +189,10 @@ fn positions_round_trip_through_pdfium_and_the_source() {
             BlobKind::file(Path::new("src.pdf"), None),
         )
         .unwrap();
-    let primary = SourceInfo {
-        src,
-        name: "src.pdf".into(),
-        derived: None,
-    };
     let model = Document::new(
         store,
-        primary,
+        src,
+        "src.pdf".into(),
         None,
         &[
             item("Upright", 0, xyz(36.0, 100.0)),

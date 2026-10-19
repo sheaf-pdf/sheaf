@@ -7,6 +7,10 @@
 //! sheaf's own [`serialize`], encrypted as their source was and replacing
 //! a file durably. Nothing in here knows about PDFium: rendering lives in
 //! other crates.
+//!
+//! The edit vocabulary is sheaf-edit's, with the types the records share
+//! with it (ids, geometry, OCR text, a tape's rows), which are re-exported
+//! where they were defined before (M10.5 §6.1).
 
 pub mod annot;
 pub mod attachments;
@@ -39,24 +43,28 @@ pub mod source;
 pub mod stamp_lib;
 pub mod stamps;
 pub mod store;
-pub mod tape;
 pub mod text_layer;
+pub mod tx;
 pub mod watermark;
 
-pub use sheaf_core::DestView;
+pub use sheaf_edit::{DestView, PageSize, Rotation, tape};
 
 pub use annot::{Annot, AnnotId, AnnotKind, Box2, Pt, default_author, pdf_date_now};
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
-    AnnotBody, AnnotRec, Bookmark, ContentStack, Damaged, Derived, DocState, Document, Edit,
-    EditOutcome, FlatOutlineItem, Foreign, FormRef, GenId, GenSpec, Generator, Invariant, JobId,
-    Layer, Mark, NewOutlineItem, NotReady, OutlineId, PageBase, PageDef, PageId, Rebase, Snapshot,
-    SourceId, SourceInfo, Static, Step, Target, TextStyle, VersionId, VersionView,
+    AnnotBody, AnnotRec, Bookmark, ContentStack, Derived, DerivedCopies, DocState, Document,
+    FlatOutlineItem, Foreign, FormInst, FormRef, GenId, GenSpec, Generator, Invariant, JobId,
+    Layer, Mark, OutlineId, PageBase, PageDef, PageId, Snapshot, SourceId, Static, Step, Target,
+    TextStyle, VersionId, VersionView,
 };
 pub use page_chars::{Glyph, PageChars};
 pub use source::{ObjRef, Source};
 pub use store::{Blob, BlobId, BlobRef, Src, Store};
 pub use text_layer::{OcrWord, TextHit, TextLayer};
+pub use tx::{
+    Actor, Commit, CommitOpts, Derive, EditError, Grant, Identity, JobKind, Notice, ResolvedOp, Tx,
+    notice_text,
+};
 
 /// What sheaf counts pages in, for progress. One spelling everywhere:
 /// `Unit::Count` compares the noun, so "page" wouldn't match.

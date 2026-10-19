@@ -3,13 +3,14 @@
 //! that moves through history as undo does, so going back and forth is
 //! free, and Save writes whichever version is current. Where edits were
 //! undone and then replaced by others, the replaced ones stay, as a branch
-//! you can open and go into.
+//! you can open and go into. A version a plugin made says so, and an
+//! edit that took content away (text, marks, pages) is badged.
 
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use gpui::{AnyElement, Context, FocusHandle, Window, div, prelude::*, px};
-use sheaf_doc::{Damaged, VersionId, VersionView};
+use gpui::{AnyElement, App, Context, FocusHandle, Window, div, prelude::*, px};
+use sheaf_doc::{Actor, EditError, VersionId, VersionView};
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::theme;
 
@@ -45,6 +46,8 @@ enum Row {
     },
     Edit {
         text: String,
+        /// It took content away (M10.5 §7.3).
+        removes: bool,
         depth: u8,
     },
     Branch {
@@ -62,6 +65,31 @@ impl Row {
             Row::Branch { .. } => BRANCH_H,
         }
     }
+}
+
+/// The badge on an edit that took content away, and on its version.
+fn removes_badge() -> impl IntoElement {
+    div().text_xs().text_color(theme::WARNING).child("Removes")
+}
+
+/// Who made `view`, as its row says: a plugin by its name.
+fn made_by(view: &VersionView, cx: &App) -> String {
+    match &view.actor {
+        Actor::Plugin { id, .. } => format!("Plugin {}", plugin_name(id, cx)),
+        _ => view.author.clone(),
+    }
+}
+
+/// Plugin `id`'s name, as its manifest says.
+#[cfg(feature = "plugins")]
+fn plugin_name(id: &str, cx: &App) -> String {
+    crate::plugins::name_of(id, cx).unwrap_or_else(|| id.to_string())
+}
+
+/// Plugin `id`'s name: its id, with plugins left out of the build.
+#[cfg(not(feature = "plugins"))]
+fn plugin_name(id: &str, _: &App) -> String {
+    id.to_string()
 }
 
 /// `D:20261014153000Z` (UTC, as sheaf writes it) as local time: just the
@@ -132,7 +160,7 @@ impl DocView {
             .unwrap_or_default();
         doc.notice = Some(format!("Went to: {label}"));
         doc.touched();
-        self.after_model_change(format!("Go to: {label}"), Default::default(), cx);
+        self.after_model_change(format!("Go to: {label}"), cx);
     }
 
     /// Up and Down: the version before or after the current one, along the
@@ -169,10 +197,14 @@ impl DocView {
         let push_version = |rows: &mut Vec<Row>, view: VersionView, depth: u8| {
             let open = h.expanded.contains(&view.id);
             let edits = view.edits.clone();
-            let single_same = edits.len() == 1 && edits[0] == view.label;
+            let single_same = edits.len() == 1 && edits[0].text == view.label;
             rows.push(Row::Version { view, depth });
             if open && !single_same {
-                rows.extend(edits.into_iter().map(|text| Row::Edit { text, depth }));
+                rows.extend((edits.into_iter()).map(|line| Row::Edit {
+                    text: line.text,
+                    removes: line.removes,
+                    depth,
+                }));
             }
         };
         for view in doc.model.timeline() {
@@ -251,17 +283,19 @@ impl DocView {
                 Row::Version { view, depth } => {
                     let id = view.id;
                     let expandable = view.edits.len() > 1
-                        || view.edits.first().is_some_and(|e| *e != view.label);
+                        || view.edits.first().is_some_and(|e| e.text != view.label);
                     let open = h.expanded.contains(&id);
+                    let by = made_by(view, cx);
                     let meta = if view.damaged {
-                        Damaged { version: id }.to_string()
+                        EditError::Mismatch { version: id }.to_string()
                     } else if view.edits.is_empty() {
                         format!("Opened · {}", fmt_local(&view.at))
-                    } else if view.author.is_empty() {
+                    } else if by.is_empty() {
                         fmt_local(&view.at)
                     } else {
-                        format!("{} · {}", view.author, fmt_local(&view.at))
+                        format!("{by} · {}", fmt_local(&view.at))
                     };
+                    let removes = view.edits.iter().any(|e| e.removes);
                     let text = if view.current {
                         theme::TEXT_BRIGHT
                     } else if view.undone {
@@ -324,22 +358,34 @@ impl DocView {
                                         .child(meta),
                                 ),
                         )
+                        .when(removes, |d| d.child(removes_badge()))
                         .when(view.saved, |d| {
                             d.child(div().text_xs().text_color(theme::SUCCESS).child("Saved"))
                         })
                         .into_any_element()
                 }
-                Row::Edit { text, depth } => place
+                Row::Edit {
+                    text,
+                    removes,
+                    depth,
+                } => place
                     .flex()
                     .items_center()
+                    .gap_1()
                     .pl(px(24.0 + *depth as f32 * INDENT))
                     .pr_2()
                     .text_xs()
                     .text_color(theme::TEXT_DETAIL)
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(text.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(text.clone()),
+                    )
+                    .when(*removes, |d| d.child(removes_badge()))
                     .into_any_element(),
                 Row::Branch { start, len, open } => {
                     let start = *start;

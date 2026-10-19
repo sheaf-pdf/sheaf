@@ -256,17 +256,16 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_doc::{Document, Edit, SourceInfo, Store};
+    use sheaf_doc::tx::fixture::bookmark;
+    use sheaf_doc::{Document, Store};
 
     fn doc(n: u32) -> Document {
         let store = Store::new();
-        let primary = SourceInfo {
-            name: "x.pdf".into(),
-            ..SourceInfo::blank(&store, n)
-        };
+        let primary = sheaf_doc::store::blank(&store, n);
         Document::new(
             store,
             primary,
+            "x.pdf".into(),
             None,
             &[],
             sheaf_doc::history::default_policy(),
@@ -302,17 +301,8 @@ mod tests {
         let ids: Vec<_> = d.state().order().iter().copied().collect();
         for (title, page) in [("Form 1040", 1), ("Schedule A/B", 3), ("Form 1040", 4)] {
             let after = d.state().outline_roots().last().copied();
-            d.apply(
-                Edit::OutlineInsert {
-                    parent: None,
-                    after,
-                    title: title.into(),
-                    target: Some(ids[page]),
-                    view: None,
-                },
-                "b",
-            )
-            .unwrap();
+            let add = bookmark(None, after, title, Some(ids[page]));
+            d.commit_ops(vec![add], "b").unwrap();
         }
         let parts = plan(&d.snapshot(), &SplitBy::TopBookmarks, "Ret").unwrap();
         let names: Vec<_> = parts.iter().map(|p| p.name.as_str()).collect();

@@ -98,7 +98,8 @@ interface types {
         /// 0 to 1.
         opacity: f32,
         stroke: f32,
-        /// Empty means the user's name.
+        /// Who made it. Set by the host, ignored in edits: a plugin's
+        /// marks are by the plugin.
         author: string,
         contents: string,
     }

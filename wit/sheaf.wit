@@ -152,10 +152,12 @@ interface types {
         /// 0 to 1.
         opacity: f32,
         stroke: f32,
-        /// Empty means the user's name.
+        /// Who made it. Set by the host, ignored in edits: a plugin's
+        /// marks are by the plugin.
         author: string,
-        /// Its text. `<<name>>`, `<<initials>>`, `<<date>>` and `<<time>>`
-        /// are filled in by the host, as dynamic stamps are.
+        /// Its text. `<<date>>` and `<<time>>` are filled in by the host,
+        /// as dynamic stamps are; `<<name>>` and `<<initials>>` stay as a
+        /// plugin writes them.
         contents: string,
         /// The inside's color, for kinds with one.
         fill: option<rgb>,

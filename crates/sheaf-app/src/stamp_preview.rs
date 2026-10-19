@@ -16,8 +16,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::Context as _;
 use gpui::RenderImage;
-use sheaf_core::PageIndex;
 use sheaf_doc::FormRef;
+use sheaf_render::PageIndex;
 
 /// Width of a picture in pixels: sharp at a stamp's usual size, zoomed in
 /// a little.
@@ -77,7 +77,7 @@ pub fn library_picture(stem: &str, pdf: &Arc<[u8]>) -> Option<Arc<RenderImage>> 
 /// The picture of a turned tape (GPUI can't turn text): its appearance as
 /// a one-page PDF, rendered like a stamp's.
 pub fn tape_picture(a: &sheaf_doc::Annot) -> Option<Arc<RenderImage>> {
-    let key = sheaf_core::checksum(
+    let key = sheaf_util::checksum(
         serde_json::to_string(&(&a.kind, a.color, &a.contents, a.turn))
             .ok()?
             .as_bytes(),

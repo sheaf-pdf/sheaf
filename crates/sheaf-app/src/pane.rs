@@ -7,9 +7,9 @@ use std::ops::Range;
 use std::time::Instant;
 
 use gpui::ScrollHandle;
-use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::geom::Geom;
 use sheaf_doc::{DocState, Document, PageDef, PageId, SourceId};
+use sheaf_edit::{PageSize, Rotation};
 
 use crate::docview::ScrollTo;
 
@@ -390,7 +390,7 @@ impl Pane {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Shown {
     pub(crate) id: PageId,
-    /// The registration and page its render handle draws.
+    /// The source and page its render handle draws.
     pub(crate) source: SourceId,
     pub(crate) index: u32,
     /// Its `to_view` takes PageSpace to the page as drawn, and `shown` is
@@ -413,7 +413,7 @@ impl Shown {
         let rotate = geom.rotate.plus(view);
         Shown {
             id,
-            source: base.source,
+            source: base.src.id(),
             index: base.index,
             geom: Geom { rotate, ..*geom },
             render: rotate.minus(base.src.geom(base.index).rotate),
@@ -429,7 +429,7 @@ mod tests {
         let refs = (0..sizes.len())
             .map(|i| Shown {
                 id: PageId(i as u64),
-                source: SourceId(0),
+                source: SourceId { hash: 0, len: 0 },
                 index: i as u32,
                 geom: Geom::read(None, None, 0),
                 render: Rotation::R0,

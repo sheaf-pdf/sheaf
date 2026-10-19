@@ -151,7 +151,7 @@ static PLUGIN_ICONS: LazyLock<RwLock<HashMap<String, Arc<[u8]>>>> = LazyLock::ne
 pub fn add_plugin_icon(plugin: &str, command: &str, svg: Vec<u8>) -> String {
     let path = format!(
         "plugin-icons/{plugin}/{command}-{}.svg",
-        sheaf_core::checksum_hex(&svg)
+        sheaf_util::checksum_hex(&svg)
     );
     if let Ok(mut icons) = PLUGIN_ICONS.write() {
         icons.insert(path.clone(), svg.into());

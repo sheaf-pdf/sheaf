@@ -27,16 +27,18 @@ use std::path::Path;
 use std::sync::Arc;
 
 use lopdf::{LazyPdf, Object, ObjectId};
-use sheaf_core::{PageIndex, Rotation};
+use sheaf_doc::Document;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::{Finding, Report};
 use sheaf_doc::materialize::{
     Output, Profile, SaveInput, SaveTarget, materialize, plan as save_plan,
 };
 use sheaf_doc::source::Limits;
-use sheaf_doc::{Document, Edit, SourceInfo};
+use sheaf_doc::tx::fixture::{delete, duplicate, file};
+use sheaf_edit::{Bring, FormBring, Op, OutlineBring, Rotation};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
@@ -124,8 +126,7 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
             return Some(out);
         }
     };
-    let info = doc.source(doc.primary()).unwrap();
-    let src = &info.src;
+    let src = doc.primary();
     let before = src.pdf();
     let after = match LazyPdf::open(
         Arc::from(written.bytes.as_slice()),
@@ -331,13 +332,12 @@ fn without_the_first_page(entry: &Entry, corpus: &Corpus) -> Option<Result<usize
         return None;
     }
     let first = doc.page(0).unwrap();
-    doc.apply(Edit::DeletePages { ids: vec![first] }, "delete")
-        .ok()?;
+    doc.commit_ops(vec![delete(&[first])], "delete").ok()?;
     let out = match written(&doc) {
         Ok(out) => out,
         Err(e) => return Some(Err(format!("{e:#}"))),
     };
-    let src = &doc.source(doc.primary()).unwrap().src;
+    let src = &doc.primary();
     let checked = |bytes: &[u8]| sheaf_doc::forms::check(bytes, src.password());
     let (was, now) = match (checked(src.bytes()), checked(&out.bytes)) {
         (Ok(was), Ok(now)) => (was, now),
@@ -433,7 +433,7 @@ fn every_file_writes_with_its_pages_duplicated() {
     let outcomes = each_entry(&entries, |entry| {
         let mut doc = opened(&corpus.path(entry))?;
         let ids: Vec<_> = doc.state().order().iter().copied().collect();
-        doc.apply(Edit::DuplicatePages { ids }, "dup").ok()?;
+        doc.commit_ops(vec![duplicate(&ids)], "dup").ok()?;
         Some(written(&doc).map(drop).map_err(|e| format!("{e:#}")))
     });
     all_written(
@@ -477,20 +477,22 @@ fn every_fourth_file_s_pages_inserted_twice_into_a_form_write() {
     );
     let outcomes = each_entry(&picked, |entry| {
         let mut doc = opened(&base).expect("the 1040 opens");
-        let info = SourceInfo::read(doc.store(), &corpus.path(entry), None)
-            .ok()?
-            .0;
-        let count = info.src.page_count();
-        let source = doc.add_source(info);
+        let path = corpus.path(entry);
+        let (src, _) = doc.store().read_file(&path, None).ok()?;
         for _ in 0..2 {
-            let insert = Edit::InsertPages {
-                source,
-                range: 0..count,
+            // Its pages and their form, without its marks and bookmarks.
+            let insert = Op::InsertPages {
+                from: file(&src, &sheaf_doc::store::file_name(&path)),
+                pages: None,
                 before: None,
-                outline: None,
-                annots: Vec::new(),
+                bring: Bring {
+                    marks: false,
+                    form: FormBring::New,
+                    outline: OutlineBring::None,
+                },
+                locals: Vec::new(),
             };
-            doc.apply(insert, "insert").ok()?;
+            doc.commit_ops(vec![insert], "insert").ok()?;
         }
         Some(written(&doc).map(drop).map_err(|e| format!("{e:#}")))
     });

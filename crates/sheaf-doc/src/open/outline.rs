@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
-use sheaf_core::DestView;
+use sheaf_edit::DestView;
 
 use crate::Source;
 use crate::attachments::{name_tree, resolve};

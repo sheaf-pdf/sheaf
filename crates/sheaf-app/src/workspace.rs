@@ -1296,8 +1296,7 @@ impl Workspace {
             let counted = cx
                 .background_executor()
                 .spawn(async move {
-                    sheaf_doc::SourceInfo::read(&sheaf_doc::Store::new(), &p, None)
-                        .map(|(info, _)| info.src.page_count())
+                    (sheaf_doc::Store::new().read_file(&p, None)).map(|(src, _)| src.page_count())
                 })
                 .await;
             ws.update_in(cx, |ws, window, cx| {

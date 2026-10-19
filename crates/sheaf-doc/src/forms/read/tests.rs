@@ -13,7 +13,6 @@ use lopdf::{Object, ObjectId, Stream, StringFormat, dictionary};
 use proptest::prelude::*;
 
 use super::*;
-use crate::SourceInfo;
 use crate::forms::corpus::Corpus;
 use crate::forms::field::{annot_flags, flags};
 use crate::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row, source};
@@ -1010,10 +1009,10 @@ fn corpus_hybrid_reference_files_read_their_newest_revision() {
             continue;
         }
         // Some damaged files don't open at all (slice 1's note).
-        let Ok((info, _)) = SourceInfo::read(&Store::new(), &corpus.path(&entry), None) else {
+        let Ok((src, _)) = Store::new().read_file(&corpus.path(&entry), None) else {
             continue;
         };
-        let facts = read(&info.src).facts;
+        let facts = read(&src).facts;
         if facts.damaged.is_some() {
             continue;
         }
@@ -1261,10 +1260,7 @@ fn corpus_hybrid_forms_bind_their_xfa() {
         if entry.kind != "hybrid" || entry.path.starts_with("forms/safedocs/") {
             continue;
         }
-        let src = SourceInfo::read(&Store::new(), &corpus.path(&entry), None)
-            .unwrap()
-            .0
-            .src;
+        let (src, _) = Store::new().read_file(&corpus.path(&entry), None).unwrap();
         let form = read(&src);
         let pdf = src.pdf();
         let acroform = pdf

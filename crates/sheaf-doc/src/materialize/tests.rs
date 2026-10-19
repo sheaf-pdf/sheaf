@@ -16,7 +16,7 @@ use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dict
 use super::*;
 use crate::history::FixedCount;
 use crate::labels::{LabelSpec, Style};
-use crate::model::{Document, Edit, OutlineId, PageId, SourceId, SourceInfo};
+use crate::model::{Document, OutlineId, PageId, SourceId};
 use crate::serialize::durable::FileStamp;
 use crate::serialize::fixture::{
     FORM_SECRETS, USER, encrypted, form, holds, object_streams_encrypted, rc4_aes_128_and_aes_256,
@@ -24,6 +24,8 @@ use crate::serialize::fixture::{
 use crate::source::Limits;
 use crate::source::lazy_tests::same;
 use crate::store::{BlobKind, Src, Store};
+use crate::tx::fixture as fx;
+use sheaf_edit::{BookmarkRef, Op, Turn};
 
 /// A file of `n` pages, each drawing "`tag` i" in Helvetica from a stream
 /// of its own, under one node that gives them their resources and media
@@ -92,41 +94,42 @@ pub(super) fn bytes(pdf: &Pdf) -> Vec<u8> {
 }
 
 /// `bytes`, read into `store` as the file `name`, opened with `password`.
-fn info(store: &Store, bytes: &[u8], name: &str, password: Option<&str>) -> SourceInfo {
+fn file_in(store: &Store, bytes: &[u8], name: &str, password: Option<&str>) -> Src {
     let kind = BlobKind::file(Path::new(name), password);
-    SourceInfo {
-        src: store.open(Arc::from(bytes), kind).unwrap(),
-        name: name.into(),
-        derived: None,
-    }
+    store.open(Arc::from(bytes), kind).unwrap()
 }
 
 /// A document over `bytes`, opened with `password`.
 pub(super) fn open(bytes: &[u8], password: Option<&str>) -> Document {
     let store = Store::new();
-    let primary = info(&store, bytes, "doc.pdf", password);
-    let src = primary.src.clone();
-    let mut d = crate::open::start(store, primary, None, Box::new(FixedCount(50)));
+    let primary = file_in(&store, bytes, "doc.pdf", password);
+    let src = primary.clone();
+    let policy = Box::new(FixedCount(50));
+    let mut d = crate::open::start(store, primary, "doc.pdf".into(), None, policy);
     d.ready(crate::open::finish(&src, &NoProgress)).unwrap();
     d
 }
 
-/// `bytes`, registered with `d` as the file `name`.
-pub(super) fn add(d: &mut Document, bytes: &[u8], name: &str) -> SourceId {
-    let info = info(d.store(), bytes, name, None);
-    d.add_source(info)
+/// A file to insert pages of: its source, held while it's used, and the
+/// name it goes by.
+#[derive(Clone)]
+pub(super) struct Other {
+    pub(super) src: Src,
+    pub(super) name: Arc<str>,
 }
 
-/// Page `index` of `source` inserted at the end of `d`.
-pub(super) fn insert(d: &mut Document, source: SourceId, index: u32) {
-    let edit = Edit::InsertPages {
-        source,
-        range: index..index + 1,
-        before: None,
-        outline: None,
-        annots: Vec::new(),
-    };
-    d.apply(edit, "insert").unwrap();
+/// `bytes`, read into `d`'s store as the file `name`.
+pub(super) fn add(d: &Document, bytes: &[u8], name: &str) -> Other {
+    Other {
+        src: file_in(d.store(), bytes, name, None),
+        name: name.into(),
+    }
+}
+
+/// Page `index` of `other` inserted at the end of `d`.
+pub(super) fn insert(d: &mut Document, other: &Other, index: u32) {
+    let insert = fx::insert(&other.src, [index], &other.name, None);
+    d.commit_ops(vec![insert], "insert").unwrap();
 }
 
 fn rewrite_plan() -> SavePlan {
@@ -159,8 +162,7 @@ pub(super) fn rewrite(d: &Document, profile: Profile) -> Output {
 
 /// `bytes` as a source, read with `password`.
 pub(super) fn source(bytes: &[u8], password: Option<&str>) -> Src {
-    let store = Store::new();
-    info(&store, bytes, "out.pdf", password).src
+    file_in(&Store::new(), bytes, "out.pdf", password)
 }
 
 /// `bytes` read lazily with `password`.
@@ -230,10 +232,7 @@ fn an_identity_rewrite_keeps_every_number_and_copies_what_it_didnt_touch() {
     }
     // The font, the resources, three contents, the XMP and the Info.
     assert_eq!(copied, 7);
-    assert_eq!(
-        out.record.map.identity,
-        Some(d.source(d.primary()).unwrap().src.id())
-    );
+    assert_eq!(out.record.map.identity, Some(d.primary().id()));
     let objects = ids(&was)
         .into_iter()
         .filter(|&id| !layout(was.get(id).unwrap()));
@@ -251,15 +250,11 @@ fn a_rewrite_is_the_same_bytes_every_time() {
     for (base, password) in [(plain, None), (aes, Some(USER))] {
         let mut d = open(&base, password);
         let first = d.page(0).unwrap();
-        d.apply(Edit::DuplicatePages { ids: vec![first] }, "dup")
-            .unwrap();
-        let turn = Edit::RotatePages {
-            ids: vec![first],
-            by: sheaf_core::Rotation::R90,
-        };
-        d.apply(turn, "turn").unwrap();
-        let source = add(&mut d, &other, "other.pdf");
-        insert(&mut d, source, 1);
+        d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
+        let turn = fx::rotate(&[first], Turn::Quarter);
+        d.commit_ops(vec![turn], "turn").unwrap();
+        let source = add(&d, &other, "other.pdf");
+        insert(&mut d, &source, 1);
         let input = SaveInput::detached(&d.snapshot());
         let once = write(&input, Profile::default()).bytes;
         let again = std::thread::scope(|scope| {
@@ -284,14 +279,10 @@ fn a_duplicate_moved_before_its_original_leaves_copy_0_with_the_original_object(
     let was = source(&before, None);
     let mut d = open(&before, None);
     let first = d.page(0).unwrap();
-    d.apply(Edit::DuplicatePages { ids: vec![first] }, "dup")
-        .unwrap();
+    d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
     let copy = d.page(1).unwrap();
-    let to_front = Edit::MovePages {
-        ids: vec![copy],
-        before: Some(first),
-    };
-    d.apply(to_front, "move").unwrap();
+    let to_front = fx::move_pages(&[copy], Some(first));
+    d.commit_ops(vec![to_front], "move").unwrap();
     let out = rewrite(&d, Profile::default());
     let now = source(&out.bytes, None);
     let pages: Vec<ObjectId> = now.page_ids().collect();
@@ -318,11 +309,10 @@ fn a_duplicate_moved_before_its_original_leaves_copy_0_with_the_original_object(
 #[test]
 fn a_tagged_page_inserted_into_a_tagged_file_has_no_struct_parents() {
     let mut d = open(&bytes(&file("A", 2, true)), None);
-    let source = add(&mut d, &bytes(&file("B", 2, true)), "other.pdf");
-    insert(&mut d, source, 1);
+    let source = add(&d, &bytes(&file("B", 2, true)), "other.pdf");
+    insert(&mut d, &source, 1);
     let first = d.page(0).unwrap();
-    d.apply(Edit::DuplicatePages { ids: vec![first] }, "dup")
-        .unwrap();
+    d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
     let out = rewrite(&d, Profile::default());
     let now = source_of(&out);
     let struct_parents: Vec<Option<i64>> = now.pages().iter().map(|p| p.struct_parents).collect();
@@ -341,8 +331,8 @@ fn a_tagged_page_inserted_into_a_tagged_file_has_no_struct_parents() {
     );
     // An untagged file's pages lose nothing worth a note.
     let mut d = open(&bytes(&file("A", 1, false)), None);
-    let source = add(&mut d, &bytes(&file("B", 1, false)), "plain.pdf");
-    insert(&mut d, source, 0);
+    let source = add(&d, &bytes(&file("B", 1, false)), "plain.pdf");
+    insert(&mut d, &source, 0);
     assert!(rewrite(&d, Profile::default()).notes.is_empty());
 }
 
@@ -408,7 +398,7 @@ fn an_encrypted_base_rewrites_encrypted() {
             );
             let (was, now) = (lazy(&before, Some(USER)), lazy(&out.bytes, Some(USER)));
             let (crypt, back) = (
-                d.source(d.primary()).unwrap().src.crypt().unwrap().clone(),
+                d.primary().crypt().unwrap().clone(),
                 crate::serialize::crypt::Crypt::of(&now).unwrap().unwrap(),
             );
             assert_eq!(back.dict(), crypt.dict(), "{name}");
@@ -448,7 +438,7 @@ fn profile_none_turns_raw_passthrough_off() {
     let out = rewrite(&d, unencrypted);
     let (was, now) = (lazy(&before, Some(USER)), lazy(&out.bytes, None));
     assert!(!now.is_encrypted());
-    let crypt = d.source(d.primary()).unwrap().src.crypt().unwrap().at();
+    let crypt = d.primary().crypt().unwrap().at();
     let anew = written_anew(&source(&before, Some(USER)));
     let mut decrypted = 0;
     for id in ids(&was) {
@@ -544,13 +534,11 @@ fn labels_follow_a_reorder() {
         prefix: String::new(),
         first: 1,
     };
-    let labels = Edit::SetPageLabels {
-        ranges: vec![
-            spec(ids[0], Style::LowerRoman),
-            spec(ids[2], Style::Decimal),
-        ],
-    };
-    d.apply(labels, "labels").unwrap();
+    let labels = fx::labels(&[
+        spec(ids[0], Style::LowerRoman),
+        spec(ids[2], Style::Decimal),
+    ]);
+    d.commit_ops(vec![labels], "labels").unwrap();
     let read = |out: &Output| {
         let pdf = Pdf::load_mem(&out.bytes).unwrap();
         crate::labels::label_ranges(&pdf).map(|r| crate::labels::labels_for(&r, 4))
@@ -559,16 +547,13 @@ fn labels_follow_a_reorder() {
         read(&rewrite(&d, Profile::default())).unwrap(),
         ["i", "ii", "1", "2"]
     );
-    let to_front = Edit::MovePages {
-        ids: vec![ids[2]],
-        before: Some(ids[0]),
-    };
-    d.apply(to_front, "move").unwrap();
+    let to_front = fx::move_pages(&[ids[2]], Some(ids[0]));
+    d.commit_ops(vec![to_front], "move").unwrap();
     assert_eq!(
         read(&rewrite(&d, Profile::default())).unwrap(),
         ["1", "i", "ii", "iii"]
     );
-    d.apply(Edit::SetPageLabels { ranges: Vec::new() }, "none")
+    d.commit_ops(vec![Op::SetPageLabels { ranges: None }], "none")
         .unwrap();
     assert_eq!(read(&rewrite(&d, Profile::default())), None);
 }
@@ -595,8 +580,8 @@ pub(super) fn save(d: &mut Document) -> Output {
 fn a_second_save_keeps_the_first_save_s_numbers() {
     let mut d = open(&bytes(&file("A", 2, false)), None);
     let other = bytes(&file("B", 3, false));
-    let source = add(&mut d, &other, "other.pdf");
-    insert(&mut d, source, 0);
+    let source = add(&d, &other, "other.pdf");
+    insert(&mut d, &source, 0);
     let inserted = d.page(2).unwrap();
     let first = save(&mut d);
     let numbered: Vec<(ObjKey, ObjectId)> = first
@@ -612,7 +597,7 @@ fn a_second_save_keeps_the_first_save_s_numbers() {
             .iter()
             .any(|(k, _)| matches!(k, ObjKey::Base { .. }))
     );
-    insert(&mut d, source, 2);
+    insert(&mut d, &source, 2);
     let added = d.page(3).unwrap();
     let second = save(&mut d);
     for (key, at) in &numbered {
@@ -726,7 +711,7 @@ fn objects_numbered_past_the_last_number_are_given_new_ones() {
     // The record keeps where they went, and the next save writes them
     // there.
     let key = |n: u32| ObjKey::Base {
-        blob: d.source(d.primary()).unwrap().src.id(),
+        blob: d.primary().id(),
         obj: (n, 0),
         copy: 0,
     };
@@ -758,9 +743,9 @@ fn a_reference_to_nothing_stays_one() {
         .set("Nothing", Object::Reference(nothing));
     let mut d = open(&bytes(&pdf), None);
     let other = bytes(&file("B", 3, false));
-    let source = add(&mut d, &other, "other.pdf");
+    let source = add(&d, &other, "other.pdf");
     for index in 0..3 {
-        insert(&mut d, source, index);
+        insert(&mut d, &source, index);
     }
     let out = rewrite(&d, Profile::default());
     let written = lazy(&out.bytes, None);
@@ -820,11 +805,8 @@ fn a_size_at_the_last_number_isnt_reserved() {
 
     let mut d = open(&base, None);
     let page = d.page(0).unwrap();
-    let turn = Edit::RotatePages {
-        ids: vec![page],
-        by: sheaf_core::Rotation::R90,
-    };
-    d.apply(turn, "turn").unwrap();
+    let turn = fx::rotate(&[page], Turn::Quarter);
+    d.commit_ops(vec![turn], "turn").unwrap();
     let out = save(&mut d);
     assert!(out.bytes.len() < 4096, "{} bytes", out.bytes.len());
     let pdf = lazy(&out.bytes, None);
@@ -950,15 +932,9 @@ fn copied_pages_bring_what_they_reach_but_other_pages() {
     let other = bytes(&linked());
     // Both pages: the link leads to the second.
     let mut d = open(&bytes(&file("A", 1, false)), None);
-    let source = add(&mut d, &other, "other.pdf");
-    let both = Edit::InsertPages {
-        source,
-        range: 0..2,
-        before: None,
-        outline: None,
-        annots: Vec::new(),
-    };
-    d.apply(both, "insert").unwrap();
+    let source = add(&d, &other, "other.pdf");
+    let both = fx::insert(&source.src, [0, 1], &source.name, None);
+    d.commit_ops(vec![both], "insert").unwrap();
     let now = source_of(&rewrite(&d, Profile::default()));
     let pages: Vec<ObjectId> = now.page_ids().collect();
     let on_first = annots(&now, pages[1]);
@@ -973,8 +949,8 @@ fn copied_pages_bring_what_they_reach_but_other_pages() {
 
     // Only the first: the link goes, the comment stays.
     let mut d = open(&bytes(&file("A", 1, false)), None);
-    let source = add(&mut d, &other, "other.pdf");
-    insert(&mut d, source, 0);
+    let source = add(&d, &other, "other.pdf");
+    insert(&mut d, &source, 0);
     let now = source_of(&rewrite(&d, Profile::default()));
     let pages: Vec<ObjectId> = now.page_ids().collect();
     assert_eq!(pages.len(), 2);
@@ -985,8 +961,7 @@ fn copied_pages_bring_what_they_reach_but_other_pages() {
     // A duplicate of a page of this file: its comment is its own.
     let mut d = open(&other, None);
     let first = d.page(0).unwrap();
-    d.apply(Edit::DuplicatePages { ids: vec![first] }, "dup")
-        .unwrap();
+    d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
     let now = source_of(&rewrite(&d, Profile::default()));
     let pages: Vec<ObjectId> = now.page_ids().collect();
     let (original, copy) = (annots(&now, pages[0]), annots(&now, pages[1]));
@@ -1118,18 +1093,15 @@ fn outline_actions_se_and_closed_items_survive_a_reorder() {
     let roots: Vec<OutlineId> = d.state().outline_roots().iter().copied().collect();
     let (site, chapter) = (roots[0], roots[1]);
     let third = d.page(2).unwrap();
-    let to_front = Edit::MovePages {
-        ids: vec![third],
-        before: d.page(0),
-    };
-    d.apply(to_front, "move").unwrap();
-    let after_chapter = Edit::OutlineMove {
-        id: site,
+    let to_front = fx::move_pages(&[third], d.page(0));
+    d.commit_ops(vec![to_front], "move").unwrap();
+    let after_chapter = Op::MoveBookmarks {
+        bookmarks: vec![BookmarkRef::Id(site)],
         parent: None,
-        after: Some(chapter),
+        at: fx::sibling(Some(chapter)),
         with_pages: false,
     };
-    d.apply(after_chapter, "move bookmark").unwrap();
+    d.commit_ops(vec![after_chapter], "move bookmark").unwrap();
     let out = save(&mut d);
     let now = source_of(&out);
     let new = items(&now);
@@ -1213,16 +1185,9 @@ fn outlined_other() -> Pdf {
 #[test]
 fn a_kept_bookmark_from_an_inserted_file_keeps_its_action() {
     let mut d = open(&bytes(&file("A", 1, false)), None);
-    let source = add(&mut d, &bytes(&outlined_other()), "b.pdf");
-    let src = d.source(source).unwrap().src.clone();
-    let both = Edit::InsertPages {
-        source,
-        range: 0..2,
-        before: None,
-        outline: Some(crate::open::outline(&src)),
-        annots: Vec::new(),
-    };
-    d.apply(both, "insert").unwrap();
+    let source = add(&d, &bytes(&outlined_other()), "b.pdf");
+    let both = fx::insert(&source.src, [0, 1], &source.name, None);
+    d.commit_ops(vec![both], "insert").unwrap();
     let out = rewrite(&d, Profile::default());
     let now = source_of(&out);
     let new = items(&now);
@@ -1261,43 +1226,30 @@ fn drawn(src: &Src, index: u32) -> Vec<u8> {
         .collect()
 }
 
-/// A derived copy of page `index` of `d`'s primary, cropped to `crop`, as
-/// a registration of `d`, and the page rebased onto it.
+/// A derived copy of page `index` of `d`'s primary, cropped to `crop`,
+/// noted with `d`, and the page rebased onto it.
 fn crop(d: &mut Document, page: PageId, index: u32, crop: [f32; 4]) -> SourceId {
-    let primary = d.primary();
-    let info = d.source(primary).unwrap().clone();
-    let bytes = crate::save::cropped_copy(&info, &[(index, crop)]).unwrap();
+    let bytes = crate::save::cropped_copy(d.primary(), &[(index, crop)]).unwrap();
     derive(d, &bytes, index, page)
 }
 
-/// `bytes`, a derived copy of page `index` of `d`'s primary, as a
-/// registration of `d`, and `page` rebased onto its first page.
+/// `bytes`, a derived copy of page `index` of `d`'s primary, noted with
+/// `d`, and `page` rebased onto its first page.
 fn derive(d: &mut Document, bytes: &[u8], index: u32, page: PageId) -> SourceId {
     let kind = BlobKind::Pdf {
         password: None,
         origin: crate::store::Origin::Memory(crate::store::MemoryKind::Derived),
     };
-    let info = SourceInfo {
-        src: d.store().open(Arc::from(bytes), kind).unwrap(),
-        name: "doc.pdf".into(),
-        derived: Some(crate::Derived {
-            from: d.primary(),
-            pages: vec![index],
-        }),
+    let copy = d.store().open(Arc::from(bytes), kind).unwrap();
+    let derived = crate::Derived {
+        from: d.primary().clone(),
+        pages: vec![index],
     };
-    let source = d.add_source(info);
-    let rebase = crate::Rebase {
-        id: page,
-        source,
-        index: 0,
-    };
-    d.apply(
-        Edit::RebasePages {
-            pages: vec![rebase],
-        },
-        "rebase",
-    )
-    .unwrap();
+    d.add_derived(&copy, derived);
+    let source = copy.id();
+    let why = crate::tx::Derive::Crop;
+    d.commit_page_base(vec![(page, copy, 0)], why, "rebase")
+        .unwrap();
     source
 }
 
@@ -1308,25 +1260,20 @@ fn derive(d: &mut Document, bytes: &[u8], index: u32, page: PageId) -> SourceId 
 #[test]
 fn the_header_is_drawn_once_and_not_again_where_the_base_draws_it() {
     let mut d = open(&bytes(&file("A", 2, false)), None);
-    let hf = crate::stamps::HeaderFooter {
-        texts: ["Head <<1>>", "", "", "", "", ""].map(String::from),
-        ..Default::default()
-    };
-    let set = Edit::SetHeaderFooter {
-        header_footer: Some(hf.clone()),
-    };
-    d.apply(set, "header").unwrap();
+    let head = fx::header("Head <<1>>");
+    d.commit_ops(vec![fx::set_header(head.clone(), None)], "header")
+        .unwrap();
     let first = rewrite(&d, Profile::default());
     let once = source_of(&first);
     assert_eq!([headers(&once, 0), headers(&once, 1)], [1, 1]);
     assert!(holds(&drawn(&once, 1), b"(Head 2)"));
 
     let mut d = open(&first.bytes, None);
-    assert_eq!(d.state().header_footer().unwrap().texts, hf.texts);
+    assert_eq!(d.state().header_footer().unwrap().texts, head.texts);
     let first_page = d.page(0).unwrap();
     crop(&mut d, first_page, 0, [0.0, 0.0, 400.0, 500.0]);
-    let other = add(&mut d, &bytes(&file("B", 1, false)), "other.pdf");
-    insert(&mut d, other, 0);
+    let other = add(&d, &bytes(&file("B", 1, false)), "other.pdf");
+    insert(&mut d, &other, 0);
     let again = source_of(&rewrite(&d, Profile::default()));
     let counts: Vec<usize> = (0..3).map(|i| headers(&again, i)).collect();
     assert_eq!(counts, [1, 1, 1]);
@@ -1347,11 +1294,7 @@ fn layer(text: &str) -> Arc<crate::text_layer::TextLayer> {
         confidence: 0.9,
     };
     let geom = crate::geom::Geom::read(None, None, 0);
-    Arc::new(crate::text_layer::TextLayer::from_engine(
-        vec![word],
-        &geom,
-        "test",
-    ))
+    Arc::new(crate::text_layer::from_engine(vec![word], &geom, "test"))
 }
 
 /// Page `index`'s `/Contents` entries in `pdf` marked as an OCR layer's.
@@ -1382,20 +1325,16 @@ fn a_re_ocr_over_a_base_layer_leaves_one_layer() {
     let mut d = open(&bytes(&file("A", 1, false)), None);
     let page = d.page(0).unwrap();
     let (old, new) = (layer("first"), layer("second"));
-    let set = |layer: &Arc<_>| Edit::SetTextLayers {
-        layers: vec![(page, Arc::clone(layer))],
-    };
-    d.apply(set(&old), "ocr").unwrap();
+    let set = |layer: &Arc<_>| fx::ocr([(page, Arc::clone(layer))]);
+    d.commit_ops(set(&old), "ocr").unwrap();
     let first = rewrite(&d, Profile::default());
     let once = crate::file::load_pdf_mem(&first.bytes, None).unwrap();
     assert_eq!(ocr_streams(&once, 0).len(), 2, "the q and the layer");
 
     let mut d = open(&first.bytes, None);
     let page = d.page(0).unwrap();
-    let set = Edit::SetTextLayers {
-        layers: vec![(page, Arc::clone(&new))],
-    };
-    d.apply(set, "ocr again").unwrap();
+    let set = fx::ocr([(page, Arc::clone(&new))]);
+    d.commit_ops(set, "ocr again").unwrap();
     let again = rewrite(&d, Profile::default());
     let pdf = crate::file::load_pdf_mem(&again.bytes, None).unwrap();
     let marked = ocr_streams(&pdf, 0);
@@ -1423,10 +1362,10 @@ fn a_re_ocr_over_a_base_layer_leaves_one_layer() {
 #[test]
 fn ocr_pages_share_one_font() {
     let mut d = open(&bytes(&file("A", 3, false)), None);
-    let layers = (0..3)
+    let layers: Vec<_> = (0..3)
         .map(|i| (d.page(i).unwrap(), layer(&format!("word{i}"))))
         .collect();
-    d.apply(Edit::SetTextLayers { layers }, "ocr").unwrap();
+    d.commit_ops(fx::ocr(layers), "ocr").unwrap();
     let out = rewrite(&d, Profile::default());
     let pdf = crate::file::load_pdf_mem(&out.bytes, None).unwrap();
     let type0 = (pdf.objects.values())
@@ -1469,9 +1408,8 @@ fn a_derived_page_is_written_as_its_original_object_with_derived_content() {
     let before = bytes(&pdf);
     let mut d = open(&before, None);
     let first = d.page(0).unwrap();
-    let info = d.source(d.primary()).unwrap().clone();
     let redrawn = crate::save::derived_copy(
-        &info,
+        d.primary(),
         &[(0, Some([0.0, 0.0, 300.0, 400.0]))],
         crate::save::HeaderKept::Yes,
         &mut |pdf, page, _, _| {
@@ -1706,8 +1644,7 @@ fn an_object_a_copy_names_that_doesnt_read_is_copied_as_null() {
     assert!(source(&before, None).pdf().object_unkept((5, 0)).is_err());
     let mut d = open(&before, None);
     let first = d.page(0).unwrap();
-    d.apply(Edit::DuplicatePages { ids: vec![first] }, "dup")
-        .unwrap();
+    d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
     let out = rewrite(&d, Profile::default());
     assert!(
         out.notes.iter().any(|n| n.0.contains("couldn't be read")),

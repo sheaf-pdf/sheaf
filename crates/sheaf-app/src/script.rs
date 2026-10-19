@@ -20,8 +20,10 @@
 //! - `{"checkpoint": "name"}`: print `SCRIPT checkpoint name` and wait (up to
 //!   two minutes) until `<script>.go` contains that name, so a harness can
 //!   take a screenshot first.
-//! - `{"dump": "outline" | "notice" | "selection" | "annots" | "pages" | "panels" |
-//!   "plugins" | "region" | "view" | "layout" | "toolbar" | "focus" | "form"}`: print state as `SCRIPT <what>: …` lines.
+//! - `{"dump": "outline" | "notice" | "selection" | "annots" | "marks" | "pages" |
+//!   "panels" | "plugins" | "region" | "view" | "layout" | "toolbar" | "focus" |
+//!   "form"}`: print state as `SCRIPT <what>: …` lines. `"marks"` is the
+//!   selected marks.
 //! - `{"quit": true}`
 //!
 //! File pickers can't be driven; set `SHEAF_SCRIPT_PICK=<path>` and every
@@ -440,13 +442,14 @@ impl Workspace {
                     Some(facts) => eprintln!("SCRIPT form: {facts}"),
                     None => eprintln!("SCRIPT form: not read yet"),
                 }
-                // The inserted files', as their sources read them.
-                let mut inserted: Vec<_> = (d.model.sources())
-                    .filter(|&(id, _)| id != d.model.primary())
-                    .collect();
-                inserted.sort_by_key(|&(id, _)| id);
-                for (source, info) in inserted {
-                    eprintln!("SCRIPT form: source {} {}", source.0, info.src.form().facts);
+                // The other files', as their sources read them.
+                let primary = d.model.primary();
+                for src in d.model.store().sources().iter().filter(|s| *s != primary) {
+                    eprintln!(
+                        "SCRIPT form: source {} {}",
+                        src.id().stem(),
+                        src.form().facts
+                    );
                 }
             }
             "selection" => eprintln!(
@@ -511,6 +514,19 @@ impl Workspace {
                             a.page_bounds()
                         );
                     }
+                }
+            }
+            "marks" => {
+                for &(page, id) in &d.selected_marks {
+                    let at = st.pos_of(page).map_or(0, |i| i + 1);
+                    let kind = (st.find_annot(id)).map_or(String::new(), |(_, a)| {
+                        let kind = format!("{:?}", a.kind);
+                        kind.split([' ', '{', '(']).next().unwrap_or("").to_string()
+                    });
+                    eprintln!("SCRIPT marks: selected page {at} {kind} {}", id.0);
+                }
+                if d.selected_marks.is_empty() {
+                    eprintln!("SCRIPT marks: none selected");
                 }
             }
             "panels" =>

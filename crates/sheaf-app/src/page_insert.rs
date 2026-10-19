@@ -5,12 +5,15 @@
 use std::path::PathBuf;
 
 use gpui::Context;
-use sheaf_core::PageSize;
 use sheaf_doc::images::PageFit;
-use sheaf_doc::{Edit, PageId, SourceInfo};
+use sheaf_doc::{Actor, Derive, JobKind, PageId, Src};
+use sheaf_edit::{
+    BlobSel, Bring, Op, PageLabelRange, PageRef, PageSel, PageSize, PageSource, RangeSet, ScopeSel,
+};
+use sheaf_ops::derive::DerivedSource;
 use sheaf_render::RenderHandle;
 
-use crate::docview::{DocView, State};
+use crate::docview::{DocView, State, failed};
 
 /// Where inserted pages go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,23 +161,30 @@ impl DocView {
         if self.still_opening(cx) {
             return;
         }
+        let Ok(with) = RangeSet::from_runs(std::iter::once(range.start + 1..=range.end)) else {
+            return self.set_notice("Replace failed: no pages to replace with", cx);
+        };
         let State::Ready(doc) = &self.state else {
             return;
         };
         let store = doc.model.store().clone();
+        let primary = doc.model.primary().clone();
+        let pages: Vec<u32> = range.clone().collect();
         self.set_notice(format!("Replacing pages from {name}…"), cx);
         cx.spawn(async move |this, cx| {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
-                    let (info, _) = SourceInfo::read(&store, &path, None)?;
-                    let incoming = crate::docview::Incoming::read(&info);
-                    let handle = RenderHandle::open_bytes(info.src.bytes().clone(), None)?;
-                    anyhow::Ok((info, handle, incoming))
+                    let (src, _) = store.read_file(&path, None)?;
+                    // What lowering reads of it, read here; what its marks
+                    // hold, held until the replace is committed.
+                    let held = sheaf_doc::tx::ready_to_insert(&store, &primary, &src, &pages);
+                    let handle = RenderHandle::open_bytes(src.bytes().clone(), None)?;
+                    anyhow::Ok((src, handle, held))
                 })
                 .await;
             this.update(cx, |v, cx| {
-                let (info, handle, incoming) = match opened {
+                let (src, handle, held) = match opened {
                     Ok(h) => h,
                     Err(e) => {
                         v.set_notice(format!("Replace failed: {e:#}"), cx);
@@ -189,43 +199,74 @@ impl DocView {
                 let State::Ready(doc) = &mut v.state else {
                     return;
                 };
-                let sid = doc.model.add_source(info);
-                doc.handles.insert(sid, handle);
+                doc.handles.entry(src.id()).or_insert(handle);
+                let mut tx = doc.model.tx(Actor::Job(JobKind::Insert));
+                for blob in held {
+                    tx.pin(blob);
+                }
+                tx.pin(src.blob().clone());
                 let n = ids.len();
                 let label = format!("Replace {n} page{}", if n == 1 { "" } else { "s" });
-                let mixed = doc.model.scripts_mixed();
-                match doc.model.apply(
-                    Edit::ReplacePages {
-                        ids,
-                        source: sid,
-                        range: range.clone(),
-                        annots: incoming.edit_marks(),
+                let replace = Op::ReplacePages {
+                    pages: ids.into_iter().map(PageRef::Id).collect(),
+                    from: PageSource::File {
+                        file: BlobSel::Id(src.id()),
+                        name: name.clone(),
                     },
-                    &label,
-                ) {
-                    Ok(out) => {
-                        doc.take_in(sid, incoming);
-                        doc.touched();
-                        let mut notice = format!(
-                            "Replaced {n} page{} with {} from {name}",
-                            if n == 1 { "" } else { "s" },
-                            range.len()
-                        );
-                        if let Some(form) = doc.model.form_notice(&out, false, mixed) {
-                            notice = format!("{notice}. {form}");
-                        }
-                        if let Some(text) = doc.model.unencodable_notice(&out) {
-                            notice = format!("{notice}. {text}");
-                        }
-                        v.after_model_change(label, out, cx);
-                        v.set_notice(notice, cx);
-                    }
-                    Err(e) => v.set_notice(crate::docview::failed("Replace", &e), cx),
+                    with: Some(with),
+                    bring: Bring::default(),
+                };
+                let Some(commit) = v.submit(tx, vec![replace], &label, cx) else {
+                    return;
+                };
+                if let State::Ready(doc) = &mut v.state {
+                    doc.take_in(&src);
                 }
+                let mut notice = format!(
+                    "Replaced {n} page{} with {} from {name}",
+                    if n == 1 { "" } else { "s" },
+                    range.len()
+                );
+                if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+                    notice = format!("{notice}. {told}");
+                }
+                v.set_notice(notice, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Each page of `copies` shown from the copy a derived flow made of it,
+    /// as `why` says, as one version called `label`, the copies noted with
+    /// the document and opened to draw: what the commit did, or None when
+    /// it failed, which the notice says. `then` follows in the same
+    /// version.
+    fn rebase(
+        &mut self,
+        copies: Vec<(DerivedSource, RenderHandle)>,
+        why: Derive,
+        then: Vec<Op>,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<sheaf_doc::Commit> {
+        let State::Ready(doc) = &mut self.state else {
+            return None;
+        };
+        let mut pages: Vec<(PageId, Src, u32)> = Vec::new();
+        for (c, handle) in copies {
+            c.note(&mut doc.model);
+            doc.handles.insert(c.src.id(), handle);
+            pages.extend(c.bases());
+        }
+        let mut tx = doc.model.tx(Actor::User);
+        if !pages.is_empty()
+            && let Err(e) = tx.set_page_base(pages, why)
+        {
+            self.set_notice(failed(label, &e), cx);
+            return None;
+        }
+        self.submit(tx, then, label, cx)
     }
 }
 
@@ -290,7 +331,7 @@ impl DocView {
                     )?;
                     let mut opened = Vec::new();
                     for c in plan {
-                        let handle = RenderHandle::open_bytes(c.info.src.bytes().clone(), None)?;
+                        let handle = RenderHandle::open_bytes(c.src.bytes().clone(), None)?;
                         opened.push((c, handle));
                     }
                     anyhow::Ok(opened)
@@ -304,29 +345,12 @@ impl DocView {
                         return;
                     }
                 };
-                let State::Ready(doc) = &mut v.state else {
-                    return;
-                };
-                let mut rebases = Vec::new();
-                for (c, handle) in opened {
-                    let sid = doc.model.add_source(c.info.clone());
-                    doc.handles.insert(sid, handle);
-                    rebases.extend(c.rebases(sid));
-                }
                 let label = format!("Crop {n} page{}", if n == 1 { "" } else { "s" });
-                match doc
-                    .model
-                    .apply(Edit::RebasePages { pages: rebases }, &label)
+                if v.rebase(opened, Derive::Crop, Vec::new(), &label, cx)
+                    .is_some()
                 {
-                    Ok(out) => {
-                        doc.touched();
-                        v.after_model_change(label.clone(), out, cx);
-                        v.set_notice(
-                            format!("Cropped {n} page{}", if n == 1 { "" } else { "s" }),
-                            cx,
-                        );
-                    }
-                    Err(e) => v.set_notice(crate::docview::failed("Crop", &e), cx),
+                    let cropped = format!("Cropped {n} page{}", if n == 1 { "" } else { "s" });
+                    v.set_notice(cropped, cx);
                 }
             })
             .ok();
@@ -360,7 +384,7 @@ impl DocView {
         let st = doc.model.state();
         let ids: Vec<PageId> = st.order().iter().copied().collect();
         let (specs, label) = match change {
-            None => (Vec::new(), "Remove page labels".to_string()),
+            None => (Vec::new(), "Remove page labels"),
             Some((from, to, style, prefix, first)) => {
                 let current = st.label_ranges().unwrap_or_default();
                 let ranges = labels::apply(
@@ -372,19 +396,17 @@ impl DocView {
                     &prefix,
                     first,
                 );
-                (labels::to_specs(&ranges, &ids), "Page labels".to_string())
+                (labels::to_specs(&ranges, &ids), "Page labels")
             }
         };
-        match doc
-            .model
-            .apply(Edit::SetPageLabels { ranges: specs }, &label)
-        {
-            Ok(out) => {
-                doc.touched();
-                self.after_model_change(label, out, cx);
-            }
-            Err(e) => self.set_notice(crate::docview::failed("Page labels", &e), cx),
-        }
+        let range = |r: labels::LabelSpec| PageLabelRange {
+            start: r.start.into(),
+            style: r.style,
+            prefix: r.prefix,
+            first: r.first,
+        };
+        let ranges = (!specs.is_empty()).then(|| specs.into_iter().map(range).collect());
+        self.apply(Op::SetPageLabels { ranges }, label, cx);
     }
 }
 
@@ -423,7 +445,7 @@ impl DocView {
                         sheaf_ops::derive::strip_stamps(&store, &snapshot, &sheaf_ops::NoProgress)?;
                     let mut opened = Vec::new();
                     for c in plan {
-                        let handle = RenderHandle::open_bytes(c.info.src.bytes().clone(), None)?;
+                        let handle = RenderHandle::open_bytes(c.src.bytes().clone(), None)?;
                         opened.push((c, handle));
                     }
                     anyhow::Ok(opened)
@@ -437,31 +459,25 @@ impl DocView {
                         return;
                     }
                 };
-                let State::Ready(doc) = &mut v.state else {
-                    return;
+                let set = match hf.filter(|hf| !hf.is_empty()) {
+                    Some(hf) => Op::SetHeaderFooter {
+                        spec: hf.spec(),
+                        scope: match hf.pages {
+                            None => ScopeSel::All,
+                            Some(pages) => ScopeSel::Pages(PageSel::ids(pages)),
+                        },
+                    },
+                    None => Op::RemoveHeaderFooter {
+                        pages: PageSel::All,
+                    },
                 };
-                let mut rebases = Vec::new();
-                for (c, handle) in opened {
-                    let sid = doc.model.add_source(c.info.clone());
-                    doc.handles.insert(sid, handle);
-                    rebases.extend(c.rebases(sid));
-                }
-                let mut edits = Vec::new();
-                if !rebases.is_empty() {
-                    edits.push(Edit::RebasePages { pages: rebases });
-                }
-                edits.push(Edit::SetHeaderFooter { header_footer: hf });
-                match doc.model.apply_batch(edits, label) {
-                    Ok(out) => {
-                        doc.touched();
-                        let mut notice = format!("{label}: shown now, written when you save");
-                        if let Some(text) = doc.model.unencodable_notice(&out) {
-                            notice = format!("{notice}. {text}");
-                        }
-                        v.after_model_change(label.to_string(), out, cx);
-                        v.set_notice(notice, cx);
+                let why = Derive::StripHeaderFooter;
+                if let Some(commit) = v.rebase(opened, why, vec![set], label, cx) {
+                    let mut notice = format!("{label}: shown now, written when you save");
+                    if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+                        notice = format!("{notice}. {told}");
                     }
-                    Err(e) => v.set_notice(crate::docview::failed(label, &e), cx),
+                    v.set_notice(notice, cx);
                 }
             })
             .ok();
@@ -523,7 +539,7 @@ impl DocView {
             format!("Remove {}", what.to_lowercase())
         };
         // Its text is drawn into the copies, out of the model's sight.
-        let unencodable = wm.as_ref().is_some_and(|w| w.unencodable());
+        let (drawn, unencodable) = (wm.is_some(), wm.as_ref().is_some_and(|w| w.unencodable()));
         self.set_notice(format!("{label}…"), cx);
         cx.spawn(async move |this, cx| {
             let planned = cx
@@ -539,7 +555,7 @@ impl DocView {
                     )?;
                     let mut opened = Vec::new();
                     for c in plan {
-                        let handle = RenderHandle::open_bytes(c.info.src.bytes().clone(), None)?;
+                        let handle = RenderHandle::open_bytes(c.src.bytes().clone(), None)?;
                         opened.push((c, handle));
                     }
                     anyhow::Ok(opened)
@@ -553,36 +569,24 @@ impl DocView {
                         return;
                     }
                 };
-                let State::Ready(doc) = &mut v.state else {
-                    return;
-                };
                 if opened.is_empty() {
                     v.set_notice(format!("No {} to remove", what.to_lowercase()), cx);
                     return;
                 }
-                let mut rebases = Vec::new();
-                for (c, handle) in opened {
-                    let sid = doc.model.add_source(c.info.clone());
-                    doc.handles.insert(sid, handle);
-                    rebases.extend(c.rebases(sid));
-                }
-                let n = rebases.len();
-                match doc
-                    .model
-                    .apply(Edit::RebasePages { pages: rebases }, &label)
-                {
-                    Ok(mut out) => {
-                        doc.touched();
-                        out.unencodable |= unencodable;
-                        let mut notice =
-                            format!("{label}: {n} page{}", if n == 1 { "" } else { "s" });
-                        if let Some(text) = doc.model.unencodable_notice(&out) {
-                            notice = format!("{notice}. {text}");
-                        }
-                        v.after_model_change(label.clone(), out, cx);
-                        v.set_notice(notice, cx);
+                let n: usize = opened.iter().map(|(c, _)| c.pages.len()).sum();
+                let why = match drawn {
+                    true => Derive::Watermark {
+                        behind,
+                        unencodable,
+                    },
+                    false => Derive::RemoveWatermark { behind },
+                };
+                if let Some(commit) = v.rebase(opened, why, Vec::new(), &label, cx) {
+                    let mut notice = format!("{label}: {n} page{}", if n == 1 { "" } else { "s" });
+                    if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+                        notice = format!("{notice}. {told}");
                     }
-                    Err(e) => v.set_notice(crate::docview::failed(&label, &e), cx),
+                    v.set_notice(notice, cx);
                 }
             })
             .ok();

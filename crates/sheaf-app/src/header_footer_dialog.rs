@@ -337,7 +337,7 @@ impl Render for HeaderFooterDialog {
                     count: self.ctx.page_count,
                     bates: hf.bates.as_ref().map(|b| b.start),
                 };
-                let size = sheaf_core::PageSize {
+                let size = sheaf_edit::PageSize {
                     width: 612.0,
                     height: 792.0,
                 };

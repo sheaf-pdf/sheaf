@@ -10,11 +10,13 @@
 use std::sync::Arc;
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
-use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Document, Edit, FixedCount, SourceInfo, Store};
+use sheaf_doc::tx::fixture::add;
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Document, FixedCount, Store};
 use sheaf_doc::{generated, stamp_lib};
+use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 use sheaf_render::{Job, Renderer};
 
@@ -158,14 +160,11 @@ fn a_stamp_from_a_cropped_turned_page_lands_where_it_shows() {
     // Placed in the box 50–150 across, 50–250 up, on a page 300 by 400.
     let blank = generated::blank_pdf(300.0, 400.0).unwrap();
     let store = Store::new();
-    let primary = SourceInfo {
-        src: store
-            .open(blank.into(), BlobKind::file("blank.pdf".as_ref(), None))
-            .unwrap(),
-        name: "blank.pdf".into(),
-        derived: None,
-    };
-    let mut doc = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
+    let primary = store
+        .open(blank.into(), BlobKind::file("blank.pdf".as_ref(), None))
+        .unwrap();
+    let policy = Box::new(FixedCount(10));
+    let mut doc = Document::new(store, primary, "blank.pdf".into(), None, &[], policy);
     // Placed, as the stamps panel places one: held until it's added.
     let turned = (doc.store())
         .intern(stamp_bytes.as_slice().into(), BlobKind::stamp())
@@ -197,7 +196,7 @@ fn a_stamp_from_a_cropped_turned_page_lands_where_it_shows() {
         name: String::new(),
     };
     let page = doc.page(0).unwrap();
-    doc.apply(Edit::AnnotAdd { page, annot }, "Stamp").unwrap();
+    doc.commit_ops(vec![add(page, &annot)], "Stamp").unwrap();
     let saved = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
 
     // A pixel a point, each.

@@ -7,12 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use in_progress::{Level, Progress};
+use in_progress::{Level, NoProgress, Progress};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::images::placement;
 use sheaf_doc::materialize::Came;
 use sheaf_doc::serialize::durable;
-use sheaf_doc::{Box2, Document, Edit, PAGES, SourceInfo, Store, TextLayer};
+use sheaf_doc::{Actor, Box2, CommitOpts, Document, JobKind, PAGES, Store};
+use sheaf_edit::{Op, PageRef};
 use sheaf_image::clean::ScanParams;
 use sheaf_image::io::PageImage;
 use sheaf_ocr::{OcrConfig, OcrImage, OcrWord};
@@ -289,21 +290,32 @@ fn add_text(
     out: &Path,
 ) -> Result<()> {
     let store = Store::new();
-    let (info, stamp) = SourceInfo::read(&store, src, None)?;
+    let (primary, stamp) = store.read_file(src, None)?;
+    let came = Came::Read {
+        path: src.into(),
+        stamp,
+    };
     let mut doc = Document::new(
         store,
-        info,
-        Some(Came::Read(stamp)),
+        primary,
+        sheaf_doc::store::file_name(src),
+        Some(came),
         &[],
         sheaf_doc::history::default_policy(),
     );
-    let layers = doc
+    let ops = doc
         .state()
         .pages()
         .zip(words)
-        .map(|((id, _, geom), w)| (id, Arc::new(TextLayer::from_engine(w, geom, engine))))
+        .map(|((id, _, geom), w)| Op::SetOcrText {
+            page: PageRef::Id(id),
+            layer: Arc::new(sheaf_doc::text_layer::from_engine(w, geom, engine)),
+        })
         .collect();
-    doc.apply(Edit::SetTextLayers { layers }, "Recognize Text")?;
+    let mut tx = doc.tx(Actor::Job(JobKind::Ocr));
+    tx.apply_batch(ops, &NoProgress)?;
+    let label = Some("Recognize Text".into());
+    doc.commit(tx, CommitOpts { label })?;
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), out)
 }
 

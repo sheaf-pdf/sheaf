@@ -14,10 +14,10 @@ use gpui::{
     RenderImage, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use serde::{Deserialize, Serialize};
-use sheaf_core::PageIndex;
 use sheaf_doc::{PageId, Snapshot, SourceId};
 use sheaf_image::raster::PixelFormat;
 use sheaf_print::{Duplex, JobSettings, Orientation, Paper, Printer, Sizing};
+use sheaf_render::PageIndex;
 use sheaf_render::{Job, RenderHandle, RenderRequest};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
@@ -486,7 +486,7 @@ impl PrintDialog {
         else {
             return;
         };
-        let Some(handle) = self.ctx.handles.get(&def.base.source) else {
+        let Some(handle) = self.ctx.handles.get(&def.base.src.id()) else {
             return;
         };
         let rx = handle.render(RenderRequest {

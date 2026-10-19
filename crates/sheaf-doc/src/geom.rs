@@ -3,7 +3,7 @@
 //! and the one conversion between the page's default user space
 //! (PageSpace, §5) and the page as it's shown.
 
-use sheaf_core::{PageSize, Rotation};
+use sheaf_edit::{PageSize, Rotation};
 
 use crate::annot::{Box2, Pt};
 

@@ -10,15 +10,12 @@
 //!
 //! [`SaveRecord`]: super::SaveRecord
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
-
 use lopdf::ObjectId;
 
 use crate::annot::AnnotId;
 use crate::content::ResId;
 use crate::forms::FieldId;
-use crate::model::{DocState, FormInst, OutlineId, PageId, SourceId, SourceInfo};
+use crate::model::{OutlineId, PageId};
 use crate::store::BlobId;
 
 /// An object of a written file, by what it is.
@@ -40,11 +37,12 @@ pub enum ObjKey {
     /// its own number when it's the primary's and `copy` is 0, otherwise
     /// copied. For an object a page's annotations reach, `copy` is the
     /// page's [`PageDef::copy`](crate::PageDef::copy), which counts the
-    /// copies of a page across every registration of its bytes (for a
-    /// derived copy's page, which is written as the page it was made from,
-    /// the copy of that page it is); what its content and resources reach
-    /// is copy 0, shared by every copy of the page. For one a form instance reaches, it's the instance's index
-    /// among its blob's ([`FormCopies`]).
+    /// copies of a page across every insert of its bytes (for a derived
+    /// copy's page, which is written as the page it was made from, the
+    /// copy of that page it is); what its content and resources reach is
+    /// copy 0, shared by every copy of the page. For one a form instance
+    /// reaches, it's the instance's [`FormInst::copy`](crate::FormInst),
+    /// fixed as it was made.
     Base {
         blob: BlobId,
         obj: ObjectId,
@@ -224,73 +222,16 @@ impl ObjKey {
     }
 }
 
-/// The copy each form instance's objects are, for [`ObjKey::Base`]: the
-/// instance's index among the instances of its file's bytes, so two
-/// registrations of one file (until slice 11 makes a source its blob)
-/// never share an object of an instance's own. The primary's copy 0 is
-/// index 0, its own objects, whether or not the state holds it; every
-/// other instance follows in (registration, copy) order.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FormCopies(BTreeMap<FormInst, u32>);
-
-impl FormCopies {
-    /// The instances `st` holds, their fields', widgets' and names', each
-    /// with its index; `sources` are the registrations, `primary` the
-    /// primary's. An instance of a registration `sources` hasn't got has
-    /// none.
-    pub fn of(
-        st: &DocState,
-        primary: SourceId,
-        sources: &HashMap<SourceId, Arc<SourceInfo>>,
-    ) -> FormCopies {
-        let mut held: BTreeSet<FormInst> = st.form().names.keys().copied().collect();
-        held.extend(st.fields().map(|(_, node)| node.inst));
-        held.extend(st.annots().filter_map(|(_, a)| Some(a.widget()?.inst)));
-        let own = FormInst {
-            src: primary,
-            copy: 0,
-        };
-        let blob_of = |src: SourceId| Some(sources.get(&src)?.src.id());
-        let mut next: HashMap<BlobId, u32> = HashMap::new();
-        if let Some(blob) = blob_of(primary) {
-            next.insert(blob, 1);
-        }
-        let mut out = BTreeMap::new();
-        for inst in held {
-            let Some(blob) = blob_of(inst.src) else {
-                continue;
-            };
-            let index = if inst == own {
-                0
-            } else {
-                let n = next.entry(blob).or_insert(0);
-                *n += 1;
-                *n - 1
-            };
-            out.insert(inst, index);
-        }
-        FormCopies(out)
-    }
-
-    /// Instance `inst`'s index among its blob's.
-    pub fn get(&self, inst: FormInst) -> Option<u32> {
-        self.0.get(&inst).copied()
-    }
-
-    /// The instances, in (registration, copy) order.
-    pub fn instances(&self) -> impl Iterator<Item = FormInst> + '_ {
-        self.0.keys().copied()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     use super::*;
     use crate::history::FixedCount;
-    use crate::model::Edit;
+    use crate::model::FormInst;
     use crate::store::{BlobKind, Store};
+    use crate::tx::fixture as fx;
 
     /// Every kind of key, two of the kinds that carry an id twice.
     fn every_key() -> Vec<ObjKey> {
@@ -384,65 +325,71 @@ mod tests {
         );
     }
 
-    /// Each form instance of one file's bytes has an index of its own,
-    /// whichever registration brought it: the primary's own instance 0, a
-    /// duplicate's and two more inserts of the same file the next ones,
-    /// and another file's first instance 0 of its own.
+    /// Each form instance of one file's bytes has a copy of its own, fixed
+    /// as it's made, whichever edit brought it: the primary's own instance
+    /// 0, a duplicate's and two more inserts of the same file the next
+    /// ones, and another file's first instance 0 of its own.
     #[test]
-    fn two_registrations_of_one_file_never_share_an_instance() {
+    fn each_insert_of_one_file_is_an_instance_of_its_own() {
         let store = Store::new();
         let bytes = crate::forms::fixture::every_kind().bytes();
-        let info = |bytes: &[u8], name: &str| SourceInfo {
-            src: (store.open(bytes.into(), BlobKind::file(Path::new(name), None))).unwrap(),
-            name: name.into(),
-            derived: None,
+        let open = |bytes: &[u8], name: &str| {
+            (store.open(bytes.into(), BlobKind::file(Path::new(name), None))).unwrap()
         };
-        let primary = info(&bytes, "form.pdf");
-        let src = primary.src.clone();
-        let mut d = crate::open::start(store.clone(), primary, None, Box::new(FixedCount(10)));
+        let primary = open(&bytes, "form.pdf");
+        let src = primary.clone();
+        let mut d = crate::open::start(
+            store.clone(),
+            primary,
+            "form.pdf".into(),
+            None,
+            Box::new(FixedCount(10)),
+        );
         d.ready(crate::open::finish(&src, &in_progress::NoProgress))
             .unwrap();
         let first = d.page(0).unwrap();
-        d.apply(Edit::DuplicatePages { ids: vec![first] }, "duplicate")
-            .unwrap();
+        let duplicate = sheaf_edit::Op::DuplicatePages {
+            pages: fx::ids(&[first]),
+            locals: Vec::new(),
+        };
+        d.commit_ops(vec![duplicate], "duplicate").unwrap();
         let other = crate::forms::fixture::every_fact().bytes();
-        let mut regs = Vec::new();
+        let mut inserted = Vec::new();
         for (bytes, name) in [
             (&bytes, "again.pdf"),
             (&bytes, "more.pdf"),
             (&other, "o.pdf"),
         ] {
-            let source = d.add_source(info(bytes, name));
-            regs.push(source);
-            let insert = Edit::InsertPages {
-                source,
-                range: 0..1,
-                before: None,
-                outline: None,
-                annots: Vec::new(),
-            };
-            d.apply(insert, "insert").unwrap();
+            let src = open(bytes, name);
+            inserted.push(src.id());
+            let insert = fx::insert(&src, [0], name, None);
+            d.commit_ops(vec![insert], "insert").unwrap();
         }
-        let sources: HashMap<SourceId, Arc<SourceInfo>> =
-            d.sources().map(|(id, s)| (id, s.clone())).collect();
-        let copies = FormCopies::of(d.state(), d.primary(), &sources);
         let inst = |src, copy| FormInst { src, copy };
+        let own = d.primary().id();
+        assert_eq!(inserted[..2], [own, own]);
         let held: BTreeSet<FormInst> = (d.state().fields()).map(|(_, n)| n.inst).collect();
         assert_eq!(
             held,
             BTreeSet::from([
-                inst(d.primary(), 0),
-                inst(d.primary(), 1),
-                inst(regs[0], 0),
-                inst(regs[1], 0),
-                inst(regs[2], 0),
+                inst(own, 0),
+                inst(own, 1),
+                inst(own, 2),
+                inst(own, 3),
+                inst(inserted[2], 0),
             ])
         );
-        assert_eq!(copies.get(inst(d.primary(), 0)), Some(0));
-        assert_eq!(copies.get(inst(d.primary(), 1)), Some(1));
-        assert_eq!(copies.get(inst(regs[0], 0)), Some(2));
-        assert_eq!(copies.get(inst(regs[1], 0)), Some(3));
-        assert_eq!(copies.get(inst(regs[2], 0)), Some(0));
-        assert_eq!(copies.get(inst(regs[2], 1)), None);
+        let names: Vec<(FormInst, &str)> = (d.state().form().names.iter())
+            .map(|(inst, name)| (*inst, &**name))
+            .collect();
+        let mut want = vec![
+            (inst(own, 0), "form.pdf"),
+            (inst(own, 1), "form.pdf"),
+            (inst(own, 2), "again.pdf"),
+            (inst(own, 3), "more.pdf"),
+            (inst(inserted[2], 0), "o.pdf"),
+        ];
+        want.sort();
+        assert_eq!(names, want);
     }
 }

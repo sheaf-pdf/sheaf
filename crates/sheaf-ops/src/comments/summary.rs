@@ -11,12 +11,12 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_core::PageSize;
 use sheaf_doc::content::{
     Color, ContentWriter, Font, Paint, Res, ResObjects, Reserved, Std14, wrap_with,
 };
 use sheaf_doc::stamp_lib::PageForm;
 use sheaf_doc::{Box2, Pt, Snapshot};
+use sheaf_edit::PageSize;
 
 use super::{CommentFilter, Listing, Sort, Thread, list, meta, numbers};
 

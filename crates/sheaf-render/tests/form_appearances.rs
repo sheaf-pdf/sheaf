@@ -7,9 +7,10 @@
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use lopdf::{Object, Stream, dictionary};
-use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::forms::fixture::{Form, Rect};
+use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 use sheaf_render::{Job, Renderer};
 

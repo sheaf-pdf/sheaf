@@ -11,16 +11,17 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use in_progress::{Level, NoProgress, Progress, Unit};
 use lopdf::{Document as Pdf, Object};
-use sheaf_core::Rotation;
+use sheaf_edit::{Op, Rotation, Turn};
 
 use super::{
     Ask, AskAnswers, Onto, SavePlan, SaveStop, Strategy, StrategyKind, Why, forced_append, plan,
     save, save_appended, save_rewritten, write_file,
 };
 use crate::forms::fixture::{Form, row};
-use crate::model::{DocState, Document, Edit, PageId, VersionId};
+use crate::model::{DocState, Document, PageId, VersionId};
 use crate::serialize::durable::FileStamp;
 use crate::text_layer::{OcrWord, TextLayer};
+use crate::tx::fixture as fx;
 
 /// An empty directory of the test's own.
 fn scratch() -> PathBuf {
@@ -50,9 +51,9 @@ fn opened(path: &Path) -> Document {
 }
 
 fn turn(d: &mut Document, index: usize) {
-    let ids = vec![d.page(index).unwrap()];
-    let by = Rotation::R90;
-    d.apply(Edit::RotatePages { ids, by }, "Rotate").unwrap();
+    let page = d.page(index).unwrap();
+    d.commit_ops(vec![fx::rotate(&[page], Turn::Quarter)], "Rotate")
+        .unwrap();
 }
 
 /// OCR text saying `text`.
@@ -68,13 +69,11 @@ fn layer(text: &str) -> std::sync::Arc<TextLayer> {
         confidence: 0.9,
     };
     let geom = crate::geom::Geom::read(None, None, 0);
-    std::sync::Arc::new(TextLayer::from_engine(vec![word], &geom, "test"))
+    std::sync::Arc::new(crate::text_layer::from_engine(vec![word], &geom, "test"))
 }
 
-fn ocr(page: PageId, text: &str) -> Edit {
-    Edit::SetTextLayers {
-        layers: vec![(page, layer(text))],
-    }
+fn ocr(page: PageId, text: &str) -> Vec<Op> {
+    fx::ocr([(page, layer(text))])
 }
 
 /// Each page of the file at `path`: its `/Rotate`, and whether its
@@ -162,7 +161,7 @@ fn an_edit_and_an_ocr_flush_during_a_slow_save_land_after_it() {
     let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
     turn(&mut d, 0);
     let job = d.begin_job();
-    d.apply_in_job(job, ocr(p0, "first"), "Recognize text")
+    d.commit_ops_in_job(job, ocr(p0, "first"), "Recognize text")
         .unwrap();
     let v = d.current_version();
     let input = d.save_input(v).unwrap();
@@ -180,7 +179,7 @@ fn an_edit_and_an_ocr_flush_during_a_slow_save_land_after_it() {
         });
         has_started.recv().unwrap();
         // While it's written: the job's next batch, and an edit.
-        d.apply_in_job(job, ocr(p1, "second"), "Recognize text")
+        d.commit_ops_in_job(job, ocr(p1, "second"), "Recognize text")
             .unwrap();
         flushed = Some(d.current_version());
         turn(&mut d, 1);
@@ -451,8 +450,7 @@ fn appends_one_after_another_reopen() {
     let original = std::fs::read(&path).unwrap();
     let mut d = opened(&path);
     let opened_record = d.saved_record().unwrap().clone();
-    let primary = d.source(d.primary()).unwrap();
-    assert_eq!(opened_record.sound, primary.src.base_sound());
+    assert_eq!(opened_record.sound, d.primary().base_sound());
     assert!(opened_record.signatures_hold && opened_record.content_hash.is_none());
     for i in 0..3 {
         turn(&mut d, i);
@@ -502,14 +500,14 @@ fn appends_one_after_another_reopen() {
     };
     assert_eq!(
         sum(&d),
-        sheaf_core::checksum(&std::fs::read(&path).unwrap())
+        sheaf_util::checksum(&std::fs::read(&path).unwrap())
     );
     for i in 1..3 {
         turn(&mut d, i);
         save_appended(&mut d, &path).unwrap();
         assert_eq!(
             sum(&d),
-            sheaf_core::checksum(&std::fs::read(&path).unwrap()),
+            sheaf_util::checksum(&std::fs::read(&path).unwrap()),
             "{i}"
         );
         assert!(!d.saved_record().unwrap().signatures_hold);
@@ -652,10 +650,10 @@ fn an_unchanged_plan_writes_nothing() {
     let mut d = opened(&path);
     let saves = |d: &Document| -> usize { d.timeline().iter().map(|v| v.saves.len()).sum() };
     let noted = saves(&d);
-    let ids = vec![d.page(0).unwrap()];
-    for by in [Rotation::R90, Rotation::R270] {
-        let ids = ids.clone();
-        d.apply(Edit::RotatePages { ids, by }, "Rotate").unwrap();
+    let first = d.page(0).unwrap();
+    for by in [Turn::Quarter, Turn::Back] {
+        d.commit_ops(vec![fx::rotate(&[first], by)], "Rotate")
+            .unwrap();
     }
     assert!(d.is_dirty());
     let v = d.current_version();

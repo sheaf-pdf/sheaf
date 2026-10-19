@@ -114,7 +114,7 @@ fn main() -> Result<()> {
     let load = t.elapsed();
     let n = doc.page_count();
     println!("{}: {n} pages, loaded in {load:?}", input.display());
-    let src = Store::new().open(sheaf_core::read_file(&input)?, BlobKind::file(&input, None))?;
+    let src = Store::new().open(sheaf_util::read_file(&input)?, BlobKind::file(&input, None))?;
     for i in 0..n.min(5) {
         let geom = src.geom(i);
         let size = geom.shown();

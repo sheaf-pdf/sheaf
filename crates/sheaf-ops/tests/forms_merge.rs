@@ -13,12 +13,15 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
-use sheaf_core::PageIndex;
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::fixture::Form;
 use sheaf_doc::materialize::StrategyKind;
-use sheaf_doc::{Document, Edit, EditOutcome, PageId, SourceInfo};
+use sheaf_doc::model::ScriptState;
+use sheaf_doc::tx::fixture::{duplicate, replace, rotate};
+use sheaf_doc::{Commit, Derive, Document, Notice, PageId};
+use sheaf_edit::Turn;
 use sheaf_ops::combine::{CombineItem, CombineParams};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::render_appearances;
 
 mod common;
@@ -31,21 +34,29 @@ fn insert(
     path: &Path,
     range: Option<Range<u32>>,
     before: Option<PageId>,
-) -> EditOutcome {
-    let (info, _) = SourceInfo::read(doc.store(), path, None).unwrap();
-    let range = range.unwrap_or(0..info.src.page_count());
-    let sid = doc.add_source(info);
-    doc.apply(
-        Edit::InsertPages {
-            source: sid,
-            range,
-            before,
-            outline: None,
-            annots: Vec::new(),
-        },
-        "Insert",
-    )
-    .unwrap()
+) -> Commit {
+    let (src, _) = doc.store().read_file(path, None).unwrap();
+    let range = range.unwrap_or(0..src.page_count());
+    let name = sheaf_doc::store::file_name(path);
+    let insert = sheaf_doc::tx::fixture::insert(&src, range, &name, before);
+    doc.commit_ops(vec![insert], "Insert").unwrap()
+}
+
+/// The parents a commit's forms went under, renamed apart.
+fn renamed_under(c: &Commit) -> Vec<String> {
+    (c.notices.iter())
+        .filter_map(|n| match n {
+            Notice::FormRenamed { under, .. } | Notice::CopiesRenamed { under, .. } => {
+                Some(under.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `doc`'s scripts are off: they came from more than one form.
+fn scripts_off(doc: &Document) -> bool {
+    doc.state().form().scripts != ScriptState::On
 }
 
 /// A field `name` with two widgets, row 1 of pages 1 and 2, whose
@@ -143,9 +154,9 @@ fn an_inserted_form_joins_the_documents_by(how: How) {
     let mut doc = open(&a);
     let out = insert(&mut doc, &b, None, None);
     // No name is taken: nothing's renamed.
-    assert!(out.forms_renamed.is_empty());
+    assert_eq!(out.notices, []);
     assert_eq!(names(&doc), ["a", "a2", "b1", "both"]);
-    assert_eq!(doc.form_notice(&out, false, false), None);
+    assert_eq!(sheaf_doc::notice_text(&out.notices), None);
     let written = (how.strategy(), written(&doc, how));
     let saved = [written, saved(&mut doc, &a, how)];
     assert_eq!(saved[1].0, how.strategy());
@@ -204,15 +215,14 @@ fn a_form_inserted_into_itself_goes_under_its_files_name_by(how: How) {
     let path = write(&dir, "form.pdf", &mut form_a());
     let mut doc = open(&path);
     let out = insert(&mut doc, &path, None, None);
-    assert_eq!(out.forms_renamed.len(), 1);
-    assert_eq!(out.forms_renamed[0].0, "form");
+    assert_eq!(renamed_under(&out), ["form"]);
     assert_eq!(
-        doc.form_notice(&out, false, false).as_deref(),
+        sheaf_doc::notice_text(&out.notices).as_deref(),
         Some("Fields from form.pdf are under “form”, since their names were taken")
     );
     // And again: the name is taken too.
     let out = insert(&mut doc, &path, None, None);
-    assert_eq!(out.forms_renamed[0].0, "form_2");
+    assert_eq!(renamed_under(&out), ["form_2"]);
     assert_eq!(
         names(&doc),
         ["a", "a2", "form.a", "form.a2", "form_2.a", "form_2.a2"]
@@ -313,11 +323,11 @@ fn a_duplicated_page_gets_fields_of_its_own_by(how: How) {
     let mut doc = open(&path);
     let first = doc.state().order()[0];
     let out = doc
-        .apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
+        .commit_ops(vec![duplicate(&[first])], "Duplicate")
         .unwrap();
-    assert_eq!(out.forms_renamed.len(), 1);
+    assert_eq!(renamed_under(&out), ["form"]);
     assert_eq!(
-        doc.form_notice(&out, true, true).as_deref(),
+        sheaf_doc::notice_text(&out.notices).as_deref(),
         Some("The copies' fields are under “form”, apart from the originals")
     );
     assert_eq!(names(&doc), ["a", "a2", "form.a"]);
@@ -361,7 +371,7 @@ fn saved_twice(appended: bool) {
         let b = write(&dir, "b.pdf", &mut form_b());
         let mut doc = open(&path);
         let first = doc.state().order()[0];
-        doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
+        doc.commit_ops(vec![duplicate(&[first])], "Duplicate")
             .unwrap();
         insert(&mut doc, &b, None, None);
         let want = [StrategyKind::Rewrite, StrategyKind::Append][usize::from(appended)];
@@ -371,14 +381,8 @@ fn saved_twice(appended: bool) {
         assert_eq!((report.fields, report.widgets), (5, 6), "{what}");
         // Then a page turned, and saved again: elsewhere, and in place.
         let last = doc.state().order()[4];
-        doc.apply(
-            Edit::RotatePages {
-                ids: vec![last],
-                by: sheaf_core::Rotation::R90,
-            },
-            "Rotate",
-        )
-        .unwrap();
+        doc.commit_ops(vec![rotate(&[last], Turn::Quarter)], "Rotate")
+            .unwrap();
         let copy = dir.join("rewritten.pdf");
         sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &copy).unwrap();
         let again = match rewritten {
@@ -409,7 +413,7 @@ fn duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own_by(how: How) {
     // B's first page, duplicated; then form.pdf's first page cropped and
     // duplicated.
     let b_first = doc.state().order()[2];
-    doc.apply(Edit::DuplicatePages { ids: vec![b_first] }, "Duplicate")
+    doc.commit_ops(vec![duplicate(&[b_first])], "Duplicate")
         .unwrap();
     let first = doc.state().order()[0];
     let plan = sheaf_ops::crop::plan(
@@ -425,15 +429,10 @@ fn duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own_by(how: How) {
         &sheaf_ops::NoProgress,
     )
     .unwrap();
-    let sid = doc.add_source(plan[0].info.clone());
-    doc.apply(
-        Edit::RebasePages {
-            pages: plan[0].rebases(sid),
-        },
-        "Crop",
-    )
-    .unwrap();
-    doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
+    plan[0].note(&mut doc);
+    let pages = plan[0].bases().collect();
+    doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
+    doc.commit_ops(vec![duplicate(&[first])], "Duplicate")
         .unwrap();
     assert_eq!(
         names(&doc),
@@ -470,18 +469,9 @@ fn replaced_pages_bring_their_form_by(how: How) {
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = open(&a);
     let second = doc.state().order()[1];
-    let (info, _) = SourceInfo::read(doc.store(), &b, None).unwrap();
-    let sid = doc.add_source(info);
-    doc.apply(
-        Edit::ReplacePages {
-            ids: vec![second],
-            source: sid,
-            range: 0..1,
-            annots: Vec::new(),
-        },
-        "Replace",
-    )
-    .unwrap();
+    let (src, _) = doc.store().read_file(&b, None).unwrap();
+    doc.commit_ops(vec![replace(&[second], &src, [0], "b.pdf")], "Replace")
+        .unwrap();
     // Written first: saving in place changes the file an Append reads.
     let written = (how.strategy(), written(&doc, how));
     // In place, it's a Rewrite: a page is gone (M9 bug 14).
@@ -605,12 +595,14 @@ fn scripts_from_two_forms_are_off_and_kept_apart_by(how: How) {
     let pb = write(&dir, "b.pdf", &mut b);
 
     let mut doc = open(&pa);
-    assert!(!doc.scripts_mixed());
+    assert!(!scripts_off(&doc));
     let out = insert(&mut doc, &pb, None, None);
-    assert!(doc.scripts_mixed());
-    assert_eq!(doc.script_sources().len(), 2);
+    let ScriptState::Off { instances } = &doc.state().form().scripts else {
+        panic!("scripts on");
+    };
+    assert_eq!(instances.len(), 2);
     assert_eq!(
-        doc.form_notice(&out, false, false).as_deref(),
+        sheaf_doc::notice_text(&out.notices).as_deref(),
         Some("Scripts are off: fields from more than one form have them")
     );
     let (strategy, bytes) = (how.strategy(), written(&doc, how));
@@ -631,7 +623,7 @@ fn scripts_from_two_forms_are_off_and_kept_apart_by(how: How) {
     let (combined, _) =
         sheaf_ops::combine::build(&items, &CombineParams::default(), &sheaf_ops::NoProgress)
             .unwrap();
-    assert!(combined.scripts_mixed());
+    assert!(scripts_off(&combined));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -761,7 +753,7 @@ fn corpus_scripted_forms_combined_have_scripts_off() {
         return;
     };
     let (doc, bytes) = combined(&[ca.clone(), ny.clone()]);
-    assert!(doc.scripts_mixed());
+    assert!(scripts_off(&doc));
     let want = [ca, ny]
         .iter()
         .map(|p| counts(p))
@@ -783,7 +775,7 @@ fn corpus_a_duplicated_page_is_a_form_of_its_own_by(how: How) {
     let mut doc = open(&f1040);
     let first = doc.state().order()[0];
     let on_first = doc.state().widgets_on(first).count();
-    doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
+    doc.commit_ops(vec![duplicate(&[first])], "Duplicate")
         .unwrap();
     let (fields, widgets) = counts(&f1040);
     let (strategy, bytes) = (how.strategy(), written(&doc, how));

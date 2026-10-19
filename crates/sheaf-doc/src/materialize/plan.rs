@@ -100,10 +100,9 @@ pub enum Why {
     /// Text the save replaces or clears, likewise.
     ReplacesText(Vec<Removed>),
     /// The Append refers to objects the saved file hasn't got (§9.1's
-    /// `present`): a Rewrite pruned them, a form instance's objects in it
-    /// are another instance's now (until slice 11), a primary object's
-    /// place in it is another record's of that object now, or what it has
-    /// names a page that's another page now.
+    /// `present`): a Rewrite pruned them, a primary object's place in it
+    /// is another record's of that object now, or what it has names a page
+    /// that's another page now.
     BaseObjectsMissing,
     /// A save transform an Append can't carry (§11.8): dropping an XFA part
     /// whose datasets hold values the save replaced, which would stay in
@@ -508,8 +507,7 @@ pub fn plan(input: &SaveInput, target: &SaveTarget) -> SavePlan {
 /// signatures or usage rights, they hold, and the file is still as sheaf
 /// read or wrote it, which the copy checks again.
 fn copies(input: &SaveInput, record: &SaveRecord) -> bool {
-    let signed =
-        (input.sources.get(&input.primary)).is_some_and(|info| !info.src.signatures().is_empty());
+    let signed = !input.primary.signatures().is_empty();
     signed && record.signatures_hold && record.stamp.holds(&record.path).unwrap_or(false)
 }
 
@@ -544,18 +542,14 @@ impl Appending {
             class |= SigClass::OTHER;
         }
         let strategy = Strategy::Append { onto: Onto::Saved };
-        let transforms = match input.sources.get(&input.primary) {
-            Some(info) => rules::plan(
-                &info.src,
-                &input.target,
-                input.primary,
-                Some(record),
-                &strategy,
-                class,
-                path.annots,
-            ),
-            None => Vec::new(),
-        };
+        let transforms = rules::plan(
+            &input.primary,
+            &input.target,
+            Some(record),
+            &strategy,
+            class,
+            path.annots,
+        );
         if !transforms.is_empty() {
             class |= SigClass::OTHER;
         }
@@ -669,18 +663,14 @@ fn rewritten(
     ));
     let strategy = Strategy::Rewrite { why };
     let saved = input.saved.as_ref().map(|s| &*s.record);
-    let transforms = match input.sources.get(&input.primary) {
-        Some(info) => rules::plan(
-            &info.src,
-            &input.target,
-            input.primary,
-            saved,
-            &strategy,
-            SigClass::all(),
-            AnnotOps::all(),
-        ),
-        None => Vec::new(),
-    };
+    let transforms = rules::plan(
+        &input.primary,
+        &input.target,
+        saved,
+        &strategy,
+        SigClass::all(),
+        AnnotOps::all(),
+    );
     let notes = transform_asks(input, &transforms, &mut asks);
     SavePlan {
         strategy,
@@ -703,8 +693,10 @@ fn signatures_ask(
     reason: Option<Why>,
 ) -> Option<Ask> {
     let holds = (input.saved.as_ref()).is_none_or(|s| s.record.signatures_hold);
-    let info = input.sources.get(&input.primary).filter(|_| holds)?;
-    let impact = sig_impact(info.src.signatures(), pending, class, fields);
+    if !holds {
+        return None;
+    }
+    let impact = sig_impact(input.primary.signatures(), pending, class, fields);
     (asking(&impact) > 0).then_some(Ask::Signatures {
         impact,
         append_anyway,

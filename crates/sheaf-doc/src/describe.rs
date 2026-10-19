@@ -1,63 +1,60 @@
-//! Edits in words, for the History panel: "Delete pages 4–6", "Add
-//! highlight on page 3". Page numbers come from the document as it was
-//! just before the edit: a step's line is made when it's applied, so a
-//! batch's later edits count pages after its earlier ones.
+//! Ops in words, for the History panel: "Delete pages 4–6", "Add a
+//! highlight on page 3" (M10.5 §8.3). An op is described as it's lowered,
+//! against the document just before it, so a transaction's later ops count
+//! pages after its earlier ones. Page numbers come from the state's
+//! position index, not a walk of the pages. A run of ops of one kind is
+//! one line ([`lines`]): a batch of 7,000 is "Recognize text on 7000
+//! pages".
 
-use crate::annot::AnnotKind;
-use crate::model::{DocState, Edit, PageId};
+use sheaf_edit::MarkKind;
 
-/// What `edit` does to `before`, the document it's applied to, in a short
+use crate::effects::Flags;
+use crate::model::{AnnotBody, DocState, PageId, Step};
+use crate::tx::{Derive, ResolvedOp};
+
+/// A line of the History panel: what some steps did, and whether they
+/// removed content that was there (its badge).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    pub text: String,
+    pub removes: bool,
+}
+
+/// What `op` does to `before`, the document it's applied to, in a short
 /// line.
-pub fn describe(edit: &Edit, before: &DocState) -> String {
+pub fn describe(op: &ResolvedOp, before: &DocState) -> String {
+    use ResolvedOp as R;
     let pages = |ids: &[PageId]| pages_text(ids, before);
-    match edit {
-        Edit::MovePages { ids, .. } => format!("Move {}", pages(ids)),
-        Edit::RotatePages { ids, by } => {
-            format!("Rotate {} {}°", pages(ids), by.degrees())
+    match op {
+        R::MovePages { pages: ids, .. } => format!("Move {}", pages(ids)),
+        R::RotatePages { pages: ids, by } => {
+            format!("Rotate {} {}°", pages(ids), by.rotation().degrees())
         }
-        Edit::DeletePages { ids } => format!("Delete {}", pages(ids)),
-        Edit::InsertPages { range, .. } => format!("Insert {}", count(range.len(), "page")),
-        Edit::DuplicatePages { ids } => format!("Duplicate {}", pages(ids)),
-        Edit::ReplacePages { ids, range, .. } => {
-            format!("Replace {} with {}", pages(ids), count(range.len(), "page"))
-        }
-        Edit::OutlineInsert { title, .. } => format!("Add bookmark “{title}”"),
-        Edit::OutlineInsertTree { items, .. } => match items.as_slice() {
-            [one] => format!("Add bookmark “{}”", one.title),
-            _ => format!("Add {}", count(items.len(), "bookmark")),
-        },
-        Edit::OutlineMove { with_pages, .. } => if *with_pages {
-            "Move a bookmark with its pages"
-        } else {
-            "Move a bookmark"
-        }
-        .into(),
-        Edit::OutlineEdit {
-            title,
-            target,
-            color,
-            view,
-            style,
-            ..
-        } => {
+        R::DeletePages { pages: ids } => format!("Delete {}", pages(ids)),
+        R::DuplicatePages { pages: ids, .. } => format!("Duplicate {}", pages(ids)),
+        R::InsertPages { pages: from, .. } => format!("Insert {}", count(from.len(), "page")),
+        R::ReplacePages {
+            pages: ids, with, ..
+        } => format!("Replace {} with {}", pages(ids), count(with.len(), "page")),
+        R::SetPageLabels { .. } => "Change page labels".into(),
+        R::AddBookmark { title, .. } => format!("Add bookmark “{title}”"),
+        R::PatchBookmarks { bookmarks, patch } => {
+            if bookmarks.len() > 1 {
+                return format!("Change {}", count(bookmarks.len(), "bookmark"));
+            }
             let mut what = Vec::new();
-            if let Some(t) = title {
+            if let Some(t) = &patch.title {
                 what.push(format!("rename it “{t}”"));
             }
-            if target.is_some() || view.is_some() {
+            if !patch.target.is_keep() || !patch.view.is_keep() {
                 what.push("change where it goes".into());
             }
-            if let Some(c) = color {
-                what.push(
-                    if c.is_some() {
-                        "color it"
-                    } else {
-                        "clear its color"
-                    }
-                    .into(),
-                );
+            match patch.color {
+                sheaf_edit::Patch::Keep => {}
+                sheaf_edit::Patch::Clear => what.push("clear its color".into()),
+                sheaf_edit::Patch::Set(_) => what.push("color it".into()),
             }
-            if style.is_some() {
+            if patch.style.is_some() {
                 what.push("change its style".into());
             }
             match what.as_slice() {
@@ -65,93 +62,220 @@ pub fn describe(edit: &Edit, before: &DocState) -> String {
                 _ => format!("Bookmark: {}", what.join(", ")),
             }
         }
-        Edit::OutlineDelete { .. } => "Delete a bookmark".into(),
-        Edit::AnnotAdd { page, annot } => match &annot.kind {
-            AnnotKind::Reply { .. } => format!("Reply{}", on_page(*page, before)),
-            AnnotKind::Status { model, state, .. } if model == crate::annot::MARKED => format!(
-                "{} a comment{}",
-                if state == "Marked" {
-                    "Check"
-                } else {
-                    "Uncheck"
-                },
-                on_page(*page, before)
-            ),
-            AnnotKind::Status { state, .. } => {
-                format!("Set status {state}{}", on_page(*page, before))
+        R::MoveBookmarks {
+            bookmarks,
+            with_pages,
+            ..
+        } => {
+            let what = match bookmarks.len() {
+                1 => "a bookmark".to_string(),
+                n => format!("{n} bookmarks"),
+            };
+            match with_pages {
+                true => format!("Move {what} with its pages"),
+                false => format!("Move {what}"),
             }
-            kind => format!("Add {}{}", noun(kind), on_page(*page, before)),
+        }
+        R::DeleteBookmarks { bookmarks } => match bookmarks.len() {
+            1 => "Delete a bookmark".into(),
+            n => format!("Delete {n} bookmarks"),
         },
-        Edit::AnnotUpdate { page, annot } => {
-            format!("Change {}{}", noun(&annot.kind), on_page(*page, before))
+        R::AddMark { page, mark, .. } => {
+            let on = on_page(*page, before);
+            match &mark.kind {
+                MarkKind::Reply {} => format!("Reply{on}"),
+                MarkKind::Status { model, state } if model == crate::annot::MARKED => {
+                    let verb = if state == "Marked" {
+                        "Check"
+                    } else {
+                        "Uncheck"
+                    };
+                    format!("{verb} a comment{on}")
+                }
+                MarkKind::Status { state, .. } => format!("Set status {state}{on}"),
+                kind => format!("Add {}{on}", noun(kind)),
+            }
         }
-        Edit::AnnotDelete { page, id } => {
-            let kind = (before.find_annot(*id))
-                .filter(|(on, _)| on == page)
-                .map(|(_, a)| noun(&a.kind))
-                .unwrap_or_else(|| "a mark".into());
-            format!("Delete {kind}{}", on_page(*page, before))
-        }
-        Edit::CommentsDelete { page, names } => format!(
-            "Delete {}{}",
-            match names.len() {
-                1 => "a comment".to_string(),
-                n => format!("{n} comments"),
-            },
-            on_page(*page, before)
-        ),
-        Edit::ConnectorAdd { a, .. } => match &a.1.kind {
-            AnnotKind::Connector { label, .. } => format!("Add connector pair {label}"),
-            _ => "Add a connector pair".into(),
+        R::AddConnector { label, .. } => format!("Add connector pair {label}"),
+        R::PatchMarks { marks, .. } => match marks.as_slice() {
+            [one] => format!("Change {}", annot_text(*one, before)),
+            _ => format!("Change {}", count(marks.len(), "mark")),
         },
-        Edit::SetTextLayers { layers } => {
-            let ids: Vec<PageId> = layers.iter().map(|(id, _)| *id).collect();
-            format!("Recognize text on {}", pages(&ids))
-        }
-        Edit::ClearTextLayers { ids } => format!("Remove recognized text from {}", pages(ids)),
-        Edit::RebasePages { pages: list } => {
-            let ids: Vec<PageId> = list.iter().map(|r| r.id).collect();
-            format!("Change the content of {}", pages(&ids))
-        }
-        Edit::SetPageLabels { .. } => "Change page labels".into(),
-        Edit::SetHeaderFooter { header_footer } => match header_footer {
-            Some(_) => "Set the header and footer".into(),
-            None => "Remove the header and footer".into(),
+        R::MoveMarks { marks, .. } => match marks.as_slice() {
+            [one] => format!("Move {}", annot_text(*one, before)),
+            _ => format!("Move {}", count(marks.len(), "mark")),
         },
+        R::DeleteAnnotations { annots } => match annots.as_slice() {
+            [one] => format!("Delete {}", annot_text(*one, before)),
+            _ => format!("Delete {}", count(annots.len(), "comment")),
+        },
+        R::AdoptAnnotations { annots } => match annots.as_slice() {
+            [one] => {
+                let on = (before.annot(*one)).map_or(String::new(), |a| on_page(a.page, before));
+                format!("Make a comment editable{on}")
+            }
+            _ => format!("Make {} editable", count(annots.len(), "comment")),
+        },
+        R::SetOcrText { page, .. } => format!("Recognize text on {}", pages(&[*page])),
+        R::ClearOcrText { pages: ids } => {
+            format!("Remove recognized text from {}", pages(ids))
+        }
+        R::SetHeaderFooter { .. } => "Set the header and footer".into(),
+        R::RemoveHeaderFooter { .. } => "Remove the header and footer".into(),
+        R::SetPageBase { pages: list, why } => {
+            let ids: Vec<PageId> = list.iter().map(|&(id, ..)| id).collect();
+            derived(*why, &pages(&ids))
+        }
     }
 }
 
+/// What a derived flow did to `pages`, the pages it names.
+fn derived(why: Derive, pages: &str) -> String {
+    let layer = |behind: bool| if behind { "background" } else { "watermark" };
+    match why {
+        Derive::Crop => format!("Crop {pages}"),
+        Derive::Watermark { behind, .. } => format!("Add a {} to {pages}", layer(behind)),
+        Derive::RemoveWatermark { behind } => format!("Remove the {} from {pages}", layer(behind)),
+        Derive::StripHeaderFooter => format!("Remove the header and footer from {pages}"),
+    }
+}
+
+/// `steps`' lines, a run of steps of one kind as one: what the History
+/// panel and a commit say they did.
+pub fn lines(steps: &[Step]) -> Vec<Line> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < steps.len() {
+        let name = steps[i].op.name();
+        let n = 1
+            + (steps[i + 1..].iter())
+                .take_while(|s| s.op.name() == name)
+                .count();
+        let run = &steps[i..i + n];
+        out.push(Line {
+            text: match run {
+                [one] => one.line.clone(),
+                _ => run_line(run),
+            },
+            removes: (run.iter()).any(|s| s.effects.effects.flags.contains(Flags::REMOVES)),
+        });
+        i += n;
+    }
+    out
+}
+
+/// What a run of steps of one kind did, in one line: how many of what.
+fn run_line(run: &[Step]) -> String {
+    use ResolvedOp as R;
+    let sum = |of: fn(&ResolvedOp) -> usize| run.iter().map(|s| of(&s.op)).sum::<usize>();
+    let pages = || count(sum(page_count), "page");
+    let n = run.len();
+    match &*run[0].op {
+        R::MovePages { .. } => format!("Move {}", pages()),
+        R::RotatePages { .. } => format!("Rotate {}", pages()),
+        R::DeletePages { .. } => format!("Delete {}", pages()),
+        R::DuplicatePages { .. } => format!("Duplicate {}", pages()),
+        R::InsertPages { .. } => format!("Insert {}", pages()),
+        R::ReplacePages { .. } => format!("Replace {}", pages()),
+        R::ClearOcrText { .. } => format!("Remove recognized text from {}", pages()),
+        R::SetOcrText { .. } => format!("Recognize text on {}", pages()),
+        R::SetPageBase { why, .. } => derived(*why, &pages()),
+        R::AddBookmark { .. } => format!("Add {}", count(n, "bookmark")),
+        R::PatchBookmarks { .. } => format!("Change {}", count(sum(target_count), "bookmark")),
+        R::MoveBookmarks { .. } => format!("Move {}", count(sum(target_count), "bookmark")),
+        R::DeleteBookmarks { .. } => format!("Delete {}", count(sum(target_count), "bookmark")),
+        R::AddMark { .. } => format!("Add {}", count(n, "mark")),
+        R::AddConnector { .. } => format!("Add {}", count(n, "connector pair")),
+        R::PatchMarks { .. } => format!("Change {}", count(sum(target_count), "mark")),
+        R::MoveMarks { .. } => format!("Move {}", count(sum(target_count), "mark")),
+        R::DeleteAnnotations { .. } => format!("Delete {}", count(sum(target_count), "comment")),
+        R::AdoptAnnotations { .. } => {
+            format!("Make {} editable", count(sum(target_count), "comment"))
+        }
+        // Each replaces the one before: the last says what's there.
+        R::SetPageLabels { .. } | R::SetHeaderFooter { .. } | R::RemoveHeaderFooter { .. } => {
+            run[n - 1].line.clone()
+        }
+    }
+}
+
+/// How many pages a page op names.
+fn page_count(op: &ResolvedOp) -> usize {
+    use ResolvedOp as R;
+    match op {
+        R::MovePages { pages, .. }
+        | R::RotatePages { pages, .. }
+        | R::DeletePages { pages }
+        | R::DuplicatePages { pages, .. }
+        | R::ClearOcrText { pages }
+        | R::RemoveHeaderFooter { pages } => pages.len(),
+        R::InsertPages { pages, .. } => pages.len(),
+        R::ReplacePages { with, .. } => with.len(),
+        R::SetPageBase { pages, .. } => pages.len(),
+        R::SetOcrText { .. } => 1,
+        _ => 0,
+    }
+}
+
+/// How many bookmarks or annotations an op names.
+fn target_count(op: &ResolvedOp) -> usize {
+    use ResolvedOp as R;
+    match op {
+        R::PatchBookmarks { bookmarks, .. }
+        | R::MoveBookmarks { bookmarks, .. }
+        | R::DeleteBookmarks { bookmarks } => bookmarks.len(),
+        R::PatchMarks { marks, .. } | R::MoveMarks { marks, .. } => marks.len(),
+        R::DeleteAnnotations { annots } | R::AdoptAnnotations { annots } => annots.len(),
+        _ => 0,
+    }
+}
+
+/// Annotation `id` in `st`, and its page: "a highlight on page 3", "a
+/// comment on page 2".
+fn annot_text(id: crate::annot::AnnotId, st: &DocState) -> String {
+    let Some(rec) = st.annot(id) else {
+        return "a mark".into();
+    };
+    let what = match &rec.body {
+        AnnotBody::Mark(m) => noun(&crate::tx::mark_kind(&m.annot.kind)),
+        AnnotBody::Foreign(f) if f.summary.is_link() => "a link".into(),
+        AnnotBody::Foreign(_) => "a comment".into(),
+        AnnotBody::Widget(_) => "a form field".into(),
+    };
+    format!("{what}{}", on_page(rec.page, st))
+}
+
 /// "a highlight", "a sticky note", "tickmark ✓".
-fn noun(kind: &AnnotKind) -> String {
+fn noun(kind: &MarkKind) -> String {
     match kind {
-        AnnotKind::Highlight { .. } => "a highlight".into(),
-        AnnotKind::Note { .. } => "a sticky note".into(),
-        AnnotKind::FreeText { .. } => "a text box".into(),
-        AnnotKind::Square { .. } => "a rectangle".into(),
-        AnnotKind::Ellipse { .. } => "an ellipse".into(),
-        AnnotKind::Line { arrow: true, .. } => "an arrow".into(),
-        AnnotKind::Line { .. } => "a line".into(),
-        AnnotKind::Ink { .. } => "a drawing".into(),
-        AnnotKind::Stamp { glyph, .. } => format!("tickmark {glyph}"),
-        AnnotKind::Connector { label, .. } => format!("connector {label}"),
-        AnnotKind::Tape { .. } => "a calculator tape".into(),
-        AnnotKind::Underline { .. } => "an underline".into(),
-        AnnotKind::StrikeOut { .. } => "a strikethrough".into(),
-        AnnotKind::Squiggly { .. } => "a squiggly underline".into(),
-        AnnotKind::Replace { .. } => "a text replacement".into(),
-        AnnotKind::Insert { .. } => "a text insertion".into(),
-        AnnotKind::PageStamp { name, .. } => format!("stamp {name}"),
-        AnnotKind::TextStamp { text, .. } => {
+        MarkKind::Highlight { .. } => "a highlight".into(),
+        MarkKind::Note { .. } => "a sticky note".into(),
+        MarkKind::FreeText { .. } => "a text box".into(),
+        MarkKind::Square { .. } => "a rectangle".into(),
+        MarkKind::Ellipse { .. } => "an ellipse".into(),
+        MarkKind::Line { arrow: true, .. } => "an arrow".into(),
+        MarkKind::Line { .. } => "a line".into(),
+        MarkKind::Ink { .. } => "a drawing".into(),
+        MarkKind::Stamp { glyph, .. } => format!("tickmark {glyph}"),
+        MarkKind::Connector { label, .. } => format!("connector {label}"),
+        MarkKind::Tape { .. } => "a calculator tape".into(),
+        MarkKind::Underline { .. } => "an underline".into(),
+        MarkKind::StrikeOut { .. } => "a strikethrough".into(),
+        MarkKind::Squiggly { .. } => "a squiggly underline".into(),
+        MarkKind::Replace { .. } => "a text replacement".into(),
+        MarkKind::Insert { .. } => "a text insertion".into(),
+        MarkKind::PageStamp { name, .. } => format!("stamp {name}"),
+        MarkKind::TextStamp { text, .. } => {
             format!("stamp {}", text.lines().next().unwrap_or_default())
         }
-        AnnotKind::PageBorder { status, .. } => format!("a {status} border"),
-        AnnotKind::Polygon { .. } => "a polygon".into(),
-        AnnotKind::Polyline { .. } => "a polyline".into(),
-        AnnotKind::Callout { .. } => "a callout".into(),
-        AnnotKind::FileAttachment { name, .. } => format!("attachment {name}"),
-        AnnotKind::Measure { what, .. } => format!("a {} measurement", what.label().to_lowercase()),
-        AnnotKind::Reply { .. } => "a reply".into(),
-        AnnotKind::Status { .. } => "a status".into(),
+        MarkKind::PageBorder { status, .. } => format!("a {status} border"),
+        MarkKind::Polygon { .. } => "a polygon".into(),
+        MarkKind::Polyline { .. } => "a polyline".into(),
+        MarkKind::Callout { .. } => "a callout".into(),
+        MarkKind::FileAttachment { name, .. } => format!("attachment {name}"),
+        MarkKind::Measure { what, .. } => format!("a {} measurement", what.label().to_lowercase()),
+        MarkKind::Reply {} => "a reply".into(),
+        MarkKind::Status { .. } => "a status".into(),
     }
 }
 
@@ -211,20 +335,12 @@ fn pages_text(ids: &[PageId], st: &DocState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::FixedCount;
-    use crate::model::{Document, SourceInfo};
-    use crate::store::Store;
-    use sheaf_core::Rotation;
-
-    fn doc(n: u32) -> Document {
-        let store = Store::new();
-        let primary = SourceInfo::blank(&store, n);
-        Document::new(store, primary, None, &[], Box::new(FixedCount(10)))
-    }
+    use crate::tx::tests::doc_of;
+    use sheaf_edit::Turn;
 
     #[test]
     fn pages_read_as_numbers_and_runs() {
-        let d = doc(10);
+        let d = doc_of(10, &[]);
         let id = |i: usize| d.page(i).unwrap();
         let st = d.state();
         assert_eq!(pages_text(&[id(2)], st), "page 3");
@@ -247,28 +363,41 @@ mod tests {
     }
 
     #[test]
-    fn edits_read_plainly() {
-        let d = doc(6);
+    fn ops_read_plainly() {
+        let d = doc_of(6, &[]);
         let id = |i: usize| d.page(i).unwrap();
         let st = d.state();
+        let delete = ResolvedOp::DeletePages {
+            pages: vec![id(3), id(4), id(5)],
+        };
+        assert_eq!(describe(&delete, st), "Delete pages 4–6");
+        let rotate = ResolvedOp::RotatePages {
+            pages: vec![id(0)],
+            by: Turn::Quarter,
+        };
+        assert_eq!(describe(&rotate, st), "Rotate page 1 90°");
+    }
+
+    /// A derived flow's line names it (M10.5 bug 8), not "change the
+    /// content".
+    #[test]
+    fn a_page_base_line_names_its_flow() {
+        let d = doc_of(6, &[]);
+        let id = |i: usize| d.page(i).unwrap();
+        let on = |i: usize, why| ResolvedOp::SetPageBase {
+            pages: vec![(id(i), d.primary().clone(), i as u32)],
+            why,
+        };
+        let st = d.state();
+        assert_eq!(describe(&on(2, Derive::Crop), st), "Crop page 3");
         assert_eq!(
-            describe(
-                &Edit::DeletePages {
-                    ids: vec![id(3), id(4), id(5)]
-                },
-                st
-            ),
-            "Delete pages 4–6"
+            describe(&on(0, Derive::StripHeaderFooter), st),
+            "Remove the header and footer from page 1"
         );
-        assert_eq!(
-            describe(
-                &Edit::RotatePages {
-                    ids: vec![id(0)],
-                    by: Rotation::R90
-                },
-                st
-            ),
-            "Rotate page 1 90°"
-        );
+        let behind = Derive::Watermark {
+            behind: true,
+            unencodable: false,
+        };
+        assert_eq!(describe(&on(1, behind), st), "Add a background to page 2");
     }
 }

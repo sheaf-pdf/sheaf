@@ -191,10 +191,7 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(src) = doc.model.source(doc.model.primary()) else {
-            return;
-        };
-        let (src, st) = (src.src.clone(), doc.model.state().clone());
+        let (src, st) = (doc.model.primary().clone(), doc.model.state().clone());
         let at: AttachmentRef = a.at.clone();
         let name = a.name.clone();
         cx.spawn(async move |this, cx| {

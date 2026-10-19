@@ -9,7 +9,8 @@
 //! rotate view, y down, so a drag reads the same in a turned pane. A mark
 //! built or reshaped there reaches the model through [`Annot::to_page`],
 //! once; [`Annot::to_frame`] brings one back into the frame to be moved,
-//! reshaped or copied.
+//! reshaped or copied. A drag's move commits as `MoveMarks` by how far it
+//! went there, applied to the marks as they are then (M10.5 §8.6).
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -18,12 +19,13 @@ use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb,
 };
-use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::store::BlobKind;
+use sheaf_doc::tx::mark_changes;
 use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Blob, BlobRef, Box2, DocState, Document, Edit, FormRef, PageId, Pt,
+    Annot, AnnotId, AnnotKind, Blob, BlobRef, Box2, DocState, Document, FormRef, PageId, Pt,
 };
+use sheaf_edit::{AnnotRef, Delta, Op, PageSize, Rotation, Vec2};
 use sheaf_ui::theme;
 use sheaf_ui::tooltip::Tooltip;
 
@@ -788,9 +790,10 @@ impl DocView {
                     x: p.x - 10.0,
                     y: p.y - 10.0,
                 };
-                let a = self.new_annot(AnnotKind::Note { pos }, color, cx);
-                self.add_annot(page_id, a, "Note", cx);
-                self.start_annot_editor(page_id, window, cx);
+                let a = self.new_annot(AnnotKind::Note { pos }, color);
+                if let Some(id) = self.add_annot(page_id, a, "Note", cx) {
+                    self.start_annot_editor_for(page_id, id, window, cx);
+                }
             }
             Tool::Tick => {
                 let w = crate::contrib::mark_width(&glyph, 24.0);
@@ -805,7 +808,6 @@ impl DocView {
                         glyph,
                     },
                     color,
-                    cx,
                 );
                 self.add_annot(page_id, a, "Tickmark", cx);
             }
@@ -918,28 +920,33 @@ impl DocView {
         if let Some(r) = &drag.resize {
             let changed = reshaped(r, b, drag.shift);
             if changed != r.orig {
-                let mut changed = changed.to_page(&edit);
-                changed.modified = sheaf_doc::pdf_date_now();
-                self.apply(
-                    Edit::AnnotUpdate {
-                        page: page_id,
-                        annot: changed,
-                    },
-                    "Resize annotation",
-                    cx,
-                );
+                // What the handle changed: the kind, which the patch names.
+                let patch = mark_changes(&r.orig.to_page(&edit), &changed.to_page(&edit));
+                let marks = vec![AnnotRef::Id(changed.id)];
+                let op = Op::PatchMarks {
+                    marks,
+                    patch,
+                    imported: None,
+                };
+                self.apply(op, "Resize annotation", cx);
             }
             return;
         }
+        // How far the drag went, as the page shows.
+        let by = Delta::View(Vec2 {
+            x: b.x - a.x,
+            y: b.y - a.y,
+        });
         if let Some(id) = adopting {
             // Another tool's comment, moved: ours now, where it was let go.
             let (dx, dy) = (b.x - a.x, b.y - a.y);
-            if (dx.abs() >= 0.5 || dy.abs() >= 0.5)
-                && let Some(m) = drag.moving.first()
-            {
-                let mut moved = dragged(m, a, b).to_page(&edit);
-                moved.modified = sheaf_doc::pdf_date_now();
-                self.adopt_foreign(id, |m| *m = moved, "Move annotation", cx);
+            if dx.abs() >= 0.5 || dy.abs() >= 0.5 {
+                let moved = Op::MoveMarks {
+                    marks: vec![AnnotRef::Id(id)],
+                    by,
+                    to_page: None,
+                };
+                self.adopt_foreign(id, Some(moved), "Move annotation", cx);
             }
             return;
         }
@@ -955,26 +962,15 @@ impl DocView {
                 }
                 return;
             }
-            let now = sheaf_doc::pdf_date_now();
             let n = drag.moving.len();
-            let edits = drag
-                .moving
-                .iter()
-                .map(|m| {
-                    let mut moved = dragged(m, a, b).to_page(&edit);
-                    moved.modified = now.clone();
-                    Edit::AnnotUpdate {
-                        page: page_id,
-                        annot: moved,
-                    }
-                })
-                .collect();
+            let marks = drag.moving.iter().map(|m| AnnotRef::Id(m.id)).collect();
             let label = if n == 1 {
                 "Move annotation".to_string()
             } else {
                 format!("Move {n} annotations")
             };
-            self.apply_batch(edits, &label, cx);
+            let to_page = None;
+            self.apply(Op::MoveMarks { marks, by, to_page }, &label, cx);
             return;
         }
         let rect = Box2::from_corners(a, b);
@@ -1007,10 +1003,10 @@ impl DocView {
                         size: 12.0,
                     },
                     color,
-                    cx,
                 );
-                self.add_annot(page_id, a, "Text", cx);
-                self.start_annot_editor(page_id, window, cx);
+                if let Some(id) = self.add_annot(page_id, a, "Text", cx) {
+                    self.start_annot_editor_for(page_id, id, window, cx);
+                }
             }
             Tool::Square | Tool::Ellipse => {
                 if too_small {
@@ -1021,7 +1017,7 @@ impl DocView {
                 } else {
                     AnnotKind::Ellipse { rect }
                 };
-                let a = self.new_annot(kind, color, cx);
+                let a = self.new_annot(kind, color);
                 self.add_annot(page_id, a, tool.label(), cx);
             }
             Tool::Line | Tool::Arrow => {
@@ -1036,7 +1032,6 @@ impl DocView {
                         arrow_start: false,
                     },
                     color,
-                    cx,
                 );
                 self.add_annot(page_id, a, tool.label(), cx);
             }
@@ -1049,7 +1044,6 @@ impl DocView {
                         paths: vec![drag.path],
                     },
                     color,
-                    cx,
                 );
                 an.stroke = 2.0;
                 self.add_annot(page_id, an, "Pencil", cx);
@@ -1096,23 +1090,8 @@ impl DocView {
         };
         let marks = std::mem::take(&mut doc.selected_marks);
         let st = doc.model.state();
-        // A reply or status goes with its comment; don't delete it twice.
-        let names: std::collections::HashSet<String> = marks
-            .iter()
-            .filter_map(|(_, id)| st.find_annot(*id).map(|(_, a)| a.name()))
-            .collect();
-        let edits: Vec<Edit> = marks
-            .iter()
-            .filter(|(_, id)| {
-                st.find_annot(*id)
-                    .and_then(|(_, a)| a.thread_parent().map(|p| !names.contains(p)))
-                    .unwrap_or(true)
-            })
-            .map(|(page, id)| Edit::AnnotDelete {
-                page: *page,
-                id: *id,
-            })
-            .collect();
+        // A reply or status goes with its comment, which is the op's to say.
+        let annots = marks.iter().map(|&(_, id)| AnnotRef::Id(id)).collect();
         let label = match marks.as_slice() {
             [] => return false,
             [(_, id)] => match st.find_annot(*id).map(|(_, a)| a.kind.clone()) {
@@ -1121,7 +1100,7 @@ impl DocView {
             },
             more => format!("Delete {} annotations", more.len()),
         };
-        self.apply_batch(edits, &label, cx);
+        self.apply(Op::DeleteAnnotations { annots }, &label, cx);
         true
     }
 
@@ -1649,20 +1628,20 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let now = sheaf_doc::pdf_date_now();
-        let edits: Vec<Edit> = doc
+        let ops: Vec<Op> = doc
             .selected_mark_list()
             .into_iter()
-            .filter_map(|(page, mut a)| {
+            .filter_map(|(_, mut a)| {
                 let before = a.clone();
-                (f(&mut a) && a != before).then(|| {
-                    a.modified = now.clone();
-                    Edit::AnnotUpdate { page, annot: a }
+                (f(&mut a) && a != before).then(|| Op::PatchMarks {
+                    marks: vec![AnnotRef::Id(a.id)],
+                    patch: mark_changes(&before, &a),
+                    imported: None,
                 })
             })
             .collect();
-        if !edits.is_empty() {
-            self.apply_batch(edits, label, cx);
+        if !ops.is_empty() {
+            self.apply_batch(ops, label, cx);
         }
     }
 
@@ -1730,12 +1709,15 @@ impl DocView {
         if copied.sheaf_marks != COPIED_MARKS || copied.marks.is_empty() {
             return false;
         }
-        let me = crate::prefs::get(cx).identity.name();
         let State::Ready(doc) = &mut self.state else {
             return false;
         };
-        let index = doc.current_page();
-        let (Some(page), Some(onto)) = (doc.page_id(index), doc.edit_geom(index)) else {
+        let mut tx = doc.model.tx(sheaf_doc::Actor::User);
+        let mut r = tx.reader();
+        let Some(page) = r.page_at(doc.current_page()) else {
+            return false;
+        };
+        let Some(onto) = r.geom(page).map(|g| **g) else {
             return false;
         };
         // Held until they're added.
@@ -1743,39 +1725,39 @@ impl DocView {
             Ok(assets) => assets.give(&mut copied.marks, &doc.model),
             Err(_) => Vec::new(),
         };
-        let before = doc.model.state().marks_on(page).count();
+        for blob in held {
+            tx.pin(blob);
+        }
         let shift = if in_place { 0.0 } else { 10.0 };
-        let now = sheaf_doc::pdf_date_now();
         let n = copied.marks.len();
-        let edits = pasted(copied.marks, &onto, shift)
-            .into_iter()
-            .map(|mut a| {
-                // A pasted connector is on its own: its partner stayed put.
-                if let AnnotKind::Connector { partner, .. } = &mut a.kind {
-                    *partner = None;
-                }
-                a.author = me.clone();
-                a.created = now.clone();
-                a.modified = now.clone();
-                // A copy is a comment of its own, not the one its replies
-                // are to.
-                a.name.clear();
-                Edit::AnnotAdd { page, annot: a }
-            })
-            .collect();
         let label = if n == 1 {
             "Paste annotation".to_string()
         } else {
             format!("Paste {n} annotations")
         };
-        self.apply_batch(edits, &label, cx);
-        drop(held);
-        if let State::Ready(doc) = &mut self.state {
-            let pasted: Vec<(PageId, AnnotId)> = (doc.model.state().marks_on(page))
-                .skip(before)
-                .map(|a| (page, a.id))
-                .collect();
-            doc.selected_marks = pasted;
+        // Each a mark of its own, made now by the user: a pasted connector
+        // without its partner, which stayed put.
+        let mut ops = Vec::with_capacity(n);
+        for a in pasted(copied.marks, &onto, shift) {
+            let asset = match self.held_asset(&mut tx, &a) {
+                Ok(asset) => asset,
+                Err(e) => {
+                    self.set_notice(crate::docview::failed(&label, &e), cx);
+                    return true;
+                }
+            };
+            ops.push(Op::AddMark {
+                page: page.into(),
+                mark: crate::docview::new_mark(&a, asset),
+                reply_to: None,
+                local: None,
+                imported: None,
+            });
+        }
+        if let Some(commit) = self.submit(tx, ops, &label, cx)
+            && let State::Ready(doc) = &mut self.state
+        {
+            doc.selected_marks = commit.created.annots().map(|id| (page, id)).collect();
         }
         if self.tool != Tool::Select {
             self.set_tool(Tool::Select, cx);
@@ -2085,11 +2067,20 @@ mod tests {
     #[test]
     fn copied_marks_take_what_they_hold() {
         use sheaf_doc::forms::fixture::{self, MARK_FILE, MARK_FILE_BYTES, MARK_STAMP};
-        use sheaf_doc::{BlobId, FixedCount, Mark, SourceInfo, Store};
+        use sheaf_doc::store::blob_id;
+        use sheaf_doc::tx::fixture as ops;
+        use sheaf_doc::{FixedCount, Mark, Store};
         let blank = || {
             let store = Store::new();
-            let primary = SourceInfo::blank(&store, 1);
-            Document::new(store, primary, None, &[], Box::new(FixedCount(10)))
+            let primary = sheaf_doc::store::blank(&store, 1);
+            Document::new(
+                store,
+                primary,
+                "a.pdf".into(),
+                None,
+                &[],
+                Box::new(FixedCount(10)),
+            )
         };
         // Placed and attached, saved, and opened: the stamp's page is the
         // file's.
@@ -2097,10 +2088,8 @@ mod tests {
         let held = fixture::mark_blobs(doc.store());
         let every = fixture::every_mark_kind();
         let p0 = doc.page(0).unwrap();
-        for annot in [every[17].clone(), every[23].clone(), every[1].clone()] {
-            doc.apply(Edit::AnnotAdd { page: p0, annot }, "add")
-                .unwrap();
-        }
+        let add = [&every[17], &every[23], &every[1]].map(|a| ops::add(p0, a));
+        doc.commit_ops(add.into(), "add").unwrap();
         drop(held);
         let path = std::env::temp_dir().join(format!(
             "sheaf-copied-{}-{:x}.pdf",
@@ -2121,18 +2110,15 @@ mod tests {
         let mut pasted = marks;
         let held = copied.give(&mut pasted, &other);
         let p0 = other.page(0).unwrap();
-        for annot in pasted {
-            other
-                .apply(Edit::AnnotAdd { page: p0, annot }, "paste")
-                .unwrap();
-        }
+        let paste = pasted.iter().map(|a| ops::add(p0, a)).collect();
+        other.commit_ops(paste, "paste").unwrap();
         drop(held);
         let got: Vec<&Mark> = other.state().mark_records_on(p0).collect();
         let AnnotKind::PageStamp { stamp, .. } = &got[0].annot.kind else {
             panic!("a page stamp")
         };
         let page = got[0].stamp.as_ref().unwrap().to_pdf().unwrap();
-        assert_eq!(*stamp, BlobId::of(&page).stem());
+        assert_eq!(*stamp, blob_id(&page).stem());
         assert_ne!(*stamp, *MARK_STAMP, "made of the file's form");
         assert!(
             matches!(&got[1].annot.kind, AnnotKind::FileAttachment { file, .. } if *file == *MARK_FILE)

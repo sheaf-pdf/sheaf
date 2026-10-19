@@ -11,13 +11,15 @@
 use std::collections::BTreeMap;
 
 use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
-use sheaf_core::PageIndex;
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::Form;
-use sheaf_doc::{Document, Edit, PageId};
+use sheaf_doc::tx::fixture::{delete, set_header};
+use sheaf_doc::{Actor, CommitOpts, Derive, Document, PageId};
+use sheaf_edit::{Op, PageSel};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::crop::{CropSpec, Margins};
+use sheaf_render::PageIndex;
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 
@@ -51,17 +53,17 @@ fn two_page_form() -> Form {
 }
 
 /// Move `pages` of `doc` onto derived copies, as the app does.
-fn rebase(doc: &mut Document, derived: Vec<sheaf_ops::derive::DerivedSource>, what: &str) {
+fn rebase(
+    doc: &mut Document,
+    derived: Vec<sheaf_ops::derive::DerivedSource>,
+    why: Derive,
+    what: &str,
+) {
     assert!(!derived.is_empty(), "{what} made no copy");
     for d in derived {
-        let sid = doc.add_source(d.info.clone());
-        doc.apply(
-            Edit::RebasePages {
-                pages: d.rebases(sid),
-            },
-            what,
-        )
-        .unwrap();
+        d.note(doc);
+        let pages = d.bases().collect();
+        doc.commit_page_base(pages, why, what).unwrap();
     }
 }
 
@@ -92,7 +94,7 @@ fn a_cropped_form_page_keeps_its_fields_by(how: How) {
     .unwrap();
     // On screen: the copy is a form, so PDFium draws its widgets (before,
     // it had no /AcroForm and the field was blank).
-    let copy = plan[0].info.src.bytes().clone();
+    let copy = plan[0].src.bytes().clone();
     let shown = PdfiumEngine::open_bytes(copy.clone(), None).unwrap();
     let r = shown
         .render_page(PageIndex(0), 612, PixelFormat::Rgba)
@@ -106,14 +108,9 @@ fn a_cropped_form_page_keeps_its_fields_by(how: How) {
     assert!(!values(&copy).contains_key("b"));
     clean(&copy, "the cropped copy");
 
-    let sid = doc.add_source(plan[0].info.clone());
-    doc.apply(
-        Edit::RebasePages {
-            pages: plan[0].rebases(sid),
-        },
-        "Crop",
-    )
-    .unwrap();
+    plan[0].note(&mut doc);
+    let pages = plan[0].bases().collect();
+    doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
     let (strategy, bytes) = (how.strategy(), written(&doc, how));
     let what = format!("{strategy:?}");
     let report = clean(&bytes, &what);
@@ -163,7 +160,7 @@ fn watermarked(remove: bool, how: How) {
         &sheaf_ops::NoProgress,
     )
     .unwrap();
-    let copy = derived[0].info.src.bytes().clone();
+    let copy = derived[0].src.bytes().clone();
     let shown = PdfiumEngine::open_bytes(copy.clone(), None).unwrap();
     let r = shown
         .render_page(PageIndex(1), 612, PixelFormat::Rgba)
@@ -173,7 +170,11 @@ fn watermarked(remove: bool, how: How) {
         "the copy draws the field"
     );
     clean(&copy, "the watermarked copy");
-    rebase(&mut doc, derived, "Watermark");
+    let drawn = Derive::Watermark {
+        behind: false,
+        unencodable: false,
+    };
+    rebase(&mut doc, derived, drawn, "Watermark");
     if remove {
         let snap = doc.snapshot();
         let derived = sheaf_ops::derive::watermark(
@@ -185,7 +186,8 @@ fn watermarked(remove: bool, how: How) {
             &sheaf_ops::NoProgress,
         )
         .unwrap();
-        rebase(&mut doc, derived, "Remove Watermark");
+        let removed = Derive::RemoveWatermark { behind: false };
+        rebase(&mut doc, derived, removed, "Remove Watermark");
     }
     let bytes = written(&doc, how);
     let what = format!("{name}, {how:?}");
@@ -279,13 +281,8 @@ fn a_form_with_its_header_and_footer_removed_keeps_its_fields() {
         ],
         ..Default::default()
     };
-    doc.apply(
-        Edit::SetHeaderFooter {
-            header_footer: Some(hf),
-        },
-        "Header & footer",
-    )
-    .unwrap();
+    doc.commit_ops(vec![set_header(hf.spec(), None)], "Header & footer")
+        .unwrap();
     let footed = dir.join("footed.pdf");
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &footed).unwrap();
     assert!(holds(&std::fs::read(&footed).unwrap(), b"SHEAFFOOTER"));
@@ -296,19 +293,16 @@ fn a_form_with_its_header_and_footer_removed_keeps_its_fields() {
         sheaf_ops::derive::strip_stamps(doc.store(), &doc.snapshot(), &sheaf_ops::NoProgress)
             .unwrap();
     assert_eq!(derived.len(), 1);
-    let sid = doc.add_source(derived[0].info.clone());
-    doc.apply_batch(
-        vec![
-            Edit::RebasePages {
-                pages: derived[0].rebases(sid),
-            },
-            Edit::SetHeaderFooter {
-                header_footer: None,
-            },
-        ],
-        "Remove header & footer",
-    )
-    .unwrap();
+    derived[0].note(&mut doc);
+    let mut tx = doc.tx(Actor::User);
+    let pages = derived[0].bases().collect();
+    tx.set_page_base(pages, Derive::StripHeaderFooter).unwrap();
+    let remove = Op::RemoveHeaderFooter {
+        pages: PageSel::All,
+    };
+    tx.apply(remove, &sheaf_ops::NoProgress).unwrap();
+    let label = Some("Remove header & footer".into());
+    doc.commit(tx, CommitOpts { label }).unwrap();
     // The footer's gone from the file: a save is a Rewrite.
     let saved = rewritten_and_saved(&mut doc, &footed);
     assert_eq!(saved[1].0, StrategyKind::Rewrite);
@@ -414,8 +408,7 @@ fn a_deleted_pages_value_leaves_a_second_tree() {
     let path = write(&dir, "form.pdf", &mut f);
     let mut doc = open(&path);
     let second = doc.state().order()[1];
-    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[second])], "Delete").unwrap();
     for (strategy, bytes) in rewritten_and_saved(&mut doc, &path) {
         let what = format!("{strategy:?}");
         assert!(!holds(&bytes, b"LEAKVALUE123"), "{what}: the value stayed");
@@ -443,8 +436,7 @@ fn a_deleted_pages_value_leaves_the_file() {
     let path = write(&dir, "form.pdf", &mut leaky_form());
     let mut doc = open(&path);
     let second = doc.state().order()[1];
-    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[second])], "Delete").unwrap();
     let saved = rewritten_and_saved(&mut doc, &path);
     // A removal is never an Append (M9 bug 14).
     assert_eq!(saved[1].0, StrategyKind::Rewrite);
@@ -495,8 +487,7 @@ fn a_form_left_with_no_fields_goes() {
     let report = clean(&bytes, "extracted");
     assert_eq!(report.class(), "no form");
 
-    doc.apply(Edit::DeletePages { ids: vec![first] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[first])], "Delete").unwrap();
     for (strategy, bytes) in rewritten_and_saved(&mut doc, &path) {
         let what = format!("{strategy:?}");
         assert_eq!(fields_of(&bytes), None, "{what}");
@@ -529,8 +520,7 @@ fn direct_object_fields_are_pruned() {
     let path = write(&dir, "form.pdf", &mut f);
     let mut doc = open(&path);
     let first = doc.state().order()[0];
-    doc.apply(Edit::DeletePages { ids: vec![first] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[first])], "Delete").unwrap();
     for (strategy, bytes) in rewritten_and_saved(&mut doc, &path) {
         let what = format!("{strategy:?}");
         let fields = fields_of(&bytes).unwrap();
@@ -571,8 +561,7 @@ fn page_templates_stay() {
     let path = write(&dir, "form.pdf", &mut f);
     let mut doc = open(&path);
     let second = doc.state().order()[1];
-    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[second])], "Delete").unwrap();
     // The new writer's post-conditions count the template as a page the
     // file keeps.
     let saved = rewritten_and_saved(&mut doc, &path)
@@ -619,13 +608,7 @@ fn corpus_ca_540_leaks_no_removed_value() {
     assert!(!holds(&extracted, b"LEAKVALUE123"), "extracted");
     assert_eq!(findings(&extracted), vec![], "extracted");
 
-    doc.apply(
-        Edit::DeletePages {
-            ids: vec![pages[4]],
-        },
-        "Delete",
-    )
-    .unwrap();
+    doc.commit_ops(vec![delete(&[pages[4]])], "Delete").unwrap();
     for (strategy, bytes) in rewritten_and_saved(&mut doc, &path) {
         let what = format!("{strategy:?}");
         assert!(!holds(&bytes, b"LEAKVALUE123"), "{what}");
@@ -675,14 +658,9 @@ fn corpus_cropped_forms_keep_their_fields_by(how: How) {
             &sheaf_ops::NoProgress,
         )
         .unwrap();
-        let sid = doc.add_source(plan[0].info.clone());
-        doc.apply(
-            Edit::RebasePages {
-                pages: plan[0].rebases(sid),
-            },
-            "Crop",
-        )
-        .unwrap();
+        plan[0].note(&mut doc);
+        let pages = plan[0].bases().collect();
+        doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
         let (strategy, bytes) = (how.strategy(), written(&doc, how));
         let what = format!("{file}, {strategy:?}");
         let report = check(&bytes, None).unwrap();
@@ -746,8 +724,7 @@ fn corpus_deleted_pages_leave_no_values() {
         pdf.save(&path).unwrap();
         let mut doc = open(&path);
         let id = doc.state().order()[page as usize];
-        doc.apply(Edit::DeletePages { ids: vec![id] }, "Delete")
-            .unwrap();
+        doc.commit_ops(vec![delete(&[id])], "Delete").unwrap();
         let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
         let dangling = dangling_structure(&bytes);
         if holds(&bytes, b"SHEAFLEAK") || dangling > 0 {

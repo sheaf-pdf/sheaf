@@ -35,7 +35,7 @@ pub fn cache_dir() -> PathBuf {
 /// Files stored before sheaf used xxh3 are named by FNV-1a (16 hex
 /// digits); they keep those names, which marks saved since then refer to.
 fn name_of(bytes: &[u8]) -> String {
-    crate::store::BlobId::of(bytes).stem()
+    crate::store::blob_id(bytes).stem()
 }
 
 /// Whether `stem` is a name the cache gives ([`name_of`], or the FNV-1a

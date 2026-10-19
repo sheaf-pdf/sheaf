@@ -5,10 +5,11 @@
 
 use std::path::PathBuf;
 
-use sheaf_core::{PageIndex, Rotation};
+use sheaf_edit::Rotation;
 use sheaf_image::raster::PixelFormat;
 use sheaf_ocr::geom::PxToPt;
 use sheaf_ocr::{EngineKind, OcrConfig, OcrImage, build_engine};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 

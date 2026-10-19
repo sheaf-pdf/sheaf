@@ -1,0 +1,2574 @@
+{
+  "$defs": {
+    "Anchor": {
+      "additionalProperties": false,
+      "description": "One end of a connector pair: where it is.",
+      "properties": {
+        "page": {
+          "$ref": "#/$defs/PageRef"
+        },
+        "rect": {
+          "$ref": "#/$defs/Box2"
+        }
+      },
+      "required": [
+        "page",
+        "rect"
+      ],
+      "type": "object"
+    },
+    "AnnotId": {
+      "description": "An annotation's id in a document: a mark's, another tool's comment's or\nlink's, a field's widget's. One id space for them all.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "AnnotRef": {
+      "description": "An annotation: its id, a mark an earlier op made, or its /NM, on its page when the name could be on more than one.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AnnotId"
+        },
+        {
+          "$ref": "#/$defs/Local"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "nm": {
+              "type": "string"
+            },
+            "page": {
+              "$ref": "#/$defs/PageRef"
+            }
+          },
+          "required": [
+            "nm"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BatesSpec": {
+      "additionalProperties": false,
+      "description": "Bates numbering: `<prefix><number, zero-padded to digits><suffix>`,\ncounting pages in scope in document order from `start`.",
+      "properties": {
+        "digits": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "start": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "suffix": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "prefix",
+        "suffix",
+        "digits",
+        "start"
+      ],
+      "type": "object"
+    },
+    "BlobId": {
+      "description": "A blob by its bytes: `b`, their checksum in 32 lowercase hex digits, `-` and their length.",
+      "pattern": "^b[0-9a-f]{32}-(0|[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "BlobSel": {
+      "description": "A blob an op uses (an inserted file, a stamp's page, an attached file):\nby its id; by a name the command line gave a file (`--with NAME=PATH`);\nor as an asset a plugin uploaded, by its handle. Resolved before the op\nis lowered.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "blob": {
+              "$ref": "#/$defs/BlobId"
+            }
+          },
+          "required": [
+            "blob"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "with": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "with"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "asset"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BookmarkPatch": {
+      "additionalProperties": false,
+      "description": "Changes to bookmarks: each field named is set or cleared, the rest kept.",
+      "properties": {
+        "color": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "style": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextStyle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PageRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where it goes; a new page is at its top unless `view` says."
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "view": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "BookmarkRef": {
+      "description": "A bookmark: its id, a bookmark an earlier op made, or its titles from the top of the outline down.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/OutlineId"
+        },
+        {
+          "$ref": "#/$defs/Local"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Box2": {
+      "description": "A box, `w` and `h` not negative, with `(x, y)` its low corner: its\nbottom-left in PageSpace, its top-left in a frame that's y down. So\n[`bottom`](Self::bottom) is its top in PageSpace.",
+      "properties": {
+        "h": {
+          "format": "float",
+          "type": "number"
+        },
+        "w": {
+          "format": "float",
+          "type": "number"
+        },
+        "x": {
+          "format": "float",
+          "type": "number"
+        },
+        "y": {
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "w",
+        "h"
+      ],
+      "type": "object"
+    },
+    "Bring": {
+      "additionalProperties": false,
+      "description": "What comes in with inserted pages besides the pages. Other tools'\nannotations and links always come.",
+      "properties": {
+        "form": {
+          "$ref": "#/$defs/FormBring",
+          "default": "new"
+        },
+        "marks": {
+          "default": true,
+          "description": "sheaf's marks on them.",
+          "type": "boolean"
+        },
+        "outline": {
+          "$ref": "#/$defs/OutlineBring",
+          "default": "merge-by-title"
+        }
+      },
+      "type": "object"
+    },
+    "Delta": {
+      "description": "How far marks move: in PageSpace, or as a view of their page shows it\n(x right, y down), which each mark's page turns into PageSpace.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "page": {
+              "$ref": "#/$defs/Vec2"
+            }
+          },
+          "required": [
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "view": {
+              "$ref": "#/$defs/Vec2"
+            }
+          },
+          "required": [
+            "view"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DestView": {
+      "description": "Where a bookmark lands on its page.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "PDF `/XYZ`: show this point at the window's top-left, at this zoom\n(1.0 = 100%). Coordinates are in PageSpace, the page's default user\nspace before `/Rotate`, as the file has them. `None` keeps the\nviewer's current value.",
+          "properties": {
+            "Xyz": {
+              "additionalProperties": false,
+              "properties": {
+                "left": {
+                  "format": "float",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "top": {
+                  "format": "float",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "zoom": {
+                  "format": "float",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "Xyz"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Any other kind (`Fit`, `FitH`, `FitR`, …), kept as the file had it:\nits name and its numbers in user space (`None` for null), written\nback unchanged.",
+          "properties": {
+            "Other": {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "params": {
+                  "items": {
+                    "format": "float",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "params"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Other"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FormBring": {
+      "description": "What becomes of the file's form fields.",
+      "oneOf": [
+        {
+          "const": "new",
+          "description": "A form of their own, renamed apart where names clash.",
+          "type": "string"
+        }
+      ]
+    },
+    "HeaderFooterSpec": {
+      "additionalProperties": false,
+      "description": "A header and footer: six slots of text, drawn on every page in scope.\nWhat `<<date>>` and `<<file>>` say is fixed when it's set, and Bates\nnumbers are counted then (M10.5 §3.5).",
+      "properties": {
+        "bates": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BatesSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "color": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "first_number": {
+          "description": "What `<<1>>` is on the document's first page.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "margins": {
+          "$ref": "#/$defs/Margins"
+        },
+        "size": {
+          "description": "The text's size, in points.",
+          "format": "float",
+          "type": "number"
+        },
+        "texts": {
+          "description": "Header left, center, right; footer left, center, right. Each can\nuse `<<1>>` (the page number), `<<N>>` (the page count),\n`<<date>>`, `<<file>>` and `<<bates>>`.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "minItems": 6,
+          "type": "array"
+        }
+      },
+      "required": [
+        "texts",
+        "size",
+        "color",
+        "margins",
+        "first_number"
+      ],
+      "type": "object"
+    },
+    "Imported": {
+      "additionalProperties": false,
+      "description": "A comment as another tool wrote it, brought in by an import: its own\n`/NM`, dates and author, kept so a second import of the same comments\nfinds them and replies still thread by name. Only the user's own\nedits and the import job may say this.",
+      "properties": {
+        "author": {
+          "type": "string"
+        },
+        "created": {
+          "description": "PDF date strings, as `D:20261011153000`.",
+          "type": "string"
+        },
+        "modified": {
+          "type": "string"
+        },
+        "nm": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nm",
+        "created",
+        "modified",
+        "author"
+      ],
+      "type": "object"
+    },
+    "LabelStyle": {
+      "description": "How a range numbers its pages (`/S`).",
+      "oneOf": [
+        {
+          "enum": [
+            "Decimal",
+            "UpperRoman",
+            "LowerRoman",
+            "UpperLetters",
+            "LowerLetters"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "None",
+          "description": "No number, only the prefix.",
+          "type": "string"
+        }
+      ]
+    },
+    "Line": {
+      "properties": {
+        "note": {
+          "type": "string"
+        },
+        "row": {
+          "$ref": "#/$defs/Row"
+        }
+      },
+      "required": [
+        "row"
+      ],
+      "type": "object"
+    },
+    "Local": {
+      "description": "Something an earlier op in the same transaction made, by the name it gave it: `$` and a number.",
+      "pattern": "^\\$[0-9]+$",
+      "type": "string"
+    },
+    "Margins": {
+      "additionalProperties": false,
+      "description": "Distances from the page's edges to the text, in points: from the top\nto the header, from the bottom to the footer, and from the sides.",
+      "properties": {
+        "bottom": {
+          "format": "float",
+          "type": "number"
+        },
+        "left": {
+          "format": "float",
+          "type": "number"
+        },
+        "right": {
+          "format": "float",
+          "type": "number"
+        },
+        "top": {
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "top",
+        "bottom",
+        "left",
+        "right"
+      ],
+      "type": "object"
+    },
+    "MarkKind": {
+      "description": "What a mark is, and where it is on its page, in PageSpace: every kind\nsheaf makes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Text markup over glyph boxes.",
+          "properties": {
+            "rects": {
+              "items": {
+                "$ref": "#/$defs/Box2"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "highlight",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rects"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Sticky note: an icon at `pos` (its box's low corner), text in the\nmark's contents.",
+          "properties": {
+            "pos": {
+              "$ref": "#/$defs/Pt"
+            },
+            "type": {
+              "const": "note",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "pos"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Text drawn in a box.",
+          "properties": {
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            },
+            "size": {
+              "format": "float",
+              "type": "number"
+            },
+            "type": {
+              "const": "free-text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rect",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            },
+            "type": {
+              "const": "square",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rect"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            },
+            "type": {
+              "const": "ellipse",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rect"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "a": {
+              "$ref": "#/$defs/Pt"
+            },
+            "arrow": {
+              "description": "An arrowhead at `b`.",
+              "type": "boolean"
+            },
+            "arrow_start": {
+              "description": "An arrowhead at `a`.",
+              "type": "boolean"
+            },
+            "b": {
+              "$ref": "#/$defs/Pt"
+            },
+            "type": {
+              "const": "line",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "a",
+            "b",
+            "arrow"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "paths": {
+              "items": {
+                "items": {
+                  "$ref": "#/$defs/Pt"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "ink",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "paths"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A stamp from the tickmark library: `glyph` is what it shows.",
+          "properties": {
+            "glyph": {
+              "type": "string"
+            },
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            },
+            "type": {
+              "const": "stamp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rect",
+            "glyph"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "PDFlyer-style connector: one end of a numbered group. Two ends made\ntogether ([`Op::AddConnector`](crate::Op::AddConnector)) link to\neach other.",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            },
+            "type": {
+              "const": "connector",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rect",
+            "label"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Calculator tape, as PDFlyer prints it: `tape`'s rows, `size` points\ntall, drawn on paper as `look` says.",
+          "properties": {
+            "look": {
+              "$ref": "#/$defs/TapeLook",
+              "default": {
+                "decimals": 2,
+                "numbers": true,
+                "paper": [
+                  255,
+                  255,
+                  255
+                ],
+                "rotation": 0,
+                "titles": true
+              }
+            },
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            },
+            "size": {
+              "format": "float",
+              "type": "number"
+            },
+            "tape": {
+              "$ref": "#/$defs/Tape"
+            },
+            "type": {
+              "const": "tape",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rect",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Text markup: a line under the text.",
+          "properties": {
+            "rects": {
+              "items": {
+                "$ref": "#/$defs/Box2"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "underline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rects"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Text markup: a line through the text.",
+          "properties": {
+            "rects": {
+              "items": {
+                "$ref": "#/$defs/Box2"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "strike-out",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rects"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Text markup: a wavy line under the text.",
+          "properties": {
+            "rects": {
+              "items": {
+                "$ref": "#/$defs/Box2"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "squiggly",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rects"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A suggested replacement (Acrobat's Replace Text): the text `struck`,\nover `rects`, is crossed out, and a caret at `at` carries the new\ntext in the mark's contents.",
+          "properties": {
+            "at": {
+              "$ref": "#/$defs/Box2"
+            },
+            "rects": {
+              "items": {
+                "$ref": "#/$defs/Box2"
+              },
+              "type": "array"
+            },
+            "struck": {
+              "type": "string"
+            },
+            "type": {
+              "const": "replace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rects",
+            "struck",
+            "at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A suggested insertion (Insert Text): a caret at `at`, the text in\nthe mark's contents.",
+          "properties": {
+            "at": {
+              "$ref": "#/$defs/Box2"
+            },
+            "type": {
+              "const": "insert",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A reply, its text the mark's contents, in the thread of the comment\nit's made as a reply to.",
+          "properties": {
+            "type": {
+              "const": "reply",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A review state set on the comment it's made as a reply to: `model`\nis `Review` (`state` None, Accepted, Rejected, Cancelled or\nCompleted) or `Marked` (the checkmark: Marked or Unmarked).",
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "type": {
+              "const": "status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "model",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A stamp from the library: the one-page PDF the mark's asset is,\ndrawn in `rect`. `name` is what the library calls it, and `text` (a\ndynamic stamp's, filled in when placed) is drawn over it.",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "page-stamp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rect",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A text stamp in a frame, as Acrobat's dynamic stamps look: the first\nline large (\"APPROVED\"), the rest small (\"GE 10/14/2026\").",
+          "properties": {
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            },
+            "status": {
+              "description": "Placed by Set Status, so Reset Status can take it off.",
+              "type": "boolean"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "text-stamp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rect",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A border around a page, as Set Status draws it; `status` names the\nstatus, so Reset Status finds it.",
+          "properties": {
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            },
+            "status": {
+              "type": "string"
+            },
+            "type": {
+              "const": "page-border",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rect",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A closed shape through `points`.",
+          "properties": {
+            "points": {
+              "items": {
+                "$ref": "#/$defs/Pt"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "polygon",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "points"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An open line through `points`.",
+          "properties": {
+            "points": {
+              "items": {
+                "$ref": "#/$defs/Pt"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "polyline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "points"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A text box (the mark's contents, `size` points) with a leader line\nfrom its edge through `knee` to an arrowhead at `point`: Acrobat's\ncallout.",
+          "properties": {
+            "knee": {
+              "$ref": "#/$defs/Pt"
+            },
+            "point": {
+              "$ref": "#/$defs/Pt"
+            },
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            },
+            "size": {
+              "format": "float",
+              "type": "number"
+            },
+            "type": {
+              "const": "callout",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rect",
+            "knee",
+            "point",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The file the mark's asset is, attached at `pos` (Acrobat's Attach\nFile), its icon's box's low corner as a note's is. `name` is the\nfile's; `icon` is one of PushPin, Paperclip, Graph and Tag.",
+          "properties": {
+            "icon": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "pos": {
+              "$ref": "#/$defs/Pt"
+            },
+            "type": {
+              "const": "file-attachment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "pos",
+            "icon",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A measurement (Acrobat's Measure tools): what `points` come to at\n`scale`; a distance has two.",
+          "properties": {
+            "points": {
+              "items": {
+                "$ref": "#/$defs/Pt"
+              },
+              "type": "array"
+            },
+            "scale": {
+              "$ref": "#/$defs/Scale"
+            },
+            "type": {
+              "const": "measure",
+              "type": "string"
+            },
+            "what": {
+              "$ref": "#/$defs/Measured"
+            }
+          },
+          "required": [
+            "type",
+            "what",
+            "points",
+            "scale"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MarkPatch": {
+      "additionalProperties": false,
+      "description": "Changes to marks: each field named is set, the rest kept.",
+      "properties": {
+        "cloudy": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "color": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "contents": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dashed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "fill": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MarkKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Its kind and shape, whole."
+        },
+        "opacity": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "stroke": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Measured": {
+      "description": "What a measurement measures.",
+      "oneOf": [
+        {
+          "const": "Distance",
+          "description": "Between two points.",
+          "type": "string"
+        },
+        {
+          "const": "Perimeter",
+          "description": "Along an open path.",
+          "type": "string"
+        },
+        {
+          "const": "Area",
+          "description": "Inside a closed shape.",
+          "type": "string"
+        }
+      ]
+    },
+    "NewMark": {
+      "additionalProperties": false,
+      "description": "A mark to make. Its id, `/NM` and dates are the host's.",
+      "properties": {
+        "asset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BlobSel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What it holds: a page stamp's one-page PDF, an attachment's file."
+        },
+        "author": {
+          "description": "Who it's by; none is whoever the host says makes it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contents": {
+          "description": "Its text: a note's or a text box's, or a comment on any other kind.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/MarkKind"
+        },
+        "style": {
+          "$ref": "#/$defs/Style"
+        },
+        "turn": {
+          "$ref": "#/$defs/Rotation",
+          "description": "The rotation it reads upright in, absolute: the page's as shown\nfor a mark made on it, the text's for markup on turned text."
+        }
+      },
+      "required": [
+        "kind",
+        "style"
+      ],
+      "type": "object"
+    },
+    "OcrWord": {
+      "additionalProperties": false,
+      "description": "One recognized word.",
+      "properties": {
+        "confidence": {
+          "description": "0 to 1.",
+          "format": "float",
+          "type": "number"
+        },
+        "rect": {
+          "$ref": "#/$defs/Box2",
+          "description": "PageSpace."
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "rect",
+        "confidence"
+      ],
+      "type": "object"
+    },
+    "Op": {
+      "description": "An edit, as a caller states it (\"delete pages 3–5\"). A document lowers\nit into changes of its model, inside a transaction; whatever it makes\nit can name with locals, for the ops after it. In JSON, `\"op\"` names\nit, kebab-case: `{\"op\": \"delete-pages\", \"pages\": {\"positions\": \"3-5\"}}`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Move `pages`, kept in document order, to just before `before`, or\nto the end.",
+          "properties": {
+            "before": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PageRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "const": "move-pages",
+              "type": "string"
+            },
+            "pages": {
+              "$ref": "#/$defs/PageSel"
+            }
+          },
+          "required": [
+            "op",
+            "pages"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Turn `pages` from where each is.",
+          "properties": {
+            "by": {
+              "$ref": "#/$defs/Turn"
+            },
+            "op": {
+              "const": "rotate-pages",
+              "type": "string"
+            },
+            "pages": {
+              "$ref": "#/$defs/PageSel"
+            }
+          },
+          "required": [
+            "op",
+            "pages",
+            "by"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Delete `pages`, and what's only on them: their marks, fields and\nbookmarks (whose children move up).",
+          "properties": {
+            "op": {
+              "const": "delete-pages",
+              "type": "string"
+            },
+            "pages": {
+              "$ref": "#/$defs/PageSel"
+            }
+          },
+          "required": [
+            "op",
+            "pages"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A copy of each page right after it; `locals` name the copies, in\norder.",
+          "properties": {
+            "locals": {
+              "items": {
+                "$ref": "#/$defs/Local"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "duplicate-pages",
+              "type": "string"
+            },
+            "pages": {
+              "$ref": "#/$defs/PageSel"
+            }
+          },
+          "required": [
+            "op",
+            "pages"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Pages of `from` (`pages`, 1-based; none is all of them) before\n`before`, or at the end, with what `bring` says comes with them.\n`locals` name the new pages, in order.",
+          "properties": {
+            "before": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PageRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bring": {
+              "$ref": "#/$defs/Bring",
+              "default": {
+                "form": "new",
+                "marks": true,
+                "outline": "merge-by-title"
+              }
+            },
+            "from": {
+              "$ref": "#/$defs/PageSource"
+            },
+            "locals": {
+              "items": {
+                "$ref": "#/$defs/Local"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "insert-pages",
+              "type": "string"
+            },
+            "pages": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RangeSet"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "from"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`pages` shown from `from`'s pages `with` (1-based; none is all of\nthem), in place. The first as many as both have keep their ids,\nand so their bookmarks; extra pages are deleted, extra\nreplacements inserted after.",
+          "properties": {
+            "bring": {
+              "$ref": "#/$defs/Bring",
+              "default": {
+                "form": "new",
+                "marks": true,
+                "outline": "merge-by-title"
+              }
+            },
+            "from": {
+              "$ref": "#/$defs/PageSource"
+            },
+            "op": {
+              "const": "replace-pages",
+              "type": "string"
+            },
+            "pages": {
+              "items": {
+                "$ref": "#/$defs/PageRef"
+              },
+              "type": "array"
+            },
+            "with": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RangeSet"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "pages",
+            "from"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The page labels, in place of any there are; none removes them.",
+          "properties": {
+            "op": {
+              "const": "set-page-labels",
+              "type": "string"
+            },
+            "ranges": {
+              "items": {
+                "$ref": "#/$defs/PageLabelRange"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A bookmark under `parent` (the top level when none), going to\n`target`, at `view` there (the top of the page when none).",
+          "properties": {
+            "at": {
+              "$ref": "#/$defs/Sibling"
+            },
+            "color": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "local": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Local"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "const": "add-bookmark",
+              "type": "string"
+            },
+            "parent": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BookmarkRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "style": {
+              "$ref": "#/$defs/TextStyle"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PageRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "view": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DestView"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "at",
+            "title"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bookmarks": {
+              "items": {
+                "$ref": "#/$defs/BookmarkRef"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "patch-bookmarks",
+              "type": "string"
+            },
+            "patch": {
+              "$ref": "#/$defs/BookmarkPatch"
+            }
+          },
+          "required": [
+            "op",
+            "bookmarks",
+            "patch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Move `bookmarks` and what's under them under `parent` (the top\nlevel when none), in order. `with_pages` moves the pages each spans\n(from its page up to the next bookmark's) with it.",
+          "properties": {
+            "at": {
+              "$ref": "#/$defs/Sibling"
+            },
+            "bookmarks": {
+              "items": {
+                "$ref": "#/$defs/BookmarkRef"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "move-bookmarks",
+              "type": "string"
+            },
+            "parent": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BookmarkRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "with_pages": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "op",
+            "bookmarks",
+            "at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Delete `bookmarks` and what's under them.",
+          "properties": {
+            "bookmarks": {
+              "items": {
+                "$ref": "#/$defs/BookmarkRef"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "delete-bookmarks",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "bookmarks"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A mark on `page`; a reply or status in the thread of `reply_to`.\n`imported` keeps an imported comment's own name, dates and author.",
+          "properties": {
+            "imported": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Imported"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "local": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Local"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mark": {
+              "$ref": "#/$defs/NewMark"
+            },
+            "op": {
+              "const": "add-mark",
+              "type": "string"
+            },
+            "page": {
+              "$ref": "#/$defs/PageRef"
+            },
+            "reply_to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnnotRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "page",
+            "mark"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Two connectors labeled `label`, linked to each other: one at `a`,\none at `b`. `locals` name them, `a`'s first.",
+          "properties": {
+            "a": {
+              "$ref": "#/$defs/Anchor"
+            },
+            "b": {
+              "$ref": "#/$defs/Anchor"
+            },
+            "label": {
+              "type": "string"
+            },
+            "locals": {
+              "items": {
+                "$ref": "#/$defs/Local"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "add-connector",
+              "type": "string"
+            },
+            "style": {
+              "$ref": "#/$defs/Style"
+            }
+          },
+          "required": [
+            "op",
+            "a",
+            "b",
+            "label",
+            "style"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Change `marks`: what `patch` names, the rest as they are.\n`imported` is an imported comment's name (its `/NM`, which must be\nthe mark's), dates and author.",
+          "properties": {
+            "imported": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Imported"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "marks": {
+              "items": {
+                "$ref": "#/$defs/AnnotRef"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "patch-marks",
+              "type": "string"
+            },
+            "patch": {
+              "$ref": "#/$defs/MarkPatch"
+            }
+          },
+          "required": [
+            "op",
+            "marks",
+            "patch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Move `marks` by `by`, onto `to_page` when one is given.",
+          "properties": {
+            "by": {
+              "$ref": "#/$defs/Delta"
+            },
+            "marks": {
+              "items": {
+                "$ref": "#/$defs/AnnotRef"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "move-marks",
+              "type": "string"
+            },
+            "to_page": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PageRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "marks",
+            "by"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Delete annotations, and their threads: replies and statuses, ours\nand other tools'. Marks, other tools' comments and links; a field's\nwidget goes only with its page.",
+          "properties": {
+            "annots": {
+              "items": {
+                "$ref": "#/$defs/AnnotRef"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "delete-annotations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "annots"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Make other tools' comments marks, editable here, keeping their ids\nand `/NM`s.",
+          "properties": {
+            "annots": {
+              "items": {
+                "$ref": "#/$defs/AnnotRef"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "adopt-annotations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "annots"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`page`'s OCR text, in place of any it has.",
+          "properties": {
+            "layer": {
+              "$ref": "#/$defs/TextLayer"
+            },
+            "op": {
+              "const": "set-ocr-text",
+              "type": "string"
+            },
+            "page": {
+              "$ref": "#/$defs/PageRef"
+            }
+          },
+          "required": [
+            "op",
+            "page",
+            "layer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Take the OCR text off `pages`: what's not saved yet and what's in\nthe file.",
+          "properties": {
+            "op": {
+              "const": "clear-ocr-text",
+              "type": "string"
+            },
+            "pages": {
+              "$ref": "#/$defs/PageSel"
+            }
+          },
+          "required": [
+            "op",
+            "pages"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The header and footer, on the pages `scope` says, in place of any\nthere is.",
+          "properties": {
+            "op": {
+              "const": "set-header-footer",
+              "type": "string"
+            },
+            "scope": {
+              "$ref": "#/$defs/ScopeSel"
+            },
+            "spec": {
+              "$ref": "#/$defs/HeaderFooterSpec"
+            }
+          },
+          "required": [
+            "op",
+            "spec",
+            "scope"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Take the header and footer off `pages`.",
+          "properties": {
+            "op": {
+              "const": "remove-header-footer",
+              "type": "string"
+            },
+            "pages": {
+              "$ref": "#/$defs/PageSel"
+            }
+          },
+          "required": [
+            "op",
+            "pages"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OutlineBring": {
+      "description": "What becomes of the file's bookmarks.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "They're left out.",
+          "type": "string"
+        },
+        {
+          "const": "merge-by-title",
+          "description": "A top-level bookmark whose title one at the top here has adds its\nchildren to that one; the rest go at the end.",
+          "type": "string"
+        }
+      ]
+    },
+    "OutlineId": {
+      "description": "A bookmark's id in a document. Never reused.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "PageId": {
+      "description": "Stable identity of a page in the virtual document. Never reused.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "PageLabelRange": {
+      "additionalProperties": false,
+      "description": "A label range: pages from `start` on, until the next range, numbered\nin `style` from `first`, after `prefix`. It stays with the page it\nstarts at when pages move.",
+      "properties": {
+        "first": {
+          "default": 1,
+          "description": "The number of the range's first page (`/St`).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "start": {
+          "$ref": "#/$defs/PageRef"
+        },
+        "style": {
+          "$ref": "#/$defs/LabelStyle"
+        }
+      },
+      "required": [
+        "start",
+        "style"
+      ],
+      "type": "object"
+    },
+    "PageRef": {
+      "description": "A page: its id, a page an earlier op made, or its position, 1-based.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/PageId"
+        },
+        {
+          "$ref": "#/$defs/Local"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "pos": {
+              "description": "1-based.",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pos"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PageSel": {
+      "description": "Pages an op acts on.",
+      "oneOf": [
+        {
+          "enum": [
+            "all"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "ids": {
+              "items": {
+                "$ref": "#/$defs/PageRef"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "ids"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "From `first` to `last`, both included, in document order.",
+          "properties": {
+            "span": {
+              "additionalProperties": false,
+              "properties": {
+                "first": {
+                  "$ref": "#/$defs/PageRef"
+                },
+                "last": {
+                  "$ref": "#/$defs/PageRef"
+                }
+              },
+              "required": [
+                "first",
+                "last"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "span"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "positions": {
+              "$ref": "#/$defs/RangeSet"
+            }
+          },
+          "required": [
+            "positions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The pages a bookmark spans: from its page up to the next\nbookmark's.",
+          "properties": {
+            "bookmark": {
+              "$ref": "#/$defs/BookmarkRef"
+            }
+          },
+          "required": [
+            "bookmark"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PageSource": {
+      "description": "Where inserted pages come from.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A PDF: `file`, by the `name` the user picked it by, which renames\nand notices say (never a name the bytes came with).",
+          "properties": {
+            "file": {
+              "$ref": "#/$defs/BlobSel"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "file",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Pt": {
+      "properties": {
+        "x": {
+          "format": "float",
+          "type": "number"
+        },
+        "y": {
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "RangeSet": {
+      "description": "Page positions, 1-based: numbers and ranges, comma-separated, as \"1-3,5\".",
+      "pattern": "^ *[0-9]+ *(- *[0-9]+ *)?(, *[0-9]+ *(- *[0-9]+ *)?)*$",
+      "type": "string"
+    },
+    "Range_of_uint": {
+      "properties": {
+        "end": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "Rotation": {
+      "description": "A clockwise quarter-turn rotation, as in the `/Rotate` entry.",
+      "enum": [
+        "R0",
+        "R90",
+        "R180",
+        "R270"
+      ],
+      "type": "string"
+    },
+    "Row": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A section's title (`1-0`).",
+          "properties": {
+            "Title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Title"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An amount and what it does.",
+          "properties": {
+            "Entry": {
+              "properties": {
+                "op": {
+                  "$ref": "#/$defs/TapeOp"
+                },
+                "value": {
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "value",
+                "op"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Entry"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The section's running total so far; the section goes on.",
+          "properties": {
+            "Subtotal": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "Subtotal"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The section's total, closing it.",
+          "properties": {
+            "Total": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "Total"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The sum of the section totals so far.",
+          "properties": {
+            "GrandTotal": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "GrandTotal"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Scale": {
+      "description": "A scale: `page` `page_unit` on the page stands for `real` `unit`, and\nvalues show `precision` decimals.",
+      "properties": {
+        "page": {
+          "format": "double",
+          "type": "number"
+        },
+        "page_unit": {
+          "type": "string"
+        },
+        "precision": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "real": {
+          "format": "double",
+          "type": "number"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "page",
+        "page_unit",
+        "real",
+        "unit",
+        "precision"
+      ],
+      "type": "object"
+    },
+    "ScopeSel": {
+      "description": "Pages something is on: every page, including those added later, or\nthese.",
+      "oneOf": [
+        {
+          "enum": [
+            "all"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "pages": {
+              "$ref": "#/$defs/PageSel"
+            }
+          },
+          "required": [
+            "pages"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Sibling": {
+      "description": "Where among its siblings a bookmark goes.",
+      "oneOf": [
+        {
+          "enum": [
+            "first",
+            "last"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Right after this one, which must be among them.",
+          "properties": {
+            "after": {
+              "$ref": "#/$defs/BookmarkRef"
+            }
+          },
+          "required": [
+            "after"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Style": {
+      "additionalProperties": false,
+      "description": "How a mark is drawn.",
+      "properties": {
+        "cloudy": {
+          "description": "A cloudy border (`/BE /S /C`): scallops along the outline of a\nrectangle, ellipse or polygon.",
+          "type": "boolean"
+        },
+        "color": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "dashed": {
+          "description": "A dashed stroke (`/BS /S /D`), for kinds with one.",
+          "type": "boolean"
+        },
+        "fill": {
+          "description": "Interior color (`/IC`), for kinds with an inside.",
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "opacity": {
+          "description": "0–1.",
+          "format": "float",
+          "type": "number"
+        },
+        "stroke": {
+          "description": "Stroke width in points, where it applies.",
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "color",
+        "opacity",
+        "stroke"
+      ],
+      "type": "object"
+    },
+    "Tape": {
+      "properties": {
+        "lines": {
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "lines"
+      ],
+      "type": "object"
+    },
+    "TapeLook": {
+      "description": "How a placed tape looks (PDFlyer's options).",
+      "properties": {
+        "decimals": {
+          "default": 2,
+          "description": "Places after the point.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numbers": {
+          "default": true,
+          "description": "The `1-1` column.",
+          "type": "boolean"
+        },
+        "paper": {
+          "default": [
+            255,
+            255,
+            255
+          ],
+          "description": "The paper's color; the text is the mark's.",
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "rotation": {
+          "default": 0,
+          "description": "Turned a quarter: 0, 90 or 270 degrees clockwise.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "titles": {
+          "default": true,
+          "description": "Title rows.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "TapeOp": {
+      "description": "What an entry does to its section's running total.",
+      "enum": [
+        "Add",
+        "Sub",
+        "Mul",
+        "Div"
+      ],
+      "type": "string"
+    },
+    "TextLayer": {
+      "additionalProperties": false,
+      "description": "The OCR result for one page.",
+      "properties": {
+        "engine": {
+          "description": "Which engine produced it, e.g. \"tesseract 5.5.2\".",
+          "type": "string"
+        },
+        "lines": {
+          "description": "Index ranges into `words`, one per line.",
+          "items": {
+            "$ref": "#/$defs/Range_of_uint"
+          },
+          "type": "array"
+        },
+        "upright": {
+          "$ref": "#/$defs/Rotation",
+          "description": "The frame the text reads upright in: the page's rotation, absolute,\nwhen it was recognized."
+        },
+        "words": {
+          "description": "Sorted by line (top to bottom in the upright frame), then left to right.",
+          "items": {
+            "$ref": "#/$defs/OcrWord"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "words",
+        "lines",
+        "upright",
+        "engine"
+      ],
+      "type": "object"
+    },
+    "TextStyle": {
+      "additionalProperties": false,
+      "description": "How a bookmark's title is drawn (its `/F`).",
+      "properties": {
+        "bold": {
+          "default": false,
+          "type": "boolean"
+        },
+        "italic": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "Turn": {
+      "description": "Degrees clockwise from where the page is; -90 is a quarter turn back.",
+      "enum": [
+        90,
+        180,
+        270,
+        -90
+      ]
+    },
+    "Vec2": {
+      "additionalProperties": false,
+      "description": "How far something moves, in points.",
+      "properties": {
+        "x": {
+          "format": "float",
+          "type": "number"
+        },
+        "y": {
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Ops as a file (`sheaf edit`) or a plugin hands them over:\n`{\"v\": \"1.0\", \"label\": \"Bookmark forms\", \"ops\": [...]}`. Reading one\nrefuses a version this build can't read: another major, or a later\nminor. Write `v` first, so a reader that can't read the rest says why.",
+  "properties": {
+    "label": {
+      "description": "What the version it makes is called, in history.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ops": {
+      "items": {
+        "$ref": "#/$defs/Op"
+      },
+      "type": "array"
+    },
+    "v": {
+      "description": "The version it's written in, as `\"1.0\"`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "v",
+    "ops"
+  ],
+  "title": "Envelope",
+  "type": "object"
+}

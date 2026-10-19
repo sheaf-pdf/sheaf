@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use gpui::{Context, Task};
-use sheaf_doc::{Edit, JobId, PageId, TextLayer};
+use sheaf_doc::{Actor, JobId, JobKind, PageId, TextLayer};
+use sheaf_edit::{Op, PageRef};
 use sheaf_ocr::{JobHandle, OcrConfig, OcrEvent, OcrPage, OcrRequest, PageSource, Scope};
 
 use crate::docview::{DocView, State};
@@ -106,7 +107,7 @@ impl DocView {
                 let base = &st.def(id)?.base;
                 Some(OcrPage {
                     id,
-                    source: base.source,
+                    source: base.src.id(),
                     index: base.index,
                     geom: doc.model.geom(id),
                     render: doc.model.render_delta(id),
@@ -342,26 +343,30 @@ impl DocView {
             cx.notify();
             return;
         }
-        let layers = std::mem::take(&mut run.pending);
-        let applied =
-            match doc
-                .model
-                .apply_in_job(run.job, Edit::SetTextLayers { layers }, "Recognize text")
-            {
-                Ok(_) => {
-                    run.flushed = true;
-                    run.last_flush = Instant::now();
-                    doc.touched();
-                    true
-                }
-                Err(e) => {
-                    log::error!("ocr: applying results: {e:#}");
-                    doc.notice = Some(crate::docview::failed("OCR: applying results", &e));
-                    false
-                }
-            };
+        let ops = (std::mem::take(&mut run.pending).into_iter())
+            .map(|(page, layer)| Op::SetOcrText {
+                page: PageRef::Id(page),
+                layer,
+            })
+            .collect();
+        let mut tx = doc.model.tx(Actor::Job(JobKind::Ocr));
+        let flushed = (tx.apply_batch(ops, &sheaf_ops::NoProgress))
+            .and_then(|_| doc.model.apply_in_job(run.job, tx, "Recognize text"));
+        let applied = match flushed {
+            Ok(_) => {
+                run.flushed = true;
+                run.last_flush = Instant::now();
+                doc.touched();
+                true
+            }
+            Err(e) => {
+                log::error!("ocr: applying results: {e:#}");
+                doc.notice = Some(crate::docview::failed("OCR: applying results", &e));
+                false
+            }
+        };
         if applied {
-            self.after_model_change("Recognize text".into(), Default::default(), cx);
+            self.after_model_change("Recognize text".into(), cx);
         } else {
             cx.notify();
         }

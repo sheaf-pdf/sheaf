@@ -685,7 +685,6 @@ mod section_tests {
     use crate::annot::AnnotId;
     use crate::forms::fixture::{Form, row};
     use crate::materialize::removal_tests::{note, opened, scratch};
-    use crate::model::Edit;
 
     /// The keys of a one-page form's text field, its widget, merged with
     /// it, and a comment beside them; and the form's state.
@@ -696,11 +695,8 @@ mod section_tests {
         let (_, mut doc) = opened(&dir, "a.pdf", &f.bytes());
         let _ = std::fs::remove_dir_all(&dir);
         let page = doc.page(0).unwrap();
-        let add = Edit::AnnotAdd {
-            page,
-            annot: note("a comment"),
-        };
-        doc.apply(add, "add").unwrap();
+        let add = crate::tx::fixture::add(page, &note("a comment"));
+        doc.commit_ops(vec![add], "add").unwrap();
         let st = doc.state().clone();
         let (field, _, term) = st.terminals().next().unwrap();
         let widget = term.widgets[0];

@@ -6,9 +6,9 @@
 //! a drag to where its text goes.
 
 use gpui::{AnyElement, Context, prelude::*};
-use sheaf_core::Rotation;
 use sheaf_doc::geom::Geom;
 use sheaf_doc::{AnnotKind, Box2, PageId, Pt};
+use sheaf_edit::Rotation;
 
 use crate::docview::{DocView, State};
 use crate::markup_tools::{Tool, stroke_canvas};
@@ -182,7 +182,7 @@ impl DocView {
             (None, true) => AnnotKind::Polygon { points },
             (None, false) => AnnotKind::Polyline { points },
         };
-        let mut a = self.new_annot(kind, crate::markup_tools::color_of(tool, cx), cx);
+        let mut a = self.new_annot(kind, crate::markup_tools::color_of(tool, cx));
         a.cloudy = tool == Tool::Cloud;
         self.add_annot(d.page_id, a, tool.label(), cx);
         true
@@ -222,9 +222,9 @@ impl DocView {
             point,
             size: 12.0,
         };
-        let a = self.new_annot(kind, crate::markup_tools::color_of(Tool::Callout, cx), cx);
-        self.add_annot(page, a, "Callout", cx);
-        self.pending_edit_last = Some(page);
+        let a = self.new_annot(kind, crate::markup_tools::color_of(Tool::Callout, cx));
+        let made = self.add_annot(page, a, "Callout", cx);
+        self.pending_edit = made.map(|id| (page, id));
     }
 
     /// Shift+D: the next drawing tool.

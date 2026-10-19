@@ -182,9 +182,11 @@ impl DocView {
         };
         let prefs = crate::prefs::get(cx);
         let height = prefs.stamps.size();
+        // A dynamic stamp's tokens are the host's to fill in as it's made;
+        // it's laid out as they'll read, the user's and now.
         let now = chrono::Local::now();
-        let fill = |template: &str| {
-            lib::fill(
+        let shown = |template: &str| {
+            sheaf_doc::stamp_lib::fill(
                 template,
                 &prefs.identity.name(),
                 &prefs.identity.initials(),
@@ -202,11 +204,10 @@ impl DocView {
         // added.
         let (kind, held) = match choice.preset_template() {
             Some(template) => {
-                let text = fill(template);
-                let (w, h) = sheaf_doc::annot::text_stamp_size(&text, height);
+                let (w, h) = sheaf_doc::annot::text_stamp_size(&shown(template), height);
                 let kind = AnnotKind::TextStamp {
                     rect: centred(w, h),
-                    text,
+                    text: template.to_string(),
                     status: false,
                 };
                 (kind, None)
@@ -241,13 +242,13 @@ impl DocView {
                     rect: centred(w, height),
                     stamp: held.id().stem(),
                     name: choice.name.clone(),
-                    text: c.stamps[i].text.as_deref().map(fill),
+                    text: c.stamps[i].text.clone(),
                 };
                 (kind, Some(held))
             }
         };
         let color = crate::markup_tools::color_of(crate::markup_tools::Tool::Stamp, cx);
-        let a = self.new_annot(kind, color, cx);
+        let a = self.new_annot(kind, color);
         self.add_annot(page, a, "Stamp", cx);
         drop(held);
         crate::state::update(cx, |s| {

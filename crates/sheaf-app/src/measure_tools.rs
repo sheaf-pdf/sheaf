@@ -156,7 +156,6 @@ impl DocView {
                 scale: Box::new(self.measure_scale()),
             },
             crate::markup_tools::color_of(Tool::Distance, cx),
-            cx,
         );
         self.add_annot(page, a, "Distance", cx);
     }

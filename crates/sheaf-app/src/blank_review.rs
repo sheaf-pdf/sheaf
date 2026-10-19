@@ -8,10 +8,12 @@
 use std::collections::HashSet;
 
 use gpui::{AnyElement, Context, ObjectFit, ScrollHandle, div, img, prelude::*, px};
-use sheaf_core::{PageIndex, Rotation};
-use sheaf_doc::{Edit, PageId};
+use sheaf_doc::PageId;
+use sheaf_edit::Rotation;
+use sheaf_edit::{Op, PageSel};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::blank::{BlankParams, Candidate, Reason};
+use sheaf_render::PageIndex;
 use sheaf_render::{Job, RenderRequest};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::{dialog, theme};
@@ -110,13 +112,9 @@ impl DocView {
         }
         let n = ids.len();
         let label = format!("Delete {n} blank page{}", if n == 1 { "" } else { "s" });
-        match doc.model.apply(Edit::DeletePages { ids }, &label) {
-            Ok(out) => {
-                doc.touched();
-                self.after_model_change(label.clone(), out, cx);
-                self.set_notice(format!("{label} — Ctrl+Z brings them back"), cx);
-            }
-            Err(e) => self.set_notice(crate::docview::failed("Delete", &e), cx),
+        let pages = PageSel::ids(ids);
+        if self.apply(Op::DeletePages { pages }, &label, cx).is_some() {
+            self.set_notice(format!("{label} — Ctrl+Z brings them back"), cx);
         }
     }
 

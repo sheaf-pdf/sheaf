@@ -18,8 +18,12 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::channel::oneshot;
-use sheaf_core::{PageIndex, PageSize, Rotation};
+use sheaf_edit::{PageSize, Rotation};
 use sheaf_image::raster::{PixelFormat, Raster};
+
+/// Zero-based index of a page within a *source file* (what the engine sees).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PageIndex(pub u32);
 
 /// What to rasterize. Sizes are device pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -285,7 +289,7 @@ pub mod pdfium {
             // enumerate 7k page sizes in one measurement). One sequential read
             // of even a few hundred MB is cheap by comparison, and it's what a
             // viewer wants anyway. Truly huge files can revisit this.
-            let bytes = sheaf_core::read_file(path)
+            let bytes = sheaf_util::read_file(path)
                 .with_context(|| format!("reading {}", path.display()))?;
             Self::open_bytes(bytes, password).with_context(|| format!("opening {}", path.display()))
         }

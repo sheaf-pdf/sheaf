@@ -1,6 +1,7 @@
 //! The bodies of the fuzz targets in `fuzz/` (cargo-fuzz), here so a
 //! stable test runs them too. Each reads what it's given, and must
-//! neither panic nor hang whatever the bytes.
+//! neither panic nor hang whatever the bytes. `op_json`'s document is
+//! built from the form fixtures, so it needs the `fixtures` feature.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -150,6 +151,161 @@ pub fn splice(data: &[u8]) -> usize {
         }
     }
     made
+}
+
+/// `data` as Op JSON (M10.5 §6.1): an envelope that reads is applied by
+/// the user to a small document ([`OpJson`]): its ops in one batch, or
+/// one by one when the batch fails, the files the fixture's ops name
+/// granted, then committed, undone and redone. Whatever the ops say, each
+/// applies or fails with an error, and what's committed keeps the state's
+/// rules ([`DocState::check_invariants`]), undone and redone too. Returns
+/// how many ops applied.
+///
+/// [`DocState::check_invariants`]: crate::model::DocState::check_invariants
+#[cfg(any(test, feature = "fixtures"))]
+pub fn op_json(data: &[u8]) -> usize {
+    let Ok(envelope) = serde_json::from_slice::<sheaf_edit::Envelope>(data) else {
+        return 0;
+    };
+    OP_JSON.with(|doc| doc.apply(envelope.ops))
+}
+
+#[cfg(any(test, feature = "fixtures"))]
+thread_local! {
+    static OP_JSON: OpJson = OpJson::new();
+}
+
+/// [`op_json`]'s document: four pages, a form with every kind of field on
+/// the first two, sheaf's marks of every kind on the third, and on the
+/// fourth another tool's comment with a reply; bookmarks, roman labels on
+/// the first two pages and a header on the last two. The names the Op
+/// JSON fixture's references use are there (`Part I › Ch. 2`, `Appendix`,
+/// `a1b2-c3`, `acro-1`, `sheaf:12`). Read once, opened afresh each time,
+/// with the files its ops are granted: a stamp's page, an attachment's
+/// file and a file of two pages as assets 0, 1 and 2, and one of a page
+/// as `logo`.
+#[cfg(any(test, feature = "fixtures"))]
+struct OpJson {
+    store: Arc<Store>,
+    primary: Src,
+    assets: Vec<crate::store::Blob>,
+    logo: crate::store::Blob,
+}
+
+#[cfg(any(test, feature = "fixtures"))]
+impl OpJson {
+    fn new() -> OpJson {
+        use crate::forms::fixture::{
+            Form, MARK_FILE_BYTES, every_kind_in, every_mark_kind, holding, mark_stamp_pdf,
+            outline_tree, write_marks,
+        };
+        use crate::model::PageId;
+        let mut f = every_kind_in(4);
+        let pages = f.pages.clone();
+        let mut third = f.dict(pages[2]).clone();
+        write_marks(&mut f.pdf, &mut third, &holding(&every_mark_kind()));
+        *f.dict(pages[2]) = third;
+        let rect = || Object::Array([72, 600, 92, 620].map(Object::from).to_vec());
+        let comment = f.pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(),
+            "NM" => Object::string_literal("a1b2-c3"), "Contents" => Object::string_literal("Why?"),
+        });
+        let reply = f.pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => comment,
+            "NM" => Object::string_literal("acro-1"), "Contents" => Object::string_literal("Because."),
+        });
+        f.set_annots(3, &[comment, reply]);
+        let item = |title: &str, page| {
+            dictionary! {
+                "Title" => Object::string_literal(title),
+                "Dest" => vec![Object::Reference(page), "Fit".into()],
+            }
+        };
+        outline_tree(
+            &mut f,
+            vec![
+                (0, item("Part I", pages[0])),
+                (1, item("Ch. 1", pages[0])),
+                (1, item("Ch. 2", pages[1])),
+                (0, item("Appendix", pages[3])),
+            ],
+        );
+        let catalog = f.catalog;
+        let labels = vec![
+            0.into(),
+            dictionary! { "S" => "r" }.into(),
+            2.into(),
+            dictionary! { "S" => "D" }.into(),
+        ];
+        f.dict(catalog)
+            .set("PageLabels", dictionary! { "Nums" => labels });
+        let mut texts: [String; 6] = Default::default();
+        texts[0] = "Draft <<1>>".into();
+        let hf = crate::stamps::HeaderFooter {
+            texts,
+            pages: Some(vec![PageId(2), PageId(3)]),
+            ..Default::default()
+        };
+        let ids: Vec<PageId> = (0..4).map(PageId).collect();
+        let scope = crate::stamps::to_catalog(&hf, &ids);
+        f.dict(catalog).set(crate::stamps::CATALOG_KEY, scope);
+        let store = Store::new();
+        let kind = BlobKind::file(Path::new("form.pdf"), None);
+        let primary = store
+            .open(f.bytes().into(), kind)
+            .expect("the fixture opens");
+        let intern = |bytes: Vec<u8>, kind| store.intern(bytes.into(), kind).expect("a blob");
+        let scan = BlobKind::file(Path::new("scan.pdf"), None);
+        let assets = vec![
+            intern(mark_stamp_pdf(), BlobKind::stamp()),
+            intern(MARK_FILE_BYTES.to_vec(), BlobKind::Attachment),
+            intern(Form::new(2).bytes(), scan),
+        ];
+        let logo = intern(
+            mark_stamp_pdf(),
+            BlobKind::file(Path::new("logo.pdf"), None),
+        );
+        OpJson {
+            store,
+            primary,
+            assets,
+            logo,
+        }
+    }
+
+    /// `ops` applied, as [`op_json`] says: how many applied.
+    fn apply(&self, ops: Vec<sheaf_edit::Op>) -> usize {
+        use crate::tx::{Actor, CommitOpts, Grant};
+        use in_progress::NoProgress;
+        let policy = Box::new(crate::history::FixedCount(4));
+        let (store, name) = (self.store.clone(), "form.pdf".into());
+        let mut d = crate::open::start(store, self.primary.clone(), name, None, policy);
+        d.ready(crate::open::finish(&self.primary, &NoProgress))
+            .expect("the fixture's facts");
+        let mut tx = d.tx(Actor::User);
+        for blob in &self.assets {
+            tx.grant(Grant::Blob(blob.clone().into()));
+        }
+        tx.grant_named("logo", Grant::Blob(self.logo.clone().into()));
+        let applied = match tx.apply_batch(ops.clone(), &NoProgress) {
+            Ok(done) => done.len(),
+            Err(_) => (ops.into_iter())
+                .filter(|op| tx.apply(op.clone(), &NoProgress).is_ok())
+                .count(),
+        };
+        let Ok(commit) = d.commit(tx, CommitOpts::default()) else {
+            return applied;
+        };
+        let kept = |d: &crate::model::Document| assert_eq!(d.state().check_invariants(), Ok(()));
+        kept(&d);
+        if commit.version.is_some() {
+            d.undo().expect("its version undone");
+            kept(&d);
+            d.redo().expect("and redone");
+            kept(&d);
+        }
+        applied
+    }
 }
 
 /// `spans`, in order and apart, each widened over the white-space either
@@ -306,6 +462,42 @@ mod tests {
         b"4294967296",
     ];
 
+    /// Mutations of each Op JSON fixture: fewer, as each opens a document
+    /// and commits; ten times as many of the ops that apply, which reach
+    /// further.
+    const OP_CASES: usize = 100;
+
+    /// What a mutation of Op JSON may write: its punctuation and values,
+    /// references in their forms, and numbers past what ids, positions and
+    /// floats hold.
+    const JSON_TOKENS: &[&[u8]] = &[
+        b"\"",
+        b"{",
+        b"}",
+        b"[",
+        b"]",
+        b",",
+        b":",
+        b"null",
+        b"true",
+        b"-1",
+        b"0",
+        b"1e309",
+        b"-0.0",
+        b"4294967296",
+        b"9007199254740993",
+        b"\"$1\"",
+        b"\"$0\"",
+        b"{\"pos\":0}",
+        b"{\"pos\":4}",
+        b"\"all\"",
+        b"{\"nm\":\"sheaf:12\"}",
+        b"{\"path\":[]}",
+        b"{\"asset\":9}",
+        b"\"1-4,2\"",
+        b"\"\\u0000\"",
+    ];
+
     fn mutate(rng: &mut fastrand::Rng, data: &mut Vec<u8>, tokens: &[&[u8]]) {
         if data.is_empty() {
             data.extend_from_slice(tokens[rng.usize(..tokens.len())]);
@@ -335,6 +527,79 @@ mod tests {
                 let number = &number[..rng.usize(1..=number.len())];
                 data.splice(at..end, number.bytes());
             }
+        }
+    }
+
+    /// A change to `json`, an envelope, that keeps it JSON, so its ops
+    /// mostly still read and are lowered: one of its ops dropped, copied
+    /// elsewhere or swapped with another; or anywhere in it, a number
+    /// replaced by another of its kind, a string by another or by one
+    /// that names something else or nothing, an element of a list dropped
+    /// or copied, a field dropped or made null.
+    fn mutate_json(rng: &mut fastrand::Rng, json: &mut serde_json::Value) {
+        use serde_json::{Value, json};
+        fn count(v: &Value) -> usize {
+            1 + match v {
+                Value::Array(a) => a.iter().map(count).sum(),
+                Value::Object(o) => o.values().map(count).sum(),
+                _ => 0,
+            }
+        }
+        /// The `k`th node of `v`, in pre-order.
+        fn nth<'a>(v: &'a mut Value, k: &mut usize) -> Option<&'a mut Value> {
+            if *k == 0 {
+                return Some(v);
+            }
+            *k -= 1;
+            match v {
+                Value::Array(a) => a.iter_mut().find_map(|x| nth(x, k)),
+                Value::Object(o) => o.values_mut().find_map(|x| nth(x, k)),
+                _ => None,
+            }
+        }
+        if let Some(ops) = json["ops"].as_array_mut().filter(|o| o.len() > 1)
+            && rng.bool()
+        {
+            let (i, j) = (rng.usize(..ops.len()), rng.usize(..ops.len()));
+            match rng.u8(..3) {
+                0 => drop(ops.remove(i)),
+                1 => ops.insert(j, ops[i].clone()),
+                _ => ops.swap(i, j),
+            }
+            return;
+        }
+        let mut k = rng.usize(..count(json));
+        let node = nth(json, &mut k).expect("a node of it");
+        match node {
+            Value::Number(n) if n.is_f64() => {
+                let floats = [0.0, -1.0, 0.5, 612.0, 1e30];
+                *node = json!(floats[rng.usize(..floats.len())]);
+            }
+            Value::Number(_) => {
+                let ints = [0, 1, 2, 3, 4, 7, 12, 99, 4294967295_u64];
+                *node = json!(ints[rng.usize(..ints.len())]);
+            }
+            Value::String(_) => {
+                let strings = ["$1", "$5", "$9", "all", "sheaf:12", "a1b2-c3", "", "1-9"];
+                *node = json!(strings[rng.usize(..strings.len())]);
+            }
+            Value::Array(a) if !a.is_empty() => {
+                let i = rng.usize(..a.len());
+                if rng.bool() {
+                    a.remove(i);
+                } else {
+                    let copy = a[i].clone();
+                    a.insert(rng.usize(..=a.len()), copy);
+                }
+            }
+            Value::Object(o) if !o.is_empty() => {
+                let key = o.keys().nth(rng.usize(..o.len())).cloned().expect("a key");
+                match rng.bool() {
+                    true => o.remove(&key),
+                    false => o.insert(key, Value::Null),
+                };
+            }
+            _ => *node = Value::Null,
         }
     }
 
@@ -526,12 +791,226 @@ mod tests {
         .collect()
     }
 
+    /// [`op_json`]'s fixtures: every op, between them every form of every
+    /// reference and every kind of mark (`sheaf_edit::fixture`), as one
+    /// envelope, and each op as an envelope of its own; then
+    /// [`applying`]'s ops, which all apply.
+    fn op_json_fixtures() -> Vec<Vec<u8>> {
+        let ops = sheaf_edit::fixture::every_op();
+        let envelope =
+            |ops| serde_json::to_vec(&sheaf_edit::Envelope::new(None, ops)).expect("Op JSON");
+        let one = ops.iter().map(|op| envelope(vec![op.clone()]));
+        (std::iter::once(envelope(ops.clone())).chain(one))
+            .chain(std::iter::once(envelope(applying())))
+            .collect()
+    }
+
+    /// Ops of every kind, and marks of every kind (the fixture's), that
+    /// apply to [`op_json`]'s document one after another, each naming what
+    /// it needs as the fixture's ops do: by position, title path, `/NM`,
+    /// local and grant. Between them they reach each cascade.
+    fn applying() -> Vec<sheaf_edit::Op> {
+        use sheaf_edit::{
+            Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Delta, Local, MarkKind,
+            MarkPatch, NewMark, Op, PageLabelRange, PageRef, PageSel, PageSource, Patch, ScopeSel,
+            Sibling, Turn, Vec2,
+        };
+        let pos = PageRef::Pos;
+        let positions = |s: &str| PageSel::Positions(s.parse().unwrap());
+        let path =
+            |titles: &[&str]| BookmarkRef::Path(titles.iter().map(|t| t.to_string()).collect());
+        let nm = |nm: &str| AnnotRef::Nm {
+            nm: nm.into(),
+            page: None,
+        };
+        let anchor = |page, x| Anchor {
+            page: pos(page),
+            rect: crate::annot::Box2 {
+                x,
+                y: 220.0,
+                w: 22.0,
+                h: 22.0,
+            },
+        };
+        let file = |file, name: &str| PageSource::File {
+            file,
+            name: name.into(),
+        };
+        let every = sheaf_edit::fixture::every_op();
+        let spec = every.iter().find_map(|op| match op {
+            Op::SetHeaderFooter { spec, .. } => Some(spec.clone()),
+            _ => None,
+        });
+        let style = every.iter().find_map(|op| match op {
+            Op::AddConnector { style, .. } => Some(style.clone()),
+            _ => None,
+        });
+        let mut ops = vec![
+            Op::AddBookmark {
+                parent: None,
+                at: Sibling::Last,
+                title: "Added".into(),
+                target: Some(pos(2)),
+                view: None,
+                color: None,
+                style: Default::default(),
+                local: Some(Local(1)),
+            },
+            Op::AddBookmark {
+                parent: Some(BookmarkRef::New(Local(1))),
+                at: Sibling::First,
+                title: "Under it".into(),
+                target: Some(pos(3)),
+                view: None,
+                color: Some([0, 0, 255]),
+                style: Default::default(),
+                local: None,
+            },
+            Op::PatchBookmarks {
+                bookmarks: vec![path(&["Part I", "Ch. 2"])],
+                patch: BookmarkPatch {
+                    title: Some("Renamed".into()),
+                    target: Patch::Set(pos(4)),
+                    ..Default::default()
+                },
+            },
+            Op::MoveBookmarks {
+                bookmarks: vec![path(&["Appendix"])],
+                parent: Some(BookmarkRef::New(Local(1))),
+                at: Sibling::Last,
+                with_pages: true,
+            },
+            Op::AddConnector {
+                a: anchor(1, 500.0),
+                b: anchor(3, 100.0),
+                label: "1".into(),
+                style: style.expect("the fixture's connector"),
+                locals: vec![Local(2), Local(3)],
+            },
+            Op::PatchMarks {
+                marks: vec![nm("sheaf:12")],
+                patch: MarkPatch {
+                    fill: Patch::Set([1, 2, 3]),
+                    contents: Some("<<name>> on <<date>>".into()),
+                    ..Default::default()
+                },
+                imported: None,
+            },
+            Op::MoveMarks {
+                marks: vec![AnnotRef::New(Local(2))],
+                by: Delta::View(Vec2 { x: 5.0, y: 5.0 }),
+                to_page: None,
+            },
+            Op::MoveMarks {
+                marks: vec![nm("sheaf:12")],
+                by: Delta::Page(Vec2 { x: 1.0, y: 1.0 }),
+                to_page: Some(pos(1)),
+            },
+            Op::AdoptAnnotations {
+                annots: vec![nm("acro-1")],
+            },
+            Op::DeleteAnnotations {
+                annots: vec![AnnotRef::New(Local(3)), nm("sheaf:2")],
+            },
+            Op::SetOcrText {
+                page: pos(1),
+                layer: sheaf_edit::fixture::layer(),
+            },
+            Op::ClearOcrText {
+                pages: positions("1-2"),
+            },
+            Op::SetPageLabels {
+                ranges: Some(vec![PageLabelRange {
+                    start: pos(3),
+                    style: sheaf_edit::LabelStyle::UpperLetters,
+                    prefix: "App-".into(),
+                    first: 1,
+                }]),
+            },
+            Op::SetHeaderFooter {
+                spec: spec.expect("the fixture's header"),
+                scope: ScopeSel::Pages(positions("1-3")),
+            },
+            Op::RemoveHeaderFooter {
+                pages: positions("2"),
+            },
+        ];
+        // The fixture's marks of every kind on the first page; a reply's
+        // and a status's to the other tool's comment on the fourth; and a
+        // page stamp's and an attachment's holding the files granted.
+        for op in every {
+            let Op::AddMark { mark, .. } = op else {
+                continue;
+            };
+            let (page, reply_to, asset) = match mark.kind {
+                MarkKind::Reply {} | MarkKind::Status { .. } => (4, Some(nm("a1b2-c3")), None),
+                MarkKind::PageStamp { .. } => (1, None, Some(BlobSel::Asset(0))),
+                MarkKind::FileAttachment { .. } => (1, None, Some(BlobSel::Asset(1))),
+                _ => (1, None, None),
+            };
+            ops.push(Op::AddMark {
+                page: pos(page),
+                mark: NewMark { asset, ..mark },
+                reply_to,
+                local: None,
+                imported: None,
+            });
+        }
+        // Then pages turned, copied, brought in, replaced and moved; and
+        // some go, with what's on them, their fields, the bookmarks to
+        // them, a label range's start and the header's pages.
+        ops.extend([
+            Op::RotatePages {
+                pages: PageSel::Span {
+                    first: pos(1),
+                    last: pos(2),
+                },
+                by: Turn::Quarter,
+            },
+            Op::DuplicatePages {
+                pages: positions("1,3"),
+                locals: vec![Local(4), Local(5)],
+            },
+            Op::InsertPages {
+                from: file(BlobSel::Asset(2), "scan.pdf"),
+                pages: Some("1-2".parse().unwrap()),
+                before: Some(PageRef::New(Local(4))),
+                bring: Default::default(),
+                locals: vec![Local(6), Local(7)],
+            },
+            Op::InsertPages {
+                from: file(BlobSel::With("logo".into()), "logo.pdf"),
+                pages: None,
+                before: None,
+                bring: Default::default(),
+                locals: Vec::new(),
+            },
+            Op::ReplacePages {
+                pages: vec![PageRef::New(Local(6))],
+                from: file(BlobSel::Asset(2), "scan.pdf"),
+                with: Some("2".parse().unwrap()),
+                bring: Default::default(),
+            },
+            Op::MovePages {
+                pages: PageSel::Ids(vec![PageRef::New(Local(5))]),
+                before: Some(pos(1)),
+            },
+            Op::DeleteBookmarks {
+                bookmarks: vec![BookmarkRef::New(Local(1))],
+            },
+            Op::DeletePages {
+                pages: positions("2-4"),
+            },
+        ]);
+        ops
+    }
+
     /// The fixtures, as the fuzz targets' first corpus, into the directory
     /// `SHEAF_FUZZ_SEEDS` names: `fuzz.yml` seeds each night's run with
     /// them, so the repository holds no PDF. The target
     /// `SHEAF_FUZZ_TARGET` names takes the marks' fixtures when it's
-    /// `sheaf_annot`, the content when it's `lexer` or `splice`, and the
-    /// files otherwise.
+    /// `sheaf_annot`, the content when it's `lexer` or `splice`, Op JSON
+    /// when it's `op_json`, and the files otherwise.
     #[test]
     #[ignore = "fuzz.yml's seeds"]
     fn write_fuzz_seeds() {
@@ -548,6 +1027,7 @@ mod tests {
             Ok("sheaf_annot") => named(mark_fixtures(), |n| format!("marks-{n}")).collect(),
             Ok("lexer") => named(content_fixtures(), |n| format!("content-{n}")).collect(),
             Ok("splice") => named(splice_fixtures(), |n| format!("content-{n}")).collect(),
+            Ok("op_json") => named(op_json_fixtures(), |n| format!("ops-{n}.json")).collect(),
             _ => named(fixtures(), |n| format!("fixture-{n}.pdf")).collect(),
         };
         for (name, seed) in seeds {
@@ -635,6 +1115,40 @@ mod tests {
                     let kept = std::env::temp_dir().join(format!("sheaf-fuzz-content-{n}-{case}"));
                     std::fs::write(&kept, &data).unwrap();
                     eprintln!("content {n}, case {case}: the input is {}", kept.display());
+                    std::panic::resume_unwind(panic);
+                }
+            }
+        }
+        // Unmutated, the ops made to apply do, all of them.
+        let fixtures = op_json_fixtures();
+        assert_eq!(op_json(fixtures.last().unwrap()), applying().len());
+        for (n, fixture) in fixtures.iter().enumerate() {
+            let json: serde_json::Value = serde_json::from_slice(fixture).unwrap();
+            let cases = match n + 1 == fixtures.len() {
+                true => 10 * OP_CASES,
+                false => OP_CASES,
+            };
+            for case in 0..cases {
+                // Mostly JSON still, which reaches lowering; now and then
+                // bytes, which reach the reader.
+                let mut data = match rng.u8(..4) {
+                    0 => fixture.clone(),
+                    _ => {
+                        let mut json = json.clone();
+                        for _ in 0..rng.usize(1..=3) {
+                            mutate_json(&mut rng, &mut json);
+                        }
+                        serde_json::to_vec(&json).unwrap()
+                    }
+                };
+                for _ in 0..rng.usize(0..=1) {
+                    mutate(&mut rng, &mut data, JSON_TOKENS);
+                }
+                let ran = std::panic::catch_unwind(|| op_json(&data));
+                if let Err(panic) = ran {
+                    let kept = std::env::temp_dir().join(format!("sheaf-fuzz-ops-{n}-{case}.json"));
+                    std::fs::write(&kept, &data).unwrap();
+                    eprintln!("ops {n}, case {case}: the input is {}", kept.display());
                     std::panic::resume_unwind(panic);
                 }
             }

@@ -5,15 +5,16 @@ use std::path::{Path, PathBuf};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
 use crate::effects::{Removed, RemovedKind};
 use crate::materialize::{
     AskAnswers, How, StrategyKind, Why, forced_rewrite, materialize, removal, save,
 };
-use crate::model::{Document, Edit, SourceInfo};
+use crate::model::Document;
 use crate::save::rewrite;
+use crate::tx::fixture as fx;
 use in_progress::NoProgress;
 
 fn tempdir() -> PathBuf {
@@ -185,9 +186,7 @@ fn a_deleted_page_leaves_the_file_whatever_points_at_it() {
         });
         let mut model = opened(&path);
         let third = model.page(2).unwrap();
-        model
-            .apply(Edit::DeletePages { ids: vec![third] }, "del")
-            .unwrap();
+        model.commit_ops(vec![fx::delete(&[third])], "del").unwrap();
         let bytes = saved(&mut model, &path, way);
         assert!(!says(&bytes, "MARK A 2"), "{way:?}");
         assert!(says(&bytes, "MARK A 0") && says(&bytes, "MARK A 1"));
@@ -250,7 +249,7 @@ fn a_reply_keeps_no_comment_of_a_deleted_page() {
         let mut model = opened(&path);
         let second = model.page(1).unwrap();
         model
-            .apply(Edit::DeletePages { ids: vec![second] }, "del")
+            .commit_ops(vec![fx::delete(&[second])], "del")
             .unwrap();
         let bytes = saved(&mut model, &path, way);
         assert!(!holds(&bytes, "SHEAFLEAK"), "{way:?}");
@@ -272,23 +271,11 @@ fn inserting_one_page(how: How) {
         link(pdf, p[0], p[1]);
     });
     let mut model = opened(&a);
-    let sb = model.add_source(SourceInfo::read(model.store(), &b, None).unwrap().0);
+    let (sb, _) = model.store().read_file(&b, None).unwrap();
     // B's first and third pages: the link between them stays, the one
     // to its second goes, and the second isn't in the file.
-    for range in [0..1, 2..3] {
-        model
-            .apply(
-                Edit::InsertPages {
-                    source: sb,
-                    range,
-                    before: None,
-                    outline: None,
-                    annots: Vec::new(),
-                },
-                "ins",
-            )
-            .unwrap();
-    }
+    let insert = fx::insert(&sb, [0, 2], "b.pdf", None);
+    model.commit_ops(vec![insert], "ins").unwrap();
     let bytes = how.write(&model);
     assert!(!says(&bytes, "MARK B 1"), "{how:?}");
     assert!(says(&bytes, "MARK B 0") && says(&bytes, "MARK B 2"));
@@ -402,9 +389,7 @@ fn fields_tags_and_threads_let_go_of_a_deleted_page() {
     });
     let mut model = opened(&path);
     let third = model.page(2).unwrap();
-    model
-        .apply(Edit::DeletePages { ids: vec![third] }, "del")
-        .unwrap();
+    model.commit_ops(vec![fx::delete(&[third])], "del").unwrap();
     let_go_of_the_third_page(&rewrite(&model.snapshot()).unwrap());
 }
 
@@ -469,7 +454,7 @@ fn copies_hold_only_the_pages_copied() {
     assert!(!says(&bytes, "MARK A 2") && says(&bytes, "MARK A 1"));
     assert_eq!(page_annots(&bytes, 0), 1);
     // A crop is a copy of the page alone.
-    let src = model.snapshot().sources[&model.primary()].clone();
+    let src = model.snapshot().primary;
     let bytes = crate::save::cropped_copy(&src, &[(0, [0.0, 0.0, 300.0, 300.0])]).unwrap();
     assert!(!says(&bytes, "MARK A 1") && !says(&bytes, "MARK A 2"));
     assert_eq!(page_annots(&bytes, 0), 0);
@@ -598,20 +583,13 @@ fn deleted_page_gone(how: How) {
     let path = file(&dir, "a.pdf", "A", 2, |_, _| {});
     let other = file(&dir, "b.pdf", "PAGESECRET", 1, |_, _| {});
     let mut model = opened(&path);
-    let info = SourceInfo::read(model.store(), &other, None).unwrap().0;
-    let source = model.add_source(info);
-    let insert = Edit::InsertPages {
-        source,
-        range: 0..1,
-        before: None,
-        outline: None,
-        annots: Vec::new(),
-    };
-    model.apply(insert, "insert").unwrap();
+    let (other, _) = model.store().read_file(&other, None).unwrap();
+    let insert = fx::insert(&other, [0], "b.pdf", None);
+    model.commit_ops(vec![insert], "insert").unwrap();
     saved_first(how, &mut model, &path, "MARK PAGESECRET");
     let page = model.page(2).unwrap();
     model
-        .apply(Edit::DeletePages { ids: vec![page] }, "delete")
+        .commit_ops(vec![fx::delete(&[page])], "delete")
         .unwrap();
     let why = saved_without(&mut model, &path, "MARK PAGESECRET");
     assert_eq!(why, [Why::Removes(gone(RemovedKind::Pages, 1))]);
@@ -629,15 +607,12 @@ fn deleted_mark_gone(how: How) {
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
     let mut model = opened(&path);
     let p0 = model.page(0).unwrap();
-    let add = Edit::AnnotAdd {
-        page: p0,
-        annot: note("SECRET-NOTE-TEXT"),
-    };
-    model.apply(add, "note").unwrap();
+    let add = fx::add(p0, &note("SECRET-NOTE-TEXT"));
+    model.commit_ops(vec![add], "note").unwrap();
     saved_first(how, &mut model, &path, "SECRET-NOTE-TEXT");
     let id = model.state().marks_on(p0).next().unwrap().id;
     model
-        .apply(Edit::AnnotDelete { page: p0, id }, "delete")
+        .commit_ops(vec![fx::delete_annots(&[id])], "delete")
         .unwrap();
     let why = saved_without(&mut model, &path, "SECRET-NOTE-TEXT");
     assert_eq!(why, [Why::Removes(gone(RemovedKind::Comments, 1))]);
@@ -655,28 +630,22 @@ fn deleted_reply_gone(how: How) {
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
     let mut model = opened(&path);
     let p0 = model.page(0).unwrap();
-    let add = Edit::AnnotAdd {
-        page: p0,
-        annot: note("the note"),
-    };
-    model.apply(add, "note").unwrap();
+    let add = fx::add(p0, &note("the note"));
+    model.commit_ops(vec![add], "note").unwrap();
     let parent = model.state().marks_on(p0).next().unwrap().name();
     let reply = Annot {
         kind: AnnotKind::Reply { parent },
         ..note("SECRET-REPLY-TEXT")
     };
-    let add = Edit::AnnotAdd {
-        page: p0,
-        annot: reply,
-    };
-    model.apply(add, "reply").unwrap();
+    let add = fx::add(p0, &reply);
+    model.commit_ops(vec![add], "reply").unwrap();
     saved_first(how, &mut model, &path, "SECRET-REPLY-TEXT");
     let id = (model.state().marks_on(p0))
         .find(|a| a.contents == "SECRET-REPLY-TEXT")
         .unwrap()
         .id;
     model
-        .apply(Edit::AnnotDelete { page: p0, id }, "delete")
+        .commit_ops(vec![fx::delete_annots(&[id])], "delete")
         .unwrap();
     let why = saved_without(&mut model, &path, "SECRET-REPLY-TEXT");
     assert_eq!(why, [Why::Removes(gone(RemovedKind::Comments, 1))]);
@@ -704,17 +673,11 @@ fn deleted_theirs_gone(how: How) {
     });
     let mut model = opened(&path);
     let p0 = model.page(0).unwrap();
-    let add = Edit::AnnotAdd {
-        page: p0,
-        annot: note("ours"),
-    };
-    model.apply(add, "note").unwrap();
+    let add = fx::add(p0, &note("ours"));
+    model.commit_ops(vec![add], "note").unwrap();
     saved_first(how, &mut model, &path, "THEIR-SECRET-TEXT");
-    let delete = Edit::CommentsDelete {
-        page: p0,
-        names: vec!["theirs".into()],
-    };
-    model.apply(delete, "delete").unwrap();
+    let delete = fx::delete_named(p0, &["theirs"]);
+    model.commit_ops(vec![delete], "delete").unwrap();
     let why = saved_without(&mut model, &path, "THEIR-SECRET-TEXT");
     assert_eq!(why, [Why::Removes(gone(RemovedKind::Comments, 1))]);
 }
@@ -729,17 +692,13 @@ fn deleted_bookmark_gone(how: How) {
     let dir = tempdir();
     let path = file(&dir, "a.pdf", "A", 2, |_, _| {});
     let mut model = opened(&path);
-    let insert = Edit::OutlineInsert {
-        parent: None,
-        after: None,
-        title: "SECRET-BOOKMARK".into(),
-        target: Some(model.page(1).unwrap()),
-        view: None,
-    };
-    model.apply(insert, "bookmark").unwrap();
+    let insert = fx::bookmark(None, None, "SECRET-BOOKMARK", Some(model.page(1).unwrap()));
+    model.commit_ops(vec![insert], "bookmark").unwrap();
     saved_first(how, &mut model, &path, "SECRET-BOOKMARK");
     let id = model.state().bookmarks_preorder()[0].1;
-    model.apply(Edit::OutlineDelete { id }, "delete").unwrap();
+    model
+        .commit_ops(vec![fx::delete_bookmark(id)], "delete")
+        .unwrap();
     let why = saved_without(&mut model, &path, "SECRET-BOOKMARK");
     assert_eq!(why, [Why::Removes(gone(RemovedKind::Bookmarks, 1))]);
 }
@@ -756,19 +715,14 @@ fn replaced_mark_text(how: How) {
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
     let mut model = opened(&path);
     let p0 = model.page(0).unwrap();
-    let add = Edit::AnnotAdd {
-        page: p0,
-        annot: note("OLD-NOTE-TEXT"),
-    };
-    model.apply(add, "note").unwrap();
+    let add = fx::add(p0, &note("OLD-NOTE-TEXT"));
+    model.commit_ops(vec![add], "note").unwrap();
     saved_first(how, &mut model, &path, "OLD-NOTE-TEXT");
     let annot = Annot {
         contents: "NEW-NOTE-TEXT".into(),
         ..model.state().marks_on(p0).next().unwrap().clone()
     };
-    model
-        .apply(Edit::AnnotUpdate { page: p0, annot }, "edit")
-        .unwrap();
+    model.commit_ops(vec![fx::update(&annot)], "edit").unwrap();
     let why = saved_without(&mut model, &path, "OLD-NOTE-TEXT");
     assert_eq!(why, [Why::ReplacesText(gone(RemovedKind::CommentText, 1))]);
     assert!(readable(&std::fs::read(&path).unwrap(), "NEW-NOTE-TEXT"));
@@ -776,8 +730,8 @@ fn replaced_mark_text(how: How) {
 
 /// OCR text saying `text`.
 fn ocr_layer(text: &str) -> std::sync::Arc<crate::text_layer::TextLayer> {
-    use crate::text_layer::{OcrWord, TextLayer};
-    std::sync::Arc::new(TextLayer::from_engine(
+    use crate::text_layer::OcrWord;
+    std::sync::Arc::new(crate::text_layer::from_engine(
         vec![OcrWord {
             text: text.into(),
             rect: crate::annot::Box2 {
@@ -820,15 +774,13 @@ fn replaced_ocr_text(how: How) {
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
     let mut model = opened(&path);
     let p0 = model.page(0).unwrap();
-    let ocr = |text: &str| Edit::SetTextLayers {
-        layers: vec![(p0, ocr_layer(text))],
-    };
-    model.apply(ocr("OCRFIRSTWORD"), "ocr").unwrap();
+    let ocr = |text: &str| fx::ocr([(p0, ocr_layer(text))]);
+    model.commit_ops(ocr("OCRFIRSTWORD"), "ocr").unwrap();
     saved_first(how, &mut model, &path, "OCRFIRSTWORD");
     assert_eq!(ocr_layers(&std::fs::read(&path).unwrap()), 1);
     // Recognized again: the old text would stay in an earlier revision,
     // so it's a full save.
-    model.apply(ocr("OCRSECONDWORD"), "ocr").unwrap();
+    model.commit_ops(ocr("OCRSECONDWORD"), "ocr").unwrap();
     let why = saved_without(&mut model, &path, "OCRFIRSTWORD");
     assert_eq!(why, [Why::ReplacesText(gone(RemovedKind::OcrLayers, 1))]);
     let now = std::fs::read(&path).unwrap();
@@ -849,13 +801,15 @@ fn re_ocr_reopened(how: How) {
     let dir = tempdir();
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
     let mut model = opened(&path);
-    let layer = |model: &Document, text: &str| Edit::SetTextLayers {
-        layers: vec![(model.page(0).unwrap(), ocr_layer(text))],
-    };
-    model.apply(layer(&model, "OCROLDWORD"), "ocr").unwrap();
+    let layer = |model: &Document, text: &str| fx::ocr([(model.page(0).unwrap(), ocr_layer(text))]);
+    model
+        .commit_ops(layer(&model, "OCROLDWORD"), "ocr")
+        .unwrap();
     saved_first(how, &mut model, &path, "OCROLDWORD");
     let mut model = opened(&path);
-    model.apply(layer(&model, "OCRNEWWORD"), "ocr").unwrap();
+    model
+        .commit_ops(layer(&model, "OCRNEWWORD"), "ocr")
+        .unwrap();
     let why = saved_without(&mut model, &path, "OCROLDWORD");
     assert!(matches!(why[..], [Why::RemovalCheck { .. }]), "{why:?}");
     let now = std::fs::read(&path).unwrap();

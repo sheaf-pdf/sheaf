@@ -9,11 +9,10 @@
 //!
 //! Trimming snapshots frees only their bytes. What the steps hold is freed
 //! when versions are pruned: by count today, and by bytes too from M10.5
-//! slice 12. So are the files only pruned versions registered: a source's
-//! blob goes with the last registration holding it, and an engine opened on
-//! it keeps only its bytes, until slice 13's engine pool closes it. Steps
-//! name sources by registration, so a source's bytes are never step bytes;
-//! the store counts each blob once.
+//! slice 12. So are the files only pruned versions show pages of: a
+//! source's blob goes with the last record holding it, and an engine opened
+//! on it keeps only its bytes, until slice 13's engine pool closes it. A
+//! source's bytes are never step bytes; the store counts each blob once.
 
 /// Versions kept, with or without snapshots. Past this, versions on other
 /// branches go first, then the oldest before the saved one.

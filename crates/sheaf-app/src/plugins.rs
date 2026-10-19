@@ -26,11 +26,11 @@ use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use gpui::{App, Context, Entity, Global, KeyBinding, KeyBindingContextPredicate, Window};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::SourceId;
+use sheaf_doc::{Actor, CommitOpts, Document, EditError, SourceId, Tx};
 use sheaf_plugin::ui::{FieldAnswer, Form, PanelRow, ShowPanel, Ui};
 use sheaf_plugin::{
-    Call, CallContext, Limits, LoadOptions, Manifest, Permissions, Plugin, PluginError, Runtime,
-    Status, TextMatch, TextSource,
+    Call, CallContext, EditBatch, Limits, LoadOptions, Manifest, Permissions, Plugin, PluginError,
+    Runtime, Status, TextMatch, TextSource,
 };
 use sheaf_render::RenderHandle;
 
@@ -921,7 +921,7 @@ impl sheaf_plugin::OcrSource for EngineOcr {
         page: sheaf_doc::PageId,
         base: &sheaf_doc::PageBase,
         geom: &sheaf_doc::geom::Geom,
-        render: sheaf_core::Rotation,
+        render: sheaf_edit::Rotation,
         language: Option<String>,
         dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer> {
@@ -941,7 +941,7 @@ impl sheaf_plugin::OcrSource for EngineOcr {
         let req = OcrRequest {
             pages: vec![OcrPage {
                 id: page,
-                source: base.source,
+                source: base.src.id(),
                 index: base.index,
                 geom: *geom,
                 render,
@@ -983,7 +983,7 @@ impl sheaf_plugin::render::RenderSource for EngineRender {
         use sheaf_render::{Job, RenderRequest};
         let handle = self.0.get(&source).context("source not open")?;
         let rx = handle.render(RenderRequest {
-            page: sheaf_core::PageIndex(index),
+            page: sheaf_render::PageIndex(index),
             job: Job::Tile {
                 page_width: page_w,
                 page_height: page_h,
@@ -991,7 +991,7 @@ impl sheaf_plugin::render::RenderSource for EngineRender {
                 y,
                 w,
                 h,
-                rotation: sheaf_core::Rotation::R0,
+                rotation: sheaf_edit::Rotation::R0,
             },
             format: PixelFormat::Rgba,
             priority: u8::MAX,
@@ -1014,108 +1014,21 @@ pub fn render_source(
     Arc::new(EngineRender(handles.clone()))
 }
 
-/// Marks a plugin adds without an author are the user's.
-/// Who the user is, and the date and time now, as dynamic stamps write
-/// them: what a plugin's marks are signed and filled in with.
-struct Signer {
-    name: String,
-    initials: String,
-    date: String,
-    time: String,
+/// Plugin `id`'s name, as its manifest says: None when it isn't
+/// installed.
+pub(crate) fn name_of(id: &str, cx: &App) -> Option<String> {
+    Some(cx.try_global::<PluginHost>()?.manifest(id)?.name.clone())
 }
 
-impl Signer {
-    fn now(prefs: &sheaf_ops::prefs::Prefs) -> Signer {
-        let now = chrono::Local::now();
-        Signer {
-            name: prefs.identity.name(),
-            initials: prefs.identity.initials(),
-            date: now.format(prefs.stamps.date_format()).to_string(),
-            time: now.format(prefs.stamps.time_format()).to_string(),
-        }
-    }
-
-    fn fill(&self, text: &mut String) {
-        if text.contains("<<") {
-            *text =
-                sheaf_ops::stamps::fill(text, &self.name, &self.initials, &self.date, &self.time);
-        }
-    }
-}
-
-/// A plugin's marks with no author are the user's, and `<<name>>`,
-/// `<<initials>>`, `<<date>>` and `<<time>>` in their text are filled in,
-/// as dynamic stamps are: the plugin never sees who the user is.
-fn sign_marks(edits: &mut [sheaf_doc::Edit], me: &Signer) {
-    let sign = |a: &mut sheaf_doc::Annot| {
-        if a.author.is_empty() {
-            a.author = me.name.clone();
-        }
-        me.fill(&mut a.contents);
-        if let sheaf_doc::AnnotKind::TextStamp { text, .. } = &mut a.kind {
-            me.fill(text);
-        }
+/// Plugin `id`'s (at `version`) batch `b`, lowered in one transaction of
+/// the plugin's on `doc` (M10.5 §6.7): what it may submit is a plugin's,
+/// and the host fills its marks in as the plugin's, never naming the user.
+fn plugin_tx(doc: &Document, id: &str, version: &str, b: EditBatch) -> Result<Tx, EditError> {
+    let actor = Actor::Plugin {
+        id: id.into(),
+        version: version.into(),
     };
-    for e in edits {
-        match e {
-            sheaf_doc::Edit::AnnotAdd { annot, .. }
-            | sheaf_doc::Edit::AnnotUpdate { annot, .. } => sign(annot),
-            sheaf_doc::Edit::ConnectorAdd { a, b } => {
-                sign(&mut a.1);
-                sign(&mut b.1);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// A plugin rewrites a mark from what its API shows it. Every plugin's
-/// update keeps the mark's creation date, name, turn and a tape's rows and
-/// look, which no API shows; a 0.2 plugin's (`api02`) keeps its fill,
-/// dashes, cloud and start arrowhead too, which 0.2 can't say.
-fn keep_unseen(edits: &mut [sheaf_doc::Edit], st: &sheaf_doc::DocState, api02: bool) {
-    for e in edits {
-        let sheaf_doc::Edit::AnnotUpdate { page, annot } = e else {
-            continue;
-        };
-        let Some((_, was)) = st.find_annot(annot.id).filter(|(on, _)| on == page) else {
-            continue;
-        };
-        annot.name = was.name.clone();
-        annot.created = was.created.clone();
-        annot.turn = was.turn;
-        if api02 {
-            annot.fill = was.fill;
-            annot.dashed = was.dashed;
-            annot.cloudy = was.cloudy;
-        }
-        if api02
-            && let (
-                sheaf_doc::AnnotKind::Line { arrow_start, .. },
-                sheaf_doc::AnnotKind::Line {
-                    arrow_start: before,
-                    ..
-                },
-            ) = (&mut annot.kind, &was.kind)
-        {
-            *arrow_start = *before;
-        }
-        // A tape's look; and its rows, unless the plugin changed its text.
-        if let (
-            sheaf_doc::AnnotKind::Tape { tape, look, .. },
-            sheaf_doc::AnnotKind::Tape {
-                tape: tape_before,
-                look: look_before,
-                ..
-            },
-        ) = (&mut annot.kind, &was.kind)
-        {
-            *look = look_before.clone();
-            if annot.contents == was.contents {
-                *tape = tape_before.clone();
-            }
-        }
-    }
+    b.lowered(doc, actor)
 }
 
 pub fn ocr_source(
@@ -1377,20 +1290,24 @@ pub fn run(
                         let left = d.notice().filter(|n| *n != running).map(str::to_string);
                         let mut last = None;
                         d.edit_source = Some(plugin_id.clone());
-                        let me = Signer::now(&crate::prefs::get(cx));
-                        // A 0.2 plugin can't see the newer fields, so an
-                        // update keeps them.
-                        let api02 = cx
-                            .global::<PluginHost>()
-                            .manifest(&plugin_id)
-                            .is_some_and(|m| !m.api.matches(&sheaf_plugin::API_VERSION));
-                        for mut b in out.batches {
-                            sign_marks(&mut b.edits, &me);
-                            if let crate::docview::State::Ready(doc) = &d.state {
-                                keep_unseen(&mut b.edits, doc.model.state(), api02);
+                        let version = (cx.global::<PluginHost>().manifest(&plugin_id))
+                            .map_or_else(String::new, |m| m.version.to_string());
+                        for b in out.batches {
+                            let label = b.label.clone();
+                            let crate::docview::State::Ready(doc) = &d.state else {
+                                break;
+                            };
+                            match plugin_tx(&doc.model, &plugin_id, &version, b) {
+                                Ok(tx) => {
+                                    let opts = CommitOpts {
+                                        label: Some(label.as_str().into()),
+                                    };
+                                    // Its notice says why when it's refused.
+                                    d.commit(tx, opts, cx).ok();
+                                }
+                                Err(e) => d.set_notice(crate::docview::failed(&label, &e), cx),
                             }
-                            d.apply_batch(b.edits, &b.label, cx);
-                            last = Some(b.label);
+                            last = Some(label);
                         }
                         d.edit_source = None;
                         if let Some(msg) = left
@@ -1571,8 +1488,14 @@ mod tests {
     /// A one-page document, still opening.
     fn opening() -> sheaf_doc::Document {
         let store = sheaf_doc::Store::new();
-        let primary = sheaf_doc::SourceInfo::blank(&store, 1);
-        sheaf_doc::open::start(store, primary, None, sheaf_doc::history::default_policy())
+        let primary = sheaf_doc::store::blank(&store, 1);
+        sheaf_doc::open::start(
+            store,
+            primary,
+            "a.pdf".into(),
+            None,
+            sheaf_doc::history::default_policy(),
+        )
     }
 
     #[test]
@@ -1632,15 +1555,24 @@ mod tests {
     /// document the calls are made from holds the file's mark and field.
     #[test]
     fn opened_goes_out_with_the_facts() {
-        use sheaf_doc::{SourceInfo, Store};
+        use sheaf_doc::Store;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("facts.pdf");
         std::fs::write(&path, sheaf_doc::forms::fixture::every_fact().bytes()).unwrap();
         let store = Store::new();
-        let (primary, stamp) = SourceInfo::read(&store, &path, None).unwrap();
-        let (src, blob) = (primary.src.clone(), primary.src.id());
-        let came = Some(sheaf_doc::materialize::Came::Read(stamp));
-        let mut doc = crate::docview::opening_model(store, primary, came, "Me".into());
+        let (primary, stamp) = store.read_file(&path, None).unwrap();
+        let (src, blob) = (primary.clone(), primary.id());
+        let came = Some(sheaf_doc::materialize::Came::Read {
+            path: path.as_path().into(),
+            stamp,
+        });
+        let mut doc = crate::docview::opening_model(
+            store,
+            primary,
+            "facts.pdf".into(),
+            came,
+            Default::default(),
+        );
         let mut waiting = Waiting::default();
         let wants = || vec!["notes".to_string()];
         waiting.hold("tax", command("scan"));
@@ -1895,85 +1827,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A plugin's marks are its own: by the plugin, whatever it says, and
+    /// with `<<name>>` and `<<initials>>` as it wrote them, since a plugin
+    /// never learns who the user is; the date and time are filled in, as
+    /// dynamic stamps are (M10.5 §6.8). Its update keeps what its API
+    /// can't show: `sheaf_plugin`'s `a_plugin_update_keeps_what_it_cant_see`.
     #[test]
-    fn a_plugin_update_keeps_what_it_cant_see() {
-        use sheaf_doc::{
-            Annot, AnnotId, AnnotKind, Document, Edit, FixedCount, Pt, SourceInfo, Store,
-        };
+    fn a_plugins_marks_are_its_own_and_never_name_the_user() {
+        use sheaf_doc::{FixedCount, Identity, Store};
+        use sheaf_edit::{Box2, MarkKind, NewMark, Op, Style};
         let store = Store::new();
-        let primary = SourceInfo::blank(&store, 1);
-        let mut d = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
-        let page = d.page(0).unwrap();
-        let line = Annot {
-            id: AnnotId(1),
-            kind: AnnotKind::Line {
-                a: Pt { x: 0.0, y: 0.0 },
-                b: Pt { x: 10.0, y: 0.0 },
-                arrow: true,
-                arrow_start: true,
-            },
-            color: [0, 0, 0],
-            opacity: 1.0,
-            stroke: 1.0,
-            author: "me".into(),
-            contents: String::new(),
-            modified: "D:1".into(),
-            created: "D:0".into(),
-            fill: None,
-            dashed: true,
-            cloudy: false,
-            turn: sheaf_core::Rotation::R90,
-            name: String::new(),
-        };
-        d.apply(Edit::AnnotAdd { page, annot: line }, "Line")
-            .unwrap();
-        let mut placed = d.state().marks_on(page).next().unwrap().clone();
-        // What a 0.2 plugin hands back: the styles it can't see are lost,
-        // and it reads upright as the file shows the page.
-        let mut back = placed.clone();
-        back.contents = "checked".into();
-        back.dashed = false;
-        back.created = "D:2".into();
-        back.turn = sheaf_core::Rotation::R0;
-        if let AnnotKind::Line { arrow_start, .. } = &mut back.kind {
-            *arrow_start = false;
-        }
-        let mut edits = vec![Edit::AnnotUpdate { page, annot: back }];
-        keep_unseen(&mut edits, d.state(), true);
-        let Edit::AnnotUpdate { annot, .. } = &edits[0] else {
-            panic!()
-        };
-        placed.contents = "checked".into();
-        placed.modified = annot.modified.clone();
-        assert_eq!(*annot, placed);
-        // A 0.3 plugin sees them, so what it says goes; but not the
-        // creation date, which no plugin sets.
-        let mut back = placed.clone();
-        back.dashed = false;
-        back.created = "D:2".into();
-        back.turn = sheaf_core::Rotation::R0;
-        let mut edits = vec![Edit::AnnotUpdate { page, annot: back }];
-        keep_unseen(&mut edits, d.state(), false);
-        let Edit::AnnotUpdate { annot, .. } = &edits[0] else {
-            panic!()
-        };
-        assert!(!annot.dashed);
-        assert_eq!(annot.created, "D:0");
-        assert_eq!(annot.turn, sheaf_core::Rotation::R90);
-    }
-
-    #[test]
-    fn a_plugins_text_is_signed_like_a_dynamic_stamp() {
-        use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId};
-        let me = Signer {
-            name: "Pat Q. Smith".into(),
+        let primary = sheaf_doc::store::blank(&store, 1);
+        let policy = Box::new(FixedCount(10));
+        let mut d = Document::new(store, primary, "a.pdf".into(), None, &[], policy);
+        d.set_identity(Identity {
+            person: "Pat Q. Smith".into(),
             initials: "PQS".into(),
-            date: "10/15/2026".into(),
-            time: "9:00 AM".into(),
-        };
-        let stamp = Annot {
-            id: AnnotId(0),
-            kind: AnnotKind::TextStamp {
+            ..Identity::default()
+        });
+        let stamp = NewMark {
+            kind: MarkKind::TextStamp {
                 rect: Box2 {
                     x: 0.0,
                     y: 0.0,
@@ -1983,32 +1856,46 @@ mod tests {
                 text: "REVIEWED\n<<initials>> <<date>>".into(),
                 status: false,
             },
-            color: [0, 0, 0],
-            opacity: 1.0,
-            stroke: 1.0,
-            author: String::new(),
+            style: Style {
+                color: [0, 0, 0],
+                opacity: 1.0,
+                stroke: 1.0,
+                fill: None,
+                dashed: false,
+                cloudy: false,
+            },
             contents: "Checked by <<name>> at <<time>>".into(),
-            modified: String::new(),
-            created: String::new(),
-            fill: None,
-            dashed: false,
-            cloudy: false,
-            turn: sheaf_core::Rotation::R0,
-            name: String::new(),
+            author: Some("Someone Else".into()),
+            turn: Default::default(),
+            asset: None,
         };
-        let mut edits = vec![Edit::AnnotAdd {
-            page: PageId(1),
-            annot: stamp,
-        }];
-        sign_marks(&mut edits, &me);
-        let Edit::AnnotAdd { annot, .. } = &edits[0] else {
-            panic!()
+        let page = d.page(0).unwrap();
+        let batch = EditBatch {
+            label: "Check".into(),
+            ops: vec![Op::AddMark {
+                page: page.into(),
+                mark: stamp,
+                reply_to: None,
+                local: None,
+                imported: None,
+            }],
+            held: Vec::new(),
+            invalid: None,
         };
-        assert_eq!(annot.author, "Pat Q. Smith");
-        assert_eq!(annot.contents, "Checked by Pat Q. Smith at 9:00 AM");
-        assert!(
-            matches!(&annot.kind, AnnotKind::TextStamp { text, .. } if text == "REVIEWED\nPQS 10/15/2026")
-        );
+        let tx = plugin_tx(&d, "checker", "1.0.0", batch).unwrap();
+        d.commit(tx, CommitOpts::default()).unwrap();
+        let a = d.state().marks_on(page).next().unwrap();
+        assert_eq!(a.author, "checker", "the plugin's, not who it says");
+        let (said, time) = a.contents.split_at("Checked by <<name>> at ".len());
+        assert_eq!(said, "Checked by <<name>> at ");
+        assert!(!time.is_empty() && !time.contains("<<"), "{time}");
+        let sheaf_doc::AnnotKind::TextStamp { text, .. } = &a.kind else {
+            panic!("{:?}", a.kind)
+        };
+        assert!(text.starts_with("REVIEWED\n<<initials>> "), "{text}");
+        assert!(!text.contains("<<date>>"), "{text}");
+        let version = &d.timeline()[1];
+        assert_eq!(version.author, "checker");
     }
 
     /// A step's line goes with it: the snapshot's step goes back to the

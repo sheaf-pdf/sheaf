@@ -1,6 +1,6 @@
 // API 0.2's marks: the kinds and fields it had. A mark of a newer kind
 // isn't shown to a 0.2 plugin (M9 decision 12), and one it updates keeps
-// what 0.2 can't say (the app's `keep_unseen`).
+// what 0.2 can't say (`Adapter::update`).
 
 /// A mark as API 0.2 shows it; None for kinds 0.2 doesn't have, which
 /// plugins don't see until 0.3 (M9 decision 12).
@@ -71,9 +71,9 @@ pub(crate) fn annot_to_wit(a: &Annot) -> Option<w::Annot> {
     })
 }
 
-/// A plugin's annotation as sheaf stores it. The author defaults to the
-/// user, and the modification time is now.
-pub(crate) fn annot_from_wit(a: w::Annot) -> Annot {
+/// What a 0.2 plugin says of a mark: its kind, color, opacity, stroke and
+/// text. Its author is the host's.
+pub(crate) fn said(a: w::Annot) -> Said {
     let kind = match a.kind {
         w::AnnotKind::Highlight(rects) => AnnotKind::Highlight {
             rects: rects.into_iter().map(box_from_wit).collect(),
@@ -121,22 +121,13 @@ pub(crate) fn annot_from_wit(a: w::Annot) -> Annot {
             look: Default::default(),
         },
     };
-    Annot {
-        id: AnnotId(a.id),
+    Said {
         kind,
         color: rgb_from_wit(a.color),
-        opacity: a.opacity.clamp(0.0, 1.0),
-        stroke: a.stroke.max(0.0),
-        // Empty means the user, whom the app names (`settings.toml`).
-        author: a.author.trim().to_string(),
+        opacity: a.opacity,
+        stroke: a.stroke,
         contents: a.contents,
-        modified: sheaf_doc::pdf_date_now(),
-        created: sheaf_doc::pdf_date_now(),
-        fill: None,
-        dashed: false,
-        cloudy: false,
-        turn: Rotation::R0,
-        name: String::new(),
+        more: None,
     }
 }
 

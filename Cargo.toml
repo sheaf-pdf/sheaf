@@ -5,7 +5,8 @@ resolver = "3"
 # nightly, with libFuzzer.
 exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures", "vendor/lopdf", "fuzz"]
 members = [
-    "crates/sheaf-core",
+    "crates/sheaf-util",
+    "crates/sheaf-edit",
     "crates/sheaf-ops",
     "crates/sheaf-image",
     "crates/sheaf-cli",
@@ -28,7 +29,8 @@ repository = "https://github.com/sheaf-pdf/sheaf"
 rust-version = "1.98"
 
 [workspace.dependencies]
-sheaf-core = { path = "crates/sheaf-core" }
+sheaf-util = { path = "crates/sheaf-util" }
+sheaf-edit = { path = "crates/sheaf-edit" }
 sheaf-doc = { path = "crates/sheaf-doc" }
 sheaf-render = { path = "crates/sheaf-render" }
 sheaf-ui = { path = "crates/sheaf-ui" }

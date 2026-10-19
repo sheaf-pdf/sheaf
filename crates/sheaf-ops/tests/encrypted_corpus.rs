@@ -15,12 +15,14 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use lopdf::Object;
-use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::forms::corpus::{Corpus, each_entry};
 use sheaf_doc::materialize::{Came, How};
 use sheaf_doc::serialize::crypt::Crypt;
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::{Document, Edit, FixedCount, Source, SourceInfo, Store};
+use sheaf_doc::tx::fixture::rotate;
+use sheaf_doc::{Document, FixedCount, Source, Store};
+use sheaf_edit::{Rotation, Turn};
+use sheaf_render::PageIndex;
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
@@ -220,8 +222,8 @@ fn check(was: &Before, bytes: Vec<u8>) -> Saved {
 /// The file at `path`, its first page turned, saved `save`.
 fn save_encrypted(path: &Path, save: How) -> Outcome {
     let store = Store::new();
-    let (primary, stamp) = SourceInfo::read(&store, path, None).ok()?;
-    let src = primary.src.clone();
+    let (primary, stamp) = store.read_file(path, None).ok()?;
+    let src = primary.clone();
     let was = Before {
         path,
         crypt: src.crypt()?.clone(),
@@ -229,10 +231,15 @@ fn save_encrypted(path: &Path, save: How) -> Outcome {
         decrypted: decrypted(&src),
         shown: shown(src.bytes().clone()).ok(),
     };
+    let came = Came::Read {
+        path: path.into(),
+        stamp,
+    };
     let mut doc = sheaf_doc::open::start(
         store,
         primary,
-        Some(Came::Read(stamp)),
+        sheaf_doc::store::file_name(path),
+        Some(came),
         Box::new(FixedCount(2)),
     );
     let opened = doc
@@ -240,11 +247,8 @@ fn save_encrypted(path: &Path, save: How) -> Outcome {
         .is_ok();
     let turned = match doc.page(0) {
         Some(first) if opened => {
-            let turn = Edit::RotatePages {
-                ids: vec![first],
-                by: Rotation::R90,
-            };
-            doc.apply(turn, "turn").is_ok()
+            let turn = rotate(&[first], Turn::Quarter);
+            doc.commit_ops(vec![turn], "turn").is_ok()
         }
         _ => false,
     };

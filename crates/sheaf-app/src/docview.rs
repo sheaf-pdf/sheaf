@@ -20,11 +20,12 @@ use gpui::{
     RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window, div,
     img, point, prelude::*, px, relative, rgb, rgba,
 };
-use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::materialize::Came;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, FormRef, Pt};
 use sheaf_doc::{materialize, save};
+use sheaf_edit::{PageSize, Rotation};
+use sheaf_render::PageIndex;
 use sheaf_ui::button::Button;
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_area::{TextArea, TextAreaEvent};
@@ -35,7 +36,14 @@ use crate::markup_tools::{Drag, Tool, arrow_head, stroke_canvas, stroke_canvas_d
 pub(crate) use crate::pane::Zoom;
 use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Shown, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
-use sheaf_doc::{Document, Edit, EditOutcome, OutlineId, PageId, SourceId, SourceInfo, Store};
+use sheaf_doc::tx::{CommitOpts, Grant, Rule, Tx, mark_kind, mark_style};
+use sheaf_doc::{
+    Actor, Commit, Document, EditError, Identity, JobKind, OutlineId, PageId, SourceId, Src, Store,
+};
+use sheaf_edit::{
+    Anchor, AnnotRef, BlobSel, Bring, FormBring, MarkPatch, NewMark, Op, OutlineBring, PageRef,
+    PageSel, PageSource, Turn,
+};
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::{Job, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit};
 
@@ -220,34 +228,6 @@ pub(crate) struct Doc {
     pub(crate) split_drag: bool,
 }
 
-/// What an inserted or replacing file brings besides its pages, read on
-/// a background thread: what its pages hold (sheaf's own marks, which the
-/// edit carries in, and what they hold; the marks given new ids as the
-/// file was read; other tools' comments and links, which the edit takes
-/// from the source), and its bookmarks. Its form is read there too, into
-/// its source, which the edit takes it from.
-#[derive(Default)]
-pub(crate) struct Incoming {
-    pub annots: Arc<sheaf_doc::open::FileAnnots>,
-    pub outline: Vec<sheaf_doc::FlatOutlineItem>,
-}
-
-impl Incoming {
-    /// What `info`'s source brings.
-    pub(crate) fn read(info: &SourceInfo) -> Incoming {
-        let facts = sheaf_doc::open::finish(&info.src, &sheaf_ops::NoProgress);
-        Incoming {
-            annots: facts.annots,
-            outline: facts.outline,
-        }
-    }
-
-    /// The marks, as `Edit::InsertPages` and `ReplacePages` carry them.
-    pub(crate) fn edit_marks(&self) -> Vec<(u32, Vec<sheaf_doc::Annot>)> {
-        self.annots.marks().into_iter().collect()
-    }
-}
-
 impl Doc {
     /// A document's view state as it opens: `model`, rendered by
     /// `handles`, in one pane, nothing rendered or selected yet.
@@ -371,19 +351,20 @@ impl Doc {
             .collect()
     }
 
-    /// After `source`'s pages came in with `incoming`: PDFium stops drawing
+    /// After pages of `src` came in with its marks: PDFium stops drawing
     /// the marks sheaf now draws.
-    pub(crate) fn take_in(&mut self, source: SourceId, incoming: Incoming) {
-        let marks = incoming.annots.marks();
+    pub(crate) fn take_in(&mut self, src: &Src) {
+        let annots = src.annots();
+        let marks = annots.marks();
         if !marks.is_empty()
-            && let Some(handle) = self.handles.get(&source)
+            && let Some(handle) = self.handles.get(&src.id())
         {
-            let renamed = incoming.annots.renamed.iter().map(|r| (r.page, r.was));
+            let renamed = annots.renamed.iter().map(|r| (r.page, r.was));
             drop(handle.hide_annots(marks_by_page(&marks, renamed)));
         }
     }
     pub(crate) fn primary(&self) -> &RenderHandle {
-        &self.handles[&self.model.primary()]
+        &self.handles[&self.model.primary().id()]
     }
 
     /// The page at position `index`.
@@ -451,7 +432,7 @@ impl Doc {
     pub(crate) fn index_of_source_page(&self, index: u32) -> Option<usize> {
         let primary = self.model.primary();
         (self.model.state().pages())
-            .position(|(_, def, _)| def.base.source == primary && def.base.index == index)
+            .position(|(_, def, _)| def.base.src == *primary && def.base.index == index)
     }
 
     /// Matches in unsaved OCR layers, which PDFium can't see, in document
@@ -487,9 +468,7 @@ impl Doc {
     /// PageSpace.
     pub(crate) fn merge_source_hits(&self, hits: &mut Vec<Hit>, incoming: Vec<SearchHit>) {
         let state = self.model.state();
-        let Some(primary) = self.model.source(self.model.primary()) else {
-            return;
-        };
+        let primary = self.model.primary();
         for h in incoming {
             let Some(order) = self.index_of_source_page(h.page) else {
                 continue;
@@ -498,7 +477,7 @@ impl Doc {
             if state.ocr_text(page).is_some() {
                 continue;
             }
-            let from_view = primary.src.geom(h.page).from_view();
+            let from_view = primary.geom(h.page).from_view();
             let at = hits.partition_point(|x| x.order <= order);
             hits.insert(
                 at,
@@ -535,7 +514,7 @@ impl Doc {
     fn drop_stale_images(&mut self) {
         let mut stale: HashSet<PageId> = HashSet::new();
         for (id, def, _) in self.model.state().pages() {
-            let now = (def.base.source, def.base.index);
+            let now = (def.base.src.id(), def.base.index);
             if let Some(was) = self.shown.insert(id, now)
                 && was != now
             {
@@ -645,7 +624,6 @@ pub enum DocEvent {
     /// the undo label ("Undo: …"/"Redo: …" for those two).
     Edited {
         label: String,
-        outcome: EditOutcome,
         /// The plugin whose edits these were, if any.
         plugin: Option<String>,
     },
@@ -720,9 +698,9 @@ pub struct DocView {
     pub(crate) selftest_ocr: Option<PathBuf>,
     /// Password the file needs, once known.
     password: Option<String>,
-    /// Open the inline editor on this page's last mark next frame (a text
-    /// edit just placed; dev hooks).
-    pub(crate) pending_edit_last: Option<PageId>,
+    /// Open the inline editor on this mark next frame (a text edit just
+    /// placed; dev hooks).
+    pub(crate) pending_edit: Option<(PageId, AnnotId)>,
     /// Recovery data found when opening, until the user has been asked.
     pending_recovery: Option<sheaf_doc::recovery::Recovery>,
     /// A save stopped to ask the reader something (M10.5 §9.2), its
@@ -876,7 +854,7 @@ impl DocView {
             selftest_ocr: None,
             pending_recovery: None,
             pending_ask: None,
-            pending_edit_last: None,
+            pending_edit: None,
             autosave: None,
             autosave_since: None,
             edits: 0,
@@ -947,25 +925,30 @@ impl DocView {
                     // The bytes, read once, and the geometry walk: the
                     // layout's sizes, before the first paint.
                     let t = Instant::now();
-                    let (primary, stamp) = SourceInfo::read(&store, &path, password.as_deref())?;
+                    let (primary, stamp) = store.read_file(&path, password.as_deref())?;
                     let walk = t.elapsed();
-                    let handle = RenderHandle::open_bytes(primary.src.bytes().clone(), password)?;
-                    anyhow::Ok((store, primary, stamp, handle, walk, recovery, torn))
+                    let handle = RenderHandle::open_bytes(primary.bytes().clone(), password)?;
+                    let name = sheaf_doc::store::file_name(&path);
+                    let came = Came::Read {
+                        path: path.as_path().into(),
+                        stamp,
+                    };
+                    anyhow::Ok((store, primary, name, came, handle, walk, recovery, torn))
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((store, primary, stamp, handle, walk, recovery, torn)) => {
+                    Ok((store, primary, name, came, handle, walk, recovery, torn)) => {
                         if timing {
                             eprintln!(
                                 "[timing] open: {walk:?} source, {:?} engine, {:?} since launch, {} pages",
                                 handle.info().open_time,
                                 launched.elapsed(),
-                                primary.src.page_count()
+                                primary.page_count()
                             );
                         }
                         viewer.pending_recovery = recovery;
-                        viewer.install(store, primary, Came::Read(stamp), handle, cx);
+                        viewer.install(store, primary, name, came, handle, cx);
                         if let (Some(torn), State::Ready(doc)) = (torn, &mut viewer.state) {
                             doc.notice = Some(torn.to_string());
                         }
@@ -1003,28 +986,29 @@ impl DocView {
     }
 
     /// Show a file as it opens, a source in `store` with `handle` rendering
-    /// it, as the primary source, and read the rest of it on a background
-    /// thread (see [`Self::finish_open`]). How it `came` says what the
-    /// document knows of its file, for its record: the file as it was
-    /// read, or a restored document's base with what its recovery sidecar
-    /// holds that the file hasn't got.
+    /// it, as the primary source under `name`, and read the rest of it on a
+    /// background thread (see [`Self::finish_open`]). How it `came` says
+    /// what the document knows of its file, for its record: the file as it
+    /// was read, or a restored document's base with what its recovery
+    /// sidecar holds that the file hasn't got.
     fn install(
         &mut self,
         store: Arc<Store>,
-        primary: SourceInfo,
+        primary: Src,
+        name: Arc<str>,
         came: Came,
         handle: RenderHandle,
         cx: &mut Context<Self>,
     ) {
-        let src = primary.src.clone();
+        let src = primary.clone();
         let recovered = matches!(came, Came::Restored { .. });
-        let author = crate::prefs::get(cx).identity.name();
-        let model = opening_model(store, primary, Some(came), author);
+        let who = crate::prefs::get(cx).doc_identity();
+        let model = opening_model(store, primary, name, Some(came), who);
         self.sidecar_of = None;
         let opened = self.path.clone();
         cx.defer(move |cx| crate::recent::add(&opened, cx));
         let mut handles = HashMap::new();
-        handles.insert(model.primary(), handle);
+        handles.insert(model.primary().id(), handle);
         let measure_scale = (crate::state::get(cx).measure_scale.clone()).unwrap_or_default();
         let doc = Doc::new(model, handles, cx.focus_handle(), measure_scale);
         self.state = State::Ready(Box::new(doc));
@@ -1087,18 +1071,17 @@ impl DocView {
                     let path = path.clone();
                     async move {
                         let store = Store::new();
-                        let (primary, came) =
+                        let (primary, name, came) =
                             sheaf_doc::recovery::restore(&store, &path, &rec, password.as_deref())?;
-                        let handle =
-                            RenderHandle::open_bytes(primary.src.bytes().clone(), password)?;
-                        anyhow::Ok((store, primary, came, handle))
+                        let handle = RenderHandle::open_bytes(primary.bytes().clone(), password)?;
+                        anyhow::Ok((store, primary, name, came, handle))
                     }
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((store, primary, came, handle)) => {
-                        viewer.install(store, primary, came, handle, cx);
+                    Ok((store, primary, name, came, handle)) => {
+                        viewer.install(store, primary, name, came, handle, cx);
                         if timing {
                             eprintln!("[timing] recovered unsaved changes in {:?}", t.elapsed());
                         }
@@ -1432,79 +1415,134 @@ impl DocView {
 
     // ----- edits ------------------------------------------------------------
 
-    pub(crate) fn apply(&mut self, edit: Edit, label: &str, cx: &mut Context<Self>) {
-        let State::Ready(doc) = &mut self.state else {
-            return;
-        };
-        let result = doc.model.apply(edit, label);
-        self.finish_edit(label, result, cx);
-    }
-
-    /// Apply edits as one undo step; if any fails, none are applied.
-    pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>, label: &str, cx: &mut Context<Self>) {
-        let State::Ready(doc) = &mut self.state else {
-            return;
-        };
-        let before: HashSet<OutlineId> = doc
-            .model
-            .state()
-            .bookmarks_preorder()
-            .iter()
-            .map(|&(_, id, _)| id)
-            .collect();
-        let result = doc.model.apply_batch(edits, label);
-        if result.is_ok() {
-            let rows = (doc.model.state().bookmarks_preorder().into_iter())
-                .map(|(depth, id, b)| (depth, id, !b.kids.is_empty()));
-            reveal_new_bookmarks(rows, &before, &mut doc.outline_expanded);
+    /// A transaction of the user's on the current version: None while no
+    /// document is open.
+    pub(crate) fn user_tx(&self) -> Option<Tx> {
+        match &self.state {
+            State::Ready(doc) => Some(doc.model.tx(Actor::User)),
+            _ => None,
         }
-        self.finish_edit(label, result, cx);
     }
 
-    /// After `apply`/`apply_batch`: notice, redraw, autosave, and tell
-    /// listeners.
+    /// `op` as a version of the user's called `label`: what the commit
+    /// did, or None when it failed, which the notice says. With
+    /// [`apply_batch`](Self::apply_batch), until slice 12's callers make
+    /// their own transactions.
+    pub(crate) fn apply(&mut self, op: Op, label: &str, cx: &mut Context<Self>) -> Option<Commit> {
+        self.apply_batch(vec![op], label, cx)
+    }
+
+    /// `ops` as one version of the user's, so one undo reverts them all.
+    /// Each sees what the ones before it did; if any fails, none is
+    /// applied.
+    pub(crate) fn apply_batch(
+        &mut self,
+        ops: Vec<Op>,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Commit> {
+        let tx = self.user_tx()?;
+        self.submit(tx, ops, label, cx)
+    }
+
+    /// `ops` lowered in `tx`, then committed as one version called
+    /// `label`: what the commit did, or None when it failed, which the
+    /// notice says.
+    pub(crate) fn submit(
+        &mut self,
+        mut tx: Tx,
+        ops: Vec<Op>,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Commit> {
+        if let Err(e) = tx.apply_batch(ops, &sheaf_ops::NoProgress) {
+            self.set_notice(failed(label, &e), cx);
+            return None;
+        }
+        let label = Some(label.into());
+        self.commit(tx, CommitOpts { label }, cx).ok()
+    }
+
+    /// `tx`'s ops as a version, as `opts` says, and the reader told what
+    /// it did or why not: what the caller gets back too. The bookmarks it
+    /// made come into view.
+    pub(crate) fn commit(
+        &mut self,
+        tx: Tx,
+        opts: CommitOpts,
+        cx: &mut Context<Self>,
+    ) -> Result<Commit, EditError> {
+        let State::Ready(doc) = &mut self.state else {
+            return Err(EditError::NotReady);
+        };
+        let had = Had::of(&doc.model);
+        let label = opts.label.clone();
+        let result = doc.model.commit(tx, opts);
+        if let Ok(c) = &result {
+            let made: HashSet<OutlineId> = c.created.bookmarks().collect();
+            if !made.is_empty() {
+                let rows = (doc.model.state().bookmarks_preorder().into_iter())
+                    .map(|(depth, id, b)| (depth, id, !b.kids.is_empty()));
+                reveal_new_bookmarks(rows, &made, &mut doc.outline_expanded);
+            }
+        }
+        let first = |c: &Commit| Some(c.lines.first()?.text.clone().into());
+        let label = (label.or_else(|| first(result.as_ref().ok()?))).unwrap_or_default();
+        self.finish_edit(&label, had, result.clone(), cx);
+        result
+    }
+
+    /// After a commit: notice, redraw, autosave, and tell listeners. The
+    /// document `had` what it had before. The notice says what went with
+    /// the edit: pages and bookmarks, the ops' own or the cascades', and
+    /// the form fields and replies the cascades took; then what the commit
+    /// tells besides.
     fn finish_edit(
         &mut self,
         label: &str,
-        result: anyhow::Result<EditOutcome>,
+        had: Had,
+        result: Result<Commit, EditError>,
         cx: &mut Context<Self>,
     ) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
         match result {
-            Ok(out) => {
-                let mut parts = Vec::new();
-                if out.pages_removed > 0 {
-                    parts.push(format!(
-                        "{} page{}",
-                        out.pages_removed,
-                        if out.pages_removed == 1 { "" } else { "s" }
-                    ));
+            Ok(commit) => {
+                let st = doc.model.state();
+                let cascaded = |rule: Rule| {
+                    (commit.cascades.iter())
+                        .filter(|c| c.rule == rule)
+                        .map(|c| c.objects)
+                        .sum()
+                };
+                let parts = [
+                    counted(had.pages.saturating_sub(st.page_count()), "page", "pages"),
+                    counted(
+                        had.bookmarks.saturating_sub(st.bookmark_count()),
+                        "bookmark",
+                        "bookmarks",
+                    ),
+                    counted(cascaded(Rule::WidgetField), "form field", "form fields"),
+                    counted(cascaded(Rule::AnnotThread), "reply", "replies"),
+                ];
+                let parts: Vec<String> = parts.into_iter().flatten().collect();
+                let mut notice = match parts.split_last() {
+                    None => label.to_string(),
+                    Some((last, [])) => format!("{label}: removed {last} — Ctrl+Z to undo"),
+                    Some((last, rest)) => format!(
+                        "{label}: removed {} and {last} — Ctrl+Z to undo",
+                        rest.join(", ")
+                    ),
+                };
+                // A form's copies renamed apart, scripts turned off, text
+                // drawn as `?`.
+                if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+                    notice = format!("{notice}. {told}");
                 }
-                if out.bookmarks_removed > 0 {
-                    parts.push(format!(
-                        "{} bookmark{}",
-                        out.bookmarks_removed,
-                        if out.bookmarks_removed == 1 { "" } else { "s" }
-                    ));
-                }
-                doc.notice = Some(if parts.is_empty() {
-                    label.to_string()
-                } else {
-                    format!("{label}: removed {} — Ctrl+Z to undo", parts.join(" and "))
-                });
-                // Duplicate Pages' copies of a form.
-                if let Some(form) = doc.model.form_notice(&out, true, true) {
-                    let n = doc.notice.take().unwrap_or_default();
-                    doc.notice = Some(format!("{n}. {form}"));
-                }
-                if let Some(text) = doc.model.unencodable_notice(&out) {
-                    let n = doc.notice.take().unwrap_or_default();
-                    doc.notice = Some(format!("{n}. {text}"));
-                }
+                doc.notice = Some(notice);
                 doc.touched();
-                self.after_model_change(label.to_string(), out, cx);
+                self.after_model_change(label.to_string(), cx);
             }
             Err(e) => {
                 doc.notice = Some(failed(label, &e));
@@ -1514,23 +1552,14 @@ impl DocView {
     }
 
     /// Bookkeeping after any change to the model.
-    pub(crate) fn after_model_change(
-        &mut self,
-        label: String,
-        outcome: EditOutcome,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn after_model_change(&mut self, label: String, cx: &mut Context<Self>) {
         if self.prune_selection() {
             cx.emit(DocEvent::SelectionChanged);
         }
         self.prune_region(cx);
         self.schedule_autosave(cx);
         let plugin = self.edit_source.clone();
-        cx.emit(DocEvent::Edited {
-            label,
-            outcome,
-            plugin,
-        });
+        cx.emit(DocEvent::Edited { label, plugin });
         cx.notify();
     }
 
@@ -1602,11 +1631,12 @@ impl DocView {
         }
     }
 
-    fn rotate_current(&mut self, by: Rotation, cx: &mut Context<Self>) {
+    fn rotate_current(&mut self, by: Turn, cx: &mut Context<Self>) {
         let ids = self.target_ids();
         if !ids.is_empty() {
             let label = self.label("Rotate", ids.len());
-            self.apply(Edit::RotatePages { ids, by }, &label, cx);
+            let pages = PageSel::ids(ids);
+            self.apply(Op::RotatePages { pages, by }, &label, cx);
         }
     }
 
@@ -1614,7 +1644,8 @@ impl DocView {
         let ids = self.target_ids();
         if !ids.is_empty() {
             let label = self.label("Delete", ids.len());
-            self.apply(Edit::DeletePages { ids }, &label, cx);
+            let pages = PageSel::ids(ids);
+            self.apply(Op::DeletePages { pages }, &label, cx);
         }
     }
 
@@ -1622,7 +1653,9 @@ impl DocView {
         let ids = self.target_ids();
         if !ids.is_empty() {
             let label = self.label("Duplicate", ids.len());
-            self.apply(Edit::DuplicatePages { ids }, &label, cx);
+            let pages = PageSel::ids(ids);
+            let locals = Vec::new();
+            self.apply(Op::DuplicatePages { pages, locals }, &label, cx);
         }
     }
 
@@ -1724,17 +1757,19 @@ impl DocView {
             .copied();
         let n = ids.len();
         let label = self.label("Move", n);
-        self.apply(Edit::MovePages { ids, before }, &label, cx);
+        let (pages, before) = (PageSel::ids(ids), before.map(PageRef::Id));
+        self.apply(Op::MovePages { pages, before }, &label, cx);
         if let State::Ready(doc) = &mut self.state {
             doc.selection = moving;
             cx.emit(DocEvent::SelectionChanged);
         }
     }
 
-    /// Sign the versions made from now on with the name in `settings.toml`.
+    /// Sign the versions and marks made from now on as `settings.toml`
+    /// says who the user is.
     pub(crate) fn sync_author(&mut self, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state {
-            doc.model.set_author(crate::prefs::get(cx).identity.name());
+            doc.model.set_identity(crate::prefs::get(cx).doc_identity());
         }
     }
 
@@ -1758,7 +1793,7 @@ impl DocView {
         };
         doc.notice = Some(format!("Undid: {label}"));
         doc.touched();
-        self.after_model_change(format!("Undo: {label}"), EditOutcome::default(), cx);
+        self.after_model_change(format!("Undo: {label}"), cx);
     }
 
     pub(crate) fn redo(&mut self, cx: &mut Context<Self>) {
@@ -1781,7 +1816,7 @@ impl DocView {
         };
         doc.notice = Some(format!("Redid: {label}"));
         doc.touched();
-        self.after_model_change(format!("Redo: {label}"), EditOutcome::default(), cx);
+        self.after_model_change(format!("Redo: {label}"), cx);
     }
 
     // ----- save --------------------------------------------------------------
@@ -2161,14 +2196,8 @@ impl DocView {
             return;
         };
         if let Some(p) = doc.page_id(0) {
-            self.apply(
-                Edit::RotatePages {
-                    ids: vec![p],
-                    by: Rotation::R90,
-                },
-                "Rotate page",
-                cx,
-            );
+            let (pages, by) = (PageSel::ids([p]), Turn::Quarter);
+            self.apply(Op::RotatePages { pages, by }, "Rotate page", cx);
         }
         self.save_to(path, cx).detach();
     }
@@ -2179,20 +2208,20 @@ impl DocView {
 
     // ----- markup -------------------------------------------------------------
 
-    /// A new mark by whoever `settings.toml` names (the OS user otherwise),
-    /// with the document's defaults filled in. Its turn is R0: built in a
-    /// page's edit frame, it reads as it was drawn there.
-    pub(crate) fn new_annot(&self, kind: AnnotKind, color: [u8; 3], cx: &App) -> Annot {
+    /// A new mark with the document's defaults, built in a page's edit
+    /// frame: its turn is R0, so it reads as it was drawn there. Who made
+    /// it and when are the host's to say as it's made (M10.5 §6.8).
+    pub(crate) fn new_annot(&self, kind: AnnotKind, color: [u8; 3]) -> Annot {
         Annot {
             id: sheaf_doc::AnnotId(0),
             kind,
             color,
             opacity: 1.0,
             stroke: 1.5,
-            author: crate::prefs::get(cx).identity.name(),
+            author: String::new(),
             contents: String::new(),
-            modified: sheaf_doc::pdf_date_now(),
-            created: sheaf_doc::pdf_date_now(),
+            modified: String::new(),
+            created: String::new(),
             fill: None,
             dashed: false,
             cloudy: false,
@@ -2203,45 +2232,105 @@ impl DocView {
 
     /// Add `annot`, a mark built in page `page`'s edit frame, as one undo
     /// step called `label`; it lands in PageSpace through
-    /// [`Annot::to_page`](sheaf_doc::Annot::to_page).
+    /// [`Annot::to_page`](sheaf_doc::Annot::to_page). The mark it made.
     pub(crate) fn add_annot(
         &mut self,
         page: PageId,
         annot: Annot,
         label: &str,
         cx: &mut Context<Self>,
-    ) {
-        let Some(edit) = self.edit_geom_of(page) else {
-            return;
-        };
+    ) -> Option<AnnotId> {
+        let edit = self.edit_geom_of(page)?;
         let annot = annot.to_page(&edit);
-        self.add_page_annot(page, annot, label, cx);
+        self.add_page_annot(page, annot, label, cx)
     }
 
     /// Add `annot`, a mark already in PageSpace (text markups, which the
-    /// page's text places, and replies and statuses, which have no place),
-    /// as one undo step called `label`.
+    /// page's text places), as one undo step called `label`. The mark it
+    /// made, which comes in selected, so its properties can be set
+    /// straight away.
     pub(crate) fn add_page_annot(
         &mut self,
         page: PageId,
         annot: Annot,
         label: &str,
         cx: &mut Context<Self>,
-    ) {
-        let count = |v: &Self| match &v.state {
-            State::Ready(doc) => doc.model.state().marks_on(page).count(),
-            _ => 0,
+    ) -> Option<AnnotId> {
+        self.add_mark(page, annot, None, label, cx)
+    }
+
+    /// Add `annot`, a reply or a status, in the thread of comment `to` on
+    /// page `page`, as one undo step called `label`. The mark it made.
+    pub(crate) fn add_reply(
+        &mut self,
+        page: PageId,
+        annot: Annot,
+        to: AnnotId,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<AnnotId> {
+        self.add_mark(page, annot, Some(to), label, cx)
+    }
+
+    /// `annot`, in PageSpace, made on `page` in the thread of `reply_to`,
+    /// and selected.
+    fn add_mark(
+        &mut self,
+        page: PageId,
+        annot: Annot,
+        reply_to: Option<AnnotId>,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<AnnotId> {
+        let mut tx = self.user_tx()?;
+        let asset = match self.held_asset(&mut tx, &annot) {
+            Ok(asset) => asset,
+            Err(e) => {
+                self.set_notice(failed(label, &e), cx);
+                return None;
+            }
         };
-        let before = count(self);
-        self.apply(Edit::AnnotAdd { page, annot }, label, cx);
-        // The new mark comes in selected, so its properties can be set
-        // straight away.
-        if count(self) > before
-            && let State::Ready(doc) = &mut self.state
-            && let Some(id) = doc.model.state().marks_on(page).last().map(|a| a.id)
-        {
+        let op = Op::AddMark {
+            page: page.into(),
+            mark: new_mark(&annot, asset),
+            reply_to: reply_to.map(AnnotRef::Id),
+            local: None,
+            imported: None,
+        };
+        let commit = self.submit(tx, vec![op], label, cx)?;
+        let id = commit.created.annots().next()?;
+        if let State::Ready(doc) = &mut self.state {
             doc.select_mark(Some((page, id)));
         }
+        Some(id)
+    }
+
+    /// What mark `a` holds by its stem, its page stamp's page or its
+    /// attached file, granted in `tx` for its op to name: as the document
+    /// finds it (its store's, else a source's).
+    pub(crate) fn held_asset(&self, tx: &mut Tx, a: &Annot) -> Result<Option<BlobSel>, EditError> {
+        let State::Ready(doc) = &self.state else {
+            return Err(EditError::NotReady);
+        };
+        let missing = |what: String| EditError::NotFound {
+            op: "add-mark",
+            what,
+        };
+        let grant = match &a.kind {
+            AnnotKind::PageStamp { stamp, name, .. } => Grant::Stamp {
+                stem: stamp.clone(),
+                form: (doc.model.find_stamp(stamp))
+                    .ok_or_else(|| missing(format!("the stamp {name}")))?,
+            },
+            AnnotKind::FileAttachment {
+                file, name, size, ..
+            } => Grant::Blob(
+                (doc.model.find_file(file, *size))
+                    .ok_or_else(|| missing(format!("the attached file {name}")))?,
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(tx.grant(grant)))
     }
 
     /// Dev hook: drop one of each mark on page 1 and save to `path`.
@@ -2262,7 +2351,6 @@ impl DocView {
                 }],
             },
             [255, 230, 0],
-            cx,
         );
         hl.opacity = 0.6;
         self.add_annot(p0, hl, "Highlight", cx);
@@ -2271,7 +2359,6 @@ impl DocView {
                 pos: Pt { x: 400.0, y: 60.0 },
             },
             [255, 200, 0],
-            cx,
         );
         note.contents = "A sticky note".into();
         self.add_annot(p0, note, "Note", cx);
@@ -2286,7 +2373,6 @@ impl DocView {
                 size: 12.0,
             },
             [200, 0, 0],
-            cx,
         );
         text.contents = "Free text written by sheaf, wrapped onto a second line.".into();
         self.add_annot(p0, text, "Text", cx);
@@ -2300,7 +2386,6 @@ impl DocView {
                 },
             },
             [0, 120, 255],
-            cx,
         );
         self.add_annot(p0, sq, "Square", cx);
         let tick = self.new_annot(
@@ -2314,7 +2399,6 @@ impl DocView {
                 glyph: "✓".into(),
             },
             [0, 150, 0],
-            cx,
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         let tick2 = self.new_annot(
@@ -2328,7 +2412,6 @@ impl DocView {
                 glyph: "F".into(),
             },
             [200, 0, 0],
-            cx,
         );
         self.add_annot(p0, tick2, "Tickmark", cx);
         let arrow = self.new_annot(
@@ -2339,7 +2422,6 @@ impl DocView {
                 arrow_start: false,
             },
             [0, 120, 255],
-            cx,
         );
         self.add_annot(p0, arrow, "Arrow", cx);
         let mut ink = self.new_annot(
@@ -2354,7 +2436,6 @@ impl DocView {
                 ],
             },
             [160, 60, 220],
-            cx,
         );
         ink.stroke = 2.5;
         self.add_annot(p0, ink, "Pencil", cx);
@@ -2370,7 +2451,6 @@ impl DocView {
                     partner: None,
                 },
                 [220, 40, 40],
-                cx,
             )
         };
         let a = mk(Box2 {
@@ -2389,14 +2469,25 @@ impl DocView {
             return;
         };
         let (a, b) = (a.to_page(&at_a), b.to_page(&at_b));
-        self.apply(
-            Edit::ConnectorAdd {
-                a: (p0, a),
-                b: (p1, b),
+        let (AnnotKind::Connector { rect, .. }, AnnotKind::Connector { rect: rect_b, .. }) =
+            (&a.kind, &b.kind)
+        else {
+            return;
+        };
+        let pair = Op::AddConnector {
+            a: Anchor {
+                page: p0.into(),
+                rect: *rect,
             },
-            "Connector 1",
-            cx,
-        );
+            b: Anchor {
+                page: p1.into(),
+                rect: *rect_b,
+            },
+            label: "1".into(),
+            style: mark_style(&a),
+            locals: Vec::new(),
+        };
+        self.apply(pair, "Connector 1", cx);
         let mut tape = self.new_annot(
             AnnotKind::Tape {
                 rect: Box2 {
@@ -2410,13 +2501,12 @@ impl DocView {
                 look: Default::default(),
             },
             [20, 20, 20],
-            cx,
         );
         tape.contents = "1,234.50 +\n250.00 +\n84.50 -\n1,400.00 T".into();
-        self.add_annot(p0, tape, "Place tape", cx);
+        let tape = self.add_annot(p0, tape, "Place tape", cx);
         self.save_to(path, cx).detach();
         // Leave the multi-line editor open on the tape so it gets exercised.
-        self.pending_edit_last = Some(p0);
+        self.pending_edit = tape.map(|id| (p0, id));
     }
 
     pub fn set_selftest_annot(&mut self, path: PathBuf) {
@@ -2441,7 +2531,6 @@ impl DocView {
                 pos: Pt { x: 400.0, y: 60.0 },
             },
             [255, 200, 0],
-            cx,
         );
         note.contents = "should not survive".into();
         self.add_annot(p0, note, "Note", cx);
@@ -2456,7 +2545,6 @@ impl DocView {
                 glyph: "✓".into(),
             },
             [0, 150, 0],
-            cx,
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         self.export_clean_to(path, cx);
@@ -2494,7 +2582,6 @@ impl DocView {
                 size: 12.0,
             },
             [200, 0, 0],
-            cx,
         );
         text.contents = "Flattened free text".into();
         self.add_annot(p0, text, "Text", cx);
@@ -2508,7 +2595,6 @@ impl DocView {
                 },
             },
             [0, 120, 255],
-            cx,
         );
         self.add_annot(p0, sq, "Square", cx);
         let tick = self.new_annot(
@@ -2522,7 +2608,6 @@ impl DocView {
                 glyph: "✓".into(),
             },
             [0, 150, 0],
-            cx,
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         self.export_flattened_to(path, cx);
@@ -2745,23 +2830,6 @@ impl DocView {
         .detach();
     }
 
-    /// Open an inline text field for the contents of the most recently
-    /// added annotation on `page` (notes and free text).
-    pub(crate) fn start_annot_editor(
-        &mut self,
-        page: PageId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let last = match &self.state {
-            State::Ready(doc) => doc.model.state().marks_on(page).last().map(|a| a.id),
-            _ => None,
-        };
-        if let Some(id) = last {
-            self.start_annot_editor_for(page, id, window, cx);
-        }
-    }
-
     /// Open the inline text field for annotation `id` on `page`.
     pub(crate) fn start_annot_editor_for(
         &mut self,
@@ -2825,11 +2893,9 @@ impl DocView {
             && let Some((_, cur)) = doc.model.state().find_annot(ed.id)
             && matches!(cur.kind, AnnotKind::Insert { .. })
         {
+            let annots = vec![AnnotRef::Id(ed.id)];
             self.apply(
-                Edit::AnnotDelete {
-                    page: ed.page,
-                    id: ed.id,
-                },
+                Op::DeleteAnnotations { annots },
                 "Delete text insertion",
                 cx,
             );
@@ -2842,17 +2908,17 @@ impl DocView {
         if let Some((_, cur)) = doc.model.state().find_annot(ed.id)
             && cur.contents != text
         {
-            let mut upd = cur.clone();
-            upd.contents = text;
-            upd.modified = sheaf_doc::pdf_date_now();
-            self.apply(
-                Edit::AnnotUpdate {
-                    page: ed.page,
-                    annot: upd,
-                },
-                "Edit text",
-                cx,
-            );
+            let patch = MarkPatch {
+                contents: Some(text),
+                ..MarkPatch::default()
+            };
+            let marks = vec![AnnotRef::Id(ed.id)];
+            let op = Op::PatchMarks {
+                marks,
+                patch,
+                imported: None,
+            };
+            self.apply(op, "Edit text", cx);
         }
         self.pending_focus = true;
         cx.notify();
@@ -2926,6 +2992,7 @@ impl DocView {
         };
         doc.notice = Some(format!("Inserting {name}…"));
         let store = doc.model.store().clone();
+        let primary = doc.model.primary().clone();
         cx.notify();
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
@@ -2933,18 +3000,18 @@ impl DocView {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
-                    let (info, _) = SourceInfo::read(&store, &path, None)?;
-                    // Pages sheaf made (blank, images) carry nothing more.
-                    let incoming = if bookmarks {
-                        Incoming::read(&info)
-                    } else {
-                        Incoming::default()
-                    };
-                    let handle = RenderHandle::open_bytes(info.src.bytes().clone(), None)?;
-                    anyhow::Ok((info, handle, incoming))
+                    let (src, _) = store.read_file(&path, None)?;
+                    // What lowering reads of it, read here, off the UI
+                    // thread; what its marks hold, held until the insert's
+                    // committed.
+                    let pages: Vec<u32> = (0..src.page_count()).collect();
+                    let held = sheaf_doc::tx::ready_to_insert(&store, &primary, &src, &pages);
+                    let handle = RenderHandle::open_bytes(src.bytes().clone(), None)?;
+                    let file = sheaf_doc::store::file_name(&path);
+                    anyhow::Ok((src, file, handle, held))
                 })
                 .await;
-            let (info, handle, mut incoming) = match opened {
+            let (src, file, handle, held) = match opened {
                 Ok(v) => v,
                 Err(e) => {
                     this.update(cx, |view, cx| {
@@ -2966,62 +3033,67 @@ impl DocView {
                 let State::Ready(doc) = &mut view.state else {
                     return;
                 };
-                let page_count = info.src.page_count();
-                let sid = doc.model.add_source(info);
-                doc.handles.insert(sid, handle);
-                let label = format!("Insert {name}");
-                let mut outcome = None;
-                let mixed = doc.model.scripts_mixed();
-                match doc.model.apply(
-                    Edit::InsertPages {
-                        source: sid,
-                        range: 0..page_count,
-                        before,
-                        outline: Some(std::mem::take(&mut incoming.outline)),
-                        annots: incoming.edit_marks(),
+                let page_count = src.page_count();
+                doc.handles.entry(src.id()).or_insert(handle);
+                let had = doc.model.state().bookmark_count();
+                let mut tx = doc.model.tx(Actor::Job(JobKind::Insert));
+                for blob in held {
+                    tx.pin(blob);
+                }
+                tx.pin(src.blob().clone());
+                // Pages sheaf made (blank, images) bring nothing more.
+                let bring = Bring {
+                    marks: bookmarks,
+                    form: FormBring::New,
+                    outline: match bookmarks {
+                        true => OutlineBring::MergeByTitle,
+                        false => OutlineBring::None,
                     },
-                    &label,
-                ) {
-                    Ok(out) => {
-                        outcome = Some(out.clone());
-                        doc.take_in(sid, incoming);
-                        doc.notice = Some(if !bookmarks {
-                            // Pages sheaf made (blank, images): name says it all.
-                            format!("Inserted {name}")
-                        } else {
-                            format!(
-                                "Inserted {} page{} from {name}{}",
-                                out.pages_added,
-                                if out.pages_added == 1 { "" } else { "s" },
-                                match out.bookmarks_added {
-                                    0 => String::new(),
-                                    1 => "; 1 bookmark merged".into(),
-                                    n => format!("; {n} bookmarks merged"),
-                                }
-                            )
-                        });
-                        if let Some(form) = doc.model.form_notice(&out, false, mixed) {
-                            let n = doc.notice.take().unwrap_or_default();
-                            doc.notice = Some(format!("{n}. {form}"));
+                };
+                let insert = Op::InsertPages {
+                    from: PageSource::File {
+                        file: BlobSel::Id(src.id()),
+                        name: file.to_string(),
+                    },
+                    pages: None,
+                    before: before.map(PageRef::Id),
+                    bring,
+                    locals: Vec::new(),
+                };
+                let label = format!("Insert {name}");
+                let Some(commit) = view.submit(tx, vec![insert], &label, cx) else {
+                    return;
+                };
+                let State::Ready(doc) = &mut view.state else {
+                    return;
+                };
+                doc.take_in(&src);
+                let added = commit.created.pages().count();
+                let merged = doc.model.state().bookmark_count().saturating_sub(had);
+                let mut notice = if !bookmarks {
+                    // Pages sheaf made (blank, images): name says it all.
+                    format!("Inserted {name}")
+                } else {
+                    format!(
+                        "Inserted {added} page{} from {name}{}",
+                        if added == 1 { "" } else { "s" },
+                        match merged {
+                            0 => String::new(),
+                            1 => "; 1 bookmark merged".into(),
+                            n => format!("; {n} bookmarks merged"),
                         }
-                        if let Some(text) = doc.model.unencodable_notice(&out) {
-                            let n = doc.notice.take().unwrap_or_default();
-                            doc.notice = Some(format!("{n}. {text}"));
-                        }
-                        if timing {
-                            eprintln!(
-                                "[timing] inserted {name} ({page_count} pages) in {:?}",
-                                t.elapsed()
-                            );
-                        }
-                    }
-                    Err(e) => doc.notice = Some(failed("Insert", &e)),
+                    )
+                };
+                if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+                    notice = format!("{notice}. {told}");
                 }
-                doc.touched();
-                match outcome {
-                    Some(out) => view.after_model_change(label, out, cx),
-                    None => cx.notify(),
+                if timing {
+                    eprintln!(
+                        "[timing] inserted {name} ({page_count} pages) in {:?}",
+                        t.elapsed()
+                    );
                 }
+                view.set_notice(notice, cx);
             })
             .ok();
         })
@@ -3762,10 +3834,9 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        let src = doc.model.source(doc.model.primary())?;
         Some(crate::properties_dialog::PropertiesContext {
             path: self.path.clone(),
-            source: src.src.clone(),
+            source: doc.model.primary().clone(),
             page_size: doc
                 .shown_ref(doc.current_page())
                 .map(|p| p.geom.shown())
@@ -3840,17 +3911,18 @@ fn renamed_notice(n: usize) -> Option<String> {
 }
 
 /// The model a file opens as in the app while its facts are read: its
-/// pages, as [`sheaf_doc::open::start`] makes them, with `author` on the
-/// marks made in it. [`take_facts`] opens it.
+/// pages, as [`sheaf_doc::open::start`] makes them, under `name`, its
+/// marks made by `who`. [`take_facts`] opens it.
 pub(crate) fn opening_model(
     store: Arc<Store>,
-    primary: SourceInfo,
+    primary: Src,
+    name: Arc<str>,
     came: Option<Came>,
-    author: String,
+    who: Identity,
 ) -> Document {
-    let mut model =
-        sheaf_doc::open::start(store, primary, came, sheaf_doc::history::default_policy());
-    model.set_author(author);
+    let policy = sheaf_doc::history::default_policy();
+    let mut model = sheaf_doc::open::start(store, primary, name, came, policy);
+    model.set_identity(who);
     model
 }
 
@@ -3863,8 +3935,7 @@ pub(crate) fn take_facts(
     blob: sheaf_doc::BlobId,
     facts: sheaf_doc::open::Facts,
 ) -> Option<sheaf_doc::open::ViewFacts> {
-    let primary = model.primary();
-    if model.source(primary).is_none_or(|s| s.src.id() != blob) {
+    if model.primary().id() != blob {
         return None;
     }
     model.ready(facts).ok()
@@ -3884,13 +3955,50 @@ fn opening_line(reading: Option<&sheaf_ops::Tracker>) -> String {
     }
 }
 
+/// `a`, a mark the user drew, as a mark to make, holding `asset`. Who
+/// made it and when are the host's (M10.5 §6.8).
+pub(crate) fn new_mark(a: &Annot, asset: Option<BlobSel>) -> NewMark {
+    NewMark {
+        kind: mark_kind(&a.kind),
+        style: mark_style(a),
+        contents: a.contents.clone(),
+        author: None,
+        turn: a.turn,
+        asset,
+    }
+}
+
 /// The notice for an edit the model refused: [`STILL_OPENING`] while the
 /// file opens, or else that `what` failed, and why.
-pub(crate) fn failed(what: &str, e: &anyhow::Error) -> String {
-    if e.is::<sheaf_doc::NotReady>() {
-        STILL_OPENING.into()
-    } else {
-        format!("{what} failed: {e:#}")
+pub(crate) fn failed(what: &str, e: &EditError) -> String {
+    match e {
+        EditError::NotReady => STILL_OPENING.into(),
+        e => format!("{what} failed: {e}"),
+    }
+}
+
+/// What a document had before an edit, to say what it removed.
+pub(crate) struct Had {
+    pages: usize,
+    bookmarks: usize,
+}
+
+impl Had {
+    pub(crate) fn of(model: &Document) -> Had {
+        let st = model.state();
+        Had {
+            pages: st.page_count(),
+            bookmarks: st.bookmark_count(),
+        }
+    }
+}
+
+/// `n` of something, `one` of it or `many`: None for none.
+fn counted(n: usize, one: &str, many: &str) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some(format!("1 {one}")),
+        n => Some(format!("{n} {many}")),
     }
 }
 
@@ -4784,8 +4892,8 @@ impl Render for DocView {
         if let Some((saving, ask)) = self.pending_ask.take() {
             self.ask_before_saving(saving, ask, window, cx);
         }
-        if let Some(page) = self.pending_edit_last.take() {
-            self.start_annot_editor(page, window, cx);
+        if let Some((page, id)) = self.pending_edit.take() {
+            self.start_annot_editor_for(page, id, window, cx);
         }
         // What the comment filter hides on the page, kept current whether
         // or not the panel is open (cached; cheap when nothing changed).
@@ -4998,11 +5106,9 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &crate::CycleTextTools, _, cx| v.cycle_text_tools(cx)))
             .on_action(cx.listener(|v, _: &SearchPrev, _, cx| v.search_step(-1, cx)))
             .on_action(
-                cx.listener(|v, _: &RotatePageCw, _, cx| v.rotate_current(Rotation::R90, cx)),
+                cx.listener(|v, _: &RotatePageCw, _, cx| v.rotate_current(Turn::Quarter, cx)),
             )
-            .on_action(
-                cx.listener(|v, _: &RotatePageCcw, _, cx| v.rotate_current(Rotation::R270, cx)),
-            )
+            .on_action(cx.listener(|v, _: &RotatePageCcw, _, cx| v.rotate_current(Turn::Back, cx)))
             .on_action(cx.listener(|v, _: &DeletePage, _, cx| {
                 if !v.delete_selected_annot(cx) && !v.delete_selected_foreign(cx) {
                     v.delete_current(cx)
@@ -6110,20 +6216,20 @@ fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) ->
         .into_any_element()
 }
 
-/// Expand what's needed to see bookmarks a batch added: their parents,
+/// Expand what's needed to see bookmarks a commit `made`: their parents,
 /// and new headings with children of their own. Everything else keeps its
 /// expanded or collapsed state. `rows` is the outline in pre-order: each
 /// bookmark's depth, id, and whether it has kids.
 fn reveal_new_bookmarks(
     rows: impl IntoIterator<Item = (u16, OutlineId, bool)>,
-    before: &HashSet<OutlineId>,
+    made: &HashSet<OutlineId>,
     expanded: &mut HashSet<OutlineId>,
 ) {
     // The bookmarks above the one at hand.
     let mut path: Vec<OutlineId> = Vec::new();
     for (depth, id, kids) in rows {
         path.truncate(depth.into());
-        if !before.contains(&id) {
+        if made.contains(&id) {
             expanded.extend(path.iter().copied());
             if kids {
                 expanded.insert(id);
@@ -6152,9 +6258,9 @@ mod tests {
             (1, 7, false),
         ]
         .map(|(depth, id, kids)| (depth, OutlineId(id), kids));
-        let before: HashSet<OutlineId> = [1, 2, 6, 7].map(OutlineId).into();
+        let made: HashSet<OutlineId> = [3, 4, 5].map(OutlineId).into();
         let mut expanded = HashSet::new();
-        reveal_new_bookmarks(rows, &before, &mut expanded);
+        reveal_new_bookmarks(rows, &made, &mut expanded);
         let mut got: Vec<u64> = expanded.iter().map(|i| i.0).collect();
         got.sort();
         assert_eq!(got, [1, 2, 4]);
@@ -6168,13 +6274,17 @@ mod tests {
         recovered: bool,
     ) -> anyhow::Result<(Document, sheaf_doc::open::ViewFacts)> {
         let store = Store::new();
-        let (primary, stamp) = SourceInfo::read(&store, path, None)?;
-        let (src, blob) = (primary.src.clone(), primary.src.id());
+        let (primary, stamp) = store.read_file(path, None)?;
+        let (src, blob) = (primary.clone(), primary.id());
         // As the app opens it: a recovered file's record has its sidecar's
         // sections pending (none, here).
         let came = match recovered {
-            false => Came::Read(stamp),
+            false => Came::Read {
+                path: path.into(),
+                stamp,
+            },
             true => Came::Restored {
+                path: path.into(),
                 base: stamp,
                 pending: materialize::PendingTail {
                     bytes: Some(Arc::from([])),
@@ -6182,7 +6292,8 @@ mod tests {
                 },
             },
         };
-        let mut model = opening_model(store, primary, Some(came), "Me".into());
+        let name = sheaf_doc::store::file_name(path);
+        let mut model = opening_model(store, primary, name, Some(came), Identity::default());
         let facts = sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
         let view = take_facts(&mut model, blob, facts).context("not taken")?;
         Ok((model, view))
@@ -6217,8 +6328,9 @@ mod tests {
         // and a field id for each field from counters that start alike.
         let duplicate = |d: &mut Document| {
             fastrand::seed(8);
-            let ids = vec![d.page(0).expect("a source has pages")];
-            d.apply(Edit::DuplicatePages { ids }, "Duplicate")
+            let first = [d.page(0).expect("a source has pages")];
+            let duplicate = sheaf_doc::tx::fixture::duplicate(&first);
+            d.commit_ops(vec![duplicate], "Duplicate")
                 .map(|_| ())
                 .map_err(|e| format!("{e:#}"))
         };
@@ -6251,9 +6363,14 @@ mod tests {
         assert!(recovered.state() == headless.state());
         assert!(recovered.is_dirty() && !recovered.can_undo());
         let store = Store::new();
-        let (primary, stamp) = SourceInfo::read(&store, &path, None).unwrap();
-        let src = primary.src.clone();
-        let mut model = opening_model(store, primary, Some(Came::Read(stamp)), "Me".into());
+        let (primary, stamp) = store.read_file(&path, None).unwrap();
+        let src = primary.clone();
+        let came = Came::Read {
+            path: path.as_path().into(),
+            stamp,
+        };
+        let name = sheaf_doc::store::file_name(&path);
+        let mut model = opening_model(store, primary, name, Some(came), Identity::default());
         let other = sheaf_doc::forms::fixture::every_kind().source();
         let facts = || sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
         assert!(take_facts(&mut model, other.id(), facts()).is_none());
@@ -6324,11 +6441,8 @@ mod tests {
         std::fs::write(&path, sheaf_doc::forms::fixture::every_fact().bytes()).unwrap();
         let (mut model, _) = as_the_view_opens(&path, false).unwrap();
         let page = model.page(0).unwrap();
-        let turn = Edit::RotatePages {
-            ids: vec![page],
-            by: Rotation::R90,
-        };
-        model.apply(turn, "Rotate").unwrap();
+        let turn = sheaf_doc::tx::fixture::rotate(&[page], Turn::Quarter);
+        model.commit_ops(vec![turn], "Rotate").unwrap();
         let ran = Arc::new(AtomicBool::new(false));
         gpui_platform::headless().run({
             let ran = ran.clone();
@@ -6406,11 +6520,8 @@ mod tests {
         std::fs::write(&path, sheaf_doc::forms::fixture::every_fact().bytes()).unwrap();
         let (mut model, _) = as_the_view_opens(&path, false).unwrap();
         let page = model.page(0).unwrap();
-        let turn = move || Edit::RotatePages {
-            ids: vec![page],
-            by: Rotation::R90,
-        };
-        model.apply(turn(), "Rotate").unwrap();
+        let turn = move || vec![sheaf_doc::tx::fixture::rotate(&[page], Turn::Quarter)];
+        model.commit_ops(turn(), "Rotate").unwrap();
         let ran = Arc::new(AtomicBool::new(false));
         gpui_platform::headless().run({
             let ran = ran.clone();
@@ -6431,7 +6542,7 @@ mod tests {
                     &sheaf_ops::NoProgress,
                 );
                 // While it was written.
-                doc.model.apply(turn(), "Rotate").unwrap();
+                doc.model.commit_ops(turn(), "Rotate").unwrap();
                 let saving = Saving {
                     input: Arc::new(input),
                     target,

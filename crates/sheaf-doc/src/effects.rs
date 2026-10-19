@@ -6,9 +6,11 @@
 //! values: an undo back to the saved state, by whatever route, changes
 //! nothing, and replaced text counts wherever it came from.
 //!
-//! What only previews, approvals and the realizer read (the pages and
-//! objects a change touches, each step's effects) comes with slices 11–13,
-//! and a generator's live redraw with slice 17.
+//! Each step keeps what it did ([`StepEffects`]): its effects, judged
+//! against the state its op found, and the pages and slots it touched,
+//! for the History panel's badge and, from slices 12–13, previews,
+//! approvals and the realizer. A generator's live redraw comes with slice
+//! 17.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
@@ -25,7 +27,7 @@ use crate::model::{
     AnnotBody, AnnotRec, Bookmark, DocState, FieldNode, Foreign, Generator, Layer, PageDef, PageId,
     Static, Terminal, Widget,
 };
-use crate::prim::{Key, Val, same};
+use crate::prim::{Key, Prim, Val, same};
 use crate::store::BlobId;
 
 bitflags! {
@@ -112,6 +114,72 @@ impl BitOr for Effects {
 impl BitOrAssign for Effects {
     fn bitor_assign(&mut self, other: Effects) {
         *self = *self | other;
+    }
+}
+
+/// What one step did (§7.1): its effects, judged against the state its op
+/// found ([`ClassifyCx::of_step`]), and the pages and slots it touched.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StepEffects {
+    pub effects: Effects,
+    /// The pages whose content, boxes or annotations it changed, and those
+    /// it added or removed.
+    pub pages: Arc<BTreeSet<PageId>>,
+    pub keys: Arc<BTreeSet<Key>>,
+}
+
+impl StepEffects {
+    /// What `prims`, which made `after` of `before`, did.
+    pub fn of(before: &DocState, after: &DocState, prims: &[Prim]) -> StepEffects {
+        let cx = ClassifyCx::of_step(before, after);
+        let mut effects = Effects::NONE;
+        let mut pages = Vec::new();
+        for p in prims {
+            effects |= classify(&p.key, p.before.as_ref(), p.after.as_ref(), &cx);
+            match p.key {
+                Key::Page(page) | Key::Geom(page) | Key::PageAnnots(page) => pages.push(page),
+                Key::Annot(_) => {
+                    let page = |v: &Option<Val>| match v {
+                        Some(Val::Annot(rec)) => Some(rec.page),
+                        _ => None,
+                    };
+                    pages.extend(page(&p.before));
+                    pages.extend(page(&p.after));
+                }
+                Key::Order
+                | Key::Field(_)
+                | Key::Form
+                | Key::Bookmark(_)
+                | Key::OutlineRoots
+                | Key::Labels
+                | Key::Generator(_) => {}
+            }
+        }
+        StepEffects {
+            effects,
+            pages: Arc::new(pages.into_iter().collect()),
+            keys: Arc::new(prims.iter().map(|p| p.key).collect()),
+        }
+    }
+
+    /// What `steps` did together.
+    pub fn union(steps: &[&StepEffects]) -> StepEffects {
+        if let [one] = steps {
+            return StepEffects::clone(one);
+        }
+        let mut effects = Effects::NONE;
+        let mut pages = BTreeSet::new();
+        let mut keys = BTreeSet::new();
+        for s in steps {
+            effects |= s.effects;
+            pages.extend(s.pages.iter().copied());
+            keys.extend(s.keys.iter().copied());
+        }
+        StepEffects {
+            effects,
+            pages: Arc::new(pages),
+            keys: Arc::new(keys),
+        }
     }
 }
 
@@ -246,6 +314,8 @@ pub struct ClassifyCx<'a> {
     /// What the target's pages show, found the first time a page's change
     /// asks.
     shown: OnceLock<Shown>,
+    /// It judges one step ([`of_step`](Self::of_step)).
+    step: bool,
 }
 
 /// What a state's pages show: their source pages, and their recognized
@@ -261,6 +331,27 @@ impl<'a> ClassifyCx<'a> {
             saved,
             target,
             shown: OnceLock::new(),
+            step: false,
+        }
+    }
+
+    /// What a step judges its change against: the state its op found, and
+    /// the one it made, looking at nothing the step didn't touch. A page
+    /// or a layer it took away is removed, though another page may show
+    /// the same, and the pages it added or removed are its `Page` slots'
+    /// (an op that adds or removes a page puts its `Page`): what a step
+    /// did, judged in O(what it touched), not what a save of it would
+    /// leave out.
+    pub fn of_step(before: &'a DocState, after: &'a DocState) -> ClassifyCx<'a> {
+        let shown = Shown {
+            pages: HashSet::new(),
+            ocr: HashSet::new(),
+        };
+        ClassifyCx {
+            saved: before,
+            target: after,
+            shown: OnceLock::from(shown),
+            step: true,
         }
     }
 
@@ -413,6 +504,7 @@ fn judged(
 ) -> Result<Effects, Misfit> {
     Ok(match key {
         Key::Order => match (orders(before)?, orders(after)?) {
+            (Some(_), Some(_)) if cx.step => Effects::of(Flags::PAGE_ORDER, SigClass::OTHER),
             (Some(a), Some(b)) => order(a, b),
             _ => return Err(Misfit),
         },

@@ -15,7 +15,7 @@ use lopdf::{
     Document as Pdf, EncryptionState, EncryptionVersion, LazyPdf, LoadOptions, Object, ObjectId,
     Permissions, Stream, StringFormat, XrefKind, dictionary,
 };
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 use super::append::{self, Base};
 use super::crypt::Crypt;
@@ -23,7 +23,7 @@ use super::xref::{Entry, Section};
 use super::{Error, object};
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2};
 use crate::history::FixedCount;
-use crate::model::{Document, Edit, SourceInfo};
+use crate::model::Document;
 use crate::serialize::fixture::{
     ATTACHED, BOOKMARK, FIELD, FORM_SECRETS, OWNER, PREFIX, USER, VALUE, attachment_only,
     encrypted, form, holds, object_streams_encrypted, one_id, rc4_aes_128_and_aes_256, whole,
@@ -696,19 +696,12 @@ fn turned(bytes: &[u8]) -> Document {
     let store = Store::new();
     let kind = BlobKind::file(Path::new("encrypted.pdf"), Some(USER));
     let src = store.open(Arc::from(bytes), kind).unwrap();
-    let primary = SourceInfo {
-        src: src.clone(),
-        name: "encrypted.pdf".into(),
-        derived: None,
-    };
-    let mut doc = crate::open::start(store, primary, None, Box::new(FixedCount(10)));
+    let policy = Box::new(FixedCount(10));
+    let mut doc = crate::open::start(store, src.clone(), "encrypted.pdf".into(), None, policy);
     doc.ready(crate::open::finish(&src, &NoProgress)).unwrap();
     let first = doc.page(0).unwrap();
-    let turn = Edit::RotatePages {
-        ids: vec![first],
-        by: Rotation::R90,
-    };
-    doc.apply(turn, "turn").unwrap();
+    let turn = crate::tx::fixture::rotate(&[first], sheaf_edit::Turn::Quarter);
+    doc.commit_ops(vec![turn], "turn").unwrap();
     doc
 }
 
@@ -1017,7 +1010,7 @@ fn a_full_write_keeps_the_trailer_but_the_bases_sections() {
             &Object::Name(b"Kept".to_vec())
         );
         // /ID[0] kept, and /ID[1] the hash of what comes before the section.
-        let written = sheaf_core::checksum(&bytes[..pdf.xref().start]).to_be_bytes();
+        let written = sheaf_util::checksum(&bytes[..pdf.xref().start]).to_be_bytes();
         let id = [b"0123456789abcdef".as_slice(), &written]
             .map(|id| Object::String(id.to_vec(), StringFormat::Hexadecimal));
         assert_eq!(trailer.get(b"ID").unwrap(), &Object::Array(id.to_vec()));
@@ -1070,11 +1063,8 @@ pub(crate) fn mark(doc: &mut Document) {
         turn: Rotation::R0,
         name: String::new(),
     };
-    let add = Edit::AnnotAdd {
-        page,
-        annot: square,
-    };
-    doc.apply(add, "mark").unwrap();
+    let add = crate::tx::fixture::add(page, &square);
+    doc.commit_ops(vec![add], "mark").unwrap();
 }
 
 /// [`turned`], and [`mark`]ed.

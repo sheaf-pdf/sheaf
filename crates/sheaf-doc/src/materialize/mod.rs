@@ -248,8 +248,7 @@ fn rewrite(
     post: Option<PostPass>,
     p: &dyn Progress,
 ) -> Result<Output> {
-    let info = (input.sources.get(&input.primary)).context("the primary isn't registered")?;
-    let src = &info.src;
+    let src = &input.primary;
     let blob = src.id();
     let mut e = emit::emit(
         input,
@@ -375,14 +374,8 @@ fn rewrite(
         xref_from: if stable { numbers.start() } else { 1 },
     };
     let (out, xref) = full::write_bodies(bodies, &layout, p)?;
-    let mut inputs = vec![&**src];
-    for inst in input.target.form().names.keys() {
-        if let Some(info) = input.sources.get(&inst.src)
-            && inputs.iter().all(|s| s.id() != info.src.id())
-        {
-            inputs.push(&info.src);
-        }
-    }
+    let inputs = emit::form::inputs(&input.target, src);
+    let inputs: Vec<&crate::Source> = inputs.iter().map(|s| &**s).collect();
     let checked = verify::Written {
         bytes: &out,
         // The form as the file had it, untouched by `keep_only` too, has

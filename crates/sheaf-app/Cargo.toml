@@ -3,6 +3,7 @@ name = "sheaf-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "sheaf"
@@ -18,7 +19,8 @@ ocr-oar = ["sheaf-ocr/oar"]
 plugins = ["dep:sheaf-plugin", "dep:semver", "dep:zip"]
 
 [dependencies]
-sheaf-core.workspace = true
+sheaf-util.workspace = true
+sheaf-edit.workspace = true
 sheaf-render.workspace = true
 sheaf-doc.workspace = true
 sheaf-ui.workspace = true

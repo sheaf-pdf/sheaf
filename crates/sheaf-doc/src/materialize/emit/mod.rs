@@ -64,7 +64,7 @@ use super::record::{SaveInput, SaveRecord};
 use crate::annot::{Annot, AnnotId, StampForm};
 use crate::content::sink::{self, Sink};
 use crate::content::{Res, ResBody, ResId, Reserved};
-use crate::model::{AnnotBody, DocState, FormRef, PageId, SourceId, SourceInfo};
+use crate::model::{AnnotBody, DerivedCopies, DocState, FormRef, PageId};
 use crate::source::ObjRef;
 use crate::store::{BlobId, Src};
 
@@ -287,8 +287,8 @@ pub(crate) struct Cx<'a> {
     /// What save policy does to the form as it's written.
     pub(crate) transforms: &'a [SaveTransform],
     pub(crate) primary: Src,
-    /// Every registration's source, by its blob: what a placeholder to a
-    /// source's object is read from.
+    /// The sources the pages are written from, by their blobs: what a
+    /// placeholder to a source's object is read from.
     srcs: HashMap<BlobId, Src>,
     /// What each page is written as.
     pub(crate) shown: HashMap<PageId, Shown>,
@@ -348,12 +348,13 @@ impl<'a> Cx<'a> {
 
     /// Whether `key`'s object is emitted: every one in a whole file; in an
     /// Append, a key the state derives when it's in scope, and any other
-    /// when the saved file hasn't got it.
+    /// when the saved file hasn't got it, or it's an object of a source
+    /// whose pages it names otherwise now ([`Closure::relinks`]).
     pub(crate) fn writes(&self, key: &ObjKey) -> bool {
         match &self.append {
             None => true,
             Some(a) if key.of_state() => a.keys.contains(key) || a.extra.contains(key),
-            Some(a) => a.record.map.get(key).is_none(),
+            Some(a) => a.record.map.get(key).is_none() || self.closure.relinks(key),
         }
     }
 
@@ -445,15 +446,12 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// The name of the file page `id` came from.
+    /// The name of the file page `id` is written from: the one its source
+    /// was first read from.
     pub(crate) fn file_name(&self, id: PageId) -> String {
-        (self.input.target.def(id))
-            .and_then(|def| self.input.sources.get(&def.base.source))
-            .and_then(|info| info.name.file_name())
-            .map_or_else(
-                || "another file".to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            )
+        (self.shown.get(&id))
+            .and_then(|page| page.src.blob().origin_name())
+            .map_or_else(|| "another file".to_string(), |n| n.to_string())
     }
 
     /// What placeholder `id` names, when it's an object of a source: the
@@ -565,24 +563,17 @@ fn part(cx: &mut Cx, obj: &Object, key: &dyn Fn(usize) -> ObjKey) -> Object {
     obj
 }
 
-/// What each page of `st`, its registrations `sources`, is written as
+/// What each page of `st`, its derived copies `derived`, is written as
 /// ([`Shown`]): itself, or for a derived copy's page the page it was made
 /// from, through copies of copies, as the copy whose number no other page
 /// of it has.
-pub(crate) fn shown(
-    st: &DocState,
-    sources: &HashMap<SourceId, Arc<SourceInfo>>,
-) -> HashMap<PageId, Shown> {
+pub(crate) fn shown(st: &DocState, derived_copies: &DerivedCopies) -> HashMap<PageId, Shown> {
     let mut out = HashMap::new();
     let mut taken = HashSet::new();
     let mut derived = Vec::new();
     for (id, def, _) in st.pages() {
-        let made_from =
-            origin(sources, def.base.source, def.base.index).and_then(|(source, index)| {
-                let src = &sources.get(&source)?.src;
-                src.page(index)?;
-                Some((src.clone(), index))
-            });
+        let made_from = (origin(derived_copies, &def.base.src, def.base.index))
+            .filter(|(src, index)| src.page(*index).is_some());
         match made_from {
             Some(from) => derived.push((id, def, from)),
             None => {
@@ -635,26 +626,23 @@ pub(crate) fn written_pages(
     pages
 }
 
-/// The page page `index` of registration `source` was made from, when
-/// it's a derived copy's (its `derived` record), through copies of
+/// The page page `index` of `src` was made from, when `src` is a derived
+/// copy (its [`Derived`](crate::Derived) record), through copies of
 /// copies: None for a page that isn't a copy's.
-fn origin(
-    sources: &HashMap<SourceId, Arc<SourceInfo>>,
-    source: SourceId,
-    index: u32,
-) -> Option<(SourceId, u32)> {
-    let mut at = None;
-    let (mut source, mut index) = (source, index);
-    // A chain longer than there are registrations would be a loop.
-    for _ in 0..sources.len() {
-        let Some(derived) = sources.get(&source).and_then(|s| s.derived.as_ref()) else {
+fn origin(derived_copies: &DerivedCopies, src: &Src, index: u32) -> Option<(Src, u32)> {
+    let mut at: Option<(Src, u32)> = None;
+    let mut index = index;
+    let mut id = src.id();
+    // A chain longer than there are copies would be a loop.
+    for _ in 0..derived_copies.len() {
+        let Some(derived) = derived_copies.get(&id) else {
             break;
         };
         let Some(&i) = derived.pages.get(index as usize) else {
             break;
         };
-        (source, index) = (derived.from, i);
-        at = Some((source, index));
+        (id, index) = (derived.from.id(), i);
+        at = Some((derived.from.clone(), i));
     }
     at
 }
@@ -684,20 +672,21 @@ pub fn emit(
         _ => bail!("only an Append emits some keys, and only onto the saved file"),
     };
     let st = &input.target;
-    let primary = (input.sources.get(&input.primary))
-        .context("the primary isn't registered")?
-        .src
-        .clone();
+    let primary = input.primary.clone();
     let version = PdfVersion::of(&primary);
-    let shown = shown(st, &input.sources);
+    let shown = shown(st, &input.derived);
     let pages = written_pages(st, &shown);
     let order: Vec<PageId> = st.order().iter().copied().collect();
     let bates = match st.header_footer() {
         Some(hf) => hf.bates_numbers(&order),
         None => Vec::new(),
     };
-    let srcs = (input.sources.values())
-        .map(|info| (info.src.id(), info.src.clone()))
+    let srcs = (shown.values())
+        .flat_map(|page| {
+            std::iter::once(&page.src).chain(page.content.as_ref().map(|(src, _)| src))
+        })
+        .chain([&primary])
+        .map(|src| (src.id(), src.clone()))
         .collect();
     let mut closure = Closure::new(primary.id(), pages);
     if let Some((record, _, _, relinked)) = saved {
@@ -753,12 +742,7 @@ pub fn emit(
     while let Some(next) = cx.closure.next(&mut cx.syms) {
         p.check()?;
         let (key, obj) = next?;
-        // An object the file has, of a source whose pages it names
-        // otherwise now, is written again.
-        match cx.closure.relinks(&key) {
-            true => cx.objects.push((key, SymObject::Built(obj))),
-            false => cx.push(key, obj),
-        }
+        cx.push(key, obj);
     }
     if cx.closure.unreadable > 0 {
         cx.notes.push(Note(format!(
@@ -978,8 +962,7 @@ fn claim(cx: &mut Cx) {
                 AnnotBody::Mark(m) => m.src.as_ref().map(|r| (r, 0)),
                 AnnotBody::Foreign(f) => f.src.as_ref().map(|r| (r, f.copy)),
                 AnnotBody::Widget(w) if cx.form.merged_into(aid).is_none() => {
-                    let copy = cx.form.copies.get(w.inst);
-                    w.src.as_ref().zip(copy)
+                    w.src.as_ref().map(|r| (r, w.inst.copy))
                 }
                 AnnotBody::Widget(_) => None,
             };

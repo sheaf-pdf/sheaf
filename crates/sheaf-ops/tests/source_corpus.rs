@@ -11,19 +11,16 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-use sheaf_core::{PageIndex, PageSize};
 use sheaf_doc::Store;
 use sheaf_doc::forms::corpus::Corpus;
-use sheaf_doc::model::SourceInfo;
+use sheaf_edit::PageSize;
+use sheaf_render::PageIndex;
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
 /// Each page's size as the page table has it.
 fn table_sizes(path: &Path) -> Result<Vec<PageSize>, String> {
-    let src = SourceInfo::read(&Store::new(), path, None)
-        .map_err(|e| format!("{e:#}"))?
-        .0
-        .src;
+    let (src, _) = (Store::new().read_file(path, None)).map_err(|e| format!("{e:#}"))?;
     Ok((0..src.page_count()).map(|i| src.page_size(i)).collect())
 }
 

@@ -19,41 +19,17 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use zeroize::Zeroizing;
 
+use crate::serialize::durable::FileStamp;
 use crate::source::{Limits, OpenError, Source};
 
-/// A blob's name: its checksum and its length. Two blobs with one id are
-/// compared byte for byte before they're taken as one.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct BlobId {
-    /// [`sheaf_core::checksum`] of the bytes.
-    pub hash: u128,
-    pub len: u64,
-}
+pub use sheaf_edit::BlobId;
 
-impl BlobId {
-    pub fn of(bytes: &[u8]) -> BlobId {
-        BlobId {
-            hash: sheaf_core::checksum(bytes),
-            len: bytes.len() as u64,
-        }
-    }
-
-    /// The blob `stem` names: the generated cache's name for a file (its
-    /// checksum in 32 hex digits, a dash and its length), which marks name
-    /// a stamp's page and an attachment's file by. None for any other
-    /// name, an older one of 16 hex digits among them.
-    pub fn from_stem(stem: &str) -> Option<BlobId> {
-        let (hash, len) = stem.split_once('-')?;
-        let id = BlobId {
-            hash: u128::from_str_radix(hash, 16).ok()?,
-            len: len.parse().ok()?,
-        };
-        (id.stem() == stem).then_some(id)
-    }
-
-    /// Its name as the generated cache gives it, what marks name it by.
-    pub fn stem(&self) -> String {
-        format!("{:032x}-{}", self.hash, self.len)
+/// The id of the blob `bytes` are: [`sheaf_util::checksum`] of them, and
+/// their length.
+pub fn blob_id(bytes: &[u8]) -> BlobId {
+    BlobId {
+        hash: sheaf_util::checksum(bytes),
+        len: bytes.len() as u64,
     }
 }
 
@@ -178,7 +154,7 @@ impl Store {
     /// password it was first given; otherwise a new one of `kind`.
     /// Different bytes under a live blob's id are a collision.
     pub fn intern(&self, bytes: Arc<[u8]>, kind: BlobKind) -> Result<Blob, BlobCollision> {
-        let id = BlobId::of(&bytes);
+        let id = blob_id(&bytes);
         let same = |blob: Arc<BlobInner>| {
             if Arc::ptr_eq(&blob.bytes, &bytes) || blob.bytes == bytes {
                 Ok(Blob(blob))
@@ -238,6 +214,44 @@ impl Store {
         self.source(&blob)
     }
 
+    /// The file at `path`, read once, opened with `password` and parsed,
+    /// and the file as it was read: what the record of a document opened
+    /// on it starts from ([`SaveRecord::opened`]). A wrong or missing
+    /// password is [`OpenError::Password`] in the chain.
+    ///
+    /// [`SaveRecord::opened`]: crate::materialize::SaveRecord::opened
+    pub fn read_file(
+        &self,
+        path: &Path,
+        password: Option<&str>,
+    ) -> anyhow::Result<(Src, FileStamp)> {
+        use anyhow::Context as _;
+        let reading = || format!("reading {}", path.display());
+        let (bytes, metadata) = sheaf_util::read_file_and_metadata(path).with_context(reading)?;
+        let stamp = FileStamp::of(&metadata, &bytes).with_context(reading)?;
+        let src = (self.open(bytes, BlobKind::file(path, password)))
+            .with_context(|| format!("opening {}", path.display()))?;
+        Ok((src, stamp))
+    }
+
+    /// The sources parsed now, by their blobs' ids: what a mark naming a
+    /// stamp or an attachment by stem is looked for in. None is parsed for
+    /// this.
+    pub fn sources(&self) -> Vec<Src> {
+        let blobs: Vec<Arc<BlobInner>> = self.read().values().filter_map(Weak::upgrade).collect();
+        let mut out: Vec<Src> = (blobs.iter())
+            .filter_map(|blob| {
+                blob.pdf
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .upgrade()
+            })
+            .map(Src)
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
     /// Whether `blob` is this store's.
     pub fn holds(&self, blob: &Blob) -> bool {
         self.get(blob.id())
@@ -252,6 +266,23 @@ impl Store {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<BlobId, Weak<BlobInner>>> {
         self.blobs.read().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// For tests: `pages` blank Letter pages, as though read from `a.pdf`,
+/// parsed into `store`.
+#[cfg(any(test, feature = "fixtures"))]
+pub fn blank(store: &Store, pages: u32) -> Src {
+    let bytes = crate::generated::blank_pages(612.0, 792.0, pages as usize)
+        .expect("blank pages are written");
+    let kind = BlobKind::file(Path::new("a.pdf"), None);
+    store.open(bytes.into(), kind).expect("blank pages open")
+}
+
+/// The name a file goes by where the reader sees it (a form instance's,
+/// a notice's): its path's last part.
+pub fn file_name(path: &Path) -> Arc<str> {
+    path.file_name()
+        .map_or_else(|| "".into(), |n| n.to_string_lossy().into())
 }
 
 impl Blob {
@@ -273,6 +304,19 @@ impl Blob {
 
     pub fn kind(&self) -> &BlobKind {
         &self.0.kind
+    }
+
+    /// The name of the file it was first interned from, when it was read
+    /// from one: a hint where nothing better names it, never a form
+    /// instance's name (those come from the edit that brought it).
+    pub fn origin_name(&self) -> Option<Arc<str>> {
+        match &self.0.kind {
+            BlobKind::Pdf {
+                origin: Origin::File(path),
+                ..
+            } => Some(file_name(path)),
+            _ => None,
+        }
     }
 
     /// The password a PDF blob was opened with.
@@ -428,9 +472,9 @@ mod tests {
 
     #[test]
     fn a_stem_names_its_blob() {
-        let id = BlobId::of(b"notes");
+        let id = blob_id(b"notes");
         let stem = id.stem();
-        assert_eq!(stem, format!("{}-5", sheaf_core::checksum_hex(b"notes")));
+        assert_eq!(stem, format!("{}-5", sheaf_util::checksum_hex(b"notes")));
         assert_eq!(BlobId::from_stem(&stem), Some(id));
         let (hash, _) = stem.split_once('-').unwrap();
         for other in [
@@ -453,7 +497,7 @@ mod tests {
         let store = Store::new();
         let held = intern(&store, b"a blob");
         let bytes: Arc<[u8]> = Arc::from(&b"other bytes"[..]);
-        let id = BlobId::of(&bytes);
+        let id = blob_id(&bytes);
         // As if `held`'s bytes had the other bytes' checksum and length.
         store
             .blobs

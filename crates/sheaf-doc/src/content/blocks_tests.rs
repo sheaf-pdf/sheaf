@@ -12,7 +12,7 @@ use super::*;
 use crate::annot::Box2;
 use crate::geom::Geom;
 use crate::source::Limits;
-use crate::text_layer::{OcrWord, TextLayer};
+use crate::text_layer::OcrWord;
 
 const LIM: &Limits = &Limits::DEFAULT;
 
@@ -547,7 +547,7 @@ fn sheafs_own_from_before_are_legacy() {
         },
         confidence: 0.9,
     }];
-    let layer = TextLayer::from_engine(words, &geom, "test");
+    let layer = crate::text_layer::from_engine(words, &geom, "test");
     crate::text_layer::install(&mut sink, &mut page, &layer);
     let ids = contents(&page);
     let resources = page.get(b"Resources").ok();

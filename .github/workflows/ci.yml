@@ -70,6 +70,23 @@ jobs:
             | grep -E '^(lopdf|pdfium-render|gpui-pre|tesseract|oar-ocr|ort|sheaf-(doc|render|ocr|ops|ui|app|plugin|print))$' || true)
           if [ -n "$bad" ]; then echo "sheaf-image depends on: $bad"; exit 1; fi
 
+      - name: sheaf-util stays byte helpers
+        shell: bash
+        # The checksum and file reads, nothing else (see crates/sheaf-util/src/lib.rs).
+        run: |
+          deps=$(cargo tree -p sheaf-util -e normal --prefix none | awk '{print $1}' | sort -u | xargs)
+          if [ "$deps" != "sheaf-util twox-hash" ]; then echo "sheaf-util depends on: $deps"; exit 1; fi
+
+      - name: sheaf-edit stays types only
+        shell: bash
+        # Plugins build on it: no other sheaf crate under it, and it builds
+        # for WASI (see crates/sheaf-edit/src/lib.rs).
+        run: |
+          bad=$(cargo tree -p sheaf-edit -e normal --prefix none | awk '{print $1}' | sort -u \
+            | grep -E '^sheaf-' | grep -vx 'sheaf-edit' || true)
+          if [ -n "$bad" ]; then echo "sheaf-edit depends on: $bad"; exit 1; fi
+          cargo build -p sheaf-edit --target wasm32-wasip2
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

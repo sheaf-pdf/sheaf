@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use im::Vector;
 use lopdf::{Dictionary, Object};
-use sheaf_core::DestView;
+use sheaf_edit::DestView;
 
 use super::Cx;
 use crate::materialize::copy::Scope;
@@ -49,7 +49,7 @@ pub(crate) fn outline(cx: &mut Cx) -> Option<Object> {
     if st.outline_roots().is_empty() {
         return None;
     }
-    let primary = &input.sources.get(&input.primary)?.src;
+    let primary = &input.primary;
     let pdf = primary.pdf();
     let held = (pdf.catalog().ok()).and_then(|c| c.get(b"Outlines").ok());
     let root_at = held.and_then(|o| o.as_reference().ok());

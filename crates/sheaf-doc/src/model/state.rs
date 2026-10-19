@@ -10,11 +10,11 @@ use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::sync::{Arc, OnceLock};
 
 use im::Vector;
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 use super::{
-    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, GenId, Generator, Mark, OutlineId,
-    PageDef, PageId, Terminal, Widget, bookmark_span,
+    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, GenId, GenSpec, Generator, Mark,
+    OutlineId, PageDef, PageId, Terminal, Widget,
 };
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::forms::{FieldId, full_name_of};
@@ -723,7 +723,7 @@ impl DocState {
     /// The pages bookmark `id` owns (as moving it with its pages takes
     /// them), in document order.
     pub fn bookmark_pages(&self, id: OutlineId) -> Option<Vec<PageId>> {
-        bookmark_span(self, id)
+        crate::tx::bookmarks::bookmark_span(self, id)
     }
 }
 
@@ -739,6 +739,8 @@ pub enum Invariant {
     Form(String),
     #[error("bookmarks: {0}")]
     Outline(String),
+    #[error("page labels: {0}")]
+    Labels(String),
     #[error("generators: {0}")]
     Generators(String),
     #[error("indexes: {0}")]
@@ -755,18 +757,22 @@ impl DocState {
     /// (M10.5 §6.4), as tests and debug builds check after each. The
     /// order, the pages and their boxes name the same pages, each once,
     /// and no two pages are one copy of one source page. Each annotation
-    /// is listed once, on its page. Each widget and its terminal field name
-    /// each other, in one instance of a form with a name. The bookmarks and
-    /// the field nodes are trees from their roots, each node in once, a
-    /// field under the parent it names, and a bookmark going to a page
-    /// there is. There's one header/footer at most, and each generator is
+    /// is listed once, on its page. The two ends of a connector name each
+    /// other. A reply or status that's one of sheaf's marks is to a comment
+    /// on its page, or names no mark at all. Each widget and its terminal
+    /// field name each other, in one instance of a form with a name. The
+    /// bookmarks and the field nodes are trees from their roots, each node
+    /// in once, a field under the parent it names, and a bookmark going to
+    /// a page there is. Each label range starts at a page there is. There's
+    /// one header/footer at most, on pages there are, and each generator is
     /// under its id. Every index is what its table makes again.
     ///
-    /// Not yet: the pages label ranges start at, the header/footer's
-    /// pages, and the comments replies and connectors name, which edits
-    /// don't keep or check until slice 11 (M10.5 bugs 11 and 12); nor that
-    /// the `/NM`s on a page or the form's full names are unique, which
-    /// files break (the indexes hold each one).
+    /// Not: that another tool's reply is to a comment on its page, as files
+    /// have them to ones that are gone or elsewhere, nor a mark's that names
+    /// another tool's comment, which a file may have deleted and have a
+    /// copy of on another page; nor that the `/NM`s on a page or the form's
+    /// full names are unique, which files break (the indexes hold each
+    /// one).
     pub fn check_invariants(&self) -> Result<(), Invariant> {
         let DocState {
             order,
@@ -776,8 +782,7 @@ impl DocState {
             outline_roots,
             page_annots,
             annots,
-            // Anchored to pages no edit checks yet.
-            labels: _,
+            labels,
             generators,
             fields,
             form,
@@ -839,6 +844,33 @@ impl DocState {
             let unlisted = annots.len() - listed.len();
             Invariant::Annots(format!("{unlisted} aren't listed on their pages"))
         })?;
+        // Connectors and threads.
+        let mut marked: Option<HashSet<String>> = None;
+        for (&id, a) in annots {
+            let Some(m) = a.mark() else {
+                continue;
+            };
+            if let Some(other) = m.partner() {
+                let back = (annots.get(&other).and_then(AnnotRec::mark)).and_then(Annot::partner);
+                hold(back == Some(id), || {
+                    Invariant::Annots(format!("{id:?}'s partner {other:?} isn't paired with it"))
+                })?;
+            }
+            if let Some(parent) = m.thread_parent()
+                && self.annot_by_nm(a.page, parent).is_none()
+            {
+                let marked = marked.get_or_insert_with(|| {
+                    (annots.values().filter_map(AnnotRec::mark))
+                        .map(Annot::name)
+                        .collect()
+                });
+                hold(!marked.contains(parent), || {
+                    Invariant::Annots(format!(
+                        "{id:?} is a reply to “{parent}”, a mark on another page"
+                    ))
+                })?;
+            }
+        }
 
         // The widgets and their fields.
         let mut widgets = 0;
@@ -916,6 +948,16 @@ impl DocState {
             Invariant::Outline(format!("{out} bookmarks aren't in the outline"))
         })?;
 
+        // The labels.
+        for spec in labels.iter().flat_map(|l| l.iter()) {
+            hold(pages.contains_key(&spec.start), || {
+                Invariant::Labels(format!(
+                    "a range starts at {:?}, which isn't a page",
+                    spec.start
+                ))
+            })?;
+        }
+
         // The generators.
         for (&id, g) in generators {
             hold(g.id == id, || {
@@ -928,6 +970,16 @@ impl DocState {
         hold(headers <= 1, || {
             Invariant::Generators(format!("{headers} draw a header/footer"))
         })?;
+        for g in generators.values() {
+            let scope = match &g.spec {
+                GenSpec::HeaderFooter(hf) => hf.pages.iter().flatten(),
+            };
+            for &page in scope {
+                hold(pages.contains_key(&page), || {
+                    Invariant::Generators(format!("{:?} is on {page:?}, which isn't a page", g.id))
+                })?;
+            }
+        }
 
         // The indexes.
         if let Some(pos) = idx.pos.get() {
@@ -1049,7 +1101,6 @@ fn path_copies<E>(touched: usize, len: usize, fanout: usize) -> usize {
 mod tests {
     use super::*;
     use crate::history::FixedCount;
-    use crate::model::Edit;
     use crate::model::tests::{opened_doc, square};
     use crate::open::Facts;
 
@@ -1064,11 +1115,8 @@ mod tests {
         };
         let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
         let p0 = d.state().order()[0];
-        let add = Edit::AnnotAdd {
-            page: p0,
-            annot: square(0),
-        };
-        d.apply(add, "add").unwrap();
+        let add = crate::tx::fixture::add(p0, &square(0));
+        d.commit_ops(vec![add], "add").unwrap();
         let st = d.state().clone();
         assert_eq!(st.pos_of(p0), Some(0));
         assert_eq!(st.check_invariants(), Ok(()));

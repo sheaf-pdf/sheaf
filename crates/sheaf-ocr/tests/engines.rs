@@ -8,13 +8,13 @@
 #[cfg(any(feature = "tesseract", feature = "oar"))]
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 #[cfg(any(feature = "tesseract", feature = "oar"))]
-use sheaf_core::{PageIndex, Rotation};
+use sheaf_edit::Rotation;
 use sheaf_image::raster::PixelFormat;
 #[cfg(any(feature = "tesseract", feature = "oar"))]
 use sheaf_ocr::{EngineKind, OcrConfig, OcrWord, build_engine};
 use sheaf_ocr::{InputKind, OcrImage};
 #[cfg(any(feature = "tesseract", feature = "oar"))]
-use sheaf_render::{Job, Renderer};
+use sheaf_render::{Job, PageIndex, Renderer};
 
 /// A Letter page saying "Hello World 1234" in 24 pt Helvetica.
 #[cfg(any(feature = "tesseract", feature = "oar"))]

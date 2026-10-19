@@ -13,9 +13,10 @@ use std::sync::Arc;
 
 use lopdf::xref::XrefType;
 use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, Stream, dictionary};
-use sheaf_core::{PageIndex, Rotation};
-use sheaf_doc::Edit;
+use sheaf_doc::tx::fixture::{move_pages, rotate};
+use sheaf_edit::{Rotation, Turn};
 use sheaf_image::raster::{PixelFormat, Raster};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
@@ -96,16 +97,10 @@ fn pages_moved_across_nodes_show_as_they_did() {
         let pages: Vec<_> = (0..3).map(|i| doc.page(i).unwrap()).collect();
         // The root's own page first, under the turned node; that node's
         // second page last, under the root.
-        let first = Edit::MovePages {
-            ids: vec![pages[2]],
-            before: Some(pages[0]),
-        };
-        doc.apply(first, "move").unwrap();
-        let last = Edit::MovePages {
-            ids: vec![pages[1]],
-            before: None,
-        };
-        doc.apply(last, "move").unwrap();
+        let first = move_pages(&[pages[2]], Some(pages[0]));
+        doc.commit_ops(vec![first], "move").unwrap();
+        let last = move_pages(&[pages[1]], None);
+        doc.commit_ops(vec![last], "move").unwrap();
         sheaf_doc::materialize::save_appended(&mut doc, &path).unwrap();
         let appended = std::fs::read(&path).unwrap();
         assert!(appended.starts_with(&bytes), "{name}");
@@ -157,16 +152,10 @@ fn three_appends_in_a_row_reopen() {
         let mut doc = sheaf_doc::open::file(&path, None).unwrap().doc;
         let pages: Vec<_> = (0..3).map(|i| doc.page(i).unwrap()).collect();
         for &page in &pages {
-            let turn = Edit::RotatePages {
-                ids: vec![page],
-                by: Rotation::R90,
-            };
-            doc.apply(turn, "turn").unwrap();
-            let last = Edit::MovePages {
-                ids: vec![doc.page(0).unwrap()],
-                before: None,
-            };
-            doc.apply(last, "move").unwrap();
+            doc.commit_ops(vec![rotate(&[page], Turn::Quarter)], "turn")
+                .unwrap();
+            let last = move_pages(&[doc.page(0).unwrap()], None);
+            doc.commit_ops(vec![last], "move").unwrap();
             sheaf_doc::materialize::save_appended(&mut doc, &path).unwrap();
         }
         let appended = std::fs::read(&path).unwrap();

@@ -55,9 +55,8 @@ use crate::materialize::removal::Mode;
 use crate::materialize::{
     self, Came, PendingTail, Profile, SaveInput, SaveRecord, SaveStop, SaveTarget, TailFlags,
 };
-use crate::model::SourceInfo;
 use crate::serialize::durable::{self, FileStamp};
-use crate::store::{BlobKind, Store};
+use crate::store::{BlobKind, Src, Store};
 
 /// The first line of a sidecar in this format.
 const FORMAT: &[u8] = b"sheaf-recovery 2\n";
@@ -276,17 +275,18 @@ fn parse(bytes: &[u8]) -> Option<(FileStamp, bool, TailFlags, &[u8])> {
 }
 
 /// The document `rec` recovers for `pdf`, opened from memory into `store`
-/// with `password` under the file's name, while the file is still its
-/// base: the file's bytes, read once and checked against the base's
-/// stamp, with the sidecar's sections after them, or a Full sidecar's
-/// document; and how it came, for its record ([`SaveRecord::restored`]):
-/// the base, and what the sidecar holds that the file hasn't got.
+/// with `password`, while the file is still its base: the file's bytes,
+/// read once and checked against the base's stamp, with the sidecar's
+/// sections after them, or a Full sidecar's document; the file's name,
+/// which it goes by; and how it came, for its record
+/// ([`SaveRecord::restored`]): the file, the base, and what the sidecar
+/// holds that the file hasn't got.
 pub fn restore(
     store: &Store,
     pdf: &Path,
     rec: &Recovery,
     password: Option<&str>,
-) -> Result<(SourceInfo, Came)> {
+) -> Result<(Src, Arc<str>, Came)> {
     let reading = || format!("reading {}", pdf.display());
     let changed = || {
         format!(
@@ -318,16 +318,12 @@ pub fn restore(
     };
     let src = (store.open(bytes, BlobKind::recovered(password)))
         .with_context(|| format!("opening the recovery data of {}", pdf.display()))?;
-    let info = SourceInfo {
-        src,
-        name: pdf.to_path_buf(),
-        derived: None,
-    };
     let came = Came::Restored {
+        path: pdf.into(),
         base: rec.base,
         pending: rec.pending.clone(),
     };
-    Ok((info, came))
+    Ok((src, crate::store::file_name(pdf), came))
 }
 
 /// Remove the sidecar, if any.
@@ -341,7 +337,7 @@ pub(crate) mod tests {
 
     use in_progress::NoProgress;
     use lopdf::{Document as Pdf, LazyPdf, Object, Stream, dictionary};
-    use sheaf_core::Rotation;
+    use sheaf_edit::Rotation;
 
     use super::*;
     use crate::effects::{Removed, RemovedKind};
@@ -349,10 +345,12 @@ pub(crate) mod tests {
     use crate::materialize::{
         AppendAnyway, Ask, AskAnswers, Onto, SaveStop, Strategy, StrategyKind, Why, plan, save,
     };
-    use crate::model::{Document, Edit};
+    use crate::model::Document;
     use crate::serialize::fixture::holds;
     use crate::source::Limits;
     use crate::store::{MemoryKind, Origin};
+    use crate::tx::fixture as fx;
+    use sheaf_edit::{AnnotRef, LabelStyle, Op, Turn};
 
     /// An empty directory of the test's own.
     fn scratch() -> PathBuf {
@@ -396,10 +394,9 @@ pub(crate) mod tests {
     /// The document `rec` restores for `pdf`, opened as the app opens it.
     pub(crate) fn restored(pdf: &Path, rec: &Recovery, password: Option<&str>) -> Document {
         let store = Store::new();
-        let (info, came) = restore(&store, pdf, rec, password).unwrap();
-        let src = info.src.clone();
+        let (src, name, came) = restore(&store, pdf, rec, password).unwrap();
         let policy = crate::history::default_policy();
-        let mut doc = crate::open::start(store, info, Some(came), policy);
+        let mut doc = crate::open::start(store, src.clone(), name, Some(came), policy);
         doc.ready(crate::open::finish(&src, &NoProgress)).unwrap();
         doc
     }
@@ -419,9 +416,16 @@ pub(crate) mod tests {
     }
 
     fn turn(doc: &mut Document, index: usize) {
-        let ids = vec![doc.page(index).unwrap()];
-        let by = Rotation::R90;
-        doc.apply(Edit::RotatePages { ids, by }, "rot").unwrap();
+        let page = doc.page(index).unwrap();
+        doc.commit_ops(vec![fx::rotate(&[page], Turn::Quarter)], "rot")
+            .unwrap();
+    }
+
+    /// Annotation `id` deleted.
+    fn delete(id: crate::annot::AnnotId) -> Op {
+        Op::DeleteAnnotations {
+            annots: vec![AnnotRef::Id(id)],
+        }
     }
 
     /// A sidecar holds what the edits changed, as sections after its file,
@@ -467,16 +471,19 @@ pub(crate) mod tests {
             recovered.file().map(|(f, s)| (&**f, *s)),
             Some((pdf.as_path(), rec.base))
         );
-        let primary = recovered.source(recovered.primary()).unwrap();
-        assert_eq!(primary.name, pdf);
-        assert_eq!(**primary.src.bytes(), *with_sections(&pdf, &rec));
-        let origin = match primary.src.blob().kind() {
+        let primary = recovered.primary();
+        assert_eq!(
+            **recovered.name(),
+            *pdf.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(**primary.bytes(), *with_sections(&pdf, &rec));
+        let origin = match primary.blob().kind() {
             BlobKind::Pdf { origin, .. } => origin.clone(),
             BlobKind::Attachment => unreachable!("a PDF"),
         };
         assert_eq!(origin, Origin::Memory(MemoryKind::Recovered));
-        assert_eq!(primary.src.geom(1).rotate, Rotation::R90);
-        assert_eq!(primary.src.geom(0).rotate, Rotation::R0);
+        assert_eq!(primary.geom(1).rotate, Rotation::R90);
+        assert_eq!(primary.geom(0).rotate, Rotation::R0);
         assert_eq!(
             recovered.geom(recovered.page(1).unwrap()).rotate,
             Rotation::R90
@@ -630,13 +637,13 @@ pub(crate) mod tests {
     #[test]
     fn sidecar_carries_ocr_layers() {
         use crate::annot::Box2;
-        use crate::text_layer::{OcrWord, TextLayer};
+        use crate::text_layer::OcrWord;
         let dir = scratch();
         let pdf = dir.join("doc.pdf");
         two_page_pdf(&pdf);
         let mut model = crate::open::file(&pdf, None).unwrap().doc;
         let p1 = model.page(1).unwrap();
-        let layer = TextLayer::from_engine(
+        let layer = crate::text_layer::from_engine(
             vec![OcrWord {
                 text: "Hello".into(),
                 rect: Box2 {
@@ -651,12 +658,7 @@ pub(crate) mod tests {
             "test",
         );
         model
-            .apply(
-                Edit::SetTextLayers {
-                    layers: vec![(p1, Arc::new(layer))],
-                },
-                "ocr",
-            )
+            .commit_ops(fx::ocr([(p1, Arc::new(layer))]), "ocr")
             .unwrap();
         sidecar_of(&model);
         let rec = find(&pdf).expect("sidecar found");
@@ -700,9 +702,10 @@ pub(crate) mod tests {
         let mut model = crate::open::file(&pdf, None).unwrap().doc;
         assert!(model.state().form().xfa.present);
         let second = model.page(1).unwrap();
-        model
-            .apply(Edit::DeletePages { ids: vec![second] }, "delete")
-            .unwrap();
+        let delete = Op::DeletePages {
+            pages: fx::ids(&[second]),
+        };
+        model.commit_ops(vec![delete], "delete").unwrap();
         sidecar_of(&model);
         let sidecar = std::fs::read(sidecar_path(&pdf)).unwrap();
         assert!(!holds(&sidecar, b"xfa-template"));
@@ -850,14 +853,8 @@ pub(crate) mod tests {
         let pdf = dir.join("header.pdf");
         std::fs::write(&pdf, &table).unwrap();
         let mut model = crate::open::file(&pdf, Some(USER)).unwrap().doc;
-        let hf = crate::stamps::HeaderFooter {
-            texts: ["HEADERSECRET <<1>>", "", "", "", "", ""].map(String::from),
-            ..Default::default()
-        };
-        let set = Edit::SetHeaderFooter {
-            header_footer: Some(hf),
-        };
-        model.apply(set, "header").unwrap();
+        let set = fx::set_header(fx::header("HEADERSECRET <<1>>"), None);
+        model.commit_ops(vec![set], "header").unwrap();
         sidecar_of(&model);
         assert_eq!(kind_of(&pdf), "full");
         let sidecar = std::fs::read(sidecar_path(&pdf)).unwrap();
@@ -901,9 +898,7 @@ pub(crate) mod tests {
         assert_eq!(report.strategy, Some(StrategyKind::Append));
         let page = model.page(0).unwrap();
         let id = model.state().marks_on(page).next().unwrap().id;
-        model
-            .apply(Edit::AnnotDelete { page, id }, "delete")
-            .unwrap();
+        model.commit_ops(vec![delete(id)], "delete").unwrap();
         fn removes_nothing(path: &mut PathEffects) {
             path.flags.remove(Flags::REMOVES | Flags::REPLACES_TEXT);
             path.removed.clear();
@@ -912,15 +907,10 @@ pub(crate) mod tests {
         assert!(find(&pdf).unwrap().pending.flags.removes);
 
         model.undo().unwrap();
-        let labels = Edit::SetPageLabels {
-            ranges: vec![crate::labels::LabelSpec {
-                start: page,
-                style: crate::labels::Style::LowerRoman,
-                prefix: String::new(),
-                first: 1,
-            }],
+        let labels = Op::SetPageLabels {
+            ranges: Some(vec![fx::label(page, LabelStyle::LowerRoman, "", 1)]),
         };
-        model.apply(labels, "labels").unwrap();
+        model.commit_ops(vec![labels], "labels").unwrap();
         fn comments_alone(path: &mut PathEffects) {
             path.sig = SigClass::ANNOT;
         }
@@ -1012,8 +1002,7 @@ pub(crate) mod tests {
         // The comment deleted, and the sidecar of that restored.
         let page = recovered.page(0).unwrap();
         let id = recovered.state().marks_on(page).next().unwrap().id;
-        let delete = Edit::AnnotDelete { page, id };
-        recovered.apply(delete, "delete").unwrap();
+        recovered.commit_ops(vec![delete(id)], "delete").unwrap();
         sidecar_of(&recovered);
         let rec = find(&pdf).unwrap();
         assert!(rec.pending.flags.removes);

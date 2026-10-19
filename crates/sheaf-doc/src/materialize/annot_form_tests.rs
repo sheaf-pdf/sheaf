@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, dictionary};
-use sheaf_core::Rotation;
+use sheaf_edit::{Rotation, Turn};
 
 use super::graph::Graph;
 use super::tests::{
@@ -20,10 +20,11 @@ use super::*;
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt};
 use crate::forms::fixture::{Form, every_mark_kind, row};
 use crate::labels::{LabelSpec, Style};
-use crate::model::{Document, Edit, PageId};
+use crate::model::{Document, PageId};
 use crate::prim::{Key, Val};
 use crate::serialize::fixture::holds;
 use crate::store::Src;
+use crate::tx::fixture as fx;
 
 /// A one-page form whose page holds `marks` as a save writes them, each
 /// holding its stamp's page or attachment's file.
@@ -97,16 +98,8 @@ fn bx(x: f32, y: f32, w: f32, h: f32) -> Box2 {
 fn every_kind_of_mark_reopens_as_written() {
     let mut d = open(&bytes(&file("A", 1, false)), None);
     let other = marked(&every_mark_kind());
-    let s = add(&mut d, &other, "marks.pdf");
-    let carried = d.source(s).unwrap().src.annots().marks();
-    let edit = Edit::InsertPages {
-        source: s,
-        range: 0..1,
-        before: None,
-        outline: None,
-        annots: carried.into_iter().collect(),
-    };
-    d.apply(edit, "insert").unwrap();
+    let s = add(&d, &other, "marks.pdf");
+    insert(&mut d, &s, 0);
     let want = marks(&d, 1);
     assert_eq!(want.len(), every_mark_kind().len());
     let out = rewrite(&d, Profile::default());
@@ -140,12 +133,10 @@ fn a_mark_as_read_is_the_file_s_object_and_an_edited_one_keeps_its_number() {
             "{at:?}"
         );
     }
-    let page = d.page(0).unwrap();
     let mut note = marks(&d, 0).remove(1);
     note.contents = "Edited".into();
     let edited = note.name();
-    d.apply(Edit::AnnotUpdate { page, annot: note }, "edit")
-        .unwrap();
+    d.commit_ops(vec![fx::update(&note)], "edit").unwrap();
     let out = rewrite(&d, Profile::default());
     let now = lazy(&out.bytes, None);
     let (at, _) = (read.iter())
@@ -181,14 +172,8 @@ fn a_replacement_saves_with_no_sheaf_part_and_reopens_as_one_mark() {
     );
     let mut d = open(&bytes(&file("A", 1, false)), None);
     let page = d.page(0).unwrap();
-    d.apply(
-        Edit::AnnotAdd {
-            page,
-            annot: replace.clone(),
-        },
-        "replace",
-    )
-    .unwrap();
+    d.commit_ops(vec![fx::add(page, &replace)], "replace")
+        .unwrap();
     let out = rewrite(&d, Profile::default());
     let list = annots_on(&source_of(&out), 0);
     assert_eq!(list.len(), 2);
@@ -227,14 +212,7 @@ fn a_replacement_saves_with_no_sheaf_part_and_reopens_as_one_mark() {
     let mut d = d;
     let mut edited = marks(&d, 0).remove(0);
     edited.contents = "newer words".into();
-    d.apply(
-        Edit::AnnotUpdate {
-            page,
-            annot: edited,
-        },
-        "edit",
-    )
-    .unwrap();
+    d.commit_ops(vec![fx::update(&edited)], "edit").unwrap();
     let out = rewrite(&d, Profile::default());
     assert!(!holds(&out.bytes, crate::annot::PART.as_bytes()));
     let back = open(&out.bytes, None);
@@ -307,17 +285,9 @@ fn replied() -> Vec<u8> {
 fn a_reply_follows_its_mark_given_a_fresh_id() {
     let mut d = open(&bytes(&file("A", 1, false)), None);
     let other = replied();
-    let s = add(&mut d, &other, "replied.pdf");
+    let s = add(&d, &other, "replied.pdf");
     for _ in 0..2 {
-        let carried = d.source(s).unwrap().src.annots().marks();
-        let edit = Edit::InsertPages {
-            source: s,
-            range: 0..1,
-            before: None,
-            outline: None,
-            annots: carried.into_iter().collect(),
-        };
-        d.apply(edit, "insert").unwrap();
+        insert(&mut d, &s, 0);
     }
     let (first, second) = (marks(&d, 1), marks(&d, 2));
     assert_ne!(first[0].id, second[0].id, "a fresh id");
@@ -401,8 +371,7 @@ fn pop_ups_go_with_their_comments_and_the_rest_stays() {
         );
     }
 
-    d.apply(Edit::DuplicatePages { ids: vec![first] }, "dup")
-        .unwrap();
+    d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
     let out = rewrite(&d, Profile::default());
     let now = source_of(&out);
     let copy = annots_on(&now, 1);
@@ -434,14 +403,8 @@ fn pop_ups_go_with_their_comments_and_the_rest_stays() {
         assert_eq!(d.get(b"P").unwrap(), &Object::Reference(copy_page));
     }
 
-    d.apply(
-        Edit::CommentsDelete {
-            page: first,
-            names: vec!["c1".into()],
-        },
-        "delete",
-    )
-    .unwrap();
+    d.commit_ops(vec![fx::delete_named(first, &["c1"])], "delete")
+        .unwrap();
     let out = rewrite(&d, Profile::default());
     let left = annots_on(&source_of(&out), 0);
     let subtypes: Vec<Option<&[u8]>> = left.iter().map(|(_, d)| name(d, b"Subtype")).collect();
@@ -467,11 +430,8 @@ fn a_connector_leads_to_the_next_of_its_group() {
             },
         )
     };
-    d.apply(
-        Edit::ConnectorAdd {
-            a: (p0, end(1, 500.0)),
-            b: (p1, end(2, 300.0)),
-        },
+    d.commit_ops(
+        vec![fx::connect((p0, &end(1, 500.0)), (p1, &end(2, 300.0)))],
         "connect",
     )
     .unwrap();
@@ -511,8 +471,8 @@ fn tagged_form() -> Vec<u8> {
 fn a_tagged_page_inserted_into_a_tagged_file_has_no_struct_parent_on_its_annotations() {
     let tagged = tagged_form();
     let mut d = open(&tagged, None);
-    let s = add(&mut d, &tagged, "other.pdf");
-    insert(&mut d, s, 0);
+    let s = add(&d, &tagged, "other.pdf");
+    insert(&mut d, &s, 0);
     let out = rewrite(&d, Profile::default());
     let now = source_of(&out);
     let own = annots_on(&now, 0);
@@ -565,8 +525,7 @@ fn a_duplicated_merged_field_is_one_object_a_copy() {
     f.fill(field, "Ada");
     let mut d = open(&f.bytes(), None);
     let first = d.page(0).unwrap();
-    d.apply(Edit::DuplicatePages { ids: vec![first] }, "dup")
-        .unwrap();
+    d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
     let out = rewrite(&d, Profile::default());
     let now = source_of(&out);
     let pages: Vec<ObjectId> = now.page_ids().collect();
@@ -617,8 +576,8 @@ fn one_form_inserted_twice_is_two_instances_sharing_nothing_of_their_own() {
     let form = f.bytes();
     let mut d = open(&bytes(&file("A", 1, false)), None);
     for name in ["f1.pdf", "f2.pdf"] {
-        let s = add(&mut d, &form, name);
-        insert(&mut d, s, 0);
+        let s = add(&d, &form, name);
+        insert(&mut d, &s, 0);
     }
     let out = rewrite(&d, Profile::default());
     let report = crate::forms::check(&out.bytes, None).unwrap();
@@ -694,10 +653,10 @@ fn reached_in(pdf: &Pdf, obj: &Object) -> BTreeSet<ObjectId> {
 
 /// A field whose widgets, its `/Kids`, were all on a deleted page goes,
 /// its tooltip with it, and so does the parent it leaves with no fields,
-/// as `keep_only` takes such fields out of a file (bug 14), though the
-/// state keeps the nodes until slice 11's cascade. A field no page ever
-/// showed stays, and so does the form; extracting the other page leaves
-/// the same.
+/// as `keep_only` takes such fields out of a file (bug 14) and the
+/// `widget.field` cascade out of the state. A field no page ever showed
+/// stays, and so does the form; extracting the other page leaves the
+/// same.
 #[test]
 fn a_field_left_with_no_widgets_goes() {
     let mut f = Form::new(2);
@@ -724,8 +683,12 @@ fn a_field_left_with_no_widgets_goes() {
     let first = d.page(0).unwrap();
     let extracted = crate::save::extract_bytes(&d.snapshot(), &[first]).unwrap();
     let second = d.page(1).unwrap();
-    d.apply(Edit::DeletePages { ids: vec![second] }, "delete")
-        .unwrap();
+    d.commit_ops(vec![fx::delete(&[second])], "delete").unwrap();
+    let st = d.state();
+    let held: BTreeSet<String> = (st.fields())
+        .filter_map(|(id, _)| st.full_name(id))
+        .collect();
+    assert_eq!(held, BTreeSet::from(["hidden", "kept"].map(String::from)));
     let out = rewrite(&d, Profile::default());
     for (bytes, what) in [(&out.bytes, "deleted"), (&extracted, "extracted")] {
         assert!(!holds(bytes, b"SHEAFGONE"), "{what}");
@@ -765,8 +728,7 @@ fn a_node_whose_kids_another_holds_stays() {
     let same = rewrite(&d, Profile::default());
     assert_eq!(names(&same.bytes), BTreeSet::from(all));
     let second = d.page(1).unwrap();
-    d.apply(Edit::DeletePages { ids: vec![second] }, "delete")
-        .unwrap();
+    d.commit_ops(vec![fx::delete(&[second])], "delete").unwrap();
     let out = rewrite(&d, Profile::default());
     let left = ["real", "real.kept", "stray"].map(String::from);
     assert_eq!(names(&out.bytes), BTreeSet::from(left));
@@ -836,21 +798,15 @@ fn owned_keys_survive_set_save_undo_save_reopen() {
                     prefix: "P-".into(),
                     first: 1,
                 }];
-                d.apply(Edit::SetPageLabels { ranges }, "labels").unwrap();
+                d.commit_ops(vec![fx::labels(&ranges)], "labels").unwrap();
             }),
         ),
         (
             "outline root",
             Box::new(|d: &mut Document| {
                 let page = d.page(2).unwrap();
-                d.apply(
-                    Edit::OutlineInsert {
-                        parent: None,
-                        after: None,
-                        title: "Zero".into(),
-                        target: Some(page),
-                        view: None,
-                    },
+                d.commit_ops(
+                    vec![fx::bookmark(None, None, "Zero", Some(page))],
                     "bookmark",
                 )
                 .unwrap();
@@ -862,8 +818,7 @@ fn owned_keys_survive_set_save_undo_save_reopen() {
                 let mut form = crate::model::FormDoc::clone(d.state().form());
                 let order: Vec<_> = form.calc_order.iter().rev().copied().collect();
                 form.calc_order = order.into();
-                let edit = Edit::SetPageLabels { ranges: Vec::new() };
-                d.put_for_test(edit, Key::Form, Some(Val::Form(Arc::new(form))), "order");
+                d.put_for_test(Key::Form, Some(Val::Form(Arc::new(form))), "order");
             }),
         ),
     ];
@@ -921,8 +876,7 @@ fn save_policy_drops_the_rights_and_a_changed_form_s_xfa() {
     assert_eq!(&*out.record.transforms, p.transforms.as_slice());
 
     let second = d.page(1).unwrap();
-    d.apply(Edit::DeletePages { ids: vec![second] }, "delete")
-        .unwrap();
+    d.commit_ops(vec![fx::delete(&[second])], "delete").unwrap();
     let input = SaveInput::detached(&d.snapshot());
     let p = plan(&input, &tgt);
     assert_eq!(
@@ -958,25 +912,30 @@ fn the_plan_asks_before_it_rewrites() {
     f.sign(sig);
     std::fs::write(&path, f.bytes()).unwrap();
     let store = crate::store::Store::new();
-    let (info, stamp) = crate::model::SourceInfo::read(&store, &path, None).unwrap();
+    let (src, stamp) = store.read_file(&path, None).unwrap();
+    let came = Came::Read {
+        path: path.as_path().into(),
+        stamp,
+    };
     let mut d = Document::new(
         store,
-        info,
-        Some(Came::Read(stamp)),
+        src,
+        "doc.pdf".into(),
+        Some(came),
         &[],
         Box::new(crate::history::FixedCount(10)),
     );
     let page = d.page(0).unwrap();
-    d.apply(
-        Edit::AnnotAdd {
+    d.commit_ops(
+        vec![fx::add(
             page,
-            annot: mark(
+            &mark(
                 1,
                 AnnotKind::Note {
                     pos: Pt { x: 9.0, y: 9.0 },
                 },
             ),
-        },
+        )],
         "note",
     )
     .unwrap();
@@ -988,11 +947,8 @@ fn the_plan_asks_before_it_rewrites() {
     assert_eq!(p.strategy, Strategy::Append { onto: Onto::Saved });
     assert_eq!(p.asks, []);
     d.abandon_save(v);
-    let turn = Edit::RotatePages {
-        ids: vec![page],
-        by: Rotation::R90,
-    };
-    d.apply(turn, "turn").unwrap();
+    let turn = fx::rotate(&[page], Turn::Quarter);
+    d.commit_ops(vec![turn], "turn").unwrap();
     let v = d.current_version();
     let input = d.save_input(v).unwrap();
     let p = plan(&input, &same);
@@ -1060,8 +1016,7 @@ fn the_plan_asks_before_it_rewrites() {
     let mut d = open(&f.bytes(), None);
     assert_eq!(d.state().form().xfa.values, 1);
     let second = d.page(1).unwrap();
-    d.apply(Edit::DeletePages { ids: vec![second] }, "delete")
-        .unwrap();
+    d.commit_ops(vec![fx::delete(&[second])], "delete").unwrap();
     let p = plan(
         &SaveInput::detached(&d.snapshot()),
         &target(Profile::default()),
@@ -1109,8 +1064,7 @@ fn a_copy_doesnt_bring_its_file_s_catalog_or_form() {
 
     let mut d = open(&before, None);
     let first = d.page(0).unwrap();
-    d.apply(Edit::DuplicatePages { ids: vec![first] }, "dup")
-        .unwrap();
+    d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
     let out = rewrite(&d, Profile::default());
     assert_eq!(catalogs(&out), 1);
     check(&out);
@@ -1130,9 +1084,9 @@ fn a_copy_doesnt_bring_its_file_s_catalog_or_form() {
     assert!(parrent.into_iter().all(|p| p == form));
 
     let mut d = open(&bytes(&file("A", 1, false)), None);
-    let other = add(&mut d, &before, "signed.pdf");
-    insert(&mut d, other, 0);
-    insert(&mut d, other, 0);
+    let other = add(&d, &before, "signed.pdf");
+    insert(&mut d, &other, 0);
+    insert(&mut d, &other, 0);
     let out = rewrite(&d, Profile::default());
     assert_eq!(catalogs(&out), 1);
     check(&out);
@@ -1246,8 +1200,7 @@ fn a_copy_brings_no_widget_its_page_doesnt_show() {
     assert_eq!(widgets(&before), 2);
     let mut d = open(&before, None);
     let first = d.page(0).unwrap();
-    d.apply(Edit::DuplicatePages { ids: vec![first] }, "dup")
-        .unwrap();
+    d.commit_ops(vec![fx::duplicate(&[first])], "dup").unwrap();
     let out = rewrite(&d, Profile::default());
     assert_eq!(widgets(&out.bytes), 3, "the two, and the shown one's copy");
 }
@@ -1405,14 +1358,11 @@ fn a_form_the_state_doesnt_model_is_kept_as_the_file_has_it() {
     let bytes = f.bytes();
     let store = crate::store::Store::new();
     let kind = crate::store::BlobKind::file(std::path::Path::new("f.pdf"), None);
-    let primary = crate::model::SourceInfo {
-        src: store.open(bytes.clone().into(), kind).unwrap(),
-        name: "f.pdf".into(),
-        derived: None,
-    };
+    let primary = store.open(bytes.clone().into(), kind).unwrap();
     let d = Document::new(
         store,
         primary,
+        "f.pdf".into(),
         None,
         &[],
         Box::new(crate::history::FixedCount(10)),

@@ -11,13 +11,15 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
-use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::materialize::{
     Profile, SaveInput, SavePlan, SaveTarget, Strategy, Why, materialize,
 };
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::{Document, Edit, FixedCount, SourceInfo, Store};
+use sheaf_doc::tx::fixture::{duplicate, insert};
+use sheaf_doc::{Document, FixedCount, Src, Store};
+use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
@@ -69,13 +71,8 @@ fn file(media: [i64; 4], crop: [i64; 4], marks: &[[i64; 2]]) -> Vec<u8> {
 }
 
 /// `bytes`, read into `store` as `name`.
-fn info(store: &Store, bytes: &[u8], name: &str) -> SourceInfo {
-    let src = (store.open(Arc::from(bytes), BlobKind::file(Path::new(name), None))).unwrap();
-    SourceInfo {
-        src,
-        name: name.into(),
-        derived: None,
-    }
+fn source(store: &Store, bytes: &[u8], name: &str) -> Src {
+    (store.open(Arc::from(bytes), BlobKind::file(Path::new(name), None))).unwrap()
 }
 
 /// Page `i` of `engine`: its size as shown, and a render 150 pixels wide.
@@ -98,21 +95,20 @@ fn pages_under_a_turned_cropped_node_keep_how_they_show() {
     );
     let other = file([0, 0, 595, 842], [50, 100, 500, 700], &[[300, 200]]);
     let store = Store::new();
-    let info_a = info(&store, &primary, "a.pdf");
-    let mut doc = Document::new(store, info_a, None, &[], Box::new(FixedCount(10)));
-    let info_b = info(doc.store(), &other, "b.pdf");
-    let source = doc.add_source(info_b);
+    let a = source(&store, &primary, "a.pdf");
+    let mut doc = Document::new(
+        store,
+        a,
+        "a.pdf".into(),
+        None,
+        &[],
+        Box::new(FixedCount(10)),
+    );
+    let b = source(doc.store(), &other, "b.pdf");
     let second = doc.page(1).unwrap();
-    let insert = Edit::InsertPages {
-        source,
-        range: 0..1,
-        before: Some(second),
-        outline: None,
-        annots: Vec::new(),
-    };
-    doc.apply(insert, "insert").unwrap();
-    doc.apply(Edit::DuplicatePages { ids: vec![second] }, "dup")
+    doc.commit_ops(vec![insert(&b, [0], "b.pdf", Some(second))], "insert")
         .unwrap();
+    doc.commit_ops(vec![duplicate(&[second])], "dup").unwrap();
     let plan = SavePlan {
         strategy: Strategy::Rewrite {
             why: vec![Why::OtherTarget, Why::NoSaveRecord],

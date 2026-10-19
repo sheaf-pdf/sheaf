@@ -13,7 +13,7 @@ use lopdf::xref::XrefType;
 use lopdf::{
     ByteSource, Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary,
 };
-use sheaf_core::Rotation;
+use sheaf_edit::{Rotation, Turn};
 
 use super::append::append;
 use super::emit::PdfVersion;
@@ -23,8 +23,9 @@ use super::removal::Mode;
 use super::removal_tests::{layer, opened, rewrite_answers, said, scratch};
 use super::{AskAnswers, SaveStop, StrategyKind, save, save_appended, save_rewritten};
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2};
-use crate::model::{Document, Edit, PageId};
+use crate::model::{Document, PageId};
 use crate::source::Limits;
+use crate::tx::fixture as fx;
 
 /// A box as written.
 fn rect(r: [i64; 4]) -> Object {
@@ -168,8 +169,7 @@ fn recolor(doc: &mut Document, color: [u8; 3]) -> AnnotId {
     let mut annot = doc.state().marks_on(page).next().unwrap().clone();
     annot.color = color;
     let id = annot.id;
-    doc.apply(Edit::AnnotUpdate { page, annot }, "color")
-        .unwrap();
+    doc.commit_ops(vec![fx::update(&annot)], "color").unwrap();
     id
 }
 
@@ -194,11 +194,8 @@ fn a_mark_s_color_change_writes_the_mark_alone() {
         &file(&[3], XrefType::CrossReferenceTable, "1.7"),
     );
     let page = doc.page(0).unwrap();
-    let add = Edit::AnnotAdd {
-        page,
-        annot: square(1),
-    };
-    doc.apply(add, "add").unwrap();
+    let add = fx::add(page, &square(1));
+    doc.commit_ops(vec![add], "add").unwrap();
     save_rewritten(&mut doc, &path).unwrap();
     let rewritten = doc.saved_record().unwrap().clone();
     assert_eq!(rewritten.strategy, StrategyKind::Rewrite);
@@ -256,21 +253,12 @@ fn both_kinds_of_cross_reference_reopen_after_an_append() {
     ] {
         let (path, mut doc) = opened(&dir, name, &file(&[2, 3], kind, "1.7"));
         let pages: Vec<PageId> = (0..5).map(|i| doc.page(i).unwrap()).collect();
-        let add = Edit::AnnotAdd {
-            page: pages[0],
-            annot: square(1),
-        };
-        doc.apply(add, "add").unwrap();
-        let turn = Edit::RotatePages {
-            ids: vec![pages[3]],
-            by: Rotation::R90,
-        };
-        doc.apply(turn, "turn").unwrap();
-        let first = Edit::MovePages {
-            ids: vec![pages[4]],
-            before: Some(pages[0]),
-        };
-        doc.apply(first, "move").unwrap();
+        let add = fx::add(pages[0], &square(1));
+        doc.commit_ops(vec![add], "add").unwrap();
+        let turn = fx::rotate(&[pages[3]], Turn::Quarter);
+        doc.commit_ops(vec![turn], "turn").unwrap();
+        let first = fx::move_pages(&[pages[4]], Some(pages[0]));
+        doc.commit_ops(vec![first], "move").unwrap();
         let (base, section) = appended_in_place(&mut doc).unwrap();
         assert!(!section.is_empty());
         let bytes = std::fs::read(&path).unwrap();
@@ -309,11 +297,8 @@ fn a_page_moved_across_nodes_carries_its_parent_and_inherited_keys() {
     let pages: Vec<PageId> = (0..4).map(|i| doc.page(i).unwrap()).collect();
     let was = doc.geom(pages[0]);
     assert_eq!(was.rotate, Rotation::R90);
-    let last = Edit::MovePages {
-        ids: vec![pages[0]],
-        before: None,
-    };
-    doc.apply(last, "move").unwrap();
+    let last = fx::move_pages(&[pages[0]], None);
+    doc.commit_ops(vec![last], "move").unwrap();
     let (base, section) = appended_in_place(&mut doc).unwrap();
     let wrote = written(base.len(), &section, &path);
     let pdf = Pdf::load(&path).unwrap();
@@ -340,11 +325,8 @@ fn a_page_moved_across_nodes_carries_its_parent_and_inherited_keys() {
     // A reorder within the second node: that node alone.
     let mut doc = back;
     let pages: Vec<PageId> = (0..4).map(|i| doc.page(i).unwrap()).collect();
-    let last = Edit::MovePages {
-        ids: vec![pages[2]],
-        before: None,
-    };
-    doc.apply(last, "move").unwrap();
+    let last = fx::move_pages(&[pages[2]], None);
+    doc.commit_ops(vec![last], "move").unwrap();
     let (base, section) = appended_in_place(&mut doc).unwrap();
     assert_eq!(
         written(base.len(), &section, &path),
@@ -365,7 +347,7 @@ fn a_split_node_keeps_its_key_through_another_append() {
         &file(&[128, 2], XrefType::CrossReferenceStream, "1.7"),
     );
     let first = doc.page(5).unwrap();
-    doc.apply(Edit::DuplicatePages { ids: vec![first] }, "duplicate")
+    doc.commit_ops(vec![fx::duplicate(&[first])], "duplicate")
         .unwrap();
     let opened = doc.saved_record().unwrap().clone();
     appended_in_place(&mut doc).unwrap();
@@ -386,11 +368,8 @@ fn a_split_node_keeps_its_key_through_another_append() {
 
     // Turn the last page of the node split off.
     let last = doc.page(128).unwrap();
-    let turn = Edit::RotatePages {
-        ids: vec![last],
-        by: Rotation::R180,
-    };
-    doc.apply(turn, "turn").unwrap();
+    let turn = fx::rotate(&[last], Turn::Half);
+    doc.commit_ops(vec![turn], "turn").unwrap();
     let (base, section) = appended_in_place(&mut doc).unwrap();
     let again = doc.saved_record().unwrap().clone();
     assert_eq!(nodes(&again.map), now);
@@ -415,11 +394,8 @@ fn new_numbers_start_past_the_size_and_the_cross_reference_stream() {
     let (size, stream) = (was.xref().size, was.xref().max_stream.unwrap());
     assert!(stream + 1 >= size, "lopdf numbers its stream last");
     let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
-    let add = Edit::AnnotAdd {
-        page: doc.page(0).unwrap(),
-        annot: square(1),
-    };
-    doc.apply(add, "add").unwrap();
+    let add = fx::add(doc.page(0).unwrap(), &square(1));
+    doc.commit_ops(vec![add], "add").unwrap();
     let (base, section) = appended_in_place(&mut doc).unwrap();
     let wrote = written(base.len(), &section, &path);
     let fresh: Vec<u32> = wrote.iter().map(|id| id.0).filter(|&n| n >= size).collect();
@@ -446,11 +422,8 @@ fn the_same_section_twice_is_the_same_bytes() {
         let mut doc = crate::open::file(&path, Some(USER)).unwrap().doc;
         let mut note = square(1);
         note.contents = "a secret square".into();
-        let add = Edit::AnnotAdd {
-            page: doc.page(0).unwrap(),
-            annot: note,
-        };
-        doc.apply(add, "add").unwrap();
+        let add = fx::add(doc.page(0).unwrap(), &note);
+        doc.commit_ops(vec![add], "add").unwrap();
         let v = doc.current_version();
         let input = doc.save_input(v).unwrap();
         let plan = SavePlan {
@@ -506,11 +479,8 @@ fn a_version_bump_writes_the_catalog_with_its_version() {
     );
     let catalog = doc.saved_record().unwrap().map.keys[&ObjKey::Catalog];
     let page = doc.page(0).unwrap();
-    let add = Edit::AnnotAdd {
-        page,
-        annot: square(1),
-    };
-    doc.apply(add, "add").unwrap();
+    let add = fx::add(page, &square(1));
+    doc.commit_ops(vec![add], "add").unwrap();
     let (base, section) = appended_in_place(&mut doc).unwrap();
     assert!(!written(base.len(), &section, &path).contains(&catalog));
     assert_eq!(
@@ -518,10 +488,8 @@ fn a_version_bump_writes_the_catalog_with_its_version() {
         PdfVersion::new(1, 1)
     );
 
-    let ocr = Edit::SetTextLayers {
-        layers: vec![(page, layer("words"))],
-    };
-    doc.apply(ocr, "ocr").unwrap();
+    let ocr = fx::ocr([(page, layer("words"))]);
+    doc.commit_ops(ocr, "ocr").unwrap();
     let (base, section) = appended_in_place(&mut doc).unwrap();
     assert!(written(base.len(), &section, &path).contains(&catalog));
     let pdf = Pdf::load(&path).unwrap();
@@ -552,8 +520,7 @@ fn what_a_rewrite_pruned_stops_an_append() {
         &file(&[3], XrefType::CrossReferenceTable, "1.7"),
     );
     let gone = doc.page(1).unwrap();
-    doc.apply(Edit::DeletePages { ids: vec![gone] }, "delete")
-        .unwrap();
+    doc.commit_ops(vec![fx::delete(&[gone])], "delete").unwrap();
     save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
     let before = std::fs::read(&path).unwrap();
     doc.undo().unwrap();
@@ -576,7 +543,7 @@ fn an_insert_leaves_the_catalog_and_keeps_the_nodes_keys() {
     );
     let catalog = doc.saved_record().unwrap().map.keys[&ObjKey::Catalog];
     let second = doc.page(1).unwrap();
-    doc.apply(Edit::DuplicatePages { ids: vec![second] }, "duplicate")
+    doc.commit_ops(vec![fx::duplicate(&[second])], "duplicate")
         .unwrap();
     let (base, section) = appended_in_place(&mut doc).unwrap();
     let wrote = written(base.len(), &section, &path);
@@ -652,21 +619,11 @@ fn a_dangling_reference_stays_dangling_past_the_new_numbers() {
     let gone = [((size, 0), false), ((size + 4, 0), false)];
     let other = file(&[3], XrefType::CrossReferenceTable, "1.7");
     let edit = |doc: &mut Document| {
-        let page = doc.page(0).unwrap();
-        let add = Edit::AnnotAdd {
-            page,
-            annot: square(1),
-        };
-        doc.apply(add, "add").unwrap();
-        let source = super::tests::add(doc, &other, "other.pdf");
-        let insert = Edit::InsertPages {
-            source,
-            range: 0..3,
-            before: None,
-            outline: None,
-            annots: Vec::new(),
-        };
-        doc.apply(insert, "insert").unwrap();
+        let add = fx::add(doc.page(0).unwrap(), &square(1));
+        doc.commit_ops(vec![add], "add").unwrap();
+        let other = super::tests::add(doc, &other, "other.pdf");
+        let insert = fx::insert(&other.src, 0..3, &other.name, None);
+        doc.commit_ops(vec![insert], "insert").unwrap();
     };
     let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
     let page = Pdf::load_mem(&bytes).unwrap().get_pages()[&1];
@@ -729,11 +686,8 @@ fn numbers_named_near_the_last_refuse_the_append() {
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     let (_, mut doc) = opened(&dir, "a.pdf", &bytes);
-    let add = Edit::AnnotAdd {
-        page: doc.page(0).unwrap(),
-        annot: square(1),
-    };
-    doc.apply(add, "add").unwrap();
+    let add = fx::add(doc.page(0).unwrap(), &square(1));
+    doc.commit_ops(vec![add], "add").unwrap();
     let v = doc.current_version();
     let input = doc.save_input(v).unwrap();
     let plan = SavePlan {

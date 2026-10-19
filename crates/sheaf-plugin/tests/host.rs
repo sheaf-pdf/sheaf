@@ -9,18 +9,19 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::executor::block_on;
-use sheaf_core::Rotation;
 use sheaf_doc::geom::Geom;
 use sheaf_doc::store::BlobKind;
+use sheaf_doc::tx::fixture;
 use sheaf_doc::{
-    AnnotKind, Box2, DestView, Document, Edit, FixedCount, SourceId, SourceInfo, Store,
+    Actor, Box2, Commit, CommitOpts, DestView, Document, EditError, FixedCount, SourceId, Store,
 };
+use sheaf_edit::{MarkKind, Op, PageRef, PageSel, Rotation, Sibling, Turn};
 use sheaf_plugin::ui::{
     BuiltinPanel, FieldAnswer, FieldKind, FieldValue, Form, PanelRow, ShowPanel, Ui,
 };
 use sheaf_plugin::{
-    Call, CallContext, CallOutput, DocContext, DocEvent, Grants, Limits, LoadOptions, Manifest,
-    Plugin, PluginError, Runtime, Status, TextMatch, TextSource,
+    Call, CallContext, CallOutput, DocContext, DocEvent, EditBatch, Grants, Limits, LoadOptions,
+    Manifest, Plugin, PluginError, Runtime, Status, TextMatch, TextSource,
 };
 
 fn workspace_root() -> PathBuf {
@@ -149,11 +150,9 @@ impl TextSource for FakeText {
 
 fn doc(pages: u32) -> Document {
     let store = Store::new();
-    let primary = SourceInfo {
-        name: "return.pdf".into(),
-        ..SourceInfo::blank(&store, pages)
-    };
-    Document::new(store, primary, None, &[], Box::new(FixedCount(50)))
+    let primary = sheaf_doc::store::blank(&store, pages);
+    let policy = Box::new(FixedCount(50));
+    Document::new(store, primary, "return.pdf".into(), None, &[], policy)
 }
 
 /// The top-level bookmarks, in order.
@@ -174,12 +173,9 @@ fn turned_doc() -> Document {
     f.dict(first).set("CropBox", crop);
     let store = Store::new();
     let kind = BlobKind::file(Path::new("turned.pdf"), None);
-    let primary = SourceInfo {
-        src: store.open(f.bytes().into(), kind).unwrap(),
-        name: "turned.pdf".into(),
-        derived: None,
-    };
-    Document::new(store, primary, None, &[], Box::new(FixedCount(50)))
+    let primary = store.open(f.bytes().into(), kind).unwrap();
+    let policy = Box::new(FixedCount(50));
+    Document::new(store, primary, "turned.pdf".into(), None, &[], policy)
 }
 
 /// Page `i`'s frame in the plugin API: its source page as the file shows
@@ -216,6 +212,17 @@ fn run(
     block_on(p.run_command(cmd, args.map(String::from), c)).expect("reply")
 }
 
+/// Batch `b` as one version of the plugin's, as the app commits it.
+fn commit(d: &mut Document, b: &EditBatch) -> Result<Commit, EditError> {
+    let plugin = Actor::Plugin {
+        id: "test".into(),
+        version: "1.0.0".into(),
+    };
+    let tx = b.clone().lowered(d, plugin)?;
+    let label = Some(b.label.as_str().into());
+    d.commit(tx, CommitOpts { label })
+}
+
 #[test]
 fn command_returns_edits_that_apply_as_one_step() {
     let p = load("edits", Limits::default());
@@ -226,16 +233,16 @@ fn command_returns_edits_that_apply_as_one_step() {
     let batch = &out.batches[0];
     assert_eq!(batch.label, "Bookmark pages");
     let titles: Vec<&str> = batch
-        .edits
+        .ops
         .iter()
         .map(|e| match e {
-            Edit::OutlineInsert { title, .. } => title.as_str(),
+            Op::AddBookmark { title, .. } => title.as_str(),
             other => panic!("unexpected {other:?}"),
         })
         .collect();
     assert_eq!(titles, ["Form 1040", "Form 1041", "Form 1042"]);
 
-    d.apply_batch(batch.edits.clone(), &batch.label).unwrap();
+    commit(&mut d, batch).unwrap();
     assert_eq!(top_level(&d).len(), 3);
     d.undo().unwrap();
     assert!(top_level(&d).is_empty(), "one undo reverts them all");
@@ -246,7 +253,7 @@ fn unsaved_ocr_text_wins_over_the_engine() {
     let p = load("ocr-text", Limits::default());
     let mut d = doc(2);
     let id = d.page(0).unwrap();
-    let layer = sheaf_doc::TextLayer::from_engine(
+    let layer = sheaf_doc::text_layer::from_engine(
         vec![sheaf_doc::OcrWord {
             text: "Schedule C".into(),
             rect: sheaf_doc::Box2 {
@@ -260,17 +267,12 @@ fn unsaved_ocr_text_wins_over_the_engine() {
         &d.geom(d.page(0).unwrap()),
         "test",
     );
-    d.apply(
-        Edit::SetTextLayers {
-            layers: vec![(id, Arc::new(layer))],
-        },
-        "ocr",
-    )
-    .unwrap();
+    d.commit_ops(fixture::ocr([(id, Arc::new(layer))]), "ocr")
+        .unwrap();
     let out = run(&p, "bookmark", None, ctx(&d)).unwrap();
     assert!(matches!(
-        &out.batches[0].edits[0],
-        Edit::OutlineInsert { title, .. } if title == "Schedule C"
+        &out.batches[0].ops[0],
+        Op::AddBookmark { title, .. } if title == "Schedule C"
     ));
 }
 
@@ -496,7 +498,7 @@ fn tax_form_bookmarks_example() {
     let out = run(&p, "scan", None, ctx(&d)).unwrap();
     let b = &out.batches[0];
     assert_eq!(b.label, "Bookmark 3 tax forms");
-    d.apply_batch(b.edits.clone(), &b.label).unwrap();
+    commit(&mut d, b).unwrap();
     let got: Vec<(String, Option<usize>)> = top_level(&d)
         .iter()
         .map(|b| (b.title.to_string(), b.page().and_then(|t| d.index_of(t))))
@@ -592,13 +594,16 @@ fn forms_round_trip_and_waiting_is_free() {
         assert_eq!(form.fields[1].kind, FieldKind::PageRange(String::new()));
     }
     assert_eq!(
-        out.batches[0].edits,
-        [Edit::OutlineInsert {
+        out.batches[0].ops,
+        [Op::AddBookmark {
             parent: None,
-            after: None,
+            at: Sibling::First,
             title: "Engagement letter".into(),
-            target: Some(d.page(2).unwrap()),
+            target: Some(PageRef::Id(d.page(2).unwrap())),
             view: None,
+            color: None,
+            style: Default::default(),
+            local: None,
         }]
     );
     // Cancelled (and no UI at all) come back as none.
@@ -739,8 +744,7 @@ fn amount_crossref_bundled_plugin() {
     .unwrap()
     .unwrap();
     assert_eq!(out.batches[0].label, "Link $12,345.67");
-    d.apply_batch(out.batches[0].edits.clone(), &out.batches[0].label)
-        .unwrap();
+    commit(&mut d, &out.batches[0]).unwrap();
     let labels: Vec<(usize, String)> = (0..3)
         .flat_map(|i| {
             let id = d.page(i).unwrap();
@@ -868,13 +872,13 @@ impl sheaf_plugin::OcrSource for FakeOcr {
         _page: sheaf_doc::PageId,
         base: &sheaf_doc::PageBase,
         geom: &sheaf_doc::geom::Geom,
-        _render: sheaf_core::Rotation,
+        _render: sheaf_edit::Rotation,
         language: Option<String>,
         _dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer> {
         // Slow, like a real engine: longer than the plugin's time limit.
         std::thread::sleep(Duration::from_millis(400));
-        Ok(sheaf_doc::TextLayer::from_engine(
+        Ok(sheaf_doc::text_layer::from_engine(
             vec![sheaf_doc::OcrWord {
                 text: format!("page{}", base.index),
                 rect: sheaf_doc::Box2 {
@@ -990,7 +994,7 @@ fn bookmark_from_pattern_bundled_plugin() {
     }
     let b = &out.batches[0];
     assert_eq!(b.label, "Bookmark 3 matches");
-    d.apply_batch(b.edits.clone(), &b.label).unwrap();
+    commit(&mut d, b).unwrap();
     let st = d.state();
     let got: Vec<(u16, String, Option<usize>, Option<f32>)> = st
         .bookmarks_preorder()
@@ -1022,8 +1026,7 @@ fn bookmark_from_pattern_bundled_plugin() {
     // A preset, the whole match, top level; then a re-run adds nothing.
     *ui.answer.lock().unwrap() = Some(answer(1, "{0}", 0));
     let out = run(&p, "bookmark", None, ctx(&d, &ui)).unwrap();
-    d.apply_batch(out.batches[0].edits.clone(), "again")
-        .unwrap();
+    commit(&mut d, &out.batches[0]).unwrap();
     let titles: Vec<String> = top_level(&d).iter().map(|b| b.title.to_string()).collect();
     assert_eq!(titles, ["Invoice 101", "Invoice 102", "Invoice 103"]);
     *ui.answer.lock().unwrap() = Some(answer(1, "{0}", 0));
@@ -1222,10 +1225,10 @@ fn currency_convert_bundled_plugin() {
     let b = &out.batches[0];
     assert_eq!(b.label, "Convert 2 amounts to USD");
     let notes: Vec<String> = b
-        .edits
+        .ops
         .iter()
         .map(|e| match e {
-            Edit::AnnotAdd { annot, .. } => annot.contents.clone(),
+            Op::AddMark { mark, .. } => mark.contents.clone(),
             other => panic!("{other:?}"),
         })
         .collect();
@@ -1237,7 +1240,7 @@ fn currency_convert_bundled_plugin() {
         ]
     );
     assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
-    d.apply_batch(b.edits.clone(), &b.label).unwrap();
+    commit(&mut d, b).unwrap();
 
     // Again: already converted, and no new requests for cached rates.
     *ui.answer.lock().unwrap() = answer("2026-10-10");
@@ -1251,7 +1254,7 @@ fn currency_convert_bundled_plugin() {
     d.undo().unwrap();
     *ui.answer.lock().unwrap() = answer("2026-10-10");
     let out = run(&p, "convert", None, ctx(&d)).unwrap();
-    assert_eq!(out.batches[0].edits.len(), 2);
+    assert_eq!(out.batches[0].ops.len(), 2);
     assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
@@ -1401,9 +1404,9 @@ fn duplicate_pages_bundled_plugin() {
     .unwrap();
     assert_eq!(out.batches[0].label, "Delete 1 duplicate page");
     assert_eq!(
-        out.batches[0].edits,
-        [Edit::DeletePages {
-            ids: vec![d.page(2).unwrap()]
+        out.batches[0].ops,
+        [Op::DeletePages {
+            pages: PageSel::ids([d.page(2).unwrap()])
         }]
     );
     assert!(ui.panels.lock().unwrap().last().unwrap().1.is_empty());
@@ -1539,10 +1542,12 @@ fn load_v02(name: &str) -> Plugin {
 fn a_plugin_built_for_02_still_loads_and_runs() {
     let p = load_v02("v02");
     assert_eq!(p.manifest().api.to_string(), "^0.2.1");
-    let d = doc(2);
+    let mut d = doc(2);
     let out = run(&p, "bookmark", None, ctx(&d)).unwrap();
     assert_eq!(out.batches.len(), 1);
-    assert_eq!(out.batches[0].edits.len(), 2);
+    assert_eq!(out.batches[0].ops.len(), 2);
+    commit(&mut d, &out.batches[0]).unwrap();
+    assert_eq!(top_level(&d).len(), 2);
     assert!(answer(&p, "settings", None).starts_with('{'));
 }
 
@@ -1566,7 +1571,7 @@ fn api_03_sees_every_kind_and_its_preferences() {
         fill: None,
         dashed: true,
         cloudy: false,
-        turn: sheaf_core::Rotation::R0,
+        turn: sheaf_edit::Rotation::R0,
         name: String::new(),
     };
     let pts = vec![
@@ -1584,19 +1589,24 @@ fn api_03_sees_every_kind_and_its_preferences() {
             scale: Box::new(Scale::default()),
         }),
     ] {
-        d.apply(Edit::AnnotAdd { page, annot }, "add").unwrap();
+        d.commit_ops(vec![fixture::add(page, &annot)], "add")
+            .unwrap();
     }
     let out = run(&p, "marks", None, ctx(&d)).unwrap();
     assert_eq!(
         answer(&p, "store", Some("kinds")),
         r#"Some("polygon:dashed,measure:dashed")"#
     );
-    match &out.batches[0].edits[..] {
-        [Edit::AnnotAdd { annot, .. }] => {
-            assert!(matches!(annot.kind, AnnotKind::Polygon { .. }));
-            assert_eq!((annot.fill, annot.dashed), (Some([255, 0, 0]), true));
-            // The host leaves tokens for the app to fill in.
-            assert_eq!(annot.contents, "Checked by <<initials>>");
+    match &out.batches[0].ops[..] {
+        [Op::AddMark { mark, .. }] => {
+            assert!(matches!(mark.kind, MarkKind::Polygon { .. }));
+            assert_eq!(
+                (mark.style.fill, mark.style.dashed),
+                (Some([255, 0, 0]), true)
+            );
+            // Tokens are for lowering, which never names the user to a
+            // plugin.
+            assert_eq!(mark.contents, "Checked by <<initials>>");
         }
         other => panic!("{other:?}"),
     }
@@ -1624,10 +1634,10 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
     assert_eq!(frame(&d, 0).rotate, Rotation::R90);
 
     let out = run(&p, "place", Some("100,200"), ctx(&d)).unwrap();
-    let edits = &out.batches[0].edits;
+    let ops = &out.batches[0].ops;
     // Shown (x, y) is PageSpace (20 + y, 30 + x) on this page.
-    let Edit::AnnotAdd { page: on, annot } = &edits[0] else {
-        panic!("{:?}", edits[0])
+    let Op::AddMark { page: on, mark, .. } = &ops[0] else {
+        panic!("{:?}", ops[0])
     };
     let rect = Box2 {
         x: 100.0,
@@ -1635,10 +1645,10 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
         w: 40.0,
         h: 20.0,
     };
-    assert_eq!(*on, page);
+    assert_eq!(*on, PageRef::Id(page));
     assert_eq!(
-        annot.kind,
-        AnnotKind::Square {
+        mark.kind,
+        MarkKind::Square {
             rect: from_view.apply_box(rect)
         }
     );
@@ -1652,13 +1662,13 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
         }
     );
     // It reads upright as the plugin placed it.
-    assert_eq!(annot.turn, Rotation::R90);
+    assert_eq!(mark.turn, Rotation::R90);
     // The bookmarks too, a missing coordinate staying missing: the top
     // as shown is PageSpace's left on this page.
-    let views: Vec<&DestView> = edits[1..]
+    let views: Vec<&DestView> = ops[1..]
         .iter()
         .map(|e| match e {
-            Edit::OutlineInsert { view: Some(v), .. } => v,
+            Op::AddBookmark { view: Some(v), .. } => v,
             other => panic!("{other:?}"),
         })
         .collect();
@@ -1679,7 +1689,7 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
     );
 
     // Read back as placed. (Each bookmark went to the outline's start.)
-    d.apply_batch(edits.clone(), "Place").unwrap();
+    commit(&mut d, &out.batches[0]).unwrap();
     let held: Vec<Option<DestView>> = top_level(&d).iter().map(|b| b.view().cloned()).collect();
     assert_eq!(held, [Some(views[1].clone()), Some(views[0].clone())]);
     let back = run(&p, "where", None, ctx(&d)).unwrap_err();
@@ -1691,8 +1701,8 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
     );
     // A new position without a new page is on the bookmark's own.
     let out = run(&p, "reposition", Some("150,250"), ctx(&d)).unwrap();
-    for e in &out.batches[0].edits {
-        let Edit::OutlineEdit { view, .. } = e else {
+    for e in &out.batches[0].ops {
+        let Op::PatchBookmarks { patch, .. } = e else {
             panic!("{e:?}")
         };
         let at = DestView::Xyz {
@@ -1700,10 +1710,9 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
             top: Some(180.0),
             zoom: None,
         };
-        assert_eq!(*view, Some(Some(at)));
+        assert_eq!(patch.view, sheaf_edit::Patch::Set(at));
     }
-    d.apply_batch(out.batches[0].edits.clone(), "Reposition")
-        .unwrap();
+    commit(&mut d, &out.batches[0]).unwrap();
     let back = run(&p, "where", None, ctx(&d)).unwrap_err();
     assert_eq!(
         back,
@@ -1714,7 +1723,7 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
     );
 
     // Unsaved OCR text, PageSpace in the model, is found where it shows.
-    let layer = sheaf_doc::TextLayer::from_engine(
+    let layer = sheaf_doc::text_layer::from_engine(
         vec![sheaf_doc::OcrWord {
             text: "1040".into(),
             rect: Box2 {
@@ -1728,13 +1737,8 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
         &d.geom(d.page(0).unwrap()),
         "test",
     );
-    d.apply(
-        Edit::SetTextLayers {
-            layers: vec![(page, Arc::new(layer))],
-        },
-        "ocr",
-    )
-    .unwrap();
+    d.commit_ops(fixture::ocr([(page, Arc::new(layer))]), "ocr")
+        .unwrap();
     let ui = Arc::new(FakeUi::default());
     run(&p, "panel", Some(r"\d{4}"), with_ui(&d, &ui)).unwrap();
     let panels = ui.panels.lock().unwrap();
@@ -1776,15 +1780,9 @@ fn page_info_is_the_turn_sheaf_added_and_the_size_shown() {
         run(&p, "pages", None, ctx(&d)).unwrap_err(),
         PluginError::Failed("0 740x580; 0 612x792".into())
     );
-    let ids = vec![d.page(0).unwrap(), d.page(1).unwrap()];
-    d.apply(
-        Edit::RotatePages {
-            ids,
-            by: Rotation::R90,
-        },
-        "Rotate",
-    )
-    .unwrap();
+    let ids = [d.page(0).unwrap(), d.page(1).unwrap()];
+    d.commit_ops(vec![fixture::rotate(&ids, Turn::Quarter)], "Rotate")
+        .unwrap();
     assert_eq!(
         run(&p, "pages", None, ctx(&d)).unwrap_err(),
         PluginError::Failed("90 580x740; 90 792x612".into())

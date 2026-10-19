@@ -15,12 +15,15 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Context, Result};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
-use crate::annot::AnnotId;
+use sheaf_edit::{AnnotRef, BlobSel, NewMark, Op, PageRef};
+
+use crate::annot::{Annot, AnnotId};
 use crate::attachments::Objects;
 use crate::file::thread_name;
 use crate::import::{Interned, NotAMark, Options};
-use crate::model::{Edit, FormRef, PageId, Snapshot};
+use crate::model::{DocState, FormRef, PageId, Snapshot};
 use crate::store::{Blob, BlobId, BlobKind, Src, Store};
+use crate::tx::{Grant, Tx};
 
 /// Comments as dictionaries, each with its page (from 0). `pdf` holds
 /// what they refer to: appearances, files, the comments their `/IRT`
@@ -126,13 +129,19 @@ pub fn from_pdf(bytes: &[u8], password: Option<&str>) -> Result<Comments> {
     })
 }
 
-/// What [`import`] did, for the notice.
+/// What [`import`] makes of comments: the ops that bring them in, what
+/// they hold, and what the notice says.
 #[derive(Debug, Default)]
 pub struct Imported {
-    pub edits: Vec<Edit>,
-    /// What the edits' marks hold that's interned for them: kept until
-    /// they're applied.
+    /// In order: on each page, the comments matched to what's there, then
+    /// the new ones, each after the comment it replies to.
+    pub ops: Vec<Op>,
+    /// What the ops' marks hold that's interned for them, for the caller
+    /// to pin in its transaction until it's committed ([`Tx::pin`]).
     pub held: Vec<Blob>,
+    /// The stamp pages and files the ops' marks hold, by the names the
+    /// ops give them ([`BlobSel::With`]), for the caller to grant.
+    pub grants: Vec<(String, Grant)>,
     /// New comments.
     pub added: usize,
     /// Comments already here (by `/NM`) brought up to date.
@@ -141,6 +150,8 @@ pub struct Imported {
     pub skipped: BTreeMap<String, usize>,
     /// Comments on pages this document doesn't have.
     pub off_the_end: usize,
+    /// Replies to comments that are neither on their page nor brought in.
+    pub orphans: usize,
 }
 
 impl Imported {
@@ -165,18 +176,50 @@ impl Imported {
                 self.off_the_end
             ));
         }
+        if self.orphans > 0 {
+            out.push_str(&format!(
+                "; {} replies left out (what they reply to isn't on their page)",
+                self.orphans
+            ));
+        }
         out
+    }
+
+    /// Its ops, with what they hold in `tx`: the blobs interned for them
+    /// pinned, and the stamp pages and files they name granted.
+    pub fn ops_in(self, tx: &mut Tx) -> Vec<Op> {
+        for blob in self.held {
+            tx.pin(blob);
+        }
+        for (name, grant) in self.grants {
+            tx.grant_named(name, grant);
+        }
+        self.ops
     }
 }
 
-/// The edits that bring `comments` into the document `snap`, whose blobs
-/// are in `store`: one comment whose `/NM` is one of our marks' updates
-/// it; one whose `/NM` is another tool's comment here takes its place, as
-/// making it editable does; the rest are added. Pages are counted in the
-/// document's order, and a comment reads upright as its page shows. What
-/// our marks hold, a page stamp's page and an attachment's file, is the
-/// document's where it has it, else interned from the comments, and held
-/// ([`Imported::held`]); an attachment of another tool's is interned too.
+/// How a comment comes in: as one of our marks, by its page and id,
+/// updated; as another tool's comment on its page, made a mark and
+/// updated; or as a new mark.
+enum Brought {
+    Ours(PageId, AnnotId),
+    Theirs(AnnotId),
+    New,
+}
+
+/// The ops that bring `comments` into the document `snap`, whose blobs are
+/// in `store` (§6.8): one whose `/NM` is one of our marks updates it
+/// (`PatchMarks`); one whose `/NM` is another tool's comment on its page
+/// makes that a mark and updates it (`AdoptAnnotations`, then
+/// `PatchMarks`), as making it editable does; the rest are added
+/// (`AddMark`). Each keeps its own name, dates and author ([`Imported`]
+/// in the ops). Pages are counted in the document's order, and a comment
+/// reads upright as its page shows. What our marks hold, a page stamp's
+/// page and an attachment's file, is the document's where it has it, else
+/// interned from the comments, and held ([`Imported::held`]); an
+/// attachment of another tool's is interned too.
+///
+/// [`Imported`]: sheaf_edit::Imported
 pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
     let st = &snap.state;
     let mut out = Imported::default();
@@ -184,9 +227,6 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
     let ours: HashMap<String, (PageId, AnnotId)> = st
         .marks()
         .map(|(page, a)| (a.name(), (page, a.id)))
-        .collect();
-    let theirs: std::collections::HashSet<&str> = (st.annots())
-        .filter_map(|(_, a)| Some(a.foreign()?.summary.name.as_str()))
         .collect();
     let mut seen = std::collections::HashSet::new();
     // By page, so a replacement's parts meet.
@@ -217,6 +257,7 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
         };
         let converted = crate::import::convert_page(&comments.pdf, &dicts, rotation, files);
         let page_annots = crate::file::PageAnnots::new(&entries);
+        let mut new = Vec::new();
         for ((dict, entry), mark) in dicts.iter().zip(&entries).zip(converted) {
             // One of sheaf's comes back exactly as it was, under the name
             // it had there, so what replies to it there does here; one
@@ -227,9 +268,6 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
                     bring_held(&comments.pdf, dict, &mut a, snap, &interned);
                     if a.name.is_empty() {
                         a.name = a.name();
-                    }
-                    if let crate::annot::AnnotKind::Connector { partner, .. } = &mut a.kind {
-                        *partner = None;
                     }
                     Ok(a)
                 }
@@ -249,25 +287,155 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
             if !seen.insert(a.name.clone()) {
                 continue;
             }
-            match ours.get(&a.name) {
-                Some(&(at, id)) => {
-                    a.id = id;
-                    out.edits.push(Edit::AnnotUpdate { page: at, annot: a });
+            let theirs = (st.annots_named(id, &a.name)).find(|&t| {
+                (st.annot(t).and_then(|rec| rec.foreign()))
+                    .is_some_and(|f| f.summary.mark.is_some() && !f.summary.is_link())
+            });
+            let brought = match (ours.get(&a.name), theirs) {
+                (Some(&(at, mark)), _) => Brought::Ours(at, mark),
+                (None, Some(t)) => Brought::Theirs(t),
+                (None, None) => Brought::New,
+            };
+            let imported = Some(imported(&a));
+            match brought {
+                Brought::Ours(at, mark) => {
+                    out.ops.push(Op::PatchMarks {
+                        marks: vec![named(st, at, mark, &a.name)],
+                        patch: crate::tx::mark_patch(&a),
+                        imported,
+                    });
                     out.updated += 1;
                 }
-                None => {
-                    if theirs.contains(a.name.as_str()) {
-                        out.updated += 1;
-                    } else {
-                        out.added += 1;
-                    }
-                    out.edits.push(Edit::AnnotAdd { page: id, annot: a });
+                Brought::Theirs(t) => {
+                    let them = named(st, id, t, &a.name);
+                    out.ops.push(Op::AdoptAnnotations {
+                        annots: vec![them.clone()],
+                    });
+                    out.ops.push(Op::PatchMarks {
+                        marks: vec![them],
+                        patch: crate::tx::mark_patch(&a),
+                        imported,
+                    });
+                    out.updated += 1;
                 }
+                Brought::New => new.push(a),
             }
+        }
+        for a in threaded(st, id, new, &mut out.orphans) {
+            let asset = match held(&a, snap, store, &mut out.grants) {
+                Ok(asset) => asset,
+                Err(kind) => {
+                    *out.skipped.entry(kind.into()).or_default() += 1;
+                    continue;
+                }
+            };
+            out.ops.push(Op::AddMark {
+                page: PageRef::Id(id),
+                mark: NewMark {
+                    kind: crate::tx::mark_kind(&a.kind),
+                    style: crate::tx::mark_style(&a),
+                    contents: a.contents.clone(),
+                    author: None,
+                    turn: a.turn,
+                    asset,
+                },
+                reply_to: (a.thread_parent()).map(|nm| AnnotRef::Nm {
+                    nm: nm.into(),
+                    page: Some(PageRef::Id(id)),
+                }),
+                local: None,
+                imported: Some(imported(&a)),
+            });
+            out.added += 1;
         }
     }
     out.held = interned.into_held();
     out
+}
+
+/// Annotation `id` on `page`, named `nm`: by its name where it's the only
+/// one there by that name, as a second import finds it, else by its id.
+fn named(st: &DocState, page: PageId, id: AnnotId, nm: &str) -> AnnotRef {
+    match st.annots_named(page, nm).nth(1) {
+        None => AnnotRef::Nm {
+            nm: nm.into(),
+            page: Some(PageRef::Id(page)),
+        },
+        Some(_) => AnnotRef::Id(id),
+    }
+}
+
+/// `a`'s own name, dates and author, which its mark keeps.
+fn imported(a: &Annot) -> sheaf_edit::Imported {
+    sheaf_edit::Imported {
+        nm: a.name.clone(),
+        created: a.created.clone(),
+        modified: a.modified.clone(),
+        author: a.author.clone(),
+    }
+}
+
+/// `new`, comments coming in on `page` as marks, each after the one it
+/// replies to when that comes in too. A reply to a comment neither on the
+/// page nor among them is in no thread here: it's left out, and counted
+/// in `orphans`.
+fn threaded(st: &DocState, page: PageId, new: Vec<Annot>, orphans: &mut usize) -> Vec<Annot> {
+    let mut out: Vec<Annot> = Vec::with_capacity(new.len());
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut waiting = new;
+    loop {
+        let before = waiting.len();
+        let mut still = Vec::new();
+        for a in waiting {
+            match a.thread_parent() {
+                Some(p) if !names.contains(p) && st.annots_named(page, p).next().is_none() => {
+                    still.push(a)
+                }
+                _ => {
+                    names.insert(a.name.clone());
+                    out.push(a);
+                }
+            }
+        }
+        waiting = still;
+        if waiting.is_empty() || waiting.len() == before {
+            break;
+        }
+    }
+    *orphans += waiting.len();
+    out
+}
+
+/// What `a`, a mark coming in, holds, as its op names it: a page stamp's
+/// page or an attachment's file, granted under its stem in `grants`. The
+/// subtype it's skipped as when the document has none and the comments
+/// brought none.
+fn held(
+    a: &Annot,
+    snap: &Snapshot,
+    store: &Store,
+    grants: &mut Vec<(String, Grant)>,
+) -> Result<Option<BlobSel>, &'static str> {
+    use crate::annot::AnnotKind;
+    let (stem, grant) = match &a.kind {
+        AnnotKind::PageStamp { stamp, .. } => {
+            let form = crate::model::find_stamp(store, &snap.primary, stamp).ok_or("Stamp")?;
+            let grant = Grant::Stamp {
+                stem: stamp.clone(),
+                form,
+            };
+            (stamp, grant)
+        }
+        AnnotKind::FileAttachment { file, size, .. } => {
+            let found = crate::model::find_file(store, &snap.primary, file, *size);
+            (file, Grant::Blob(found.ok_or("FileAttachment")?))
+        }
+        _ => return Ok(None),
+    };
+    if !grants.iter().any(|(name, _)| name == stem) {
+        grants.push((stem.clone(), grant));
+    }
+    Ok(Some(BlobSel::With(stem.clone())))
 }
 
 /// What `a`, one of our marks, holds in `pdf`, its dictionary `dict`, for
@@ -287,10 +455,10 @@ fn bring_held(
     interned: &Interned,
 ) {
     use crate::annot::AnnotKind;
-    let (store, sources, primary) = (interned.store(), &snap.sources, snap.primary);
+    let (store, primary) = (interned.store(), &snap.primary);
     match &mut a.kind {
         AnnotKind::PageStamp { stamp, name, .. } => {
-            match crate::model::find_stamp(store, sources, primary, stamp) {
+            match crate::model::find_stamp(store, primary, stamp) {
                 Some(FormRef::Blob(page)) => interned.hold(page.blob().clone()),
                 Some(FormRef::Base(_)) => {}
                 None => {
@@ -310,7 +478,7 @@ fn bring_held(
         }
         AnnotKind::FileAttachment {
             file, name, size, ..
-        } => match crate::model::find_file(store, sources, primary, file, *size) {
+        } => match crate::model::find_file(store, primary, file, *size) {
             Some(found) => interned.hold(found.blob().clone()),
             None => {
                 let bytes = crate::file::attached_file(pdf, dict)
@@ -336,7 +504,7 @@ fn bring_held(
 /// pointing at what they reply to when it's written too. Pages are
 /// counted in the document's order.
 pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<Comments> {
-    let (st, sources) = (&snap.state, &snap.sources);
+    let st = &snap.state;
     let mut out = Comments::new();
     let mut cx = crate::annot::WriteCx::new();
     // Each written comment's name and parent's name, to link them after.
@@ -428,12 +596,14 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
             d.set("IRT", to);
         }
     }
-    out.file = st
-        .pages()
-        .next()
-        .and_then(|(_, def, _)| sources.get(&def.base.source))
-        .and_then(|s| s.name.file_name())
-        .map(|n| n.to_string_lossy().into_owned());
+    // The file of the first page: the document's own, else the file its
+    // source was first read from.
+    out.file = (st.pages().next())
+        .and_then(|(_, def, _)| match def.base.src == snap.primary {
+            true => Some(snap.name.clone()),
+            false => def.base.src.blob().origin_name(),
+        })
+        .map(|n| n.to_string());
     Ok(out)
 }
 

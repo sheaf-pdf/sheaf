@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use sheaf_doc::annot::REVIEW_STATES;
+use sheaf_doc::tx::{Actor, CommitOpts};
 use sheaf_ops::comments::{self, Column, CommentFilter, DataFormat, Layout, Sort, Summary};
 
 #[derive(Args)]
@@ -317,11 +318,15 @@ fn import(a: ImportArgs) -> anyhow::Result<()> {
         let got = comments::import_data(&snap, &store, &bytes, a.from_password.as_deref())
             .with_context(|| from.display().to_string())?;
         eprintln!("{}: {}", from.display(), got.summary());
-        // What the marks hold is held until they're added.
-        if !got.edits.is_empty() {
-            doc.apply_batch(got.edits, "Import comments")?;
+        // What the marks hold is held in the transaction until they're
+        // added.
+        let mut tx = doc.tx(Actor::Cli);
+        let ops = got.ops_in(&mut tx);
+        if !ops.is_empty() {
+            tx.apply_batch(ops, &sheaf_ops::NoProgress)?;
+            let label = Some("Import comments".into());
+            doc.commit(tx, CommitOpts { label })?;
         }
-        drop(got.held);
     }
     // It asks nothing: a save the file's signatures allow keeps them (an
     // Append onto a copy of the input), and one they don't, or one that
