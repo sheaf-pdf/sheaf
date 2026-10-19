@@ -976,44 +976,54 @@ fn closed_bookmark_stays_closed(how: How) {
 
 /// Bug 13 (todos/m9.md): after a save in place, a version from before
 /// it still means the file it was made from, whatever the path holds
-/// now: undone past the save and saved again, its pages are written.
+/// now: undone past the save and saved again, its pages are written,
+/// whether the first save was a Rewrite or an Append, and whether the
+/// save after the undo is planned (an Append onto the file the first
+/// wrote, as a move removes nothing) or a Rewrite.
 #[test]
 fn undo_past_a_save_then_save_writes_the_right_pages() {
-    undo_past_a_save(false);
+    undo_past_a_save(How::Rewritten);
 }
 
 #[test]
 fn undo_past_a_save_then_save_writes_the_right_pages_appended() {
-    undo_past_a_save(true);
+    undo_past_a_save(How::Appended);
 }
 
-fn undo_past_a_save(appended: bool) {
-    let dir = tempdir();
-    let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
-    let mut model = open(&a, &[], Box::new(FixedCount(10)));
-    let ids: Vec<PageId> = model.state().order().iter().copied().collect();
-    model
-        .apply(
-            Edit::MovePages {
-                ids: vec![ids[2]],
-                before: Some(ids[0]),
-            },
-            "move",
-        )
-        .unwrap();
-    match appended {
-        true => materialize::save_appended(&mut model, &a).unwrap(),
-        false => materialize::save(&mut model, &a, &AskAnswers::default(), &NoProgress).unwrap(),
-    };
-    let saved = read_pages(&std::fs::read(&a).unwrap());
-    assert_eq!(saved[0].0, "A 2");
-    model.undo().unwrap();
-    materialize::save(&mut model, &a, &AskAnswers::default(), &NoProgress).unwrap();
-    let pages: Vec<String> = read_pages(&std::fs::read(&a).unwrap())
-        .into_iter()
-        .map(|(t, _)| t)
-        .collect();
-    assert_eq!(pages, vec!["A 0", "A 1", "A 2"], "{appended}");
+fn undo_past_a_save(first: How) {
+    for again in [None, Some(How::Rewritten)] {
+        let what = format!("{first:?}, then {again:?}");
+        let dir = tempdir();
+        let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
+        let ids: Vec<PageId> = model.state().order().iter().copied().collect();
+        model
+            .apply(
+                Edit::MovePages {
+                    ids: vec![ids[2]],
+                    before: Some(ids[0]),
+                },
+                "move",
+            )
+            .unwrap();
+        let saved = first.save(&mut model, &a);
+        assert_eq!(saved.strategy, Some(first.strategy()), "{what}");
+        let saved = read_pages(&std::fs::read(&a).unwrap());
+        assert_eq!(saved[0].0, "A 2", "{what}");
+        model.undo().unwrap();
+        let report = match again {
+            None => materialize::save(&mut model, &a, &AskAnswers::default(), &NoProgress).unwrap(),
+            Some(how) => how.save(&mut model, &a),
+        };
+        let want = again.map_or(StrategyKind::Append, How::strategy);
+        assert_eq!(report.strategy, Some(want), "{what}");
+        let pages: Vec<String> = read_pages(&std::fs::read(&a).unwrap())
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        assert_eq!(pages, vec!["A 0", "A 1", "A 2"], "{what}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// A note of ours as the thread tests use it.
@@ -1403,41 +1413,120 @@ fn made_ours_takes_its_place(how: How) {
     assert_eq!(names, [("sq-reply", Some("sq"))], "{how:?}");
 }
 
-/// Another tool's comment made ours takes nothing out of the file: the
-/// mark is the comment's object, and the part grouped under the
-/// replacement is what the mark draws, so a save in place appends.
-/// The mark deleted then is something gone.
+/// Another tool's comment made ours is the comment's object, and the
+/// part grouped under the replacement is what the mark draws, but a save
+/// in place rewrites the file. Appended, the removal check vetoes it: the
+/// replacement writes a strikeout of its own, and the old one's `/NM`
+/// would stay readable in the earlier revision. So a Rewrite is right,
+/// whatever the planner says. What it says now is a stopgap (slice 10's
+/// notes, "After the commit", a comment made ours, left for Greg): the
+/// path has the comments' records go (the square, the caret and the
+/// strikeout grouped under it: an `AnnotAdd` draws the mark's id afresh),
+/// so it plans a Rewrite for three comments removed, where the reader
+/// made two theirs and removed none. Slice 8 counted an adopted comment
+/// as kept; counted so again, the plan appends and the removal check's
+/// veto makes the save a Rewrite (`Why::RemovalCheck`): either reason
+/// passes here. Appended anyway, as the both-ways tests append, the
+/// reader is told the text stays readable. Either way, the mark deleted
+/// then is something gone.
 #[test]
 fn a_comment_made_ours_is_saved_in_place() {
-    let dir = tempdir();
-    let path = file_with_their_shapes(&dir);
-    let mut model = opened(&path);
-    let p0 = model.page(0).unwrap();
-    for name in ["sq", "c1"] {
-        let (id, f) = (model.state().foreign_on(p0))
-            .find(|(_, f)| f.summary.name == name)
-            .unwrap();
-        let mut annot = (**f.summary.mark.as_ref().unwrap()).clone();
-        annot.id = id;
+    use std::sync::Arc;
+
+    use super::append::{self, Refused};
+    use super::key::ObjKey;
+    use super::plan::{Onto, forced_append};
+    use super::removal::Mode;
+    use crate::effects::{Removed, RemovedKind};
+
+    let removes = |count| {
+        vec![Why::Removes(vec![Removed {
+            kind: RemovedKind::Comments,
+            count,
+        }])]
+    };
+    for appended in [false, true] {
+        let dir = tempdir();
+        let path = file_with_their_shapes(&dir);
+        let original = std::fs::read(&path).unwrap();
+        let mut model = opened(&path);
+        let p0 = model.page(0).unwrap();
+        for name in ["sq", "c1"] {
+            let (id, f) = (model.state().foreign_on(p0))
+                .find(|(_, f)| f.summary.name == name)
+                .unwrap();
+            let mut annot = (**f.summary.mark.as_ref().unwrap()).clone();
+            annot.id = id;
+            model
+                .apply(Edit::AnnotAdd { page: p0, annot }, "adopt")
+                .unwrap();
+        }
+        let theirs: Vec<String> = (model.state().foreign_on(p0))
+            .map(|(_, f)| f.summary.name.clone())
+            .collect();
+        assert_eq!(theirs, ["sq-reply"]);
+        match appended {
+            false => {
+                // The removal check, were it appended.
+                let input = model.recovery_input();
+                let plan = forced_append(&input, Onto::Saved);
+                let base: Arc<[u8]> = original.clone().into();
+                let refused =
+                    append::append(&input, &plan, Arc::new(base), Mode::Veto, &NoProgress)
+                        .err()
+                        .unwrap();
+                let strike = (page_annots(&original).into_iter())
+                    .find(|(_, d)| crate::file::thread_name(d) == "c1-strike")
+                    .unwrap()
+                    .0;
+                assert!(
+                    matches!(
+                        refused.downcast_ref::<Refused>(),
+                        Some(Refused::Removes(found)) if !found.derived
+                            && matches!(found.key, ObjKey::Base { obj, copy: 0, .. } if obj == strike)
+                    ),
+                    "{refused:#}"
+                );
+                let saved =
+                    materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress)
+                        .unwrap();
+                assert_eq!(saved.strategy, Some(StrategyKind::Rewrite));
+                // KNOWN MISCOUNT, not the spec: `Removes([Comments: 3])`
+                // today, for two comments made ours (see the doc comment).
+                assert!(
+                    matches!(
+                        saved.why.as_slice(),
+                        [Why::Removes(_) | Why::RemovalCheck { .. }]
+                    ),
+                    "{:?}",
+                    saved.why
+                );
+                // The old strikeout is gone with its name.
+                assert!(!says(&std::fs::read(&path).unwrap(), "c1-strike"));
+            }
+            true => {
+                let saved = materialize::save_appended(&mut model, &path).unwrap();
+                assert_eq!(saved.strategy, Some(StrategyKind::Append));
+                let told = materialize::Note(append::STAYS_READABLE.into());
+                assert!(saved.notes.contains(&told), "{:?}", saved.notes);
+                assert!(std::fs::read(&path).unwrap().starts_with(&original));
+            }
+        }
+        assert!(!model.is_dirty(), "{appended}");
+        let sq = (model.state().marks_on(p0))
+            .find(|a| a.name == "sq")
+            .unwrap()
+            .id;
         model
-            .apply(Edit::AnnotAdd { page: p0, annot }, "adopt")
+            .apply(Edit::AnnotDelete { page: p0, id: sq }, "delete")
             .unwrap();
+        // The mark and its thread's reply.
+        let saved = materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress);
+        let saved = saved.unwrap();
+        assert_eq!(saved.strategy, Some(StrategyKind::Rewrite), "{appended}");
+        assert_eq!(saved.why, removes(2), "{appended}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
-    let theirs: Vec<String> = (model.state().foreign_on(p0))
-        .map(|(_, f)| f.summary.name.clone())
-        .collect();
-    assert_eq!(theirs, ["sq-reply"]);
-    let saved = materialize::save_appended(&mut model, &path).unwrap();
-    assert_eq!(saved.strategy, Some(StrategyKind::Append));
-    let sq = (model.state().marks_on(p0))
-        .find(|a| a.name == "sq")
-        .unwrap()
-        .id;
-    model
-        .apply(Edit::AnnotDelete { page: p0, id: sq }, "delete")
-        .unwrap();
-    let saved = materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress);
-    assert_eq!(saved.unwrap().strategy, Some(StrategyKind::Rewrite));
 }
 
 /// Of two comments of another tool's named alike on a page, the one

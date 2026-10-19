@@ -5,7 +5,9 @@
 //!
 //! - **Numbering** ([`number::appended`]): an object the file's map has
 //!   is written over itself, under its number; a primary object at its own;
-//!   anything new past every number the file uses.
+//!   anything new past every number the file uses and every primary
+//!   number the section names, so a reference to one that nothing is (the
+//!   input's damage) stays one.
 //! - **References** to what the section doesn't write are the file's: a
 //!   key its map numbers, a primary object still in it (`present`), a
 //!   primary page, annotation, field or bookmark at its own number. One the
@@ -14,18 +16,22 @@
 //!   by a Rewrite.
 //! - **Refused** ([`Refused`]) as well onto a file whose cross-reference
 //!   sections were rebuilt, or whose page tree can't be spliced, when a
-//!   form instance's objects in the file are another instance's now, and
-//!   when a primary object's number in it is another record's of that
-//!   object, which stays there: the save is a Rewrite instead, or a signed
-//!   document asks first. A section that writes the catalog or the form's
-//!   dictionary of a file whose signatures hold, which none of them
-//!   allows, is refused too unless the reader chose to append anyway: the
-//!   plan judged the save within what they allow, and the save asks as it
-//!   would have.
+//!   form instance's objects in the file are another instance's now, when
+//!   a primary object's number in it is another record's of that object,
+//!   which stays there, or the record it is sits elsewhere in it, and when
+//!   what it has names a page that a copy's reference names another page
+//!   by now, which the section doesn't write again: the save is a Rewrite
+//!   instead, or a signed document asks first. A section that writes the
+//!   catalog or the form's dictionary of a file whose signatures hold,
+//!   which none of them allows, is refused too unless the reader chose to
+//!   append anyway: the plan judged the save within what they allow, and
+//!   the save asks as it would have.
 //! - **Checked** ([`verify::section`]): copy-on-write and every reference;
 //!   then the removal check ([`removal`]), against the file as its record
 //!   has it, which refuses an Append that would leave removed text
-//!   readable, or reports it where the reader agreed it stays readable;
+//!   readable, or reports it where the reader agreed it stays readable,
+//!   but for a derived object whose removal the save's path didn't say
+//!   (a misclassification), unless they agreed to what the check finds;
 //!   the form, with the file, when the section writes any of it; in debug
 //!   builds every object read back.
 //! - **Save policy** (§11.8): what the file had of it applies to what the
@@ -41,7 +47,7 @@
 //!   both are written after the file's bytes.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
@@ -59,7 +65,9 @@ use super::record::{
 };
 use super::removal::{self, Mode};
 use super::{Output, deps, number, verify};
+use crate::effects::judge;
 use crate::forms::rules;
+use crate::prim::Key;
 use crate::serialize::append::{self, Base};
 use crate::source::Source;
 
@@ -76,8 +84,9 @@ pub struct NotInFile {
 /// instead ([`Refused::why`]), or a signed document asks first.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Refused {
-    /// The file's cross-reference sections were rebuilt to read it, or its
-    /// page tree can't be spliced.
+    /// The file's cross-reference sections were rebuilt to read it, its
+    /// page tree can't be spliced, or too few object numbers are left past
+    /// the primary numbers the section names.
     #[error("the saved file can't take an update: {0}")]
     Unsound(String),
     #[error(transparent)]
@@ -86,12 +95,21 @@ pub enum Refused {
     /// `FormCopies` indexes the instances the state holds (until slice 11).
     #[error("a form's objects in the saved file are another copy of it now")]
     FormShift,
-    /// A key that is a primary object would be written somewhere other
-    /// than its own number, or its number in the file still holds another
-    /// record of that object (a page brought in again before the first):
-    /// only a Rewrite renumbers them.
+    /// A key that is a primary object would be written, or is in the file,
+    /// somewhere other than its own number, or its number in the file still
+    /// holds another record of that object (a page brought in again before
+    /// the first, a crop's copy made the page's copy 0 by a move): only a
+    /// Rewrite renumbers them.
     #[error("{0:?}'s object in the saved file is another's there")]
     Held(ObjKey),
+    /// What the file has of the key's object, which the section doesn't
+    /// write again, names a page of its source that a copy's reference to
+    /// it names another page by now, or none (a copy of the page came or
+    /// went, [`deps::Closure::stale`]); or the catalog's holds a page of
+    /// the primary that's no page's copy 0 now: only a Rewrite names it
+    /// anew, or prunes it.
+    #[error("{0:?}'s object in the saved file names a page another page is written as now")]
+    Stale(ObjKey),
     /// The removal check found text the section would leave readable in
     /// `found`'s object.
     #[error("the update would leave removed text readable in {:?}", .0.key)]
@@ -111,7 +129,7 @@ impl Refused {
     pub fn why(&self) -> Option<Why> {
         match self {
             Refused::Unsound(_) => Some(Why::BaseUnsound),
-            Refused::Missing(_) | Refused::FormShift | Refused::Held(_) => {
+            Refused::Missing(_) | Refused::FormShift | Refused::Held(_) | Refused::Stale(_) => {
                 Some(Why::BaseObjectsMissing)
             }
             Refused::Removes(found) => Some(Why::RemovalCheck { key: found.key }),
@@ -191,6 +209,9 @@ pub fn append(
     if deps.form_shift {
         return Err(Refused::FormShift.into());
     }
+    if let Some(key) = deps.stale {
+        return Err(Refused::Stale(key).into());
+    }
     let scope = EmitScope::Keys(Arc::new(deps.keys));
     let onto = EmitBase::Saved {
         record,
@@ -199,7 +220,21 @@ pub fn append(
         relinked: &deps.relinked,
     };
     let e = emit::emit(input, scope, onto, &transforms, p)?;
-    let numbers = number::appended(&e, record)?;
+    // The primary's objects the section writes as the file has them: the
+    // numbers they refer to are primary numbers it names, which its new
+    // keys are numbered past.
+    let mut raw: HashMap<ObjKey, Object> = HashMap::new();
+    let mut named = Vec::new();
+    for (key, obj) in &e.objects {
+        if let SymObject::Raw(r) = obj
+            && r.src.id() == primary.id()
+        {
+            let obj = (*r.src.pdf().object_unkept(r.id)?).clone();
+            refs(&obj, &mut |n| named.push(n));
+            raw.insert(*key, obj);
+        }
+    }
+    let numbers = number::appended(&e, record, named)?;
     let file = Saved::new(record, primary, &e.owned);
     held(&e, &numbers, &file)?;
     let number = |key: &ObjKey| match numbers.by_key.get(key) {
@@ -231,7 +266,7 @@ pub fn append(
             }
             // The primary's object as it is: what it names is the file's.
             SymObject::Raw(r) if r.src.id() == primary.id() => {
-                let obj = (*r.src.pdf().object_unkept(r.id)?).clone();
+                let obj = (raw.remove(key)).with_context(|| format!("{key:?} is emitted twice"))?;
                 let mut missing = None;
                 refs(&obj, &mut |n| {
                     if missing.is_none() {
@@ -294,6 +329,16 @@ pub fn append(
         .into_iter()
         .flatten()
         .collect();
+    // What the reader agreed stays readable, when they chose to append
+    // anyway, is what the save's path says it removes, slot by slot: what
+    // the plan's offer listed, judged again.
+    let said: BTreeSet<Key> = match mode {
+        Mode::Report | Mode::ReportAll => {
+            let path = judge(&saved.state, &input.target, &input.path_keys);
+            path.removing.into_keys().collect()
+        }
+        Mode::Veto | Mode::Anyway | Mode::Recovery => BTreeSet::new(),
+    };
     let removed = removal::check(&removal::Section {
         old: &old,
         objects: &objects,
@@ -302,14 +347,26 @@ pub fn append(
         target: &input.target,
         primary: primary.id(),
         allowed: &e.allowed_drops,
+        said: &said,
         lim,
     });
     match (removed, mode) {
         (Some(found), Mode::Veto | Mode::Anyway) => {
-            removal::veto(found);
+            removal::count(found);
             return Err(Refused::Removes(found).into());
         }
-        (Some(_), Mode::Report) => notes.push(Note(STAYS_READABLE.into())),
+        // A misclassification the offer didn't list: the save asks again,
+        // saying the check found removed text.
+        (Some(found), Mode::Report) if found.misclassified() => {
+            removal::count(found);
+            return Err(Refused::Removes(found).into());
+        }
+        (Some(found), Mode::Report | Mode::ReportAll) => {
+            if found.misclassified() {
+                removal::count(found);
+            }
+            notes.push(Note(STAYS_READABLE.into()));
+        }
         (Some(_), Mode::Recovery) | (None, _) => {}
     }
     let unjudged = Unjudged {
@@ -511,17 +568,22 @@ impl<'a> Saved<'a> {
 }
 
 /// Refuses a section `e` numbered as `numbers` onto the saved `file` that
-/// writes a key that's a primary object ([`Emission::owned`]) anywhere but
+/// leaves a key that's a primary object ([`Emission::owned`]) anywhere but
 /// at its number, or there over another key the file holds there still,
 /// neither written elsewhere nor its own merged widget: the object would
-/// be the other's to what refers to it by number.
+/// be the other's to what refers to it by number. A key the section
+/// doesn't write is where the file's map has it (else at its own number,
+/// as [`Saved::number`] finds it): a page that's another page's copy 0
+/// now (a crop's copies trading which is copy 0 as they're moved), which
+/// the file has at a number of its own, isn't at the page's object, where
+/// a Rewrite writes it and what refers to the page by number goes.
 fn held(e: &Emission, numbers: &number::Appended, file: &Saved) -> Result<(), Refused> {
     let mut there: Option<HashMap<u32, Vec<ObjKey>>> = None;
-    for (key, _) in &e.objects {
-        let Some(&own) = e.owned.get(key) else {
-            continue;
-        };
-        if numbers.by_key.get(key) != Some(&own) {
+    for (key, &own) in &e.owned {
+        let at = (numbers.by_key.get(key).copied())
+            .or_else(|| file.record.map.keys.get(key).copied())
+            .unwrap_or(own);
+        if at != own {
             return Err(Refused::Held(*key));
         }
         if !file.mapped().contains(&own.0) {

@@ -598,3 +598,166 @@ fn an_insert_leaves_the_catalog_and_keeps_the_nodes_keys() {
         ["page 0", "page 1", "page 1", "page 2", "page 3"]
     );
 }
+
+/// A one-page file holding a mark and another tool's reply to it, where
+/// the page's `/PieceInfo` names objects the file hasn't got at `page`
+/// past its `/Size`, and the reply's `/ExData` at `reply` past it:
+/// another tool's damage, which a save keeps. With its `/Size`.
+fn dangling(page: &[u32], reply: &[u32]) -> (Vec<u8>, u32) {
+    let mut f = crate::forms::fixture::Form::new(1);
+    let main = crate::annot::to_pdf(&square(3), &mut f.pdf).main;
+    let main = f.pdf.add_object(main);
+    let theirs = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text", "IRT" => main,
+        "NM" => Object::string_literal("r1"), "Rect" => rect([100, 700, 120, 720]),
+        "Contents" => Object::string_literal("their reply"),
+    });
+    f.set_annots(0, &[main, theirs]);
+    f.pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+    let size = f.pdf.max_id + 1;
+    let gone = |past: &[u32]| -> Dictionary {
+        (past.iter().enumerate())
+            .map(|(i, &n)| (format!("D{i}"), Object::Reference((size + n, 0))))
+            .collect()
+    };
+    f.dict(f.pages[0]).set("PieceInfo", gone(page));
+    f.dict(theirs).set("ExData", gone(reply));
+    let bytes = f.bytes();
+    assert_eq!(lazy(&bytes).xref().size, size);
+    (bytes, size)
+}
+
+/// What `key` of the object at `at` of the file at `path` names, each
+/// with whether the file has it.
+fn named_in(path: &Path, at: ObjectId, key: &[u8]) -> Vec<(ObjectId, bool)> {
+    let pdf = Pdf::load(path).unwrap();
+    let dict = pdf.get_dictionary(at).unwrap();
+    let names = dict.get(key).unwrap().as_dict().unwrap();
+    (names.iter())
+        .map(|(_, v)| v.as_reference().unwrap())
+        .map(|r| (r, pdf.get_object(r).is_ok()))
+        .collect()
+}
+
+/// A page that names objects its file hasn't got, at its `/Size` and past
+/// it, edited so the section writes it, beside a mark and pages from
+/// another file that take new numbers: the new numbers start past every
+/// number the page names, so each still names nothing, as a Rewrite of
+/// the same edits leaves it (review finding 5, after the commit; before,
+/// the first new objects took those numbers, and the page named them).
+#[test]
+fn a_dangling_reference_stays_dangling_past_the_new_numbers() {
+    let dir = scratch();
+    let (bytes, size) = dangling(&[0, 4], &[]);
+    let gone = [((size, 0), false), ((size + 4, 0), false)];
+    let other = file(&[3], XrefType::CrossReferenceTable, "1.7");
+    let edit = |doc: &mut Document| {
+        let page = doc.page(0).unwrap();
+        let add = Edit::AnnotAdd {
+            page,
+            annot: square(1),
+        };
+        doc.apply(add, "add").unwrap();
+        let source = super::tests::add(doc, &other, "other.pdf");
+        let insert = Edit::InsertPages {
+            source,
+            range: 0..3,
+            before: None,
+            outline: None,
+            annots: Vec::new(),
+        };
+        doc.apply(insert, "insert").unwrap();
+    };
+    let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
+    let page = Pdf::load_mem(&bytes).unwrap().get_pages()[&1];
+    edit(&mut doc);
+    let (base, section) = planned_in_place(&mut doc);
+    let wrote = written(base.len(), &section, &path);
+    assert!(wrote.contains(&page), "{wrote:?}");
+    assert_eq!(named_in(&path, page, b"PieceInfo"), gone);
+    let fresh: Vec<u32> = wrote.iter().map(|id| id.0).filter(|&n| n >= size).collect();
+    assert!(fresh.len() > 4, "{fresh:?}");
+    assert!(fresh.iter().all(|&n| n > size + 4), "{fresh:?}");
+    assert_eq!(crate::open::file(&path, None).unwrap().doc.page_count(), 4);
+
+    let (path, mut doc) = opened(&dir, "b.pdf", &bytes);
+    edit(&mut doc);
+    save_rewritten(&mut doc, &path).unwrap();
+    assert_eq!(named_in(&path, page, b"PieceInfo"), gone);
+}
+
+/// Another tool's reply that names an object its file hasn't got, at its
+/// `/Size`, written by the section as the file has it (its mark recolored),
+/// beside the mark's new appearance: the new numbers start past what the
+/// reply names, so it still names nothing (review finding 5, after the
+/// commit).
+#[test]
+fn a_reply_written_as_it_was_keeps_its_dangling_reference() {
+    let dir = scratch();
+    let (bytes, size) = dangling(&[], &[0]);
+    let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
+    let page = doc.page(0).unwrap();
+    let (_, reply) = doc.state().foreign_on(page).next().unwrap();
+    let reply = reply.src.as_ref().unwrap().id;
+    recolor(&mut doc, [10, 200, 10]);
+    let (base, section) = planned_in_place(&mut doc);
+    let wrote = written(base.len(), &section, &path);
+    assert!(wrote.contains(&reply), "{wrote:?}");
+    assert_eq!(named_in(&path, reply, b"ExData"), [((size, 0), false)]);
+    let fresh: Vec<u32> = wrote.iter().map(|id| id.0).filter(|&n| n >= size).collect();
+    assert!(!fresh.is_empty());
+    assert!(fresh.iter().all(|&n| n > size), "{fresh:?}");
+    assert_eq!(color_of(&path), [10, 200, 10]);
+}
+
+/// A page that names the last number a file may use, which nothing is,
+/// leaves no numbers past it for the section's new objects: the Append is
+/// refused, so the save is a Rewrite, which numbers it for itself, and
+/// stops here too, its own numbering past that number run out as well:
+/// the file can't be saved, and is left as it was (review finding 5,
+/// after the commit; where new numbers start is left for Greg).
+#[test]
+fn numbers_named_near_the_last_refuse_the_append() {
+    use super::append::Refused;
+    use super::plan::Why;
+    let dir = scratch();
+    let mut pdf = Pdf::load_mem(&file(&[1], XrefType::CrossReferenceTable, "1.7")).unwrap();
+    let page = pdf.get_pages()[&1];
+    let last = crate::serialize::NUMBERS - 1;
+    let gone = dictionary! { "D0" => Object::Reference((last, 0)) };
+    (pdf.get_dictionary_mut(page).unwrap()).set("PieceInfo", gone);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    let (_, mut doc) = opened(&dir, "a.pdf", &bytes);
+    let add = Edit::AnnotAdd {
+        page: doc.page(0).unwrap(),
+        annot: square(1),
+    };
+    doc.apply(add, "add").unwrap();
+    let v = doc.current_version();
+    let input = doc.save_input(v).unwrap();
+    let plan = SavePlan {
+        strategy: Strategy::Append { onto: Onto::Saved },
+        asks: Vec::new(),
+        transforms: Vec::new(),
+        notes: Vec::new(),
+    };
+    let base: Arc<dyn ByteSource> = Arc::new(Arc::<[u8]>::from(&bytes[..]));
+    let out = append(&input, &plan, base, Mode::Veto, &NoProgress);
+    doc.abandon_save(v);
+    let Err(e) = out else {
+        panic!("the Append wasn't refused");
+    };
+    let refused = e.chain().find_map(|c| c.downcast_ref::<Refused>());
+    assert!(matches!(refused, Some(Refused::Unsound(_))), "{e:#}");
+    assert_eq!(refused.unwrap().why(), Some(Why::BaseUnsound));
+    // Planned, the save is that Rewrite, whose numbers run out the same
+    // way: it stops, and nothing is written.
+    let path = doc.file().unwrap().0.to_path_buf();
+    let stop = save(&mut doc, &path, &AskAnswers::default(), &NoProgress).unwrap_err();
+    assert!(
+        stop.to_string().contains("objects a PDF may have"),
+        "{stop}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}

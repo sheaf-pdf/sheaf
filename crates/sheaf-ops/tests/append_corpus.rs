@@ -462,6 +462,7 @@ fn appended_or_not(doc: &mut Document, path: &Path) -> Result<Strategy, SaveStop
     let answers = AskAnswers {
         append_anyway: true,
         stays_readable: true,
+        found: true,
         break_signatures: true,
         drop_xfa_values: true,
         ..Default::default()

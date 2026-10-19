@@ -340,7 +340,9 @@ fn a_duplicated_page_gets_fields_of_its_own_by(how: How) {
 }
 
 /// A duplicate and an insert, saved in place, then saved again: each
-/// field is written once each time.
+/// field is written once each time. The second save in place is planned
+/// (an Append: a turn removes nothing) or a Rewrite, which numbers
+/// through the first save's record.
 #[test]
 fn saving_twice_writes_each_field_once() {
     saved_twice(false);
@@ -352,38 +354,45 @@ fn saving_twice_writes_each_field_once_appended() {
 }
 
 fn saved_twice(appended: bool) {
-    let dir = scratch(&format!("merge-twice-{appended}"));
-    let path = write(&dir, "form.pdf", &mut form_a());
-    let b = write(&dir, "b.pdf", &mut form_b());
-    let mut doc = open(&path);
-    let first = doc.state().order()[0];
-    doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
-        .unwrap();
-    insert(&mut doc, &b, None, None);
-    let want = [StrategyKind::Rewrite, StrategyKind::Append][usize::from(appended)];
-    assert_eq!(save_in_place(&mut doc, &path, appended), want);
-    let once = std::fs::read(&path).unwrap();
-    let report = clean(&once, "first save");
-    assert_eq!((report.fields, report.widgets), (5, 6));
-    // Then a page turned, and saved again both ways.
-    let last = doc.state().order()[4];
-    doc.apply(
-        Edit::RotatePages {
-            ids: vec![last],
-            by: sheaf_core::Rotation::R90,
-        },
-        "Rotate",
-    )
-    .unwrap();
-    let copy = dir.join("rewritten.pdf");
-    sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &copy).unwrap();
-    // A turn removes nothing: the plan appends it.
-    assert_eq!(planned(&mut doc, &path).0, StrategyKind::Append);
-    for (what, at) in [("rewritten", &copy), ("in place", &path)] {
-        let report = clean(&std::fs::read(at).unwrap(), what);
+    for rewritten in [false, true] {
+        let what = format!("first appended {appended}, then rewritten {rewritten}");
+        let dir = scratch(&format!("merge-twice-{appended}-{rewritten}"));
+        let path = write(&dir, "form.pdf", &mut form_a());
+        let b = write(&dir, "b.pdf", &mut form_b());
+        let mut doc = open(&path);
+        let first = doc.state().order()[0];
+        doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
+            .unwrap();
+        insert(&mut doc, &b, None, None);
+        let want = [StrategyKind::Rewrite, StrategyKind::Append][usize::from(appended)];
+        assert_eq!(save_in_place(&mut doc, &path, appended), want, "{what}");
+        let once = std::fs::read(&path).unwrap();
+        let report = clean(&once, "first save");
         assert_eq!((report.fields, report.widgets), (5, 6), "{what}");
+        // Then a page turned, and saved again: elsewhere, and in place.
+        let last = doc.state().order()[4];
+        doc.apply(
+            Edit::RotatePages {
+                ids: vec![last],
+                by: sheaf_core::Rotation::R90,
+            },
+            "Rotate",
+        )
+        .unwrap();
+        let copy = dir.join("rewritten.pdf");
+        sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &copy).unwrap();
+        let again = match rewritten {
+            false => planned(&mut doc, &path).0,
+            true => save_in_place(&mut doc, &path, false),
+        };
+        let want = [StrategyKind::Append, StrategyKind::Rewrite][usize::from(rewritten)];
+        assert_eq!(again, want, "{what}");
+        for (at, how) in [(&copy, "elsewhere"), (&path, "in place")] {
+            let report = clean(&std::fs::read(at).unwrap(), how);
+            assert_eq!((report.fields, report.widgets), (5, 6), "{what}, {how}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 sheaf_doc::both_ways!(

@@ -116,6 +116,7 @@ pub fn save_appended(doc: &mut Document, path: &Path) -> Result<SaveReport, Save
     let answers = AskAnswers {
         append_anyway: true,
         stays_readable: true,
+        found: true,
         ..Default::default()
     };
     saved_as(
@@ -178,7 +179,7 @@ pub fn appended(doc: &Document) -> Result<Vec<u8>, SaveStop> {
         &input,
         &plan,
         Arc::new(base.clone()),
-        Mode::Report,
+        Mode::ReportAll,
         &in_progress::NoProgress,
     )
     .map_err(super::stopped)?;
@@ -308,8 +309,11 @@ fn saved_as(
 ///   whose signatures hold, which none allows, asks as an Append they
 ///   don't allow does, unless the reader chose to append anyway. When
 ///   what they agreed to said something stays readable, the removal check
-///   reports what it finds; else it finds removed text the plan didn't
-///   say, and asks again, saying so.
+///   reports what it finds, but for a derived object whose removal the
+///   save's path didn't say (a misclassification), which asks again,
+///   saying the check found removed text, until they agree to that too;
+///   else it finds removed text the plan didn't say, and asks again,
+///   saying so.
 /// - **An Unchanged plan** writes nothing: the record is the saved file's,
 ///   for the version saved.
 ///
@@ -357,11 +361,14 @@ fn write(
     let expect = (target.stamp).filter(|_| target.same_file && !answers.overwrite);
     // What the reader agreed would stay readable, the removal check
     // reports; after an Append anyway that said nothing would, it still
-    // stops on what it finds, to ask again.
-    let mode = match (answers.append_anyway, answers.stays_readable) {
-        (true, true) => Mode::Report,
-        (true, false) => Mode::Anyway,
-        (false, _) => Mode::Veto,
+    // stops on what it finds, to ask again, and after one that listed what
+    // the path removes, on a derived object's removal it didn't list,
+    // until they agree to what the check finds.
+    let mode = match answers {
+        a if !a.append_anyway => Mode::Veto,
+        a if !a.stays_readable => Mode::Anyway,
+        a if !a.found => Mode::Report,
+        _ => Mode::ReportAll,
     };
     let (plan, out) = match plan.strategy {
         Strategy::Append { .. } => {

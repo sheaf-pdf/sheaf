@@ -30,9 +30,13 @@
 //! What it finds stops the Append (a veto): a derived object's is a
 //! misclassification, logged as [`RemovalMisclassified`] and counted, and
 //! another's is counted apart ([`vetoes`]). In "Append anyway" mode it's
-//! reported instead, and a recovery sidecar's section is flagged by it.
+//! reported instead, and a recovery sidecar's section is flagged by it;
+//! but a derived object whose record inputs the save's path didn't say
+//! remove text (`Section::said`) is still a misclassification, logged and
+//! counted, which stops the Append unless the reader agreed that what the
+//! check finds stays readable too.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,6 +50,7 @@ use crate::annot::{AnnotId, AnnotKind};
 use crate::content::{Concat, FontDecoders, ReadObjects, ResCx, TextBag, text_bag};
 use crate::file::text_string;
 use crate::model::{AnnotBody, AnnotRec, DocState, FormRef, Mark, PageId};
+use crate::prim::Key;
 use crate::source::Limits;
 use crate::store::BlobId;
 
@@ -59,9 +64,15 @@ pub enum Mode {
     /// said nothing stays readable): they agreed to that, not to removed
     /// text staying readable, which the save asks about again.
     Anyway,
-    /// "Append anyway": the reader chose to keep what the save removes
-    /// readable in the earlier revision, and it's reported.
+    /// "Append anyway": the reader chose to keep what the save's path
+    /// says it removes readable in the earlier revision, and it's
+    /// reported. A derived object whose record inputs it didn't say
+    /// remove text is a misclassification, which stops the Append, as
+    /// [`Mode::Anyway`] does, to ask again.
     Report,
+    /// "Append anyway" to an ask that said what the removal check found
+    /// stays readable too: whatever it finds is reported.
+    ReportAll,
     /// A recovery sidecar's section (§11.10), which is never the file:
     /// what it finds flags the sidecar, for the save that writes the
     /// section to judge.
@@ -69,11 +80,22 @@ pub enum Mode {
 }
 
 /// A section's object whose text, as the saved file has it, the target
-/// hasn't got: its key, and whether sheaf derived it.
+/// hasn't got: its key, whether sheaf derived it, and for a derived one,
+/// whether the save's path said its record inputs remove or replace text
+/// ([`Section::said`]): a misclassification when it didn't.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Found {
     pub key: ObjKey,
     pub derived: bool,
+    pub said: bool,
+}
+
+impl Found {
+    /// Whether it's a misclassification: a derived object the save's path
+    /// didn't say removes text.
+    pub fn misclassified(&self) -> bool {
+        self.derived && !self.said
+    }
 }
 
 /// A derived object whose record inputs the check found text removed
@@ -90,8 +112,10 @@ impl fmt::Display for RemovalMisclassified {
     }
 }
 
-/// How many Appends the check stopped in this process, by whether the
-/// object was derived (a misclassification) or another's (for tuning).
+/// How many misclassifications the check found in this process, each
+/// stopping an Append or reported by one the reader agreed to (`derived`),
+/// and how many Appends it stopped on another's object (`source`, for
+/// tuning).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vetoes {
     pub derived: usize,
@@ -122,10 +146,11 @@ pub(crate) fn vetoes_here() -> Vetoes {
     HERE.get()
 }
 
-/// `found` stopping an Append: logged when it's a misclassification, and
-/// counted.
-pub(crate) fn veto(found: Found) {
-    if found.derived {
+/// `found`, stopping an Append, or a misclassification an Append anyway
+/// reports: logged when it's a misclassification, and counted.
+pub(crate) fn count(found: Found) {
+    let derived = found.misclassified();
+    if derived {
         log::warn!("{}", RemovalMisclassified { key: found.key });
         DERIVED.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -133,8 +158,8 @@ pub(crate) fn veto(found: Found) {
     }
     #[cfg(test)]
     HERE.set(Vetoes {
-        derived: HERE.get().derived + usize::from(found.derived),
-        source: HERE.get().source + usize::from(!found.derived),
+        derived: HERE.get().derived + usize::from(derived),
+        source: HERE.get().source + usize::from(!derived),
     });
 }
 
@@ -153,6 +178,11 @@ pub(crate) struct Section<'a> {
     pub primary: BlobId,
     /// Keys whose old objects may go (live redraws, slice 17).
     pub allowed: &'a [ObjKey],
+    /// The slots the save's path says remove or replace text, when the
+    /// reader agreed that what it lists stays readable (an Append anyway):
+    /// a derived object judged on their values in the two states is what
+    /// they agreed to, and the rest a misclassification. Empty otherwise.
+    pub said: &'a BTreeSet<Key>,
     pub lim: &'a Limits,
 }
 
@@ -213,6 +243,7 @@ pub fn of_rewrite(
         target: &input.target,
         primary: primary.id(),
         allowed: &[],
+        said: &BTreeSet::new(),
         lim,
     }))
 }
@@ -390,25 +421,60 @@ impl<'a> Walk<'a> {
     }
 
     /// What the walk found, derived objects first: a mark that says less
-    /// now, then a page with less drawn over it, then what couldn't be
-    /// read, then the first object whose text the section hasn't got.
+    /// now, then a page with less drawn over it, the first the save's path
+    /// didn't say (a misclassification) before the first it did; then what
+    /// couldn't be read, then the first object whose text the section
+    /// hasn't got. What a mark says is its slot's to say; what's drawn
+    /// over a page is its recognized text, its page's slot's, and the
+    /// header and footer's, a generator's (a page's place and the count
+    /// change that too, which no slot says).
     fn found(&self) -> Option<Found> {
-        let (was, now) = (&self.s.saved.state, self.s.target);
-        let derived = |key: ObjKey| Found { key, derived: true };
+        let s = self.s;
+        let (was, now) = (&s.saved.state, s.target);
+        let derived = |key: ObjKey, said: bool| Found {
+            key,
+            derived: true,
+            said,
+        };
+        let mut said = None;
         for (&a, &key) in &self.marks {
             if says(was.annot(a)).missing_from(&says(now.annot(a))) > 0 {
-                return Some(derived(key));
+                if !s.said.contains(&Key::Annot(a)) {
+                    return Some(derived(key, false));
+                }
+                said.get_or_insert(key);
             }
         }
         let (then, after) = (Drawn::new(was), Drawn::new(now));
+        let header = (s.said.iter()).any(|k| matches!(k, Key::Generator(_)));
         for (&page, &key) in &self.pages {
-            if then.on(page).missing_from(&after.on(page)) > 0 {
-                return Some(derived(key));
+            let ([ocr, hf], [a, b]) = (then.on(page), after.on(page));
+            let mut drawn = a;
+            drawn.extend(&b);
+            let mut all = ocr.clone();
+            all.extend(&hf);
+            if all.missing_from(&drawn) == 0 {
+                continue;
             }
+            let mut unsaid = TextBag::default();
+            if !s.said.contains(&Key::Page(page)) {
+                unsaid.extend(&ocr);
+            }
+            if !header {
+                unsaid.extend(&hf);
+            }
+            if unsaid.missing_from(&drawn) > 0 {
+                return Some(derived(key, false));
+            }
+            said.get_or_insert(key);
+        }
+        if let Some(key) = said {
+            return Some(derived(key, true));
         }
         let source = |key: ObjKey| Found {
             key,
             derived: false,
+            said: false,
         };
         if let Some(key) = self.unread {
             return Some(source(key));
@@ -729,17 +795,17 @@ impl<'a> Drawn<'a> {
         }
     }
 
-    /// The words drawn over page `id`: its OCR text, and the header and
+    /// The words drawn over page `id`: its OCR text, then the header and
     /// footer's text on it. Nothing for a page the state hasn't got.
-    fn on(&self, id: PageId) -> TextBag {
+    fn on(&self, id: PageId) -> [TextBag; 2] {
         let st = self.st;
-        let mut bag = TextBag::default();
+        let (mut ocr, mut bag) = (TextBag::default(), TextBag::default());
         let Some(pos) = st.pos_of(id) else {
-            return bag;
+            return [ocr, bag];
         };
         if let Some(layer) = st.ocr_text(id) {
             for word in &layer.words {
-                bag.add(&word.text);
+                ocr.add(&word.text);
             }
         }
         if let Some(hf) = crate::stamps::drawn_over(st, id)
@@ -758,6 +824,6 @@ impl<'a> Drawn<'a> {
                 bag.add(&placed.text);
             }
         }
-        bag
+        [ocr, bag]
     }
 }
