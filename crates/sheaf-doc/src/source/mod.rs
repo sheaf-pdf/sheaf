@@ -5,9 +5,10 @@
 //! file is a typed error, never a panic, a hang or memory without bound.
 //!
 //! What a source says about itself is a pure function of its bytes, read
-//! once: the page table when it opens, its conformance claims when first
-//! asked. Sources come from the [`Store`](crate::store::Store), one per
-//! distinct file.
+//! once: the page table when it opens; its conformance claims, what its
+//! pages hold beside their content, its form and signatures, and the
+//! header and footer sheaf drew, when first asked. Sources come from the
+//! [`Store`](crate::store::Store), one per distinct file.
 
 mod conformance;
 #[doc(hidden)]
@@ -22,13 +23,18 @@ mod tests;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+use in_progress::{NoProgress, Progress};
 use lopdf::{LazyPdf, Object, ObjectId, XrefFacts};
 use sheaf_core::PageSize;
 
 use crate::content::{ContentError, DrawnForms, PageBlocks};
+use crate::forms::FileForm;
+use crate::forms::sigs::Signatures;
 use crate::geom::Geom;
+use crate::open::FileAnnots;
 use crate::serialize::crypt::Crypt;
-use crate::store::{Blob, BlobCollision, BlobId};
+use crate::stamps::HeaderFooter;
+use crate::store::{Blob, BlobCollision, BlobId, Src};
 
 pub use conformance::{Conformance, PdfA};
 pub use limits::{ContentLimits, FormLimits, Limits, PageTreeLimits};
@@ -47,6 +53,23 @@ pub struct Source {
     blocks: Box<[OnceLock<Arc<PageBlocks>>]>,
     forms: DrawnForms,
     conformance: OnceLock<Conformance>,
+    annots: OnceLock<Arc<FileAnnots>>,
+    form: OnceLock<Arc<FileForm>>,
+    signatures: OnceLock<Arc<Signatures>>,
+    header_footer: OnceLock<Option<StoredHeaderFooter>>,
+}
+
+/// A header and footer sheaf drew, as its file's catalog stores it, and
+/// the indexes of the pages it's on (None: every page).
+pub type StoredHeaderFooter = (HeaderFooter, Option<Vec<usize>>);
+
+/// An object of a source: what a record was read from, so what sheaf
+/// doesn't model of it survives (M10.5 §2, rule 1). It pins the source.
+/// Equal, ordered and hashed by the source's id and the object's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ObjRef {
+    pub src: Src,
+    pub id: ObjectId,
 }
 
 /// Why a source didn't open.
@@ -111,6 +134,10 @@ impl Source {
             forms: DrawnForms::default(),
             pages,
             conformance: OnceLock::new(),
+            annots: OnceLock::new(),
+            form: OnceLock::new(),
+            signatures: OnceLock::new(),
+            header_footer: OnceLock::new(),
         })
     }
 
@@ -165,6 +192,15 @@ impl Source {
     /// member.
     pub fn raw_span(&self, id: ObjectId) -> Option<Range<usize>> {
         self.pdf.raw_span(id)
+    }
+
+    /// [`raw_span`](Self::raw_span) of an object a writer may copy as it
+    /// is: None too for a stream whose `/Length` is a reference, whose
+    /// bytes name the object holding its length, which the object as read
+    /// doesn't, for one whose data its `/Length` doesn't fit, and for an
+    /// object without its `endobj`, whose copy would be as damaged.
+    pub fn raw_span_whole(&self, id: ObjectId) -> Option<Range<usize>> {
+        self.pdf.raw_span_whole(id)
     }
 
     pub fn page_count(&self) -> u32 {
@@ -227,6 +263,44 @@ impl Source {
         self.blocks
             .get(index as usize)
             .is_some_and(|slot| slot.get().is_some())
+    }
+
+    /// What its pages hold beside their content: sheaf's marks and other
+    /// tools' comments and links, each with its object and an id, read
+    /// once (see [`crate::open::FileAnnots`]).
+    pub fn annots(&self) -> &Arc<FileAnnots> {
+        self.annots_counting(&NoProgress)
+    }
+
+    /// [`annots`](Self::annots), with `p` counting the pages read: all at
+    /// once when they were read before.
+    pub(crate) fn annots_counting(&self, p: &dyn Progress) -> &Arc<FileAnnots> {
+        if let Some(annots) = self.annots.get() {
+            p.inc(u64::from(self.page_count()));
+            return annots;
+        }
+        let annots = crate::open::annots::read(self, p);
+        self.annots.get_or_init(|| Arc::new(annots))
+    }
+
+    /// Its form: the field tree, the widgets on its pages and what sheaf
+    /// shows about it, read once (see [`crate::forms::read`]).
+    pub fn form(&self) -> &Arc<FileForm> {
+        self.form.get_or_init(|| Arc::new(crate::forms::read(self)))
+    }
+
+    /// Its signatures, what each allows after it, and Reader's usage
+    /// rights, read once (see [`crate::forms::sigs`]).
+    pub fn signatures(&self) -> &Arc<Signatures> {
+        (self.signatures).get_or_init(|| Arc::new(crate::forms::sigs::read(self)))
+    }
+
+    /// The header and footer its catalog says sheaf drew on its pages
+    /// ([`crate::stamps::from_catalog`]), read once.
+    pub fn header_footer(&self) -> Option<&StoredHeaderFooter> {
+        (self.header_footer)
+            .get_or_init(|| crate::stamps::from_catalog(&self.pdf))
+            .as_ref()
     }
 
     /// What its XMP metadata claims it conforms to: PDF/A and PDF/UA.

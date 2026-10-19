@@ -21,14 +21,13 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use lopdf::{Dictionary, Object, Stream, dictionary};
 use serde::{Deserialize, Serialize};
 use sheaf_core::Rotation;
 
 use crate::annot::{Box2, Pt};
-use crate::content::{
-    self, ContentWriter, Font, Glyphless, ResObjects, Reserved, ResourceNeeds, TextMode,
-};
+use crate::content::sink::{self, Sink};
+use crate::content::{ContentWriter, Font, Glyphless, Res, Reserved, ResourceNeeds, TextMode};
 use crate::geom::{Affine, Geom};
 
 /// One recognized word.
@@ -394,72 +393,52 @@ pub(crate) fn to_content(layer: &TextLayer) -> (Vec<u8>, ResourceNeeds) {
 }
 
 /// Add `layer` to `page` (an owned, flattened page dictionary about to be
-/// written): `/Contents` becomes `[q, original…, layer]` and `/Resources`
-/// is inlined with the layer's font, the `q` and the font written once a
-/// save through `res`. An earlier layer of ours is removed first. No-op
-/// for an empty layer.
-pub(crate) fn install(
-    pdf: &mut Pdf,
-    page: &mut Dictionary,
-    layer: &TextLayer,
-    res: &mut ResObjects,
-) {
-    strip(pdf, page);
+/// written), read and written through `sink`: `/Contents` becomes `[q,
+/// original…, layer]` and `/Resources` is inlined with the layer's font,
+/// the `q` and the font written once a save. A layer of ours the page
+/// holds already ([`has_layer`]) is taken out first, so a re-OCR leaves
+/// one. An empty layer only takes the old one out.
+pub(crate) fn install(sink: &mut dyn Sink, page: &mut Dictionary, layer: &TextLayer) {
+    if has_layer(sink, page) {
+        strip(sink, page);
+    }
     if layer.is_empty() {
         return;
     }
     let (content, needs) = to_content(layer);
-    let q = res.stream(pdf, dictionary! { MARKER => true }, b"q\n".to_vec());
+    let q = Stream::new(dictionary! { MARKER => true }, b"q\n".to_vec());
+    let q = sink.resource(&Res::of([q.into()]));
     let mut stream = Stream::new(dictionary! { MARKER => true }, content);
     let _ = stream.compress();
-    let ocr = pdf.add_object(stream);
+    let ocr = sink.add(stream.into());
     // Never decode the original streams: array entries are concatenated
     // with whitespace, and the q/Q pair isolates whatever state they leave.
     let mut entries = vec![Object::Reference(q)];
-    match page.get(b"Contents").ok().cloned() {
-        None => {}
-        Some(Object::Array(a)) => entries.extend(a),
-        Some(Object::Reference(r)) => match pdf.get_object(r) {
-            Ok(Object::Array(a)) => entries.extend(a.iter().cloned()),
-            _ => entries.push(Object::Reference(r)),
-        },
-        Some(other) => entries.push(other),
-    }
+    entries.extend(sink::content_entries(sink, page));
     entries.push(Object::Reference(ocr));
     page.set("Contents", Object::Array(entries));
-    let mut resources = content::resources_of(pdf, page);
-    res.bind(pdf, &needs, &mut resources);
+    let mut resources = sink::resources(sink, page);
+    sink::bind(sink, &needs, &mut resources);
     page.set("Resources", Object::Dictionary(resources));
 }
 
-/// Whether the page has an OCR layer of ours in its content.
-pub(crate) fn has_layer(pdf: &Pdf, page: &Dictionary) -> bool {
-    let mut probe = page.clone();
-    strip(pdf, &mut probe);
-    probe.get(b"Contents").ok() != page.get(b"Contents").ok()
+/// Whether the page has an OCR layer of ours in its content: a stream
+/// marked as one in its `/Contents` array.
+pub(crate) fn has_layer(sink: &mut dyn Sink, page: &Dictionary) -> bool {
+    layer_entries(sink, page).is_some_and(|(_, ours)| ours.contains(&true))
 }
 
 /// Remove a layer we wrote earlier from the page's `/Contents`.
-pub(crate) fn strip(pdf: &Pdf, page: &mut Dictionary) {
-    let Some(entries) = page
-        .get(b"Contents")
-        .ok()
-        .and_then(|c| pdf.dereference(c).ok())
-        .and_then(|(_, o)| o.as_array().ok().cloned())
-    else {
+pub(crate) fn strip(sink: &mut dyn Sink, page: &mut Dictionary) {
+    let Some((entries, ours)) = layer_entries(sink, page) else {
         return;
     };
-    let ours = |e: &Object| {
-        e.as_reference()
-            .ok()
-            .and_then(|r| pdf.get_object(r).ok())
-            .and_then(|o| o.as_stream().ok())
-            .is_some_and(|s| s.dict.has(MARKER.as_bytes()))
-    };
-    if !entries.iter().any(ours) {
+    if !ours.contains(&true) {
         return;
     }
-    let kept: Vec<Object> = entries.into_iter().filter(|e| !ours(e)).collect();
+    let kept: Vec<Object> = (entries.into_iter().zip(ours))
+        .filter_map(|(e, ours)| (!ours).then_some(e))
+        .collect();
     match kept.len() {
         0 => {
             page.remove(b"Contents");
@@ -469,9 +448,31 @@ pub(crate) fn strip(pdf: &Pdf, page: &mut Dictionary) {
     }
 }
 
+/// The page's `/Contents` array, when it has one, and which of its
+/// entries are a layer's streams.
+fn layer_entries(sink: &mut dyn Sink, page: &Dictionary) -> Option<(Vec<Object>, Vec<bool>)> {
+    let entries = match page.get(b"Contents").ok()? {
+        Object::Array(entries) => entries.clone(),
+        Object::Reference(r) => sink.array(*r)?,
+        _ => return None,
+    };
+    let ours = (entries.iter())
+        .map(|e| {
+            (e.as_reference().ok())
+                .and_then(|r| sink.stream_dict(r))
+                .is_some_and(|d| d.has(MARKER.as_bytes()))
+        })
+        .collect();
+    Some((entries, ours))
+}
+
 #[cfg(test)]
 mod tests {
+    use lopdf::Document as Pdf;
+
     use super::*;
+    use crate::content::sink::Lopdf;
+    use crate::content::{self, ResObjects};
     use crate::geom::Rect;
 
     const ROTATIONS: [Rotation; 4] = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
@@ -753,6 +754,10 @@ mod tests {
         assert_eq!(off, "1 0 0 1 -27 814");
     }
 
+    fn sink<'a>(pdf: &'a mut Pdf, res: &'a mut ResObjects) -> Lopdf<'a> {
+        Lopdf { pdf, res }
+    }
+
     #[test]
     fn install_and_strip_are_idempotent() {
         let mut pdf = Pdf::with_version("1.5");
@@ -762,7 +767,7 @@ mod tests {
         let mut page = dictionary! { "Type" => "Page", "Contents" => orig, "Resources" => res };
         let l = layer(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], Rotation::R0);
         let mut objs = ResObjects::default();
-        install(&mut pdf, &mut page, &l, &mut objs);
+        install(&mut sink(&mut pdf, &mut objs), &mut page, &l);
         let contents = page.get(b"Contents").unwrap().as_array().unwrap().clone();
         assert_eq!(contents.len(), 3);
         assert_eq!(contents[1], Object::Reference(orig));
@@ -783,14 +788,16 @@ mod tests {
         );
         // A second install replaces rather than stacks.
         let before = pdf.objects.len();
-        install(&mut pdf, &mut page, &l, &mut objs);
+        assert!(has_layer(&mut sink(&mut pdf, &mut objs), &page));
+        install(&mut sink(&mut pdf, &mut objs), &mut page, &l);
         assert_eq!(page.get(b"Contents").unwrap().as_array().unwrap().len(), 3);
         assert_eq!(pdf.objects.len(), before + 1, "only a new content stream");
-        strip(&pdf, &mut page);
+        strip(&mut sink(&mut pdf, &mut objs), &mut page);
         assert_eq!(page.get(b"Contents").unwrap(), &Object::Reference(orig));
+        assert!(!has_layer(&mut sink(&mut pdf, &mut objs), &page));
         // An empty layer leaves the page alone.
         let empty = layer(vec![], Rotation::R0);
-        install(&mut pdf, &mut page, &empty, &mut objs);
+        install(&mut sink(&mut pdf, &mut objs), &mut page, &empty);
         assert_eq!(page.get(b"Contents").unwrap(), &Object::Reference(orig));
     }
 
@@ -801,7 +808,7 @@ mod tests {
         let mut res = ResObjects::default();
         let mut pages = [dictionary! {}, dictionary! {}];
         for page in &mut pages {
-            install(&mut pdf, page, &l, &mut res);
+            install(&mut sink(&mut pdf, &mut res), page, &l);
         }
         let font = |page: &Dictionary| {
             let resources = page.get(b"Resources").unwrap().as_dict().unwrap();

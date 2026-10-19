@@ -175,6 +175,8 @@ fn positions_round_trip_through_pdfium_and_the_source() {
         color: None,
         style: Default::default(),
         open: true,
+        object: None,
+        kept: false,
     };
     let fit_h = Some(DestView::Other {
         kind: "FitH".into(),
@@ -191,11 +193,11 @@ fn positions_round_trip_through_pdfium_and_the_source() {
         src,
         name: "src.pdf".into(),
         derived: None,
-        stamp: None,
     };
     let model = Document::new(
         store,
         primary,
+        None,
         &[
             item("Upright", 0, xyz(36.0, 100.0)),
             // PageSpace on a /Rotate 90 page is still 612 wide, 792 tall.

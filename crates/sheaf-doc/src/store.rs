@@ -3,9 +3,9 @@
 //! hands out one blob for the same bytes, however often they're interned,
 //! and one source for a blob while anything holds it.
 //!
-//! Liveness is the `Arc`: a blob lives while a [`Blob`] or [`Src`] holds
-//! it, and the store keeps only weak references, so nothing has to be
-//! freed by hand. A [`Source`] holds its blob, and the blob only a weak
+//! Liveness is the `Arc`: a blob lives while a [`Blob`], [`BlobRef`] or
+//! [`Src`] holds it, and the store keeps only weak references, so nothing
+//! has to be freed by hand. A [`Source`] holds its blob, and the blob only a weak
 //! reference to its source, so there's no cycle. Interning is outside
 //! undo: undoing an insert leaves its file interned, and the bytes go when
 //! the last version that holds them does.
@@ -37,6 +37,24 @@ impl BlobId {
             len: bytes.len() as u64,
         }
     }
+
+    /// The blob `stem` names: the generated cache's name for a file (its
+    /// checksum in 32 hex digits, a dash and its length), which marks name
+    /// a stamp's page and an attachment's file by. None for any other
+    /// name, an older one of 16 hex digits among them.
+    pub fn from_stem(stem: &str) -> Option<BlobId> {
+        let (hash, len) = stem.split_once('-')?;
+        let id = BlobId {
+            hash: u128::from_str_radix(hash, 16).ok()?,
+            len: len.parse().ok()?,
+        };
+        (id.stem() == stem).then_some(id)
+    }
+
+    /// Its name as the generated cache gives it, what marks name it by.
+    pub fn stem(&self) -> String {
+        format!("{:032x}-{}", self.hash, self.len)
+    }
 }
 
 /// What a blob is: a PDF, or a file a mark attaches. Images come with
@@ -52,6 +70,24 @@ pub enum BlobKind {
 }
 
 impl BlobKind {
+    /// A page stamp's one-page PDF: a library stamp's, or one made from a
+    /// placed stamp's page.
+    pub fn stamp() -> BlobKind {
+        BlobKind::Pdf {
+            password: None,
+            origin: Origin::Memory(MemoryKind::Library),
+        }
+    }
+
+    /// A file restored after a crash, from its recovery sidecar, opened
+    /// with `password`.
+    pub fn recovered(password: Option<&str>) -> BlobKind {
+        BlobKind::Pdf {
+            password: password.map(|p| Zeroizing::new(p.to_owned())),
+            origin: Origin::Memory(MemoryKind::Recovered),
+        }
+    }
+
     /// A PDF read from the file at `path`, opened with `password`.
     pub fn file(path: &Path, password: Option<&str>) -> BlobKind {
         BlobKind::Pdf {
@@ -78,6 +114,10 @@ pub enum MemoryKind {
     /// A page stamp's one-page PDF, from the stamp library or made from a
     /// placed stamp's page, as one placed or pasted is.
     Library,
+    /// A file restored after a crash from its recovery sidecar (M10.5
+    /// §11.10): its bytes on disk with the sidecar's sections after them,
+    /// or a Full sidecar's whole document.
+    Recovered,
 }
 
 /// Two different byte strings with one [`BlobId`]: the second isn't
@@ -250,6 +290,63 @@ impl fmt::Debug for Blob {
     }
 }
 
+/// A blob as a record holds it: pins it. Equal, ordered and hashed by its
+/// id.
+#[derive(Clone)]
+pub struct BlobRef(Blob);
+
+impl BlobRef {
+    pub fn blob(&self) -> &Blob {
+        &self.0
+    }
+
+    pub fn id(&self) -> BlobId {
+        self.0.id()
+    }
+
+    pub fn bytes(&self) -> &Arc<[u8]> {
+        self.0.bytes()
+    }
+}
+
+impl From<Blob> for BlobRef {
+    fn from(blob: Blob) -> BlobRef {
+        BlobRef(blob)
+    }
+}
+
+impl PartialEq for BlobRef {
+    fn eq(&self, other: &BlobRef) -> bool {
+        self.id() == other.id()
+    }
+}
+
+impl Eq for BlobRef {}
+
+impl std::hash::Hash for BlobRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id().hash(state);
+    }
+}
+
+impl PartialOrd for BlobRef {
+    fn partial_cmp(&self, other: &BlobRef) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BlobRef {
+    fn cmp(&self, other: &BlobRef) -> std::cmp::Ordering {
+        self.id().cmp(&other.id())
+    }
+}
+
+impl fmt::Debug for BlobRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BlobRef").field(&self.id()).finish()
+    }
+}
+
 /// A PDF source: pins its blob. Equal, ordered and hashed by its blob's
 /// id.
 #[derive(Clone)]
@@ -327,6 +424,28 @@ mod tests {
         let other = intern(&store, b"other bytes");
         assert_ne!(other.id(), first.id());
         assert_eq!(store.bytes(), first.len() + other.len());
+    }
+
+    #[test]
+    fn a_stem_names_its_blob() {
+        let id = BlobId::of(b"notes");
+        let stem = id.stem();
+        assert_eq!(stem, format!("{}-5", sheaf_core::checksum_hex(b"notes")));
+        assert_eq!(BlobId::from_stem(&stem), Some(id));
+        let (hash, _) = stem.split_once('-').unwrap();
+        for other in [
+            // Named by FNV-1a, before xxh3.
+            "cbf29ce484222325-0".to_string(),
+            String::new(),
+            "fixture-file".into(),
+            stem.to_uppercase(),
+            format!("+{stem}"),
+            format!("{hash}-05"),
+            format!("{hash}-"),
+            format!("{hash}-5.pdf"),
+        ] {
+            assert_eq!(BlobId::from_stem(&other), None, "{other:?}");
+        }
     }
 
     #[test]

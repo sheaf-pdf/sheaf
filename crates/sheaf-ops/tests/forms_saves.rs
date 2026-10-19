@@ -4,17 +4,21 @@
 //! nothing signed needs it (bug 7); an XFA copy holding values the
 //! AcroForm lacks is found; a save that would rewrite a signed file asks,
 //! and appending leaves its signed bytes as they were, an encrypted one's
-//! too.
+//! too. A save, an edit and another save keep the form, the marks, other
+//! tools' annotations and the bookmarks (M10.5 slice 8).
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use std::path::Path;
 
-use lopdf::{Document as Pdf, EncryptionState, EncryptionVersion, Object, Permissions};
-use sheaf_doc::forms::fixture::Form;
-use sheaf_doc::forms::{Finding, check};
-use sheaf_doc::save::{IfChanged, Signed, Strategy, WouldBreakSignatures, save_to_path_noting};
-use sheaf_doc::{Document, Edit, SourceInfo};
+use lopdf::{
+    Document as Pdf, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions, dictionary,
+};
+use sheaf_doc::forms::fixture::{Form, note, outline_tree};
+use sheaf_doc::forms::sigs::Verdict;
+use sheaf_doc::forms::{Finding, Value, check};
+use sheaf_doc::materialize::{Ask, AskAnswers, Note, SaveReport, SaveStop, Why};
+use sheaf_doc::{AnnotBody, AnnotId, Document, Edit, ObjRef, SourceInfo};
 
 mod common;
 use common::*;
@@ -65,21 +69,24 @@ fn tooltips(bytes: &[u8]) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
-#[test]
-fn a_changed_hybrid_form_loses_its_xfa_copy() {
+sheaf_doc::both_ways!(
+    a_changed_hybrid_form_loses_its_xfa_copy,
+    a_changed_hybrid_form_loses_its_xfa_copy_appended: changed_hybrid_loses_xfa
+);
+
+fn changed_hybrid_loses_xfa(how: How) {
     // Bug 6: a page deleted, so the XFA describes a field that's gone.
-    let dir = scratch("saves-xfa");
+    let dir = scratch(&format!("saves-xfa-{how:?}"));
     let path = write(&dir, "form.pdf", &mut hybrid());
     let mut doc = open(&path);
-    let second = doc.state().pages[1].id;
+    let second = doc.state().order()[1];
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    assert!(doc.form_changed());
-    let mut saved = written_both_ways(&doc);
-    saved.extend(saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")));
-    for (strategy, bytes) in saved {
+    assert!(drops_xfa(&doc, &path));
+    let written = (how.strategy(), written(&doc, how));
+    for (strategy, bytes) in [written, saved(&mut doc, &path, how)] {
         let what = format!("{strategy:?}");
-        if strategy == Strategy::Rewrite {
+        if strategy == StrategyKind::Rewrite {
             clean(&bytes, &what);
         }
         assert!(!parts(&bytes).0, "{what}: the XFA copy stayed");
@@ -90,20 +97,53 @@ fn a_changed_hybrid_form_loses_its_xfa_copy() {
             tips.contains(&("form1[0].x[0]".into(), Some("Tip for x".into()))),
             "{what}: {tips:?}"
         );
-        if strategy == Strategy::Rewrite {
+        if strategy == StrategyKind::Rewrite {
             assert_eq!(tips.len(), 1, "{what}");
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An export that leaves out a hybrid form's widget page changes its form
+/// as a page delete does: extracted pages and a printed copy drop the XFA
+/// copy, its tooltip on the field kept in `/TU`, and the field left out
+/// goes. Every page exported keeps the form as it was, XFA and all.
 #[test]
-fn an_unchanged_hybrid_form_keeps_its_xfa_copy() {
+fn an_export_without_a_hybrid_form_s_widget_page_drops_its_xfa() {
+    let dir = scratch("export-xfa");
+    let path = write(&dir, "form.pdf", &mut hybrid());
+    let doc = open(&path);
+    let snap = doc.snapshot();
+    let order: Vec<_> = snap.state.order().iter().copied().collect();
+    let extracted = sheaf_doc::save::extract_bytes(&snap, &order[..1]).unwrap();
+    let printed = sheaf_doc::save::print_pdf(&snap, &order[..1], false).unwrap();
+    for (bytes, what) in [(&extracted, "extracted"), (&printed, "printed")] {
+        clean(bytes, what);
+        assert!(!parts(bytes).0, "{what}: the XFA copy stayed");
+        assert_eq!(
+            tooltips(bytes),
+            [("form1[0].x[0]".into(), Some("Tip for x".into()))],
+            "{what}"
+        );
+    }
+    let every = sheaf_doc::save::extract_bytes(&snap, &order).unwrap();
+    clean(&every, "every page");
+    assert!(parts(&every).0, "every page: the XFA copy went");
+    assert_eq!(tooltips(&every).len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+sheaf_doc::both_ways!(
+    an_unchanged_hybrid_form_keeps_its_xfa_copy,
+    an_unchanged_hybrid_form_keeps_its_xfa_copy_appended: unchanged_hybrid_keeps_xfa
+);
+
+fn unchanged_hybrid_keeps_xfa(how: How) {
     // A page turned: the form is as it was.
-    let dir = scratch("saves-xfa-kept");
+    let dir = scratch(&format!("saves-xfa-kept-{how:?}"));
     let path = write(&dir, "form.pdf", &mut hybrid());
     let mut doc = open(&path);
-    let first = doc.state().pages[0].id;
+    let first = doc.state().order()[0];
     doc.apply(
         Edit::RotatePages {
             ids: vec![first],
@@ -112,8 +152,9 @@ fn an_unchanged_hybrid_form_keeps_its_xfa_copy() {
         "Rotate",
     )
     .unwrap();
-    assert!(!doc.form_changed());
-    for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
+    assert!(!drops_xfa(&doc, &path));
+    let written = (how.strategy(), written(&doc, how));
+    for (strategy, bytes) in [written, saved(&mut doc, &path, how)] {
         let what = format!("{strategy:?}");
         clean(&bytes, &what);
         assert!(parts(&bytes).0, "{what}");
@@ -123,8 +164,10 @@ fn an_unchanged_hybrid_form_keeps_its_xfa_copy() {
 
 #[test]
 fn a_form_brought_into_a_hybrid_one_is_saved_in_full() {
-    // An insert changes the form: the incremental save refuses, and the
-    // full one takes the XFA copy out.
+    // An insert changes the form: a save takes the XFA copy out. The plan
+    // appends, dropping it in the section (M10.5 §11.8), but the removal
+    // check finds the XFA's text would stay readable in the earlier
+    // revision, so the save is a Rewrite (§11.9).
     let dir = scratch("saves-xfa-insert");
     let path = write(&dir, "form.pdf", &mut hybrid());
     let other = write(&dir, "other.pdf", &mut Form::new(1));
@@ -134,10 +177,8 @@ fn a_form_brought_into_a_hybrid_one_is_saved_in_full() {
         blue(&mut f, "z", 0, 0, "Zed");
         std::fs::write(&other, f.bytes()).unwrap();
     }
-    let info = SourceInfo::read(doc.store(), &other, None).unwrap();
-    let form = sheaf_doc::forms::read(&info.src);
+    let (info, _) = SourceInfo::read(doc.store(), &other, None).unwrap();
     let sid = doc.add_source(info);
-    doc.set_source_form(sid, form);
     doc.apply(
         Edit::InsertPages {
             source: sid,
@@ -149,14 +190,18 @@ fn a_form_brought_into_a_hybrid_one_is_saved_in_full() {
         "Insert",
     )
     .unwrap();
-    assert!(sheaf_doc::incremental::incremental(&doc.snapshot()).is_err());
-    let (strategy, notes) =
-        save_to_path_noting(&doc.snapshot(), &path, Signed::Ask, IfChanged::Ask).unwrap();
-    assert_eq!(strategy, Strategy::Rewrite);
-    assert!(
-        notes.contains(&sheaf_doc::forms::rules::XFA_REMOVED.to_string()),
-        "{notes:?}"
-    );
+    let drop_xfa = AskAnswers {
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    let report = save(&mut doc, &path, drop_xfa).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    let found = Why::RemovalCheck {
+        key: sheaf_doc::materialize::ObjKey::AcroForm,
+    };
+    assert_eq!(report.why, [found]);
+    let removed = Note(sheaf_doc::forms::rules::XFA_REMOVED.into());
+    assert!(report.notes.contains(&removed), "{:?}", report.notes);
     let bytes = std::fs::read(&path).unwrap();
     let report = clean(&bytes, "saved");
     assert_eq!(report.fields, 3);
@@ -164,16 +209,20 @@ fn a_form_brought_into_a_hybrid_one_is_saved_in_full() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn usage_rights_go_with_a_rewrite() {
+sheaf_doc::both_ways!(
+    usage_rights_go_with_a_rewrite,
+    usage_rights_go_with_a_rewrite_appended: usage_rights_go
+);
+
+fn usage_rights_go(how: How) {
     // Bug 7: they'd still sign the original's bytes.
-    let dir = scratch("saves-rights");
+    let dir = scratch(&format!("saves-rights-{how:?}"));
     let mut f = hybrid();
     f.usage_rights();
     let path = write(&dir, "form.pdf", &mut f);
     assert_eq!(parts(&std::fs::read(&path).unwrap()), (true, true, true));
     let mut doc = open(&path);
-    let first = doc.state().pages[0].id;
+    let first = doc.state().order()[0];
     doc.apply(
         Edit::RotatePages {
             ids: vec![first],
@@ -182,17 +231,15 @@ fn usage_rights_go_with_a_rewrite() {
         "Rotate",
     )
     .unwrap();
-    // Saved as it is: an update keeps them, still signing the original.
-    let saved = saved_both_ways(&doc, &path, &dir.join("rewritten.pdf"));
-    assert_eq!(saved[1].0, Strategy::Incremental);
-    for (strategy, bytes) in saved {
+    // A turn is neither a fill nor a comment, which are all usage rights
+    // allow (M10.5 §9.3): a save by either strategy takes them out. No
+    // signature needs `/SigFlags` now; the form is as it was.
+    let want = (true, false, false);
+    let written = (how.strategy(), written(&doc, how));
+    for (strategy, bytes) in [written, saved(&mut doc, &path, how)] {
         let what = format!("{strategy:?}");
+        assert_eq!(strategy, how.strategy());
         clean(&bytes, &what);
-        let want = match strategy {
-            // No signature needs `/SigFlags` now; the form is as it was.
-            Strategy::Rewrite => (true, false, false),
-            Strategy::Incremental => (true, true, true),
-        };
         assert_eq!(parts(&bytes), want, "{what}");
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -235,6 +282,29 @@ fn signature_fits(bytes: &[u8]) -> bool {
         .any(|f| matches!(f, Finding::StaleSignature { .. }))
 }
 
+/// `doc` saved to `path` (`materialize::save`) with `answers`.
+fn save(doc: &mut Document, path: &Path, answers: AskAnswers) -> Result<SaveReport, SaveStop> {
+    sheaf_doc::materialize::save(doc, path, &answers, &sheaf_ops::NoProgress)
+}
+
+/// Whether `stop` asks before a Rewrite breaks the file's one signature,
+/// for what the save removes, offering an Append anyway.
+fn asks_for_removal(stop: &SaveStop) -> bool {
+    matches!(
+        stop,
+        SaveStop::Ask(Ask::Signatures {
+            impact,
+            append_anyway: Some(_),
+            reason: Some(Why::Removes(_)),
+        }) if impact.len() == 1 && impact[0].verdict == Verdict::Invalid
+    )
+}
+
+/// A save of a signed file that removes something asks first (M10.5
+/// §9.2–9.3): Append anyway, Rewrite or Cancel. Asked, nothing's written
+/// and the document is as unsaved as it was; rewritten, the signature
+/// breaks and the deleted page's value goes. An unsigned file isn't asked
+/// about.
 #[test]
 fn a_save_that_would_rewrite_a_signed_file_asks() {
     let dir = scratch("saves-signed");
@@ -242,37 +312,145 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
     let original = std::fs::read(&path).unwrap();
     assert!(signature_fits(&original));
     let mut doc = open(&path);
-    let second = doc.state().pages[1].id;
+    let second = doc.state().order()[1];
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    let snap = doc.snapshot();
     // Asked: nothing's written.
-    let err = save_to_path_noting(&snap, &path, Signed::Ask, IfChanged::Ask).unwrap_err();
-    let e = err.downcast_ref::<WouldBreakSignatures>().expect("asks");
-    assert_eq!(*e, WouldBreakSignatures { signatures: 1 });
+    let stop = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
+    assert!(asks_for_removal(&stop), "{stop:?}");
     assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(doc.is_dirty());
     // Rewritten elsewhere: the signature breaks, and the value goes.
     let copy = dir.join("rewritten.pdf");
-    save_to_path_noting(&snap, &copy, Signed::Rewrite, IfChanged::Ask).unwrap();
+    let rewrite = AskAnswers {
+        break_signatures: true,
+        ..Default::default()
+    };
+    let report = save(&mut doc, &copy, rewrite).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    assert!(!doc.is_dirty());
     let rewritten = std::fs::read(&copy).unwrap();
     assert!(!signature_fits(&rewritten));
     assert!(!holds(&rewritten, b"LEAKVALUE123"));
-    // Appended: the signed bytes are as they were, and the signature fits;
-    // the deleted page's value stays in the earlier revision, as said.
-    let (strategy, _) = save_to_path_noting(&snap, &path, Signed::Append, IfChanged::Ask).unwrap();
-    assert_eq!(strategy, Strategy::Incremental);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    // Saved onto the file that Rewrite wrote, it isn't asked again: that
+    // file has no signature left to break. Nor saved over the signed file
+    // again: the document's signatures stopped holding with the Rewrite,
+    // whatever file it writes (`SaveRecord::signatures_hold`).
+    let first = doc.state().order()[0];
+    doc.apply(
+        Edit::RotatePages {
+            ids: vec![first],
+            by: sheaf_core::Rotation::R90,
+        },
+        "Rotate",
+    )
+    .unwrap();
+    save(&mut doc, &copy, AskAnswers::default()).unwrap();
+    assert!(!doc.is_dirty());
+    doc.apply(
+        Edit::RotatePages {
+            ids: vec![first],
+            by: sheaf_core::Rotation::R90,
+        },
+        "Rotate",
+    )
+    .unwrap();
+    let report = save(&mut doc, &path, AskAnswers::default()).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    assert_eq!(report.why, [Why::OtherTarget]);
+    assert!(!signature_fits(&std::fs::read(&path).unwrap()));
+    // An unsigned file isn't asked about.
+    let plain = write(&dir, "plain.pdf", &mut hybrid());
+    let mut doc = open(&plain);
+    let second = doc.state().order()[1];
+    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
+        .unwrap();
+    let drop_xfa = AskAnswers {
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    save(&mut doc, &plain, drop_xfa).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Appended, a signed file's bytes are as they were and its signature
+/// fits; the deleted page's value stays in the earlier revision, as the
+/// reader is told.
+#[test]
+fn a_signed_file_appended_keeps_its_signature() {
+    let dir = scratch("saves-signed-appended");
+    let path = write(&dir, "signed.pdf", &mut signed());
+    let original = std::fs::read(&path).unwrap();
+    let mut doc = open(&path);
+    let second = doc.state().order()[1];
+    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
+        .unwrap();
+    let report = sheaf_doc::materialize::save_appended(&mut doc, &path).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
     let appended = std::fs::read(&path).unwrap();
     assert!(appended.starts_with(&original));
     assert!(signature_fits(&appended));
     let report = check(&appended, None).unwrap();
     assert_eq!((report.pages, report.signed), (1, 1));
-    // An unsigned file isn't asked about.
-    let plain = write(&dir, "plain.pdf", &mut hybrid());
-    let mut doc = open(&plain);
-    let second = doc.state().pages[1].id;
-    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
-        .unwrap();
-    save_to_path_noting(&doc.snapshot(), &plain, Signed::Ask, IfChanged::Ask).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A signed file saved as another (`Onto::CopyOf`) is a copy of the file
+/// with a section after it: the copy starts with the signed bytes, the
+/// signature fits it, and the file it copied is untouched. With that file
+/// changed by another program since it was read, nothing is written, and
+/// the save asks about it.
+#[test]
+fn a_signed_file_saved_as_another_copies_and_appends() {
+    let dir = scratch("saves-signed-copy");
+    let path = write(&dir, "signed.pdf", &mut signed());
+    let original = std::fs::read(&path).unwrap();
+    let copy = dir.join("copy.pdf");
+    let mut doc = open(&path);
+    let first = doc.state().order()[0];
+    doc.apply(
+        Edit::AnnotAdd {
+            page: first,
+            annot: note(),
+        },
+        "Note",
+    )
+    .unwrap();
+    let report = sheaf_doc::materialize::save_appended(&mut doc, &copy).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
+    let copied = std::fs::read(&copy).unwrap();
+    assert!(copied.len() > original.len() && copied.starts_with(&original));
+    assert!(signature_fits(&copied));
+    assert_eq!(check(&copied, None).unwrap().signed, 1);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    // The copy is the document's file now, its stamp what was written.
+    let (file, stamp) = doc.file().unwrap();
+    assert_eq!(&**file, copy.as_path());
+    assert!(stamp.holds(&copy).unwrap() && !doc.is_dirty());
+
+    // Its file changed since: refused, nothing written.
+    let mut doc = open(&path);
+    doc.apply(
+        Edit::AnnotAdd {
+            page: first,
+            annot: note(),
+        },
+        "Note",
+    )
+    .unwrap();
+    let mut theirs = original.clone();
+    theirs.extend_from_slice(b"\n");
+    std::fs::write(&path, &theirs).unwrap();
+    let elsewhere = dir.join("elsewhere.pdf");
+    let stop = sheaf_doc::materialize::save_appended(&mut doc, &elsewhere);
+    let asks = SaveStop::Ask(Ask::FileChanged {
+        path: path.as_path().into(),
+    });
+    assert_eq!(stop, Err(asks));
+    assert!(!elsewhere.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), theirs);
+    assert!(doc.is_dirty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -297,7 +475,7 @@ fn an_encrypted_signed_file_appends_and_keeps_its_signature() {
     let original = std::fs::read(&path).unwrap();
     assert!(signature_fits(&original));
     let mut doc = open(&path);
-    let [first, second] = [0, 1].map(|i| doc.state().pages[i].id);
+    let [first, second] = [0, 1].map(|i| doc.state().order()[i]);
     let title = "APPENDEDTITLE123";
     doc.apply(
         Edit::OutlineInsert {
@@ -312,16 +490,18 @@ fn an_encrypted_signed_file_appends_and_keeps_its_signature() {
     .unwrap();
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    let snap = doc.snapshot();
-    let err = save_to_path_noting(&snap, &path, Signed::Ask, IfChanged::Ask).unwrap_err();
-    assert_eq!(
-        err.downcast_ref::<WouldBreakSignatures>(),
-        Some(&WouldBreakSignatures { signatures: 1 })
-    );
+    let stop = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
+    assert!(asks_for_removal(&stop), "{stop:?}");
     assert_eq!(std::fs::read(&path).unwrap(), original);
-    // Appended: the signed bytes are as they were, and the signature fits.
-    let (strategy, _) = save_to_path_noting(&snap, &path, Signed::Append, IfChanged::Ask).unwrap();
-    assert_eq!(strategy, Strategy::Incremental);
+    // Appended anyway: the signed bytes are as they were, and the
+    // signature fits.
+    let anyway = AskAnswers {
+        append_anyway: true,
+        stays_readable: true,
+        ..Default::default()
+    };
+    let report = save(&mut doc, &path, anyway).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
     let appended = std::fs::read(&path).unwrap();
     assert!(appended.starts_with(&original));
     assert!(signature_fits(&appended));
@@ -332,7 +512,7 @@ fn an_encrypted_signed_file_appends_and_keeps_its_signature() {
     let section = &appended[original.len()..];
     assert!(!section.windows(title.len()).any(|w| w == title.as_bytes()));
     assert!(holds(&appended, title.as_bytes()));
-    let saved = SourceInfo::read(doc.store(), &path, None).unwrap();
+    let (saved, _) = SourceInfo::read(doc.store(), &path, None).unwrap();
     assert!(saved.src.pdf().is_encrypted());
     assert_eq!(saved.src.page_count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
@@ -343,18 +523,16 @@ fn a_certified_file_asks_too() {
     let dir = scratch("saves-certified");
     let mut f = Form::new(2);
     let sig = f.signature("cert", 0, row(0));
-    f.certify(sig);
+    f.certify(sig, 2);
     let path = write(&dir, "certified.pdf", &mut f);
     let mut doc = open(&path);
-    let second = doc.state().pages[1].id;
+    let second = doc.state().order()[1];
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    let err = save_to_path_noting(&doc.snapshot(), &path, Signed::Ask, IfChanged::Ask).unwrap_err();
-    assert_eq!(
-        err.downcast_ref::<WouldBreakSignatures>()
-            .map(|e| e.signatures),
-        Some(1)
-    );
+    let original = std::fs::read(&path).unwrap();
+    let err = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
+    assert!(asks_for_removal(&err), "{err:?}");
+    assert_eq!(std::fs::read(&path).unwrap(), original);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -364,10 +542,8 @@ fn signed_fields_brought_in_are_kept_and_said_so() {
     let a = write(&dir, "a.pdf", &mut Form::new(1));
     let s = write(&dir, "signed.pdf", &mut signed());
     let mut doc = open(&a);
-    let info = SourceInfo::read(doc.store(), &s, None).unwrap();
-    let form = sheaf_doc::forms::read(&info.src);
+    let (info, _) = SourceInfo::read(doc.store(), &s, None).unwrap();
     let sid = doc.add_source(info);
-    doc.set_source_form(sid, form);
     let out = doc
         .apply(
             Edit::InsertPages {
@@ -400,7 +576,7 @@ fn corpus_path(path: &str) -> Option<std::path::PathBuf> {
 /// The file at `path` opened, its page `index` deleted, and rewritten.
 fn without_page(path: &Path, index: usize) -> (Document, Vec<u8>) {
     let mut doc = open(path);
-    let id = doc.state().pages[index].id;
+    let id = doc.state().order()[index];
     doc.apply(Edit::DeletePages { ids: vec![id] }, "Delete")
         .unwrap();
     let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
@@ -442,9 +618,255 @@ fn corpus_the_w9s_instructions_page_alone_has_no_form() {
         return;
     };
     let doc = open(&fw9);
-    let second = doc.state().pages[1].id;
+    let second = doc.state().order()[1];
     let bytes = sheaf_doc::save::extract_bytes(&doc.snapshot(), &[second]).unwrap();
     let report = clean(&bytes, "W-9 page 2");
     assert_eq!(report.class(), "no form");
     assert_eq!(parts(&bytes), (false, false, false));
+}
+
+/// A two-page form, `top.a` ("Alpha") on page 1 and `top.b` ("Beta") on
+/// page 2, under nested bookmarks, with one of sheaf's marks and another
+/// tool's comment on page 1 and a link on page 2.
+fn everything() -> Form {
+    let mut f = Form::new(2);
+    let a = blue(&mut f, "a", 0, 0, "Alpha");
+    let b = blue(&mut f, "b", 1, 0, "Beta");
+    f.group("top", &[a, b]);
+    let mark = sheaf_doc::annot::to_pdf(&note(), &mut f.pdf).main;
+    let mark = f.pdf.add_object(mark);
+    let theirs = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text",
+        "Rect" => vec![300.into(), 300.into(), 320.into(), 320.into()],
+        "Contents" => Object::string_literal("Theirs"),
+        "NM" => Object::string_literal("theirs-1"),
+        "T" => Object::string_literal("Pat"),
+    });
+    let link = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Link",
+        "Rect" => vec![300.into(), 400.into(), 400.into(), 420.into()],
+        "A" => dictionary! {
+            "S" => "URI", "URI" => Object::string_literal("https://example.com/"),
+        },
+    });
+    let mut first = f.annots(0);
+    first.extend([mark, theirs]);
+    f.set_annots(0, &first);
+    let mut second = f.annots(1);
+    second.push(link);
+    f.set_annots(1, &second);
+    let pages = f.pages.clone();
+    let item = |title: &str, page: ObjectId| {
+        dictionary! {
+            "Title" => Object::string_literal(title),
+            "Dest" => vec![page.into(), "Fit".into()],
+        }
+    };
+    outline_tree(
+        &mut f,
+        vec![
+            (0, item("Part", pages[0])),
+            (1, item("First", pages[0])),
+            (1, item("Second", pages[1])),
+        ],
+    );
+    f
+}
+
+/// What a document holds, page by page in order: sheaf's marks (their
+/// ids and text), other tools' comments and links (what they are and their
+/// names), the fields (full names and values), and the bookmarks in
+/// pre-order (depth, title and the page they go to).
+#[derive(Debug, PartialEq)]
+struct Held {
+    marks: Vec<(usize, AnnotId, String)>,
+    theirs: Vec<(usize, String, String)>,
+    fields: Vec<(String, Option<Value>)>,
+    bookmarks: Vec<(u16, String, Option<usize>)>,
+}
+
+fn held(doc: &Document) -> Held {
+    let st = doc.state();
+    let pages = || st.order().iter().enumerate();
+    let mut fields: Vec<(String, Option<Value>)> = (st.terminals())
+        .map(|(id, _, t)| (st.full_name(id).unwrap(), t.value.clone()))
+        .collect();
+    fields.sort_by(|a, b| a.0.cmp(&b.0));
+    Held {
+        marks: pages()
+            .flat_map(|(i, &p)| st.marks_on(p).map(move |a| (i, a.id, a.contents.clone())))
+            .collect(),
+        theirs: pages()
+            .flat_map(|(i, &p)| {
+                (st.foreign_on(p))
+                    .map(move |(_, f)| (i, f.summary.subtype.clone(), f.summary.name.clone()))
+            })
+            .collect(),
+        fields,
+        bookmarks: (st.bookmarks_preorder().into_iter())
+            .map(|(depth, _, b)| {
+                (
+                    depth,
+                    b.title.to_string(),
+                    b.page().and_then(|p| st.pos_of(p)),
+                )
+            })
+            .collect(),
+    }
+}
+
+/// Every record in `doc` that a file holds is the object the primary file
+/// has it as: each mark, other tool's annotation, widget, field and
+/// bookmark.
+fn all_in_the_primary(doc: &Document, what: &str) {
+    let st = doc.state();
+    let primary = doc.source(doc.primary()).unwrap().src.id();
+    let ours = |src: Option<&ObjRef>| src.is_some_and(|s| s.src.id() == primary);
+    for (id, a) in st.annots() {
+        let src = match &a.body {
+            AnnotBody::Mark(m) => m.src.as_ref(),
+            AnnotBody::Foreign(f) => f.src.as_ref(),
+            AnnotBody::Widget(w) => w.src.as_ref(),
+        };
+        assert!(ours(src), "{what}: annotation {id:?}");
+    }
+    for (id, node) in st.fields() {
+        assert!(ours(node.src.as_ref()), "{what}: field {id:?}");
+    }
+    for (_, id, b) in st.bookmarks_preorder() {
+        assert!(ours(b.src.as_ref()), "{what}: bookmark {id:?}");
+    }
+}
+
+/// `doc` saved to `path` by a Rewrite, or by an Append when
+/// `incremental`, whatever the plan would decide. The document shows what
+/// it did.
+fn save_by(doc: &mut Document, path: &Path, incremental: bool) {
+    let report = match incremental {
+        true => sheaf_doc::materialize::save_appended(doc, path),
+        false => sheaf_doc::materialize::save_rewritten(doc, path),
+    };
+    let want = [StrategyKind::Rewrite, StrategyKind::Append][usize::from(incremental)];
+    assert_eq!(report.unwrap().strategy, Some(want));
+}
+
+/// A save changes nothing in the document (M10.5 §9.1): every record is
+/// still the object the file it opened has it as, and an edit and a second
+/// save write them all again.
+#[test]
+fn a_save_an_edit_and_a_second_save_keep_everything() {
+    saved_again(false);
+}
+
+#[test]
+fn a_save_an_edit_and_a_second_save_keep_everything_appended() {
+    saved_again(true);
+}
+
+fn saved_again(incremental: bool) {
+    let dir = scratch(&format!("saves-again-{incremental}"));
+    let what = if incremental {
+        "incremental"
+    } else {
+        "rewrite"
+    };
+    let path = write(&dir, &format!("{what}.pdf"), &mut everything());
+    let mut doc = open(&path);
+    let opened = held(&doc);
+    assert_eq!(opened.marks.len(), 1, "{what}");
+    assert_eq!(opened.theirs.len(), 2, "{what}");
+    assert_eq!(opened.fields.len(), 2, "{what}");
+    assert_eq!(opened.bookmarks.len(), 3, "{what}");
+    save_by(&mut doc, &path, incremental);
+    assert_eq!(held(&doc), opened, "{what}: saved");
+    all_in_the_primary(&doc, what);
+
+    // Page 2 before page 1, a mark added, a bookmark renamed and the
+    // form's first page duplicated.
+    let [p1, p2] = [0, 1].map(|i| doc.state().order()[i]);
+    let first = doc.state().bookmarks_preorder()[1].1;
+    let edits = vec![
+        Edit::MovePages {
+            ids: vec![p2],
+            before: Some(p1),
+        },
+        Edit::AnnotAdd {
+            page: p2,
+            annot: note(),
+        },
+        Edit::OutlineEdit {
+            id: first,
+            title: Some("Renamed".into()),
+            target: None,
+            color: None,
+            view: None,
+            style: None,
+        },
+        Edit::DuplicatePages { ids: vec![p1] },
+    ];
+    doc.apply_batch(edits, "Edit").unwrap();
+    let edited = held(&doc);
+    assert_eq!(edited.marks.len(), 3, "{what}");
+    assert_eq!(edited.fields.len(), 3, "{what}: {:?}", edited.fields);
+    save_by(&mut doc, &path, incremental);
+    assert_eq!(held(&doc), edited, "{what}: saved again");
+    let bytes = std::fs::read(&path).unwrap();
+    clean(&bytes, what);
+    assert_eq!(held(&open(&path)), edited, "{what}: reopened");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two fields named alike, as real forms have them, are each written at
+/// its own object's number, not both at the first; so their page
+/// duplicated and saved again brings both (M10.5 slice 8).
+#[test]
+fn fields_named_alike_stay_two_across_saves() {
+    named_alike(false);
+}
+
+#[test]
+fn fields_named_alike_stay_two_across_saves_appended() {
+    named_alike(true);
+}
+
+fn named_alike(incremental: bool) {
+    let dir = scratch(&format!("named-alike-{incremental}"));
+    let what = if incremental {
+        "incremental"
+    } else {
+        "rewrite"
+    };
+    let mut f = Form::new(1);
+    blue(&mut f, "Name", 0, 0, "first");
+    blue(&mut f, "Name", 0, 1, "second");
+    let path = write(&dir, &format!("{what}.pdf"), &mut f);
+    let mut doc = open(&path);
+    save_by(&mut doc, &path, incremental);
+    all_in_the_primary(&doc, what);
+    // The fields at their objects' numbers, which a save keeps.
+    let saved = form_in(&std::fs::read(&path).unwrap());
+    let value_at = |object: ObjectId| {
+        let f = saved.fields.iter().find(|f| f.object == object).unwrap();
+        f.value.clone()
+    };
+    let st = doc.state();
+    let objects: Vec<(ObjectId, Option<Value>)> = (st.terminals())
+        .map(|(_, node, t)| (node.src.as_ref().unwrap().id, t.value.clone()))
+        .collect();
+    assert_ne!(objects[0].0, objects[1].0, "{what}");
+    for (object, value) in &objects {
+        assert_eq!(&value_at(*object), value, "{what}");
+    }
+    let page = st.order()[0];
+    doc.apply(Edit::DuplicatePages { ids: vec![page] }, "Duplicate")
+        .unwrap();
+    save_by(&mut doc, &path, incremental);
+    let mut values: Vec<Option<Value>> = (held(&open(&path)).fields.into_iter())
+        .map(|(_, value)| value)
+        .collect();
+    values.sort_by_key(|v| format!("{v:?}"));
+    let text = |s: &str| Some(Value::Text(s.into()));
+    let want = [text("first"), text("first"), text("second"), text("second")];
+    assert_eq!(values, want, "{what}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

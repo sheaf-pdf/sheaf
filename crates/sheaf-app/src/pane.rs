@@ -8,7 +8,8 @@ use std::time::Instant;
 
 use gpui::ScrollHandle;
 use sheaf_core::{PageSize, Rotation};
-use sheaf_doc::{Document, PageRef};
+use sheaf_doc::geom::Geom;
+use sheaf_doc::{DocState, Document, PageDef, PageId, SourceId};
 
 use crate::docview::ScrollTo;
 
@@ -149,7 +150,7 @@ pub(crate) struct Layout {
     pub(crate) k: f32,
     /// Every page, with the pane's rotate view added to its rotation: what
     /// to render and how to map between the page and the screen.
-    pub(crate) refs: Vec<PageRef>,
+    pub(crate) refs: Vec<Shown>,
     rects: Vec<Option<PageRect>>,
     /// Rows that have geometry, top to bottom.
     rows: Vec<Row>,
@@ -171,20 +172,16 @@ pub(crate) struct LayoutSpec {
 
 impl Layout {
     pub(crate) fn build(spec: LayoutSpec, model: &Document) -> Self {
-        let refs: Vec<PageRef> = model
+        let refs: Vec<Shown> = model
             .state()
-            .pages
-            .iter()
-            .map(|p| PageRef {
-                rotation: p.rotation.plus(spec.rotation),
-                ..*p
-            })
+            .pages()
+            .map(|(id, def, geom)| Shown::new(id, def, geom, spec.rotation))
             .collect();
-        let sizes: Vec<PageSize> = refs.iter().map(|r| model.page_size(r)).collect();
+        let sizes: Vec<PageSize> = refs.iter().map(|r| r.geom.shown()).collect();
         Self::from_sizes(spec, refs, &sizes)
     }
 
-    fn from_sizes(spec: LayoutSpec, refs: Vec<PageRef>, sizes: &[PageSize]) -> Self {
+    fn from_sizes(spec: LayoutSpec, refs: Vec<Shown>, sizes: &[PageSize]) -> Self {
         let LayoutSpec {
             zoom,
             mode,
@@ -382,11 +379,44 @@ impl Pane {
         }
     }
 
-    /// Page `p` as this pane shows it: with rotate view added.
-    pub(crate) fn shown(&self, p: PageRef) -> PageRef {
-        PageRef {
-            rotation: p.rotation.plus(self.rotation),
-            ..p
+    /// Page `id` of `st` as this pane shows it: with rotate view added.
+    pub(crate) fn shown(&self, st: &DocState, id: PageId) -> Option<Shown> {
+        Shown::of(st, id, self.rotation)
+    }
+}
+
+/// A page as a pane draws it: the source page that renders it, and its
+/// boxes turned by its rotation and the pane's rotate view.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Shown {
+    pub(crate) id: PageId,
+    /// The registration and page its render handle draws.
+    pub(crate) source: SourceId,
+    pub(crate) index: u32,
+    /// Its `to_view` takes PageSpace to the page as drawn, and `shown` is
+    /// the size drawn.
+    pub(crate) geom: Geom,
+    /// The turn PDFium adds to the source page's own `/Rotate` to draw it
+    /// so: what a render `Job` takes.
+    pub(crate) render: Rotation,
+}
+
+impl Shown {
+    /// Page `id` of `st`, turned `view` more.
+    pub(crate) fn of(st: &DocState, id: PageId, view: Rotation) -> Option<Shown> {
+        Some(Shown::new(id, st.def(id)?, st.geom(id)?, view))
+    }
+
+    /// Page `id`, which shows `def` with `geom`, turned `view` more.
+    pub(crate) fn new(id: PageId, def: &PageDef, geom: &Geom, view: Rotation) -> Shown {
+        let base = &def.base;
+        let rotate = geom.rotate.plus(view);
+        Shown {
+            id,
+            source: base.source,
+            index: base.index,
+            geom: Geom { rotate, ..*geom },
+            render: rotate.minus(base.src.geom(base.index).rotate),
         }
     }
 }
@@ -394,15 +424,15 @@ impl Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_doc::{PageId, SourceId};
 
     fn layout(mode: PageMode, zoom: Zoom, row: usize, sizes: &[(f32, f32)]) -> Layout {
         let refs = (0..sizes.len())
-            .map(|i| PageRef {
+            .map(|i| Shown {
                 id: PageId(i as u64),
                 source: SourceId(0),
                 index: i as u32,
-                rotation: Rotation::R0,
+                geom: Geom::read(None, None, 0),
+                render: Rotation::R0,
             })
             .collect();
         let sizes: Vec<PageSize> = sizes

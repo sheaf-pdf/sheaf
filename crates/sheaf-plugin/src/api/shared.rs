@@ -12,8 +12,8 @@ use std::time::Instant;
 use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Box2, DestView, Edit, NewOutlineItem, OutlineId, OutlineNode,
-    PageId, PageRef, Pt, Snapshot, SourceId, TextHit,
+    Annot, AnnotId, AnnotKind, Bookmark, Box2, DestView, Edit, NewOutlineItem, OutlineId, PageId,
+    Pt, Snapshot, TextHit,
 };
 use in_progress::{Level, Progress, Tracker, Unit};
 use wasmtime::component::Resource;
@@ -84,8 +84,8 @@ pub(crate) fn box_from_wit(b: w::Box2) -> Box2 {
 }
 
 /// A page's size as displayed.
-pub(crate) fn page_size(snap: &Snapshot, p: &PageRef) -> PageSize {
-    snap.geom(p).shown()
+pub(crate) fn page_size(snap: &Snapshot, page: PageId) -> PageSize {
+    snap.geom(page).shown()
 }
 
 /// A page's frame, what the API's page coordinates are in: its source
@@ -93,8 +93,8 @@ pub(crate) fn page_size(snap: &Snapshot, p: &PageRef) -> PageSize {
 /// any sheaf adds (`wit/sheaf.wit`). None for a page that isn't in the
 /// document, whose geometry passes as it is.
 fn page_frame(snap: &Snapshot, page: PageId) -> Option<Geom> {
-    let p = snap.state.pages.iter().find(|p| p.id == page)?;
-    snap.source(p.source).map(|s| s.src.geom(p.index))
+    let base = &snap.state.def(page)?.base;
+    Some(base.src.geom(base.index))
 }
 
 /// PageSpace into `page`'s frame, for geometry going out.
@@ -135,11 +135,11 @@ pub(crate) fn layer_to_wit(l: &sheaf_doc::TextLayer, to_view: Affine) -> api::oc
     }
 }
 
-pub(crate) fn page_info(snap: &Snapshot, p: &PageRef) -> w::PageInfo {
-    let size = page_size(snap, p);
+pub(crate) fn page_info(snap: &Snapshot, page: PageId) -> w::PageInfo {
+    let size = page_size(snap, page);
     w::PageInfo {
-        id: p.id.0,
-        rotation: rotation_to_wit(snap.render_delta(p)),
+        id: page.0,
+        rotation: rotation_to_wit(snap.render_delta(page)),
         width: size.width,
         height: size.height,
     }
@@ -184,16 +184,21 @@ pub(crate) fn dest_from_wit(v: w::DestView, from_view: Affine) -> DestView {
     }
 }
 
-pub(crate) fn outline_item(snap: &Snapshot, depth: u16, n: &OutlineNode) -> w::OutlineItem {
+pub(crate) fn outline_item(
+    snap: &Snapshot,
+    depth: u16,
+    id: OutlineId,
+    b: &Bookmark,
+) -> w::OutlineItem {
     w::OutlineItem {
-        id: n.id.0,
-        title: n.title.clone(),
-        target: n.target.map(|p| p.0),
-        view: n.view.as_ref().map(|v| {
-            let to_view = n.target.map_or(Affine::IDENTITY, |t| to_frame(snap, t));
+        id: id.0,
+        title: b.title.to_string(),
+        target: b.page().map(|p| p.0),
+        view: b.view().map(|v| {
+            let to_view = b.page().map_or(Affine::IDENTITY, |t| to_frame(snap, t));
             dest_to_wit(v, to_view)
         }),
-        color: n.color.map(rgb_to_wit),
+        color: b.color.map(rgb_to_wit),
         depth,
     }
 }
@@ -268,10 +273,7 @@ pub(crate) fn edit_from_wit(snap: Option<&Snapshot>, e: w::Edit) -> Edit {
             // A position is on the bookmark's new page, or else its own.
             let page = || match target {
                 Some(t) => t,
-                None => snap.and_then(|s| {
-                    let flat = s.state.outline_flat();
-                    flat.into_iter().find(|(_, n)| n.id == id)?.1.target
-                }),
+                None => snap.and_then(|s| s.state.bookmark(id)?.page()),
             };
             Edit::OutlineEdit {
                 id,
@@ -430,9 +432,9 @@ impl api::document::Host for HostState {
         };
         d.snapshot
             .state
-            .pages
+            .order()
             .iter()
-            .map(|p| page_info(&d.snapshot, p))
+            .map(|&p| page_info(&d.snapshot, p))
             .collect()
     }
 
@@ -442,9 +444,9 @@ impl api::document::Host for HostState {
         };
         d.snapshot
             .state
-            .outline_flat()
+            .bookmarks_preorder()
             .into_iter()
-            .map(|(depth, n)| outline_item(&d.snapshot, depth, n))
+            .map(|(depth, id, b)| outline_item(&d.snapshot, depth, id, b))
             .collect()
     }
 
@@ -456,13 +458,9 @@ impl api::document::Host for HostState {
         let to_view = to_frame(&d.snapshot, page);
         d.snapshot
             .state
-            .annots_on(page)
-            .map(|l| {
-                l.iter()
-                    .filter_map(|a| annot_to_wit(&a.mapped(&to_view)))
-                    .collect()
-            })
-            .unwrap_or_default()
+            .marks_on(page)
+            .filter_map(|a| annot_to_wit(&a.mapped(&to_view)))
+            .collect()
     }
 
     fn selection(&mut self) -> Vec<u64> {
@@ -478,20 +476,12 @@ impl api::document::Host for HostState {
 
 impl api::text::Host for HostState {
     fn page_text(&mut self, page: u64) -> Result<String, String> {
-        let d = self.doc().ok_or("no document is open")?;
-        let id = PageId(page);
-        if let Some(layer) = d.snapshot.state.text_layer(id) {
+        let (d, id, base) = self.page_base(page)?;
+        if let Some(layer) = d.snapshot.state.ocr_text(id) {
             return Ok(layer.text());
         }
-        let p = d
-            .snapshot
-            .state
-            .pages
-            .iter()
-            .find(|p| p.id == id)
-            .ok_or_else(|| format!("no page {page}"))?;
         d.text
-            .page_text(p.source, p.index)
+            .page_text(base.source, base.index)
             .map_err(|e| format!("{e:#}"))
     }
 
@@ -500,29 +490,21 @@ impl api::text::Host for HostState {
         page: u64,
         regex: String,
     ) -> Result<Vec<api::types::TextMatch>, String> {
-        let d = self.doc().ok_or("no document is open")?;
+        self.doc().ok_or("no document is open")?;
         let re = regex::RegexBuilder::new(&regex)
             .size_limit(1 << 20)
             .build()
             .map_err(|e| e.to_string())?;
-        let id = PageId(page);
-        let found: Vec<TextMatch> = match d.snapshot.state.text_layer(id) {
+        let (d, id, base) = self.page_base(page)?;
+        let found: Vec<TextMatch> = match d.snapshot.state.ocr_text(id) {
             Some(layer) => layer_matches(
                 sheaf_doc::text_layer::pattern_search(layer, &re),
                 to_frame(&d.snapshot, id),
             ),
-            None => {
-                let p = d
-                    .snapshot
-                    .state
-                    .pages
-                    .iter()
-                    .find(|p| p.id == id)
-                    .ok_or_else(|| format!("no page {page}"))?;
-                d.text
-                    .pattern_search(p.source, p.index, &Arc::new(re))
-                    .map_err(|e| format!("{e:#}"))?
-            }
+            None => d
+                .text
+                .pattern_search(base.source, base.index, &Arc::new(re))
+                .map_err(|e| format!("{e:#}"))?,
         };
         Ok(found.into_iter().map(text_match_to_wit).collect())
     }
@@ -533,15 +515,15 @@ impl api::text::Host for HostState {
         query: String,
         match_case: bool,
     ) -> Result<Vec<api::types::TextMatch>, String> {
-        let (d, p) = self.page_ref(page)?;
-        let found: Vec<TextMatch> = match d.snapshot.state.text_layer(p.id) {
+        let (d, id, base) = self.page_base(page)?;
+        let found: Vec<TextMatch> = match d.snapshot.state.ocr_text(id) {
             Some(layer) => layer_matches(
                 sheaf_doc::text_layer::search(layer, &query, match_case),
-                to_frame(&d.snapshot, p.id),
+                to_frame(&d.snapshot, id),
             ),
             None => d
                 .text
-                .search(p.source, p.index, &query, match_case)
+                .search(base.source, base.index, &query, match_case)
                 .map_err(|e| format!("{e:#}"))?,
         };
         Ok(found.into_iter().map(text_match_to_wit).collect())
@@ -554,15 +536,15 @@ impl api::text::Host for HostState {
     ) -> Result<Vec<api::types::TextMatch>, String> {
         static WORD: std::sync::LazyLock<Arc<regex::Regex>> =
             std::sync::LazyLock::new(|| Arc::new(regex::Regex::new(r"\S+").unwrap()));
-        let (d, p) = self.page_ref(page)?;
-        let words: Vec<TextMatch> = match d.snapshot.state.text_layer(p.id) {
+        let (d, id, base) = self.page_base(page)?;
+        let words: Vec<TextMatch> = match d.snapshot.state.ocr_text(id) {
             Some(layer) => layer_matches(
                 sheaf_doc::text_layer::pattern_search(layer, &WORD),
-                to_frame(&d.snapshot, p.id),
+                to_frame(&d.snapshot, id),
             ),
             None => d
                 .text
-                .pattern_search(p.source, p.index, &WORD)
+                .pattern_search(base.source, base.index, &WORD)
                 .map_err(|e| format!("{e:#}"))?,
         };
         let within = |m: &TextMatch| match rect {
@@ -587,12 +569,12 @@ impl api::text::Host for HostState {
         page: u64,
         rect: api::types::Box2,
     ) -> Result<Vec<api::types::Box2>, String> {
-        let (d, p) = self.page_ref(page)?;
+        let (d, id, base) = self.page_base(page)?;
         let rect = box_from_wit(rect);
-        let boxes = match d.snapshot.state.text_layer(p.id) {
+        let boxes = match d.snapshot.state.ocr_text(id) {
             // `rect` is in the page's frame, the layer in PageSpace.
             Some(layer) => {
-                let to_view = to_frame(&d.snapshot, p.id);
+                let to_view = to_frame(&d.snapshot, id);
                 layer
                     .boxes_in_rect(to_view.inverse().apply_box(rect))
                     .into_iter()
@@ -601,7 +583,7 @@ impl api::text::Host for HostState {
             }
             None => d
                 .text
-                .text_boxes(p.source, p.index, rect)
+                .text_boxes(base.source, base.index, rect)
                 .map_err(|e| format!("{e:#}"))?,
         };
         Ok(boxes.into_iter().map(box_to_wit).collect())
@@ -631,13 +613,13 @@ impl api::ocr::Host for HostState {
         page: u64,
         options: api::ocr::OcrOptions,
     ) -> Result<api::ocr::TextLayer, String> {
-        let (d, p) = self.page_ref(page)?;
+        let (d, id, base) = self.page_base(page)?;
         let ocr = d.ocr.clone().ok_or("OCR isn't available")?;
-        let geom = d.snapshot.geom(&p);
-        let render = d.snapshot.render_delta(&p);
-        let to_view = to_frame(&d.snapshot, p.id);
+        let geom = d.snapshot.geom(id);
+        let render = d.snapshot.render_delta(id);
+        let to_view = to_frame(&d.snapshot, id);
         let started = Instant::now();
-        let layer = ocr.recognize(&p, &geom, render, options.language, options.dpi);
+        let layer = ocr.recognize(id, base, &geom, render, options.language, options.dpi);
         // The engine's time isn't the plugin's.
         self.deadline += started.elapsed();
         layer
@@ -650,7 +632,7 @@ impl api::ocr::Host for HostState {
         let page = PageId(page);
         d.snapshot
             .state
-            .text_layer(page)
+            .ocr_text(page)
             .map(|l| layer_to_wit(l, to_frame(&d.snapshot, page)))
     }
 }
@@ -734,29 +716,17 @@ impl api::render::Host for HostState {}
 impl api::render::HostPageRenderer for HostState {
     fn new(&mut self, page: u64) -> Resource<PageRenderer> {
         // An unknown page still gets a handle; `render` reports it.
-        let found = self.doc().and_then(|d| {
-            let p = d
-                .snapshot
-                .state
-                .pages
-                .iter()
-                .find(|p| p.id == PageId(page))
-                .copied()?;
-            let s = d.snapshot.source(p.source).map(|s| s.src.page_size(p.index))?;
-            Some((p, (s.width, s.height)))
+        let page = PageId(page);
+        let base = self
+            .doc()
+            .and_then(|d| Some(d.snapshot.state.def(page)?.base.clone()));
+        let size = base.as_ref().map_or((0.0, 0.0), |b| {
+            let s = b.src.page_size(b.index);
+            (s.width, s.height)
         });
-        let (page, size) = found.unwrap_or((
-            PageRef {
-                id: PageId(page),
-                source: SourceId(u32::MAX),
-                index: 0,
-                rotation: sheaf_core::Rotation::R0,
-            },
-            (0.0, 0.0),
-        ));
         let r = self
             .table
-            .push(PageRenderer { page, size })
+            .push(PageRenderer { page, base, size })
             .expect("resource table full");
         self.render_handles.renderers.push(r.rep());
         r
@@ -771,13 +741,14 @@ impl api::render::HostPageRenderer for HostState {
         this: Resource<PageRenderer>,
         options: api::render::RenderOptions,
     ) -> Result<Resource<RenderedImage>, String> {
-        let (page, (pw, ph)) = {
+        let (page, shows, (pw, ph)) = {
             let r = self.table.get(&this).map_err(|e| e.to_string())?;
-            (r.page, r.size)
+            let shows = r.base.as_ref().map(|b| (b.source, b.index));
+            (r.page, shows, r.size)
         };
-        if pw <= 0.0 {
-            return Err(format!("no page {}", page.id.0));
-        }
+        let Some((shown, index)) = shows.filter(|_| pw > 0.0) else {
+            return Err(format!("no page {}", page.0));
+        };
         let d = self.doc().ok_or("no document is open")?;
         let source = d.render.clone().ok_or("rendering isn't available")?;
         let dpi = options.dpi.clamp(1, MAX_DPI);
@@ -816,7 +787,7 @@ impl api::render::HostPageRenderer for HostState {
         }
         let started = Instant::now();
         let rgba = source
-            .render(page.source, page.index, page_w, page_h, (x0, y0, w, h))
+            .render(shown, index, page_w, page_h, (x0, y0, w, h))
             .map_err(|e| format!("{e:#}"));
         // Rendering is the host's time, not the plugin's.
         self.deadline += started.elapsed();

@@ -889,12 +889,15 @@ fn is_encryption_dictionary(dict: &Dictionary) -> bool {
 }
 
 /// sheaf: a signature dictionary as PDFium tells one: `/Type /Sig` (or `/DocTimeStamp`), or
-/// with no `/Type`, `/FT /Sig`.
+/// with no `/Type`, `/FT /Sig`; and with neither, one with a signature's `/ByteRange` and
+/// `/Contents`, since `/Type` is optional in a signature dictionary (ISO 32000-2 Table 255).
 fn is_signature_dictionary(dict: &Dictionary) -> bool {
-    dict.get(b"Type")
-        .or_else(|_| dict.get(b"FT"))
-        .and_then(Object::as_name)
-        .is_ok_and(|kind| kind == b"Sig" || kind == b"DocTimeStamp")
+    match dict.get(b"Type").or_else(|_| dict.get(b"FT")) {
+        Ok(kind) => kind
+            .as_name()
+            .is_ok_and(|kind| kind == b"Sig" || kind == b"DocTimeStamp"),
+        Err(_) => dict.has(b"ByteRange") && dict.has(b"Contents"),
+    }
 }
 
 /// Encrypts `obj`.

@@ -177,6 +177,15 @@ pub fn check(bytes: &[u8], password: Option<&str>) -> Result<Report> {
     Ok(check_pdf(&pdf, bytes, password))
 }
 
+/// [`check`] of what the file's latest revision reaches. An update frees
+/// nothing (M10.5 slice 10): what it unlinks stays in the file, in use, for
+/// the revisions before it, and isn't the form it leaves.
+pub fn check_latest(bytes: &[u8], password: Option<&str>) -> Result<Report> {
+    let mut pdf = crate::file::load_pdf_mem(bytes, password)?;
+    pdf.prune_objects();
+    Ok(check_pdf(&pdf, bytes, password))
+}
+
 /// [`check`] for a file on disk.
 pub fn check_file(path: &Path, password: Option<&str>) -> Result<Report> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;

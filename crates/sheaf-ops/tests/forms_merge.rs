@@ -16,7 +16,7 @@ use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_core::PageIndex;
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::fixture::Form;
-use sheaf_doc::save::Strategy;
+use sheaf_doc::materialize::StrategyKind;
 use sheaf_doc::{Document, Edit, EditOutcome, PageId, SourceInfo};
 use sheaf_ops::combine::{CombineItem, CombineParams};
 use sheaf_render::pdfium::render_appearances;
@@ -32,11 +32,9 @@ fn insert(
     range: Option<Range<u32>>,
     before: Option<PageId>,
 ) -> EditOutcome {
-    let info = SourceInfo::read(doc.store(), path, None).unwrap();
+    let (info, _) = SourceInfo::read(doc.store(), path, None).unwrap();
     let range = range.unwrap_or(0..info.src.page_count());
-    let form = sheaf_doc::forms::read(&info.src);
     let sid = doc.add_source(info);
-    doc.set_source_form(sid, form);
     doc.apply(
         Edit::InsertPages {
             source: sid,
@@ -127,16 +125,19 @@ fn da_of(bytes: &[u8], name: &str) -> String {
 
 /// The full names of the fields in the model.
 fn names(doc: &Document) -> Vec<String> {
-    doc.state()
-        .fields
-        .values()
-        .map(|f| f.name.clone())
+    let st = doc.state();
+    (st.terminals())
+        .map(|(id, _, _)| st.full_name(id).unwrap())
         .collect()
 }
 
-#[test]
-fn an_inserted_form_joins_the_documents() {
-    let dir = scratch("merge-insert");
+sheaf_doc::both_ways!(
+    an_inserted_form_joins_the_documents,
+    an_inserted_form_joins_the_documents_appended: an_inserted_form_joins_the_documents_by
+);
+
+fn an_inserted_form_joins_the_documents_by(how: How) {
+    let dir = scratch(&format!("merge-insert-{how:?}"));
     let a = write(&dir, "a.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = open(&a);
@@ -145,8 +146,9 @@ fn an_inserted_form_joins_the_documents() {
     assert!(out.forms_renamed.is_empty());
     assert_eq!(names(&doc), ["a", "a2", "b1", "both"]);
     assert_eq!(doc.form_notice(&out, false, false), None);
-    let saved = saved_both_ways(&doc, &a, &dir.join("rewritten.pdf"));
-    assert_eq!(saved[1].0, Strategy::Incremental);
+    let written = (how.strategy(), written(&doc, how));
+    let saved = [written, saved(&mut doc, &a, how)];
+    assert_eq!(saved[1].0, how.strategy());
     for (strategy, bytes) in saved {
         let what = format!("{strategy:?}");
         let report = clean(&bytes, &what);
@@ -166,32 +168,39 @@ fn an_inserted_form_joins_the_documents() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn one_page_brings_only_its_widgets() {
+sheaf_doc::both_ways!(
+    one_page_brings_only_its_widgets,
+    one_page_brings_only_its_widgets_appended: one_page_brings_only_its_widgets_by
+);
+
+fn one_page_brings_only_its_widgets_by(how: How) {
     // Page 2 of B: `both`, with its widget there and not the one on page 1.
-    let dir = scratch("merge-one-page");
+    let dir = scratch(&format!("merge-one-page-{how:?}"));
     let a = write(&dir, "a.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = open(&a);
     insert(&mut doc, &b, Some(1..2), None);
     assert_eq!(names(&doc), ["a", "a2", "both"]);
-    for (strategy, bytes) in written_both_ways(&doc) {
-        let what = format!("{strategy:?}");
-        let report = clean(&bytes, &what);
-        assert_eq!((report.fields, report.widgets), (3, 3), "{what}");
-        assert!(holds(&bytes, b"PAGETWO"), "{what}");
-        assert!(
-            !holds(&bytes, b"PAGEONE"),
-            "{what}: a widget of a page left behind"
-        );
-        assert!(!holds(&bytes, b"Beta"), "{what}");
-    }
+    let (strategy, bytes) = (how.strategy(), written(&doc, how));
+    let what = format!("{strategy:?}");
+    let report = clean(&bytes, &what);
+    assert_eq!((report.fields, report.widgets), (3, 3), "{what}");
+    assert!(holds(&bytes, b"PAGETWO"), "{what}");
+    assert!(
+        !holds(&bytes, b"PAGEONE"),
+        "{what}: a widget of a page left behind"
+    );
+    assert!(!holds(&bytes, b"Beta"), "{what}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn a_form_inserted_into_itself_goes_under_its_files_name() {
-    let dir = scratch("merge-itself");
+sheaf_doc::both_ways!(
+    a_form_inserted_into_itself_goes_under_its_files_name,
+    a_form_inserted_into_itself_goes_under_its_files_name_appended: a_form_inserted_into_itself_goes_under_its_files_name_by
+);
+
+fn a_form_inserted_into_itself_goes_under_its_files_name_by(how: How) {
+    let dir = scratch(&format!("merge-itself-{how:?}"));
     let path = write(&dir, "form.pdf", &mut form_a());
     let mut doc = open(&path);
     let out = insert(&mut doc, &path, None, None);
@@ -208,7 +217,8 @@ fn a_form_inserted_into_itself_goes_under_its_files_name() {
         names(&doc),
         ["a", "a2", "form.a", "form.a2", "form_2.a", "form_2.a2"]
     );
-    for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
+    let written = (how.strategy(), written(&doc, how));
+    for (strategy, bytes) in [written, saved(&mut doc, &path, how)] {
         let what = format!("{strategy:?}");
         let report = clean(&bytes, &what);
         assert_eq!(
@@ -224,10 +234,14 @@ fn a_form_inserted_into_itself_goes_under_its_files_name() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn a_clash_on_a_parent_renames_the_whole_form() {
+sheaf_doc::both_ways!(
+    a_clash_on_a_parent_renames_the_whole_form,
+    a_clash_on_a_parent_renames_the_whole_form_appended: a_clash_on_a_parent_renames_the_whole_form_by
+);
+
+fn a_clash_on_a_parent_renames_the_whole_form_by(how: How) {
     // `top.x` here and `top.y` coming in: only the parents' names clash.
-    let dir = scratch("merge-parent");
+    let dir = scratch(&format!("merge-parent-{how:?}"));
     let mut a = Form::new(1);
     let x = a.text("x", 0, row(0));
     a.group("top", &[x]);
@@ -239,20 +253,23 @@ fn a_clash_on_a_parent_renames_the_whole_form() {
     let mut doc = open(&pa);
     insert(&mut doc, &pb, None, None);
     assert_eq!(names(&doc), ["top.x", "b.top.y"]);
-    for (strategy, bytes) in written_both_ways(&doc) {
-        let what = format!("{strategy:?}");
-        let report = clean(&bytes, &what);
-        assert_eq!(report.fields, 2, "{what}");
-        let read: Vec<String> = form_in(&bytes).fields.into_iter().map(|f| f.name).collect();
-        assert_eq!(read, ["top.x", "b.top.y"], "{what}");
-    }
+    let (strategy, bytes) = (how.strategy(), written(&doc, how));
+    let what = format!("{strategy:?}");
+    let report = clean(&bytes, &what);
+    assert_eq!(report.fields, 2, "{what}");
+    let read: Vec<String> = form_in(&bytes).fields.into_iter().map(|f| f.name).collect();
+    assert_eq!(read, ["top.x", "b.top.y"], "{what}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn a_font_of_the_same_name_comes_in_renamed() {
+sheaf_doc::both_ways!(
+    a_font_of_the_same_name_comes_in_renamed,
+    a_font_of_the_same_name_comes_in_renamed_appended: a_font_of_the_same_name_comes_in_renamed_by
+);
+
+fn a_font_of_the_same_name_comes_in_renamed_by(how: How) {
     // B's `/Helv` is Times: its fields use it as `/Helv_2`.
-    let dir = scratch("merge-fonts");
+    let dir = scratch(&format!("merge-fonts-{how:?}"));
     let mut b = Form::new(1);
     blue(&mut b, "b", 0, 0, "Beta");
     let helv = b.helv;
@@ -261,34 +278,40 @@ fn a_font_of_the_same_name_comes_in_renamed() {
     let pb = write(&dir, "b.pdf", &mut b);
     let mut doc = open(&pa);
     insert(&mut doc, &pb, None, None);
-    for (strategy, bytes) in written_both_ways(&doc) {
-        let what = format!("{strategy:?}");
-        clean(&bytes, &what);
-        assert_eq!(da_of(&bytes, "b"), "/Helv_2 10 Tf 0 g", "{what}");
-        assert_eq!(da_of(&bytes, "a"), "/Helv 10 Tf 0 g", "{what}");
-        let f = fonts(&bytes);
-        assert!(
-            f.contains(&"Helv".into()) && f.contains(&"Helv_2".into()),
-            "{what}: {f:?}"
-        );
-    }
+    let (strategy, bytes) = (how.strategy(), written(&doc, how));
+    let what = format!("{strategy:?}");
+    clean(&bytes, &what);
+    assert_eq!(da_of(&bytes, "b"), "/Helv_2 10 Tf 0 g", "{what}");
+    assert_eq!(da_of(&bytes, "a"), "/Helv 10 Tf 0 g", "{what}");
+    let f = fonts(&bytes);
+    assert!(
+        f.contains(&"Helv".into()) && f.contains(&"Helv_2".into()),
+        "{what}: {f:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Save `doc` in place as the app does: then it shows the saved file.
-fn save_in_place(doc: &mut Document, path: &Path) -> Strategy {
-    let strategy = sheaf_doc::save::save_to_path(&doc.snapshot(), path).unwrap();
-    let info = SourceInfo::read(doc.store(), path, None).unwrap();
-    doc.rebase_to_saved(info);
-    strategy
+/// Save `doc` in place by a Rewrite, or by an Append when `appended`,
+/// whatever the plan would decide: how it was written. The document shows
+/// what it did.
+fn save_in_place(doc: &mut Document, path: &Path, appended: bool) -> StrategyKind {
+    let report = match appended {
+        true => sheaf_doc::materialize::save_appended(doc, path),
+        false => sheaf_doc::materialize::save_rewritten(doc, path),
+    };
+    report.unwrap().strategy.expect("the file was written")
 }
 
-#[test]
-fn a_duplicated_page_gets_fields_of_its_own() {
-    let dir = scratch("merge-duplicate");
+sheaf_doc::both_ways!(
+    a_duplicated_page_gets_fields_of_its_own,
+    a_duplicated_page_gets_fields_of_its_own_appended: a_duplicated_page_gets_fields_of_its_own_by
+);
+
+fn a_duplicated_page_gets_fields_of_its_own_by(how: How) {
+    let dir = scratch(&format!("merge-duplicate-{how:?}"));
     let path = write(&dir, "form.pdf", &mut form_a());
     let mut doc = open(&path);
-    let first = doc.state().pages[0].id;
+    let first = doc.state().order()[0];
     let out = doc
         .apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
         .unwrap();
@@ -298,8 +321,9 @@ fn a_duplicated_page_gets_fields_of_its_own() {
         Some("The copies' fields are under “form”, apart from the originals")
     );
     assert_eq!(names(&doc), ["a", "a2", "form.a"]);
-    let saved = saved_both_ways(&doc, &path, &dir.join("rewritten.pdf"));
-    assert_eq!(saved[1].0, Strategy::Incremental);
+    let written = (how.strategy(), written(&doc, how));
+    let saved = [written, saved(&mut doc, &path, how)];
+    assert_eq!(saved[1].0, how.strategy());
     for (strategy, bytes) in saved {
         let what = format!("{strategy:?}");
         let report = clean(&bytes, &what);
@@ -315,24 +339,34 @@ fn a_duplicated_page_gets_fields_of_its_own() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A duplicate and an insert, saved in place, then saved again: each
+/// field is written once each time.
 #[test]
 fn saving_twice_writes_each_field_once() {
-    // A duplicate and an insert, saved in place, then saved again: the
-    // fields are the saved file's own now.
-    let dir = scratch("merge-twice");
+    saved_twice(false);
+}
+
+#[test]
+fn saving_twice_writes_each_field_once_appended() {
+    saved_twice(true);
+}
+
+fn saved_twice(appended: bool) {
+    let dir = scratch(&format!("merge-twice-{appended}"));
     let path = write(&dir, "form.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = open(&path);
-    let first = doc.state().pages[0].id;
+    let first = doc.state().order()[0];
     doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
         .unwrap();
     insert(&mut doc, &b, None, None);
-    assert_eq!(save_in_place(&mut doc, &path), Strategy::Incremental);
+    let want = [StrategyKind::Rewrite, StrategyKind::Append][usize::from(appended)];
+    assert_eq!(save_in_place(&mut doc, &path, appended), want);
     let once = std::fs::read(&path).unwrap();
     let report = clean(&once, "first save");
     assert_eq!((report.fields, report.widgets), (5, 6));
     // Then a page turned, and saved again both ways.
-    let last = doc.state().pages[4].id;
+    let last = doc.state().order()[4];
     doc.apply(
         Edit::RotatePages {
             ids: vec![last],
@@ -341,27 +375,34 @@ fn saving_twice_writes_each_field_once() {
         "Rotate",
     )
     .unwrap();
-    for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
-        let what = format!("{strategy:?}");
-        let report = clean(&bytes, &what);
+    let copy = dir.join("rewritten.pdf");
+    sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &copy).unwrap();
+    // A turn removes nothing: the plan appends it.
+    assert_eq!(planned(&mut doc, &path).0, StrategyKind::Append);
+    for (what, at) in [("rewritten", &copy), ("in place", &path)] {
+        let report = clean(&std::fs::read(at).unwrap(), what);
         assert_eq!((report.fields, report.widgets), (5, 6), "{what}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own() {
-    let dir = scratch("merge-duplicate-copies");
+sheaf_doc::both_ways!(
+    duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own,
+    duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own_appended: duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own_by
+);
+
+fn duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own_by(how: How) {
+    let dir = scratch(&format!("merge-duplicate-copies-{how:?}"));
     let path = write(&dir, "form.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = open(&path);
     insert(&mut doc, &b, None, None);
     // B's first page, duplicated; then form.pdf's first page cropped and
     // duplicated.
-    let b_first = doc.state().pages[2].id;
+    let b_first = doc.state().order()[2];
     doc.apply(Edit::DuplicatePages { ids: vec![b_first] }, "Duplicate")
         .unwrap();
-    let first = doc.state().pages[0].id;
+    let first = doc.state().order()[0];
     let plan = sheaf_ops::crop::plan(
         doc.store(),
         &doc.snapshot(),
@@ -389,38 +430,39 @@ fn duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own() {
         names(&doc),
         ["a", "a2", "b1", "both", "b.b1", "b.both", "form.a"]
     );
-    for (strategy, bytes) in written_both_ways(&doc) {
-        let what = format!("{strategy:?}");
-        let report = clean(&bytes, &what);
-        // `both` has a widget on each of B's pages; only the first's is
-        // copied.
-        assert_eq!(
-            (report.pages, report.fields, report.widgets),
-            (6, 7, 8),
-            "{what}"
-        );
-        let v = values(&bytes);
-        assert_eq!(
-            (v["b.b1"].as_str(), v["form.a"].as_str()),
-            ("Beta", "Alpha"),
-            "{what}"
-        );
-    }
+    let (strategy, bytes) = (how.strategy(), written(&doc, how));
+    let what = format!("{strategy:?}");
+    let report = clean(&bytes, &what);
+    // `both` has a widget on each of B's pages; only the first's is
+    // copied.
+    assert_eq!(
+        (report.pages, report.fields, report.widgets),
+        (6, 7, 8),
+        "{what}"
+    );
+    let v = values(&bytes);
+    assert_eq!(
+        (v["b.b1"].as_str(), v["form.a"].as_str()),
+        ("Beta", "Alpha"),
+        "{what}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn replaced_pages_bring_their_form() {
+sheaf_doc::both_ways!(
+    replaced_pages_bring_their_form,
+    replaced_pages_bring_their_form_appended: replaced_pages_bring_their_form_by
+);
+
+fn replaced_pages_bring_their_form_by(how: How) {
     // Page 2 of A (with `a2`) replaced by B's first page.
-    let dir = scratch("merge-replace");
+    let dir = scratch(&format!("merge-replace-{how:?}"));
     let a = write(&dir, "a.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = open(&a);
-    let second = doc.state().pages[1].id;
-    let info = SourceInfo::read(doc.store(), &b, None).unwrap();
-    let form = sheaf_doc::forms::read(&info.src);
+    let second = doc.state().order()[1];
+    let (info, _) = SourceInfo::read(doc.store(), &b, None).unwrap();
     let sid = doc.add_source(info);
-    doc.set_source_form(sid, form);
     doc.apply(
         Edit::ReplacePages {
             ids: vec![second],
@@ -431,13 +473,12 @@ fn replaced_pages_bring_their_form() {
         "Replace",
     )
     .unwrap();
-    // The incremental writer's first: saving in place changes the file it
-    // reads.
-    let mut saved = written_both_ways(&doc);
-    let in_place = saved_both_ways(&doc, &a, &dir.join("rewritten.pdf"));
-    assert_eq!(in_place[1].0, Strategy::Rewrite);
-    saved.extend(in_place);
-    for (strategy, bytes) in saved {
+    // Written first: saving in place changes the file an Append reads.
+    let written = (how.strategy(), written(&doc, how));
+    // In place, it's a Rewrite: a page is gone (M9 bug 14).
+    let in_place = planned(&mut doc, &a);
+    assert_eq!(in_place.0, StrategyKind::Rewrite);
+    for (strategy, bytes) in [written, in_place] {
         let what = format!("{strategy:?}");
         let v = values(&bytes);
         assert_eq!(
@@ -445,13 +486,13 @@ fn replaced_pages_bring_their_form() {
             ("Alpha", "Beta"),
             "{what}"
         );
-        if strategy == Strategy::Rewrite {
+        if strategy == StrategyKind::Rewrite {
             // `a2` was only on the page replaced: it's gone.
             let report = clean(&bytes, &what);
             assert_eq!((report.fields, report.widgets), (3, 3), "{what}");
         } else {
-            // The incremental writer (a recovery sidecar's) can't take it
-            // out: a save is a rewrite (M9 bug 14).
+            // An Append (a recovery section's shape) can't take it out: a
+            // save is a Rewrite (M9 bug 14).
             let findings = check(&bytes, None).unwrap().findings;
             assert_eq!(
                 findings,
@@ -464,20 +505,23 @@ fn replaced_pages_bring_their_form() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn undo_takes_the_form_out_again() {
-    let dir = scratch("merge-undo");
+sheaf_doc::both_ways!(
+    undo_takes_the_form_out_again,
+    undo_takes_the_form_out_again_appended: undo_takes_the_form_out_again_by
+);
+
+fn undo_takes_the_form_out_again_by(how: How) {
+    let dir = scratch(&format!("merge-undo-{how:?}"));
     let a = write(&dir, "a.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = open(&a);
     insert(&mut doc, &b, None, None);
     doc.undo().unwrap().unwrap();
     assert_eq!(names(&doc), ["a", "a2"]);
-    for (strategy, bytes) in written_both_ways(&doc) {
-        let what = format!("{strategy:?}");
-        assert!(!holds(&bytes, b"Beta"), "{what}");
-        assert_eq!(clean(&bytes, &what).fields, 2, "{what}");
-    }
+    let (strategy, bytes) = (how.strategy(), written(&doc, how));
+    let what = format!("{strategy:?}");
+    assert!(!holds(&bytes, b"Beta"), "{what}");
+    assert_eq!(clean(&bytes, &what).fields, 2, "{what}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -518,11 +562,15 @@ fn script_names(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn scripts_from_two_forms_are_off_and_kept_apart() {
+sheaf_doc::both_ways!(
+    scripts_from_two_forms_are_off_and_kept_apart,
+    scripts_from_two_forms_are_off_and_kept_apart_appended: scripts_from_two_forms_are_off_and_kept_apart_by
+);
+
+fn scripts_from_two_forms_are_off_and_kept_apart_by(how: How) {
     // A: a keystroke script on `a`, and document scripts; B: document
     // scripts with a name A's have.
-    let dir = scratch("merge-scripts");
+    let dir = scratch(&format!("merge-scripts-{how:?}"));
     let mut a = form_a();
     let first = a.fields()[0];
     a.dict(first).set(
@@ -556,16 +604,15 @@ fn scripts_from_two_forms_are_off_and_kept_apart() {
         doc.form_notice(&out, false, false).as_deref(),
         Some("Scripts are off: fields from more than one form have them")
     );
-    for (strategy, bytes) in written_both_ways(&doc) {
-        let what = format!("{strategy:?}");
-        clean(&bytes, &what);
-        assert_eq!(
-            script_names(&bytes),
-            ["!ADBE::0200_VersChkStrings", "Init", "Init 2"],
-            "{what}"
-        );
-        assert!(holds(&bytes, b"var b = 2;"), "{what}");
-    }
+    let (strategy, bytes) = (how.strategy(), written(&doc, how));
+    let what = format!("{strategy:?}");
+    clean(&bytes, &what);
+    assert_eq!(
+        script_names(&bytes),
+        ["!ADBE::0200_VersChkStrings", "Init", "Init 2"],
+        "{what}"
+    );
+    assert!(holds(&bytes, b"var b = 2;"), "{what}");
     // Combine says the same.
     let items = [pa.clone(), pb.clone()].map(|path| CombineItem {
         path,
@@ -664,12 +711,11 @@ fn corpus_the_1040_and_two_schedules_combine_with_unique_names() {
     let paths = [f1040, s1, sb];
     let (doc, bytes) = combined(&paths);
     // Every IRS form's root is `topmostSubform[0]`: the schedules are
-    // renamed for their files.
-    let renamed: Vec<&str> = doc
-        .state()
-        .fields
-        .values()
-        .filter_map(|f| f.under.as_deref())
+    // renamed for their files, under parents sheaf made.
+    let st = doc.state();
+    let renamed: Vec<&str> = (st.form().roots.iter())
+        .filter_map(|&root| st.field(root).filter(|n| n.src.is_none()))
+        .map(|n| &*n.partial)
         .collect();
     assert!(renamed.contains(&"f1040s1") && renamed.contains(&"f1040sb"));
     let want = paths
@@ -716,22 +762,25 @@ fn corpus_scripted_forms_combined_have_scripts_off() {
     assert_eq!(findings(&bytes), vec![]);
 }
 
-#[test]
-fn corpus_a_duplicated_page_is_a_form_of_its_own() {
+sheaf_doc::both_ways!(
+    corpus_a_duplicated_page_is_a_form_of_its_own,
+    corpus_a_duplicated_page_is_a_form_of_its_own_appended: corpus_a_duplicated_page_is_a_form_of_its_own_by
+);
+
+fn corpus_a_duplicated_page_is_a_form_of_its_own_by(how: How) {
     let Some(f1040) = corpus_path("forms/irs/f1040.pdf") else {
         return;
     };
     let mut doc = open(&f1040);
-    let first = doc.state().pages[0].id;
-    let on_first = doc.state().widgets_on(first).map_or(0, |w| w.len());
+    let first = doc.state().order()[0];
+    let on_first = doc.state().widgets_on(first).count();
     doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
         .unwrap();
     let (fields, widgets) = counts(&f1040);
-    for (strategy, bytes) in written_both_ways(&doc) {
-        let what = format!("{strategy:?}");
-        let report = check(&bytes, None).unwrap();
-        assert_eq!(report.widgets, widgets + on_first, "{what}");
-        assert!(report.fields > fields, "{what}");
-        assert_eq!(findings(&bytes), vec![], "{what}");
-    }
+    let (strategy, bytes) = (how.strategy(), written(&doc, how));
+    let what = format!("{strategy:?}");
+    let report = check(&bytes, None).unwrap();
+    assert_eq!(report.widgets, widgets + on_first, "{what}");
+    assert!(report.fields > fields, "{what}");
+    assert_eq!(findings(&bytes), vec![], "{what}");
 }

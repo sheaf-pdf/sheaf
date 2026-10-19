@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use in_progress::{Level, Progress};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::images::placement;
+use sheaf_doc::materialize::Came;
 use sheaf_doc::serialize::durable;
 use sheaf_doc::{Box2, Document, Edit, PAGES, SourceInfo, Store, TextLayer};
 use sheaf_image::clean::ScanParams;
@@ -288,17 +289,19 @@ fn add_text(
     out: &Path,
 ) -> Result<()> {
     let store = Store::new();
-    let info = SourceInfo::read(&store, src, None)?;
-    let mut doc = Document::new(store, info, &[], sheaf_doc::history::default_policy());
+    let (info, stamp) = SourceInfo::read(&store, src, None)?;
+    let mut doc = Document::new(
+        store,
+        info,
+        Some(Came::Read(stamp)),
+        &[],
+        sheaf_doc::history::default_policy(),
+    );
     let layers = doc
         .state()
-        .pages
-        .iter()
+        .pages()
         .zip(words)
-        .map(|(p, w)| {
-            let layer = TextLayer::from_engine(w, &doc.geom(p), engine);
-            (p.id, Arc::new(layer))
-        })
+        .map(|((id, _, geom), w)| (id, Arc::new(TextLayer::from_engine(w, geom, engine))))
         .collect();
     doc.apply(Edit::SetTextLayers { layers }, "Recognize Text")?;
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), out)

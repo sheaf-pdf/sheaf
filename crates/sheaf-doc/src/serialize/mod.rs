@@ -13,8 +13,11 @@
 //!   runs, a deleted object's entry at the next generation, and positions
 //!   counted from the header.
 //! - [`append`]: an update after a file's last section, in the base's
-//!   cross-reference kind, `/Prev` at its real start, `/ID[0]` kept.
-//! - [`full`]: a whole file, with no `/Prev` and no object streams.
+//!   cross-reference kind, `/Prev` at its real start, `/ID[0]` kept, its
+//!   AES IVs keyed by what each object is.
+//! - [`full`]: a whole file, with no `/Prev` and no object streams: an
+//!   object either copied as the source has it, at its own number, or
+//!   written, its AES IVs keyed by what it is.
 //! - [`crypt`]: each object encrypted on its own with the source's
 //!   [`Crypt`](crypt::Crypt), its AES IVs keyed hashes, so an encrypted
 //!   file saves encrypted, its `/Encrypt` and `/ID[0]` kept.
@@ -36,7 +39,15 @@ pub mod xref;
 use anyhow::Context as _;
 use lopdf::{Dictionary, Object, ObjectId, StringFormat};
 
+use crate::materialize::ObjKey;
 use crypt::Crypt;
+
+/// The object numbers a written file may use are below it: ISO 32000-1
+/// Annex C's 8,388,607 indirect objects, as many as sheaf's reader takes
+/// (`ReadLimits::max_objects`), so a file sheaf writes is one it reads,
+/// and a full write's cross-reference section, which lists every number
+/// from 0, has at most that many rows.
+pub const NUMBERS: u32 = lopdf::ReadLimits::DEFAULT.max_objects;
 
 /// Why the serializer wrote nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -65,11 +76,13 @@ fn in_object(id: &Option<ObjectId>) -> String {
         .unwrap_or_default()
 }
 
-/// Object `id` written at the end of `out`, encrypted under its id when
-/// there's a `crypt`: where it starts.
-fn indirect(
+/// Object `id`, which is `key`, written at the end of `out`, encrypted
+/// under its id, its IVs keyed by `key`, when there's a `crypt`: where it
+/// starts.
+fn indirect_as(
     out: &mut Vec<u8>,
     id: ObjectId,
+    key: &ObjKey,
     obj: &Object,
     crypt: Option<&Crypt>,
 ) -> anyhow::Result<usize> {
@@ -77,7 +90,7 @@ fn indirect(
         return Ok(object::indirect(out, id, obj)?);
     };
     let obj = crypt
-        .encrypt(id, obj)
+        .encrypt_as(id, key, obj)
         .with_context(|| format!("encrypting object {} {}", id.0, id.1))?;
     Ok(object::indirect(out, id, &obj)?)
 }

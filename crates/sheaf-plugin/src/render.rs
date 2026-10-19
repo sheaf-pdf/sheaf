@@ -3,7 +3,7 @@
 //! when the call that made it returns.
 
 use anyhow::Result;
-use sheaf_doc::{PageRef, SourceId};
+use sheaf_doc::{PageBase, PageId, SourceId};
 use wasmtime::component::Resource;
 
 use crate::runtime::HostState;
@@ -31,7 +31,9 @@ pub trait RenderSource: Send + Sync {
 
 /// A `page-renderer` handle.
 pub struct PageRenderer {
-    pub(crate) page: PageRef,
+    pub(crate) page: PageId,
+    /// The source page it shows; None for a page the document hasn't got.
+    pub(crate) base: Option<PageBase>,
     /// Points, as the file draws it.
     pub(crate) size: (f32, f32),
 }

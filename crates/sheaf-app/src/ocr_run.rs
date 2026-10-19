@@ -85,32 +85,32 @@ impl DocView {
             cx.notify();
             return;
         }
-        let refs: Vec<sheaf_doc::PageRef> = match spec.scope {
-            Scope::All => doc.model.state().pages.iter().copied().collect(),
-            Scope::Current => doc.page_ref(doc.current_page()).into_iter().collect(),
-            Scope::Selected => doc
-                .model
-                .state()
-                .pages
-                .iter()
-                .filter(|p| doc.selection.contains(&p.id))
+        let st = doc.model.state();
+        let ids: Vec<PageId> = match spec.scope {
+            Scope::All => st.order().iter().copied().collect(),
+            Scope::Current => doc.page_id(doc.current_page()).into_iter().collect(),
+            Scope::Selected => (st.order().iter())
+                .filter(|p| doc.selection.contains(p))
                 .copied()
                 .collect(),
-            Scope::Range => spec.pages.iter().filter_map(|&i| doc.page_ref(i)).collect(),
+            Scope::Range => spec.pages.iter().filter_map(|&i| st.page_at(i)).collect(),
         };
-        if refs.is_empty() {
+        if ids.is_empty() {
             doc.notice = Some("No pages to recognize".into());
             cx.notify();
             return;
         }
-        let pages: Vec<OcrPage> = refs
+        let pages: Vec<OcrPage> = ids
             .iter()
-            .map(|p| OcrPage {
-                id: p.id,
-                source: p.source,
-                index: p.index,
-                geom: doc.model.geom(p),
-                render: doc.model.render_delta(p),
+            .filter_map(|&id| {
+                let base = &st.def(id)?.base;
+                Some(OcrPage {
+                    id,
+                    source: base.source,
+                    index: base.index,
+                    geom: doc.model.geom(id),
+                    render: doc.model.render_delta(id),
+                })
             })
             .collect();
         let sources: HashMap<_, Arc<dyn PageSource>> = doc

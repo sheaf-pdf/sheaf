@@ -89,7 +89,15 @@ Marked `sheaf:` in the source.
     `dereference`, `catalog`, `trailer`, `version`, `is_encrypted`),
     with `object` (an `Arc`), `raw_span` (where an object is in the
     bytes, from its header to after `endobj`, a stream whose `/Length`
-    the parser couldn't read too, by the length its data was read by),
+    the parser couldn't read too, by the length its data was read by;
+    from M10.5 slice 9 its check that the object reads isn't kept, so a
+    Rewrite copying a file's objects as they are doesn't keep them all;
+    and `raw_span_whole`, the same but None for a stream whose `/Length`
+    is a reference, which the parser reads into the dictionary, so a
+    Rewrite copying the bytes would name an object it pruned, or whose
+    data its `/Length` doesn't fit, which the parser reads by where the
+    data ends, and for an object without its `endobj`, which the parser
+    takes but a copy would carry on),
     `ids` (the objects the table lists in use), `is_read` (whether a
     read of an object was kept, so a test can tell what a reader read)
     and `xref()`
@@ -142,11 +150,12 @@ Marked `sheaf:` in the source.
     members of object streams the scan can't list included:
     `base_sound()` is false.
   - Where it reads otherwise than the eager reader: it reads only what
-    the table lists, under the number the table gives; and an object
-    that doesn't decrypt is an error, not kept half decrypted.
+    the table lists, under the number the table gives (the eager reader
+    keeps an object stream's members the table doesn't list); and an
+    object that doesn't decrypt is an error, not kept half decrypted.
   - sheaf-doc's `source::lazy_tests` covers it: every object of the
     corpus's 4,389 readable forms (2,989,321) read lazily, from memory
-    and from the file, equals the eager load, both ways, but in 12 files
+    and from the file, equals the eager load, both ways, but in 7 files
     it lists, each with how many objects differ and why, where the eager
     reader or the file is what's wrong; the caps; a 100-byte prefix; a
     rebuilt table, with a trailer and without; the bytes a slightly
@@ -164,7 +173,11 @@ Marked `sheaf:` in the source.
   - `encryption.rs`, `transform_object`: the strings of an encryption
     dictionary (an earlier revision's `/Encrypt` too) and a signature's
     `/Contents` aren't decrypted or encrypted (ISO 32000-2 7.6.2; a
-    signature dictionary as PDFium tells one). A stream with the `Crypt`
+    signature dictionary as PDFium tells one, or, with neither `/Type`
+    nor `/FT`, one with `/ByteRange` and `/Contents`, since `/Type` is
+    optional there: 1263925's signature has neither, and its copy, read
+    lazily, failed to decrypt and stopped a save that inserted its
+    pages). A stream with the `Crypt`
     filter and no `/Name`, or no `DecodeParms`, is Identity, and an
     array of `DecodeParms` is read. In 126 of the corpus's encrypted
     forms an object failed to decrypt: a signature, or a catalog with
@@ -190,6 +203,15 @@ Marked `sheaf:` in the source.
     `startxref` says, opened in PDFium and in neither reader. A stream
     that doesn't decode is no trailer, so lopdf's tests of malformed
     streams still fail their loads.
+  - `reader.rs`, `load_objects_raw`: an object whose header names
+    another number than its entry's, a number the table places itself,
+    isn't kept. The eager reader kept every object under its header's
+    number, the last entry's winning, so in 5 corpus forms an earlier
+    revision's Info dictionary, at another entry's offset, took the
+    place of the current one, which the lazy reader reads; a Rewrite
+    copying the current one's bytes then named what the graph it pruned
+    never had (M10.5 slice 9's review). An object under a number the
+    table doesn't place is kept, as it was.
   - `reader.rs`, `load_objects_raw`, and `LazyPdf`'s rebuilt load: where
     object streams hold a member the table doesn't place, the one later
     in the file wins, as incremental updates append. The eager reader

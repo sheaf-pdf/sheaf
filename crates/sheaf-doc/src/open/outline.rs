@@ -1,6 +1,7 @@
 //! The bookmarks, read from the source (M10.5 §3.8): each item's title,
-//! the page it goes to and where on it, its color and style, and whether
-//! the file shows it closed, flattened in pre-order with its depth.
+//! the page it goes to and where on it, or whether it goes somewhere else
+//! sheaf keeps as the file has it, its color and style, whether the file
+//! shows it closed, and its object, flattened in pre-order with its depth.
 //!
 //! Positions are PageSpace (M10.5 §5), as the file has them, so a
 //! bookmark sheaf saved is read back where it was put, and a crop or a
@@ -42,28 +43,62 @@ pub fn outline(src: &Source) -> Vec<FlatOutlineItem> {
     let Some(first) = first else {
         return Vec::new();
     };
-    let mut pages = HashMap::new();
-    for (index, id) in src.page_ids().enumerate() {
-        // A page the tree lists twice is where it's first listed, as
-        // PDFium's page index has it.
-        pages.entry(id).or_insert(index as u32);
-    }
-    let mut walk = Walk {
-        src,
-        pdf,
-        pages,
-        names: None,
-        seen: HashSet::new(),
-        out: Vec::new(),
-    };
+    let mut walk = Walk::new(src);
     walk.level(Some(first), 0);
     walk.out
+}
+
+/// Where a source's outline items go, as [`outline`] reads them: what a
+/// save keeps an item's own destination by (M10.5 §11.3).
+pub(crate) struct Dests<'a> {
+    walk: Walk<'a>,
+}
+
+impl<'a> Dests<'a> {
+    pub(crate) fn new(src: &'a Source) -> Dests<'a> {
+        Dests {
+            walk: Walk::new(src),
+        }
+    }
+
+    /// The page object `item`, an outline item of the source, goes to and
+    /// where on it it lands, when its `/Dest`, else its GoTo's `/D`, names
+    /// the page by reference: None for one that goes elsewhere, nowhere or
+    /// to a page by its index.
+    pub(crate) fn page_of(&mut self, item: &'a Dictionary) -> Option<(ObjectId, Option<DestView>)> {
+        let walk = &mut self.walk;
+        let dest = (item.get(b"Dest").ok())
+            .and_then(|dest| walk.dest(dest))
+            .or_else(|| walk.goto(item))?;
+        let &Object::Reference(page) = dest.first()? else {
+            return None;
+        };
+        walk.pages
+            .contains_key(&page)
+            .then(|| (page, walk.view(dest)))
+    }
+
+    /// `item`'s title, as the bookmark it opens as has it.
+    pub(crate) fn title(&self, item: &Dictionary) -> String {
+        self.walk.title(item)
+    }
+
+    /// `item`'s color and style, as the bookmark it opens as has them.
+    pub(crate) fn style(&self, item: &Dictionary) -> (Option<[u8; 3]>, TextStyle) {
+        self.walk.style(item)
+    }
 }
 
 /// A title's text, as PDFium shows it: the text string's
 /// ([`text_string`]), control characters as spaces.
 fn title(bytes: &[u8]) -> String {
-    text_string(bytes)
+    shown_title(&text_string(bytes))
+}
+
+/// Title `title` as the walk reads it back: control characters as
+/// spaces.
+fn shown_title(title: &str) -> String {
+    title
         .chars()
         .map(|c| if c < ' ' { ' ' } else { c })
         .collect()
@@ -86,6 +121,23 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
+    fn new(src: &'a Source) -> Walk<'a> {
+        let mut pages = HashMap::new();
+        for (index, id) in src.page_ids().enumerate() {
+            // A page the tree lists twice is where it's first listed, as
+            // PDFium's page index has it.
+            pages.entry(id).or_insert(index as u32);
+        }
+        Walk {
+            src,
+            pdf: src.pdf(),
+            pages,
+            names: None,
+            seen: HashSet::new(),
+            out: Vec::new(),
+        }
+    }
+
     /// The run of siblings from `first`, each followed by its children.
     fn level(&mut self, first: Option<ObjectId>, depth: u16) {
         let mut next = first;
@@ -96,20 +148,14 @@ impl<'a> Walk<'a> {
             let Ok(item) = self.pdf.get_dictionary(id) else {
                 return;
             };
-            let (page, view) = self.target(item);
+            let (page, view, kept) = self.target(item);
             let (color, style) = self.style(item);
             let count = item
                 .get(b"Count")
                 .ok()
                 .and_then(|c| resolve(self.pdf, c))
                 .and_then(|c| c.as_i64().ok());
-            let title = item
-                .get(b"Title")
-                .ok()
-                .and_then(|t| resolve(self.pdf, t))
-                .and_then(|t| t.as_str().ok())
-                .map(title)
-                .unwrap_or_default();
+            let title = self.title(item);
             self.out.push(FlatOutlineItem {
                 title,
                 page,
@@ -118,6 +164,8 @@ impl<'a> Walk<'a> {
                 color,
                 style,
                 open: count.is_none_or(|n| n >= 0),
+                object: Some(id),
+                kept,
             });
             if depth < MAX_DEPTH {
                 self.level(link(item, b"First"), depth + 1);
@@ -126,20 +174,28 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// `item`'s `/Title`, as shown.
+    fn title(&self, item: &Dictionary) -> String {
+        (item.get(b"Title").ok())
+            .and_then(|t| resolve(self.pdf, t))
+            .and_then(|t| t.as_str().ok())
+            .map(title)
+            .unwrap_or_default()
+    }
+
     /// Where `item` goes: its `/Dest`, else its GoTo action's `/D`. No
-    /// page, no position.
-    fn target(&mut self, item: &'a Dictionary) -> (Option<u32>, Option<DestView>) {
-        let dest = match item.get(b"Dest") {
-            Ok(dest) => self.dest(dest),
-            Err(_) => None,
+    /// page, no position; and then whether it has a `/Dest` or an `/A`,
+    /// which go somewhere else, kept as read.
+    fn target(&mut self, item: &'a Dictionary) -> (Option<u32>, Option<DestView>, bool) {
+        let explicit = item.get(b"Dest").ok();
+        let dest = explicit.and_then(|dest| self.dest(dest));
+        let Some((page, dest)) = dest
+            .or_else(|| self.goto(item))
+            .and_then(|dest| Some((self.page(dest)?, dest)))
+        else {
+            return (None, None, explicit.is_some() || item.has(b"A"));
         };
-        let Some(dest) = dest.or_else(|| self.goto(item)) else {
-            return (None, None);
-        };
-        let Some(page) = self.page(dest) else {
-            return (None, None);
-        };
-        (Some(page), self.view(dest))
+        (Some(page), self.view(dest), false)
     }
 
     /// The destination of `item`'s `/A`, when it's a GoTo.

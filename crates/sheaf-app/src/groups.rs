@@ -159,7 +159,7 @@ impl DocView {
         let pages: Vec<usize> = if with {
             on
         } else {
-            (0..doc.model.state().pages.len())
+            (0..doc.model.state().page_count())
                 .filter(|i| !on.contains(i))
                 .collect()
         };
@@ -346,7 +346,7 @@ impl DocView {
             return false;
         };
         let page_id = match &self.state {
-            State::Ready(doc) => doc.page_ref(page).map(|r| r.id),
+            State::Ready(doc) => doc.page_id(page),
             _ => None,
         };
         let Some(page_id) = page_id else {

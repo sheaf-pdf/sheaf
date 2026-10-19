@@ -1297,7 +1297,7 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     sheaf_doc::SourceInfo::read(&sheaf_doc::Store::new(), &p, None)
-                        .map(|info| info.src.page_count())
+                        .map(|(info, _)| info.src.page_count())
                 })
                 .await;
             ws.update_in(cx, |ws, window, cx| {
@@ -1462,7 +1462,7 @@ impl Workspace {
         let Some(snapshot) = doc.read(cx).model_snapshot() else {
             return;
         };
-        let page_count = snapshot.state.pages.len();
+        let page_count = snapshot.state.page_count();
         cx.spawn_in(window, async move |ws, cx| {
             let current = cx
                 .background_executor()

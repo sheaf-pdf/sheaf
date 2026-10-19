@@ -7,11 +7,9 @@
 //! form (`/NeedsRendering`), and from the field model's class once it's
 //! read, which also catches a static XFA form with no AcroForm fields.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{AnyElement, Context, div, prelude::*, px};
-use sheaf_doc::SourceId;
 use sheaf_doc::forms::{FormClass, FormFacts};
 use sheaf_render::FormType;
 use sheaf_ui::button::Button;
@@ -29,10 +27,9 @@ pub(crate) const XFA_VALUES: &str = "This form's XFA part holds values sheaf doe
 /// What the view knows about the forms in a document's files.
 #[derive(Default)]
 pub(crate) struct Forms {
-    /// The primary file's, once read.
+    /// The primary file's, once read. Inserted files' are their sources'
+    /// (`Source::form`).
     pub(crate) primary: Option<Arc<FormFacts>>,
-    /// Inserted files', by source. Their fields come in with M10 slice 4.
-    pub(crate) incoming: HashMap<SourceId, Arc<FormFacts>>,
     /// The bar was dismissed, for this window's session.
     pub(crate) bar_dismissed: bool,
     /// The user agreed to a save removing an XFA copy that holds values
@@ -77,58 +74,6 @@ impl Doc {
 }
 
 impl DocView {
-    /// Whether a save of the form as it is would remove an XFA copy that
-    /// holds values sheaf doesn't show, and the user hasn't agreed to that
-    /// this session.
-    pub(crate) fn would_drop_xfa_values(&self) -> bool {
-        let State::Ready(doc) = &self.state else {
-            return false;
-        };
-        !doc.forms.xfa_values_dropped
-            && doc
-                .forms
-                .primary
-                .as_ref()
-                .is_some_and(|f| f.xfa && f.xfa_values > 0)
-            && doc.model.form_changed()
-    }
-
-    /// Ask before a save removes the XFA copy's values; save to `path` if
-    /// the user agrees.
-    pub(crate) fn ask_to_drop_xfa_values(
-        &mut self,
-        path: std::path::PathBuf,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) {
-        let rx = sheaf_ui::prompts::ask(
-            window,
-            cx,
-            gpui::PromptLevel::Warning,
-            "Remove the form's XFA part?",
-            Some(
-                "It holds values sheaf doesn't show, which Adobe Acrobat or Reader shows. \
-                 Saving the form as it is now removes it, and them.",
-            ),
-            &[
-                gpui::PromptButton::new("Save and Remove It"),
-                gpui::PromptButton::cancel("Cancel"),
-            ],
-        );
-        cx.spawn(async move |this, cx| {
-            if let Ok(0) = rx.await {
-                this.update(cx, |v, cx| {
-                    if let State::Ready(doc) = &mut v.state {
-                        doc.forms.xfa_values_dropped = true;
-                    }
-                    v.save_to(path, cx).detach();
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-
     /// The bar above the pages about the document's form.
     pub(crate) fn render_form_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let State::Ready(doc) = &self.state else {

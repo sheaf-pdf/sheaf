@@ -12,16 +12,18 @@
 //! reshaped or copied.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex};
 
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb,
 };
 use sheaf_core::{PageSize, Rotation};
-use sheaf_doc::assets::MarkAssets;
 use sheaf_doc::geom::{Affine, Geom};
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt};
+use sheaf_doc::store::BlobKind;
+use sheaf_doc::{
+    Annot, AnnotId, AnnotKind, Blob, BlobRef, Box2, DocState, Document, Edit, FormRef, PageId, Pt,
+};
 use sheaf_ui::theme;
 use sheaf_ui::tooltip::Tooltip;
 
@@ -483,7 +485,7 @@ impl DocView {
             return;
         };
         let b = a.page_bounds();
-        let Some(index) = doc.model.state().index_of(page_id) else {
+        let Some(index) = doc.model.index_of(page_id) else {
             return;
         };
         doc.reveal(index, b);
@@ -511,7 +513,7 @@ impl DocView {
         if y < top || y > top + h || x < left || x > left + w {
             return None;
         }
-        let pane = doc.model.geom(&layout.refs[i]);
+        let pane = layout.refs[i].geom;
         let k = w / pane.shown().width.max(1.0);
         let shown = Pt {
             x: (x - left) / k,
@@ -550,16 +552,16 @@ impl DocView {
             return None;
         }
         let from_edit = self.edit_geom_of(page_id)?.from_view();
-        doc.model.state().annots_on(page_id).and_then(|list| {
-            list.iter()
-                .rev()
-                .filter(|a| !doc.hidden_marks.contains(&a.id))
-                .find(|a| {
-                    let at = from_edit.then(Affine::upright(a.turn)).apply(p);
-                    a.hit(at, tolerance)
-                })
-                .cloned()
-        })
+        let marks: Vec<&Annot> = doc.model.state().marks_on(page_id).collect();
+        marks
+            .into_iter()
+            .rev()
+            .filter(|a| !doc.hidden_marks.contains(&a.id))
+            .find(|a| {
+                let at = from_edit.then(Affine::upright(a.turn)).apply(p);
+                a.hit(at, tolerance)
+            })
+            .cloned()
     }
 
     /// The handle of the selected mark under `p` (in the edit frame), when
@@ -606,7 +608,7 @@ impl DocView {
         // Hit areas of a few screen pixels, whatever the zoom.
         let tolerance = 4.0 / k.max(0.01);
         let page_id = match &self.state {
-            State::Ready(doc) => doc.page_ref(page).map(|r| r.id),
+            State::Ready(doc) => doc.page_id(page),
             _ => None,
         };
         let Some(page_id) = page_id else {
@@ -716,12 +718,12 @@ impl DocView {
             }
             // Another tool's comment: selected by a click, made ours when
             // it's dragged or double-clicked (see `adopt`).
-            if let Some(ix) = self.foreign_at(page_id, p, tolerance) {
+            if let Some(id) = self.foreign_at(page_id, p, tolerance) {
                 if ev.click_count >= 2 && self.tool == Tool::Select {
-                    self.edit_foreign(ix, window, cx);
+                    self.edit_foreign(id, window, cx);
                     return;
                 }
-                let Some((_, mark)) = self.foreign_mark(ix) else {
+                let Some((_, mark)) = self.foreign_mark(id) else {
                     return;
                 };
                 let State::Ready(doc) = &mut self.state else {
@@ -731,8 +733,8 @@ impl DocView {
                     return;
                 };
                 doc.select_mark(None);
-                doc.selected_foreign = Some(ix);
-                doc.adopting = Some(ix);
+                doc.selected_foreign = Some(id);
+                doc.adopting = Some(id);
                 doc.drag = Some(Drag {
                     page,
                     page_id,
@@ -776,10 +778,9 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(pref) = doc.page_ref(page) else {
+        let Some(page_id) = doc.page_id(page) else {
             return;
         };
-        let page_id = pref.id;
         match tool {
             Tool::Select => {}
             Tool::Note => {
@@ -844,7 +845,7 @@ impl DocView {
         };
         if ev.pressed_button.is_none() {
             let page_id = match &self.state {
-                State::Ready(doc) => doc.page_ref(page).map(|r| r.id),
+                State::Ready(doc) => doc.page_id(page),
                 _ => None,
             };
             if let Some(page_id) = page_id {
@@ -930,7 +931,7 @@ impl DocView {
             }
             return;
         }
-        if let Some(ix) = adopting {
+        if let Some(id) = adopting {
             // Another tool's comment, moved: ours now, where it was let go.
             let (dx, dy) = (b.x - a.x, b.y - a.y);
             if (dx.abs() >= 0.5 || dy.abs() >= 0.5)
@@ -938,7 +939,7 @@ impl DocView {
             {
                 let mut moved = dragged(m, a, b).to_page(&edit);
                 moved.modified = sheaf_doc::pdf_date_now();
-                self.adopt_foreign(ix, |m| *m = moved, "Move annotation", cx);
+                self.adopt_foreign(id, |m| *m = moved, "Move annotation", cx);
             }
             return;
         }
@@ -1315,7 +1316,8 @@ impl DocView {
                     .absolute()
                     .inset_0()
                     .children(shown.iter().flat_map(|m| {
-                        crate::docview::annot_elements(m, doc.model.assets(), &to_pane, size, k)
+                        let held = crate::docview::stamp_of(doc.model.state(), m.id);
+                        crate::docview::annot_elements(m, held, &to_pane, size, k)
                     }))
                     .into_any_element(),
             );
@@ -1391,13 +1393,7 @@ impl DocView {
                     div()
                         .absolute()
                         .inset_0()
-                        .children(crate::docview::annot_elements(
-                            &m,
-                            doc.model.assets(),
-                            &to_pane,
-                            size,
-                            k,
-                        ))
+                        .children(crate::docview::annot_elements(&m, None, &to_pane, size, k))
                         .into_any_element(),
                 )
             }
@@ -1524,59 +1520,86 @@ struct CopiedMarks {
 /// held them in the frame the file displayed, before PageSpace).
 const COPIED_MARKS: u32 = 2;
 
-/// What the marks copied last hold, by stem: each page stamp's page, a
-/// one-page PDF, and each attachment's bytes (M10.5 §14.1's clipboard
-/// blob cache). A paste in any window gives them to its document, whose
-/// files may have neither. It holds one copy's, as the clipboard does.
+/// What the marks copied last hold, by stem: each page stamp's page and
+/// each attachment's file, held while they're on the clipboard (M10.5
+/// §14.1's clipboard blob cache). A paste in any window gives them to its
+/// document, whose files may have neither. It holds one copy's, as the
+/// clipboard does.
 #[derive(Default)]
 struct CopiedAssets {
-    stamps: HashMap<String, Arc<[u8]>>,
-    files: HashMap<String, Arc<[u8]>>,
+    stamps: HashMap<String, FormRef>,
+    files: HashMap<String, BlobRef>,
 }
 
 static COPIED_ASSETS: LazyLock<Mutex<CopiedAssets>> = LazyLock::new(Default::default);
 
 impl CopiedAssets {
-    /// What `marks` hold, from `assets`, their document's.
-    fn of(marks: &[Annot], assets: &MarkAssets) -> CopiedAssets {
+    /// What `marks`, `st`'s, hold.
+    fn of(marks: &[Annot], st: &DocState) -> CopiedAssets {
         let mut held = CopiedAssets::default();
         for a in marks {
-            match &a.kind {
-                AnnotKind::PageStamp { stamp, .. } => {
-                    if let Some(pdf) = assets.stamp_pdf(stamp) {
-                        held.stamps.insert(stamp.clone(), pdf);
-                    }
+            let Some(m) = st.annot(a.id).and_then(|rec| rec.mark_record()) else {
+                continue;
+            };
+            match (&a.kind, &m.stamp, &m.file) {
+                (AnnotKind::PageStamp { stamp, .. }, Some(form), _) => {
+                    held.stamps.insert(stamp.clone(), form.clone());
                 }
-                AnnotKind::FileAttachment { file, name, .. } => match assets.file_bytes(file) {
-                    Ok(bytes) => {
-                        held.files.insert(file.clone(), bytes);
-                    }
-                    Err(e) => log::warn!("copying attachment {name}: {e:#}"),
-                },
+                (AnnotKind::FileAttachment { file: stem, .. }, _, Some(file)) => {
+                    held.files.insert(stem.clone(), file.clone());
+                }
                 _ => {}
             }
         }
         held
     }
 
-    /// What `marks` name of these, given to `assets`, the document they're
-    /// pasted into.
-    fn give(&self, marks: &[Annot], assets: &MarkAssets) {
+    /// What `marks` name of these, given to `doc`, the document they're
+    /// pasted into: interned into its store, but for a stamp's page it
+    /// has under the same stem; a page a file holds is made a one-page
+    /// PDF first, and a mark whose bytes are another blob's then names
+    /// that one. The blobs, to hold until the marks are added.
+    fn give(&self, marks: &mut [Annot], doc: &Document) -> Vec<Blob> {
+        let store = doc.store();
+        let mut held = Vec::new();
         for a in marks {
-            match &a.kind {
-                AnnotKind::PageStamp { stamp, .. } => {
-                    if let Some(pdf) = self.stamps.get(stamp) {
-                        assets.intern_stamp(stamp, pdf.clone());
-                    }
+            let (stem, bytes, kind) = match &mut a.kind {
+                AnnotKind::PageStamp { stamp, name, .. } => {
+                    let Some(form) = self.stamps.get(stamp.as_str()) else {
+                        continue;
+                    };
+                    let page = match (form, doc.find_stamp(stamp)) {
+                        (_, Some(FormRef::Base(_))) => continue,
+                        (FormRef::Blob(page), _) => page.bytes().clone(),
+                        (FormRef::Base(_), Some(FormRef::Blob(page))) => {
+                            held.push(page.blob().clone());
+                            continue;
+                        }
+                        (FormRef::Base(_), None) => match form.to_pdf() {
+                            Ok(page) => page,
+                            Err(e) => {
+                                log::warn!("pasting stamp {name}: {e:#}");
+                                continue;
+                            }
+                        },
+                    };
+                    (stamp, page, BlobKind::stamp())
                 }
-                AnnotKind::FileAttachment { file, .. } => {
-                    if let Some(bytes) = self.files.get(file) {
-                        assets.intern_file(file, bytes.clone());
-                    }
+                AnnotKind::FileAttachment { file, .. } => match self.files.get(file.as_str()) {
+                    Some(bytes) => (file, bytes.bytes().clone(), BlobKind::Attachment),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            match store.intern(bytes, kind) {
+                Ok(blob) => {
+                    *stem = blob.id().stem();
+                    held.push(blob);
                 }
-                _ => {}
+                Err(e) => log::warn!("pasting {stem}: {e}"),
             }
         }
+        held
     }
 }
 
@@ -1660,7 +1683,7 @@ impl DocView {
         if marks.is_empty() {
             return false;
         }
-        let held = CopiedAssets::of(&marks, doc.model.assets());
+        let held = CopiedAssets::of(&marks, doc.model.state());
         if let Ok(mut copied) = COPIED_ASSETS.lock() {
             *copied = held;
         }
@@ -1696,7 +1719,7 @@ impl DocView {
     /// theirs: a little down and right of there, or exactly there
     /// (`in_place`). They come in selected, as one undo step.
     pub(crate) fn paste_marks(&mut self, in_place: bool, cx: &mut Context<Self>) -> bool {
-        let Some(copied) = cx.read_from_clipboard().and_then(|item| {
+        let Some(mut copied) = cx.read_from_clipboard().and_then(|item| {
             item.entries().iter().find_map(|e| match e {
                 gpui::ClipboardEntry::String(s) => s.metadata_json::<CopiedMarks>(),
                 _ => None,
@@ -1712,14 +1735,15 @@ impl DocView {
             return false;
         };
         let index = doc.current_page();
-        let (Some(page), Some(onto)) = (doc.page_ref(index).map(|p| p.id), doc.edit_geom(index))
-        else {
+        let (Some(page), Some(onto)) = (doc.page_id(index), doc.edit_geom(index)) else {
             return false;
         };
-        if let Ok(held) = COPIED_ASSETS.lock() {
-            held.give(&copied.marks, doc.model.assets());
-        }
-        let before = doc.model.state().annots_on(page).map_or(0, |l| l.len());
+        // Held until they're added.
+        let held = match COPIED_ASSETS.lock() {
+            Ok(assets) => assets.give(&mut copied.marks, &doc.model),
+            Err(_) => Vec::new(),
+        };
+        let before = doc.model.state().marks_on(page).count();
         let shift = if in_place { 0.0 } else { 10.0 };
         let now = sheaf_doc::pdf_date_now();
         let n = copied.marks.len();
@@ -1745,13 +1769,12 @@ impl DocView {
             format!("Paste {n} annotations")
         };
         self.apply_batch(edits, &label, cx);
+        drop(held);
         if let State::Ready(doc) = &mut self.state {
-            let pasted: Vec<(PageId, AnnotId)> = doc
-                .model
-                .state()
-                .annots_on(page)
-                .map(|l| l.iter().skip(before).map(|a| (page, a.id)).collect())
-                .unwrap_or_default();
+            let pasted: Vec<(PageId, AnnotId)> = (doc.model.state().marks_on(page))
+                .skip(before)
+                .map(|a| (page, a.id))
+                .collect();
             doc.selected_marks = pasted;
         }
         if self.tool != Tool::Select {
@@ -2056,19 +2079,65 @@ mod tests {
     }
 
     /// Copied marks take their stamps' pages and files with them, and a
-    /// paste gives them to a document that has neither.
+    /// paste gives them to a document that has neither: the file as it
+    /// is, and a page a file holds as a one-page PDF, which the pasted
+    /// mark names by its blob's stem.
     #[test]
     fn copied_marks_take_what_they_hold() {
         use sheaf_doc::forms::fixture::{self, MARK_FILE, MARK_FILE_BYTES, MARK_STAMP};
+        use sheaf_doc::{BlobId, FixedCount, Mark, SourceInfo, Store};
+        let blank = || {
+            let store = Store::new();
+            let primary = SourceInfo::blank(&store, 1);
+            Document::new(store, primary, None, &[], Box::new(FixedCount(10)))
+        };
+        // Placed and attached, saved, and opened: the stamp's page is the
+        // file's.
+        let mut doc = blank();
+        let held = fixture::mark_blobs(doc.store());
         let every = fixture::every_mark_kind();
-        let marks = [every[17].clone(), every[23].clone(), every[1].clone()];
-        let held = CopiedAssets::of(&marks, &fixture::mark_assets());
-        assert_eq!((held.stamps.len(), held.files.len()), (1, 1));
-        let other = MarkAssets::new(sheaf_doc::Store::new());
-        assert!(other.stamp(MARK_STAMP).is_none());
-        held.give(&marks, &other);
-        assert!(other.stamp_pdf(MARK_STAMP).is_some());
-        assert_eq!(&*other.file_bytes(MARK_FILE).unwrap(), MARK_FILE_BYTES);
+        let p0 = doc.page(0).unwrap();
+        for annot in [every[17].clone(), every[23].clone(), every[1].clone()] {
+            doc.apply(Edit::AnnotAdd { page: p0, annot }, "add")
+                .unwrap();
+        }
+        drop(held);
+        let path = std::env::temp_dir().join(format!(
+            "sheaf-copied-{}-{:x}.pdf",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &path).unwrap();
+        let doc = sheaf_doc::open::file(&path, None).unwrap().doc;
+        let _ = std::fs::remove_file(&path);
+        let p0 = doc.page(0).unwrap();
+        let marks: Vec<Annot> = doc.state().marks_on(p0).cloned().collect();
+        let copied = CopiedAssets::of(&marks, doc.state());
+        assert_eq!((copied.stamps.len(), copied.files.len()), (1, 1));
+        drop(doc);
+
+        let mut other = blank();
+        assert!(other.find_stamp(&MARK_STAMP).is_none());
+        let mut pasted = marks;
+        let held = copied.give(&mut pasted, &other);
+        let p0 = other.page(0).unwrap();
+        for annot in pasted {
+            other
+                .apply(Edit::AnnotAdd { page: p0, annot }, "paste")
+                .unwrap();
+        }
+        drop(held);
+        let got: Vec<&Mark> = other.state().mark_records_on(p0).collect();
+        let AnnotKind::PageStamp { stamp, .. } = &got[0].annot.kind else {
+            panic!("a page stamp")
+        };
+        let page = got[0].stamp.as_ref().unwrap().to_pdf().unwrap();
+        assert_eq!(*stamp, BlobId::of(&page).stem());
+        assert_ne!(*stamp, *MARK_STAMP, "made of the file's form");
+        assert!(
+            matches!(&got[1].annot.kind, AnnotKind::FileAttachment { file, .. } if *file == *MARK_FILE)
+        );
+        assert_eq!(&**got[1].file.as_ref().unwrap().bytes(), MARK_FILE_BYTES);
     }
 
     fn mark(kind: AnnotKind) -> Annot {

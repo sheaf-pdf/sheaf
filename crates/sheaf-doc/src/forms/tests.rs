@@ -4,7 +4,7 @@
 
 use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 
-use super::check::{Finding, Report, check};
+use super::check::{Finding, Report, check, check_latest};
 use super::corpus::{Corpus, parse_manifest};
 use super::fixture::{Form, append_revision, every_kind, hybrid_reference, hybrid_update, row};
 
@@ -263,6 +263,45 @@ fn values_with_no_appearance() {
     );
 }
 
+/// What an update unlinks stays in the file for the revision before it,
+/// so `check` finds a widget it took off its page and out of the form on
+/// no page, where `check_latest`, of what the newest revision reaches,
+/// finds nothing. What the update writes that the newest revision reaches
+/// (a widget on the page no field has) both find.
+#[test]
+fn the_latest_revision_is_checked_alone() {
+    let mut f = Form::new(1);
+    let kept = f.text("kept", 0, row(0));
+    let gone = f.text("gone", 0, row(1));
+    let (page, form) = (f.pages[0], f.acroform);
+    let original = f.bytes();
+    let unlinked = append_revision(&original, &[page, form], |pdf| {
+        let annots = vec![Object::Reference(kept)];
+        pdf.get_dictionary_mut(page)
+            .unwrap()
+            .set("Annots", annots.clone());
+        pdf.get_dictionary_mut(form).unwrap().set("Fields", annots);
+    });
+    assert_findings(
+        &checked(&unlinked),
+        &[Finding::OffPage(vec!["gone".into()])],
+    );
+    assert_findings(&check_latest(&unlinked, None).unwrap(), &[]);
+
+    let stray = append_revision(&original, &[page], |pdf| {
+        let lost = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Widget", "FT" => "Tx",
+            "T" => Object::string_literal("lost"), "P" => page,
+            "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+        });
+        let annots = vec![kept.into(), gone.into(), lost.into()];
+        pdf.get_dictionary_mut(page).unwrap().set("Annots", annots);
+    });
+    let orphan = [Finding::Orphans(vec!["lost".into()])];
+    assert_findings(&checked(&stray), &orphan);
+    assert_findings(&check_latest(&stray, None).unwrap(), &orphan);
+}
+
 #[test]
 fn values_an_earlier_revision_holds() {
     let mut f = Form::new(1);
@@ -458,7 +497,7 @@ fn signatures_fit_their_revision() {
     // A certification is one signature, in /Perms and in its field.
     let mut f = Form::new(1);
     let field = f.signature("Author", 0, row(0));
-    f.certify(field);
+    f.certify(field, 2);
     let certified = f.bytes();
     let report = checked(&certified);
     assert!(report.certified);

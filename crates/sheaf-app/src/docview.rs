@@ -5,9 +5,9 @@
 //! share its render handles and caches.
 //!
 //! The page sequence comes from `sheaf_doc::Document` (see
-//! docs/document-model.md): a virtual list of `PageRef`s over one or more
-//! source files, each with its own render worker. Caches key by `PageId`, so
-//! reordering pages costs nothing visually.
+//! docs/document-model.md): an order of pages, each showing a page of one
+//! of its source files, each file with its own render worker. Caches key by
+//! `PageId`, so reordering pages costs nothing visually.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -21,10 +21,10 @@ use gpui::{
     img, point, prelude::*, px, relative, rgb, rgba,
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
-use sheaf_doc::assets::MarkAssets;
 use sheaf_doc::geom::{Affine, Geom};
-use sheaf_doc::save;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
+use sheaf_doc::materialize::Came;
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, FormRef, Pt};
+use sheaf_doc::{materialize, save};
 use sheaf_ui::button::Button;
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_area::{TextArea, TextAreaEvent};
@@ -33,11 +33,9 @@ use sheaf_ui::theme;
 
 use crate::markup_tools::{Drag, Tool, arrow_head, stroke_canvas, stroke_canvas_dashed};
 pub(crate) use crate::pane::Zoom;
-use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
+use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Shown, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
-use sheaf_doc::{
-    Document, Edit, EditOutcome, OutlineId, PageId, PageRef, SourceId, SourceInfo, Store,
-};
+use sheaf_doc::{Document, Edit, EditOutcome, OutlineId, PageId, SourceId, SourceInfo, Store};
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::{Job, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit};
 
@@ -123,6 +121,9 @@ pub(crate) struct Doc {
     /// Images we've stopped showing; GPU textures are released in `render`,
     /// the only place we have a `Window`.
     pub(crate) retired: Vec<Arc<RenderImage>>,
+    /// How many times every rendered image was dropped
+    /// ([`invalidate_tiles`](Self::invalidate_tiles)): a save never does.
+    pub(crate) tiles_invalidated: u64,
     pub(crate) first_paint: Option<Instant>,
     /// Last edit notice, shown in the status bar.
     pub(crate) notice: Option<String>,
@@ -173,8 +174,6 @@ pub(crate) struct Doc {
     /// Other tools' comments sheaf has hidden in the engines: (source, page
     /// in it, slot in its /Annots).
     pub(crate) foreign_hidden: HashSet<(SourceId, u32, usize)>,
-    /// Bumped when `foreign_annots` changes.
-    pub(crate) foreign_generation: u64,
     /// Text selected with the Select tool (see text_select.rs).
     pub(crate) text_sel: Option<crate::text_select::TextSel>,
     pub(crate) text_drag: Option<crate::text_select::TextDrag>,
@@ -194,12 +193,10 @@ pub(crate) struct Doc {
     pub(crate) group_list: Option<crate::groups::GroupList>,
     /// The right-click menu on a mark, where it was opened.
     pub(crate) mark_menu: Option<gpui::Point<gpui::Pixels>>,
-    /// Comments other tools left in the files the pages come from
-    /// (read-only), with the source each is in.
-    pub(crate) foreign_annots: Vec<(SourceId, sheaf_doc::file::ForeignAnnot)>,
-    pub(crate) selected_foreign: Option<usize>,
+    /// Another tool's comment selected, here or in the Comments panel.
+    pub(crate) selected_foreign: Option<AnnotId>,
     /// Another tool's comment being dragged, made ours when it's let go.
-    pub(crate) adopting: Option<usize>,
+    pub(crate) adopting: Option<AnnotId>,
     /// Files embedded in the primary file, and its portfolio schema if it
     /// is one (see attachments_panel.rs), once the file has opened.
     pub(crate) attachments: Vec<sheaf_doc::attachments::Attachment>,
@@ -210,7 +207,6 @@ pub(crate) struct Doc {
     /// Optional content groups and which are hidden (see layers_panel.rs).
     pub(crate) layers: Vec<sheaf_doc::layers::Layer>,
     pub(crate) layers_hidden: HashSet<sheaf_doc::layers::LayerId>,
-    pub(crate) layers_default: HashSet<sheaf_doc::layers::LayerId>,
     pub(crate) layers_generation: u64,
     /// The primary file's marks that sheaf draws itself, as `/NM`s by page
     /// index: PDFium is told not to draw them, again whenever its renderer
@@ -225,19 +221,15 @@ pub(crate) struct Doc {
 }
 
 /// What an inserted or replacing file brings besides its pages, read on
-/// a background thread: sheaf's own marks (which the edit carries in) and
-/// what they hold, other tools' comments, its bookmarks, and its form.
+/// a background thread: what its pages hold (sheaf's own marks, which the
+/// edit carries in, and what they hold; the marks given new ids as the
+/// file was read; other tools' comments and links, which the edit takes
+/// from the source), and its bookmarks. Its form is read there too, into
+/// its source, which the edit takes it from.
 #[derive(Default)]
 pub(crate) struct Incoming {
-    pub marks: HashMap<u32, Vec<sheaf_doc::Annot>>,
-    /// The marks given new ids as the file was read, with the ids their
-    /// `/NM`s still say.
-    pub renamed: Vec<sheaf_doc::open::Renamed>,
-    /// The marks' stamps' pages and attachments' files.
-    pub assets: sheaf_doc::assets::SourceAssets,
-    pub foreign: Vec<sheaf_doc::file::ForeignAnnot>,
+    pub annots: Arc<sheaf_doc::open::FileAnnots>,
     pub outline: Vec<sheaf_doc::FlatOutlineItem>,
-    pub form: sheaf_doc::forms::FileForm,
 }
 
 impl Incoming {
@@ -245,22 +237,108 @@ impl Incoming {
     pub(crate) fn read(info: &SourceInfo) -> Incoming {
         let facts = sheaf_doc::open::finish(&info.src, &sheaf_ops::NoProgress);
         Incoming {
-            marks: facts.marks,
-            renamed: facts.renamed,
-            assets: facts.assets,
-            foreign: facts.foreign,
+            annots: facts.annots,
             outline: facts.outline,
-            form: facts.form,
         }
     }
 
     /// The marks, as `Edit::InsertPages` and `ReplacePages` carry them.
     pub(crate) fn edit_marks(&self) -> Vec<(u32, Vec<sheaf_doc::Annot>)> {
-        self.marks.iter().map(|(i, l)| (*i, l.clone())).collect()
+        self.annots.marks().into_iter().collect()
     }
 }
 
 impl Doc {
+    /// A document's view state as it opens: `model`, rendered by
+    /// `handles`, in one pane, nothing rendered or selected yet.
+    pub(crate) fn new(
+        model: Document,
+        handles: HashMap<SourceId, RenderHandle>,
+        outline_focus: FocusHandle,
+        measure_scale: sheaf_doc::measure::Scale,
+    ) -> Doc {
+        Doc {
+            model,
+            handles,
+            version: 0,
+            panes: vec![Pane::new(Zoom::FitWidth, PageMode::default())],
+            active: 0,
+            previews: HashMap::new(),
+            tiles: HashMap::new(),
+            shown: HashMap::new(),
+            inflight: HashMap::new(),
+            retired: Vec::new(),
+            tiles_invalidated: 0,
+            first_paint: None,
+            notice: None,
+            reading: None,
+            thumb_scroll: ScrollHandle::new(),
+            thumb_keep: HashSet::new(),
+            review_keep: HashSet::new(),
+            thumb_followed: None,
+            outline_expanded: HashSet::new(),
+            outline_scroll: ScrollHandle::new(),
+            selection: HashSet::new(),
+            sel_anchor: None,
+            drop_target: None,
+            saving: false,
+            outline_focus,
+            outline_selected: None,
+            outline_drop: None,
+            outline_rename: None,
+            outline_menu: None,
+            outline_rows: Vec::new(),
+            drag: None,
+            selected_marks: Vec::new(),
+            comment_filter: Default::default(),
+            comments_hidden: false,
+            comment_view: None,
+            hidden_marks: HashSet::new(),
+            foreign_hidden: HashSet::new(),
+            text_sel: None,
+            text_drag: None,
+            page_chars: HashMap::new(),
+            chars_loading: HashSet::new(),
+            annot_editor: None,
+            poly: None,
+            measure_scale,
+            calibrate: Default::default(),
+            group_list: None,
+            mark_menu: None,
+            selected_foreign: None,
+            adopting: None,
+            labels: std::cell::RefCell::new((u64::MAX, None)),
+            attachments: Vec::new(),
+            collection: None,
+            attachment_selected: None,
+            forms: Default::default(),
+            layers: Vec::new(),
+            layers_hidden: HashSet::new(),
+            layers_generation: 0,
+            drawn_marks: Vec::new(),
+            split: 0.5,
+            split_drag: false,
+        }
+    }
+
+    /// A save's file is written: its version is the saved one now, with
+    /// the file's record, and the save is over. Nothing the document shows
+    /// changes (M10.5 §9.1), so nothing rendered goes: every tile and
+    /// preview stays.
+    pub(crate) fn take_save(
+        &mut self,
+        written: materialize::Written,
+    ) -> anyhow::Result<materialize::SaveReport> {
+        self.saving = false;
+        let report = written.report();
+        let version = written.record.version;
+        if let Err(e) = written.record_in(&mut self.model) {
+            self.model.abandon_save(version);
+            return Err(e);
+        }
+        Ok(report)
+    }
+
     /// The mark picked last, if any: the one with handles.
     pub(crate) fn selected_annot(&self) -> Option<(PageId, AnnotId)> {
         self.selected_marks.last().copied()
@@ -287,34 +365,30 @@ impl Doc {
         self.selected_marks
             .iter()
             .filter_map(|(p, id)| {
-                let a = st.annots_on(*p)?.iter().find(|a| a.id == *id)?.clone();
+                let a = st.find_annot(*id).filter(|(on, _)| on == p)?.1.clone();
                 Some((*p, a))
             })
             .collect()
     }
 
     /// After `source`'s pages came in with `incoming`: PDFium stops drawing
-    /// the marks sheaf now draws, and the file's other comments are listed.
+    /// the marks sheaf now draws.
     pub(crate) fn take_in(&mut self, source: SourceId, incoming: Incoming) {
-        if !incoming.marks.is_empty()
+        let marks = incoming.annots.marks();
+        if !marks.is_empty()
             && let Some(handle) = self.handles.get(&source)
         {
-            let renamed = incoming.renamed.iter().map(|r| (r.page, r.was));
-            drop(handle.hide_annots(marks_by_page(&incoming.marks, renamed)));
+            let renamed = incoming.annots.renamed.iter().map(|r| (r.page, r.was));
+            drop(handle.hide_annots(marks_by_page(&marks, renamed)));
         }
-        self.foreign_annots
-            .extend(incoming.foreign.into_iter().map(|f| (source, f)));
-        self.foreign_generation += 1;
-        self.forms
-            .incoming
-            .insert(source, Arc::new(incoming.form.facts));
     }
     pub(crate) fn primary(&self) -> &RenderHandle {
         &self.handles[&self.model.primary()]
     }
 
-    pub(crate) fn page_ref(&self, index: usize) -> Option<PageRef> {
-        self.model.page(index).copied()
+    /// The page at position `index`.
+    pub(crate) fn page_id(&self, index: usize) -> Option<PageId> {
+        self.model.page(index)
     }
 
     pub(crate) fn pane(&self) -> &Pane {
@@ -332,8 +406,9 @@ impl Doc {
 
     /// Page `index` as the active pane shows it (with rotate view): for
     /// mapping between page and screen, never for edits.
-    pub(crate) fn shown_ref(&self, index: usize) -> Option<PageRef> {
-        self.page_ref(index).map(|p| self.pane().shown(p))
+    pub(crate) fn shown_ref(&self, index: usize) -> Option<Shown> {
+        let st = self.model.state();
+        self.pane().shown(st, st.page_at(index)?)
     }
 
     /// Page `index` as the active pane draws it (M10.5 §5): its boxes,
@@ -341,14 +416,14 @@ impl Doc {
     /// takes PageSpace to the page as drawn, in points from its top-left
     /// (times the zoom's px per point), and `shown` is the size drawn.
     pub(crate) fn pane_geom(&self, index: usize) -> Option<Geom> {
-        self.shown_ref(index).map(|p| self.model.geom(&p))
+        self.shown_ref(index).map(|p| p.geom)
     }
 
     /// Page `index`'s edit frame: the page as it shows without rotate
     /// view, in points from its top-left, y down, which is where gestures
     /// build and edit marks. Its `from_view` takes them to PageSpace.
     pub(crate) fn edit_geom(&self, index: usize) -> Option<Geom> {
-        self.page_ref(index).map(|p| self.model.geom(&p))
+        self.page_id(index).map(|p| self.model.geom(p))
     }
 
     /// Bring `b`, a box in PageSpace on page `index`, into the active
@@ -373,22 +448,10 @@ impl Doc {
 
     /// Display index of the primary source's page `index`, if it's still in
     /// the document (search hits are reported in source pages).
-    /// Where page `index` of `source` is shown, if it is.
-    pub(crate) fn index_of_page_in(&self, source: SourceId, index: u32) -> Option<usize> {
-        self.model
-            .state()
-            .pages
-            .iter()
-            .position(|p| p.source == source && p.index == index)
-    }
-
     pub(crate) fn index_of_source_page(&self, index: u32) -> Option<usize> {
         let primary = self.model.primary();
-        self.model
-            .state()
-            .pages
-            .iter()
-            .position(|p| p.source == primary && p.index == index)
+        (self.model.state().pages())
+            .position(|(_, def, _)| def.base.source == primary && def.base.index == index)
     }
 
     /// Matches in unsaved OCR layers, which PDFium can't see, in document
@@ -399,13 +462,13 @@ impl Doc {
     ) -> Vec<Hit> {
         let state = self.model.state();
         let mut out = Vec::new();
-        for (order, p) in state.pages.iter().enumerate() {
-            let Some(layer) = state.text_layer(p.id) else {
+        for (order, (page, def, _)) in state.pages().enumerate() {
+            let Some(layer) = def.content.ocr_text() else {
                 continue;
             };
             for h in find(layer) {
                 out.push(Hit {
-                    page: p.id,
+                    page,
                     order,
                     rects: h.rects,
                     text: h.text,
@@ -416,9 +479,10 @@ impl Doc {
     }
 
     /// Merge hits from the primary file's own text into `hits`, keeping
-    /// document order. A page with an unsaved OCR layer is skipped: the
-    /// layer's hits stand in for it (after a save the layer is in the file
-    /// and gone from the model, so nothing is counted twice). The engine's
+    /// document order. A page with an OCR layer the model draws is
+    /// skipped: the layer's hits stand in for it (the engine shows the
+    /// page without it, before a save and after), so nothing is counted
+    /// twice. The engine's
     /// boxes are on its page as the file shows it; they're kept in
     /// PageSpace.
     pub(crate) fn merge_source_hits(&self, hits: &mut Vec<Hit>, incoming: Vec<SearchHit>) {
@@ -430,8 +494,8 @@ impl Doc {
             let Some(order) = self.index_of_source_page(h.page) else {
                 continue;
             };
-            let page = state.pages[order].id;
-            if state.has_text_layer(page) {
+            let page = state.order()[order];
+            if state.ocr_text(page).is_some() {
                 continue;
             }
             let from_view = primary.src.geom(h.page).from_view();
@@ -470,12 +534,12 @@ impl Doc {
     /// Forget images of pages that now show a different source page.
     fn drop_stale_images(&mut self) {
         let mut stale: HashSet<PageId> = HashSet::new();
-        for p in self.model.state().pages.iter() {
-            let now = (p.source, p.index);
-            if let Some(was) = self.shown.insert(p.id, now)
+        for (id, def, _) in self.model.state().pages() {
+            let now = (def.base.source, def.base.index);
+            if let Some(was) = self.shown.insert(id, now)
                 && was != now
             {
-                stale.insert(p.id);
+                stale.insert(id);
             }
         }
         if stale.is_empty() {
@@ -509,6 +573,7 @@ impl Doc {
     /// Drop every rendered image so pages re-rasterize (after the engine's
     /// view of a page changed, e.g. annotations hidden).
     pub(crate) fn invalidate_tiles(&mut self) {
+        self.tiles_invalidated += 1;
         for (_, im) in self.tiles.drain() {
             self.retired.push(im);
         }
@@ -660,20 +725,23 @@ pub struct DocView {
     pub(crate) pending_edit_last: Option<PageId>,
     /// Recovery data found when opening, until the user has been asked.
     pending_recovery: Option<sheaf_doc::recovery::Recovery>,
-    /// A save that would break a signed file's signatures, until the user
-    /// has chosen how to save it (M10 proposal 7), and whether the user
-    /// already chose to overwrite a file changed on disk.
-    pending_signed: Option<(PathBuf, save::WouldBreakSignatures, save::IfChanged)>,
-    /// A save stopped because another program changed the file since it
-    /// was read, until the user has chosen what to do (M10.5 proposal 33):
-    /// where, and how a signed file was to be saved.
-    pending_changed: Option<(PathBuf, save::Signed)>,
-    /// A save that would remove an XFA copy holding values sheaf doesn't
-    /// show, until the user has agreed (M10 proposal 6).
-    pending_xfa: Option<PathBuf>,
+    /// A save stopped to ask the reader something (M10.5 §9.2), its
+    /// version still sealed, until they've answered: whether to replace a
+    /// file another program changed, to break a signed file's signatures,
+    /// or to drop an XFA part that holds values.
+    pending_ask: Option<(Saving, materialize::Ask)>,
     autosave: Option<Task<()>>,
     /// When the edits since the last sidecar write began.
     autosave_since: Option<Instant>,
+    /// Bumped by every change autosave hears of: with the current version,
+    /// what a sidecar is of.
+    edits: u64,
+    /// What the last sidecar written holds (the current version, and
+    /// `edits`, as it was written), so autosave writes nothing new for the
+    /// same; None once a save changed the file it's written against.
+    sidecar_of: Option<(sheaf_doc::VersionId, u64)>,
+    /// A sidecar is being written: the next waits for it.
+    sidecar_writing: bool,
     pub(crate) tool: Tool,
     pub(crate) tick_glyph: String,
     /// The Select tool is over text (the pointer is an I-beam).
@@ -705,6 +773,18 @@ pub struct DocView {
     /// Plugin calls given while the file opens, until it's ready.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_calls: crate::plugins::Waiting,
+}
+
+/// A save between its seal and its record (M10.5 §9.1): the version it
+/// writes, sealed ([`Document::save_input`]), where it writes, what the
+/// plan decided, what the reader has answered of what it asks, and when
+/// it began.
+pub(crate) struct Saving {
+    input: Arc<materialize::SaveInput>,
+    target: materialize::SaveTarget,
+    plan: materialize::SavePlan,
+    answers: materialize::AskAnswers,
+    started: Instant,
 }
 
 /// A search match, addressed by page id so it survives reordering and so
@@ -743,7 +823,21 @@ impl DocView {
         launched: Instant,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self {
+        let mut this = Self::unopened(path, password, timing, launched, cx);
+        this.open(cx);
+        this
+    }
+
+    /// A view of the file at `path`, not opened yet: [`Self::new`] opens
+    /// it, and a test gives it a document of its own.
+    pub(crate) fn unopened(
+        path: PathBuf,
+        password: Option<String>,
+        timing: bool,
+        launched: Instant,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
             focus_handle: cx.focus_handle(),
             password,
             path,
@@ -781,12 +875,13 @@ impl DocView {
             selftest_flatten: None,
             selftest_ocr: None,
             pending_recovery: None,
-            pending_signed: None,
-            pending_changed: None,
-            pending_xfa: None,
+            pending_ask: None,
             pending_edit_last: None,
             autosave: None,
             autosave_since: None,
+            edits: 0,
+            sidecar_of: None,
+            sidecar_writing: false,
             tool: Tool::Select,
             tick_glyph: "✓".into(),
             text_hover: false,
@@ -805,9 +900,7 @@ impl DocView {
             plugin_panels: HashMap::new(),
             #[cfg(feature = "plugins")]
             plugin_calls: Default::default(),
-        };
-        this.open(cx);
-        this
+        }
     }
 
     /// The file's name, without the dirty marker.
@@ -843,20 +936,26 @@ impl DocView {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
+                    // A save a crash cut short is undone first, so the file
+                    // is the one its recovery sidecar was written against.
+                    let torn = sheaf_doc::serialize::append::undo_torn(&path)
+                        .inspect_err(|e| log::warn!("undoing the last save to {}: {e}", path.display()))
+                        .ok()
+                        .flatten();
                     let recovery = sheaf_doc::recovery::find(&path);
                     let store = Store::new();
                     // The bytes, read once, and the geometry walk: the
                     // layout's sizes, before the first paint.
                     let t = Instant::now();
-                    let primary = SourceInfo::read(&store, &path, password.as_deref())?;
+                    let (primary, stamp) = SourceInfo::read(&store, &path, password.as_deref())?;
                     let walk = t.elapsed();
                     let handle = RenderHandle::open_bytes(primary.src.bytes().clone(), password)?;
-                    anyhow::Ok((store, primary, handle, walk, recovery))
+                    anyhow::Ok((store, primary, stamp, handle, walk, recovery, torn))
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((store, primary, handle, walk, recovery)) => {
+                    Ok((store, primary, stamp, handle, walk, recovery, torn)) => {
                         if timing {
                             eprintln!(
                                 "[timing] open: {walk:?} source, {:?} engine, {:?} since launch, {} pages",
@@ -866,7 +965,10 @@ impl DocView {
                             );
                         }
                         viewer.pending_recovery = recovery;
-                        viewer.install(store, primary, handle, false, cx);
+                        viewer.install(store, primary, Came::Read(stamp), handle, cx);
+                        if let (Some(torn), State::Ready(doc)) = (torn, &mut viewer.state) {
+                            doc.notice = Some(torn.to_string());
+                        }
                     }
                     Err(e) if needs_password(&e) => viewer.lock(cx),
                     Err(e) => viewer.state = State::Failed(format!("{e:#}")),
@@ -902,90 +1004,30 @@ impl DocView {
 
     /// Show a file as it opens, a source in `store` with `handle` rendering
     /// it, as the primary source, and read the rest of it on a background
-    /// thread (see [`Self::finish_open`]). Its name is what was read: the
-    /// document's own path, or when `recovered`, the temporary file that
-    /// holds the recovered changes.
+    /// thread (see [`Self::finish_open`]). How it `came` says what the
+    /// document knows of its file, for its record: the file as it was
+    /// read, or a restored document's base with what its recovery sidecar
+    /// holds that the file hasn't got.
     fn install(
         &mut self,
         store: Arc<Store>,
         primary: SourceInfo,
+        came: Came,
         handle: RenderHandle,
-        recovered: bool,
         cx: &mut Context<Self>,
     ) {
         let src = primary.src.clone();
-        let model = opening_model(store, primary, crate::prefs::get(cx).identity.name());
+        let recovered = matches!(came, Came::Restored { .. });
+        let author = crate::prefs::get(cx).identity.name();
+        let model = opening_model(store, primary, Some(came), author);
+        self.sidecar_of = None;
         let opened = self.path.clone();
         cx.defer(move |cx| crate::recent::add(&opened, cx));
         let mut handles = HashMap::new();
         handles.insert(model.primary(), handle);
-        self.state = State::Ready(Box::new(Doc {
-            model,
-            handles,
-            version: 0,
-            panes: vec![Pane::new(Zoom::FitWidth, PageMode::default())],
-            active: 0,
-            previews: HashMap::new(),
-            tiles: HashMap::new(),
-            shown: HashMap::new(),
-            inflight: HashMap::new(),
-            retired: Vec::new(),
-            first_paint: None,
-            notice: None,
-            reading: None,
-            thumb_scroll: ScrollHandle::new(),
-            thumb_keep: HashSet::new(),
-            review_keep: HashSet::new(),
-            thumb_followed: None,
-            outline_expanded: HashSet::new(),
-            outline_scroll: ScrollHandle::new(),
-            selection: HashSet::new(),
-            sel_anchor: None,
-            drop_target: None,
-            saving: false,
-            outline_focus: cx.focus_handle(),
-            outline_selected: None,
-            outline_drop: None,
-            outline_rename: None,
-            outline_menu: None,
-            outline_rows: Vec::new(),
-            drag: None,
-            selected_marks: Vec::new(),
-            comment_filter: Default::default(),
-            comments_hidden: false,
-            comment_view: None,
-            hidden_marks: HashSet::new(),
-            foreign_hidden: HashSet::new(),
-            foreign_generation: 0,
-            text_sel: None,
-            text_drag: None,
-            page_chars: HashMap::new(),
-            chars_loading: HashSet::new(),
-            annot_editor: None,
-            poly: None,
-            measure_scale: crate::state::get(cx)
-                .measure_scale
-                .clone()
-                .unwrap_or_default(),
-            calibrate: Default::default(),
-            group_list: None,
-            mark_menu: None,
-            foreign_annots: Vec::new(),
-            selected_foreign: None,
-            adopting: None,
-            labels: std::cell::RefCell::new((u64::MAX, None)),
-            attachments: Vec::new(),
-            collection: None,
-            attachment_selected: None,
-            forms: Default::default(),
-            layers: Vec::new(),
-            layers_hidden: HashSet::new(),
-            layers_default: HashSet::new(),
-            layers_generation: 0,
-            drawn_marks: Vec::new(),
-            split: 0.5,
-            split_drag: false,
-        }));
+        let measure_scale = (crate::state::get(cx).measure_scale.clone()).unwrap_or_default();
+        let doc = Doc::new(model, handles, cx.focus_handle(), measure_scale);
+        self.state = State::Ready(Box::new(doc));
         self.finish_open(src, recovered, cx);
         if let Some(src) = self.initial_pattern.take() {
             self.run_initial_pattern(src, cx);
@@ -1028,10 +1070,13 @@ impl DocView {
         .detach();
     }
 
-    /// Open the original plus its recovery section from a temporary file,
-    /// leaving the document dirty so Save writes it back to its own path.
+    /// Open the document `rec` recovers, from memory, its record the file's
+    /// with the sidecar's sections pending: it stays unsaved until its first
+    /// save writes them, which checks that the file is still the one the
+    /// sidecar was written against (M10.5 §11.10).
     fn recover(&mut self, rec: sheaf_doc::recovery::Recovery, cx: &mut Context<Self>) {
         let path = self.path.clone();
+        let password = self.password.clone();
         self.state = State::Loading;
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
@@ -1041,26 +1086,19 @@ impl DocView {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        let stamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0);
-                        let tmp = std::env::temp_dir().join(format!(
-                            "sheaf-recovered-{}-{stamp}.pdf",
-                            std::process::id()
-                        ));
-                        sheaf_doc::recovery::materialize(&path, &rec, &tmp)?;
                         let store = Store::new();
-                        let primary = SourceInfo::read(&store, &tmp, None)?;
-                        let handle = RenderHandle::open_bytes(primary.src.bytes().clone(), None)?;
-                        anyhow::Ok((store, primary, handle))
+                        let (primary, came) =
+                            sheaf_doc::recovery::restore(&store, &path, &rec, password.as_deref())?;
+                        let handle =
+                            RenderHandle::open_bytes(primary.src.bytes().clone(), password)?;
+                        anyhow::Ok((store, primary, came, handle))
                     }
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((store, primary, handle)) => {
-                        viewer.install(store, primary, handle, true, cx);
+                    Ok((store, primary, came, handle)) => {
+                        viewer.install(store, primary, came, handle, cx);
                         if timing {
                             eprintln!("[timing] recovered unsaved changes in {:?}", t.elapsed());
                         }
@@ -1084,6 +1122,13 @@ impl DocView {
     /// Write the recovery sidecar a few seconds after the last edit, and at
     /// least every half minute while edits keep coming.
     pub(crate) fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
+        self.edits += 1;
+        self.autosave_again(cx);
+    }
+
+    /// Write the sidecar later: a few seconds from now, or at once when
+    /// the edits waiting began half a minute ago.
+    fn autosave_again(&mut self, cx: &mut Context<Self>) {
         let first = *self.autosave_since.get_or_insert_with(Instant::now);
         let delay = if first.elapsed() >= std::time::Duration::from_secs(30) {
             std::time::Duration::ZERO
@@ -1096,6 +1141,13 @@ impl DocView {
         }));
     }
 
+    /// Bring the recovery sidecar up to date: gone when nothing is unsaved;
+    /// otherwise what the current version changed, written beside the
+    /// document's file against that file as sheaf last read or wrote it
+    /// (its record's), unless the last sidecar holds it already. It waits
+    /// for a save in flight, whose file it would be written against, and
+    /// for the sidecar being written. A document no file of this path holds
+    /// has none. A sidecar is encrypted as its file is.
     fn write_recovery(&mut self, cx: &mut Context<Self>) {
         self.autosave = None;
         self.autosave_since = None;
@@ -1103,39 +1155,101 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let (dirty, saving) = (doc.model.is_dirty(), doc.saving);
-        // Only against the file itself, not a recovered temporary.
-        let primary_is_file = doc
-            .model
-            .source(doc.model.primary())
-            .is_some_and(|s| s.name == path);
-        if !dirty {
+        if !doc.model.is_dirty() {
             sheaf_doc::recovery::discard(&path);
+            self.sidecar_of = None;
             return;
         }
-        if saving {
-            self.schedule_autosave(cx);
+        if doc.saving || self.sidecar_writing {
+            self.autosave_again(cx);
             return;
         }
-        if !primary_is_file || self.password.is_some() {
+        let of = (doc.model.current_version(), self.edits);
+        if self.sidecar_of == Some(of) {
             return;
         }
-        let snap = doc.model.snapshot();
+        let Some((file, base)) = (doc.model.file()).filter(|(file, _)| &***file == path.as_path())
+        else {
+            return;
+        };
+        let (file, base) = (file.clone(), *base);
+        let input = doc.model.recovery_input();
         let timing = self.timing;
-        cx.background_executor()
-            .spawn(async move {
-                let t = Instant::now();
-                match sheaf_doc::recovery::write(&snap) {
-                    Ok(Some(n)) => {
-                        if timing {
-                            eprintln!("[timing] recovery sidecar: {n} bytes in {:?}", t.elapsed());
-                        }
+        self.sidecar_writing = true;
+        cx.spawn(async move |this, cx| {
+            let written = cx
+                .background_executor()
+                .spawn({
+                    let file = file.clone();
+                    async move {
+                        let t = Instant::now();
+                        let written = sheaf_doc::recovery::write(
+                            &input,
+                            &file,
+                            &base,
+                            &sheaf_ops::NoProgress,
+                        );
+                        (written, t.elapsed())
                     }
-                    Ok(None) => {}
-                    Err(e) => log::warn!("writing recovery sidecar: {e:#}"),
+                })
+                .await;
+            this.update(cx, |v, cx| {
+                v.sidecar_writing = false;
+                let (n, took) = match written {
+                    (Ok(n), took) => (n, took),
+                    (Err(e), _) => {
+                        log::warn!("writing recovery sidecar: {e:#}");
+                        return;
+                    }
+                };
+                if timing {
+                    eprintln!("[timing] recovery sidecar: {n} bytes in {took:?}");
+                }
+                let State::Ready(doc) = &v.state else {
+                    return;
+                };
+                if doc.model.file().is_some_and(|(_, now)| *now == base) {
+                    v.sidecar_of = Some(of);
+                } else {
+                    // A save replaced the file it's written against
+                    // meanwhile: it's stale, and the next one is due.
+                    sheaf_doc::recovery::discard(&file);
+                    v.write_recovery(cx);
                 }
             })
-            .detach();
+            .ok();
+        })
+        .detach();
+    }
+
+    /// [`Self::write_recovery`] on this thread, at once: what a save does
+    /// as it ends. A sidecar already being written was begun against the
+    /// file the save replaced, and, stale when it's done, writes this one
+    /// again after it, in the background.
+    fn write_recovery_now(&mut self, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let file = (doc.model.file()).filter(|(file, _)| &***file == path.as_path());
+        let (Some((file, base)), false, true) = (file, self.sidecar_writing, doc.model.is_dirty())
+        else {
+            return self.write_recovery(cx);
+        };
+        self.autosave = None;
+        self.autosave_since = None;
+        let of = (doc.model.current_version(), self.edits);
+        let t = Instant::now();
+        let input = doc.model.recovery_input();
+        match sheaf_doc::recovery::write(&input, file, base, &sheaf_ops::NoProgress) {
+            Ok(n) => {
+                if self.timing {
+                    eprintln!("[timing] recovery sidecar: {n} bytes in {:?}", t.elapsed());
+                }
+                self.sidecar_of = Some(of);
+            }
+            Err(e) => log::warn!("writing recovery sidecar: {e:#}"),
+        }
     }
 
     /// The user chose to drop unsaved changes: the sidecar goes with them.
@@ -1184,8 +1298,8 @@ impl DocView {
     /// view still shows that file as it opens (a recovery, a reopen or a
     /// close can come between), they make its opened version, and the
     /// view takes what it shows beside the model; then listeners hear the
-    /// file opened, and the dev hooks that edit or save run. A
-    /// `recovered` file stays unsaved until it's saved.
+    /// file opened, and the dev hooks that edit or save run. A `recovered`
+    /// file says it stays unsaved until it's saved.
     fn ready(
         &mut self,
         blob: sheaf_doc::BlobId,
@@ -1197,16 +1311,13 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(view) = take_facts(&mut doc.model, blob, facts, recovered) else {
+        let Some(view) = take_facts(&mut doc.model, blob, facts) else {
             return;
         };
-        let primary = doc.model.primary();
         doc.reading = None;
         if doc.notice.as_deref() == Some(STILL_OPENING) {
             doc.notice = None;
         }
-        doc.foreign_annots = view.foreign.into_iter().map(|f| (primary, f)).collect();
-        doc.foreign_generation += 1;
         doc.attachments = view.attachments;
         doc.collection = view.collection;
         doc.set_layers(view.layers);
@@ -1220,28 +1331,25 @@ impl DocView {
         }
         let st = doc.model.state();
         // Start with the top level expanded where the file leaves it open.
-        doc.outline_expanded = st.outline.iter().filter(|n| n.open).map(|n| n.id).collect();
+        doc.outline_expanded = (st.outline_roots().iter())
+            .filter(|&&id| st.bookmark(id).is_some_and(|b| b.open))
+            .copied()
+            .collect();
         if self.timing {
             eprintln!(
                 "[timing] ready: {} sheaf annotations, {} third-party, {} bookmarks, {} fields \
                  in {:?}, {:?} since launch",
-                st.annots.values().map(|l| l.len()).sum::<usize>(),
-                doc.foreign_annots.len(),
-                st.outline_flat().len(),
-                st.fields.len(),
+                st.marks().count(),
+                st.annots().filter(|(_, a)| a.foreign().is_some()).count(),
+                st.bookmark_count(),
+                st.terminals().count(),
                 started.elapsed(),
                 self.launched.elapsed()
             );
         }
         let mut drawn = drawn_marks(st);
         if !view.renamed.is_empty() {
-            let index: HashMap<PageId, u32> = st
-                .pages
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.id, i as u32))
-                .collect();
-            let at = |&(page, id): &(PageId, AnnotId)| Some((*index.get(&page)?, id));
+            let at = |&(page, id): &(PageId, AnnotId)| Some((st.pos_of(page)? as u32, id));
             hide_renamed(&mut drawn, view.renamed.iter().filter_map(at));
         }
         if doc.notice.is_none() {
@@ -1340,17 +1448,15 @@ impl DocView {
         let before: HashSet<OutlineId> = doc
             .model
             .state()
-            .outline_flat()
+            .bookmarks_preorder()
             .iter()
-            .map(|(_, n)| n.id)
+            .map(|&(_, id, _)| id)
             .collect();
         let result = doc.model.apply_batch(edits, label);
         if result.is_ok() {
-            reveal_new_bookmarks(
-                &doc.model.state().outline,
-                &before,
-                &mut doc.outline_expanded,
-            );
+            let rows = (doc.model.state().bookmarks_preorder().into_iter())
+                .map(|(depth, id, b)| (depth, id, !b.kids.is_empty()));
+            reveal_new_bookmarks(rows, &before, &mut doc.outline_expanded);
         }
         self.finish_edit(label, result, cx);
     }
@@ -1454,16 +1560,16 @@ impl DocView {
         let selection = doc
             .model
             .state()
-            .pages
+            .order()
             .iter()
-            .filter(|p| doc.selection.contains(&p.id))
-            .map(|p| p.id)
+            .filter(|p| doc.selection.contains(p))
+            .copied()
             .collect();
         Some(sheaf_plugin::DocContext {
             path: self.path.clone(),
             snapshot: doc.model.snapshot(),
             selection,
-            current_page: doc.page_ref(doc.current_page()).map(|p| p.id),
+            current_page: doc.page_id(doc.current_page()),
             text: crate::plugins::text_source(&doc.handles),
             ocr: Some(crate::plugins::ocr_source(&doc.handles, ocr)),
             render: Some(crate::plugins::render_source(&doc.handles)),
@@ -1476,18 +1582,15 @@ impl DocView {
             return Vec::new();
         };
         if doc.selection.is_empty() {
-            return doc
-                .page_ref(doc.current_page())
-                .map(|p| vec![p.id])
-                .unwrap_or_default();
+            return doc.page_id(doc.current_page()).into_iter().collect();
         }
         // Keep document order so the label and any insertion are predictable.
         doc.model
             .state()
-            .pages
+            .order()
             .iter()
-            .filter(|p| doc.selection.contains(&p.id))
-            .map(|p| p.id)
+            .filter(|p| doc.selection.contains(p))
+            .copied()
             .collect()
     }
 
@@ -1527,7 +1630,7 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        doc.selection = doc.model.state().pages.iter().map(|p| p.id).collect();
+        doc.selection = doc.model.state().order().iter().copied().collect();
         cx.emit(DocEvent::SelectionChanged);
         cx.notify();
     }
@@ -1550,11 +1653,12 @@ impl DocView {
             return false;
         };
         let st = doc.model.state().clone();
-        doc.selected_marks.retain(|(pid, aid)| {
-            st.annots_on(*pid)
-                .is_some_and(|l| l.iter().any(|a| a.id == *aid))
-        });
-        let live: HashSet<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
+        doc.selected_marks
+            .retain(|(pid, aid)| st.find_annot(*aid).is_some_and(|(on, _)| on == *pid));
+        if doc.selected_foreign.is_some_and(|id| !st.has_annot(id)) {
+            doc.selected_foreign = None;
+        }
+        let live: HashSet<PageId> = doc.model.state().order().iter().copied().collect();
         if doc.text_sel.is_some_and(|s| !live.contains(&s.page)) {
             doc.text_sel = None;
         }
@@ -1570,7 +1674,7 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let refs: Vec<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
+        let refs: Vec<PageId> = doc.model.state().order().iter().copied().collect();
         let Some(&id) = refs.get(index) else { return };
         if modifiers.shift {
             let anchor = doc
@@ -1613,11 +1717,11 @@ impl DocView {
         let before = doc
             .model
             .state()
-            .pages
+            .order()
             .iter()
             .skip(at)
-            .find(|p| !moving.contains(&p.id))
-            .map(|p| p.id);
+            .find(|p| !moving.contains(p))
+            .copied();
         let n = ids.len();
         let label = self.label("Move", n);
         self.apply(Edit::MovePages { ids, before }, &label, cx);
@@ -1715,233 +1819,339 @@ impl DocView {
         self.save_to(path, cx)
     }
 
-    /// Save to `path` (the document's own path for plain Save). Runs the
-    /// rewrite on a background thread from a snapshot, then reopens the saved
-    /// file as the new primary source without disturbing undo history.
-    /// Resolves to whether the save succeeded.
+    /// Save to `path`: the document's own path for plain Save, any other
+    /// for Save As, which is a save too, its file the document's from then
+    /// on (M10.5 §9.1). The current version is sealed while it's saved, so
+    /// an edit made meanwhile, an OCR flush among them, makes a version
+    /// after it, which stays unsaved. The plan is made in the background,
+    /// what it asks is asked ([`Self::ask_before_saving`]), the file is
+    /// written in the background, and the version is recorded as the saved
+    /// one ([`Self::finish_save`]). Nothing the screen shows changes.
+    /// Resolves to whether it saved: false when it stopped to ask.
     pub fn save_to(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<bool> {
         if self.still_opening(cx) {
             return Task::ready(false);
         }
-        if self.would_drop_xfa_values() {
-            // Asked next frame.
-            self.pending_xfa = Some(path);
-            cx.notify();
-            return Task::ready(false);
-        }
-        self.save_signed(path, save::Signed::Ask, save::IfChanged::Ask, cx)
-    }
-
-    /// Ask whether to rewrite a signed file, breaking its signatures, or
-    /// append to it, keeping what was removed in its earlier revision; then
-    /// save as chosen, a file changed on disk as `if_changed` says.
-    fn ask_how_to_save_signed(
-        &mut self,
-        path: PathBuf,
-        signed: save::WouldBreakSignatures,
-        if_changed: save::IfChanged,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let n = signed.signatures;
-        let rewrite = format!(
-            "Rewrite (breaks {n} signature{})",
-            if n == 1 { "" } else { "s" }
-        );
-        let rx = sheaf_ui::prompts::ask(
-            window,
-            cx,
-            gpui::PromptLevel::Warning,
-            &format!("\"{}\" is signed", self.file_name()),
-            Some(
-                "A full save breaks its signatures. Appending keeps them, and keeps what you removed in the file's earlier version, where anyone can recover it.",
-            ),
-            &[
-                gpui::PromptButton::new(rewrite),
-                gpui::PromptButton::ok("Append (earlier versions stay in the file)"),
-                gpui::PromptButton::cancel("Cancel"),
-            ],
-        );
-        cx.spawn(async move |this, cx| {
-            let how = match rx.await {
-                Ok(0) => save::Signed::Rewrite,
-                Ok(1) => save::Signed::Append,
-                _ => return,
-            };
-            this.update(cx, |v, cx| {
-                v.save_signed(path, how, if_changed, cx).detach()
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Ask what to do about a file another program changed since sheaf
-    /// read it: save it elsewhere, replace it anyway (losing that program's
-    /// changes) or leave it (M10.5 proposal 33).
-    fn ask_file_changed(
-        &mut self,
-        path: PathBuf,
-        signed: save::Signed,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let rx = sheaf_ui::prompts::ask(
-            window,
-            cx,
-            gpui::PromptLevel::Warning,
-            &format!("\"{}\" changed on disk", self.file_name()),
-            Some("Another program changed it since sheaf read it."),
-            &[
-                gpui::PromptButton::ok("Save As…"),
-                gpui::PromptButton::new("Overwrite"),
-                gpui::PromptButton::cancel("Cancel"),
-            ],
-        );
-        cx.spawn(async move |this, cx| {
-            let answer = rx.await;
-            this.update(cx, |v, cx| match answer {
-                Ok(0) => v.save_as(cx),
-                Ok(1) => v
-                    .save_signed(path, signed, save::IfChanged::Overwrite, cx)
-                    .detach(),
-                _ => {}
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// [`save_to`](Self::save_to), with a signed file treated as `signed`
-    /// says and a file changed on disk as `if_changed` says.
-    fn save_signed(
-        &mut self,
-        path: PathBuf,
-        signed: save::Signed,
-        if_changed: save::IfChanged,
-        cx: &mut Context<Self>,
-    ) -> Task<bool> {
         let State::Ready(doc) = &mut self.state else {
             return Task::ready(false);
         };
+        // A second save would write after the first's file: the reader
+        // saves again once it's written.
         if doc.saving {
             doc.notice = Some("Already saving…".into());
             cx.notify();
             return Task::ready(false);
         }
+        let input = match doc.model.save_input(doc.model.current_version()) {
+            Ok(input) => Arc::new(input),
+            Err(e) => {
+                doc.notice = Some(format!("Save failed: {e:#}"));
+                cx.notify();
+                return Task::ready(false);
+            }
+        };
         doc.saving = true;
         doc.notice = Some(format!("Saving {}…", path.display()));
-        let snapshot = doc.model.snapshot();
-        let store = doc.model.store().clone();
-        let password = self.password.clone();
-        let timing = self.timing;
+        let target = doc.model.save_target(&path);
+        // Agreed to once, for this window's session.
+        let answers = materialize::AskAnswers {
+            drop_xfa_values: doc.forms.xfa_values_dropped,
+            ..Default::default()
+        };
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let t = Instant::now();
-            let result = cx
+            let started = Instant::now();
+            let plan = cx
                 .background_executor()
                 .spawn({
-                    let path = path.clone();
+                    let (input, target) = (input.clone(), target.clone());
+                    async move { materialize::plan(&input, &target) }
+                })
+                .await;
+            let saving = Saving {
+                input,
+                target,
+                plan,
+                answers,
+                started,
+            };
+            match this.update(cx, |view, cx| view.go_on_saving(saving, cx)) {
+                Ok(written) => written.await,
+                Err(_) => false,
+            }
+        })
+    }
+
+    /// Ask what `saving`'s plan asks that the reader hasn't answered, next
+    /// frame; once nothing is left to ask, write its file in the
+    /// background. Resolves to whether it saved.
+    fn go_on_saving(&mut self, saving: Saving, cx: &mut Context<Self>) -> Task<bool> {
+        if let Some(ask) = materialize::unanswered(&saving.plan, &saving.answers) {
+            if let State::Ready(doc) = &mut self.state {
+                doc.notice = None;
+            }
+            self.pending_ask = Some((saving, ask));
+            cx.notify();
+            return Task::ready(false);
+        }
+        cx.spawn(async move |this, cx| {
+            let written = cx
+                .background_executor()
+                .spawn({
+                    let input = saving.input.clone();
+                    let (plan, target) = (saving.plan.clone(), saving.target.clone());
+                    let answers = saving.answers;
                     async move {
-                        let (strategy, notes) =
-                            save::save_to_path_noting(&snapshot, &path, signed, if_changed)?;
-                        // What was written, read back: the source the
-                        // document shows from now on. It's encrypted as the
-                        // file was, so it opens with the same password.
-                        let saved = SourceInfo::read(&store, &path, password.as_deref())?;
-                        let handle = RenderHandle::open_bytes(saved.src.bytes().clone(), password)?;
-                        anyhow::Ok((saved, handle, strategy, notes))
+                        materialize::write_file(
+                            &input,
+                            &plan,
+                            target,
+                            &answers,
+                            &sheaf_ops::NoProgress,
+                        )
                     }
                 })
                 .await;
-            this.update(cx, |view, cx| {
-                let State::Ready(doc) = &mut view.state else {
-                    return false;
-                };
-                doc.saving = false;
-                let ok = match result {
-                    Ok((saved, handle, strategy, notes)) => {
-                        let page_count = saved.src.page_count();
-                        let saved_src = saved.src.clone();
-                        let sid = doc.model.rebase_to_saved(saved);
-                        // Our marks are now in the file; keep PDFium from drawing them.
-                        let pages = drawn_marks(doc.model.state());
-                        doc.drawn_marks = pages.clone();
-                        // The saved file's third-party comments, at their
-                        // new page numbers.
-                        doc.foreign_annots.clear();
-                        doc.foreign_generation += 1;
-                        // A new engine: nothing of theirs is hidden in it.
-                        doc.foreign_hidden.retain(|(s, _, _)| *s != sid);
-                        reread_foreign(sid, saved_src, cx);
-                        if !pages.is_empty() {
-                            let rx = handle.hide_annots(pages);
-                            cx.spawn(async move |this, cx| {
-                                let _ = rx.await;
-                                this.update(cx, |view, cx| {
-                                    if let State::Ready(doc) = &mut view.state {
-                                        doc.invalidate_tiles();
-                                    }
-                                    cx.notify();
-                                })
-                                .ok();
-                            })
-                            .detach();
-                        }
-                        doc.handles.insert(sid, handle);
-                        sheaf_doc::recovery::discard(&view.path);
-                        sheaf_doc::recovery::discard(&path);
-                        view.autosave = None;
-                        view.autosave_since = None;
-                        view.path = path.clone();
-                        let saved_path = path.clone();
-                        cx.defer(move |cx| crate::recent::add(&saved_path, cx));
-                        doc.notice = Some(format!(
-                            "Saved {} ({strategy:?}) in {:?}{}",
-                            path.display(),
-                            t.elapsed(),
-                            notes.iter().map(|n| format!(" — {n}")).collect::<String>()
-                        ));
-                        if timing {
-                            eprintln!(
-                                "[timing] saved {} ({} pages, {strategy:?}) in {:?}",
-                                path.display(),
-                                page_count,
-                                t.elapsed()
-                            );
-                        }
-                        doc.touched();
-                        view.refresh_facts(cx);
-                        if let State::Ready(doc) = &view.state
-                            && doc.layers_changed()
-                        {
-                            view.apply_layers(cx);
-                        }
-                        cx.emit(DocEvent::Saved { path: path.clone() });
-                        true
-                    }
-                    Err(e) => {
-                        // Asked next frame.
-                        if let Some(broken) = e.downcast_ref::<save::WouldBreakSignatures>() {
-                            doc.notice = None;
-                            view.pending_signed = Some((path.clone(), broken.clone(), if_changed));
-                        } else if let Some(save::SaveStop::Ask(save::Ask::FileChanged { .. })) =
-                            e.downcast_ref::<save::SaveStop>()
-                        {
-                            doc.notice = None;
-                            view.pending_changed = Some((path.clone(), signed));
-                        } else {
-                            doc.notice = Some(format!("Save failed: {e:#}"));
-                            log::error!("save: {e:#}");
-                        }
-                        false
-                    }
-                };
-                cx.notify();
-                ok
-            })
-            .unwrap_or(false)
+            this.update(cx, |view, cx| view.finish_save(saving, written, cx))
+                .unwrap_or(false)
         })
+    }
+
+    /// Ask the reader what `ask`, from `saving`'s plan or its write, needs,
+    /// and go on saving as they choose; any other answer ends the save,
+    /// nothing written. A signed file's ask offers what the plan allows:
+    /// an Append anyway, which keeps the signed revision as it was signed
+    /// and what the save removes readable in it, and a Rewrite, which
+    /// breaks every signature.
+    fn ask_before_saving(
+        &mut self,
+        mut saving: Saving,
+        ask: materialize::Ask,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui::PromptButton;
+        use materialize::Ask;
+        /// What a button of the ask does: the last, Cancel, ends the save.
+        #[derive(Clone, Copy)]
+        enum Choice {
+            SaveAs,
+            Overwrite,
+            AppendAnyway,
+            Rewrite,
+            DropXfa,
+        }
+        let name = self.file_name();
+        let (message, detail, choices) = match &ask {
+            Ask::FileChanged { .. } => (
+                format!("\"{name}\" changed on disk"),
+                "Another program changed it since sheaf read it.".to_string(),
+                vec![
+                    (PromptButton::ok("Save As…"), Choice::SaveAs),
+                    (PromptButton::new("Overwrite"), Choice::Overwrite),
+                ],
+            ),
+            Ask::Signatures {
+                impact,
+                append_anyway,
+                reason,
+            } => {
+                let n = impact.len();
+                let s = if n == 1 { "" } else { "s" };
+                let mut detail = match reason {
+                    Some(why) => {
+                        format!(
+                            "Saving rewrites the whole file ({why}), which breaks its signature{s}."
+                        )
+                    }
+                    None if n == 1 => "Its signature doesn't allow these changes after it: \
+                                       an update would show as breaking it."
+                        .to_string(),
+                    None => "Its signatures don't allow these changes after them: \
+                             an update would show as breaking them."
+                        .to_string(),
+                };
+                let mut choices = Vec::new();
+                if let Some(anyway) = append_anyway {
+                    detail.push_str(
+                        " Append Anyway adds the changes after the signed revision, \
+                         which stays as it was signed",
+                    );
+                    match anyway.stays_readable.as_slice() {
+                        [] => detail.push('.'),
+                        kept => {
+                            let kept: Vec<String> = kept.iter().map(|r| r.to_string()).collect();
+                            detail.push_str(&format!(
+                                ", but what the save removes stays readable in it: {}.",
+                                kept.join(", ")
+                            ));
+                        }
+                    }
+                    choices.push((PromptButton::new("Append Anyway"), Choice::AppendAnyway));
+                }
+                choices.push((
+                    PromptButton::new(format!("Rewrite (breaks {n} signature{s})")),
+                    Choice::Rewrite,
+                ));
+                (format!("\"{name}\" is signed"), detail, choices)
+            }
+            Ask::XfaHoldsValues { .. } => (
+                "Remove the form's XFA part?".to_string(),
+                "It holds values sheaf doesn't show, which Adobe Acrobat or Reader shows. \
+                 Saving the form as it is now removes it, and them."
+                    .to_string(),
+                vec![(PromptButton::new("Save and Remove It"), Choice::DropXfa)],
+            ),
+        };
+        let offer = match &ask {
+            Ask::Signatures { append_anyway, .. } => append_anyway.clone(),
+            _ => None,
+        };
+        let mut buttons: Vec<PromptButton> = choices.iter().map(|(b, _)| b.clone()).collect();
+        buttons.push(PromptButton::cancel("Cancel"));
+        let rx = sheaf_ui::prompts::ask(
+            window,
+            cx,
+            gpui::PromptLevel::Warning,
+            &message,
+            Some(&detail),
+            &buttons,
+        );
+        cx.spawn(async move |this, cx| {
+            let answer = rx.await.ok();
+            this.update(cx, |view, cx| {
+                match answer
+                    .and_then(|i| choices.get(i))
+                    .map(|(_, choice)| *choice)
+                {
+                    Some(Choice::SaveAs) => {
+                        view.abandon_save(saving, cx);
+                        view.save_as(cx);
+                        return;
+                    }
+                    Some(Choice::Overwrite) => saving.answers.overwrite = true,
+                    Some(Choice::AppendAnyway) => {
+                        if let Some(offer) = &offer {
+                            saving.answers.take(offer);
+                        }
+                    }
+                    Some(Choice::Rewrite) => saving.answers.break_signatures = true,
+                    Some(Choice::DropXfa) => {
+                        saving.answers.drop_xfa_values = true;
+                        if let State::Ready(doc) = &mut view.state {
+                            doc.forms.xfa_values_dropped = true;
+                        }
+                    }
+                    None => {
+                        view.abandon_save(saving, cx);
+                        return;
+                    }
+                }
+                view.go_on_saving(saving, cx).detach();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `saving` ends with nothing written: its version is unsealed.
+    fn abandon_save(&mut self, saving: Saving, cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &mut self.state {
+            doc.model.abandon_save(saving.input.version);
+            doc.saving = false;
+        }
+        cx.notify();
+    }
+
+    /// `saving`'s write is done, `written` saying how. The file written,
+    /// its version is the saved one, with the file's record; a stop asks
+    /// the reader again (another program changed the file just before the
+    /// rename) or ends the save. Then the recovery sidecar follows the new
+    /// file. Whether it saved.
+    ///
+    /// The screen keeps what it shows: the pages, their renders and what
+    /// the engines hide are the document's, which a save doesn't change.
+    fn finish_save(
+        &mut self,
+        saving: Saving,
+        written: Result<materialize::Written, materialize::SaveStop>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let State::Ready(doc) = &mut self.state else {
+            return false;
+        };
+        let written = match written {
+            Ok(written) => written,
+            Err(materialize::SaveStop::Ask(ask)) => {
+                // Asked next frame.
+                doc.notice = None;
+                self.pending_ask = Some((saving, ask));
+                cx.notify();
+                return false;
+            }
+            Err(stop) => {
+                doc.notice = Some(match stop {
+                    materialize::SaveStop::Cancelled(_) => "Save cancelled".into(),
+                    stop => {
+                        log::error!("save: {stop}");
+                        format!("Save failed: {stop}")
+                    }
+                });
+                self.abandon_save(saving, cx);
+                return false;
+            }
+        };
+        let report = match doc.take_save(written) {
+            Ok(report) => report,
+            Err(e) => {
+                doc.notice = Some(format!("Save failed: {e:#}"));
+                cx.notify();
+                return false;
+            }
+        };
+        let path = report.path.to_path_buf();
+        let took = saving.started.elapsed();
+        let notes: String = (report.notes.iter()).map(|n| format!(" — {n}")).collect();
+        doc.notice = Some(match report.strategy {
+            // A Rewrite says why (M10.5 §7.3).
+            Some(strategy) if !report.why.is_empty() => {
+                let why: Vec<String> = report.why.iter().map(|w| w.to_string()).collect();
+                format!(
+                    "Saved {} ({strategy:?}: {}) in {took:?}{notes}",
+                    path.display(),
+                    why.join("; ")
+                )
+            }
+            Some(strategy) => format!("Saved {} ({strategy:?}) in {took:?}{notes}", path.display()),
+            // The file holds the document already: nothing was written.
+            None => format!("Nothing to save{notes}"),
+        });
+        if self.timing {
+            eprintln!(
+                "[timing] saved {} ({} pages, {:?}) in {took:?}",
+                path.display(),
+                doc.model.page_count(),
+                report.strategy,
+            );
+        }
+        if path != self.path {
+            // Save As: the file the document was is no longer its file, and
+            // keeps no sidecar of it.
+            sheaf_doc::recovery::discard(&self.path);
+            self.path = path.clone();
+        }
+        let saved_path = path.clone();
+        cx.defer(move |cx| crate::recent::add(&saved_path, cx));
+        // Against the file just written: none while the version saved is
+        // the current one, or else one at once, with the edits made since,
+        // written before the save is done (M10.5 D39): the sidecar from
+        // before is stale against the new file, and a crash before a
+        // sidecar of it would lose those edits.
+        self.sidecar_of = None;
+        self.write_recovery_now(cx);
+        cx.emit(DocEvent::Saved { path });
+        cx.notify();
+        true
     }
 
     /// Dev hook: rotate the first page and save to `path`, so the save path
@@ -1950,10 +2160,10 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        if let Some(p) = doc.page_ref(0) {
+        if let Some(p) = doc.page_id(0) {
             self.apply(
                 Edit::RotatePages {
-                    ids: vec![p.id],
+                    ids: vec![p],
                     by: Rotation::R90,
                 },
                 "Rotate page",
@@ -2019,7 +2229,7 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let count = |v: &Self| match &v.state {
-            State::Ready(doc) => doc.model.state().annots_on(page).map_or(0, |l| l.len()),
+            State::Ready(doc) => doc.model.state().marks_on(page).count(),
             _ => 0,
         };
         let before = count(self);
@@ -2028,11 +2238,7 @@ impl DocView {
         // straight away.
         if count(self) > before
             && let State::Ready(doc) = &mut self.state
-            && let Some(id) = doc
-                .model
-                .state()
-                .annots_on(page)
-                .and_then(|l| l.last().map(|a| a.id))
+            && let Some(id) = doc.model.state().marks_on(page).last().map(|a| a.id)
         {
             doc.select_mark(Some((page, id)));
         }
@@ -2043,7 +2249,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let Some(p0) = doc.page_ref(0).map(|p| p.id) else {
+        let Some(p0) = doc.page_id(0) else {
             return;
         };
         let mut hl = self.new_annot(
@@ -2155,7 +2361,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let p1 = doc.page_ref(1).map(|p| p.id).unwrap_or(p0);
+        let p1 = doc.page_id(1).unwrap_or(p0);
         let mk = |rect: Box2| {
             self.new_annot(
                 AnnotKind::Connector {
@@ -2227,7 +2433,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let Some(p0) = doc.page_ref(0).map(|p| p.id) else {
+        let Some(p0) = doc.page_id(0) else {
             return;
         };
         let mut note = self.new_annot(
@@ -2260,14 +2466,14 @@ impl DocView {
     #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     pub(crate) fn page_ids(&self) -> Vec<PageId> {
         match &self.state {
-            State::Ready(doc) => doc.model.state().pages.iter().map(|p| p.id).collect(),
+            State::Ready(doc) => doc.model.state().order().iter().copied().collect(),
             _ => Vec::new(),
         }
     }
 
     fn doc_page_id(&self, index: usize) -> Option<PageId> {
         match &self.state {
-            State::Ready(doc) => doc.page_ref(index).map(|p| p.id),
+            State::Ready(doc) => doc.page_id(index),
             _ => None,
         }
     }
@@ -2420,12 +2626,8 @@ impl DocView {
         let snapshot = doc.model.snapshot();
         // Flattening keeps an attachment's icon and drops its file, as
         // Acrobat does: say so.
-        let files = snapshot
-            .state
-            .annots
-            .values()
-            .flatten()
-            .filter(|a| matches!(a.kind, AnnotKind::FileAttachment { .. }))
+        let files = (snapshot.state.marks())
+            .filter(|(_, a)| matches!(a.kind, AnnotKind::FileAttachment { .. }))
             .count()
             + doc
                 .attachments
@@ -2552,11 +2754,7 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let last = match &self.state {
-            State::Ready(doc) => doc
-                .model
-                .state()
-                .annots_on(page)
-                .and_then(|l| l.last().map(|a| a.id)),
+            State::Ready(doc) => doc.model.state().marks_on(page).last().map(|a| a.id),
             _ => None,
         };
         if let Some(id) = last {
@@ -2575,14 +2773,11 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(annot) = doc
-            .model
-            .state()
-            .annots_on(page)
-            .and_then(|l| l.iter().find(|a| a.id == id).cloned())
+        let Some((_, annot)) = (doc.model.state().find_annot(id)).filter(|(on, _)| *on == page)
         else {
             return;
         };
+        let annot = annot.clone();
         let hint = match annot.kind {
             AnnotKind::Replace { .. } => "Type the replacement; Ctrl+Enter or click away when done",
             AnnotKind::Insert { .. } => {
@@ -2627,11 +2822,7 @@ impl DocView {
         let text = ed.input.read(cx).text().to_string();
         // An insertion with nothing to insert isn't one.
         if text.trim().is_empty()
-            && let Some(cur) = doc
-                .model
-                .state()
-                .annots_on(ed.page)
-                .and_then(|l| l.iter().find(|a| a.id == ed.id))
+            && let Some((_, cur)) = doc.model.state().find_annot(ed.id)
             && matches!(cur.kind, AnnotKind::Insert { .. })
         {
             self.apply(
@@ -2648,14 +2839,10 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        if let Some(cur) = doc
-            .model
-            .state()
-            .annots_on(ed.page)
-            .and_then(|l| l.iter().find(|a| a.id == ed.id).cloned())
+        if let Some((_, cur)) = doc.model.state().find_annot(ed.id)
             && cur.contents != text
         {
-            let mut upd = cur;
+            let mut upd = cur.clone();
             upd.contents = text;
             upd.modified = sheaf_doc::pdf_date_now();
             self.apply(
@@ -2705,7 +2892,7 @@ impl DocView {
             return None;
         };
         let last_target = targets.last().and_then(|id| doc.model.index_of(*id));
-        last_target.and_then(|i| doc.page_ref(i + 1)).map(|p| p.id)
+        last_target.and_then(|i| doc.page_id(i + 1))
     }
 
     /// Insert every page of `path` after the current page (or after the
@@ -2746,7 +2933,7 @@ impl DocView {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
-                    let info = SourceInfo::read(&store, &path, None)?;
+                    let (info, _) = SourceInfo::read(&store, &path, None)?;
                     // Pages sheaf made (blank, images) carry nothing more.
                     let incoming = if bookmarks {
                         Incoming::read(&info)
@@ -2785,9 +2972,6 @@ impl DocView {
                 let label = format!("Insert {name}");
                 let mut outcome = None;
                 let mixed = doc.model.scripts_mixed();
-                doc.model.set_source_form(sid, incoming.form.clone());
-                doc.model.set_source_renamed(sid, &incoming.renamed);
-                doc.model.set_source_assets(sid, &incoming.assets);
                 match doc.model.apply(
                     Edit::InsertPages {
                         source: sid,
@@ -3358,7 +3542,7 @@ impl DocView {
 
     pub(crate) fn ensure_rendered(
         &mut self,
-        pref: PageRef,
+        pref: Shown,
         want: RenderRequest,
         cx: &mut Context<Self>,
     ) {
@@ -3452,22 +3636,18 @@ impl DocView {
         };
         let st = doc.model.state();
         let selected: Vec<usize> = st
-            .pages
+            .order()
             .iter()
             .enumerate()
-            .filter(|(_, p)| doc.selection.contains(&p.id))
+            .filter(|(_, p)| doc.selection.contains(p))
             .map(|(i, _)| i)
             .collect();
         let bookmark = doc.outline_selected.and_then(|id| {
-            let title = st
-                .outline_flat()
-                .into_iter()
-                .find(|(_, n)| n.id == id)
-                .map(|(_, n)| n.title.clone())?;
+            let title = st.bookmark(id)?.title.to_string();
             let pages = st
                 .bookmark_pages(id)?
                 .into_iter()
-                .filter_map(|p| st.index_of(p))
+                .filter_map(|p| st.pos_of(p))
                 .collect();
             Some((title, pages))
         });
@@ -3588,7 +3768,7 @@ impl DocView {
             source: src.src.clone(),
             page_size: doc
                 .shown_ref(doc.current_page())
-                .map(|p| doc.model.page_size(&p))
+                .map(|p| p.geom.shown())
                 .map(|s| (s.width, s.height)),
             dirty: doc.model.is_dirty(),
         })
@@ -3662,31 +3842,32 @@ fn renamed_notice(n: usize) -> Option<String> {
 /// The model a file opens as in the app while its facts are read: its
 /// pages, as [`sheaf_doc::open::start`] makes them, with `author` on the
 /// marks made in it. [`take_facts`] opens it.
-pub(crate) fn opening_model(store: Arc<Store>, primary: SourceInfo, author: String) -> Document {
-    let mut model = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
+pub(crate) fn opening_model(
+    store: Arc<Store>,
+    primary: SourceInfo,
+    came: Option<Came>,
+    author: String,
+) -> Document {
+    let mut model =
+        sheaf_doc::open::start(store, primary, came, sheaf_doc::history::default_policy());
     model.set_author(author);
     model
 }
 
 /// `facts`, read from the file `blob`, made `model`'s opened version, and
-/// what the view shows beside it; a `recovered` file stays unsaved. None
-/// when `model` no longer shows that file, or has opened already: another
-/// open of the same bytes had its facts first.
+/// what the view shows beside it. None when `model` no longer shows that
+/// file, or has opened already: another open of the same bytes had its
+/// facts first.
 pub(crate) fn take_facts(
     model: &mut Document,
     blob: sheaf_doc::BlobId,
     facts: sheaf_doc::open::Facts,
-    recovered: bool,
 ) -> Option<sheaf_doc::open::ViewFacts> {
     let primary = model.primary();
     if model.source(primary).is_none_or(|s| s.src.id() != blob) {
         return None;
     }
-    let view = model.ready(facts).ok()?;
-    if recovered {
-        model.mark_unsaved();
-    }
-    Some(view)
+    model.ready(facts).ok()
 }
 
 /// The status line while a file's facts are read: the page its first
@@ -3714,46 +3895,16 @@ pub(crate) fn failed(what: &str, e: &anyhow::Error) -> String {
 }
 
 /// The marks sheaf draws itself, as `/NM`s by page index, when `st`'s
-/// pages are the primary file's in order: as it opened, or as a save
-/// wrote it.
+/// pages are the primary file's in order, as it opened.
 fn drawn_marks(st: &sheaf_doc::DocState) -> Vec<(u32, Vec<String>)> {
-    st.pages
+    st.order()
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| {
-            let list = st.annots.get(&p.id)?;
-            Some((i as u32, list.iter().flat_map(|a| a.pdf_names()).collect()))
+        .filter_map(|(i, &p)| {
+            let names: Vec<String> = st.marks_on(p).flat_map(|a| a.pdf_names()).collect();
+            (!names.is_empty()).then_some((i as u32, names))
         })
         .collect()
-}
-
-/// Read the third-party comments in `src`, the file a save wrote, in the
-/// background and list them as `source`'s (after a save, the file's pages
-/// have new numbers), and what sheaf's marks hold in it, which is where
-/// they're found from then on: a file attached since the last save is the
-/// saved file's.
-fn reread_foreign(source: SourceId, src: sheaf_doc::Src, cx: &mut Context<DocView>) {
-    cx.spawn(async move |this, cx| {
-        let found = cx
-            .background_executor()
-            .spawn(async move { sheaf_doc::file::annots_in(src.pdf(), src.page_ids()) })
-            .await;
-        this.update(cx, |view, cx| {
-            if let State::Ready(doc) = &mut view.state
-                && doc.model.primary() == source
-            {
-                let foreign = found.foreign;
-                doc.model.set_saved_assets(source, &found.assets);
-                doc.foreign_annots.retain(|(s, _)| *s != source);
-                doc.foreign_annots
-                    .extend(foreign.into_iter().map(|f| (source, f)));
-                doc.foreign_generation += 1;
-                cx.notify();
-            }
-        })
-        .ok();
-    })
-    .detach();
 }
 
 /// Wrap a BGRA raster as a GPUI image without copying the pixel data.
@@ -3776,7 +3927,7 @@ impl Focusable for DocView {
 struct PagePlan {
     index: usize,
     /// As the pane shows it (rotate view included).
-    pref: PageRef,
+    pref: Shown,
     left: f32,
     top: f32,
     w: f32,
@@ -3792,7 +3943,7 @@ struct PaneFrame {
     /// Pages near the viewport whose images stay cached, with the rotation
     /// this pane draws them at.
     keep: Vec<(PageId, Rotation)>,
-    wants: Vec<(PageRef, RenderRequest)>,
+    wants: Vec<(Shown, RenderRequest)>,
 }
 
 /// In a non-continuous mode, pick the row a queued scroll lands on before
@@ -3987,12 +4138,12 @@ fn plan_pane(
     let fetch = visible.start.saturating_sub(PREFETCH)..(visible.end + PREFETCH).min(count);
     for i in visible.start.saturating_sub(KEEP)..(visible.end + KEEP).min(count) {
         let pref = &layout.refs[i];
-        frame.keep.push((pref.id, doc.model.render_delta(pref)));
+        frame.keep.push((pref.id, pref.render));
     }
     for i in fetch {
         let Some(r) = layout.rect(i) else { continue };
         let pref = layout.refs[i];
-        let rotation = doc.model.render_delta(&pref);
+        let rotation = pref.render;
         let (left, top, w, h) = (r.left, r.top, r.w, r.h);
         let dev_w = (w * scale).round().max(1.0) as u32;
         let dev_h = (h * scale).round().max(1.0) as u32;
@@ -4171,7 +4322,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         .bg(theme::PAGE)
         .shadow_md();
     // The turn the page's images were rendered with.
-    let rot = doc.model.render_delta(&pl.pref);
+    let rot = pl.pref.render;
     if let Some(prev) = doc.previews.get(&(pl.pref.id, rot)) {
         page_div = page_div.child(
             div()
@@ -4218,7 +4369,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     }
     // Hit rects, text and marks are in PageSpace; the pane frame puts them
     // on the page as drawn.
-    let pane = doc.model.geom(&pl.pref);
+    let pane = pl.pref.geom;
     let to_pane = pane.to_view();
     let size = pane.shown();
     let k = pl.w / size.width.max(1.0);
@@ -4284,12 +4435,11 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     page_div = page_div.children(header_footer_elements(doc, pl, k));
     // Our markup, drawn over the page as the pane shows it, less what the
     // comment filter or View > Hide Comments hides.
-    if let Some(list) = doc.model.state().annots_on(pl.pref.id)
-        && !doc.comments_hidden
-    {
-        let assets = doc.model.assets();
-        for a in list.iter().filter(|a| !doc.hidden_marks.contains(&a.id)) {
-            page_div = page_div.children(annot_elements(a, assets, &to_pane, size, k));
+    if !doc.comments_hidden {
+        let marks = doc.model.state().mark_records_on(pl.pref.id);
+        for m in marks.filter(|m| !doc.hidden_marks.contains(&m.annot.id)) {
+            let elements = annot_elements(&m.annot, m.stamp.as_ref(), &to_pane, size, k);
+            page_div = page_div.children(elements);
         }
     }
     // Selection outlines; handles when one mark is selected and nothing is
@@ -4341,11 +4491,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     }
     if let Some(ed) = &doc.annot_editor
         && ed.page == pl.pref.id
-        && let Some(a) = doc
-            .model
-            .state()
-            .annots_on(ed.page)
-            .and_then(|l| l.iter().find(|a| a.id == ed.id))
+        && let Some((_, a)) = doc.model.state().find_annot(ed.id)
     {
         // Under the mark as shown (a callout's: under its box).
         let b = match &a.kind {
@@ -4362,11 +4508,14 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 .child(ed.input.clone()),
         );
     }
-    if let Some((source, f)) = doc.selected_foreign.and_then(|i| doc.foreign_annots.get(i))
-        && pl.pref.source == *source
-        && f.page == pl.pref.index
+    if let Some(a) = doc
+        .selected_foreign
+        .and_then(|id| doc.model.state().annot(id))
+        && a.page == pl.pref.id
+        && let Some(f) = a.foreign()
     {
-        page_div = page_div.child(crate::comments_panel::foreign_outline(f, &to_pane, k));
+        let outline = crate::comments_panel::foreign_outline(&f.summary, &to_pane, k);
+        page_div = page_div.child(outline);
     }
     if let Some(overlay) = crate::region::overlay(ov.region, pl.pref.id, &to_pane, k) {
         page_div = page_div.child(overlay);
@@ -4597,7 +4746,7 @@ impl DocView {
         };
         let size = doc
             .shown_ref(doc.current_page())
-            .map(|p| doc.model.page_size(&p))
+            .map(|p| p.geom.shown())
             .map(|s| format!("{:.0}×{:.0} pt", s.width, s.height))
             .unwrap_or_default();
         let mut view_mode = String::new();
@@ -4632,14 +4781,8 @@ impl Render for DocView {
         if let Some(rec) = self.pending_recovery.take() {
             self.offer_recovery(rec, window, cx);
         }
-        if let Some((path, signed, if_changed)) = self.pending_signed.take() {
-            self.ask_how_to_save_signed(path, signed, if_changed, window, cx);
-        }
-        if let Some((path, signed)) = self.pending_changed.take() {
-            self.ask_file_changed(path, signed, window, cx);
-        }
-        if let Some(path) = self.pending_xfa.take() {
-            self.ask_to_drop_xfa_values(path, window, cx);
+        if let Some((saving, ask)) = self.pending_ask.take() {
+            self.ask_before_saving(saving, ask, window, cx);
         }
         if let Some(page) = self.pending_edit_last.take() {
             self.start_annot_editor(page, window, cx);
@@ -5048,7 +5191,9 @@ impl DocView {
         if !cx.has_active_drag() {
             doc.drop_target = None;
         }
-        let refs: Vec<PageRef> = doc.model.state().pages.iter().copied().collect();
+        let refs: Vec<Shown> = (doc.model.state().pages())
+            .map(|(id, def, geom)| Shown::new(id, def, geom, Rotation::R0))
+            .collect();
         let count = refs.len();
         if count == 0 {
             doc.thumb_keep.clear();
@@ -5063,7 +5208,7 @@ impl DocView {
         let thumb_w = (panel_w - 2.0 * THUMB_PAD).clamp(40.0, THUMB_W);
 
         // Item geometry. Cumulative tops are cheap enough per frame.
-        let sizes: Vec<PageSize> = refs.iter().map(|r| doc.model.page_size(r)).collect();
+        let sizes: Vec<PageSize> = refs.iter().map(|r| r.geom.shown()).collect();
         let item_h = |i: usize| {
             thumb_w * sizes[i].height / sizes[i].width.max(1.0) + THUMB_LABEL_H + THUMB_PAD
         };
@@ -5094,16 +5239,16 @@ impl DocView {
 
         let visible = layout.visible_in(scroll_y, view_h);
         doc.thumb_keep = (visible.start.saturating_sub(2)..(visible.end + 2).min(count))
-            .map(|i| (refs[i].id, doc.model.render_delta(&refs[i])))
+            .map(|i| (refs[i].id, refs[i].render))
             .collect();
 
         // Pages that are bookmark targets get a marker (a delete would cascade).
         let targets: HashSet<PageId> = doc
             .model
             .state()
-            .outline_flat()
+            .bookmarks_preorder()
             .iter()
-            .filter_map(|(_, n)| n.target)
+            .filter_map(|(_, _, b)| b.page())
             .collect();
         let selection = doc.selection.clone();
         let labels: Vec<String> = visible.clone().map(|i| doc.page_label(i)).collect();
@@ -5113,7 +5258,7 @@ impl DocView {
         let mut items = Vec::new();
         for i in visible {
             let pref = &refs[i];
-            let rotation = doc.model.render_delta(pref);
+            let rotation = pref.render;
             wants.push((
                 *pref,
                 RenderRequest {
@@ -5284,31 +5429,29 @@ impl Render for DragPreview {
     }
 }
 
-/// The unsaved header/footer on one page, in page-local logical px. Only
-/// without a view rotation: GPUI can't turn text, and the header/footer
-/// reads upright on the page as the document has it.
+/// The header/footer on one page, in page-local logical px, where the
+/// page's file doesn't draw it (`stamps::drawn_over`), as a save draws it
+/// there. Only without a view rotation: GPUI can't turn text, and the
+/// header/footer reads upright on the page as the document has it.
 fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
     let st = doc.model.state();
-    let Some(hf) = &st.header_footer else {
+    let Some(hf) = sheaf_doc::stamps::drawn_over(st, pl.pref.id) else {
         return Vec::new();
     };
-    let own = st.pages.get(pl.index);
-    if !doc.model.header_footer_dirty()
-        || !hf.covers(pl.pref.id)
-        || own.is_none_or(|p| p.rotation != pl.pref.rotation)
-    {
+    let own = st.geom(pl.pref.id);
+    if own.is_none_or(|g| g.rotate != pl.pref.geom.rotate) {
         return Vec::new();
     }
-    let size = doc.model.page_size(&pl.pref);
+    let size = pl.pref.geom.shown();
     let bates = if hf.bates.is_some() {
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
+        let ids: Vec<PageId> = st.order().iter().copied().collect();
         hf.bates_numbers(&ids).get(pl.index).copied().flatten()
     } else {
         None
     };
     let facts = sheaf_doc::stamps::PageFacts {
         index: pl.index,
-        count: st.pages.len(),
+        count: st.page_count(),
         bates,
     };
     let [r, g, b] = hf.color;
@@ -5421,14 +5564,19 @@ fn caret_element(at: Box2, color: gpui::Rgba, m: &Affine, shown: PageSize, k: f3
     crate::markup_tools::fill_canvas(vec![tri], color, shown, k)
 }
 
+/// The page mark `id` of `st` holds, if it's a page stamp.
+pub(crate) fn stamp_of(st: &DocState, id: AnnotId) -> Option<&FormRef> {
+    st.annot(id)?.mark_record()?.stamp.as_ref()
+}
+
 /// GPUI elements for one mark, positioned in page-local logical px:
 /// `to_pane` takes PageSpace onto the page as drawn, `shown` in size, at
 /// `k` logical px a point. The mark is laid out as it reads (upright),
-/// then turned onto the page, as the file draws it; a page stamp's page
-/// is one of `assets`, its document's.
+/// then turned onto the page, as the file draws it; a page stamp draws
+/// `held`, the page it holds.
 pub(crate) fn annot_elements(
     a: &Annot,
-    assets: &Arc<MarkAssets>,
+    held: Option<&FormRef>,
     to_pane: &Affine,
     shown: PageSize,
     k: f32,
@@ -5778,7 +5926,7 @@ pub(crate) fn annot_elements(
             name,
             text,
         } => {
-            let el = match crate::stamp_preview::picture(stamp, assets) {
+            let el = match crate::stamp_preview::picture(stamp, held) {
                 Some(image) => place(*rect)
                     .opacity(a.opacity.clamp(0.0, 1.0))
                     .child(img(image).size_full().object_fit(ObjectFit::Fill)),
@@ -5964,65 +6112,49 @@ fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) ->
 
 /// Expand what's needed to see bookmarks a batch added: their parents,
 /// and new headings with children of their own. Everything else keeps its
-/// expanded or collapsed state.
+/// expanded or collapsed state. `rows` is the outline in pre-order: each
+/// bookmark's depth, id, and whether it has kids.
 fn reveal_new_bookmarks(
-    tree: &im::Vector<sheaf_doc::OutlineNode>,
+    rows: impl IntoIterator<Item = (u16, OutlineId, bool)>,
     before: &HashSet<OutlineId>,
     expanded: &mut HashSet<OutlineId>,
 ) {
-    fn walk(
-        nodes: &im::Vector<sheaf_doc::OutlineNode>,
-        path: &mut Vec<OutlineId>,
-        before: &HashSet<OutlineId>,
-        expanded: &mut HashSet<OutlineId>,
-    ) {
-        for n in nodes {
-            if !before.contains(&n.id) {
-                expanded.extend(path.iter().copied());
-                if !n.children.is_empty() {
-                    expanded.insert(n.id);
-                }
+    // The bookmarks above the one at hand.
+    let mut path: Vec<OutlineId> = Vec::new();
+    for (depth, id, kids) in rows {
+        path.truncate(depth.into());
+        if !before.contains(&id) {
+            expanded.extend(path.iter().copied());
+            if kids {
+                expanded.insert(id);
             }
-            path.push(n.id);
-            walk(&n.children, path, before, expanded);
-            path.pop();
         }
+        path.push(id);
     }
-    walk(tree, &mut Vec::new(), before, expanded);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::Context as _;
-    use sheaf_doc::OutlineNode;
-
-    fn node(id: u64, children: Vec<OutlineNode>) -> OutlineNode {
-        OutlineNode {
-            id: OutlineId(id),
-            title: id.to_string(),
-            target: None,
-            view: None,
-            color: None,
-            style: Default::default(),
-            open: true,
-            children: children.into(),
-        }
-    }
 
     #[test]
     fn new_bookmarks_are_revealed() {
         // 1 (old, collapsed) > 2 (old) > 3 (new); 4 (new heading) > 5 (new);
         // 6 (old, collapsed, untouched) > 7 (old).
-        let tree: im::Vector<OutlineNode> = vec![
-            node(1, vec![node(2, vec![node(3, vec![])])]),
-            node(4, vec![node(5, vec![])]),
-            node(6, vec![node(7, vec![])]),
+        let rows = [
+            (0, 1, true),
+            (1, 2, true),
+            (2, 3, false),
+            (0, 4, true),
+            (1, 5, false),
+            (0, 6, true),
+            (1, 7, false),
         ]
-        .into();
+        .map(|(depth, id, kids)| (depth, OutlineId(id), kids));
         let before: HashSet<OutlineId> = [1, 2, 6, 7].map(OutlineId).into();
         let mut expanded = HashSet::new();
-        reveal_new_bookmarks(&tree, &before, &mut expanded);
+        reveal_new_bookmarks(rows, &before, &mut expanded);
         let mut got: Vec<u64> = expanded.iter().map(|i| i.0).collect();
         got.sort();
         assert_eq!(got, [1, 2, 4]);
@@ -6036,11 +6168,23 @@ mod tests {
         recovered: bool,
     ) -> anyhow::Result<(Document, sheaf_doc::open::ViewFacts)> {
         let store = Store::new();
-        let primary = SourceInfo::read(&store, path, None)?;
+        let (primary, stamp) = SourceInfo::read(&store, path, None)?;
         let (src, blob) = (primary.src.clone(), primary.src.id());
-        let mut model = opening_model(store, primary, "Me".into());
+        // As the app opens it: a recovered file's record has its sidecar's
+        // sections pending (none, here).
+        let came = match recovered {
+            false => Came::Read(stamp),
+            true => Came::Restored {
+                base: stamp,
+                pending: materialize::PendingTail {
+                    bytes: Some(Arc::from([])),
+                    flags: materialize::TailFlags::default(),
+                },
+            },
+        };
+        let mut model = opening_model(store, primary, Some(came), "Me".into());
         let facts = sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
-        let view = take_facts(&mut model, blob, facts, recovered).context("not taken")?;
+        let view = take_facts(&mut model, blob, facts).context("not taken")?;
         Ok((model, view))
     }
 
@@ -6068,10 +6212,12 @@ mod tests {
         if version(&a) != version(&h) {
             return Err("the version");
         }
-        // A copy of a page draws a page id, and a field id for each field
-        // on it.
+        // A copy of a page draws an annotation id for each annotation on
+        // it from the thread's rng, seeded alike for both, and a page id
+        // and a field id for each field from counters that start alike.
         let duplicate = |d: &mut Document| {
-            let ids = vec![d.page(0).expect("a source has pages").id];
+            fastrand::seed(8);
+            let ids = vec![d.page(0).expect("a source has pages")];
             d.apply(Edit::DuplicatePages { ids }, "Duplicate")
                 .map(|_| ())
                 .map_err(|e| format!("{e:#}"))
@@ -6105,15 +6251,15 @@ mod tests {
         assert!(recovered.state() == headless.state());
         assert!(recovered.is_dirty() && !recovered.can_undo());
         let store = Store::new();
-        let primary = SourceInfo::read(&store, &path, None).unwrap();
+        let (primary, stamp) = SourceInfo::read(&store, &path, None).unwrap();
         let src = primary.src.clone();
-        let mut model = opening_model(store, primary, "Me".into());
+        let mut model = opening_model(store, primary, Some(Came::Read(stamp)), "Me".into());
         let other = sheaf_doc::forms::fixture::every_kind().source();
         let facts = || sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
-        assert!(take_facts(&mut model, other.id(), facts(), false).is_none());
+        assert!(take_facts(&mut model, other.id(), facts()).is_none());
         assert!(!model.is_ready());
-        assert!(take_facts(&mut model, src.id(), facts(), false).is_some());
-        assert!(take_facts(&mut model, src.id(), facts(), false).is_none());
+        assert!(take_facts(&mut model, src.id(), facts()).is_some());
+        assert!(take_facts(&mut model, src.id(), facts()).is_none());
 
         let Some(corpus) = sheaf_doc::forms::corpus::Corpus::or_skip() else {
             return;
@@ -6161,6 +6307,156 @@ mod tests {
                 .unwrap()
                 .starts_with("3 annotations shared an id")
         );
+    }
+
+    /// A save changes nothing the document shows, so it drops nothing
+    /// rendered: through the view's own end of a save (`finish_save`), the
+    /// tile counter doesn't move, and no tile or preview is dropped, by it
+    /// or page by page. Run in a headless app for the view's focus handle;
+    /// on Linux, where it needs no main thread. The file is in a `sheaf-`
+    /// temporary directory, which the recent files leave out.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_save_doesnt_move_the_tile_counter() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("every-fact.pdf");
+        std::fs::write(&path, sheaf_doc::forms::fixture::every_fact().bytes()).unwrap();
+        let (mut model, _) = as_the_view_opens(&path, false).unwrap();
+        let page = model.page(0).unwrap();
+        let turn = Edit::RotatePages {
+            ids: vec![page],
+            by: Rotation::R90,
+        };
+        model.apply(turn, "Rotate").unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let mut doc =
+                    Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                doc.invalidate_tiles();
+                doc.retired.clear();
+                let pixel = || {
+                    let pixel = image::Frame::new(image::RgbaImage::new(1, 1));
+                    Arc::new(RenderImage::new(smallvec::smallvec![pixel]))
+                };
+                doc.previews.insert((page, Rotation::R90), pixel());
+                let job = Job::Page {
+                    width: 100,
+                    rotation: Rotation::R90,
+                };
+                doc.tiles.insert((page, job), pixel());
+                let before = doc.tiles_invalidated;
+                // A save, as the view makes one: sealed, planned, written,
+                // then ended by the view, which records it.
+                let v = doc.model.current_version();
+                let input = doc.model.save_input(v).unwrap();
+                doc.saving = true;
+                let target = doc.model.save_target(&path);
+                let plan = materialize::plan(&input, &target);
+                let answers = materialize::AskAnswers::default();
+                let written = materialize::write_file(
+                    &input,
+                    &plan,
+                    target.clone(),
+                    &answers,
+                    &sheaf_ops::NoProgress,
+                );
+                let saving = Saving {
+                    input: Arc::new(input),
+                    target,
+                    plan,
+                    answers,
+                    started: Instant::now(),
+                };
+                let view = cx.new(|cx| {
+                    let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
+                    view.state = State::Ready(Box::new(doc));
+                    view
+                });
+                view.update(cx, |view, cx| {
+                    assert!(view.finish_save(saving, written, cx));
+                    let State::Ready(doc) = &view.state else {
+                        panic!("ready");
+                    };
+                    assert!(!doc.model.is_dirty() && !doc.saving);
+                    assert_eq!(doc.tiles_invalidated, before);
+                    assert_eq!((doc.previews.len(), doc.tiles.len()), (1, 1));
+                    assert!(doc.retired.is_empty());
+                });
+                ran.store(true, Ordering::Relaxed);
+                // Once the event loop runs: a stop before it starts is lost.
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A save with an edit made while it was written leaves the sidecar
+    /// of that edit, against the new file, by the time the view has ended
+    /// the save (M10.5 D39): the sidecar from before is stale against the
+    /// new file, and a crash before a new one would lose the edit.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_save_with_an_edit_since_leaves_its_sidecar_as_it_ends() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("every-fact.pdf");
+        std::fs::write(&path, sheaf_doc::forms::fixture::every_fact().bytes()).unwrap();
+        let (mut model, _) = as_the_view_opens(&path, false).unwrap();
+        let page = model.page(0).unwrap();
+        let turn = move || Edit::RotatePages {
+            ids: vec![page],
+            by: Rotation::R90,
+        };
+        model.apply(turn(), "Rotate").unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let mut doc =
+                    Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                let v = doc.model.current_version();
+                let input = doc.model.save_input(v).unwrap();
+                doc.saving = true;
+                let target = doc.model.save_target(&path);
+                let plan = materialize::plan(&input, &target);
+                let answers = materialize::AskAnswers::default();
+                let written = materialize::write_file(
+                    &input,
+                    &plan,
+                    target.clone(),
+                    &answers,
+                    &sheaf_ops::NoProgress,
+                );
+                // While it was written.
+                doc.model.apply(turn(), "Rotate").unwrap();
+                let saving = Saving {
+                    input: Arc::new(input),
+                    target,
+                    plan,
+                    answers,
+                    started: Instant::now(),
+                };
+                let view = cx.new(|cx| {
+                    let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
+                    view.state = State::Ready(Box::new(doc));
+                    view
+                });
+                view.update(cx, |view, cx| {
+                    assert!(view.finish_save(saving, written, cx));
+                    let State::Ready(doc) = &view.state else {
+                        panic!("ready");
+                    };
+                    assert!(doc.model.is_dirty());
+                });
+                assert!(sheaf_doc::recovery::find(&path).is_some());
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
     }
 
     #[test]

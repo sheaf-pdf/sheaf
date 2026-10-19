@@ -363,8 +363,8 @@ impl crate::docview::DocView {
         };
         let pane = doc.pane();
         let r = pane.layout.as_ref()?.rect(page)?;
-        let pref = doc.page_ref(page)?;
-        let file = doc.model.source(pref.source)?.src.geom(pref.index);
+        let base = &doc.model.state().def(doc.page_id(page)?)?.base;
+        let file = base.src.geom(base.index);
         let geom = doc.pane_geom(page)?;
         let shown = file
             .from_view()
@@ -430,32 +430,37 @@ impl Workspace {
         match what {
             "notice" => eprintln!("SCRIPT notice: {:?}", d.notice),
             "form" => {
-                let widgets: usize = st.widgets.values().map(|w| w.len()).sum();
+                let widgets = st.annots().filter(|(_, a)| a.widget().is_some()).count();
                 eprintln!(
                     "SCRIPT form: {} fields, {widgets} widgets; bar {:?}",
-                    st.fields.len(),
+                    st.terminals().count(),
                     d.form_bar()
                 );
                 match &d.forms.primary {
                     Some(facts) => eprintln!("SCRIPT form: {facts}"),
                     None => eprintln!("SCRIPT form: not read yet"),
                 }
-                for (source, facts) in &d.forms.incoming {
-                    eprintln!("SCRIPT form: source {} {facts}", source.0);
+                // The inserted files', as their sources read them.
+                let mut inserted: Vec<_> = (d.model.sources())
+                    .filter(|&(id, _)| id != d.model.primary())
+                    .collect();
+                inserted.sort_by_key(|&(id, _)| id);
+                for (source, info) in inserted {
+                    eprintln!("SCRIPT form: source {} {}", source.0, info.src.form().facts);
                 }
             }
             "selection" => eprintln!(
                 "SCRIPT selection: {:?}",
                 view.selected_text().map(|(_, text, _)| text)
             ),
-            "pages" => eprintln!("SCRIPT pages: {}", st.pages.len()),
+            "pages" => eprintln!("SCRIPT pages: {}", st.page_count()),
             "view" => eprintln!(
                 "SCRIPT view: page {} {:?} selected {:?}",
                 view.current_page() + 1,
                 view.current_view().map(|(_, v)| v),
                 d.outline_selected
-                    .and_then(|id| st.outline_flat().into_iter().find(|(_, n)| n.id == id))
-                    .map(|(_, n)| n.title.clone())
+                    .and_then(|id| st.bookmark(id))
+                    .map(|b| b.title.to_string())
             ),
             "toolbar" => {
                 for line in self.toolbar_dump(cx) {
@@ -480,19 +485,19 @@ impl Workspace {
                 view.region.as_ref().map(|r| (r.page, r.rect()))
             ),
             "outline" => {
-                for (depth, n) in st.outline_flat() {
+                for (depth, _, b) in st.bookmarks_preorder() {
                     eprintln!(
                         "SCRIPT outline: {}{} -> page {:?} view {:?}",
                         "  ".repeat(depth as usize),
-                        n.title,
-                        n.target.and_then(|t| st.index_of(t)).map(|i| i + 1),
-                        n.view
+                        b.title,
+                        b.page().and_then(|t| st.pos_of(t)).map(|i| i + 1),
+                        b.view()
                     );
                 }
             }
             "annots" => {
-                for (i, p) in st.pages.iter().enumerate() {
-                    for a in st.annots_on(p.id).into_iter().flatten() {
+                for (i, &p) in st.order().iter().enumerate() {
+                    for a in st.marks_on(p) {
                         let kind = format!("{:?}", a.kind);
                         let kind = kind.split([' ', '{', '(']).next().unwrap_or("");
                         eprintln!(

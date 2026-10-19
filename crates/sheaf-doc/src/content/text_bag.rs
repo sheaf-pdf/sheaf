@@ -1,7 +1,9 @@
 //! Text as words: what content's text-showing operators draw, decoded
 //! through each font's `/ToUnicode` or encoding, composed (NFC) and
 //! counted by word. The same text drawn in two fonts, with different
-//! codes, gives equal bags: what the removal check compares (§11.9).
+//! codes, gives equal bags: what the removal check compares (§11.9). A
+//! string whose codes a font doesn't say the text of is its bytes' hash,
+//! which only the same bytes match.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -14,10 +16,13 @@ use super::lex::{self, LexError, ResCx, Tok};
 use super::page::{Concat, ReadObjects, direct};
 use crate::source::Limits;
 
-/// Words, each with how many times it's drawn.
+/// Words, each with how many times it's drawn, and what isn't words, by
+/// hash: strings drawn in codes a font doesn't say the text of, and what
+/// the removal check compares whole (an image, an embedded file).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextBag {
     words: BTreeMap<String, usize>,
+    hashes: BTreeMap<u128, usize>,
 }
 
 impl TextBag {
@@ -29,18 +34,49 @@ impl TextBag {
         }
     }
 
+    /// Counts what isn't words, by its hash.
+    pub fn add_hash(&mut self, hash: u128) {
+        *self.hashes.entry(hash).or_default() += 1;
+    }
+
+    /// Counts `other`'s words and hashes too.
+    pub fn extend(&mut self, other: &TextBag) {
+        for (word, n) in &other.words {
+            *self.words.entry(word.clone()).or_default() += n;
+        }
+        for (&hash, n) in &other.hashes {
+            *self.hashes.entry(hash).or_default() += n;
+        }
+    }
+
     /// Each word, in order, with how many times it's drawn.
     pub fn words(&self) -> impl Iterator<Item = (&str, usize)> {
         self.words.iter().map(|(w, &n)| (w.as_str(), n))
     }
 
-    /// How many words it holds, each as many times as it's drawn.
+    /// Each hash, in order, with how many times it's counted.
+    pub fn hashes(&self) -> impl Iterator<Item = (u128, usize)> + '_ {
+        self.hashes.iter().map(|(&h, &n)| (h, n))
+    }
+
+    /// How many words and hashes it holds, each as many times as it's
+    /// counted.
     pub fn len(&self) -> usize {
-        self.words.values().sum()
+        self.words.values().chain(self.hashes.values()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.words.is_empty()
+        self.words.is_empty() && self.hashes.is_empty()
+    }
+
+    /// How many of its words and hashes `other` hasn't got, counting each
+    /// as often as it has it more than `other`: none when it's within
+    /// `other`.
+    pub fn missing_from(&self, other: &TextBag) -> usize {
+        let short = |n: usize, has: Option<&usize>| n.saturating_sub(has.copied().unwrap_or(0));
+        let words = (self.words.iter()).map(|(w, &n)| short(n, other.words.get(w)));
+        let hashes = (self.hashes.iter()).map(|(h, &n)| short(n, other.hashes.get(h)));
+        words.chain(hashes).sum()
     }
 }
 
@@ -49,7 +85,8 @@ impl TextBag {
 /// `'` and `"` show are decoded and run together, and a word ends at
 /// white-space, at `BT` and `ET`, and where the text moves to a new place
 /// (`Td`, `TD`, `Tm`, `T*`, `'`, `"`); `TJ`'s adjustments don't end one.
-/// A font the resources haven't reads each byte as the code it is.
+/// A string with a code its font doesn't say the text of, or shown in no
+/// font the resources have, is its bytes' hash, and ends a word.
 pub fn text_bag(
     content: &Concat,
     res: &ResCx,
@@ -61,19 +98,27 @@ pub fn text_bag(
     let mut font = None;
     let mut saved = Vec::new();
     let depth = lim.content.depth;
-    let show = |run: &mut String, font: Option<&Decoder>, operand: Option<&[u8]>| match operand
-        .and_then(|o| lex::object(o, depth))
-    {
-        Some(Object::String(s, _)) => decode(font, &s, run),
-        Some(Object::Array(items)) => {
-            for item in items {
-                if let Object::String(s, _) = item {
-                    decode(font, &s, run);
+    let show =
+        |bag: &mut TextBag, run: &mut String, font: Option<&Decoder>, operand: Option<&[u8]>| {
+            let mut string = |s: &[u8]| match font.and_then(|f| f.text(s)) {
+                Some(text) => run.push_str(&text),
+                None => {
+                    bag.add(&std::mem::take(run));
+                    bag.add_hash(sheaf_core::checksum(s));
                 }
+            };
+            match operand.and_then(|o| lex::object(o, depth)) {
+                Some(Object::String(s, _)) => string(&s),
+                Some(Object::Array(items)) => {
+                    for item in items {
+                        if let Object::String(s, _) = item {
+                            string(&s);
+                        }
+                    }
+                }
+                _ => {}
             }
-        }
-        _ => {}
-    };
+        };
     lex::steps(content.bytes(), res, lim, |step| {
         let Tok::Op(op) = step.tok else {
             return Ok::<_, LexError>(());
@@ -82,10 +127,10 @@ pub fn text_bag(
             b"q" => saved.push(font),
             b"Q" => font = saved.pop().unwrap_or(font),
             b"Tf" => font = step.name(1).and_then(|n| fonts.get(&n)),
-            b"Tj" | b"TJ" => show(&mut run, font, step.arg(0)),
+            b"Tj" | b"TJ" => show(&mut bag, &mut run, font, step.arg(0)),
             b"'" | b"\"" => {
                 bag.add(&std::mem::take(&mut run));
-                show(&mut run, font, step.arg(0));
+                show(&mut bag, &mut run, font, step.arg(0));
             }
             b"BT" | b"ET" | b"Td" | b"TD" | b"Tm" | b"T*" => bag.add(&std::mem::take(&mut run)),
             _ => {}
@@ -94,15 +139,6 @@ pub fn text_bag(
     })?;
     bag.add(&run);
     Ok(bag)
-}
-
-/// `s`'s codes in `font` as text, pushed onto `run`; with no font, each
-/// byte as the code it is.
-fn decode(font: Option<&Decoder>, s: &[u8], run: &mut String) {
-    match font {
-        Some(font) => font.decode(s, run),
-        None => run.extend(s.iter().map(|&b| char::from(b))),
-    }
 }
 
 /// How the fonts of some resources read as text, by resource name.
@@ -122,7 +158,7 @@ impl FontDecoders {
     /// - its base encoding: WinAnsi, MacRoman or Standard as named, or
     ///   its own: Symbol's or ZapfDingbats' for those, Standard for
     ///   another Type 1 font;
-    /// - otherwise the code as is.
+    /// - otherwise none: a string with such a code isn't read as text.
     pub fn read(
         objects: &impl ReadObjects,
         resources: Option<&Object>,
@@ -247,24 +283,22 @@ impl Decoder {
         }
     }
 
-    /// `s`'s codes as text, pushed onto `out`.
-    fn decode(&self, s: &[u8], out: &mut String) {
+    /// `s`'s codes as text: None when the font doesn't say the text of
+    /// one of them.
+    fn text(&self, s: &[u8]) -> Option<String> {
+        let mut out = String::new();
         let mut at = 0;
         while at < s.len() {
             let rest = &s[at..];
             let len = self.code_len(rest).clamp(1, rest.len());
             let code = rest[..len].iter().fold(0u32, |c, &b| c << 8 | u32::from(b));
             at += len;
-            if let Some(text) = self.cmap.get(code) {
-                out.push_str(&text);
-            } else if let Some(Some(text)) =
-                self.encoded.as_ref().and_then(|e| e.get(code as usize))
-            {
-                out.push_str(text);
-            } else {
-                out.push(char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER));
+            match self.cmap.get(code) {
+                Some(text) => out.push_str(&text),
+                None => out.push_str(self.encoded.as_ref()?.get(code as usize)?.as_deref()?),
             }
         }
+        Some(out)
     }
 
     /// How many bytes the code `rest` starts with takes: the codespace

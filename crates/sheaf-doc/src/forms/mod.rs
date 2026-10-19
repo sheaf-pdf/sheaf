@@ -1,7 +1,8 @@
 //! AcroForms (M10). The field model ([`field`]) and reading it from a
-//! source with the facts sheaf shows about the form ([`read`]), and the
-//! form check ([`check`]): what in a file's form other viewers would trip
-//! on, or what a save would carry where it shouldn't.
+//! source with the facts sheaf shows about the form ([`read`]), what its
+//! signatures allow after them ([`sigs`]), and the form check ([`check`]):
+//! what in a file's form other viewers would trip on, or what a save would
+//! carry where it shouldn't.
 //!
 //! Tests build forms in code ([`fixture`]) and read real ones from Greg's
 //! corpus ([`corpus`]). Both are compiled for this crate's tests and, with
@@ -13,14 +14,26 @@ pub mod corpus;
 pub mod field;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
-pub(crate) mod merge;
 pub mod read;
 pub mod rules;
+pub mod sigs;
 pub mod xfa;
 
 #[cfg(test)]
 mod tests;
 
-pub use check::{Finding, Report, check, check_file};
+pub use check::{Finding, Report, check, check_file, check_latest};
 pub use field::{Field, FieldId, FieldKind, Value, Widget};
 pub use read::{FileForm, FormClass, FormFacts, read};
+
+/// The full name of a node named `partial` under one named `up`: the two
+/// joined by a dot, passing over an empty one, as PDFium's are. The
+/// reader names a file's nodes by it, and the document's full-name index
+/// its own.
+pub(crate) fn full_name_of(up: &str, partial: &str) -> String {
+    match (up, partial) {
+        (up, "") => up.to_string(),
+        ("", partial) => partial.to_string(),
+        (up, partial) => format!("{up}.{partial}"),
+    }
+}

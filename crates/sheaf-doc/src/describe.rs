@@ -86,10 +86,9 @@ pub fn describe(edit: &Edit, before: &DocState) -> String {
             format!("Change {}{}", noun(&annot.kind), on_page(*page, before))
         }
         Edit::AnnotDelete { page, id } => {
-            let kind = before
-                .annots_on(*page)
-                .and_then(|list| list.iter().find(|a| a.id == *id))
-                .map(|a| noun(&a.kind))
+            let kind = (before.find_annot(*id))
+                .filter(|(on, _)| on == page)
+                .map(|(_, a)| noun(&a.kind))
                 .unwrap_or_else(|| "a mark".into());
             format!("Delete {kind}{}", on_page(*page, before))
         }
@@ -166,7 +165,7 @@ fn count(n: usize, what: &str) -> String {
 
 /// " on page 3", or nothing when the page isn't in the document.
 fn on_page(page: PageId, st: &DocState) -> String {
-    st.index_of(page)
+    st.pos_of(page)
         .map(|i| format!(" on page {}", i + 1))
         .unwrap_or_default()
 }
@@ -174,22 +173,18 @@ fn on_page(page: PageId, st: &DocState) -> String {
 /// "page 3", "pages 2, 5", "pages 4–6", or a count when one of them isn't
 /// in the document.
 fn pages_text(ids: &[PageId], st: &DocState) -> String {
-    // One walk of the pages, not a search for each id: their numbers come
-    // out sorted, each once. A sorted list finds the ids faster than a hash
-    // set does, from one id to thousands.
     let mut wanted = ids.to_vec();
     wanted.sort_unstable();
     wanted.dedup();
-    let numbers: Vec<usize> = st
-        .pages
+    let mut numbers: Vec<usize> = wanted
         .iter()
-        .enumerate()
-        .filter(|(_, p)| wanted.binary_search(&p.id).is_ok())
-        .map(|(i, _)| i + 1)
+        .filter_map(|&id| st.pos_of(id))
+        .map(|i| i + 1)
         .collect();
     if numbers.len() != wanted.len() || numbers.is_empty() {
         return count(wanted.len(), "page");
     }
+    numbers.sort_unstable();
     // Runs: 4–6, 9.
     let mut runs: Vec<String> = Vec::new();
     let mut i = 0;
@@ -224,13 +219,13 @@ mod tests {
     fn doc(n: u32) -> Document {
         let store = Store::new();
         let primary = SourceInfo::blank(&store, n);
-        Document::new(store, primary, &[], Box::new(FixedCount(10)))
+        Document::new(store, primary, None, &[], Box::new(FixedCount(10)))
     }
 
     #[test]
     fn pages_read_as_numbers_and_runs() {
         let d = doc(10);
-        let id = |i: usize| d.page(i).unwrap().id;
+        let id = |i: usize| d.page(i).unwrap();
         let st = d.state();
         assert_eq!(pages_text(&[id(2)], st), "page 3");
         assert_eq!(pages_text(&[id(5), id(4), id(3)], st), "pages 4–6");
@@ -254,7 +249,7 @@ mod tests {
     #[test]
     fn edits_read_plainly() {
         let d = doc(6);
-        let id = |i: usize| d.page(i).unwrap().id;
+        let id = |i: usize| d.page(i).unwrap();
         let st = d.state();
         assert_eq!(
             describe(

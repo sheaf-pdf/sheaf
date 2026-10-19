@@ -13,15 +13,16 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
 use sheaf_core::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
-use crate::model::PageId;
+use crate::model::{FormRef, Mark, PageId};
 use crate::stamps::HeaderFooter;
-use crate::store::{BlobKind, Src, Store};
+use crate::store::{Blob, BlobId, BlobKind, Src, Store};
 
 /// A rectangle in page space: left, bottom, right, top.
 pub type Rect = [f32; 4];
@@ -349,20 +350,39 @@ impl Form {
         self.pdf.prune_objects();
     }
 
-    /// Reader usage rights: `/Perms /UR3`, a signature over the whole
-    /// file, and `/SigFlags 2`.
+    /// Reader usage rights that allow filling in: [`Form::usage_rights_for`]
+    /// `/Form [/FillIn]`, and no `/Annots`.
     pub fn usage_rights(&mut self) {
+        self.usage_rights_for(&["FillIn"], &[]);
+    }
+
+    /// Reader usage rights: `/Perms /UR3`, a signature over the whole file
+    /// whose `/TransformParams` grant `form` (`/Form`) and `annots`
+    /// (`/Annots`, when there are some), and `/SigFlags`' AppendOnly (2).
+    pub fn usage_rights_for(&mut self, form: &[&str], annots: &[&str]) {
+        let names = |names: &[&str]| -> Vec<Object> {
+            (names.iter())
+                .map(|n| Object::Name(n.as_bytes().to_vec()))
+                .collect()
+        };
+        let mut params = dictionary! {
+            "Type" => "TransformParams", "V" => "2.2",
+            "Form" => names(form),
+            "Document" => vec![Object::Name(b"FullSave".to_vec())],
+        };
+        if !annots.is_empty() {
+            params.set("Annots", names(annots));
+        }
         let sig = self.signature_dict(dictionary! {
-            "Type" => "SigRef", "TransformMethod" => "UR3",
-            "TransformParams" => dictionary! {
-                "Type" => "TransformParams", "V" => "2.2",
-                "Form" => vec![Object::Name(b"FillIn".to_vec())],
-                "Document" => vec![Object::Name(b"FullSave".to_vec())],
-            },
+            "Type" => "SigRef", "TransformMethod" => "UR3", "TransformParams" => params,
         });
-        self.dict(self.catalog)
-            .set("Perms", dictionary! { "UR3" => sig });
-        self.dict(self.acroform).set("SigFlags", 2);
+        self.perm("UR3", sig);
+        let flags = self
+            .dict(self.acroform)
+            .get(b"SigFlags")
+            .and_then(Object::as_i64);
+        self.dict(self.acroform)
+            .set("SigFlags", flags.unwrap_or(0) | 2);
     }
 
     /// Sign signature field `field`: a `/V` over the whole file, and
@@ -374,16 +394,53 @@ impl Form {
     }
 
     /// Certify with signature field `field`: [`Form::sign`], with a
-    /// DocMDP reference that allows filling, and `/Perms /DocMDP`.
-    pub fn certify(&mut self, field: ObjectId) {
+    /// DocMDP reference that permits `p` (1 nothing, 2 filling in, 3
+    /// filling in and comments), and `/Perms /DocMDP`.
+    pub fn certify(&mut self, field: ObjectId, p: i64) {
         let sig = self.signature_dict(dictionary! {
             "Type" => "SigRef", "TransformMethod" => "DocMDP",
-            "TransformParams" => dictionary! { "Type" => "TransformParams", "P" => 2, "V" => "1.2" },
+            "TransformParams" => dictionary! { "Type" => "TransformParams", "P" => p, "V" => "1.2" },
         });
         self.dict(field).set("V", sig);
-        self.dict(self.catalog)
-            .set("Perms", dictionary! { "DocMDP" => sig });
+        self.perm("DocMDP", sig);
         self.dict(self.acroform).set("SigFlags", 3);
+    }
+
+    /// Sign signature field `field` locking fields, as a FieldMDP
+    /// signature does: its `/Lock` (`/Action` `action`, which locks
+    /// `/All`, or the full names `fields` `/Include` or `/Exclude`, and
+    /// PDF 2.0's `/P` when `p` is some), and a `/V` whose FieldMDP
+    /// reference says the same.
+    pub fn sign_locking(&mut self, field: ObjectId, action: &str, fields: &[&str], p: Option<i64>) {
+        let mut params =
+            dictionary! { "Type" => "TransformParams", "Action" => action, "V" => "1.2" };
+        if action != "All" {
+            let names: Vec<Object> = fields.iter().map(|&f| Object::string_literal(f)).collect();
+            params.set("Fields", names);
+        }
+        let mut lock = params.clone();
+        lock.set("Type", "SigFieldLock");
+        lock.remove(b"V");
+        if let Some(p) = p {
+            lock.set("P", p);
+        }
+        let sig = self.signature_dict(dictionary! {
+            "Type" => "SigRef", "TransformMethod" => "FieldMDP", "TransformParams" => params,
+        });
+        let d = self.dict(field);
+        d.set("V", sig);
+        d.set("Lock", lock);
+        self.dict(self.acroform).set("SigFlags", 3);
+    }
+
+    /// `/Perms /key`: `sig`, beside what it holds.
+    fn perm(&mut self, key: &str, sig: ObjectId) {
+        let catalog = self.dict(self.catalog);
+        let mut perms = (catalog.get(b"Perms").and_then(Object::as_dict))
+            .cloned()
+            .unwrap_or_default();
+        perms.set(key, sig);
+        catalog.set("Perms", perms);
     }
 
     /// A structure tree, as Acrobat tags a form: a `/Form` element per
@@ -623,7 +680,12 @@ pub fn row(i: usize) -> Rect {
 /// list box `kind[0]` (both filled), a push button `print[0]` and the
 /// signature field `sig[0]`.
 pub fn every_kind() -> Form {
-    let mut f = Form::new(2);
+    every_kind_in(2)
+}
+
+/// [`every_kind`]'s fields on the first two of `pages` pages (two or more).
+pub fn every_kind_in(pages: usize) -> Form {
+    let mut f = Form::new(pages);
     let name = f.text("name[0]", 0, row(0));
     f.fill(name, "Ann Lee");
     let empty = f.text("empty[0]", 0, row(1));
@@ -682,26 +744,45 @@ pub fn every_fact() -> Form {
 
 /// `items` as `f`'s outline: each (depth, item) in pre-order, a depth at
 /// most one below the item before's. The links between them are filled
-/// in, and `/Count` where an item has none: how many items are below it.
-/// The items' ids, in order.
+/// in, and `/Count` where an item has none: how many items show below it,
+/// an item given a negative one being closed. The items' ids, in order.
 pub fn outline_tree(f: &mut Form, items: Vec<(u16, Dictionary)>) -> Vec<ObjectId> {
     let root = f.pdf.new_object_id();
     let ids: Vec<ObjectId> = items.iter().map(|_| f.pdf.new_object_id()).collect();
     let depths: Vec<u16> = items.iter().map(|(depth, _)| *depth).collect();
     let mut dicts: Vec<Dictionary> = items.into_iter().map(|(_, item)| item).collect();
-    // The items below `at` (None: the root), and those of them a level down.
-    let below = |at: Option<usize>| {
+    let closed: Vec<bool> = (dicts.iter())
+        .map(|d| {
+            d.get(b"Count")
+                .and_then(Object::as_i64)
+                .is_ok_and(|c| c < 0)
+        })
+        .collect();
+    // The items a level below `at` (None: the root).
+    let kids = |at: Option<usize>| -> Vec<usize> {
         let (from, depth) = at.map_or((0, 0), |i| (i + 1, depths[i] + 1));
-        let all: Vec<usize> = (from..depths.len())
+        (from..depths.len())
             .take_while(|&j| depths[j] >= depth)
-            .collect();
-        let kids: Vec<usize> = all
-            .iter()
-            .copied()
             .filter(|&j| depths[j] == depth)
-            .collect();
-        (all.len(), kids)
+            .collect()
     };
+    // How many items show below `at` while it's open.
+    fn shown(
+        at: Option<usize>,
+        kids: &dyn Fn(Option<usize>) -> Vec<usize>,
+        closed: &[bool],
+    ) -> usize {
+        (kids(at).into_iter())
+            .map(|k| {
+                1 + if closed[k] {
+                    0
+                } else {
+                    shown(Some(k), kids, closed)
+                }
+            })
+            .sum()
+    }
+    let below = |at: Option<usize>| (shown(at, &kids, &closed), kids(at));
     let link = |dicts: &mut [Dictionary], parent: Option<usize>, root_dict: &mut Dictionary| {
         let (count, kids) = below(parent);
         for pair in kids.windows(2) {
@@ -761,22 +842,20 @@ pub fn note() -> Annot {
     }
 }
 
-/// The stem [`every_mark_kind`]'s page stamp names its page by: no name
-/// the generated cache gives, so writing and reading it never touches the
-/// cache. [`mark_assets`] holds it.
-pub const MARK_STAMP: &str = "fixture-stamp";
+/// The stem [`every_mark_kind`]'s page stamp names its page by, its
+/// blob's: [`mark_stamp_pdf`]'s.
+pub static MARK_STAMP: LazyLock<String> = LazyLock::new(|| BlobId::of(&mark_stamp_pdf()).stem());
 
-/// The stem [`every_mark_kind`]'s attachment names its file by, as
-/// [`MARK_STAMP`] is.
-pub const MARK_FILE: &str = "fixture-file";
+/// The stem [`every_mark_kind`]'s attachment names its file by,
+/// [`MARK_FILE_BYTES`]'s.
+pub static MARK_FILE: LazyLock<String> = LazyLock::new(|| BlobId::of(MARK_FILE_BYTES).stem());
 
 /// The bytes of [`every_mark_kind`]'s attachment.
 pub const MARK_FILE_BYTES: &[u8] = b"fixture notes\n";
 
-/// What [`every_mark_kind`]'s stamp and attachment name, as a document
-/// holds them: a page 100 by 50 points with a blue square in its corner
-/// and [`MARK_FILE_BYTES`].
-pub fn mark_assets() -> std::sync::Arc<crate::assets::MarkAssets> {
+/// The page [`every_mark_kind`]'s page stamp draws: a one-page PDF, its
+/// page 100 by 50 points with a blue square in its corner.
+pub fn mark_stamp_pdf() -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(
@@ -795,10 +874,100 @@ pub fn mark_assets() -> std::sync::Arc<crate::assets::MarkAssets> {
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
-    let assets = crate::assets::MarkAssets::new(Store::new());
-    assets.intern_stamp(MARK_STAMP, bytes.into());
-    assets.intern_file(MARK_FILE, MARK_FILE_BYTES.into());
-    std::sync::Arc::new(assets)
+    bytes
+}
+
+/// [`every_mark_kind`]'s stamp's page and attachment's file, interned in
+/// `store`: while they're held, an edit adding a mark that names them
+/// finds them there.
+pub fn mark_blobs(store: &Store) -> [Blob; 2] {
+    let stamp = store.intern(mark_stamp_pdf().into(), BlobKind::stamp());
+    let file = store.intern(MARK_FILE_BYTES.into(), BlobKind::Attachment);
+    [stamp.unwrap(), file.unwrap()]
+}
+
+/// `marks` written onto `page`, a page dictionary of `pdf`, after what its
+/// `/Annots` has, each as a save writes it ([`crate::annot::to_pdf_in`],
+/// over [`crate::annot::emission`]): its companions grouped under it
+/// (`/IRT`, `/RT /Group`), and a reply after what it replies to, with
+/// `/IRT` to it and its `/Rect` (one whose parent isn't on the page last,
+/// unthreaded). What they draw with is in `pdf` once.
+pub fn write_marks(pdf: &mut Pdf, page: &mut Dictionary, marks: &[Mark]) {
+    use crate::annot::{WriteCx, to_pdf_in};
+    let mut cx = WriteCx::new();
+    let mut list: Vec<Object> = (page.get(b"Annots").and_then(Object::as_array))
+        .cloned()
+        .unwrap_or_default();
+    let rect_of = |pdf: &Pdf, d: &Dictionary| {
+        (d.get(b"Rect").ok())
+            .and_then(|r| pdf.dereference(r).ok())
+            .map_or_else(
+                || Object::Array(vec![Object::Integer(0); 4]),
+                |(_, o)| o.clone(),
+            )
+    };
+    // What a reply may name: what's on the page, then each mark written.
+    let mut named: std::collections::HashMap<String, (ObjectId, Object)> = (list.iter())
+        .filter_map(|e| {
+            let id = e.as_reference().ok()?;
+            let d = pdf.get_dictionary(id).ok()?;
+            Some((crate::file::thread_name(d), (id, rect_of(pdf, d))))
+        })
+        .collect();
+    let (threads, marks): (Vec<&Mark>, Vec<&Mark>) =
+        (marks.iter()).partition(|m| m.annot.thread_parent().is_some());
+    for m in marks {
+        let written = to_pdf_in(m, pdf, &mut cx);
+        let rect = rect_of(pdf, &written.main);
+        let id = pdf.add_object(Object::Dictionary(written.main));
+        list.push(id.into());
+        named.insert(m.annot.name(), (id, rect));
+        for mut part in written.companions {
+            part.set("IRT", id);
+            part.set("RT", Object::Name(b"Group".to_vec()));
+            list.push(pdf.add_object(Object::Dictionary(part)).into());
+        }
+    }
+    let mut pending = threads;
+    while !pending.is_empty() {
+        let parent = |m: &Mark| m.annot.thread_parent().unwrap_or_default().to_string();
+        let (ready, waiting): (Vec<&Mark>, Vec<&Mark>) =
+            (pending.iter()).partition(|m| named.contains_key(&parent(m)));
+        let stuck = ready.is_empty();
+        for m in if stuck { &waiting } else { &ready } {
+            let mut main = to_pdf_in(m, pdf, &mut cx).main;
+            if let Some((irt, rect)) = named.get(&parent(m)).cloned() {
+                main.set("IRT", irt);
+                main.set("Rect", rect);
+            }
+            let rect = rect_of(pdf, &main);
+            let id = pdf.add_object(Object::Dictionary(main));
+            list.push(id.into());
+            named.insert(m.annot.name(), (id, rect));
+        }
+        pending = if stuck { Vec::new() } else { waiting };
+    }
+    page.set("Annots", list);
+}
+
+/// `marks` as a document holds them: a page stamp naming [`MARK_STAMP`]
+/// holding its page, and an attachment naming [`MARK_FILE`] its file.
+pub fn holding(marks: &[Annot]) -> Vec<Mark> {
+    let [stamp, file] = mark_blobs(&Store::new());
+    let mark = |a: &Annot| {
+        let mut m = Mark::from(a.clone());
+        match &a.kind {
+            AnnotKind::PageStamp { stamp: s, .. } if *s == *MARK_STAMP => {
+                m.stamp = Some(FormRef::Blob(stamp.clone().into()));
+            }
+            AnnotKind::FileAttachment { file: f, .. } if *f == *MARK_FILE => {
+                m.file = Some(file.clone().into());
+            }
+            _ => {}
+        }
+        m
+    };
+    marks.iter().map(mark).collect()
 }
 
 /// One mark of every kind, not turned, in PageSpace within a visible box
@@ -806,7 +975,7 @@ pub fn mark_assets() -> std::sync::Arc<crate::assets::MarkAssets> {
 /// perimeter and an area, which a file holds as `/Vertices` where a
 /// distance is `/L`: ids from 1, the reply and the status in the note's
 /// thread, and the stamp and the attachment naming [`MARK_STAMP`] and
-/// [`MARK_FILE`], which [`mark_assets`] holds.
+/// [`MARK_FILE`] (see [`holding`]).
 pub fn every_mark_kind() -> Vec<Annot> {
     use crate::annot::{Box2, REVIEW};
     use crate::measure::{Measured, Scale};
@@ -892,7 +1061,7 @@ pub fn every_mark_kind() -> Vec<Annot> {
         },
         AnnotKind::PageStamp {
             rect: b(60.0, 300.0, 100.0, 50.0),
-            stamp: MARK_STAMP.into(),
+            stamp: MARK_STAMP.clone(),
             name: "Approved".into(),
             text: Some("GE".into()),
         },
@@ -920,7 +1089,7 @@ pub fn every_mark_kind() -> Vec<Annot> {
         AnnotKind::FileAttachment {
             pos: p(500.0, 700.0),
             icon: "Paperclip".into(),
-            file: MARK_FILE.into(),
+            file: MARK_FILE.clone(),
             name: "notes.txt".into(),
             size: MARK_FILE_BYTES.len() as u64,
         },

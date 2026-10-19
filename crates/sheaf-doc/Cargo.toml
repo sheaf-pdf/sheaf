@@ -40,6 +40,8 @@ sha2 = "0.11"
 # Text in a mark's staleness digest is NFC, whatever another tool wrote
 # (M10.5 §3.6).
 unicode-normalization = "0.1"
+# What a change means for saving and signatures, as sets (M10.5 §7.1).
+bitflags.workspace = true
 
 [dev-dependencies]
 image.workspace = true

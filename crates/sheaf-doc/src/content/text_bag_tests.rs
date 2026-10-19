@@ -136,17 +136,81 @@ fn words_end_where_the_text_moves() {
         ["it’sαb"]
     );
     assert_eq!(
-        read(b"BT (one) Tj 0 -12 Td (two) Tj T* (three) ' ET"),
+        read(b"BT /T 9 Tf (one) Tj 0 -12 Td (two) Tj T* (three) ' ET"),
         ["one", "three", "two"]
     );
     assert_eq!(
-        read(b"BT (a) Tj ET BT (b) Tj ET (c d) Tj"),
+        read(b"/T 9 Tf BT (a) Tj ET BT (b) Tj ET (c d) Tj"),
         ["a", "b", "c", "d"]
     );
-    // No font, or one the resources haven't: the bytes as they are.
-    assert_eq!(read(b"BT /X 9 Tf (caf\\351) Tj ET"), ["café"]);
     assert_eq!(bag(&pdf, &resources, b"").len(), 0);
     assert!(bag(&pdf, &resources, b"q Q").is_empty());
+}
+
+/// A string in no font, in one the resources haven't, or with a code its
+/// font doesn't say the text of, is its bytes' hash, and ends the word
+/// before it: only the same bytes match it.
+#[test]
+fn codes_no_font_reads_are_their_bytes_hash() {
+    let mut pdf = Pdf::with_version("1.7");
+    let standard = pdf.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Times-Roman",
+    });
+    let symbolic = pdf.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "ABCDEF+Wingdings",
+    });
+    let composite = pdf.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "GHIJKL+Arial",
+        "Encoding" => "Identity-H",
+    });
+    let resources: Object = dictionary! {
+        "Font" => dictionary! { "T" => standard, "W" => symbolic, "C" => composite },
+    }
+    .into();
+    let hashed = |bytes: &[&[u8]]| {
+        let mut bag = TextBag::default();
+        for b in bytes {
+            bag.add_hash(sheaf_core::checksum(b));
+        }
+        bag
+    };
+    assert_eq!(
+        bag(&pdf, &resources, b"BT (caf\\351) Tj ET"),
+        hashed(&[b"caf\xe9"])
+    );
+    assert_eq!(
+        bag(&pdf, &resources, b"BT /X 9 Tf (a) Tj ET"),
+        hashed(&[b"a"])
+    );
+    assert_eq!(
+        bag(&pdf, &resources, b"BT /W 9 Tf (ab) Tj ET"),
+        hashed(&[b"ab"])
+    );
+    assert_eq!(
+        bag(&pdf, &resources, b"BT /C 9 Tf <0041> Tj ET"),
+        hashed(&[b"\0A"])
+    );
+    // Standard has no code 0x80: the string is a hash between two words.
+    let mut want = words("one two");
+    want.add_hash(sheaf_core::checksum(b"x\x80"));
+    assert_eq!(
+        bag(
+            &pdf,
+            &resources,
+            b"BT /T 9 Tf (one) Tj (x\\200) Tj (two) Tj ET"
+        ),
+        want
+    );
+    // Within: the same bytes, and the words, as often or more.
+    let other = bag(
+        &pdf,
+        &resources,
+        b"BT /T 9 Tf (two one) Tj /W 1 Tf (x\\200) Tj ET",
+    );
+    assert_eq!(want.missing_from(&other), 0);
+    assert_eq!(other.missing_from(&want), 0);
+    assert_eq!(words("one one two three").missing_from(&want), 2);
+    assert_eq!(want.len(), 3);
 }
 
 /// A composite font whose encoding isn't Identity: its CMap's codespace

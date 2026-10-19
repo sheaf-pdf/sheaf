@@ -19,6 +19,8 @@
 //!   [`FontRes`], a font as a page resource named by its [`ResId`].
 //! - [`ContentWriter`]: content written, its resources ([`Res`]) named at
 //!   the end, and [`ResObjects`], which writes them for the old writers.
+//! - [`sink`]: where the legacy installers draw, the old writers' lopdf
+//!   document or the emitter.
 
 mod balance;
 mod blocks;
@@ -32,6 +34,7 @@ mod marked;
 mod names;
 mod page;
 mod res;
+pub mod sink;
 mod splice;
 #[cfg(test)]
 mod tests;
@@ -56,7 +59,7 @@ pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, 
 pub use res::{Res, ResBody, ResId};
 pub use splice::{SpliceError, splice};
 pub use text_bag::{FontDecoders, TextBag, text_bag};
-pub use to_lopdf::{ResObjects, resources_of};
+pub use to_lopdf::ResObjects;
 pub use writer::{
     Blend, Color, ContentWriter, FillRule, GState, LineCap, LineJoin, Need, Paint, Reserved,
     ResourceNeeds, TextMode, write_string,

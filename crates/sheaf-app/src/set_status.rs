@@ -12,7 +12,7 @@ use gpui::{
 };
 use serde::{Deserialize, Serialize};
 use sheaf_doc::geom::Geom;
-use sheaf_doc::{Annot, AnnotKind, Box2, Edit, OutlineId, TextStyle};
+use sheaf_doc::{Annot, AnnotKind, Box2, Edit, OutlineId, PageId, TextStyle};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
@@ -291,11 +291,7 @@ impl DocView {
         };
         let id = doc.outline_selected?;
         let st = doc.model.state();
-        let title = st
-            .outline_flat()
-            .into_iter()
-            .find(|(_, n)| n.id == id)
-            .map(|(_, n)| n.title.clone())?;
+        let title = st.bookmark(id)?.title.to_string();
         let pages = st.bookmark_pages(id).map_or(0, |p| p.len());
         Some((id, title, pages))
     }
@@ -322,7 +318,7 @@ impl DocView {
         let app: &App = cx;
         let edits = status_edits(
             doc.model.state(),
-            &|pref| doc.model.geom(pref),
+            &|page| doc.model.geom(page),
             id,
             &spec,
             &stamp_text,
@@ -370,7 +366,7 @@ impl DocView {
 /// signed by `sign`.
 fn status_edits(
     st: &sheaf_doc::DocState,
-    geom: &dyn Fn(&sheaf_doc::PageRef) -> Geom,
+    geom: &dyn Fn(PageId) -> Geom,
     id: OutlineId,
     spec: &StatusSpec,
     stamp_text: &str,
@@ -390,12 +386,13 @@ fn status_edits(
     }];
     let mut marks = Vec::new();
     for page in st.bookmark_pages(id).unwrap_or_default() {
-        let Some(edit) = st.pages.iter().find(|p| p.id == page).map(geom) else {
+        if st.def(page).is_none() {
             continue;
-        };
+        }
+        let edit = geom(page);
         let size = edit.shown();
         // A page's border is replaced, not doubled.
-        for a in st.annots_on(page).into_iter().flatten() {
+        for a in st.marks_on(page) {
             if matches!(a.kind, AnnotKind::PageBorder { .. }) {
                 edits.push(Edit::AnnotDelete { page, id: a.id });
             }
@@ -452,7 +449,7 @@ fn reset_edits(st: &sheaf_doc::DocState, id: OutlineId, stamps: bool) -> Vec<Edi
         style: Some(TextStyle::default()),
     }];
     for page in st.bookmark_pages(id).unwrap_or_default() {
-        for a in st.annots_on(page).into_iter().flatten() {
+        for a in st.marks_on(page) {
             let goes = match &a.kind {
                 AnnotKind::PageBorder { .. } => true,
                 AnnotKind::TextStamp { status, .. } => *status && stamps,
@@ -500,6 +497,7 @@ mod tests {
         let d = Document::new(
             store,
             primary,
+            None,
             &[
                 FlatOutlineItem {
                     title: "Cash".into(),
@@ -509,6 +507,8 @@ mod tests {
                     color: None,
                     style: Default::default(),
                     open: true,
+                    object: None,
+                    kept: false,
                 },
                 FlatOutlineItem {
                     title: "Receivables".into(),
@@ -518,11 +518,13 @@ mod tests {
                     color: None,
                     style: Default::default(),
                     open: true,
+                    object: None,
+                    kept: false,
                 },
             ],
             Box::new(FixedCount(10)),
         );
-        let cash = d.state().outline[0].id;
+        let cash = d.state().outline_roots()[0];
         (d, cash)
     }
 
@@ -544,16 +546,12 @@ mod tests {
         };
         set(&mut d);
         // Cash owns pages 1-3: each has a border and a stamp; 4 and 5 none.
-        let count = |d: &Document, i: usize| {
-            d.state()
-                .annots_on(d.page(i).unwrap().id)
-                .map_or(0, |l| l.len())
-        };
+        let count = |d: &Document, i: usize| d.state().marks_on(d.page(i).unwrap()).count();
         assert_eq!(
             (0..5).map(|i| count(&d, i)).collect::<Vec<_>>(),
             [2, 2, 2, 0, 0]
         );
-        let node = &d.state().outline[0];
+        let node = d.state().bookmark(cash).unwrap();
         assert_eq!(node.color, Some(spec.color));
         assert!(node.style.bold);
         // Again: the borders are replaced, the stamps added.
@@ -563,7 +561,7 @@ mod tests {
         d.apply_batch(reset_edits(d.state(), cash, false), "reset")
             .unwrap();
         assert_eq!(count(&d, 0), 2);
-        assert_eq!(d.state().outline[0].color, None);
+        assert_eq!(d.state().bookmark(cash).unwrap().color, None);
         d.apply_batch(reset_edits(d.state(), cash, true), "reset")
             .unwrap();
         assert_eq!(count(&d, 0), 0);
@@ -574,7 +572,7 @@ mod tests {
     #[test]
     fn a_status_is_laid_out_on_the_page_as_it_shows() {
         let (mut d, cash) = binder();
-        let first = d.page(0).unwrap().id;
+        let first = d.page(0).unwrap();
         d.apply(
             Edit::RotatePages {
                 ids: vec![first],
@@ -595,13 +593,7 @@ mod tests {
         d.apply_batch(edits, "status").unwrap();
         let geom = d.geom(d.page(0).unwrap());
         let size = geom.shown();
-        let marks: Vec<Annot> = d
-            .state()
-            .annots_on(first)
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect();
+        let marks: Vec<Annot> = d.state().marks_on(first).cloned().collect();
         let [border, stamp] = marks.as_slice() else {
             panic!()
         };

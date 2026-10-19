@@ -2,11 +2,11 @@
 //!
 //! A [`Prim`] puts one slot of the document, a [`Key`], from the value it
 //! held before the edit to the value it holds after. `None` is absent: no
-//! labels, no header/footer, nothing for that page or field. Before-values
-//! cost nothing, since they are the parent's values (im and `Arc` clones),
-//! and they make replay checked: [`DocState::apply`] refuses a prim whose
-//! before isn't what the slot holds, so a damaged history fails instead of
-//! quietly building another document.
+//! labels, no such generator, nothing for that page, bookmark or field.
+//! Before-values cost nothing, since they are the parent's values (im and
+//! `Arc` clones), and they make replay checked: [`DocState::apply`]
+//! refuses a prim whose before isn't what the slot holds, so a damaged
+//! history fails instead of quietly building another document.
 //!
 //! An edit writes through a recording context, [`Rec`], which turns what it
 //! wrote into prims. A slot put back to the value it had makes none, so an
@@ -14,23 +14,29 @@
 //!
 //! History counts what it holds with [`HeapSize`] (§3.9).
 //!
-//! The keys are transitional, one per field of today's `DocState`; M10.5
-//! slice 8 replaces them with the records' keys.
+//! The keys are the records' own, eleven kinds of slot (`Order`, `Page`,
+//! `Geom`, `PageAnnots`, `Annot`, `Field`, `Form`, `Bookmark`,
+//! `OutlineRoots`, `Labels`, `Generator`).
 
 use std::collections::BTreeSet;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use im::{OrdSet, Vector};
+use im::Vector;
 use sheaf_core::DestView;
 
-use crate::annot::{Annot, AnnotKind, Box2, Pt};
-use crate::forms::field::{Action, Choice, Trigger, Value};
-use crate::forms::{Field, FieldId, Widget};
+use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt};
+use crate::file::ForeignAnnot;
+use crate::forms::FieldId;
+use crate::forms::field::{Action, Choice, Mk, Trigger, Value};
+use crate::geom::Geom;
 use crate::labels::LabelSpec;
 use crate::measure::Scale;
 use crate::model::{
-    DocState, Edit, FlatOutlineItem, NewOutlineItem, OutlineNode, PageId, PageRef, Rebase,
+    AnnotBody, AnnotRec, Bookmark, ContentStack, DocState, Edit, FieldNode, FieldProps,
+    FlatOutlineItem, Foreign, FormDoc, FormInst, GenId, GenSpec, Generator, Layer, Mark,
+    NewOutlineItem, OutlineId, PageDef, PageId, Rebase, ScriptState, Static, Target, Terminal,
+    Widget, WidgetProps,
 };
 use crate::stamps::{Bates, HeaderFooter};
 use crate::tape::{Row, Tape};
@@ -39,32 +45,40 @@ use crate::text_layer::TextLayer;
 /// A slot of the document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Key {
-    Pages,
-    Outline,
-    /// A page's marks.
-    AnnotsOf(PageId),
-    TextLayer(PageId),
-    /// Other tools' comments deleted from a page.
-    RemovedOf(PageId),
-    Labels,
-    HeaderFooter,
+    /// The pages in document order.
+    Order,
+    /// What a page shows.
+    Page(PageId),
+    /// A page's boxes and `/Rotate`.
+    Geom(PageId),
+    Bookmark(OutlineId),
+    /// The top-level bookmarks, in order.
+    OutlineRoots,
+    /// A page's annotations, in `/Annots` order.
+    PageAnnots(PageId),
+    Annot(AnnotId),
+    /// A node of the form's field tree.
     Field(FieldId),
-    WidgetsOf(PageId),
+    /// The form as a whole.
+    Form,
+    Labels,
+    Generator(GenId),
 }
 
-/// What a slot holds. Pages and Outline always hold one.
+/// What a slot holds. Order, OutlineRoots and Form always hold one.
 #[derive(Debug, Clone)]
 pub enum Val {
-    Pages(Vector<PageRef>),
-    Outline(Vector<OutlineNode>),
-    Annots(Vector<Annot>),
-    TextLayer(Arc<TextLayer>),
-    Removed(OrdSet<String>),
-    Labels(Vector<LabelSpec>),
-    HeaderFooter(Arc<HeaderFooter>),
-    /// A copy: `DocState` holds its fields by value.
-    Field(Box<Field>),
-    Widgets(Vector<Widget>),
+    Order(Vector<PageId>),
+    Page(Arc<PageDef>),
+    Geom(Arc<Geom>),
+    Bookmark(Arc<Bookmark>),
+    OutlineRoots(Vector<OutlineId>),
+    PageAnnots(Vector<AnnotId>),
+    Annot(AnnotRec),
+    Field(Arc<FieldNode>),
+    Form(Arc<FormDoc>),
+    Labels(Arc<[LabelSpec]>),
+    Generator(Arc<Generator>),
 }
 
 /// One slot, from `before` to `after`.
@@ -88,90 +102,22 @@ pub struct Mismatch {
 pub(crate) fn same(a: Option<&Val>, b: Option<&Val>) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some(Val::Pages(a)), Some(Val::Pages(b))) => a.ptr_eq(b) || a == b,
-        (Some(Val::Outline(a)), Some(Val::Outline(b))) => a.ptr_eq(b) || a == b,
-        (Some(Val::Annots(a)), Some(Val::Annots(b))) => a.ptr_eq(b) || a == b,
-        (Some(Val::TextLayer(a)), Some(Val::TextLayer(b))) => Arc::ptr_eq(a, b) || a == b,
-        (Some(Val::Removed(a)), Some(Val::Removed(b))) => a.ptr_eq(b) || a == b,
-        (Some(Val::Labels(a)), Some(Val::Labels(b))) => a.ptr_eq(b) || a == b,
-        (Some(Val::HeaderFooter(a)), Some(Val::HeaderFooter(b))) => Arc::ptr_eq(a, b) || a == b,
-        (Some(Val::Field(a)), Some(Val::Field(b))) => a == b,
-        (Some(Val::Widgets(a)), Some(Val::Widgets(b))) => a.ptr_eq(b) || a == b,
+        (Some(Val::Order(a)), Some(Val::Order(b))) => a.ptr_eq(b) || a == b,
+        (Some(Val::Page(a)), Some(Val::Page(b))) => Arc::ptr_eq(a, b) || a == b,
+        (Some(Val::Geom(a)), Some(Val::Geom(b))) => Arc::ptr_eq(a, b) || a == b,
+        (Some(Val::Bookmark(a)), Some(Val::Bookmark(b))) => Arc::ptr_eq(a, b) || a == b,
+        (Some(Val::OutlineRoots(a)), Some(Val::OutlineRoots(b))) => a.ptr_eq(b) || a == b,
+        (Some(Val::PageAnnots(a)), Some(Val::PageAnnots(b))) => a.ptr_eq(b) || a == b,
+        (Some(Val::Annot(a)), Some(Val::Annot(b))) => a.same(b),
+        (Some(Val::Labels(a)), Some(Val::Labels(b))) => Arc::ptr_eq(a, b) || a == b,
+        (Some(Val::Generator(a)), Some(Val::Generator(b))) => Arc::ptr_eq(a, b) || a == b,
+        (Some(Val::Field(a)), Some(Val::Field(b))) => Arc::ptr_eq(a, b) || a == b,
+        (Some(Val::Form(a)), Some(Val::Form(b))) => Arc::ptr_eq(a, b) || a == b,
         _ => false,
     }
 }
 
 impl DocState {
-    /// What `key` holds.
-    pub(crate) fn get(&self, key: &Key) -> Option<Val> {
-        match *key {
-            Key::Pages => Some(Val::Pages(self.pages.clone())),
-            Key::Outline => Some(Val::Outline(self.outline.clone())),
-            Key::AnnotsOf(page) => self.annots.get(&page).cloned().map(Val::Annots),
-            Key::TextLayer(page) => self.text_layers.get(&page).cloned().map(Val::TextLayer),
-            Key::RemovedOf(page) => self.removed_comments.get(&page).cloned().map(Val::Removed),
-            Key::Labels => self.labels.clone().map(Val::Labels),
-            Key::HeaderFooter => self.header_footer.clone().map(Val::HeaderFooter),
-            Key::Field(id) => self
-                .fields
-                .get(&id)
-                .map(|f| Val::Field(Box::new(f.clone()))),
-            Key::WidgetsOf(page) => self.widgets.get(&page).cloned().map(Val::Widgets),
-        }
-    }
-
-    /// Puts `val` in `key`'s slot. A value `key` can't hold leaves the
-    /// state as it was.
-    fn set(&mut self, key: &Key, val: Option<Val>) -> Result<(), Mismatch> {
-        let misfit = Err(Mismatch { key: *key });
-        match *key {
-            Key::Pages => match val {
-                Some(Val::Pages(v)) => self.pages = v,
-                _ => return misfit,
-            },
-            Key::Outline => match val {
-                Some(Val::Outline(v)) => self.outline = v,
-                _ => return misfit,
-            },
-            Key::AnnotsOf(page) => match val {
-                Some(Val::Annots(v)) => _ = self.annots.insert(page, v),
-                None => _ = self.annots.remove(&page),
-                _ => return misfit,
-            },
-            Key::TextLayer(page) => match val {
-                Some(Val::TextLayer(v)) => _ = self.text_layers.insert(page, v),
-                None => _ = self.text_layers.remove(&page),
-                _ => return misfit,
-            },
-            Key::RemovedOf(page) => match val {
-                Some(Val::Removed(v)) => _ = self.removed_comments.insert(page, v),
-                None => _ = self.removed_comments.remove(&page),
-                _ => return misfit,
-            },
-            Key::Labels => match val {
-                Some(Val::Labels(v)) => self.labels = Some(v),
-                None => self.labels = None,
-                _ => return misfit,
-            },
-            Key::HeaderFooter => match val {
-                Some(Val::HeaderFooter(v)) => self.header_footer = Some(v),
-                None => self.header_footer = None,
-                _ => return misfit,
-            },
-            Key::Field(id) => match val {
-                Some(Val::Field(v)) => _ = self.fields.insert(id, *v),
-                None => _ = self.fields.remove(&id),
-                _ => return misfit,
-            },
-            Key::WidgetsOf(page) => match val {
-                Some(Val::Widgets(v)) => _ = self.widgets.insert(page, v),
-                None => _ = self.widgets.remove(&page),
-                _ => return misfit,
-            },
-        }
-        Ok(())
-    }
-
     /// Applies `p`: when its key holds its before, puts its after there.
     /// Otherwise the state is left as it was.
     pub fn apply(&mut self, p: &Prim) -> Result<(), Mismatch> {
@@ -255,7 +201,9 @@ macro_rules! no_heap {
     };
 }
 
-no_heap!(u32, PageId, PageRef, Pt, Box2, Trigger, Rebase);
+no_heap!(
+    u32, PageId, OutlineId, AnnotId, FieldId, FormInst, Pt, Box2, Trigger, Rebase
+);
 
 impl HeapSize for String {
     fn heap_size(&self) -> usize {
@@ -307,12 +255,6 @@ impl<T: HeapSize + Clone> HeapSize for Vector<T> {
     }
 }
 
-impl<T: HeapSize + Ord + Clone> HeapSize for OrdSet<T> {
-    fn heap_size(&self) -> usize {
-        self.len() * size_of::<T>() + self.iter().map(T::heap_size).sum::<usize>()
-    }
-}
-
 impl HeapSize for DestView {
     fn heap_size(&self) -> usize {
         match self {
@@ -322,9 +264,20 @@ impl HeapSize for DestView {
     }
 }
 
-impl HeapSize for OutlineNode {
+impl HeapSize for Target {
     fn heap_size(&self) -> usize {
-        self.title.heap_size() + self.view.heap_size() + self.children.heap_size()
+        match self {
+            Target::Page { view, .. } => view.heap_size(),
+            Target::Kept => 0,
+        }
+    }
+}
+
+/// Its title, where it goes and its kids; not its item's source, whose
+/// bytes the store counts.
+impl HeapSize for Bookmark {
+    fn heap_size(&self) -> usize {
+        self.title.heap_size() + self.target.heap_size() + self.kids.heap_size()
     }
 }
 
@@ -359,6 +312,20 @@ impl HeapSize for HeaderFooter {
             + self.date.heap_size()
             + self.file.heap_size()
             + self.bates.heap_size()
+    }
+}
+
+impl HeapSize for GenSpec {
+    fn heap_size(&self) -> usize {
+        match self {
+            GenSpec::HeaderFooter(hf) => size_of::<HeaderFooter>() + hf.heap_size(),
+        }
+    }
+}
+
+impl HeapSize for Generator {
+    fn heap_size(&self) -> usize {
+        self.spec.heap_size()
     }
 }
 
@@ -435,6 +402,84 @@ impl HeapSize for Annot {
     }
 }
 
+/// Its mark, as read: not the object it was read as, nor its stamp's page
+/// or its file, whose bytes the store counts.
+impl HeapSize for Mark {
+    fn heap_size(&self) -> usize {
+        self.annot.heap_size()
+    }
+}
+
+impl HeapSize for ForeignAnnot {
+    fn heap_size(&self) -> usize {
+        self.subtype.heap_size()
+            + self.author.heap_size()
+            + self.contents.heap_size()
+            + self.modified.heap_size()
+            + self.name.heap_size()
+            + self.parent.heap_size()
+            + self.state.heap_size()
+            + self.created.heap_size()
+            + self.mark.heap_size()
+    }
+}
+
+/// Its summary, which its copies share: not its object, whose bytes the
+/// store counts.
+impl HeapSize for Foreign {
+    fn heap_size(&self) -> usize {
+        size_of::<ForeignAnnot>() + self.summary.heap_size()
+    }
+}
+
+impl HeapSize for Mk {
+    fn heap_size(&self) -> usize {
+        self.caption.heap_size()
+    }
+}
+
+impl HeapSize for WidgetProps {
+    fn heap_size(&self) -> usize {
+        self.actions.heap_size()
+    }
+}
+
+/// Where it is and what it shows, and its props, which its copies share;
+/// not the annotation it was read as, whose bytes the store counts.
+impl HeapSize for Widget {
+    fn heap_size(&self) -> usize {
+        self.da.heap_size()
+            + self.state.heap_size()
+            + self.states.heap_size()
+            + size_of::<Mk>()
+            + self.mk.heap_size()
+            + self.shared()
+    }
+}
+
+impl Widget {
+    /// Its props, which its copies share.
+    pub(crate) fn shared(&self) -> usize {
+        size_of::<WidgetProps>() + self.props.heap_size()
+    }
+}
+
+impl HeapSize for AnnotBody {
+    fn heap_size(&self) -> usize {
+        match self {
+            AnnotBody::Mark(m) => size_of::<Mark>() + m.heap_size(),
+            AnnotBody::Foreign(f) => size_of::<Foreign>() + f.heap_size(),
+            AnnotBody::Widget(w) => size_of::<Widget>() + w.heap_size(),
+        }
+    }
+}
+
+impl HeapSize for AnnotRec {
+    fn heap_size(&self) -> usize {
+        self.body.heap_size()
+    }
+}
+
 impl HeapSize for Value {
     fn heap_size(&self) -> usize {
         match self {
@@ -457,26 +502,62 @@ impl HeapSize for Action {
     }
 }
 
-impl HeapSize for Field {
+impl HeapSize for FieldProps {
     fn heap_size(&self) -> usize {
-        self.name.heap_size()
-            + self.value.heap_size()
-            + self.default.heap_size()
-            + self.da.heap_size()
+        self.da.heap_size()
             + self.options.heap_size()
             + self.tooltip.heap_size()
             + self.actions.heap_size()
-            + self.under.heap_size()
     }
 }
 
-impl HeapSize for Widget {
+impl HeapSize for Terminal {
     fn heap_size(&self) -> usize {
-        self.da.heap_size()
-            + self.mk.caption.heap_size()
-            + self.state.heap_size()
-            + self.states.heap_size()
-            + self.actions.heap_size()
+        self.value.heap_size()
+            + self.default.heap_size()
+            + self.widgets.heap_size()
+            + size_of::<FieldProps>()
+            + self.props.heap_size()
+    }
+}
+
+/// Its name, kids and terminal; not the field it was read as, whose bytes
+/// the store counts.
+impl HeapSize for FieldNode {
+    fn heap_size(&self) -> usize {
+        self.partial.heap_size()
+            + self.kids.heap_size()
+            + self
+                .term
+                .as_ref()
+                .map_or(0, |t| size_of::<Terminal>() + t.heap_size())
+    }
+}
+
+impl FieldNode {
+    /// Its terminal's props, which its copies share.
+    pub(crate) fn shared(&self) -> usize {
+        (self.term.as_ref()).map_or(0, |t| size_of::<FieldProps>() + t.props.heap_size())
+    }
+}
+
+impl HeapSize for ScriptState {
+    fn heap_size(&self) -> usize {
+        match self {
+            ScriptState::On => 0,
+            ScriptState::Off { instances } => instances.heap_size(),
+        }
+    }
+}
+
+impl HeapSize for FormDoc {
+    fn heap_size(&self) -> usize {
+        self.roots.heap_size()
+            + self.names.len() * size_of::<(FormInst, Arc<str>)>()
+            + self.names.values().map(Arc::heap_size).sum::<usize>()
+            + self.scripts.heap_size()
+            + self.calc_order.heap_size()
+            + self.da.as_ref().map_or(0, Arc::heap_size)
     }
 }
 
@@ -486,18 +567,52 @@ impl HeapSize for TextLayer {
     }
 }
 
+impl HeapSize for Static {
+    fn heap_size(&self) -> usize {
+        match self {
+            Static::OcrText(text) => size_of::<TextLayer>() + text.heap_size(),
+        }
+    }
+}
+
+impl HeapSize for Layer {
+    fn heap_size(&self) -> usize {
+        self.body.heap_size()
+    }
+}
+
+impl HeapSize for ContentStack {
+    fn heap_size(&self) -> usize {
+        self.over.heap_size()
+    }
+}
+
+/// Its content stack counts, but not the empty one every untouched page
+/// shares, nor its source, whose bytes the store counts.
+impl HeapSize for PageDef {
+    fn heap_size(&self) -> usize {
+        if ContentStack::is_shared_empty(&self.content) {
+            0
+        } else {
+            size_of::<ContentStack>() + self.content.heap_size()
+        }
+    }
+}
+
 impl HeapSize for Val {
     fn heap_size(&self) -> usize {
         match self {
-            Val::Pages(v) => v.heap_size(),
-            Val::Outline(v) => v.heap_size(),
-            Val::Annots(v) => v.heap_size(),
-            Val::TextLayer(l) => size_of::<TextLayer>() + l.heap_size(),
-            Val::Removed(s) => s.heap_size(),
+            Val::Order(v) => v.heap_size(),
+            Val::Page(def) => size_of::<PageDef>() + def.heap_size(),
+            Val::Geom(_) => size_of::<Geom>(),
+            Val::Bookmark(b) => size_of::<Bookmark>() + b.heap_size(),
+            Val::OutlineRoots(v) => v.heap_size(),
+            Val::PageAnnots(v) => v.heap_size(),
+            Val::Annot(rec) => rec.heap_size(),
+            Val::Field(f) => size_of::<FieldNode>() + f.heap_size(),
+            Val::Form(f) => size_of::<FormDoc>() + f.heap_size(),
             Val::Labels(v) => v.heap_size(),
-            Val::HeaderFooter(h) => size_of::<HeaderFooter>() + h.heap_size(),
-            Val::Field(f) => f.heap_size(),
-            Val::Widgets(v) => v.heap_size(),
+            Val::Generator(g) => size_of::<Generator>() + g.heap_size(),
         }
     }
 }
@@ -535,68 +650,89 @@ impl HeapSize for Edit {
 mod tests {
     use super::*;
     use crate::labels::Style;
-    use crate::model::SourceId;
-    use sheaf_core::Rotation;
+    use crate::model::{PageBase, SourceId, SourceInfo};
+    use crate::store::Store;
 
+    /// Three blank pages, in their file's order.
     fn state() -> DocState {
-        DocState {
-            pages: (0..3)
-                .map(|i| PageRef {
-                    id: PageId(i),
+        let src = SourceInfo::blank(&Store::new(), 3).src;
+        let pages = (0..3).map(|index| {
+            let def = PageDef {
+                base: PageBase {
                     source: SourceId(0),
-                    index: i as u32,
-                    rotation: Rotation::R0,
-                })
-                .collect(),
-            outline: Vector::new(),
-            annots: im::HashMap::new(),
-            text_layers: im::HashMap::new(),
-            labels: None,
-            header_footer: None,
-            removed_comments: im::HashMap::new(),
-            fields: im::OrdMap::new(),
-            widgets: im::HashMap::new(),
-        }
+                    src: src.clone(),
+                    index,
+                },
+                copy: 0,
+                content: ContentStack::empty(),
+            };
+            (
+                PageId(index.into()),
+                Arc::new(def),
+                Arc::new(src.geom(index)),
+            )
+        });
+        DocState::builder().pages(pages).build()
     }
 
     fn labels(prefix: &str) -> Val {
-        Val::Labels(Vector::unit(LabelSpec {
+        Val::Labels(Arc::new([LabelSpec {
             start: PageId(0),
             style: Style::Decimal,
             prefix: prefix.into(),
             first: 1,
-        }))
+        }]))
     }
 
-    fn reversed(st: &DocState) -> Vector<PageRef> {
-        st.pages.iter().rev().copied().collect()
+    fn reversed(st: &DocState) -> Vector<PageId> {
+        st.order().iter().rev().copied().collect()
     }
 
     #[test]
     fn apply_sets_and_removes() {
         let mut st = state();
-        let pages = reversed(&st);
+        let order = reversed(&st);
         st.apply(&Prim {
-            key: Key::Pages,
-            before: st.get(&Key::Pages),
-            after: Some(Val::Pages(pages.clone())),
+            key: Key::Order,
+            before: st.get(&Key::Order),
+            after: Some(Val::Order(order.clone())),
         })
         .unwrap();
-        assert_eq!(st.pages, pages);
+        assert_eq!(*st.order(), order);
         st.apply(&Prim {
             key: Key::Labels,
             before: None,
             after: Some(labels("A-")),
         })
         .unwrap();
-        assert_eq!(st.labels.as_ref().unwrap()[0].prefix, "A-");
+        assert_eq!(st.labels().unwrap()[0].prefix, "A-");
         st.apply(&Prim {
             key: Key::Labels,
             before: Some(labels("A-")),
             after: None,
         })
         .unwrap();
-        assert_eq!(st.labels, None);
+        assert_eq!(st.labels(), None);
+    }
+
+    /// A new order finds positions anew, while the states of the old one
+    /// keep theirs.
+    #[test]
+    fn positions_follow_the_order() {
+        let mut st = state();
+        let was = st.clone();
+        assert_eq!(st.pos_of(PageId(0)), Some(0));
+        st.apply(&Prim {
+            key: Key::Order,
+            before: st.get(&Key::Order),
+            after: Some(Val::Order(reversed(&st))),
+        })
+        .unwrap();
+        assert_eq!(st.pos_of(PageId(0)), Some(2));
+        assert_eq!(st.pos_of(PageId(2)), Some(0));
+        assert_eq!(st.pos_of(PageId(9)), None);
+        assert_eq!(was.pos_of(PageId(0)), Some(0));
+        assert_eq!(st.page_at(0), Some(PageId(2)));
     }
 
     #[test]
@@ -604,37 +740,42 @@ mod tests {
         let mut st = state();
         let was = st.clone();
         let wrong = Prim {
-            key: Key::Pages,
-            before: Some(Val::Pages(reversed(&st))),
-            after: Some(Val::Pages(Vector::new())),
+            key: Key::Order,
+            before: Some(Val::Order(reversed(&st))),
+            after: Some(Val::Order(Vector::new())),
         };
-        assert_eq!(st.apply(&wrong), Err(Mismatch { key: Key::Pages }));
+        assert_eq!(st.apply(&wrong), Err(Mismatch { key: Key::Order }));
         let absent = Prim {
             key: Key::Labels,
             before: Some(labels("A-")),
             after: None,
         };
         assert_eq!(st.apply(&absent), Err(Mismatch { key: Key::Labels }));
-        // Pages always hold a value, and only pages.
+        // The order always holds a value, and only an order.
         let misfit = Prim {
-            key: Key::Pages,
-            before: st.get(&Key::Pages),
+            key: Key::Order,
+            before: st.get(&Key::Order),
             after: Some(labels("A-")),
         };
-        assert_eq!(st.apply(&misfit), Err(Mismatch { key: Key::Pages }));
+        assert_eq!(st.apply(&misfit), Err(Mismatch { key: Key::Order }));
         assert_eq!(st, was);
     }
 
     #[test]
     fn same_sees_equal_values_as_the_same() {
         let st = state();
-        let (a, b) = (Val::Pages(reversed(&st)), Val::Pages(reversed(&st)));
-        let (Val::Pages(va), Val::Pages(vb)) = (&a, &b) else {
+        let (a, b) = (Val::Order(reversed(&st)), Val::Order(reversed(&st)));
+        let (Val::Order(va), Val::Order(vb)) = (&a, &b) else {
             unreachable!()
         };
         assert!(!va.ptr_eq(vb), "built apart");
         assert!(same(Some(&a), Some(&b)));
-        assert!(!same(Some(&a), st.get(&Key::Pages).as_ref()));
+        assert!(!same(Some(&a), st.get(&Key::Order).as_ref()));
+        // A page's records built apart, and equal.
+        let def = st.def(PageId(1)).unwrap();
+        let again = Val::Page(Arc::new(PageDef::clone(def)));
+        assert!(same(Some(&again), st.get(&Key::Page(PageId(1))).as_ref()));
+        assert!(!same(Some(&again), st.get(&Key::Page(PageId(2))).as_ref()));
         assert!(same(None, None));
         assert!(!same(Some(&labels("A-")), None));
         assert!(!same(Some(&labels("A-")), Some(&labels("B-"))));
@@ -653,9 +794,15 @@ mod tests {
             names.capacity() * size_of::<String>() + strings
         );
         // An im vector counts as its elements.
-        let pages = Val::Pages(state().pages);
-        assert_eq!(pages.heap_size(), 3 * size_of::<PageRef>());
-        assert_eq!(labels("A-").heap_size(), size_of::<LabelSpec>() + 2);
+        let order = Val::Order(state().order().clone());
+        assert_eq!(order.heap_size(), 3 * size_of::<PageId>());
+        assert_eq!(
+            labels("A-").heap_size(),
+            2 * size_of::<usize>() + size_of::<LabelSpec>() + 2
+        );
+        // An untouched page holds the stack every one shares.
+        let page = state().get(&Key::Page(PageId(0))).unwrap();
+        assert_eq!(page.heap_size(), size_of::<PageDef>());
     }
 
     #[test]
@@ -663,14 +810,14 @@ mod tests {
         let st = state();
         let mut rec = Rec::new(st.clone());
         rec.put(Key::Labels, Some(labels("A-")));
-        rec.put(Key::TextLayer(PageId(1)), None);
-        rec.put(Key::Pages, Some(Val::Pages(reversed(&st))));
-        assert_eq!(rec.pages[0].id, PageId(2), "it reads its own writes");
+        rec.put(Key::Geom(PageId(9)), None);
+        rec.put(Key::Order, Some(Val::Order(reversed(&st))));
+        assert_eq!(rec.page_at(0), Some(PageId(2)), "it reads its own writes");
         rec.put(Key::Labels, None);
         let (after, prims) = rec.finish();
         let keys: Vec<Key> = prims.iter().map(|p| p.key).collect();
-        assert_eq!(keys, [Key::Pages]);
-        assert_eq!(after.pages, reversed(&st));
+        assert_eq!(keys, [Key::Order]);
+        assert_eq!(*after.order(), reversed(&st));
         // The prims take the state it started from to the one it made.
         let mut replayed = st;
         for p in &prims {

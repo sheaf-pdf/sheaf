@@ -308,7 +308,7 @@ impl PrintDialog {
 
     /// Display indices of the pages to print, or why there are none.
     fn page_list(&self, cx: &App) -> Result<Vec<usize>, String> {
-        let n = self.ctx.snapshot.state.pages.len();
+        let n = self.ctx.snapshot.state.page_count();
         match self.pages {
             Pages::All => Ok((0..n).collect()),
             Pages::Current => Ok(vec![self.ctx.current.min(n.saturating_sub(1))]),
@@ -434,12 +434,8 @@ impl PrintDialog {
                 return;
             }
         };
-        let pages = self.ctx.snapshot.state.pages.clone();
-        let ids: Vec<PageId> = list
-            .iter()
-            .filter_map(|&i| pages.get(i))
-            .map(|p| p.id)
-            .collect();
+        let st = &self.ctx.snapshot.state;
+        let ids: Vec<PageId> = list.iter().filter_map(|&i| st.page_at(i)).collect();
         let paper = self.current_paper();
         let prefs = PrintPrefs {
             printer: Some(printer.name.clone()),
@@ -484,17 +480,20 @@ impl PrintDialog {
         if self.images.contains_key(&key) || self.pending.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
-        let Some(pref) = self.ctx.snapshot.state.pages.get(index).copied() else {
+        let snap = &self.ctx.snapshot;
+        let Some((id, def)) =
+            (snap.state.page_at(index)).and_then(|id| Some((id, snap.state.def(id)?)))
+        else {
             return;
         };
-        let Some(handle) = self.ctx.handles.get(&pref.source) else {
+        let Some(handle) = self.ctx.handles.get(&def.base.source) else {
             return;
         };
         let rx = handle.render(RenderRequest {
-            page: PageIndex(pref.index),
+            page: PageIndex(def.base.index),
             job: Job::Page {
                 width,
-                rotation: self.ctx.snapshot.render_delta(&pref),
+                rotation: snap.render_delta(id),
             },
             format: PixelFormat::Bgra,
             priority: 0,
@@ -624,7 +623,7 @@ impl PrintDialog {
                 })),
             )
             .into_any_element();
-        let n = self.ctx.snapshot.state.pages.len();
+        let n = self.ctx.snapshot.state.page_count();
         let page_opts = [
             (Pages::All, format!("All ({n})")),
             (
@@ -783,9 +782,9 @@ impl PrintDialog {
             .shadow_md();
         let mut caption = String::new();
         if let Some(index) = index
-            && let Some(pref) = self.ctx.snapshot.state.pages.get(index).copied()
+            && let Some(id) = self.ctx.snapshot.state.page_at(index)
         {
-            let geom = self.ctx.snapshot.geom(&pref);
+            let geom = self.ctx.snapshot.geom(id);
             let shown = geom.shown();
             let p = sheaf_print::place(
                 shown.width,
@@ -809,14 +808,15 @@ impl PrintDialog {
             if let Some(im) = self.images.get(&(index, dev_w)) {
                 page = page.child(img(im.clone()).size_full().object_fit(ObjectFit::Fill));
             }
-            if self.markup
-                && let Some(list) = self.ctx.snapshot.state.annots_on(pref.id)
-            {
+            if self.markup {
                 let (to_view, k) = (geom.to_view(), w / shown.width.max(1.0));
-                for a in list.iter() {
-                    let assets = &self.ctx.snapshot.assets;
+                for m in self.ctx.snapshot.state.mark_records_on(id) {
                     page = page.children(crate::docview::annot_elements(
-                        a, assets, &to_view, shown, k,
+                        &m.annot,
+                        m.stamp.as_ref(),
+                        &to_view,
+                        shown,
+                        k,
                     ));
                 }
             }

@@ -17,18 +17,24 @@ use in_progress::NoProgress;
 use lopdf::Object;
 use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::forms::corpus::{Corpus, each_entry};
+use sheaf_doc::materialize::{Came, How};
 use sheaf_doc::serialize::crypt::Crypt;
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::{Edit, FixedCount, Snapshot, Source, SourceInfo, Store};
+use sheaf_doc::{Document, Edit, FixedCount, Source, SourceInfo, Store};
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
-/// The two ways a save writes a file.
-type Save = fn(&Snapshot) -> anyhow::Result<Vec<u8>>;
-const STRATEGIES: [(&str, Save); 2] = [
-    ("Rewrite", sheaf_doc::save::rewrite),
-    ("Append", sheaf_doc::incremental::incremental),
-];
+/// What a save `how` writes of `doc`, or why it didn't, and what the
+/// save is called.
+fn saved(doc: &Document, how: How) -> (&'static str, anyhow::Result<Vec<u8>>) {
+    match how {
+        How::Rewritten => ("Rewrite", sheaf_doc::save::rewrite(&doc.snapshot())),
+        How::Appended => {
+            let appended = sheaf_doc::materialize::appended(doc);
+            ("Append", appended.map_err(anyhow::Error::from))
+        }
+    }
+}
 
 /// What a save of a corpus file came to.
 enum Saved {
@@ -42,8 +48,8 @@ enum Saved {
 }
 
 /// What became of one corpus file: None when it isn't encrypted or
-/// doesn't open without a password; else how it's encrypted, and each
-/// strategy's save.
+/// doesn't open without a password; else how it's encrypted, and the
+/// save.
 type Outcome = Option<(String, Vec<(&'static str, Saved)>)>;
 
 /// How `crypt` encrypts: its version and revision, and its streams'
@@ -211,10 +217,10 @@ fn check(was: &Before, bytes: Vec<u8>) -> Saved {
     Saved::Kept
 }
 
-/// The file at `path`, its first page turned, saved by each strategy.
-fn save_encrypted(path: &Path) -> Outcome {
+/// The file at `path`, its first page turned, saved `save`.
+fn save_encrypted(path: &Path, save: How) -> Outcome {
     let store = Store::new();
-    let primary = SourceInfo::read(&store, path, None).ok()?;
+    let (primary, stamp) = SourceInfo::read(&store, path, None).ok()?;
     let src = primary.src.clone();
     let was = Before {
         path,
@@ -223,11 +229,16 @@ fn save_encrypted(path: &Path) -> Outcome {
         decrypted: decrypted(&src),
         shown: shown(src.bytes().clone()).ok(),
     };
-    let mut doc = sheaf_doc::open::start(store, primary, Box::new(FixedCount(2)));
+    let mut doc = sheaf_doc::open::start(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        Box::new(FixedCount(2)),
+    );
     let opened = doc
         .ready(sheaf_doc::open::finish(&src, &NoProgress))
         .is_ok();
-    let turned = match doc.page(0).map(|p| p.id) {
+    let turned = match doc.page(0) {
         Some(first) if opened => {
             let turn = Edit::RotatePages {
                 ids: vec![first],
@@ -241,27 +252,26 @@ fn save_encrypted(path: &Path) -> Outcome {
         let failed = Saved::Failed("doesn't open to edit".into());
         return Some((how(&was.crypt), vec![("Open", failed)]));
     }
-    let snap = doc.snapshot();
-    let saves = STRATEGIES.map(|(strategy, save)| {
-        let saved = match save(&snap) {
-            Ok(bytes) => check(&was, bytes),
-            Err(e) if strategy == "Append" && !src.base_sound() => {
-                Saved::Declined(format!("{e:#}"))
-            }
-            Err(e) => Saved::Failed(format!("doesn't save: {e:#}")),
-        };
-        (strategy, saved)
-    });
-    Some((how(&was.crypt), saves.into()))
+    let (strategy, written) = saved(&doc, save);
+    let saved = match written {
+        Ok(bytes) => check(&was, bytes),
+        Err(e) if save == How::Appended && !src.base_sound() => Saved::Declined(format!("{e:#}")),
+        Err(e) => Saved::Failed(format!("doesn't save: {e:#}")),
+    };
+    Some((how(&was.crypt), vec![(strategy, saved)]))
 }
 
-#[test]
-fn encrypted_corpus_files_save_encrypted_by_both_strategies() {
+sheaf_doc::both_ways!(
+    encrypted_corpus_files_save_encrypted_by_both_strategies,
+    encrypted_corpus_files_save_encrypted_by_both_strategies_appended: save_encrypted_corpus
+);
+
+fn save_encrypted_corpus(save: How) {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
     let entries = corpus.manifest().unwrap();
-    let outcomes = each_entry(&entries, |entry| save_encrypted(&corpus.path(entry)));
+    let outcomes = each_entry(&entries, |entry| save_encrypted(&corpus.path(entry), save));
     let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_strategy: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     let mut failed = Vec::new();

@@ -12,7 +12,7 @@ use lopdf::{Object, dictionary};
 use sheaf_core::Rotation;
 use sheaf_doc::forms::FormClass;
 use sheaf_doc::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
-use sheaf_doc::save::{Strategy, save_to_path};
+use sheaf_doc::materialize::{How, StrategyKind};
 use sheaf_doc::{Document, Edit, SourceInfo, Store};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{FormType, Renderer};
@@ -37,7 +37,7 @@ fn open(path: &Path) -> Document {
 
 /// What `path` says about itself when it opens, read from its source.
 fn facts_of(path: &Path) -> sheaf_doc::open::Facts {
-    let info = SourceInfo::read(&Store::new(), path, None).unwrap();
+    let (info, _) = SourceInfo::read(&Store::new(), path, None).unwrap();
     sheaf_doc::open::finish(&info.src, &sheaf_ops::NoProgress)
 }
 
@@ -91,11 +91,11 @@ fn forms_open_into_the_model() {
     let path = write(&dir, "every-kind.pdf", &mut every_kind());
     let doc = open(&path);
     let st = doc.state();
-    assert_eq!(st.fields.len(), 9);
+    assert_eq!(st.terminals().count(), 9);
     let on_page: Vec<usize> = st
-        .pages
+        .order()
         .iter()
-        .map(|p| st.widgets_on(p.id).map_or(0, |w| w.len()))
+        .map(|&p| st.widgets_on(p).count())
         .collect();
     assert_eq!(on_page, [6, 4]);
     let facts = facts_of(&path);
@@ -136,9 +136,10 @@ fn forms_open_into_the_model() {
         let path = write(&dir, name, &mut form);
         let doc = open(&path);
         assert_eq!(doc.page_count(), 1, "{name}");
-        assert!(doc.state().fields.is_empty(), "{name}");
-        assert!(doc.state().widgets.is_empty(), "{name}");
-        let facts = facts_of(&path).form.facts;
+        assert_eq!(doc.state().field_count(), 0, "{name}");
+        let widgets = doc.state().annots().filter(|(_, a)| a.widget().is_some());
+        assert_eq!(widgets.count(), 0, "{name}");
+        let facts = facts_of(&path).form.facts.clone();
         let damaged = facts.damaged.clone().unwrap_or_default();
         assert!(damaged.contains(why), "{name}: {damaged:?}");
         assert!(!facts.is_fillable());
@@ -147,41 +148,45 @@ fn forms_open_into_the_model() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn a_hybrid_reference_update_opens_and_saves_whole() {
+sheaf_doc::both_ways!(
+    a_hybrid_reference_update_opens_and_saves_whole,
+    a_hybrid_reference_update_opens_and_saves_whole_appended: hybrid_saves_whole
+);
+
+fn hybrid_saves_whole(how: How) {
     // The update's catalog and fields are only in its /XRefStm, and
     // `city` only in the first section's. A save that read either
     // revision alone would drop some of them.
-    let dir = scratch("hybrid");
+    let dir = scratch(&format!("hybrid-{how:?}"));
     let path = dir.join("hybrid.pdf");
     std::fs::write(&path, hybrid_update(&hybrid_reference())).unwrap();
     let names = |path: &Path| -> Vec<String> {
         let doc = open(path);
-        doc.state()
-            .fields
-            .values()
-            .map(|f| f.name.clone())
+        let st = doc.state();
+        (st.terminals())
+            .map(|(id, _, _)| st.full_name(id).unwrap())
             .collect()
     };
     assert_eq!(names(&path), ["name", "city", "sig"]);
 
-    let mut doc = open(&path);
-    let page = doc.state().pages[0].id;
-    let rotate = Edit::RotatePages {
-        ids: vec![page],
-        by: Rotation::R90,
+    let rotated = |path: &Path| -> Document {
+        let mut doc = open(path);
+        let page = doc.state().order()[0];
+        let rotate = Edit::RotatePages {
+            ids: vec![page],
+            by: Rotation::R90,
+        };
+        doc.apply(rotate, "rotate").unwrap();
+        doc
     };
-    doc.apply(rotate, "rotate").unwrap();
+    // Saved as another file by a Rewrite.
     let copy = dir.join("copy.pdf");
-    assert_eq!(
-        save_to_path(&doc.snapshot(), &copy).unwrap(),
-        Strategy::Rewrite
-    );
+    let report = How::Rewritten.save(&mut rotated(&path), &copy);
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     assert_eq!(names(&copy), ["name", "city", "sig"]);
-    assert_eq!(
-        save_to_path(&doc.snapshot(), &path).unwrap(),
-        Strategy::Incremental
-    );
+    // Saved in place.
+    let report = how.save(&mut rotated(&path), &path);
+    assert_eq!(report.strategy, Some(how.strategy()));
     assert_eq!(names(&path), ["name", "city", "sig"]);
     let _ = std::fs::remove_dir_all(&dir);
 }

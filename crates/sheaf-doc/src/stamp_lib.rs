@@ -6,10 +6,10 @@
 //! Acrobat stamp file reads the same way.
 //!
 //! A stamp placed in a document is its page alone, a one-page PDF named
-//! by content (`generated::store`), which the document keeps
-//! (`assets::MarkAssets`). Saved, its appearance draws that page as a
-//! Form XObject ([`page_form`]), which the file holds from then on;
-//! [`form_to_pdf`] makes a one-page PDF of it again, to show or copy.
+//! by content (`generated::store`), which the mark holds
+//! ([`FormRef`](crate::model::FormRef)). Saved, its appearance draws that
+//! page as a Form XObject ([`page_form`]), which the file holds from then
+//! on; [`form_to_pdf`] makes a one-page PDF of it again, to show or copy.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -55,7 +55,7 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
         .enumerate()
         .map(|(i, id)| {
             let dict = pdf.get_dictionary(id).ok();
-            let geom = crate::file::page_geom(pdf, id);
+            let geom = geom(pdf, id);
             StampPage {
                 name: names
                     .get(&id)
@@ -132,7 +132,7 @@ pub fn one_page(pdf: &Pdf, index: usize) -> Result<Vec<u8>> {
     let mut map = HashMap::new();
     let mut dict = page_without_extras(pdf, page, &mut out, &mut map)?;
     // What the page inherits, it takes along.
-    let geom = crate::file::page_geom(pdf, page);
+    let geom = geom(pdf, page);
     dict.set("MediaBox", visible_array(&geom));
     if geom.rotate != Rotation::R0 {
         dict.set("Rotate", geom.rotate.degrees());
@@ -166,27 +166,55 @@ fn page_without_extras(
     scratch
         .objects
         .insert(page, Object::Dictionary(trimmed.clone()));
-    let mut dict = crate::save::copy_page_dict(&scratch, page, dst, map)?;
+    let mut dict = crate::materialize::copy::copy_page_dict(&scratch, page, dst, map)?;
     // Resources a page inherits from its tree.
     if !dict.has(b"Resources")
         && let Some(r) = inherited(src, page, b"Resources")
     {
-        dict.set("Resources", crate::save::remap(&scratch, &r, dst, map)?);
+        dict.set(
+            "Resources",
+            crate::materialize::copy::remap(&scratch, &r, dst, map)?,
+        );
     }
     Ok(dict)
 }
 
 /// An attribute a page inherits from its ancestors.
 fn inherited(pdf: &Pdf, page: ObjectId, key: &[u8]) -> Option<Object> {
+    inherited_as(pdf, page, key, |v| Some(v.clone()))
+}
+
+/// The first of `page`'s and then its ancestors' `key`s that `read`
+/// reads.
+fn inherited_as<T>(
+    pdf: &Pdf,
+    page: ObjectId,
+    key: &[u8],
+    read: impl Fn(&Object) -> Option<T>,
+) -> Option<T> {
     let mut id = page;
-    for _ in 0..32 {
+    for _ in 0..64 {
         let d = pdf.get_dictionary(id).ok()?;
-        if let Ok(v) = d.get(key) {
-            return Some(v.clone());
+        if let Some(v) = d.get(key).ok().and_then(&read) {
+            return Some(v);
         }
         id = d.get(b"Parent").ok()?.as_reference().ok()?;
     }
     None
+}
+
+/// Page `page`'s boxes and `/Rotate`, each its own or what it inherits,
+/// as [`Geom::read`] reads them.
+fn geom(pdf: &Pdf, page: ObjectId) -> Geom {
+    let boxed = |key: &[u8]| {
+        inherited_as(pdf, page, key, |o| {
+            let (_, o) = pdf.dereference(o).ok()?;
+            crate::annot::box_of(o.as_array().ok()?)
+        })
+        .map(|[a, b, c, d]| Rect::new(a, b, c, d))
+    };
+    let rotate = inherited_as(pdf, page, b"Rotate", |o| o.as_i64().ok());
+    Geom::read(boxed(b"MediaBox"), boxed(b"CropBox"), rotate.unwrap_or(0))
 }
 
 /// A collection titled `title` of `stamps`: each a one-page PDF, with its
@@ -208,10 +236,7 @@ pub fn build_collection(
             .context("a stamp with no page")?;
         let mut map = HashMap::new();
         let mut dict = page_without_extras(&src, page, &mut out, &mut map)?;
-        dict.set(
-            "MediaBox",
-            visible_array(&crate::file::page_geom(&src, page)),
-        );
+        dict.set("MediaBox", visible_array(&geom(&src, page)));
         dict.set("Parent", pages_id);
         dict.remove(TEXT_KEY.as_bytes());
         if let Some(t) = text.as_ref().filter(|t| !t.is_empty()) {
@@ -400,8 +425,8 @@ pub fn page_forms(src: &Pdf, pages: &[ObjectId], dst: &mut Pdf) -> Result<Vec<Pa
     let mut map = HashMap::new();
     let mut out = Vec::new();
     for &page in pages {
-        let geom = crate::file::page_geom(src, page);
-        let mut dict = crate::save::copy_page_dict(&scratch, page, dst, &mut map)?;
+        let geom = geom(src, page);
+        let mut dict = crate::materialize::copy::copy_page_dict(&scratch, page, dst, &mut map)?;
         // The page placeholder isn't wanted, only what it pointed at.
         dst.objects.remove(&map[&page]);
         if !dict.has(b"Resources")
@@ -409,7 +434,7 @@ pub fn page_forms(src: &Pdf, pages: &[ObjectId], dst: &mut Pdf) -> Result<Vec<Pa
         {
             dict.set(
                 "Resources",
-                crate::save::remap(&scratch, &r, dst, &mut map)?,
+                crate::materialize::copy::remap(&scratch, &r, dst, &mut map)?,
             );
         }
         // The page's streams as one, as a viewer draws them.
@@ -455,7 +480,8 @@ pub fn form_to_pdf<P: Objects + ?Sized>(src: &P, form: ObjectId) -> Result<Vec<u
     let mut out = Pdf::with_version("1.5");
     let pages_id = out.new_object_id();
     let mut map = HashMap::new();
-    let copied = crate::save::remap(src, &Object::Reference(form), &mut out, &mut map)?;
+    let copied =
+        crate::materialize::copy::remap(src, &Object::Reference(form), &mut out, &mut map)?;
     let content = out.add_object(Stream::new(dictionary! {}, b"/Stamp Do".to_vec()));
     let page = out.add_object(dictionary! {
         "Type" => "Page", "Parent" => pages_id, "Contents" => content,

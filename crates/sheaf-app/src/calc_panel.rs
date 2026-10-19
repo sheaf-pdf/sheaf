@@ -600,8 +600,9 @@ impl DocView {
             State::Ready(doc) => doc
                 .model
                 .state()
-                .annots_on(page)
-                .and_then(|l| l.iter().find(|a| a.id == id).cloned()),
+                .find_annot(id)
+                .filter(|(on, _)| *on == page)
+                .map(|(_, a)| a.clone()),
             _ => None,
         };
         let Some(a) = annot else { return };
@@ -634,8 +635,9 @@ impl DocView {
             State::Ready(doc) => doc
                 .model
                 .state()
-                .annots_on(page)
-                .and_then(|l| l.iter().find(|a| a.id == id).cloned()),
+                .find_annot(id)
+                .filter(|(on, _)| *on == page)
+                .map(|(_, a)| a.clone()),
             _ => None,
         };
         let Some(mut a) = annot else {

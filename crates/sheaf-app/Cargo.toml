@@ -57,6 +57,8 @@ resvg = { version = "0.46", default-features = false }
 image = { workspace = true, features = ["ico"] }
 # Forms built in code (M10).
 sheaf-doc = { workspace = true, features = ["fixtures"] }
+# The annotation ids an edit draws, seeded alike for two documents.
+fastrand = "2"
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"

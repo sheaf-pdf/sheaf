@@ -10,7 +10,7 @@ use gpui::{
     AnchoredPositionMode, AnyElement, Context, DragMoveEvent, Entity, Focusable, MouseButton,
     Pixels, Point, Subscription, Window, anchored, deferred, div, point, prelude::*, px, rgb,
 };
-use sheaf_doc::{DestView, Edit, OutlineId, OutlineNode, PageId};
+use sheaf_doc::{DestView, Edit, OutlineId, PageId};
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
@@ -71,25 +71,6 @@ impl Render for DragPreview {
     }
 }
 
-/// Parent and previous sibling of a node, for sibling-relative inserts.
-fn locate(
-    nodes: &im::Vector<OutlineNode>,
-    id: OutlineId,
-    parent: Option<OutlineId>,
-) -> Option<(Option<OutlineId>, Option<OutlineId>)> {
-    let mut prev = None;
-    for n in nodes {
-        if n.id == id {
-            return Some((parent, prev));
-        }
-        if let Some(found) = locate(&n.children, id, Some(n.id)) {
-            return Some(found);
-        }
-        prev = Some(n.id);
-    }
-    None
-}
-
 impl DocView {
     /// The current view as a bookmark destination, as Acrobat records it:
     /// the page in view and how far down it the top of the window is, in
@@ -98,19 +79,19 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        let pref = doc.page_ref(doc.current_page())?;
+        let page = doc.page_id(doc.current_page())?;
         let pane = doc.pane();
         let Some(r) = pane
             .layout
             .as_ref()
             .and_then(|l| l.rect(doc.current_page()))
         else {
-            return Some((pref.id, None));
+            return Some((page, None));
         };
         let scroll_y = -f32::from(pane.scroll.offset().y);
         let fy = (scroll_y - r.top) / r.h;
         if fy <= 0.0 {
-            return Some((pref.id, None));
+            return Some((page, None));
         }
         // The page's left edge at the window's top, as the pane shows it.
         let geom = doc.pane_geom(doc.current_page())?;
@@ -118,7 +99,7 @@ impl DocView {
             .from_view()
             .apply_axes(Some(0.0), Some(fy.min(1.0) * geom.shown().height));
         Some((
-            pref.id,
+            page,
             Some(DestView::Xyz {
                 left,
                 top,
@@ -172,12 +153,10 @@ impl DocView {
             None => (None, None),
         };
         // Acrobat places the new bookmark as a sibling after the selected one.
-        let (parent, after) = match doc
-            .outline_selected
-            .and_then(|sel| locate(&doc.model.state().outline, sel, None))
-        {
+        let st = doc.model.state();
+        let (parent, after) = match doc.outline_selected.and_then(|sel| st.bookmark_place(sel)) {
             Some((parent, _)) => (parent, doc.outline_selected),
-            None => (None, doc.model.state().outline.last().map(|n| n.id)),
+            None => (None, st.outline_roots().last().copied()),
         };
         self.apply(
             Edit::OutlineInsert {
@@ -190,19 +169,21 @@ impl DocView {
             "New bookmark",
             cx,
         );
-        // The new node is the one after `after` (or first); find it and rename.
+        // The new node is the sibling after `after` (or the first); find it
+        // and rename.
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let flat = doc.model.state().outline_flat();
-        let new_id = match after {
-            Some(a) => flat
-                .iter()
-                .position(|(_, n)| n.id == a)
-                .and_then(|i| flat.get(i + 1))
-                .map(|(_, n)| n.id),
-            None => flat.first().map(|(_, n)| n.id),
+        let st = doc.model.state();
+        let siblings = match parent {
+            Some(p) => st.bookmark(p).map(|b| b.kids.clone()).unwrap_or_default(),
+            None => st.outline_roots().clone(),
         };
+        let new_id = match after {
+            Some(a) => siblings.index_of(&a).and_then(|i| siblings.get(i + 1)),
+            None => siblings.front(),
+        }
+        .copied();
         if let Some(id) = new_id {
             doc.outline_selected = Some(id);
             if let Some(parent) = parent {
@@ -216,16 +197,10 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some((_, node)) = doc
-            .model
-            .state()
-            .outline_flat()
-            .into_iter()
-            .find(|(_, n)| n.id == id)
-        else {
+        let Some(node) = doc.model.state().bookmark(id) else {
             return;
         };
-        let title = node.title.clone();
+        let title = node.title.to_string();
         let input = cx.new(|cx| {
             let mut i = TextInput::new("Bookmark title", cx);
             i.set_text(title, cx);
@@ -340,9 +315,9 @@ impl DocView {
         doc.outline_expanded = if expanded {
             doc.model
                 .state()
-                .outline_flat()
+                .bookmarks_preorder()
                 .iter()
-                .map(|(_, n)| n.id)
+                .map(|&(_, id, _)| id)
                 .collect()
         } else {
             HashSet::new()
@@ -363,21 +338,21 @@ impl DocView {
         if row_id == id {
             return;
         }
-        let tree = &doc.model.state().outline;
+        let st = doc.model.state();
         let (parent, after) = match drop.pos {
             DropPos::Into => (Some(row_id), None),
-            DropPos::Before => match locate(tree, row_id, None) {
+            DropPos::Before => match st.bookmark_place(row_id) {
                 Some((parent, prev)) => (
                     parent,
                     if prev == Some(id) {
-                        locate(tree, id, None).and_then(|(_, p)| p)
+                        st.bookmark_place(id).and_then(|(_, p)| p)
                     } else {
                         prev
                     },
                 ),
                 None => return,
             },
-            DropPos::After => match locate(tree, row_id, None) {
+            DropPos::After => match st.bookmark_place(row_id) {
                 Some((parent, _)) => (parent, Some(row_id)),
                 None => return,
             },
@@ -455,7 +430,7 @@ impl DocView {
                 .child("Loading bookmarks…")
                 .into_any_element();
         }
-        let flat = doc.model.state().outline_flat();
+        let flat = doc.model.state().bookmarks_preorder();
         if flat.is_empty() {
             return container
                 .p_2()
@@ -466,31 +441,23 @@ impl DocView {
         }
 
         // Flatten to the visible rows: skip descendants of collapsed nodes.
-        let positions: std::collections::HashMap<PageId, usize> = doc
-            .model
-            .state()
-            .pages
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.id, i))
-            .collect();
         let mut rows: Vec<(usize, OutlineId, u16, Option<usize>)> = Vec::new();
         let mut hide_below: Option<u16> = None;
-        for (ix, (depth, node)) in flat.iter().enumerate() {
+        for (ix, &(depth, id, node)) in flat.iter().enumerate() {
             if let Some(d) = hide_below {
-                if *depth > d {
+                if depth > d {
                     continue;
                 }
                 hide_below = None;
             }
             rows.push((
                 ix,
-                node.id,
-                *depth,
-                node.target.and_then(|t| positions.get(&t).copied()),
+                id,
+                depth,
+                node.page().and_then(|t| doc.model.index_of(t)),
             ));
-            if !node.children.is_empty() && !doc.outline_expanded.contains(&node.id) {
-                hide_below = Some(*depth);
+            if !node.kids.is_empty() && !doc.outline_expanded.contains(&id) {
+                hide_below = Some(depth);
             }
         }
         doc.outline_rows = rows.iter().map(|(_, id, d, t)| (*id, *d, *t)).collect();
@@ -499,21 +466,21 @@ impl DocView {
 
         let layout = ListLayout::fixed(rows.len(), ROW_H).padded(0.0, PAD);
 
-        let cur_id = doc.page_ref(doc.current_page()).map(|p| p.id);
+        let cur_id = doc.page_id(doc.current_page());
         let selected = doc.outline_selected;
         let drop = doc.outline_drop;
         let rename = doc.outline_rename.as_ref().map(|r| (r.id, r.input.clone()));
         let mut els = Vec::new();
         for r in layout.visible(&doc.outline_scroll) {
             let (ix, id, depth, target) = rows[r];
-            let node = flat[ix].1;
-            let view = node.view.clone();
-            let orphan = node.target.is_some() && target.is_none();
+            let node = flat[ix].2;
+            let view = node.view().cloned();
+            let orphan = node.page().is_some() && target.is_none();
             let expanded = doc.outline_expanded.contains(&id);
-            let active = node.target.is_some() && node.target == cur_id;
+            let active = node.page().is_some() && node.page() == cur_id;
             let is_selected = selected == Some(id);
             let into = drop.is_some_and(|d| d.row == r && d.pos == DropPos::Into);
-            let chevron = if node.children.is_empty() {
+            let chevron = if node.kids.is_empty() {
                 " "
             } else if expanded {
                 "▾"
@@ -538,10 +505,10 @@ impl DocView {
                     .text_color(title_color)
                     .when(node.style.bold, |d| d.font_weight(gpui::FontWeight::BOLD))
                     .when(node.style.italic, |d| d.italic())
-                    .child(node.title.clone())
+                    .child(node.title.to_string())
                     .into_any_element(),
             };
-            let title_for_drag = node.title.clone();
+            let title_for_drag = node.title.to_string();
             els.push(
                 layout
                     .place(r)

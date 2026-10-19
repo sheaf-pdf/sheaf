@@ -50,7 +50,7 @@ impl DocView {
         match at {
             Where::AfterCurrent => self.insert_point(),
             Where::BeforeCurrent => self.target_ids().first().copied(),
-            Where::Start => doc.page_ref(0).map(|p| p.id),
+            Where::Start => doc.page_id(0),
             Where::End => None,
         }
     }
@@ -60,8 +60,8 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return LETTER;
         };
-        doc.page_ref(doc.current_page())
-            .map(|p| doc.model.page_size(&p))
+        doc.page_id(doc.current_page())
+            .map(|p| doc.model.page_size(p))
             .unwrap_or(LETTER)
     }
 
@@ -167,7 +167,7 @@ impl DocView {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
-                    let info = SourceInfo::read(&store, &path, None)?;
+                    let (info, _) = SourceInfo::read(&store, &path, None)?;
                     let incoming = crate::docview::Incoming::read(&info);
                     let handle = RenderHandle::open_bytes(info.src.bytes().clone(), None)?;
                     anyhow::Ok((info, handle, incoming))
@@ -194,9 +194,6 @@ impl DocView {
                 let n = ids.len();
                 let label = format!("Replace {n} page{}", if n == 1 { "" } else { "s" });
                 let mixed = doc.model.scripts_mixed();
-                doc.model.set_source_form(sid, incoming.form.clone());
-                doc.model.set_source_renamed(sid, &incoming.renamed);
-                doc.model.set_source_assets(sid, &incoming.assets);
                 match doc.model.apply(
                     Edit::ReplacePages {
                         ids,
@@ -252,10 +249,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return Vec::new();
         };
-        indexes
-            .iter()
-            .filter_map(|&i| doc.page_ref(i).map(|p| p.id))
-            .collect()
+        indexes.iter().filter_map(|&i| doc.page_id(i)).collect()
     }
 }
 
@@ -364,7 +358,7 @@ impl DocView {
             return;
         };
         let st = doc.model.state();
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
+        let ids: Vec<PageId> = st.order().iter().copied().collect();
         let (specs, label) = match change {
             None => (Vec::new(), "Remove page labels".to_string()),
             Some((from, to, style, prefix, first)) => {
@@ -396,7 +390,7 @@ impl DocView {
 
 impl DocView {
     pub(crate) fn has_page_labels(&self) -> bool {
-        matches!(&self.state, State::Ready(doc) if doc.model.state().labels.is_some())
+        matches!(&self.state, State::Ready(doc) if doc.model.state().labels().is_some())
     }
 }
 
@@ -480,7 +474,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        doc.model.state().header_footer.as_deref().cloned()
+        doc.model.state().header_footer().map(|hf| (**hf).clone())
     }
 }
 
@@ -492,10 +486,10 @@ impl DocView {
         };
         doc.model
             .state()
-            .pages
+            .order()
             .iter()
             .enumerate()
-            .filter(|(_, p)| ids.contains(&p.id))
+            .filter(|(_, p)| ids.contains(p))
             .map(|(i, _)| i)
             .collect()
     }
@@ -520,7 +514,7 @@ impl DocView {
         let store = doc.model.store().clone();
         let scope: Vec<PageId> = match pages {
             Some(ix) => self.page_ids_at(&ix),
-            None => snapshot.state.pages.iter().map(|p| p.id).collect(),
+            None => snapshot.state.order().iter().copied().collect(),
         };
         let what = if behind { "Background" } else { "Watermark" };
         let label = if wm.is_some() {

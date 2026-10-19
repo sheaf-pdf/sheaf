@@ -2,9 +2,10 @@
 //! filtered and sorted. Written out as a summary PDF ([`summary_pdf`]),
 //! CSV ([`csv`]) or text ([`text`]), the same list in the same order.
 //!
-//! A comment is one of sheaf's marks or another tool's annotation
-//! ([`ForeignAnnot`]); replies and review statuses thread under the
-//! comment they're on, by `/NM`.
+//! A comment is one of sheaf's marks or another tool's comment (a
+//! [`Foreign`](sheaf_doc::Foreign) record, whose summary is a
+//! [`ForeignAnnot`]; another tool's links aren't comments); replies and
+//! review statuses thread under the comment they're on, by `/NM`.
 
 mod summary;
 
@@ -14,16 +15,15 @@ use std::path::Path;
 use anyhow::Result;
 use sheaf_doc::annot::{COLORS, MARKED};
 use sheaf_doc::file::ForeignAnnot;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, Document, PageId, PageRef, SourceId};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, Document, PageId};
 
 pub use summary::{Layout, summary_pdf};
 
-/// A comment: one of our marks, or another tool's (an index into the
-/// document's list of them).
+/// A comment: one of our marks, or another tool's.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Item {
     Ours(PageId, AnnotId),
-    Foreign(usize),
+    Foreign(AnnotId),
 }
 
 /// What the list shows. Each set lists what's hidden, so everything shows
@@ -213,20 +213,12 @@ impl Comment {
     }
 }
 
-/// Every comment on the page `pref`: our marks, then the other tools'
-/// that are on it (`foreign`, indexes into `foreign_all`), less those
-/// deleted in sheaf and their threads, and those one of our marks has
-/// taken the place of (made editable) with their grouped parts, which
-/// come back second.
-pub fn comments_on(
-    st: &DocState,
-    foreign_all: &[(SourceId, ForeignAnnot)],
-    pref: &PageRef,
-    foreign: &[usize],
-) -> (Vec<Comment>, Vec<usize>) {
-    let page = pref.id;
+/// Every comment on `page`: our marks, then the other tools' (their links
+/// aren't comments), less any one of our marks has the name of, which it
+/// took the place of, with their grouped parts: those come back second.
+pub fn comments_on(st: &DocState, page: PageId) -> (Vec<Comment>, Vec<AnnotId>) {
     let mut out = Vec::new();
-    for a in st.annots_on(page).into_iter().flatten() {
+    for a in st.marks_on(page) {
         out.push(Comment {
             item: Item::Ours(page, a.id),
             name: a.name(),
@@ -251,34 +243,20 @@ pub fn comments_on(
             measurement: measurement_of(&a.kind),
         });
     }
-    let theirs: Vec<(usize, &ForeignAnnot)> = foreign
-        .iter()
-        .filter_map(|&i| foreign_all.get(i).map(|(_, f)| (i, f)))
+    let theirs: Vec<(AnnotId, &ForeignAnnot)> = (st.foreign_on(page))
+        .map(|(id, f)| (id, &*f.summary))
+        .filter(|(_, f)| !f.is_link())
         .collect();
-    let mut gone = match st.removed_comments.get(&page) {
-        Some(removed) => sheaf_doc::file::removed_with_threads(
-            theirs
-                .iter()
-                .map(|(_, f)| (f.name.as_str(), f.parent.as_deref())),
-            removed,
-        ),
-        None => HashSet::new(),
-    };
-    let ours: HashSet<&str> = out.iter().map(|c| c.name.as_str()).collect();
-    for (_, f) in &theirs {
-        let part_of_ours = f.grouped && f.parent.as_deref().is_some_and(|p| ours.contains(p));
+    let ours: HashSet<String> = out.iter().map(|c| c.name.clone()).collect();
+    let mut taken = Vec::new();
+    for (id, f) in theirs {
+        let part_of_ours = f.grouped && f.parent.as_ref().is_some_and(|p| ours.contains(p));
         if ours.contains(f.name.as_str()) || part_of_ours {
-            gone.insert(f.name.clone());
-        }
-    }
-    let mut deleted = Vec::new();
-    for (i, f) in theirs {
-        if gone.contains(&f.name) {
-            deleted.push(i);
+            taken.push(id);
             continue;
         }
         out.push(Comment {
-            item: Item::Foreign(i),
+            item: Item::Foreign(id),
             name: f.name.clone(),
             parent: f.parent.clone(),
             grouped: f.grouped,
@@ -305,7 +283,7 @@ pub fn comments_on(
             measurement: f.mark.as_ref().and_then(|m| measurement_of(&m.kind)),
         });
     }
-    (out, deleted)
+    (out, taken)
 }
 
 /// A page's comments as threads: the top-level ones in order, and the
@@ -358,9 +336,10 @@ pub struct Listing {
     pub types: BTreeSet<String>,
     pub authors: BTreeSet<String>,
     pub colors: BTreeSet<[u8; 3]>,
-    /// Comments the filter (or a deletion) hides on the page.
+    /// Comments the filter hides on the page, and other tools' one of our
+    /// marks took the place of.
     pub hidden_ours: HashSet<AnnotId>,
-    pub hidden_foreign: HashSet<usize>,
+    pub hidden_foreign: HashSet<AnnotId>,
 }
 
 impl Listing {
@@ -401,26 +380,13 @@ pub struct Entry {
 
 /// `st`'s comments as the panel lists them, filtered by `cf` and by
 /// `needle` (lowercase; a thread shows if any of it matches).
-pub fn list(
-    st: &DocState,
-    foreign_all: &[(SourceId, ForeignAnnot)],
-    cf: &CommentFilter,
-    needle: &str,
-) -> Listing {
-    let mut foreign_on: HashMap<(SourceId, u32), Vec<usize>> = HashMap::new();
-    for (i, (source, f)) in foreign_all.iter().enumerate() {
-        foreign_on.entry((*source, f.page)).or_default().push(i);
-    }
+pub fn list(st: &DocState, cf: &CommentFilter, needle: &str) -> Listing {
     let mut out = Listing::default();
     // Each thread shown, and what it sorts by.
     let mut kept: Vec<(GroupKey, Thread)> = Vec::new();
-    for (index, pref) in st.pages.iter().enumerate() {
-        let foreign = foreign_on
-            .get(&(pref.source, pref.index))
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let (comments, deleted) = comments_on(st, foreign_all, pref, foreign);
-        out.hidden_foreign.extend(deleted);
+    for (index, &page) in st.order().iter().enumerate() {
+        let (comments, taken) = comments_on(st, page);
+        out.hidden_foreign.extend(taken);
         if comments.is_empty() {
             continue;
         }
@@ -442,8 +408,8 @@ pub fn list(
                         Item::Ours(_, id) => {
                             out.hidden_ours.insert(id);
                         }
-                        Item::Foreign(i) => {
-                            out.hidden_foreign.insert(i);
+                        Item::Foreign(id) => {
+                            out.hidden_foreign.insert(id);
                         }
                     }
                 }
@@ -457,7 +423,7 @@ pub fn list(
                 group_key(cf.sort, root, index),
                 Thread {
                     page: index,
-                    page_id: pref.id,
+                    page_id: page,
                     status,
                     entries: order
                         .into_iter()
@@ -784,16 +750,10 @@ pub fn numbers(thread: &Thread, n: usize) -> Vec<String> {
         .collect()
 }
 
-/// A document from a file, with the other tools' comments in it: what
-/// [`list`] needs.
-pub fn open(
-    path: &Path,
-    password: Option<&str>,
-) -> Result<(Document, Vec<(SourceId, ForeignAnnot)>)> {
-    let opened = sheaf_doc::open::file(path, password)?;
-    let primary = opened.doc.primary();
-    let foreign = opened.view.foreign.into_iter();
-    Ok((opened.doc, foreign.map(|f| (primary, f)).collect()))
+/// A document from a file, with our marks and the other tools' comments
+/// in it: what [`list`] lists.
+pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
+    Ok(sheaf_doc::open::file(path, password)?.doc)
 }
 
 /// A comments data file's format.
@@ -825,25 +785,24 @@ impl DataFormat {
 /// thread, as the listing has them.
 pub fn export_data(
     snap: &sheaf_doc::Snapshot,
-    foreign: &[(SourceId, ForeignAnnot)],
     items: &[Item],
     format: DataFormat,
 ) -> Result<Vec<u8>> {
-    let ours: Vec<(PageId, AnnotId)> = items
+    let ours: Vec<AnnotId> = items
         .iter()
         .filter_map(|i| match *i {
-            Item::Ours(p, a) => Some((p, a)),
+            Item::Ours(_, a) => Some(a),
             Item::Foreign(_) => None,
         })
         .collect();
-    let theirs: Vec<usize> = items
+    let theirs: Vec<AnnotId> = items
         .iter()
         .filter_map(|i| match *i {
             Item::Foreign(f) => Some(f),
             Item::Ours(..) => None,
         })
         .collect();
-    let comments = sheaf_doc::exchange::gather(snap, foreign, &ours, &theirs)?;
+    let comments = sheaf_doc::exchange::gather(snap, &ours, &theirs)?;
     match format {
         DataFormat::Xfdf => sheaf_doc::exchange::xfdf::write(&comments),
         DataFormat::Fdf => sheaf_doc::exchange::fdf::write(&comments),
@@ -859,16 +818,16 @@ pub fn items(listing: &Listing) -> Vec<Item> {
 }
 
 /// The comments in an FDF, XFDF or PDF file (`bytes`) as the edits that
-/// bring them into `snap`, matched by `/NM` (see
-/// `sheaf_doc::exchange::import`). `password` opens a PDF.
+/// bring them into `snap`, whose blobs are in `store`, matched by `/NM`
+/// (see `sheaf_doc::exchange::import`). `password` opens a PDF.
 pub fn import_data(
     snap: &sheaf_doc::Snapshot,
-    foreign: &[(SourceId, ForeignAnnot)],
+    store: &sheaf_doc::Store,
     bytes: &[u8],
     password: Option<&str>,
 ) -> Result<sheaf_doc::exchange::Imported> {
     let comments = sheaf_doc::exchange::read(bytes, password)?;
-    Ok(sheaf_doc::exchange::import(snap, foreign, &comments))
+    Ok(sheaf_doc::exchange::import(snap, store, &comments))
 }
 
 /// A column of the CSV export.

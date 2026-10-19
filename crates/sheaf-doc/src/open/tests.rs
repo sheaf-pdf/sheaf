@@ -3,15 +3,20 @@
 //! over Greg's corpus, the old loaders' eager reading of each file. The
 //! readers' own tests read their fixtures as sources with [`lazily`].
 
+use std::collections::{HashMap, HashSet};
+
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_core::Rotation;
 
 use super::*;
-use crate::annot::{AnnotId, WriteCx};
+use crate::annot::{Annot, AnnotId};
+use crate::file::ForeignAnnot;
 use crate::forms::corpus::{Corpus, Entry, each_entry};
 use crate::forms::fixture::{Form, every_fact, note, outline_tree};
 use crate::labels::Style;
-use crate::model::{DocState, Edit, NotReady, PageId};
+use crate::materialize::rewrite_tests::annots_read;
+use crate::materialize::{Came, How, ObjKey};
+use crate::model::{DocState, Edit, Invariant, Mark, NotReady, PageId};
 use crate::store::{BlobKind, Src};
 
 /// `pdf` written and read as a source, in a store of its own: what a
@@ -35,33 +40,52 @@ pub(crate) fn lazily(pdf: &mut Pdf) -> Src {
     crate::forms::fixture::source(bytes)
 }
 
+/// Other tools' annotations `annots` has, by page and then in `/Annots`
+/// order.
+fn theirs(annots: &FileAnnots) -> Vec<&ForeignAnnot> {
+    let mut pages: Vec<u32> = annots.pages.keys().copied().collect();
+    pages.sort_unstable();
+    (pages.into_iter())
+        .flat_map(|index| annots.foreign_on(index).map(|(_, _, f)| &**f))
+        .collect()
+}
+
+/// Other tools' annotations on `st`'s pages, in order.
+fn theirs_in(st: &DocState) -> Vec<ForeignAnnot> {
+    (st.order().iter())
+        .flat_map(|&page| st.foreign_on(page).map(|(_, f)| (*f.summary).clone()))
+        .collect()
+}
+
 /// `st` holds what [`every_fact`] says, on the pages it says it of.
 pub(crate) fn assert_every_fact(st: &DocState) {
-    let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
-    let marks: Vec<(PageId, Vec<Annot>)> = st
-        .annots
-        .iter()
-        .map(|(page, list)| (*page, list.iter().cloned().collect()))
+    let ids: Vec<PageId> = st.order().iter().copied().collect();
+    let marks: Vec<(PageId, Vec<Annot>)> = (ids.iter())
+        .map(|&page| (page, st.marks_on(page).cloned().collect::<Vec<_>>()))
+        .filter(|(_, list)| !list.is_empty())
         .collect();
     assert_eq!(marks, [(ids[1], vec![note()])]);
-    assert_eq!(st.fields.len(), 1);
-    let widgets: Vec<(PageId, usize)> = st.widgets.iter().map(|(p, w)| (*p, w.len())).collect();
+    assert_eq!(st.terminals().count(), 1);
+    let widgets: Vec<(PageId, usize)> = (ids.iter())
+        .map(|&page| (page, st.widgets_on(page).count()))
+        .filter(|&(_, n)| n > 0)
+        .collect();
     assert_eq!(widgets, [(ids[0], 1)]);
-    let labels = st.labels.as_ref().expect("labels");
+    let labels = st.labels().expect("labels");
     assert_eq!(labels.len(), 1);
     assert_eq!(
         (labels[0].start, labels[0].style),
         (ids[0], Style::LowerRoman)
     );
-    let hf = st.header_footer.as_ref().expect("a header/footer");
+    let hf = st.header_footer().expect("a header/footer");
     assert_eq!(
         (hf.texts[0].as_str(), &hf.pages),
         ("Draft", &Some(vec![ids[2]]))
     );
     let outline: Vec<(u16, &str, Option<PageId>, bool)> = st
-        .outline_flat()
+        .bookmarks_preorder()
         .iter()
-        .map(|(depth, n)| (*depth, n.title.as_str(), n.target, n.open))
+        .map(|(depth, _, b)| (*depth, &*b.title, b.page(), b.open))
         .collect();
     assert_eq!(
         outline,
@@ -80,11 +104,10 @@ fn no_fact_comes_after_the_first_edit() {
         src: store.open(every_fact().bytes().into(), kind).unwrap(),
         name: "facts.pdf".into(),
         derived: None,
-        stamp: None,
     };
     let src = primary.src.clone();
-    let mut doc = start(store, primary, crate::history::default_policy());
-    let page = doc.page(0).unwrap().id;
+    let mut doc = start(store, primary, None, crate::history::default_policy());
+    let page = doc.page(0).unwrap();
     let rotate = || Edit::RotatePages {
         ids: vec![page],
         by: Rotation::R90,
@@ -143,7 +166,7 @@ fn finish_never_lexes_content() {
         .filter(|&&id| src.pdf().is_read(id))
         .collect();
     assert!(read.is_empty(), "content read: {read:?}");
-    assert_eq!(facts.marks[&1], vec![note()]);
+    assert_eq!(facts.annots.marks()[&1], vec![note()]);
     let roman = LabelRange {
         start: 0,
         style: Style::LowerRoman,
@@ -200,8 +223,8 @@ fn marked(degrees: i32, marks: &[Annot]) -> Form {
     dict.set("MediaBox", MEDIA.map(num).to_vec());
     dict.set("CropBox", CROP.map(num).to_vec());
     dict.set("Rotate", i64::from(degrees));
-    let mut cx = WriteCx::new(crate::forms::fixture::mark_assets());
-    crate::save::write_page_annots(&mut f.pdf, &mut dict, marks.iter(), None, &[], &mut cx);
+    let marks = crate::forms::fixture::holding(marks);
+    crate::forms::fixture::write_marks(&mut f.pdf, &mut dict, &marks);
     *f.dict(page) = dict;
     f
 }
@@ -230,12 +253,15 @@ fn opened(bytes: Vec<u8>) -> Opened {
         src: store.open(bytes.into(), kind).unwrap(),
         name: "marks.pdf".into(),
         derived: None,
-        stamp: None,
     };
     let src = primary.src.clone();
-    let mut doc = start(store, primary, crate::history::default_policy());
+    let mut doc = start(store, primary, None, crate::history::default_policy());
     let view = doc.ready(finish(&src, &NoProgress)).unwrap();
-    Opened { doc, view }
+    Opened {
+        doc,
+        view,
+        torn: None,
+    }
 }
 
 /// Every kind of mark, written by the writer a save uses on a page turned
@@ -276,10 +302,12 @@ fn every_mark_kind_round_trips_on_every_rotate() {
         let src = f.source();
         assert_eq!(src.geom(0).rotate, turn);
         let facts = finish(&src, &NoProgress);
-        assert!(facts.foreign.is_empty(), "{degrees}: {:?}", facts.foreign);
+        let foreign = theirs(&facts.annots);
+        assert!(foreign.is_empty(), "{degrees}: {foreign:?}");
         // Replies and statuses are written after what they're in the
         // thread of.
-        assert_marks(&facts.marks[&0], &marks, 1.0 / 64.0, &format!("{degrees}°"));
+        let read = &facts.annots.marks()[&0];
+        assert_marks(read, &marks, 1.0 / 64.0, &format!("{degrees}°"));
     }
 }
 
@@ -320,21 +348,26 @@ fn a_v1_mark_reads_as_its_v2_self() {
         }
         let facts = finish(&f.source(), &NoProgress);
         let case = format!("{degrees}°, its JSON in {frame}°'s frame");
-        assert!(facts.foreign.is_empty(), "{case}: {:?}", facts.foreign);
-        assert_marks(&facts.marks[&0], &marks, 0.01, &case);
+        let foreign = theirs(&facts.annots);
+        assert!(foreign.is_empty(), "{case}: {foreign:?}");
+        assert_marks(&facts.annots.marks()[&0], &marks, 0.01, &case);
     }
 }
+
+crate::both_ways!(
+    a_stale_mark_is_another_tools_comment,
+    a_stale_mark_is_another_tools_comment_appended: stale_mark_is_theirs
+);
 
 /// A mark another tool has edited since sheaf wrote it is that tool's
 /// comment: Acrobat's edit of its text (a new `/Contents` and `/M`) opens
 /// among the other tools' comments, as a mark that can be made editable,
 /// and not among the marks, whether its `/SheafAnnot` is version 2, whose
 /// digest no longer matches, or version 1, whose `modified` isn't `/M`. A
-/// rewrite and an incremental save of an edit of the page's other marks
+/// Rewrite and an Append of an edit of the page's other marks
 /// keep it as that tool left it: not put back as sheaf wrote it, and not
 /// dropped.
-#[test]
-fn a_stale_mark_is_another_tools_comment() {
+fn stale_mark_is_theirs(how: How) {
     use crate::annot::AnnotKind;
     for v1 in [false, true] {
         let marks = every_mark_turned(Rotation::R90)[1..4].to_vec();
@@ -363,18 +396,13 @@ fn a_stale_mark_is_another_tools_comment() {
             .get_dictionary(square)
             .unwrap()
             .clone();
-        let Opened { mut doc, view } = opened(bytes);
-        let page = doc.page(0).unwrap().id;
-        let ids: Vec<AnnotId> = doc
-            .state()
-            .annots_on(page)
-            .unwrap()
-            .iter()
-            .map(|a| a.id)
-            .collect();
+        let Opened { mut doc, .. } = opened(bytes);
+        let page = doc.page(0).unwrap();
+        let ids: Vec<AnnotId> = doc.state().marks_on(page).map(|a| a.id).collect();
         assert_eq!(ids, [AnnotId(2), AnnotId(3)], "{case}");
-        let [theirs] = view.foreign.as_slice() else {
-            panic!("{case}: {:?}", view.foreign);
+        let foreign = theirs_in(doc.state());
+        let [theirs] = foreign.as_slice() else {
+            panic!("{case}: {foreign:?}");
         };
         assert_eq!(
             (theirs.name.as_str(), theirs.contents.as_str()),
@@ -391,67 +419,64 @@ fn a_stale_mark_is_another_tools_comment() {
             ),
             "{case}"
         );
-        let mut note = doc.state().annots_on(page).unwrap()[0].clone();
+        let mut note = doc.state().marks_on(page).next().unwrap().clone();
         note.contents = "Edited in sheaf".into();
         doc.apply(Edit::AnnotUpdate { page, annot: note }, "Edit")
             .unwrap();
-        let snap = doc.snapshot();
-        let saves = [
-            crate::save::rewrite(&snap).unwrap(),
-            crate::incremental::incremental(&snap).unwrap(),
-        ];
-        for (saved, how) in saves.iter().zip(["rewrite", "incremental"]) {
-            let how = format!("{case}, {how}");
-            let pdf = Pdf::load_mem(saved).unwrap();
-            let page = pdf.page_iter().next().unwrap();
-            let found = crate::file::annots_in(&pdf, [page]);
-            let contents: Vec<&str> = found.sheaf[&0]
-                .iter()
-                .map(|a| a.contents.as_str())
-                .collect();
-            assert_eq!(contents, ["Edited in sheaf", "About this"], "{how}");
-            let [theirs] = found.foreign.as_slice() else {
-                panic!("{how}: {:?}", found.foreign);
-            };
-            assert_eq!(theirs.name, "sheaf:4", "{how}");
-            let list = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap();
-            let kept = list.as_array().unwrap().iter().find_map(|e| {
-                let d = pdf.get_dictionary(e.as_reference().ok()?).ok()?;
-                (crate::file::thread_name(d) == "sheaf:4").then_some(d)
-            });
-            let keys = |d: &Dictionary| -> Vec<(Vec<u8>, Object)> {
-                d.iter()
-                    .filter(|(k, _)| k.as_slice() != b"AP")
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            };
-            assert_eq!(kept.map(keys), Some(keys(&as_left)), "{how}");
-        }
+        let saved = how.write(&doc);
+        let case = format!("{case}, {how:?}");
+        let pdf = Pdf::load_mem(&saved).unwrap();
+        let page = pdf.page_iter().next().unwrap();
+        let found = annots_read(&saved);
+        let contents: Vec<String> = (found.sheaf()[&0].iter())
+            .map(|a| a.contents.clone())
+            .collect();
+        assert_eq!(contents, ["Edited in sheaf", "About this"], "{case}");
+        let foreign = found.foreign();
+        let [(_, theirs)] = foreign.as_slice() else {
+            panic!("{case}: {foreign:?}");
+        };
+        assert_eq!(theirs.name, "sheaf:4", "{case}");
+        let list = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap();
+        let kept = list.as_array().unwrap().iter().find_map(|e| {
+            let d = pdf.get_dictionary(e.as_reference().ok()?).ok()?;
+            (crate::file::thread_name(d) == "sheaf:4").then_some(d)
+        });
+        let keys = |d: &Dictionary| -> Vec<(Vec<u8>, Object)> {
+            d.iter()
+                .filter(|(k, _)| k.as_slice() != b"AP")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        assert_eq!(kept.map(keys), Some(keys(&as_left)), "{case}");
     }
 }
+
+crate::both_ways!(
+    a_mark_without_its_page_or_file_is_another_tools_comment,
+    a_mark_without_its_page_or_file_is_another_tools_comment_appended: a_mark_holding_nothing
+);
 
 /// A page stamp written where its page couldn't be found, and an
 /// attachment written without its file, hold neither: each opens as
 /// another tool's comment, as a stale mark does, and a save of an edit of
 /// the page's other mark keeps them as they are.
-#[test]
-fn a_mark_without_its_page_or_file_is_another_tools_comment() {
+fn a_mark_holding_nothing(how: How) {
     let every = crate::forms::fixture::every_mark_kind();
     // The note (2), the page stamp (18) and the attachment (24).
     let marks = [every[1].clone(), every[17].clone(), every[23].clone()];
     let mut f = Form::new(1);
     let mut page = f.dict(f.pages[0]).clone();
-    // A document that has neither.
-    let assets = crate::assets::MarkAssets::new(Store::new());
-    let mut cx = WriteCx::new(std::sync::Arc::new(assets));
-    crate::save::write_page_annots(&mut f.pdf, &mut page, marks.iter(), None, &[], &mut cx);
+    // Marks that hold neither.
+    let marks = marks.map(Mark::from);
+    crate::forms::fixture::write_marks(&mut f.pdf, &mut page, &marks);
     *f.dict(f.pages[0]) = page;
-    let Opened { mut doc, view } = opened(f.bytes());
-    let page = doc.page(0).unwrap().id;
-    let mut note = doc.state().annots_on(page).unwrap()[0].clone();
+    let Opened { mut doc, .. } = opened(f.bytes());
+    let page = doc.page(0).unwrap();
+    let mut note = doc.state().marks_on(page).next().unwrap().clone();
     assert_eq!(note.id, AnnotId(2));
-    assert_eq!(doc.state().annots_on(page).unwrap().len(), 1);
-    let theirs = |foreign: &[crate::file::ForeignAnnot]| -> Vec<(String, String)> {
+    assert_eq!(doc.state().marks_on(page).count(), 1);
+    let names = |foreign: Vec<&ForeignAnnot>| -> Vec<(String, String)> {
         foreign
             .iter()
             .map(|f| (f.name.clone(), f.subtype.clone()))
@@ -461,21 +486,14 @@ fn a_mark_without_its_page_or_file_is_another_tools_comment() {
         ("sheaf:18".to_string(), "Stamp".to_string()),
         ("sheaf:24".to_string(), "FileAttachment".to_string()),
     ];
-    assert_eq!(theirs(&view.foreign), want);
+    assert_eq!(names(theirs_in(doc.state()).iter().collect()), want);
     note.contents = "Edited in sheaf".into();
     doc.apply(Edit::AnnotUpdate { page, annot: note }, "Edit")
         .unwrap();
-    let snap = doc.snapshot();
-    for saved in [
-        crate::save::rewrite(&snap).unwrap(),
-        crate::incremental::incremental(&snap).unwrap(),
-    ] {
-        let pdf = Pdf::load_mem(&saved).unwrap();
-        let found = crate::file::annots_in(&pdf, pdf.page_iter());
-        assert_eq!(found.sheaf[&0].len(), 1);
-        assert_eq!(theirs(&found.foreign), want);
-        assert!(found.assets.stamps.is_empty() && found.assets.files.is_empty());
-    }
+    let found = annots_read(&how.write(&doc));
+    assert_eq!(found.sheaf()[&0].len(), 1);
+    let foreign = found.foreign().into_iter().map(|(_, f)| f).collect();
+    assert_eq!(names(foreign), want);
 }
 
 /// A mark another tool has only written out again stays sheaf's: its
@@ -536,8 +554,9 @@ fn a_reserialized_mark_stays_a_mark() {
         }
     }
     let facts = finish(&f.source(), &NoProgress);
-    assert!(facts.foreign.is_empty(), "{:?}", facts.foreign);
-    assert_marks(&facts.marks[&0], &marks, 0.0, "reserialized");
+    let foreign = theirs(&facts.annots);
+    assert!(foreign.is_empty(), "{foreign:?}");
+    assert_marks(&facts.annots.marks()[&0], &marks, 0.0, "reserialized");
 }
 
 /// A mark's text with characters PDFDocEncoding gives other meanings (a
@@ -558,8 +577,9 @@ fn a_mark_s_text_reads_back_as_written() {
         assert_eq!(crate::file::text_string(text), *want);
     }
     let facts = finish(&f.source(), &NoProgress);
-    assert!(facts.foreign.is_empty(), "{:?}", facts.foreign);
-    assert_eq!(facts.marks[&0], [n]);
+    let foreign = theirs(&facts.annots);
+    assert!(foreign.is_empty(), "{foreign:?}");
+    assert_eq!(facts.annots.marks()[&0], [n]);
 }
 
 /// A page of version 1 replacements whose StrikeOuts are gone, each of
@@ -586,15 +606,20 @@ fn a_page_of_v1_replacements_reads_in_linear_time() {
     f.set_annots(0, &ids);
     let started = std::time::Instant::now();
     let facts = finish(&f.source(), &NoProgress);
-    let mut page = f.dict(f.pages[0]).clone();
-    crate::save::strip_sheaf_annots(&f.pdf, &mut page);
+    let page = f.dict(f.pages[0]).clone();
+    let kept = crate::file::not_ours(&f.pdf, page.get(b"Annots").unwrap().as_array().unwrap());
     let took = started.elapsed();
     // None has its StrikeOut, so each is another tool's, and kept.
-    assert!(facts.marks.is_empty());
-    assert_eq!(facts.foreign.len(), N);
-    assert_eq!(page.get(b"Annots").unwrap().as_array().unwrap().len(), N);
+    assert!(facts.annots.marks().is_empty());
+    assert_eq!(theirs(&facts.annots).len(), N);
+    assert_eq!(kept.len(), N);
     assert!(took < std::time::Duration::from_secs(5), "{took:?}");
 }
+
+crate::both_ways!(
+    a_page_copied_by_another_tool_gets_fresh_ids,
+    a_page_copied_by_another_tool_gets_fresh_ids_appended: a_copied_page_gets_fresh_ids
+);
 
 /// A page another program copied, as Acrobat's Insert Pages copies one,
 /// carries copies of its marks, which say the same ids: the first page's
@@ -604,15 +629,14 @@ fn a_page_of_v1_replacements_reads_in_linear_time() {
 /// the copy; a save of either kind gives the copies `/NM`s of their own,
 /// and the other tool's reply follows its note there. Deleting the copied
 /// note takes that reply out with it.
-#[test]
-fn a_page_copied_by_another_tool_gets_fresh_ids() {
+fn a_copied_page_gets_fresh_ids(how: How) {
     let every = crate::forms::fixture::every_mark_kind();
     // The note (2), the square (4) and the note's reply (16).
     let marks = [every[1].clone(), every[3].clone(), every[15].clone()];
     let mut f = Form::new(2);
     let mut page = f.dict(f.pages[0]).clone();
-    let mut cx = WriteCx::new(crate::forms::fixture::mark_assets());
-    crate::save::write_page_annots(&mut f.pdf, &mut page, marks.iter(), None, &[], &mut cx);
+    let marks = marks.map(Mark::from);
+    crate::forms::fixture::write_marks(&mut f.pdf, &mut page, &marks);
     *f.dict(f.pages[0]) = page;
     let originals = f.annots(0);
     let mut copies: Vec<ObjectId> = originals
@@ -639,10 +663,10 @@ fn a_page_copied_by_another_tool_gets_fresh_ids() {
     f.set_annots(1, &copies);
     let bytes = f.bytes();
 
-    let Opened { mut doc, view } = opened(bytes.clone());
+    let Opened { mut doc, view, .. } = opened(bytes.clone());
     let st = doc.state();
-    let [first, copy] = [0, 1].map(|i| st.pages[i].id);
-    let ids = |page| -> Vec<AnnotId> { st.annots_on(page).unwrap().iter().map(|a| a.id).collect() };
+    let [first, copy] = [0, 1].map(|i| st.order()[i]);
+    let ids = |page| -> Vec<AnnotId> { st.marks_on(page).map(|a| a.id).collect() };
     assert_eq!(ids(first), [AnnotId(2), AnnotId(4), AnnotId(16)]);
     let new = ids(copy);
     assert!(
@@ -654,49 +678,42 @@ fn a_page_copied_by_another_tool_gets_fresh_ids() {
     let was = [2, 4, 16].map(|id| (copy, AnnotId(id)));
     assert_eq!(view.renamed, was);
     let note = format!("sheaf:{}", new[0].0);
-    let reply = &st.annots_on(copy).unwrap()[2];
+    let reply = st.marks_on(copy).nth(2).unwrap();
     assert_eq!(reply.thread_parent(), Some(note.as_str()));
-    let threads = |view: &ViewFacts| -> Vec<(String, Option<String>)> {
-        view.foreign
-            .iter()
-            .map(|f| (f.name.clone(), f.parent.clone()))
+    let threads = |st: &DocState| -> Vec<(String, Option<String>)> {
+        (theirs_in(st).into_iter())
+            .map(|f| (f.name, f.parent))
             .collect()
     };
     let in_thread = [("acro-reply".to_string(), Some(note.clone()))];
-    assert_eq!(threads(&view), in_thread);
+    assert_eq!(threads(st), in_thread);
     let again = opened(bytes);
     assert!(again.doc.state() == st && again.view == view);
     assert!(!doc.is_dirty());
 
-    // Nothing else changed, and a save of either kind writes them.
-    let snap = doc.snapshot();
-    let saves = [
-        crate::save::rewrite(&snap).unwrap(),
-        crate::incremental::incremental(&snap).unwrap(),
-    ];
-    // Other tools' first, as a save writes a page's annotations.
-    let mut want = vec!["acro-reply".to_string()];
-    want.extend(new.iter().map(|id| format!("sheaf:{}", id.0)));
-    for (saved, how) in saves.into_iter().zip(["rewrite", "incremental"]) {
-        let pdf = Pdf::load_mem(&saved).unwrap();
-        let second = pdf.page_iter().nth(1).unwrap();
-        let list = pdf.get_dictionary(second).unwrap().get(b"Annots").unwrap();
-        let names: Vec<String> = list
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|e| {
-                crate::file::thread_name(pdf.get_dictionary(e.as_reference().unwrap()).unwrap())
-            })
-            .collect();
-        assert_eq!(names, want, "{how}");
-        let reopened = opened(saved);
-        assert!(reopened.view.renamed.is_empty(), "{how}");
-        assert_eq!(threads(&reopened.view), in_thread, "{how}");
-        let st = reopened.doc.state();
-        let marks = st.annots_on(st.pages[1].id).unwrap();
-        assert_eq!(marks.iter().map(|a| a.id).collect::<Vec<_>>(), new, "{how}");
-    }
+    // Nothing else changed, and a save writes them, a page's annotations
+    // in the records' order.
+    let saved = how.write(&doc);
+    let copies: Vec<String> = new.iter().map(|id| format!("sheaf:{}", id.0)).collect();
+    let in_order: Vec<String> = (copies.iter().cloned())
+        .chain(["acro-reply".to_string()])
+        .collect();
+    let pdf = Pdf::load_mem(&saved).unwrap();
+    let second = pdf.page_iter().nth(1).unwrap();
+    let list = pdf.get_dictionary(second).unwrap().get(b"Annots").unwrap();
+    let names: Vec<String> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| crate::file::thread_name(pdf.get_dictionary(e.as_reference().unwrap()).unwrap()))
+        .collect();
+    assert_eq!(names, in_order);
+    let reopened = opened(saved);
+    assert!(reopened.view.renamed.is_empty());
+    let st = reopened.doc.state();
+    assert_eq!(threads(st), in_thread);
+    let marks: Vec<AnnotId> = st.marks_on(st.order()[1]).map(|a| a.id).collect();
+    assert_eq!(marks, new);
 
     // The copied note deleted, the other tool's reply to it goes too.
     doc.apply(
@@ -707,19 +724,92 @@ fn a_page_copied_by_another_tool_gets_fresh_ids() {
         "Delete",
     )
     .unwrap();
-    let snap = doc.snapshot();
-    let saves = [
-        crate::save::rewrite(&snap).unwrap(),
-        crate::incremental::incremental(&snap).unwrap(),
-    ];
-    for (saved, how) in saves.into_iter().zip(["rewrite", "incremental"]) {
-        let reopened = opened(saved);
-        assert!(
-            reopened.view.foreign.is_empty(),
-            "{how}: {:?}",
-            reopened.view.foreign
-        );
+    let reopened = opened(how.write(&doc));
+    let foreign = theirs_in(reopened.doc.state());
+    assert!(foreign.is_empty(), "{foreign:?}");
+}
+
+/// A page of `f` with our note and, as other tools leave them, a note, a
+/// reply to it and a link, each its own object, and a link written into
+/// the page's `/Annots`.
+fn with_their_annots(f: &mut Form, page: usize, tag: &str) {
+    let rect = || vec![10.into(), 10.into(), 30.into(), 30.into()];
+    let mut dict = f.dict(f.pages[page]).clone();
+    let ours = [Mark::from(note())];
+    crate::forms::fixture::write_marks(&mut f.pdf, &mut dict, &ours);
+    *f.dict(f.pages[page]) = dict;
+    let theirs = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(),
+        "NM" => Object::string_literal(format!("{tag}-note")),
+        "Contents" => Object::string_literal("theirs"),
+    });
+    let reply = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => theirs,
+        "Contents" => Object::string_literal("a reply"),
+    });
+    let link = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Link", "Rect" => rect(),
+    });
+    let mut list: Vec<Object> = (f.annots(page).into_iter().map(Object::Reference)).collect();
+    list.extend([theirs, reply, link].map(Object::Reference));
+    list.push(Object::Dictionary(dictionary! {
+        "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![40.into(), 40.into(), 50.into(), 50.into()],
+    }));
+    f.dict(f.pages[page]).set("Annots", list);
+}
+
+/// Other tools' comments and links open as records, each the object it
+/// is (none for a link written into the page's `/Annots`), under ids
+/// drawn from an rng the file's hash seeds (M10.5 §4): the same bytes
+/// opened again give each the same id, no mark's, below 2^53, while other
+/// bytes give others.
+#[test]
+fn reopening_gives_their_comments_the_same_ids() {
+    let mut f = Form::new(2);
+    with_their_annots(&mut f, 0, "a");
+    with_their_annots(&mut f, 1, "b");
+    let bytes = f.bytes();
+    let theirs = |o: &Opened| -> Vec<(usize, AnnotId, String, bool)> {
+        let st = o.doc.state();
+        (st.order().iter().enumerate())
+            .flat_map(|(i, &page)| {
+                st.foreign_on(page)
+                    .map(move |(id, f)| (i, id, f.summary.subtype.clone(), f.src.is_some()))
+            })
+            .collect()
+    };
+    let (once, again) = (opened(bytes.clone()), opened(bytes));
+    let read = theirs(&once);
+    assert_eq!(read, theirs(&again));
+    let kinds: Vec<(usize, &str, bool)> = (read.iter())
+        .map(|(i, _, subtype, object)| (*i, subtype.as_str(), *object))
+        .collect();
+    let page = |i| {
+        [
+            (i, "Text", true),
+            (i, "Text", true),
+            (i, "Link", true),
+            (i, "Link", false),
+        ]
+    };
+    assert_eq!(kinds, [page(0), page(1)].concat());
+    let st = once.doc.state();
+    let marks: HashSet<AnnotId> = st.marks().map(|(_, a)| a.id).collect();
+    let ids: HashSet<AnnotId> = read.iter().map(|(_, id, ..)| *id).collect();
+    assert_eq!(ids.len(), read.len());
+    assert!(ids.iter().all(|id| !marks.contains(id) && id.0 < 1 << 53));
+    // Their records are the objects they were read as.
+    let src = &st.def(st.order()[0]).unwrap().base.src;
+    for (_, f) in st.foreign_on(st.order()[0]) {
+        let at = f.src.as_ref().map(|o| (o.src.id(), o.id.0));
+        assert!(at.is_none_or(|(blob, n)| blob == src.id() && n > 0));
+        assert_eq!(f.copy, 0);
     }
+    // Another file's, another hash's.
+    with_their_annots(&mut f, 1, "c");
+    let other = opened(f.bytes());
+    let other: HashSet<AnnotId> = theirs(&other).iter().map(|(_, id, ..)| *id).collect();
+    assert!(other.is_disjoint(&ids), "{other:?}");
 }
 
 /// Trees whose nodes list themselves, twice each, are read a node at a
@@ -840,6 +930,8 @@ struct Outcome {
     /// Whether it has labels, a header/footer, a portfolio schema,
     /// bookmark styles.
     with: [bool; 4],
+    /// What its document's records break, opened.
+    broken: Option<Invariant>,
 }
 
 /// Why a corpus file's facts aren't its manifest row's, where the
@@ -882,22 +974,40 @@ const EXPLAINED: &[(&str, Explained)] = &[
     ("forms/safedocs/1210120.pdf", Explained::Fewer),
 ];
 
-/// `entry`'s file opened, and its facts compared.
+/// `entry`'s file opened, its facts compared, and its document's
+/// invariants checked.
 fn compare(corpus: &Corpus, entry: &Entry) -> Outcome {
-    let Ok(info) = crate::SourceInfo::read(&Store::new(), &corpus.path(entry), None) else {
+    let store = Store::new();
+    let Ok((info, stamp)) = crate::SourceInfo::read(&store, &corpus.path(entry), None) else {
         return Outcome {
             unopened: true,
             ..Default::default()
         };
     };
-    let src = &info.src;
+    let src = &info.src.clone();
     let facts = finish(src, &NoProgress);
+    let mut doc = start(
+        store,
+        info,
+        Some(Came::Read(stamp)),
+        crate::history::default_policy(),
+    );
+    doc.ready(finish(src, &NoProgress)).unwrap();
+    // The opened file's record (slice 9): the opened version's, its
+    // catalog and page tree's root among the numbers in use.
+    let rec = doc.saved_record().expect("an opened file's record");
+    assert_eq!(rec.version, doc.current_version(), "{}", entry.path);
+    for key in [ObjKey::Catalog, ObjKey::PagesNode(0)] {
+        let at = rec.map.get(&key);
+        let present = at.is_some_and(|(n, _)| rec.present.contains(n));
+        assert!(present, "{}: {key:?} at {at:?}", entry.path);
+    }
     let mut out = Outcome {
         fields: facts.form.facts.fields,
         damaged: facts.form.facts.damaged.is_some(),
         counts: [
-            facts.marks.values().map(Vec::len).sum(),
-            facts.foreign.len(),
+            facts.annots.marks().values().map(Vec::len).sum(),
+            theirs(&facts.annots).len(),
             facts.attachments.len(),
             facts.layers.len(),
         ],
@@ -910,6 +1020,7 @@ fn compare(corpus: &Corpus, entry: &Entry) -> Outcome {
                 .iter()
                 .any(|b| b.color.is_some() || !b.style.is_plain()),
         ],
+        broken: doc.state().check_invariants().err(),
         ..Default::default()
     };
     // pypdf couldn't read an unparsed one: its row has no counts.
@@ -926,10 +1037,17 @@ fn compare(corpus: &Corpus, entry: &Entry) -> Outcome {
         return out;
     };
     out.renumbered = !src.page_ids().eq(pdf.page_iter());
-    let old = crate::file::annots_in(&pdf, pdf.page_iter());
+    // Each page turned as the page table reads it.
+    let turned = (pdf.page_iter().zip(0..)).map(|(page, i)| (page, src.geom(i).rotate));
+    let old = crate::file::annots_in(&pdf, turned);
     let same = [
-        (Fact::Marks, facts.marks == old.sheaf),
-        (Fact::Foreign, facts.foreign == old.foreign),
+        (Fact::Marks, facts.annots.marks() == old.sheaf()),
+        (
+            Fact::Foreign,
+            theirs(&facts.annots)
+                .into_iter()
+                .eq(old.foreign().into_iter().map(|(_, f)| f)),
+        ),
         (
             Fact::Labels,
             facts.labels == crate::labels::label_ranges(&pdf),
@@ -958,7 +1076,9 @@ fn compare(corpus: &Corpus, entry: &Entry) -> Outcome {
 /// row's, and every other fact is what the same readers read from lopdf's
 /// eager load of the same bytes, numbering pages by `get_pages`. What
 /// differs is [`EXPLAINED`]'s, and only that. (The outline is PDFium's,
-/// as sheaf-render's `the_source_outline_is_pdfium_s` finds.) Skips
+/// as sheaf-render's `the_source_outline_is_pdfium_s` finds.) And every
+/// file's document, opened, keeps the records' invariants (M10.5 slice
+/// 8), and its opened version holds the file's record (slice 9). Skips
 /// without the corpus.
 #[test]
 fn the_open_s_facts_from_the_source_equal_the_eager_reading() {
@@ -987,6 +1107,10 @@ fn the_open_s_facts_from_the_source_equal_the_eager_reading() {
         with(2),
         with(3),
     );
+    let broken: Vec<(&str, &Invariant)> = (entries.iter().zip(&outcomes))
+        .filter_map(|(e, o)| Some((e.path.as_str(), o.broken.as_ref()?)))
+        .collect();
+    assert!(broken.is_empty(), "{broken:#?}");
     let differ: Vec<(&Entry, &Outcome)> = entries
         .iter()
         .zip(&outcomes)

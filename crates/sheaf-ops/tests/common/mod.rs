@@ -1,5 +1,7 @@
 //! Helpers the forms tests share: fixtures, saving both ways, and what a
-//! saved file holds.
+//! saved file holds. A test that saves both ways is a case taking its
+//! [`How`], run twice by `sheaf_doc::both_ways!`: by a Rewrite, and by an
+//! Append.
 
 #![allow(dead_code)]
 
@@ -11,7 +13,7 @@ use sheaf_doc::Document;
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{Form, Rect, source};
 use sheaf_doc::forms::{FileForm, Finding, Report, Value, check};
-use sheaf_doc::save::{Strategy, save_to_path};
+pub use sheaf_doc::materialize::{How, StrategyKind};
 use sheaf_image::raster::Raster;
 
 /// Half of a row's inside, in pixels.
@@ -131,38 +133,67 @@ pub fn clean(bytes: &[u8], what: &str) -> Report {
     report
 }
 
-/// Save `doc` by rewrite to `copy`, then in place: the bytes each gave.
-/// A page that's gone makes the second a rewrite too (M9 bug 14).
-pub fn saved_both_ways(doc: &Document, path: &Path, copy: &Path) -> Vec<(Strategy, Vec<u8>)> {
-    sheaf_doc::save::rewrite_to_path(&doc.snapshot(), copy).unwrap();
-    let rewritten = std::fs::read(copy).unwrap();
-    let strategy = save_to_path(&doc.snapshot(), path).unwrap();
-    vec![
-        (Strategy::Rewrite, rewritten),
-        (strategy, std::fs::read(path).unwrap()),
-    ]
+/// `doc` saved to `path`, its own file, `how`, whatever the plan would
+/// decide: by a Rewrite, or by an Append. What it was saved as, and the
+/// file.
+pub fn saved(doc: &mut Document, path: &Path, how: How) -> (StrategyKind, Vec<u8>) {
+    let report = how.save(doc, path);
+    let strategy = report.strategy.expect("the file was written");
+    (strategy, std::fs::read(path).unwrap())
 }
 
-/// What each strategy writes for `doc`. A page shown from a copy counts
-/// as removed content, so saving in place rewrites (M9 bug 14), but the
-/// incremental writer still writes it: for crash recovery's sidecar. So
-/// does a changed form with an XFA copy or usage rights.
-pub fn written_both_ways(doc: &Document) -> Vec<(Strategy, Vec<u8>)> {
-    let snap = doc.snapshot();
-    let incremental = sheaf_doc::incremental::incremental(&snap).unwrap_or_else(|e| {
-        // A changed form with an XFA copy or usage rights is saved in full
-        // (M10 slice 5); a recovery sidecar still appends, taking them out.
-        assert!(snap.form_changed, "{e:#}");
-        let (len, section) = sheaf_doc::incremental::incremental_section(&snap).unwrap();
-        let info = snap.source(snap.primary).unwrap();
-        let mut bytes = info.src.bytes()[..len].to_vec();
-        bytes.extend(section);
-        bytes
-    });
-    vec![
-        (Strategy::Rewrite, sheaf_doc::save::rewrite(&snap).unwrap()),
-        (Strategy::Incremental, incremental),
-    ]
+/// `doc` saved to `path`, its own file, as the save's plan says
+/// (`materialize::save`), a signature or an XFA part's values given up
+/// when it asks. What it was saved as, and the file.
+pub fn planned(doc: &mut Document, path: &Path) -> (StrategyKind, Vec<u8>) {
+    let answers = sheaf_doc::materialize::AskAnswers {
+        break_signatures: true,
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    let report = sheaf_doc::materialize::save(doc, path, &answers, &sheaf_ops::NoProgress);
+    let strategy = report.unwrap().strategy.expect("the file was written");
+    (strategy, std::fs::read(path).unwrap())
+}
+
+/// `doc` written by a Rewrite, then saved to `path`, its file, as the
+/// save's plan says, which must be a Rewrite too: what each wrote. For a
+/// document something's gone from, which strict removal rewrites (M9 bug
+/// 14, M10.5 proposal 9).
+pub fn rewritten_and_saved(doc: &mut Document, path: &Path) -> [(StrategyKind, Vec<u8>); 2] {
+    let written = (StrategyKind::Rewrite, rewritten(doc));
+    let saved = planned(doc, path);
+    assert_eq!(saved.0, StrategyKind::Rewrite, "something's gone");
+    [written, saved]
+}
+
+/// What `doc` writes by a Rewrite: a save's bytes.
+pub fn rewritten(doc: &Document) -> Vec<u8> {
+    sheaf_doc::save::rewrite(&doc.snapshot()).unwrap()
+}
+
+/// What `doc` writes by an Append onto its file, whatever a save would
+/// plan: a recovery section's shape too.
+pub fn appended(doc: &Document) -> Vec<u8> {
+    sheaf_doc::materialize::appended(doc).unwrap()
+}
+
+/// Whether a save of `doc` to `path`, its file, drops the form's XFA
+/// copy: save policy plans it when the form isn't the file's
+/// (`forms::rules::plan`).
+pub fn drops_xfa(doc: &Document, path: &Path) -> bool {
+    use sheaf_doc::materialize::{SaveInput, SaveTransform, plan};
+    let input = SaveInput::detached(&doc.snapshot());
+    let plan = plan(&input, &doc.save_target(path));
+    (plan.transforms.iter()).any(|t| matches!(t, SaveTransform::DropXfa { .. }))
+}
+
+/// What `doc` writes `how`.
+pub fn written(doc: &Document, how: How) -> Vec<u8> {
+    match how {
+        How::Rewritten => rewritten(doc),
+        How::Appended => appended(doc),
+    }
 }
 
 /// Object references in the file's structure that lead nowhere: an

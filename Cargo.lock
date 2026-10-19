@@ -6552,6 +6552,7 @@ dependencies = [
  "chrono",
  "embed-resource",
  "env_logger",
+ "fastrand",
  "futures",
  "gpui-pre",
  "gpui-pre-platform",
@@ -6613,6 +6614,7 @@ name = "sheaf-doc"
 version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
+ "bitflags 2.13.2",
  "env_logger",
  "fastrand",
  "flate2",
@@ -6764,6 +6766,7 @@ dependencies = [
  "env_logger",
  "futures",
  "image",
+ "in-progress",
  "log",
  "lopdf",
  "parking_lot",

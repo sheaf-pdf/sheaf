@@ -5,25 +5,32 @@
 //! is one string, and a file whose objects are in an encrypted object
 //! stream, which lopdf can't write; and what the serializer's tests
 //! share: the edit they save, the bytes some writers put before the
-//! header, and a search of the bytes written.
+//! header, a file whose cross-reference table is long, and a search of the
+//! bytes written.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use in_progress::NoProgress;
 use lopdf::encryption;
 use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
 use lopdf::xref::XrefType;
 use lopdf::{
-    Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, Object, Permissions, Stream,
-    dictionary,
+    Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions,
+    Stream, XrefKind, dictionary,
 };
 
 use sheaf_core::Rotation;
 
+use super::crypt::Crypt;
 use super::{full, object};
 use crate::forms::fixture::{Form, note, outline_tree, row};
-use crate::model::{Edit, Snapshot};
+use crate::materialize::ObjKey;
+use crate::materialize::emit::PdfVersion;
+use crate::model::{Document, Edit};
+use crate::store::BlobId;
 
 pub const OWNER: &str = "owner";
 pub const USER: &str = "user";
@@ -203,6 +210,44 @@ pub fn written(pdf: &Pdf) -> [Vec<u8>; 2] {
     })
 }
 
+/// `objects` as a whole file of `version` whose cross-references are
+/// `kind` and whose trailer is `base`'s but for its sections' own keys,
+/// through the writer saves use ([`full::write_bodies`]): each object
+/// written anew, keyed as a file's own at its number, encrypted with
+/// `crypt` when given, the `/Encrypt` dictionary after the last. What a
+/// full write leaves out (object streams, cross-reference streams, a
+/// linearization dictionary) is left out.
+pub fn whole(
+    objects: &BTreeMap<ObjectId, Object>,
+    base: &Dictionary,
+    kind: XrefKind,
+    version: &str,
+    crypt: Option<&Crypt>,
+) -> Vec<u8> {
+    let blob = BlobId { hash: 0, len: 0 };
+    let written: Vec<(&ObjectId, &Object)> = (objects.iter())
+        .filter(|(_, obj)| !full::left_out(obj))
+        .collect();
+    let past = written.iter().map(|(id, _)| id.0 + 1).max().unwrap_or(1);
+    let bodies = written.into_iter().map(|(&id, obj)| {
+        let key = ObjKey::Base {
+            blob,
+            obj: id,
+            copy: 0,
+        };
+        Ok((id, full::Body::Object(Cow::Borrowed(obj), key)))
+    });
+    let layout = full::Layout {
+        trailer: base,
+        kind,
+        version: PdfVersion::parse(version.as_bytes()).expect("a version"),
+        crypt,
+        encrypt_at: (past, 0),
+        xref_from: 1,
+    };
+    full::write_bodies(bodies, &layout, &NoProgress).unwrap().0
+}
+
 /// `pdf` encrypted with `state` the way a writer that packs objects into
 /// an object stream does, which lopdf's `save_modern` gets wrong (it
 /// encrypts each member under its own number, in a container it leaves
@@ -290,6 +335,32 @@ pub fn object_streams_encrypted(pdf: &Pdf, state: &EncryptionState) -> Vec<u8> {
 /// Bytes some writers put before `%PDF-`.
 pub const PREFIX: [u8; 100] = [b'~'; 100];
 
+/// `count` blank pages, written with a cross-reference table: a row an
+/// object, so a long one, which starts further back than a stamp's tail
+/// once there are a few thousand.
+pub fn blank_table(count: usize) -> Vec<u8> {
+    let mut pdf = Pdf::with_version("1.4");
+    let pages = pdf.new_object_id();
+    let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
+    let kids: Vec<Object> = (0..count)
+        .map(|_| {
+            let page = dictionary! {
+                "Type" => "Page", "Parent" => pages, "Contents" => content,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            };
+            pdf.add_object(page).into()
+        })
+        .collect();
+    let tree = dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count as i64 };
+    pdf.objects.insert(pages, tree.into());
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    pdf.trailer.set("Root", catalog);
+    pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
+}
+
 /// Whether `bytes` hold `text` anywhere.
 pub fn holds(bytes: &[u8], text: &[u8]) -> bool {
     bytes.windows(text.len()).any(|w| w == text)
@@ -297,9 +368,9 @@ pub fn holds(bytes: &[u8], text: &[u8]) -> bool {
 
 /// `path` opened as the app opens it, with `password`, its first page
 /// turned a quarter and a note put on it.
-pub fn edited(path: &Path, password: Option<&str>) -> Snapshot {
+pub fn edited(path: &Path, password: Option<&str>) -> Document {
     let mut doc = crate::open::file(path, password).unwrap().doc;
-    let page = doc.page(0).unwrap().id;
+    let page = doc.page(0).unwrap();
     let turn = Edit::RotatePages {
         ids: vec![page],
         by: Rotation::R90,
@@ -313,5 +384,5 @@ pub fn edited(path: &Path, password: Option<&str>) -> Snapshot {
         "note",
     )
     .unwrap();
-    doc.snapshot()
+    doc
 }

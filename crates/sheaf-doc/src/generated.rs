@@ -1,11 +1,13 @@
 //! PDFs sheaf makes for pages that have no file of their own (images, blank
-//! pages), and the stamps and attachments marks name, written to a
-//! content-addressed cache: the same bytes give the same file, and a file
-//! outlives a crash so recovery can still use it. Blank and image pages
-//! go in as files, read from here into the document's store; marks name
-//! their stamps and attachments by the file's stem, which a document finds
-//! in its own table first ([`MarkAssets`](crate::assets::MarkAssets)) and
-//! here only when it has no other copy.
+//! pages), and the library's stamps, written to a content-addressed cache:
+//! the same bytes give the same file, and a file outlives a crash so
+//! recovery can still use it. Blank and image pages go in as files, read
+//! from here into the document's store. Marks name their stamps' pages and
+//! attachments' files by the stems this cache gives ([`BlobId::stem`]),
+//! and hold them themselves; a mark naming a stamp nothing else holds
+//! finds it here (until M10.5 slice 19).
+//!
+//! [`BlobId::stem`]: crate::store::BlobId::stem
 
 use std::path::PathBuf;
 
@@ -29,11 +31,11 @@ pub fn cache_dir() -> PathBuf {
     base.unwrap_or_else(std::env::temp_dir).join("sheaf")
 }
 
-/// A file's name in the cache: its checksum and length. Files stored
-/// before sheaf used xxh3 are named by FNV-1a (16 hex digits); they keep
-/// those names, which marks saved since then refer to.
+/// A file's name in the cache: its blob's stem, its checksum and length.
+/// Files stored before sheaf used xxh3 are named by FNV-1a (16 hex
+/// digits); they keep those names, which marks saved since then refer to.
 fn name_of(bytes: &[u8]) -> String {
-    format!("{}-{}", sheaf_core::checksum_hex(bytes), bytes.len())
+    crate::store::BlobId::of(bytes).stem()
 }
 
 /// Whether `stem` is a name the cache gives ([`name_of`], or the FNV-1a
@@ -97,25 +99,6 @@ pub fn stem_of(path: &std::path::Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-/// Keep any file's bytes in the cache (an attachment until it's saved
-/// into the document), named by content; returns the name.
-pub fn store_blob(bytes: &[u8]) -> Result<String> {
-    let dir = cache_dir().join("files");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let stem = name_of(bytes);
-    let path = dir.join(&stem);
-    if !std::fs::read(&path).is_ok_and(|b| b == bytes) {
-        write_new(&path, bytes)?;
-    }
-    Ok(stem)
-}
-
-/// Where the cache keeps the file named `stem` (see [`store_blob`]).
-/// None if `stem` isn't a cache name ([`is_stem`]).
-pub fn blob_path(stem: &str) -> Option<PathBuf> {
-    is_stem(stem).then(|| cache_dir().join("files").join(stem))
 }
 
 /// One blank page of `width` × `height` points.
@@ -190,10 +173,7 @@ mod tests {
             "C:\\x",
         ] {
             assert!(!is_stem(bad), "{bad:?}");
-            assert!(
-                path_of(bad).is_none() && blob_path(bad).is_none(),
-                "{bad:?}"
-            );
+            assert!(path_of(bad).is_none(), "{bad:?}");
         }
     }
 }

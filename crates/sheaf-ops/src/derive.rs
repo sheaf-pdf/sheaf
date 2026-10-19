@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use in_progress::Progress;
 use sheaf_doc::content::{ContentError, PaginationKind};
 use sheaf_doc::geom::Geom;
+use sheaf_doc::save::HeaderKept;
 use sheaf_doc::store::{BlobKind, MemoryKind, Origin};
 use sheaf_doc::{Derived, PAGES, PageId, Rebase, Snapshot, SourceId, SourceInfo, Store};
 
@@ -48,7 +49,6 @@ pub(crate) fn copy_of(
         src: store.open(bytes.into(), kind)?,
         name: original.name.clone(),
         derived: Some(Derived { from, pages }),
-        stamp: None,
     })
 }
 
@@ -74,14 +74,14 @@ pub fn strip_stamps(
     progress: &dyn Progress,
 ) -> Result<Vec<DerivedSource>> {
     let kinds = sheaf_doc::stamps::HEADER_FOOTER;
-    progress.set_total(Some(snap.state.pages.len() as u64), PAGES);
+    progress.set_total(Some(snap.state.page_count() as u64), PAGES);
     // (page, index in source, place in the document)
     let mut by_source: BTreeMap<SourceId, Vec<(PageId, u32, u32)>> = BTreeMap::new();
-    for (n, p) in snap.state.pages.iter().enumerate() {
+    for (n, (id, def, _)) in snap.state.pages().enumerate() {
         by_source
-            .entry(p.source)
+            .entry(def.base.source)
             .or_default()
-            .push((p.id, p.index, n as u32));
+            .push((id, def.base.index, n as u32));
     }
     let mut out = Vec::new();
     let mut done = 0;
@@ -100,7 +100,8 @@ pub fn strip_stamps(
             continue;
         }
         let list: Vec<(u32, Option<[f32; 4]>)> = keep.iter().map(|k| (k.1, None)).collect();
-        let bytes = sheaf_doc::save::derived_copy(info, &list, &mut |pdf, d, _, at| {
+        let stripped = HeaderKept::No;
+        let bytes = sheaf_doc::save::derived_copy(info, &list, stripped, &mut |pdf, d, _, at| {
             sheaf_doc::stamps::strip(pdf, d, keep[at].2, kinds)?;
             Ok(())
         })?;
@@ -135,15 +136,18 @@ pub fn watermark(
     } else {
         sheaf_doc::stamps::WATERMARK
     };
-    progress.set_total(Some(snap.state.pages.len() as u64), PAGES);
+    progress.set_total(Some(snap.state.page_count() as u64), PAGES);
     // (page, index in source, place in the document, draw?, its rotation)
     let mut by_source: BTreeMap<SourceId, Vec<_>> = BTreeMap::new();
-    for (n, p) in snap.state.pages.iter().enumerate() {
-        let draw = wm.is_some() && scope.contains(&p.id);
-        by_source
-            .entry(p.source)
-            .or_default()
-            .push((p.id, p.index, n as u32, draw, p.rotation));
+    for (n, (id, def, geom)) in snap.state.pages().enumerate() {
+        let draw = wm.is_some() && scope.contains(&id);
+        by_source.entry(def.base.source).or_default().push((
+            id,
+            def.base.index,
+            n as u32,
+            draw,
+            geom.rotate,
+        ));
     }
     let mut out = Vec::new();
     let mut done = 0;
@@ -162,7 +166,8 @@ pub fn watermark(
             continue;
         }
         let list: Vec<(u32, Option<[f32; 4]>)> = keep.iter().map(|k| (k.1, None)).collect();
-        let bytes = sheaf_doc::save::derived_copy(info, &list, &mut |pdf, d, geom, at| {
+        let kept = HeaderKept::Yes;
+        let bytes = sheaf_doc::save::derived_copy(info, &list, kept, &mut |pdf, d, geom, at| {
             let (_, _, n, draw, rotate) = keep[at];
             sheaf_doc::stamps::strip(pdf, d, n, kinds)?;
             if draw && let Some(wm) = wm {
@@ -187,12 +192,15 @@ pub fn watermark(
 /// one sheaf wrote, for the dialog to start from.
 pub fn current_watermark(snap: &Snapshot, behind: bool) -> Option<sheaf_doc::watermark::Watermark> {
     let mut by_source: BTreeMap<SourceId, Vec<u32>> = BTreeMap::new();
-    for p in snap.state.pages.iter() {
-        by_source.entry(p.source).or_default().push(p.index);
+    for (_, def, _) in snap.state.pages() {
+        by_source
+            .entry(def.base.source)
+            .or_default()
+            .push(def.base.index);
     }
     for (sid, indexes) in by_source {
         let info = snap.source(sid)?;
-        let file = sheaf_doc::file::load_source(info).ok()?;
+        let file = sheaf_doc::materialize::graph::load(info).ok()?;
         let objs: Vec<_> = file.get_pages().into_values().collect();
         for i in indexes {
             if let Some(d) = objs
@@ -237,9 +245,8 @@ mod tests {
             src: store.open(f.bytes().into(), kind).unwrap(),
             name: "t.pdf".into(),
             derived: None,
-            stamp: None,
         };
-        Document::new(store, primary, &[], Box::new(FixedCount(10)))
+        Document::new(store, primary, None, &[], Box::new(FixedCount(10)))
     }
 
     /// Pages are picked by their blocks: those with a header sheaf drew,
@@ -247,7 +254,7 @@ mod tests {
     #[test]
     fn pages_are_picked_by_their_blocks() {
         let d = doc(&[b"0 g", HEADER, AUTHORED]);
-        let ids: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
+        let ids: Vec<PageId> = d.state().order().iter().copied().collect();
         let copies = strip_stamps(d.store(), &d.snapshot(), &NoProgress).unwrap();
         assert_eq!(copies.len(), 1);
         assert_eq!(copies[0].pages, [(ids[1], 0)]);
@@ -277,7 +284,7 @@ mod tests {
     #[test]
     fn a_page_that_cant_be_read_is_named() {
         let mut d = doc(&[b"0 g", b"/A BMC"]);
-        let ids: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
+        let ids: Vec<PageId> = d.state().order().iter().copied().collect();
         let first = Edit::MovePages {
             ids: vec![ids[1]],
             before: Some(ids[0]),

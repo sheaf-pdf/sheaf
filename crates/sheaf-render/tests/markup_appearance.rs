@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::annot::caret_box;
+use sheaf_doc::materialize::Came;
+use sheaf_doc::store::BlobKind;
 use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Box2, Document, Edit, FixedCount, Pt, SourceInfo, Store,
+    Annot, AnnotId, AnnotKind, Blob, Box2, Document, Edit, FixedCount, Pt, SourceInfo, Store,
 };
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::pdfium::{PdfiumEngine, appearance_text};
@@ -81,8 +83,8 @@ fn placed(model: &Document, a: Annot) -> Annot {
 }
 
 /// A one-page red stamp, 100 × 50, placed in `model` as the stamps panel
-/// places one; its name.
-fn red_stamp(model: &Document) -> String {
+/// places one: interned, and held until it's added.
+fn red_stamp(model: &Document) -> Blob {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(
@@ -103,8 +105,10 @@ fn red_stamp(model: &Document) -> String {
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
-    model.assets().intern_stamp("red", bytes.into());
-    "red".into()
+    model
+        .store()
+        .intern(bytes.into(), BlobKind::stamp())
+        .unwrap()
 }
 
 fn row(y: f32) -> Box2 {
@@ -131,10 +135,17 @@ fn check(rotate: i64) {
     }
     .rotated(Rotation::from_degrees(rotate as i32));
     let store = Store::new();
-    let primary = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-    let page = model.page(0).unwrap().id;
+    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        &[],
+        Box::new(FixedCount(10)),
+    );
+    let page = model.page(0).unwrap();
     let replaced = row(300.0);
+    let red = red_stamp(&model);
     for a in [
         mark(
             AnnotKind::Underline {
@@ -171,7 +182,7 @@ fn check(rotate: i64) {
                     w: 100.0,
                     h: 50.0,
                 },
-                stamp: red_stamp(&model),
+                stamp: red.id().stem(),
                 name: "Red".into(),
                 text: None,
             },
@@ -375,9 +386,15 @@ fn tapes_draw_turned_and_from_old_text() {
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
     let store = Store::new();
-    let primary = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-    let page = model.page(0).unwrap().id;
+    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        &[],
+        Box::new(FixedCount(10)),
+    );
+    let page = model.page(0).unwrap();
     let mut tape = Tape {
         lines: vec![
             Line::new(Row::Title("Cash".into())),
@@ -483,9 +500,15 @@ fn clouds_and_callouts_draw() {
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
     let store = Store::new();
-    let primary = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-    let page = model.page(0).unwrap().id;
+    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        &[],
+        Box::new(FixedCount(10)),
+    );
+    let page = model.page(0).unwrap();
     let mut cloud = mark(
         AnnotKind::Square {
             rect: Box2 {
@@ -565,9 +588,15 @@ fn free_text_reads_back_from_its_appearance() {
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
     let store = Store::new();
-    let primary = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-    let page = model.page(0).unwrap().id;
+    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        &[],
+        Box::new(FixedCount(10)),
+    );
+    let page = model.page(0).unwrap();
     let text = "é € — “ ”";
     let mut note = mark(
         AnnotKind::FreeText {

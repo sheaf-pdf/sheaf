@@ -7,7 +7,8 @@
 //! `model::Document::marginal`. Every `.rs` file under `crates/` (but not
 //! under a `target`) is parsed with `syn`, and a row fails on:
 //! - **a definition at that path:** an item, an impl's or trait's item as
-//!   `Type::item`, a field as `Type::field`, a variant as `Type::Variant`.
+//!   `Type::item`, a field as `Type::field`, a variant as `Type::Variant`,
+//!   a variant's field as `Type::Variant::field`.
 //!   A file's module comes from its path, and inline `mod`s nest;
 //! - **a path that names it:** one that holds the row's last two segments
 //!   in a row, after a leading `crate`, `self`, `super` or `sheaf_*`, in
@@ -191,12 +192,267 @@ const RETIRED: &[(&str, u8)] = &[
     ("save::write_atomic", 7),
     ("images::write_atomic", 7),
     ("save::WouldBreakSignatures::encrypted", 7),
+    ("model::PageRef", 8),
+    ("model::OutlineNode", 8),
+    // DocState's fields and accessors went in slice 8, which moved its
+    // struct to model/state.rs: a field would come back there, and a
+    // method in any of the files with an `impl DocState`.
+    ("model::state::DocState::index_of", 8),
+    ("model::state::DocState::page_positions", 8),
+    ("model::state::DocState::text_layers", 8),
+    ("model::state::DocState::text_layer", 8),
+    ("model::state::DocState::has_text_layer", 8),
+    ("model::state::DocState::outline", 8),
+    ("model::state::DocState::outline_flat", 8),
+    ("model::state::DocState::removed_comments", 8),
+    ("model::state::DocState::widgets", 8),
+    ("model::DocState::index_of", 8),
+    ("model::DocState::page_positions", 8),
+    ("model::DocState::text_layer", 8),
+    ("model::DocState::has_text_layer", 8),
+    ("model::DocState::outline_flat", 8),
+    ("prim::DocState::index_of", 8),
+    ("prim::DocState::page_positions", 8),
+    ("prim::DocState::text_layer", 8),
+    ("prim::DocState::has_text_layer", 8),
+    ("prim::DocState::outline_flat", 8),
+    ("model::Document::saved_outline", 8),
+    ("model::Document::saved_labels", 8),
+    ("model::Document::saved_annots", 8),
+    ("model::Document::saved_removed", 8),
+    ("model::Document::saved_fields", 8),
+    ("model::Document::baked_header_footer", 8),
+    ("model::Document::forms", 8),
+    ("model::Document::set_source_form", 8),
+    ("model::Document::assets", 8),
+    ("model::Document::set_source_assets", 8),
+    ("model::Document::set_saved_assets", 8),
+    ("model::Snapshot::assets", 8),
+    ("model::source_geom", 8),
+    ("model::render_delta_in", 8),
+    ("model::outline_find", 8),
+    ("model::outline_update", 8),
+    ("model::outline_remove", 8),
+    ("model::subtree_contains", 8),
+    ("model::strip_targets", 8),
+    ("model::count_nodes", 8),
+    ("model::collect_targets", 8),
+    ("model::collect_ids", 8),
+    ("model::import_marks", 8),
+    ("prim::Key::Pages", 8),
+    ("prim::Key::Outline", 8),
+    ("prim::Key::AnnotsOf", 8),
+    ("prim::Key::TextLayer", 8),
+    ("prim::Key::RemovedOf", 8),
+    ("prim::Key::HeaderFooter", 8),
+    ("prim::Key::WidgetsOf", 8),
+    ("prim::Val::Pages", 8),
+    ("prim::Val::Outline", 8),
+    ("prim::Val::Annots", 8),
+    ("prim::Val::TextLayer", 8),
+    ("prim::Val::Removed", 8),
+    ("prim::Val::HeaderFooter", 8),
+    ("prim::Val::Widgets", 8),
+    ("open::Facts::marks", 8),
+    ("open::Facts::renamed", 8),
+    ("open::Facts::foreign", 8),
+    ("open::Facts::assets", 8),
+    ("open::ViewFacts::foreign", 8),
+    ("file::AnnotsInFile::assets", 8),
+    ("file::ForeignAnnot::page", 8),
+    ("file::is_comment_subtype", 8),
+    ("assets::MarkAssets", 8),
+    ("assets::SourceAssets", 8),
+    ("assets::Stamp", 8),
+    ("assets::File", 8),
+    ("generated::store_blob", 8),
+    ("generated::blob_path", 8),
+    ("annot::copy_stream", 8),
+    ("attachments::AttachmentRef::Cached", 8),
+    ("forms::field::Field::source_name", 8),
+    ("forms::field::Field::has_scripts", 8),
+    ("forms::fixture::mark_assets", 8),
+    ("runtime::HostState::page_ref", 8),
+    ("docview::Doc::page_ref", 8),
+    ("docview::Doc::foreign_annots", 8),
+    ("docview::Doc::foreign_generation", 8),
+    ("docview::Doc::index_of_page_in", 8),
+    ("docview::Incoming::marks", 8),
+    ("docview::Incoming::renamed", 8),
+    ("docview::Incoming::assets", 8),
+    ("docview::Incoming::foreign", 8),
+    ("docview::Incoming::form", 8),
+    ("docview::reread_foreign", 8),
+    ("form_bar::Forms::incoming", 8),
+    ("outline_panel::locate", 8),
+    ("stamp_preview::Tried", 8),
+    ("stamp_preview::Previews::missing", 8),
+    ("model::Saved", 9),
+    ("save::SaveStop", 9),
+    ("save::Ask", 9),
+    ("save::LoadedSource", 9),
+    ("file::load_source", 9),
+    ("save::INHERITED", 9),
+    ("save::inherited_attrs", 9),
+    ("save::copy_page_dict", 9),
+    ("save::is_page_node", 9),
+    ("save::copy_object", 9),
+    ("save::remap", 9),
+    ("content::to_lopdf::resources_of", 9),
+    ("content::to_lopdf::ResObjects::stream", 9),
+    ("save::build_rewrite", 9),
+    ("save::rewrite_with", 9),
+    ("save::finish", 9),
+    ("save::kept_encryption", 9),
+    ("serialize::full::write", 9),
+    ("model::Document::rebase_to_saved", 9),
+    ("model::rebind_annots", 9),
+    ("model::rebind_fields", 9),
+    ("model::Document::mark_saved", 9),
+    ("recovery::MAGIC", 9),
+    ("recovery::materialize", 9),
+    ("docview::DocView::save_signed", 9),
+    ("docview::DocView::ask_how_to_save_signed", 9),
+    ("docview::DocView::ask_file_changed", 9),
+    ("docview::DocView::pending_signed", 9),
+    ("docview::DocView::pending_changed", 9),
+    ("docview::DocView::pending_xfa", 9),
+    ("docview::Doc::layers_default", 9),
+    ("form_bar::DocView::would_drop_xfa_values", 9),
+    ("form_bar::DocView::ask_to_drop_xfa_values", 9),
+    ("attachments_panel::DocView::refresh_facts", 9),
+    ("layers_panel::Doc::layers_changed", 9),
+    // Slice 9, step 7: the old writers, the old entry point, the legacy
+    // projection, the dirty tracking and the renames table.
+    ("incremental::incremental", 9),
+    ("incremental::append", 9),
+    ("incremental::incremental_section", 9),
+    ("incremental::Mode", 9),
+    ("save::save_to_path", 9),
+    ("save::save_to_path_noting", 9),
+    ("save::Strategy", 9),
+    ("save::Signed", 9),
+    ("save::WouldBreakSignatures", 9),
+    ("save::IfChanged", 9),
+    ("save::write_checked", 9),
+    ("save::file_changed", 9),
+    ("save::write_outline", 9),
+    ("save::outline_dest", 9),
+    ("save::write_page_annots", 9),
+    ("save::ConnectorRef", 9),
+    ("save::PageAnnotsWritten", 9),
+    ("save::strip_sheaf_annots", 9),
+    ("save::link_connectors", 9),
+    ("save::is_identity", 9),
+    ("save::reserve_pages", 9),
+    ("save::reserve_page_objects", 9),
+    ("save::copy_of", 9),
+    ("save::origin", 9),
+    ("save::origins", 9),
+    ("save::needed", 9),
+    ("save::copy_derived_page", 9),
+    ("save::geom_of", 9),
+    ("forms::merge::CopyMaps", 9),
+    ("forms::merge::FormCopy", 9),
+    ("forms::merge::page_copy", 9),
+    ("forms::merge::copy_annots", 9),
+    ("forms::merge::annots_on", 9),
+    ("forms::merge::merge", 9),
+    ("forms::rules::take_out", 9),
+    ("forms::read::fields_of", 9),
+    ("kept::drop_dead_links", 9),
+    ("kept::prune_fields", 9),
+    ("materialize::graph::Loaded::pdf", 9),
+    ("materialize::graph::Loaded::from_pdf_owned", 9),
+    ("file::page_geom", 9),
+    ("file::read_annots", 9),
+    ("file::read_annots_mem", 9),
+    ("file::read_sheaf_annots", 9),
+    ("file::read_sheaf_annots_mem", 9),
+    ("file::removed_with_threads", 9),
+    ("annot::WriteCx::owning", 9),
+    ("annot::WriteCx::own", 9),
+    ("serialize::append::Base::of", 9),
+    ("model::LegacyDocState", 9),
+    ("model::legacy::LegacyDocState", 9),
+    ("model::legacy_field", 9),
+    ("model::legacy::legacy_field", 9),
+    ("model::Snapshot::legacy", 9),
+    ("forms::field::Field::source", 9),
+    ("forms::field::Field::copy", 9),
+    ("forms::field::Field::under", 9),
+    ("model::Document::baseline", 9),
+    ("model::Document::removes_content", 9),
+    ("model::Document::annots_dirty_pages", 9),
+    ("model::Document::fields_dirty", 9),
+    ("model::Document::header_footer_dirty", 9),
+    ("model::Document::form_changed", 9),
+    ("model::Document::widgets_changed", 9),
+    ("model::Snapshot::outline_dirty", 9),
+    ("model::Snapshot::labels_dirty", 9),
+    ("model::Snapshot::header_footer_dirty", 9),
+    ("model::Snapshot::annots_dirty", 9),
+    ("model::Snapshot::fields_dirty", 9),
+    ("model::Snapshot::removes_content", 9),
+    ("model::Snapshot::form_changed", 9),
+    ("model::state::DocState::annots_changed_from", 9),
+    ("model::DocState::annots_changed_from", 9),
+    ("prim::DocState::annots_changed_from", 9),
+    ("model::state::DocState::fields_changed_from", 9),
+    ("model::DocState::fields_changed_from", 9),
+    ("prim::DocState::fields_changed_from", 9),
+    ("model::state::DocState::outline_eq", 9),
+    ("model::DocState::outline_eq", 9),
+    ("prim::DocState::outline_eq", 9),
+    ("model::state::DocState::labels_eq", 9),
+    ("model::DocState::labels_eq", 9),
+    ("prim::DocState::labels_eq", 9),
+    ("model::state::DocState::keeps_annots_of", 9),
+    ("model::DocState::keeps_annots_of", 9),
+    ("prim::DocState::keeps_annots_of", 9),
+    ("model::state::DocState::keeps_bookmarks_of", 9),
+    ("model::DocState::keeps_bookmarks_of", 9),
+    ("prim::DocState::keeps_bookmarks_of", 9),
+    ("model::state::DocState::widgets_eq_on", 9),
+    ("model::DocState::widgets_eq_on", 9),
+    ("prim::DocState::widgets_eq_on", 9),
+    ("model::Renames", 9),
+    ("model::Snapshot::renamed", 9),
+    ("model::Snapshot::renamed_on", 9),
+    ("model::Document::renamed", 9),
+    ("model::Document::set_source_renamed", 9),
+    ("model::SourceInfo::stamp", 9),
+    ("forms::rules::has", 9),
+    // Moved to `materialize::plan`, which asks before a Rewrite breaks
+    // them.
+    ("save::signatures_broken", 9),
+    // AES IVs keyed by the number an object is written at: an update's
+    // section keys them by what it is.
+    ("serialize::indirect", 10),
+    ("serialize::crypt::Crypt::encrypt", 10),
+    // A stamp in hex is the stamp's own (`FileStamp::hex`), which an
+    // append's journal says it in too.
+    ("recovery::stamp_hex", 10),
+    ("recovery::parse_stamp", 10),
+    // Every save a Rewrite, and a signed file's ask by a count: the
+    // planner decides, and asks by each signature's impact.
+    ("materialize::plan::Why::AlwaysRewrite", 10),
+    ("materialize::plan::signatures_broken", 10),
+    ("materialize::plan::Ask::Signatures::signatures", 10),
+    // A restored document's file, and its being unsaved, are its record's:
+    // the file's, with the recovery sidecar's sections pending.
+    ("model::Document::disk_base", 10),
+    ("model::Document::set_disk_base", 10),
+    ("model::Document::mark_unsaved", 10),
+    // An update frees nothing: an object it unlinks stays in use.
+    ("serialize::xref::Entry::deleted", 10),
 ];
 
 /// Last segments only a path matches: names the new design uses again
 /// (§17), and words common enough to name other things.
 const QUALIFIED_ONLY: &[&str] = &[
     "Mode",
+    "deleted",
     "Step",
     "PageRef",
     "LabelSpec",
@@ -235,6 +491,69 @@ const QUALIFIED_ONLY: &[&str] = &[
     "objects",
     "runs",
     "encrypted",
+    "index_of",
+    "text_layers",
+    "removed_comments",
+    "widgets",
+    "forms",
+    "assets",
+    "marks",
+    "foreign",
+    "renamed",
+    "form",
+    "TextLayer",
+    "HeaderFooter",
+    "Stamp",
+    "File",
+    "locate",
+    "missing",
+    "Pages",
+    "Annots",
+    "incoming",
+    "has_scripts",
+    "Saved",
+    "SaveStop",
+    "Ask",
+    "inherited_attrs",
+    "copy_page_dict",
+    "is_page_node",
+    "copy_object",
+    "remap",
+    "stream",
+    "finish",
+    "write",
+    "materialize",
+    "append",
+    "Strategy",
+    "Signed",
+    "copy_of",
+    "origin",
+    "origins",
+    "needed",
+    "copy_annots",
+    "annots_on",
+    "merge",
+    "fields_of",
+    "pdf",
+    "own",
+    "of",
+    "copy",
+    "under",
+    "baseline",
+    "form_changed",
+    "stamp",
+    "signatures_broken",
+    "has",
+    // What a save's path removed (§9.2's `Removed`, and its kinds'
+    // `Widgets`), not slice 8's removed slot value and widgets' slot.
+    "Removed",
+    "Widgets",
+    // `serialize::object::indirect` writes an object's frame, and
+    // lopdf's `Document::encrypt` encrypts a whole file.
+    "indirect",
+    "encrypt",
+    // `Source::signatures` reads them; `Ask::Signatures`' count is gone.
+    "signatures",
 ];
 
 #[test]
@@ -304,6 +623,20 @@ mod tests {
             (11, "incremental::Mode", 9),
         ]
     );
+}
+
+#[test]
+fn a_variant_s_field_is_named_from_its_enum() {
+    const ROWS: &[(&str, u8)] = &[("plan::Ask::Signatures::count", 10)];
+    let src = r#"
+enum Ask {
+    Signatures { count: usize },
+    Other { count: usize },
+}
+"#;
+    let hits = scan(src, vec!["plan".into()], ROWS).unwrap();
+    // Not line 4's, another variant's.
+    assert_eq!(hits, [(3, "plan::Ask::Signatures::count", 10)]);
 }
 
 #[test]
@@ -436,13 +769,14 @@ impl Scan {
         self.hits.insert((at.span().start().line, row, slice));
     }
 
-    /// A definition of `name`, in `within` (a type or trait) if given.
-    fn defines(&mut self, within: Option<&Ident>, name: &Ident) {
+    /// A definition of `name`, in `within` (a type or trait, and a
+    /// variant of it).
+    fn defines(&mut self, within: &[&Ident], name: &Ident) {
         let path: Vec<String> = self
             .module
             .iter()
             .cloned()
-            .chain(within.map(Ident::to_string))
+            .chain(within.iter().map(|i| i.to_string()))
             .chain([name.to_string()])
             .collect();
         for &(row, slice) in self.rows {
@@ -522,52 +856,57 @@ impl Scan {
 
 impl<'ast> Visit<'ast> for Scan {
     fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
-        self.defines(None, &m.ident);
+        self.defines(&[], &m.ident);
         self.module.push(m.ident.to_string());
         visit::visit_item_mod(self, m);
         self.module.pop();
     }
 
     fn visit_item_struct(&mut self, s: &'ast syn::ItemStruct) {
-        self.defines(None, &s.ident);
+        self.defines(&[], &s.ident);
         for field in &s.fields {
             if let Some(name) = &field.ident {
-                self.defines(Some(&s.ident), name);
+                self.defines(&[&s.ident], name);
             }
         }
         visit::visit_item_struct(self, s);
     }
 
     fn visit_item_enum(&mut self, e: &'ast syn::ItemEnum) {
-        self.defines(None, &e.ident);
+        self.defines(&[], &e.ident);
         for variant in &e.variants {
-            self.defines(Some(&e.ident), &variant.ident);
+            self.defines(&[&e.ident], &variant.ident);
+            for field in &variant.fields {
+                if let Some(name) = &field.ident {
+                    self.defines(&[&e.ident, &variant.ident], name);
+                }
+            }
         }
         visit::visit_item_enum(self, e);
     }
 
     fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-        self.defines(None, &f.sig.ident);
+        self.defines(&[], &f.sig.ident);
         visit::visit_item_fn(self, f);
     }
 
     fn visit_item_const(&mut self, c: &'ast syn::ItemConst) {
-        self.defines(None, &c.ident);
+        self.defines(&[], &c.ident);
         visit::visit_item_const(self, c);
     }
 
     fn visit_item_static(&mut self, s: &'ast syn::ItemStatic) {
-        self.defines(None, &s.ident);
+        self.defines(&[], &s.ident);
         visit::visit_item_static(self, s);
     }
 
     fn visit_item_type(&mut self, t: &'ast syn::ItemType) {
-        self.defines(None, &t.ident);
+        self.defines(&[], &t.ident);
         visit::visit_item_type(self, t);
     }
 
     fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
-        self.defines(None, &t.ident);
+        self.defines(&[], &t.ident);
         for item in &t.items {
             let name = match item {
                 TraitItem::Fn(f) => &f.sig.ident,
@@ -575,7 +914,7 @@ impl<'ast> Visit<'ast> for Scan {
                 TraitItem::Type(t) => &t.ident,
                 _ => continue,
             };
-            self.defines(Some(&t.ident), name);
+            self.defines(&[&t.ident], name);
         }
         visit::visit_item_trait(self, t);
     }
@@ -591,7 +930,7 @@ impl<'ast> Visit<'ast> for Scan {
                     ImplItem::Type(t) => &t.ident,
                     _ => continue,
                 };
-                self.defines(Some(&ty.ident), name);
+                self.defines(&[&ty.ident], name);
             }
         }
         visit::visit_item_impl(self, i);

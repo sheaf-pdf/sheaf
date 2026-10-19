@@ -85,7 +85,7 @@ impl SplitDialog {
             .collect();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let method = if snapshot.state.outline.is_empty() {
+        let method = if snapshot.state.outline_roots().is_empty() {
             Method::EveryN
         } else {
             Method::Bookmarks
@@ -216,7 +216,7 @@ impl Render for SplitDialog {
                 .into_any_element()
         });
         let preview = self.preview(cx);
-        let n = self.snapshot.state.pages.len();
+        let n = self.snapshot.state.page_count();
         dialog::backdrop("split-backdrop")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)

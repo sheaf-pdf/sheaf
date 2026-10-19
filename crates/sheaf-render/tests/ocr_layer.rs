@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, Rotation};
+use sheaf_doc::materialize::Came;
 use sheaf_doc::{
     Box2, Document, Edit, FixedCount, OcrWord, PageChars, Pt, SourceInfo, Store, TextLayer,
 };
@@ -96,9 +97,15 @@ fn check(rotate: i64, by: Rotation) {
     let src = dir.join("src.pdf");
     blank_pdf(&src, rotate);
     let store = Store::new();
-    let primary = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-    let page = model.page(0).unwrap().id;
+    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        &[],
+        Box::new(FixedCount(10)),
+    );
+    let page = model.page(0).unwrap();
     if by != Rotation::R0 {
         model
             .apply(
@@ -112,7 +119,7 @@ fn check(rotate: i64, by: Rotation) {
     }
     // Two words on a line, as the engine would report them in the frame
     // the page was shown in.
-    let shown = model.geom(&model.state().pages[0]);
+    let shown = model.geom(model.state().order()[0]);
     let hello = Box2 {
         x: 72.0,
         y: 100.0,

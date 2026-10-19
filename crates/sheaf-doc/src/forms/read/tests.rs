@@ -17,6 +17,7 @@ use crate::SourceInfo;
 use crate::forms::corpus::Corpus;
 use crate::forms::field::{annot_flags, flags};
 use crate::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row, source};
+use crate::source::Limits;
 use crate::store::{BlobKind, Store};
 
 /// The form as a file holds it, written and read back.
@@ -79,7 +80,8 @@ fn js(script: &str) -> Object {
 
 #[test]
 fn every_kind_of_field() {
-    let form = read_back(&mut every_kind());
+    let mut f = every_kind();
+    let form = read_back(&mut f);
     let fields: Vec<(&str, FieldKind, Option<Value>)> = form
         .fields
         .iter()
@@ -100,8 +102,20 @@ fn every_kind_of_field() {
             ("form1[0].sig[0]", Signature, None),
         ]
     );
+    // Every node in tree order, a terminal's id its node's: the parent
+    // first, then its kids.
+    let nodes: Vec<(&str, Option<FieldId>)> = (form.nodes.iter())
+        .map(|n| (&*n.partial, n.parent))
+        .collect();
+    assert_eq!(
+        nodes[..2],
+        [("form1[0]", None), ("name[0]", Some(FieldId(0)))]
+    );
+    assert!(nodes[1..].iter().all(|&(_, up)| up == Some(FieldId(0))));
+    assert_eq!(form.nodes[0].kids, (1..10).map(FieldId).collect::<Vec<_>>());
+    assert_eq!(form.nodes[0].object, f.fields()[0]);
     let ids: Vec<u64> = form.fields.iter().map(|f| f.id.0).collect();
-    assert_eq!(ids, (0..9).collect::<Vec<_>>());
+    assert_eq!(ids, (1..10).collect::<Vec<_>>());
     let name = field(&form, "form1[0].name[0]");
     assert_eq!(name.da.as_deref(), Some("/Helv 10 Tf 0 g"));
     assert_eq!(
@@ -124,8 +138,13 @@ fn every_kind_of_field() {
             .map(|w| (w.field.0, w.slot))
             .collect()
     };
-    assert_eq!(on_page(0), [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (4, 5)]);
-    assert_eq!(on_page(1), [(5, 0), (6, 1), (7, 2), (8, 3)]);
+    assert_eq!(on_page(0), [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (5, 5)]);
+    assert_eq!(on_page(1), [(6, 0), (7, 1), (8, 2), (9, 3)]);
+    // Each is its field's own dictionary, but for the radio group's kids.
+    let merged: Vec<bool> = form.widgets[&0].iter().map(|w| w.merged).collect();
+    assert_eq!(merged, [true, true, true, true, false, false]);
+    assert!(form.widgets[&1].iter().all(|w| w.merged));
+    assert!(form.fields.iter().all(|f| f.outside == 0));
     let first = &form.widgets[&0][0];
     assert_eq!(first.rect, row(0));
     assert_eq!(first.flags, annot_flags::PRINT);
@@ -231,7 +250,7 @@ fn the_forms_own_keys() {
     let facts = read_back(&mut f).facts;
     assert!(facts.need_appearances);
     assert_eq!(facts.align, 1);
-    assert_eq!(facts.calculation_order, [FieldId(1), FieldId(0)]);
+    assert_eq!(facts.calculation_order, [FieldId(2), FieldId(1)]);
 }
 
 #[test]
@@ -423,7 +442,7 @@ fn usage_rights_signatures_and_a_certification() {
 
     let mut f = Form::new(1);
     let sig = f.signature("Author", 0, row(0));
-    f.certify(sig);
+    f.certify(sig, 2);
     let facts = read_back(&mut f).facts;
     assert!(facts.certified && !facts.usage_rights);
     assert_eq!(
@@ -755,12 +774,26 @@ fn fields_listed_twice_are_read_once() {
     assert_eq!(form.facts.damaged, None);
     let names: Vec<&str> = form.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["twice", "parent.kid", "x", "y"]);
+    // Nodes: twice, parent, kid, x and y; kid read once, under parent.
+    let nodes: Vec<(&str, Option<u64>)> = (form.nodes.iter())
+        .map(|n| (&*n.partial, n.parent.map(|p| p.0)))
+        .collect();
+    assert_eq!(
+        nodes,
+        [
+            ("twice", None),
+            ("parent", None),
+            ("kid", Some(1)),
+            ("x", None),
+            ("y", None)
+        ]
+    );
     let owners: Vec<(u64, usize)> = form.widgets[&0]
         .iter()
         .map(|w| (w.field.0, w.slot))
         .collect();
     // y's own widget isn't its kid any more: no field has it.
-    assert_eq!(owners, [(0, 0), (1, 1), (2, 2)]);
+    assert_eq!(owners, [(0, 0), (2, 1), (3, 2)]);
 }
 
 #[test]
@@ -786,6 +819,50 @@ fn a_page_listed_twice_has_its_widgets_at_both_indexes() {
         .collect();
     assert_eq!(on, [(0, a), (1, a)]);
     assert_eq!(form.facts.widgets, 2);
+}
+
+/// A widget no page of the page tree lists, as a page template's, counts
+/// as its field's outside; a widget on a page doesn't.
+#[test]
+fn a_template_s_widgets_are_outside() {
+    let mut f = every_kind();
+    let spawned = f.text("spawned", 0, row(6));
+    let annots: Vec<_> = f.annots(0).into_iter().filter(|&a| a != spawned).collect();
+    f.set_annots(0, &annots);
+    let template = f.pdf.add_object(dictionary! {
+        "Type" => "Page",
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Annots" => vec![Object::Reference(spawned)],
+    });
+    let templates =
+        dictionary! { "Names" => vec![Object::string_literal("extra"), template.into()] };
+    f.dict(f.catalog)
+        .set("Names", dictionary! { "Templates" => templates });
+    let form = read_back(&mut f);
+    let outside: Vec<(&str, u16)> = (form.fields.iter())
+        .filter(|f| f.outside > 0)
+        .map(|f| (f.name.as_str(), f.outside))
+        .collect();
+    assert_eq!(outside, [("spawned", 1)]);
+    assert_eq!(form.facts.widgets, 10);
+}
+
+/// A full name passes over a node with no `/T` or an empty one, as
+/// PDFium's does.
+#[test]
+fn an_empty_partial_name_is_passed_over() {
+    let mut f = Form::new(1);
+    let a = f.text("a", 0, row(0));
+    let b = f.text("b", 0, row(1));
+    let unnamed = f.group("", &[a]);
+    f.dict(unnamed).remove(b"T");
+    let empty = f.group("", &[b]);
+    f.group("top", &[unnamed, empty]);
+    let form = read_back(&mut f);
+    let names: Vec<&str> = form.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["top.a", "top.b"]);
+    let partials: Vec<&str> = form.nodes.iter().map(|n| &*n.partial).collect();
+    assert_eq!(partials, ["top", "", "a", "", "b"]);
 }
 
 #[test]
@@ -890,13 +967,12 @@ fn a_cross_reference_stream_many_sections_share_is_read_once() {
     }
     bytes.extend_from_slice(format!("startxref\n{prev}\n%%EOF\n").as_bytes());
 
-    // Eagerly, as the old writers load it.
+    // Eagerly, as a Rewrite loads its primary (`materialize::graph`).
     let start = Instant::now();
     let pdf = crate::file::load_pdf_mem(&bytes, None).unwrap();
     let took = start.elapsed();
     let acroform = pdf.catalog().unwrap().get(b"AcroForm").unwrap();
-    let acroform = resolve(&pdf, acroform).unwrap().as_dict().unwrap();
-    assert_eq!(fields_of(&pdf, acroform).unwrap().len(), 2);
+    assert!(resolve(&pdf, acroform).unwrap().as_dict().is_ok());
     assert!(took.as_secs_f32() < 1.0, "{took:?}");
 
     let start = Instant::now();
@@ -934,7 +1010,7 @@ fn corpus_hybrid_reference_files_read_their_newest_revision() {
             continue;
         }
         // Some damaged files don't open at all (slice 1's note).
-        let Ok(info) = SourceInfo::read(&Store::new(), &corpus.path(&entry), None) else {
+        let Ok((info, _)) = SourceInfo::read(&Store::new(), &corpus.path(&entry), None) else {
             continue;
         };
         let facts = read(&info.src).facts;
@@ -1127,8 +1203,9 @@ fn tree_file(nodes: &[Node], roots: &[usize]) -> Vec<u8> {
 
 proptest! {
     /// Any tree reads without a panic, and what's read hangs together:
-    /// fields are distinct objects, each widget belongs to one of them,
-    /// and every number is finite.
+    /// fields are distinct objects, each its node, nodes come after their
+    /// parents and name them as their kids, each widget belongs to one of
+    /// the fields, and every number is finite.
     #[test]
     fn any_field_tree_reads(
         nodes in prop::collection::vec(node(), 1..20),
@@ -1143,6 +1220,15 @@ proptest! {
         }
         let objects: HashSet<ObjectId> = form.fields.iter().map(|f| f.object).collect();
         prop_assert_eq!(objects.len(), form.fields.len());
+        for f in &form.fields {
+            prop_assert_eq!(form.nodes[f.id.0 as usize].object, f.object);
+        }
+        for (i, n) in (0..).zip(&form.nodes) {
+            prop_assert!(n.parent.is_none_or(|p| p.0 < i));
+            for kid in &n.kids {
+                prop_assert_eq!(form.nodes[kid.0 as usize].parent, Some(FieldId(i)));
+            }
+        }
         let ids: HashSet<FieldId> = form.fields.iter().map(|f| f.id).collect();
         let mut owner = HashMap::new();
         for w in form.widgets.values().flatten() {
@@ -1177,6 +1263,7 @@ fn corpus_hybrid_forms_bind_their_xfa() {
         }
         let src = SourceInfo::read(&Store::new(), &corpus.path(&entry), None)
             .unwrap()
+            .0
             .src;
         let form = read(&src);
         let pdf = src.pdf();

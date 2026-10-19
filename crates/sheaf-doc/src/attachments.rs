@@ -7,9 +7,9 @@ use std::collections::HashSet;
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId};
 
-use crate::Source;
-use crate::assets::MarkAssets;
+use crate::annot::AnnotId;
 use crate::file::pdf_text;
+use crate::{DocState, Source};
 
 /// Where an attachment lives, stable across reloads of the same file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -18,9 +18,8 @@ pub enum AttachmentRef {
     Named(String),
     /// The `n`th file-attachment annotation on page `page` (file order).
     Annot { page: u32, n: u32 },
-    /// One of sheaf's, by the stem its mark names its file by, which the
-    /// document's [`MarkAssets`] find: saved or not yet.
-    Cached(String),
+    /// One of sheaf's, its mark: the file it holds, saved or not yet.
+    Mark(AnnotId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,7 +87,7 @@ pub fn attachments_in<P: Objects + ?Sized>(
                 n,
             };
             n += 1;
-            // sheaf's own are listed from the document (`Cached`); one
+            // sheaf's own are listed from the document (`Mark`); one
             // another tool has edited since is that tool's.
             if crate::file::is_ours(pdf, entry, &page_annots) {
                 continue;
@@ -112,23 +111,25 @@ pub fn attachments_in<P: Objects + ?Sized>(
 }
 
 /// The bytes of attachment `at` in `src`, its pages numbered as its page
-/// table numbers them, as they're listed; one of sheaf's from `assets`,
-/// the document's.
-pub fn read_attachment(src: &Source, assets: &MarkAssets, at: &AttachmentRef) -> Result<Vec<u8>> {
-    attachment_bytes(src.pdf(), src.page_ids(), assets, at)
+/// table numbers them, as they're listed; one of sheaf's from its mark in
+/// `st`.
+pub fn read_attachment(st: &DocState, src: &Source, at: &AttachmentRef) -> Result<Vec<u8>> {
+    if let AttachmentRef::Mark(id) = at {
+        let mark = st.annot(*id).and_then(|a| a.mark_record());
+        let file = mark.context("the attachment isn't in the document")?;
+        let file = file.file.as_ref().context("the attachment holds no file")?;
+        return Ok(file.bytes().to_vec());
+    }
+    attachment_bytes(src.pdf(), src.page_ids(), at)
 }
 
 /// The bytes of attachment `at` in a file whose page objects, by index,
-/// are `pages`, in a document whose marks' files are `assets`.
+/// are `pages`: another tool's, or the file's own.
 pub fn attachment_bytes<P: Objects + ?Sized>(
     pdf: &P,
     pages: impl IntoIterator<Item = ObjectId>,
-    assets: &MarkAssets,
     at: &AttachmentRef,
 ) -> Result<Vec<u8>> {
-    if let AttachmentRef::Cached(stem) = at {
-        return Ok(assets.file_bytes(stem)?.to_vec());
-    }
     let spec = match at {
         AttachmentRef::Named(key) => name_tree(pdf, b"EmbeddedFiles")
             .into_iter()
@@ -136,7 +137,7 @@ pub fn attachment_bytes<P: Objects + ?Sized>(
             .and_then(|(_, o)| resolve(pdf, o))
             .and_then(|o| o.as_dict().ok())
             .with_context(|| format!("no embedded file named {key:?}"))?,
-        AttachmentRef::Cached(_) => unreachable!("read from the document's files above"),
+        AttachmentRef::Mark(_) => bail!("one of sheaf's is read from its mark"),
         AttachmentRef::Annot { page, n } => {
             let page_id = pages
                 .into_iter()
@@ -171,13 +172,23 @@ pub fn attachment_bytes<P: Objects + ?Sized>(
 
 /// An embedded file stream's bytes, decoded.
 pub(crate) fn file_bytes(stream: &lopdf::Stream) -> Result<Vec<u8>> {
-    if stream.dict.get(b"Filter").is_err() {
-        return Ok(stream.content.clone());
-    }
-    match stream.decompressed_content() {
-        Ok(b) => Ok(b),
-        Err(e) => bail!("can't decode the embedded file: {e}"),
-    }
+    decoded(stream, None)
+}
+
+/// The bytes of the file an attachment mark holds, `stream`, which the
+/// mark says is `size` bytes: none past that is decoded, so a small
+/// stream can't swell into a large one the mark didn't say.
+pub(crate) fn mark_file_bytes(stream: &lopdf::Stream, size: u64) -> Result<Vec<u8>> {
+    decoded(stream, Some(usize::try_from(size).unwrap_or(usize::MAX)))
+}
+
+/// `stream`'s bytes, decoded, at most `limit` of them.
+fn decoded(stream: &lopdf::Stream, limit: Option<usize>) -> Result<Vec<u8>> {
+    let bytes = match limit {
+        Some(limit) => stream.decompressed_content_with_limit(limit),
+        None => stream.decompressed_content(),
+    };
+    bytes.map_err(|e| anyhow::anyhow!("can't decode the embedded file: {e}"))
 }
 
 /// A file specification's name, description and parameters.
@@ -499,8 +510,7 @@ pub(crate) mod tests {
     fn reads_bytes_plain_and_compressed() {
         let pdf = sample();
         let list = attachments_in(&pdf, pdf.page_iter());
-        let assets = MarkAssets::new(crate::Store::new());
-        let bytes = |at: &AttachmentRef| attachment_bytes(&pdf, pdf.page_iter(), &assets, at);
+        let bytes = |at: &AttachmentRef| attachment_bytes(&pdf, pdf.page_iter(), at);
         assert_eq!(bytes(&list[0].at).unwrap(), b"hello");
         assert_eq!(bytes(&list[1].at).unwrap(), b"%PDF-1.4 tiny");
         assert_eq!(bytes(&list[2].at).unwrap(), b"annot bytes");
@@ -516,11 +526,11 @@ pub(crate) mod tests {
         let src = crate::open::tests::lazily(&mut pdf);
         let list = attachments_in(&pdf, pdf.page_iter());
         assert_eq!(attachments_in(src.pdf(), src.page_ids()), list);
-        let assets = MarkAssets::new(crate::Store::new());
+        let st = DocState::builder().build();
         for a in &list {
             assert_eq!(
-                read_attachment(&src, &assets, &a.at).unwrap(),
-                attachment_bytes(&pdf, pdf.page_iter(), &assets, &a.at).unwrap(),
+                read_attachment(&st, &src, &a.at).unwrap(),
+                attachment_bytes(&pdf, pdf.page_iter(), &a.at).unwrap(),
                 "{}",
                 a.name
             );

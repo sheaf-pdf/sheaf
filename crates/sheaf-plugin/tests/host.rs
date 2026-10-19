@@ -153,7 +153,15 @@ fn doc(pages: u32) -> Document {
         name: "return.pdf".into(),
         ..SourceInfo::blank(&store, pages)
     };
-    Document::new(store, primary, &[], Box::new(FixedCount(50)))
+    Document::new(store, primary, None, &[], Box::new(FixedCount(50)))
+}
+
+/// The top-level bookmarks, in order.
+fn top_level(d: &Document) -> Vec<Arc<sheaf_doc::Bookmark>> {
+    let st = d.state();
+    (st.outline_roots().iter())
+        .map(|&id| st.bookmark(id).unwrap().clone())
+        .collect()
 }
 
 /// Two pages: the first `/Rotate 90` with its CropBox off the origin,
@@ -170,16 +178,15 @@ fn turned_doc() -> Document {
         src: store.open(f.bytes().into(), kind).unwrap(),
         name: "turned.pdf".into(),
         derived: None,
-        stamp: None,
     };
-    Document::new(store, primary, &[], Box::new(FixedCount(50)))
+    Document::new(store, primary, None, &[], Box::new(FixedCount(50)))
 }
 
 /// Page `i`'s frame in the plugin API: its source page as the file shows
 /// it, whatever sheaf has turned since.
 fn frame(d: &Document, i: usize) -> Geom {
-    let p = d.page(i).unwrap();
-    d.source(p.source).unwrap().src.geom(p.index)
+    let base = &d.state().def(d.page(i).unwrap()).unwrap().base;
+    base.src.geom(base.index)
 }
 
 fn ctx(d: &Document) -> CallContext {
@@ -187,8 +194,8 @@ fn ctx(d: &Document) -> CallContext {
         doc: Some(DocContext {
             path: "return.pdf".into(),
             snapshot: d.snapshot(),
-            selection: d.page(1).map(|p| p.id).into_iter().collect(),
-            current_page: Some(d.page(0).unwrap().id),
+            selection: d.page(1).into_iter().collect(),
+            current_page: Some(d.page(0).unwrap()),
             text: Arc::new(FakeText),
             ocr: None,
             render: None,
@@ -229,16 +236,16 @@ fn command_returns_edits_that_apply_as_one_step() {
     assert_eq!(titles, ["Form 1040", "Form 1041", "Form 1042"]);
 
     d.apply_batch(batch.edits.clone(), &batch.label).unwrap();
-    assert_eq!(d.state().outline.len(), 3);
+    assert_eq!(top_level(&d).len(), 3);
     d.undo().unwrap();
-    assert!(d.state().outline.is_empty(), "one undo reverts them all");
+    assert!(top_level(&d).is_empty(), "one undo reverts them all");
 }
 
 #[test]
 fn unsaved_ocr_text_wins_over_the_engine() {
     let p = load("ocr-text", Limits::default());
     let mut d = doc(2);
-    let id = d.page(0).unwrap().id;
+    let id = d.page(0).unwrap();
     let layer = sheaf_doc::TextLayer::from_engine(
         vec![sheaf_doc::OcrWord {
             text: "Schedule C".into(),
@@ -283,7 +290,7 @@ fn plugin_sees_the_call_context() {
     let PluginError::Failed(msg) = err else {
         panic!("{err:?}")
     };
-    let (p0, p1) = (d.page(0).unwrap().id.0, d.page(1).unwrap().id.0);
+    let (p0, p1) = (d.page(0).unwrap().0, d.page(1).unwrap().0);
     assert_eq!(
         msg,
         format!(
@@ -490,11 +497,9 @@ fn tax_form_bookmarks_example() {
     let b = &out.batches[0];
     assert_eq!(b.label, "Bookmark 3 tax forms");
     d.apply_batch(b.edits.clone(), &b.label).unwrap();
-    let got: Vec<(String, Option<usize>)> = d
-        .state()
-        .outline
+    let got: Vec<(String, Option<usize>)> = top_level(&d)
         .iter()
-        .map(|n| (n.title.clone(), n.target.and_then(|t| d.index_of(t))))
+        .map(|b| (b.title.to_string(), b.page().and_then(|t| d.index_of(t))))
         .collect();
     assert_eq!(
         got,
@@ -572,7 +577,7 @@ fn forms_round_trip_and_waiting_is_free() {
         },
         FieldAnswer {
             id: "pages".into(),
-            value: FieldValue::PageRange(vec![d.page(2).unwrap().id]),
+            value: FieldValue::PageRange(vec![d.page(2).unwrap()]),
         },
     ]);
     let out = run(&p, "form", None, with_ui(&d, &ui)).unwrap();
@@ -592,7 +597,7 @@ fn forms_round_trip_and_waiting_is_free() {
             parent: None,
             after: None,
             title: "Engagement letter".into(),
-            target: Some(d.page(2).unwrap().id),
+            target: Some(d.page(2).unwrap()),
             view: None,
         }]
     );
@@ -615,7 +620,7 @@ fn panels_notices_and_panel_actions() {
     assert_eq!(id, "matches");
     let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
     assert_eq!(labels, ["1040", "1041"]);
-    assert_eq!(rows[1].page, Some(d.page(1).unwrap().id));
+    assert_eq!(rows[1].page, Some(d.page(1).unwrap()));
     assert_eq!(rows[0].detail, "5,10");
     assert_eq!(*ui.notices.lock().unwrap(), ["2 matches"]);
     assert_eq!(
@@ -687,7 +692,7 @@ fn amount_crossref_bundled_plugin() {
         progress: None,
         preferences: String::new(),
     };
-    let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap().id).collect();
+    let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap()).collect();
     *ui.answer.lock().unwrap() = Some(vec![
         FieldAnswer {
             id: "min".into(),
@@ -738,21 +743,17 @@ fn amount_crossref_bundled_plugin() {
         .unwrap();
     let labels: Vec<(usize, String)> = (0..3)
         .flat_map(|i| {
-            let id = d.page(i).unwrap().id;
+            let id = d.page(i).unwrap();
             d.state()
-                .annots_on(id)
-                .map(|l| {
-                    l.iter()
-                        .filter_map(|a| match &a.kind {
-                            sheaf_doc::AnnotKind::Connector { label, partner, .. } => {
-                                assert!(partner.is_some(), "the host pairs the ends");
-                                Some((i, label.clone()))
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
+                .marks_on(id)
+                .filter_map(|a| match &a.kind {
+                    sheaf_doc::AnnotKind::Connector { label, partner, .. } => {
+                        assert!(partner.is_some(), "the host pairs the ends");
+                        Some((i, label.clone()))
+                    }
+                    _ => None,
                 })
-                .unwrap_or_default()
+                .collect::<Vec<_>>()
         })
         .collect();
     assert_eq!(labels, [(0, "1".to_string()), (1, "1".to_string())]);
@@ -864,7 +865,8 @@ struct FakeOcr;
 impl sheaf_plugin::OcrSource for FakeOcr {
     fn recognize(
         &self,
-        page: &sheaf_doc::PageRef,
+        _page: sheaf_doc::PageId,
+        base: &sheaf_doc::PageBase,
         geom: &sheaf_doc::geom::Geom,
         _render: sheaf_core::Rotation,
         language: Option<String>,
@@ -874,7 +876,7 @@ impl sheaf_plugin::OcrSource for FakeOcr {
         std::thread::sleep(Duration::from_millis(400));
         Ok(sheaf_doc::TextLayer::from_engine(
             vec![sheaf_doc::OcrWord {
-                text: format!("page{}", page.index),
+                text: format!("page{}", base.index),
                 rect: sheaf_doc::Box2 {
                     x: 10.0,
                     y: 10.0,
@@ -946,7 +948,7 @@ fn bookmark_from_pattern_bundled_plugin() {
         progress: None,
         preferences: String::new(),
     };
-    let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap().id).collect();
+    let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap()).collect();
     let answer = |source: usize, template: &str, placement: usize| {
         vec![
             FieldAnswer {
@@ -991,18 +993,18 @@ fn bookmark_from_pattern_bundled_plugin() {
     d.apply_batch(b.edits.clone(), &b.label).unwrap();
     let st = d.state();
     let got: Vec<(u16, String, Option<usize>, Option<f32>)> = st
-        .outline_flat()
+        .bookmarks_preorder()
         .into_iter()
-        .map(|(depth, n)| {
-            let index = n.target.and_then(|t| d.index_of(t));
+        .map(|(depth, _, b)| {
+            let index = b.page().and_then(|t| d.index_of(t));
             // Held in PageSpace: where it lands as the plugin placed it.
-            let top = match (&n.view, index) {
+            let top = match (b.view(), index) {
                 (Some(DestView::Xyz { left, top, .. }), Some(i)) => {
                     frame(&d, i).to_view().apply_axes(*left, *top).1
                 }
                 _ => None,
             };
-            (depth, n.title.clone(), index, top)
+            (depth, b.title.to_string(), index, top)
         })
         .collect();
     assert_eq!(
@@ -1022,7 +1024,7 @@ fn bookmark_from_pattern_bundled_plugin() {
     let out = run(&p, "bookmark", None, ctx(&d, &ui)).unwrap();
     d.apply_batch(out.batches[0].edits.clone(), "again")
         .unwrap();
-    let titles: Vec<String> = d.state().outline.iter().map(|n| n.title.clone()).collect();
+    let titles: Vec<String> = top_level(&d).iter().map(|b| b.title.to_string()).collect();
     assert_eq!(titles, ["Invoice 101", "Invoice 102", "Invoice 103"]);
     *ui.answer.lock().unwrap() = Some(answer(1, "{0}", 0));
     let out = run(&p, "bookmark", None, ctx(&d, &ui)).unwrap();
@@ -1061,7 +1063,7 @@ fn subtotal_bundled_plugin() {
         "Rent $1,200.00 W-2\nFees (34.50) 2025\nTotal 9,999",
     ]));
     let d = doc(1);
-    let page = d.page(0).unwrap().id;
+    let page = d.page(0).unwrap();
     let ui = Arc::new(FakeUi::default());
     let ctx = || CallContext {
         doc: Some(DocContext {
@@ -1401,7 +1403,7 @@ fn duplicate_pages_bundled_plugin() {
     assert_eq!(
         out.batches[0].edits,
         [Edit::DeletePages {
-            ids: vec![d.page(2).unwrap().id]
+            ids: vec![d.page(2).unwrap()]
         }]
     );
     assert!(ui.panels.lock().unwrap().last().unwrap().1.is_empty());
@@ -1550,7 +1552,7 @@ fn api_03_sees_every_kind_and_its_preferences() {
     use sheaf_doc::{Annot, AnnotId, AnnotKind, Pt};
     let p = load("v03", Limits::default());
     let mut d = doc(1);
-    let page = d.page(0).unwrap().id;
+    let page = d.page(0).unwrap();
     let mark = |kind| Annot {
         id: AnnotId(0),
         kind,
@@ -1617,7 +1619,7 @@ fn api_03_sees_every_kind_and_its_preferences() {
 fn a_plugin_works_in_the_page_as_the_file_shows_it() {
     let p = load("frames", Limits::default());
     let mut d = turned_doc();
-    let page = d.page(0).unwrap().id;
+    let page = d.page(0).unwrap();
     let from_view = frame(&d, 0).from_view();
     assert_eq!(frame(&d, 0).rotate, Rotation::R90);
 
@@ -1678,7 +1680,7 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
 
     // Read back as placed. (Each bookmark went to the outline's start.)
     d.apply_batch(edits.clone(), "Place").unwrap();
-    let held: Vec<Option<DestView>> = d.state().outline.iter().map(|n| n.view.clone()).collect();
+    let held: Vec<Option<DestView>> = top_level(&d).iter().map(|b| b.view().cloned()).collect();
     assert_eq!(held, [Some(views[1].clone()), Some(views[0].clone())]);
     let back = run(&p, "where", None, ctx(&d)).unwrap_err();
     assert_eq!(
@@ -1747,7 +1749,7 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
 fn a_region_arrives_as_the_file_shows_the_page() {
     let p = load("frame-region", Limits::default());
     let d = turned_doc();
-    let page = d.page(0).unwrap().id;
+    let page = d.page(0).unwrap();
     let event = Call::Event(DocEvent::Region {
         page,
         rect: Box2 {
@@ -1774,7 +1776,7 @@ fn page_info_is_the_turn_sheaf_added_and_the_size_shown() {
         run(&p, "pages", None, ctx(&d)).unwrap_err(),
         PluginError::Failed("0 740x580; 0 612x792".into())
     );
-    let ids = vec![d.page(0).unwrap().id, d.page(1).unwrap().id];
+    let ids = vec![d.page(0).unwrap(), d.page(1).unwrap()];
     d.apply(
         Edit::RotatePages {
             ids,

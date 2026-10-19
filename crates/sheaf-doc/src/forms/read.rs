@@ -26,15 +26,19 @@
 //! `/Parent` isn't followed (the form check reports kids whose `/Parent`
 //! is elsewhere), so a loop through `/Parent` alone isn't damage. A field `/Fields` lists that's also another's kid is
 //! read as the kid, under its parent's name. Fields and kids that are
-//! direct objects aren't read. Values, options and actions many fields
-//! share are read once, so a value a thousand fields inherit is one
-//! string.
+//! direct objects aren't read. A full name joins the `/T`s from the root
+//! down, as PDFium's does, passing over a node with none or an empty one.
+//! Values, options and actions many fields share are read once, so a
+//! value a thousand fields inherit is one string.
+//!
+//! Every node of the tree is numbered, in tree order (M10.5 §4): a
+//! terminal field's id is its node's.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId};
+use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
 
 use super::field::{
     Action, Border, BorderStyle, Choice, Color, Field, FieldId, FieldKind, Mk, Trigger, Value,
@@ -42,25 +46,40 @@ use super::field::{
 };
 use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text_bytes;
-use crate::model::SourceId;
-use crate::source::{FormLimits, Limits, PageFacts, Source};
+use crate::source::{FormLimits, PageFacts, Source};
 
 /// The most of `/MaxLen` layout uses: comb cells and character limits.
 pub const MAX_LAYOUT_LEN: u32 = 1000;
 /// How far from the origin a widget's rect may reach, in points.
 pub const MAX_COORD: f32 = 1_000_000.0;
 
-/// A file's form as read when it opens.
+/// A file's form as read when it opens: what its source says about it
+/// ([`Source::form`]), which the open and the pages that come in from it
+/// read.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FileForm {
     pub facts: FormFacts,
-    /// Terminal fields, in tree order, with ids from 0 and source 0 (the
-    /// primary's, at open): `Document::ready` takes them as they are.
+    /// Every node of the field tree, in tree order, node `i` with id `i`.
     /// None when the form is damaged.
+    pub nodes: Vec<Node>,
+    /// Terminal fields, in tree order, each with its node's id and source
+    /// 0. None when the form is damaged.
     pub fields: Vec<Field>,
     /// Their widgets on pages, by page index, each page's in `/Annots`
     /// order. A widget on two pages is on both.
     pub widgets: BTreeMap<u32, Vec<Widget>>,
+}
+
+/// A node of a form's field tree: a terminal field, or a parent of
+/// others.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Node {
+    pub object: ObjectId,
+    /// `/T`: empty when it has none.
+    pub partial: Arc<str>,
+    pub parent: Option<FieldId>,
+    /// The fields under it, in `/Kids` order; not its widgets.
+    pub kids: Vec<FieldId>,
 }
 
 /// What sheaf shows about a form: in Properties, the XFA-only bar, and the
@@ -265,6 +284,7 @@ pub fn read(src: &Source) -> FileForm {
 
     let widgets = r.on_pages(src.pages());
     let fields = std::mem::take(&mut r.fields);
+    let nodes = std::mem::take(&mut r.nodes);
     // A damaged form has a field tree, however little of it was read: a
     // damaged hybrid form isn't XFA-only.
     let read = match r.damaged {
@@ -337,19 +357,10 @@ pub fn read(src: &Source) -> FileForm {
     }
     FileForm {
         facts,
+        nodes,
         fields,
         widgets,
     }
-}
-
-/// The terminal fields of `form`, an AcroForm in an eager document, as
-/// [`read`] reads them; None when its tree is damaged. For the old writers
-/// (`forms::rules`), which read the file they're writing: transitional
-/// (M10.5), gone with them in slice 9.
-pub(crate) fn fields_of(pdf: &Pdf, form: &Dictionary) -> Option<Vec<Field>> {
-    let mut r = Reader::new(pdf, &Limits::DEFAULT.forms);
-    r.tree(form);
-    r.damaged.is_none().then_some(r.fields)
 }
 
 /// Whether field `f` lacks `value`, which its XFA copy holds: text it
@@ -387,6 +398,7 @@ struct Inherited<'a> {
 struct Reader<'a, P: Objects + ?Sized> {
     pdf: &'a P,
     limits: FormLimits,
+    nodes: Vec<Node>,
     fields: Vec<Field>,
     /// Each widget's field (by index in `fields`), and whether it's a kid
     /// rather than the field's own dictionary.
@@ -394,7 +406,8 @@ struct Reader<'a, P: Objects + ?Sized> {
     seen: HashSet<ObjectId>,
     /// The fields from the root down to the one being read.
     path: HashSet<ObjectId>,
-    nodes: usize,
+    /// Fields reached, read or not.
+    visited: usize,
     /// Bytes of full names, and of other text, so far.
     names: usize,
     text: usize,
@@ -410,11 +423,12 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         Reader {
             pdf,
             limits: *limits,
+            nodes: Vec::new(),
             fields: Vec::new(),
             widget_of: HashMap::new(),
             seen: HashSet::new(),
             path: HashSet::new(),
-            nodes: 0,
+            visited: 0,
             names: 0,
             text: 0,
             damaged: None,
@@ -457,7 +471,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                 // them first.
                 roots.sort_by_key(|id| kids.contains(id));
                 for root in roots {
-                    self.node(root, Inherited::default(), "", 1);
+                    self.node(root, Inherited::default(), "", None, 1);
                 }
             }
             None => self.damage(format!(
@@ -467,8 +481,16 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         }
     }
 
-    /// Read field `id`, a kid of the field with full name `up_name`.
-    fn node(&mut self, id: ObjectId, up: Inherited<'a>, up_name: &str, depth: usize) {
+    /// Read field `id`, a kid of node `parent` (none for a root) with full
+    /// name `up_name`.
+    fn node(
+        &mut self,
+        id: ObjectId,
+        up: Inherited<'a>,
+        up_name: &str,
+        parent: Option<FieldId>,
+        depth: usize,
+    ) {
         if self.damaged.is_some() {
             return;
         }
@@ -483,8 +505,8 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         if !self.seen.insert(id) {
             return;
         }
-        self.nodes += 1;
-        if self.nodes > limits.nodes {
+        self.visited += 1;
+        if self.visited > limits.nodes {
             return self.damage(format!(
                 "the field tree has more than {} nodes",
                 limits.nodes
@@ -495,13 +517,13 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             return;
         };
         let part = dict.get(b"T").ok().and_then(|t| resolve(pdf, t));
-        let name = match part.and_then(|t| t.as_str().ok()) {
+        let partial = match part.and_then(|t| t.as_str().ok()) {
             Some(t) if t.len() > limits.name => None,
-            Some(t) if up_name.is_empty() => Some(pdf_text_bytes(t)),
-            Some(t) => Some(format!("{up_name}.{}", pdf_text_bytes(t))),
-            None => Some(up_name.to_string()),
+            Some(t) => Some(pdf_text_bytes(t)),
+            None => Some(String::new()),
         };
-        let Some(name) = name.filter(|n| n.len() <= limits.name) else {
+        let name = partial.as_deref().map(|t| super::full_name_of(up_name, t));
+        let (Some(partial), Some(name)) = (partial, name.filter(|n| n.len() <= limits.name)) else {
             return self.damage(format!(
                 "a full name is longer than {} KiB",
                 limits.name >> 10
@@ -513,6 +535,16 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                 "the full names come to more than {} MiB",
                 limits.names >> 20
             ));
+        }
+        let me = FieldId(self.nodes.len() as u64);
+        self.nodes.push(Node {
+            object: id,
+            partial: partial.into(),
+            parent,
+            kids: Vec::new(),
+        });
+        if let Some(p) = parent {
+            self.nodes[p.0 as usize].kids.push(me);
         }
 
         let mut here = up;
@@ -566,7 +598,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             // unless it has kids of its own.
             if k.has(b"T") || (!is_widget(k) && k.has(b"Kids")) {
                 field_kids = true;
-                self.node(kid, here.clone(), &name, depth + 1);
+                self.node(kid, here.clone(), &name, Some(me), depth + 1);
             } else if self.path.contains(&kid) {
                 self.damage(cycle());
             } else if self.seen.insert(kid) {
@@ -594,8 +626,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         }
         let kind = FieldKind::of(here.ft, here.flags);
         self.fields.push(Field {
-            id: FieldId(index as u64),
-            source: SourceId(0),
+            id: me,
             object: id,
             name,
             kind,
@@ -608,8 +639,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             options: here.options.unwrap_or_else(|| Arc::from([])),
             tooltip: tooltip.map(|t| t.to_string()),
             actions,
-            copy: 0,
-            under: None,
+            outside: 0,
         });
     }
 
@@ -768,7 +798,8 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
 
     /// Every page's widgets that belong to a field, by page index: what
     /// each page's `/Annots` in the page table lists. An array pages share
-    /// is looked through once.
+    /// is looked through once. A field's widgets no page lists are counted
+    /// as its [`outside`](Field::outside).
     fn on_pages(&mut self, pages: &[PageFacts]) -> BTreeMap<u32, Vec<Widget>> {
         let pdf = self.pdf;
         let mut out: BTreeMap<u32, Vec<Widget>> = BTreeMap::new();
@@ -798,11 +829,18 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
                 let Some(d) = pdf.dictionary(id) else {
                     continue;
                 };
-                let widget = self.widget(id, d, FieldId(field as u64), slot, kid);
+                let widget = self.widget(id, d, self.fields[field].id, slot, kid);
                 if self.damaged.is_some() {
                     return out;
                 }
                 out.entry(index as u32).or_default().push(widget);
+            }
+        }
+        let listed: HashSet<ObjectId> = arrays.into_values().flatten().map(|(_, id)| id).collect();
+        for (id, &(field, _)) in &self.widget_of {
+            if !listed.contains(id) {
+                let outside = &mut self.fields[field].outside;
+                *outside = outside.saturating_add(1);
             }
         }
         out
@@ -895,6 +933,7 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
         Widget {
             field,
             object: id,
+            merged: !kid,
             slot,
             rect,
             flags: number(pdf, d, b"F").unwrap_or(0) as u32,

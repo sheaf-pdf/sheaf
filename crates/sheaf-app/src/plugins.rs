@@ -918,7 +918,8 @@ struct EngineOcr(HashMap<SourceId, RenderHandle>, sheaf_ocr::OcrConfig);
 impl sheaf_plugin::OcrSource for EngineOcr {
     fn recognize(
         &self,
-        page: &sheaf_doc::PageRef,
+        page: sheaf_doc::PageId,
+        base: &sheaf_doc::PageBase,
         geom: &sheaf_doc::geom::Geom,
         render: sheaf_core::Rotation,
         language: Option<String>,
@@ -939,9 +940,9 @@ impl sheaf_plugin::OcrSource for EngineOcr {
             .collect();
         let req = OcrRequest {
             pages: vec![OcrPage {
-                id: page.id,
-                source: page.source,
-                index: page.index,
+                id: page,
+                source: base.source,
+                index: base.index,
                 geom: *geom,
                 render,
             }],
@@ -1077,10 +1078,7 @@ fn keep_unseen(edits: &mut [sheaf_doc::Edit], st: &sheaf_doc::DocState, api02: b
         let sheaf_doc::Edit::AnnotUpdate { page, annot } = e else {
             continue;
         };
-        let Some(was) = st
-            .annots_on(*page)
-            .and_then(|l| l.iter().find(|a| a.id == annot.id))
-        else {
+        let Some((_, was)) = st.find_annot(annot.id).filter(|(on, _)| on == page) else {
             continue;
         };
         annot.name = was.name.clone();
@@ -1574,7 +1572,7 @@ mod tests {
     fn opening() -> sheaf_doc::Document {
         let store = sheaf_doc::Store::new();
         let primary = sheaf_doc::SourceInfo::blank(&store, 1);
-        sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy())
+        sheaf_doc::open::start(store, primary, None, sheaf_doc::history::default_policy())
     }
 
     #[test]
@@ -1639,9 +1637,10 @@ mod tests {
         let path = dir.path().join("facts.pdf");
         std::fs::write(&path, sheaf_doc::forms::fixture::every_fact().bytes()).unwrap();
         let store = Store::new();
-        let primary = SourceInfo::read(&store, &path, None).unwrap();
+        let (primary, stamp) = SourceInfo::read(&store, &path, None).unwrap();
         let (src, blob) = (primary.src.clone(), primary.src.id());
-        let mut doc = crate::docview::opening_model(store, primary, "Me".into());
+        let came = Some(sheaf_doc::materialize::Came::Read(stamp));
+        let mut doc = crate::docview::opening_model(store, primary, came, "Me".into());
         let mut waiting = Waiting::default();
         let wants = || vec!["notes".to_string()];
         waiting.hold("tax", command("scan"));
@@ -1650,7 +1649,7 @@ mod tests {
         waiting.hold("tax", command("tick"));
         assert!(waiting.release(&doc, wants()).is_empty(), "read, not taken");
         assert!(!waiting.opened());
-        crate::docview::take_facts(&mut doc, blob, facts, false).unwrap();
+        crate::docview::take_facts(&mut doc, blob, facts).unwrap();
         let opened = Call::Event(sheaf_plugin::DocEvent::Opened);
         assert_eq!(
             waiting.release(&doc, wants()),
@@ -1663,11 +1662,8 @@ mod tests {
         assert!(waiting.opened(), "a close now says `closed`");
         // What a plugin's context is made from when `opened` goes out.
         let seen = doc.snapshot();
-        assert_eq!(
-            seen.state.annots.values().map(|l| l.len()).sum::<usize>(),
-            1
-        );
-        assert_eq!(seen.state.fields.len(), 1);
+        assert_eq!(seen.state.marks().count(), 1);
+        assert_eq!(seen.state.terminals().count(), 1);
     }
 
     /// While the file opens, a plugin keeps only its newest region event,
@@ -1679,7 +1675,7 @@ mod tests {
         let mut doc = opening();
         let region = |x: f32| {
             Call::Event(DocEvent::Region {
-                page: doc.page(0).unwrap().id,
+                page: doc.page(0).unwrap(),
                 rect: sheaf_doc::Box2 {
                     x,
                     y: 0.0,
@@ -1906,8 +1902,8 @@ mod tests {
         };
         let store = Store::new();
         let primary = SourceInfo::blank(&store, 1);
-        let mut d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
-        let page = d.page(0).unwrap().id;
+        let mut d = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
+        let page = d.page(0).unwrap();
         let line = Annot {
             id: AnnotId(1),
             kind: AnnotKind::Line {
@@ -1931,7 +1927,7 @@ mod tests {
         };
         d.apply(Edit::AnnotAdd { page, annot: line }, "Line")
             .unwrap();
-        let mut placed = d.state().annots_on(page).unwrap()[0].clone();
+        let mut placed = d.state().marks_on(page).next().unwrap().clone();
         // What a 0.2 plugin hands back: the styles it can't see are lost,
         // and it reads upright as the file shows the page.
         let mut back = placed.clone();

@@ -174,14 +174,13 @@ enum SummaryArg {
 /// The file's comments, and the filter as asked.
 struct Opened {
     doc: sheaf_doc::Document,
-    foreign: Vec<(sheaf_doc::SourceId, sheaf_doc::file::ForeignAnnot)>,
     filter: CommentFilter,
     needle: String,
 }
 
 impl Common {
     fn open(&self) -> anyhow::Result<Opened> {
-        let (doc, foreign) = comments::open(&self.input, self.password.as_deref())?;
+        let doc = comments::open(&self.input, self.password.as_deref())?;
         let mut filter = CommentFilter {
             sort: match self.sort {
                 SortArg::Page => Sort::Page,
@@ -213,14 +212,13 @@ impl Common {
             filter.pages = Some((a, b.min(doc.page_count() - 1)));
         }
         // The filter lists what's hidden; these say what's shown.
-        let all = comments::list(doc.state(), &foreign, &CommentFilter::default(), "");
+        let all = comments::list(doc.state(), &CommentFilter::default(), "");
         filter.types = hidden(&all.types, &self.types, "type")?;
         filter.authors = hidden(&all.authors, &self.authors, "author")?;
         let states = REVIEW_STATES.iter().map(|s| s.to_string()).collect();
         filter.statuses = hidden(&states, &self.statuses, "status")?;
         Ok(Opened {
             doc,
-            foreign,
             filter,
             needle: self.search.as_deref().unwrap_or("").trim().to_lowercase(),
         })
@@ -271,7 +269,7 @@ pub fn run(args: CommentsArgs, _quiet: bool) -> anyhow::Result<()> {
                     .collect::<anyhow::Result<_>>()?
             };
             let o = a.common.open()?;
-            let listing = comments::list(o.doc.state(), &o.foreign, &o.filter, &o.needle);
+            let listing = comments::list(o.doc.state(), &o.filter, &o.needle);
             let labels = o.doc.state().page_labels();
             let out = comments::csv(&listing, labels.as_deref(), &columns);
             write_out(a.output.as_deref(), out.as_bytes())
@@ -284,19 +282,14 @@ pub fn run(args: CommentsArgs, _quiet: bool) -> anyhow::Result<()> {
                 (None, None) => DataFormat::Xfdf,
             };
             let o = a.common.open()?;
-            let listing = comments::list(o.doc.state(), &o.foreign, &o.filter, &o.needle);
-            let out = comments::export_data(
-                &o.doc.snapshot(),
-                &o.foreign,
-                &comments::items(&listing),
-                format,
-            )?;
+            let listing = comments::list(o.doc.state(), &o.filter, &o.needle);
+            let out = comments::export_data(&o.doc.snapshot(), &comments::items(&listing), format)?;
             write_out(a.output.as_deref(), &out)
         }
         What::Import(a) => import(a),
         What::Text(a) => {
             let o = a.common.open()?;
-            let listing = comments::list(o.doc.state(), &o.foreign, &o.filter, &o.needle);
+            let listing = comments::list(o.doc.state(), &o.filter, &o.needle);
             let labels = o.doc.state().page_labels();
             let out = comments::text(
                 &listing,
@@ -317,22 +310,28 @@ fn import(a: ImportArgs) -> anyhow::Result<()> {
     if output.exists() && !a.force {
         bail!("{} already exists (--force replaces)", output.display());
     }
-    let (mut doc, foreign) = comments::open(&a.input, a.password.as_deref())?;
+    let mut doc = comments::open(&a.input, a.password.as_deref())?;
     for from in &a.from {
         let bytes = std::fs::read(from).with_context(|| format!("reading {}", from.display()))?;
-        let got = comments::import_data(
-            &doc.snapshot(),
-            &foreign,
-            &bytes,
-            a.from_password.as_deref(),
-        )
-        .with_context(|| from.display().to_string())?;
+        let (snap, store) = (doc.snapshot(), doc.store().clone());
+        let got = comments::import_data(&snap, &store, &bytes, a.from_password.as_deref())
+            .with_context(|| from.display().to_string())?;
         eprintln!("{}: {}", from.display(), got.summary());
+        // What the marks hold is held until they're added.
         if !got.edits.is_empty() {
             doc.apply_batch(got.edits, "Import comments")?;
         }
+        drop(got.held);
     }
-    sheaf_doc::save::save_to_path(&doc.snapshot(), &output)
+    // It asks nothing: a save the file's signatures allow keeps them (an
+    // Append onto a copy of the input), and one they don't, or one that
+    // drops XFA holding values, goes ahead, rewriting the file.
+    let answers = sheaf_doc::materialize::AskAnswers {
+        break_signatures: true,
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    sheaf_doc::materialize::save(&mut doc, &output, &answers, &sheaf_ops::NoProgress)
         .with_context(|| format!("writing {}", output.display()))?;
     println!("{}", output.display());
     Ok(())
@@ -355,7 +354,6 @@ fn summary(a: SummaryArgs) -> anyhow::Result<()> {
     };
     let bytes = comments::summary_pdf(
         &o.doc.snapshot(),
-        &o.foreign,
         &o.filter,
         &o.needle,
         layout,

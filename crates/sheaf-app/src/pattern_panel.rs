@@ -681,16 +681,8 @@ impl DocView {
             view: None,
             depth: 0,
         }];
-        let index: std::collections::HashMap<sheaf_doc::PageId, usize> = doc
-            .model
-            .state()
-            .pages
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.id, i))
-            .collect();
         items.extend(ps.hits.iter().map(|h| {
-            let geom = index.get(&h.page).and_then(|i| doc.edit_geom(*i));
+            let geom = doc.model.index_of(h.page).and_then(|i| doc.edit_geom(i));
             let at = geom.and_then(|g| {
                 let to_view = g.to_view();
                 let top = h
@@ -713,7 +705,7 @@ impl DocView {
             }
         }));
         let n = items.len() - 1;
-        let after = doc.model.state().outline.last().map(|o| o.id);
+        let after = doc.model.state().outline_roots().last().copied();
         self.apply_batch(
             vec![sheaf_doc::Edit::OutlineInsertTree {
                 parent: None,
