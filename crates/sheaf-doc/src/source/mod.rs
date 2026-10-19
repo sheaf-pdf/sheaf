@@ -6,8 +6,8 @@
 //!
 //! What a source says about itself is a pure function of its bytes, read
 //! once: the page table when it opens; its conformance claims, what its
-//! pages hold beside their content, its form, and the header and footer
-//! sheaf drew, when first asked. Sources come from the
+//! pages hold beside their content, its form and signatures, and the
+//! header and footer sheaf drew, when first asked. Sources come from the
 //! [`Store`](crate::store::Store), one per distinct file.
 
 mod conformance;
@@ -29,6 +29,7 @@ use sheaf_core::PageSize;
 
 use crate::content::{ContentError, DrawnForms, PageBlocks};
 use crate::forms::FileForm;
+use crate::forms::sigs::Signatures;
 use crate::geom::Geom;
 use crate::open::FileAnnots;
 use crate::serialize::crypt::Crypt;
@@ -54,6 +55,7 @@ pub struct Source {
     conformance: OnceLock<Conformance>,
     annots: OnceLock<Arc<FileAnnots>>,
     form: OnceLock<Arc<FileForm>>,
+    signatures: OnceLock<Arc<Signatures>>,
     header_footer: OnceLock<Option<StoredHeaderFooter>>,
 }
 
@@ -134,6 +136,7 @@ impl Source {
             conformance: OnceLock::new(),
             annots: OnceLock::new(),
             form: OnceLock::new(),
+            signatures: OnceLock::new(),
             header_footer: OnceLock::new(),
         })
     }
@@ -284,6 +287,12 @@ impl Source {
     /// shows about it, read once (see [`crate::forms::read`]).
     pub fn form(&self) -> &Arc<FileForm> {
         self.form.get_or_init(|| Arc::new(crate::forms::read(self)))
+    }
+
+    /// Its signatures, what each allows after it, and Reader's usage
+    /// rights, read once (see [`crate::forms::sigs`]).
+    pub fn signatures(&self) -> &Arc<Signatures> {
+        (self.signatures).get_or_init(|| Arc::new(crate::forms::sigs::read(self)))
     }
 
     /// The header and footer its catalog says sheaf drew on its pages

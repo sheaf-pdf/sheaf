@@ -28,9 +28,10 @@ use crate::forms::{FileForm, FormFacts};
 use crate::history::HistoryPolicy;
 use crate::labels::LabelRange;
 use crate::layers::Layer;
+use crate::materialize::Came;
 use crate::model::{FlatOutlineItem, PageId};
 use crate::portfolio::Collection;
-use crate::serialize::durable::FileStamp;
+use crate::serialize::append::Torn;
 use crate::stamps::HeaderFooter;
 use crate::{Document, PAGES, Source, SourceInfo, Store};
 
@@ -99,38 +100,56 @@ pub struct ViewFacts {
 pub struct Opened {
     pub doc: Document,
     pub view: ViewFacts,
+    /// What was done with the file's last save, a crash having cut it
+    /// short, before it was read ([`undo_torn`]): the reader is told.
+    ///
+    /// [`undo_torn`]: crate::serialize::append::undo_torn
+    pub torn: Option<Torn>,
 }
 
 /// `primary` as a document while it opens: its pages, as the page table
 /// [`SourceInfo::read`] built has them, and nothing else, so the first
-/// page can paint at once. It reads nothing of its own. `stamp` is the
-/// file as `read` read it, which the opened version's record starts from;
-/// None for a primary made in memory. Edits are refused with
+/// page can paint at once. It reads nothing of its own. How it `came` is
+/// what's known of its file, which the opened version's record starts
+/// from: the file as `read` read it, or a recovery sidecar's base with
+/// what the sidecar holds that the file hasn't got; None for a primary
+/// made in memory. Edits are refused with
 /// [`NotReady`](crate::model::NotReady) until [`Document::ready`] takes
 /// [`finish`]'s facts.
 pub fn start(
     store: Arc<Store>,
     primary: SourceInfo,
-    stamp: Option<FileStamp>,
+    came: Option<Came>,
     policy: Box<dyn HistoryPolicy>,
 ) -> Document {
-    Document::loading(store, primary, stamp, policy)
+    Document::loading(store, primary, came, policy)
 }
 
-/// `path` opened as the app opens it, with no window: [`start`],
-/// [`finish`] and [`Document::ready`] in a row, in a store of its own.
+/// `path` opened as the app opens it, with no window: an append a crash
+/// cut short undone ([`undo_torn`]), then [`start`], [`finish`] and
+/// [`Document::ready`] in a row, in a store of its own.
+///
+/// [`undo_torn`]: crate::serialize::append::undo_torn
 pub fn file(path: &Path, password: Option<&str>) -> Result<Opened> {
+    // A file it can't undo is read as it is: its last whole section's.
+    let torn = (crate::serialize::append::undo_torn(path))
+        .inspect_err(|e| log::warn!("undoing the last save to {}: {e}", path.display()))
+        .ok()
+        .flatten();
+    if let Some(torn) = torn {
+        log::warn!("{}: {torn}", path.display());
+    }
     let store = Store::new();
     let (primary, stamp) = SourceInfo::read(&store, path, password)?;
     let src = primary.src.clone();
     let mut doc = start(
         store,
         primary,
-        Some(stamp),
+        Some(Came::Read(stamp)),
         crate::history::default_policy(),
     );
     let view = doc.ready(finish(&src, &NoProgress))?;
-    Ok(Opened { doc, view })
+    Ok(Opened { doc, view, torn })
 }
 
 /// Everything `src` says about itself besides its pages. One pass over

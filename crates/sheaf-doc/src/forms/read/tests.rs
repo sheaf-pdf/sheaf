@@ -442,7 +442,7 @@ fn usage_rights_signatures_and_a_certification() {
 
     let mut f = Form::new(1);
     let sig = f.signature("Author", 0, row(0));
-    f.certify(sig);
+    f.certify(sig, 2);
     let facts = read_back(&mut f).facts;
     assert!(facts.certified && !facts.usage_rights);
     assert_eq!(

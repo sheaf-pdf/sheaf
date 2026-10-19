@@ -64,6 +64,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 parking_lot = "0.12"
 futures = "0.3"
 smallvec = "1"
+# Sets of flags: what a change means for saving (sheaf-doc's effects).
+bitflags = "2"
 unicode-segmentation = "1"
 im = "15"
 regex = "1"

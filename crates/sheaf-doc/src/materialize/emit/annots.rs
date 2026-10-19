@@ -41,7 +41,7 @@ use std::collections::{HashMap, HashSet};
 
 use lopdf::{Dictionary, Object, ObjectId, Stream, dictionary};
 
-use super::{Cx, Shown, SymObject};
+use super::{Cx, Shown};
 use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted, Held, StampForm};
 use crate::content::Res;
 use crate::file::PageAnnots;
@@ -271,7 +271,8 @@ impl Page<'_> {
                     obj: *r,
                     copy: shown.copy,
                 };
-                if cx.closure.claim(key) {
+                // An Append's saved file may have it already.
+                if cx.closure.claim(key) && cx.writes(&key) {
                     let out = built(cx);
                     cx.push(key, Object::Dictionary(out));
                 }
@@ -298,6 +299,11 @@ impl Page<'_> {
             },
         };
         let scope = Scope { src, copy: f.copy };
+        // A link to a page that isn't written leads nowhere: a Rewrite's
+        // `keep_only` drops it, and an Append leaves it out as that would.
+        if cx.saved().is_some() && f.summary.subtype == "Link" && leads_nowhere(cx, dict, &scope) {
+            return (Vec::new(), None);
+        }
         let parent = (f.summary.parent.as_deref())
             .and_then(|name| st.annot_by_nm(self.id, name))
             .map(ObjKey::Annot)
@@ -323,7 +329,7 @@ impl Page<'_> {
             && self.refs_kept(cx, dict, parent)
             && (dict.has(b"NM") || !named())
         {
-            cx.objects.push((key, SymObject::Raw(r.clone())));
+            cx.push_raw(key, r.clone());
             return (vec![cx.placeholder(key)], rect);
         }
         let mut popup = None;
@@ -353,7 +359,7 @@ impl Page<'_> {
             return (vec![Object::Dictionary(out)], rect);
         };
         if cx.owned_at(key) == Some(r.id) && cx.unchanged(&out, dict) {
-            cx.objects.push((key, SymObject::Raw(r.clone())));
+            cx.push_raw(key, r.clone());
         } else {
             cx.push(key, Object::Dictionary(out));
         }
@@ -427,7 +433,7 @@ impl Page<'_> {
                 src: scope.src.clone(),
                 id: at,
             };
-            cx.objects.push((key, SymObject::Raw(raw)));
+            cx.push_raw(key, raw);
         } else {
             cx.push(key, Object::Dictionary(out));
         }
@@ -458,9 +464,12 @@ impl Page<'_> {
         } = annot::emission(&m.annot, held);
         let page = cx.placeholder(ObjKey::Page(self.id));
         main.set("P", page.clone());
+        // An appearance an Append doesn't write isn't drawn.
         let ap = ObjKey::AnnotPart(aid, Part::Ap);
-        let form = appearance.form(cx);
-        cx.push(ap, Object::Stream(form));
+        if cx.writes(&ap) {
+            let form = appearance.form(cx);
+            cx.push(ap, Object::Stream(form));
+        }
         main.set("AP", dictionary! { "N" => cx.placeholder(ap) });
         if let Some((parent, rect)) = parent {
             main.set("IRT", cx.placeholder(parent));
@@ -477,8 +486,10 @@ impl Page<'_> {
         // A replacement has one companion, its StrikeOut.
         if let Some((mut dict, appearance)) = companions.into_iter().next() {
             let ap = ObjKey::AnnotPart(aid, Part::CompanionAp);
-            let form = appearance.form(cx);
-            cx.push(ap, Object::Stream(form));
+            if cx.writes(&ap) {
+                let form = appearance.form(cx);
+                cx.push(ap, Object::Stream(form));
+            }
             dict.set("AP", dictionary! { "N" => cx.placeholder(ap) });
             dict.set("IRT", cx.placeholder(key));
             dict.set("RT", Object::Name(b"Group".to_vec()));
@@ -556,8 +567,7 @@ impl Page<'_> {
                 companions.push(entry);
             }
         }
-        cx.objects
-            .push((ObjKey::Annot(aid), SymObject::Raw(r.clone())));
+        cx.push_raw(ObjKey::Annot(aid), r.clone());
         let scope = Scope {
             src: &r.src,
             copy: 0,
@@ -570,6 +580,36 @@ impl Page<'_> {
             .and_then(|o| pdf.dereference(o).ok())
             .map(|(_, o)| o.clone());
         Some((entries, rect))
+    }
+}
+
+/// Whether link `dict`, of `scope`'s source, goes to a page that isn't
+/// written, or nowhere: its explicit destination's (its `/Dest`, or its
+/// GoTo action's `/D`) first entry is a page the save doesn't write, or
+/// null. A named destination is the name tree's to resolve.
+fn leads_nowhere(cx: &Cx, dict: &Dictionary, scope: &Scope) -> bool {
+    let pdf = scope.src.pdf();
+    let deref = |o: &Object| pdf.dereference(o).ok().map(|(_, o)| o.clone());
+    let dest = match dict.get(b"Dest") {
+        Ok(dest) => deref(dest),
+        Err(_) => (dict.get(b"A").ok().and_then(deref))
+            .filter(|a| a.as_dict().is_ok_and(|a| is(a, b"S", b"GoTo")))
+            .and_then(|a| a.as_dict().ok()?.get(b"D").ok().and_then(deref)),
+    };
+    let dest = match dest {
+        Some(Object::Dictionary(d)) => d.get(b"D").ok().and_then(deref),
+        dest => dest,
+    };
+    let Some(Object::Array(dest)) = dest else {
+        return false;
+    };
+    match dest.first() {
+        None | Some(Object::Null) => true,
+        Some(Object::Reference(page)) => {
+            crate::materialize::copy::is_page_node(pdf, *page)
+                && !cx.closure.writes_page(*page, scope)
+        }
+        Some(_) => false,
     }
 }
 
@@ -641,6 +681,10 @@ impl Cx<'_> {
         if let Some(&made) = self.files.get(&file.id()) {
             return Some(made);
         }
+        if let Some(at) = self.held_file(stem, file.id()) {
+            self.files.insert(file.id(), at);
+            return Some(at);
+        }
         let stream = Stream::new(
             dictionary! {
                 "Type" => "EmbeddedFile",
@@ -651,6 +695,28 @@ impl Cx<'_> {
         let made = self.resource_of(vec![Object::Stream(stream)]);
         self.files.insert(file.id(), made);
         Some(made)
+    }
+
+    /// In an Append, the embedded file stream the saved file holds for an
+    /// attachment naming `stem`, a primary's object still in the file whose
+    /// data is blob `file`'s: its placeholder, so the section refers to it
+    /// rather than embed the file again.
+    fn held_file(&mut self, stem: &str, file: crate::store::BlobId) -> Option<ObjectId> {
+        let record = self.saved()?;
+        let at = self.primary.annots().file(stem)?;
+        if !record.present.contains(at.0) {
+            return None;
+        }
+        let stream = self.primary.pdf().get_object(at).ok()?;
+        let data = crate::attachments::file_bytes(stream.as_stream().ok()?).ok()?;
+        if crate::store::BlobId::of(&data) != file {
+            return None;
+        }
+        let scope = Scope {
+            src: &self.primary.clone(),
+            copy: 0,
+        };
+        self.sym(&Object::Reference(at), &scope).as_reference().ok()
     }
 
     /// `objects`, a resource's (the resource first; a reference `(i, 0)`

@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use in_progress::{Level, Progress};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::images::placement;
+use sheaf_doc::materialize::Came;
 use sheaf_doc::serialize::durable;
 use sheaf_doc::{Box2, Document, Edit, PAGES, SourceInfo, Store, TextLayer};
 use sheaf_image::clean::ScanParams;
@@ -292,7 +293,7 @@ fn add_text(
     let mut doc = Document::new(
         store,
         info,
-        Some(stamp),
+        Some(Came::Read(stamp)),
         &[],
         sheaf_doc::history::default_policy(),
     );

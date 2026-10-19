@@ -263,7 +263,7 @@ fn highlight_covers_its_glyphs(how: How) {
     let now = doc.geom(doc.state().order()[0]);
     let shown = (now.visible(), now.rotate);
     assert_eq!(shown.1, Rotation::R90);
-    let bytes = how.write(&doc.snapshot());
+    let bytes = how.write(&doc);
     let out = dir.join(format!("{how:?}.pdf"));
     std::fs::write(&out, bytes).unwrap();
     let saved = open(&out);

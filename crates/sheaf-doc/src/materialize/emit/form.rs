@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat};
 
-use super::{Cx, SymObject};
+use super::Cx;
 use crate::annot::AnnotId;
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::materialize::copy::Scope;
@@ -381,7 +381,7 @@ pub(crate) fn widget(
         && (!dict.has(b"P") || named(b"P", page_at))
         && !cx.form.renamed.contains_key(&r.src.id())
     {
-        cx.objects.push((key, SymObject::Raw(r.clone())));
+        cx.push_raw(key, r.clone());
         cx.form.keys.push(key);
         return Some(cx.placeholder(key));
     }
@@ -413,7 +413,7 @@ pub(crate) fn widget(
 /// has it when `key` keeps `r`'s number and nothing in it changed.
 fn put(cx: &mut Cx, key: ObjKey, out: Dictionary, r: &ObjRef, read: &Dictionary) {
     if cx.owned_at(key) == Some(r.id) && cx.unchanged(&out, read) {
-        cx.objects.push((key, SymObject::Raw(r.clone())));
+        cx.push_raw(key, r.clone());
         cx.form.keys.push(key);
     } else {
         built(cx, key, out);
@@ -422,9 +422,10 @@ fn put(cx: &mut Cx, key: ObjKey, out: Dictionary, r: &ObjRef, read: &Dictionary)
 
 /// `out`, made anew, pushed under `key`, one of the form's.
 fn built(cx: &mut Cx, key: ObjKey, out: Dictionary) {
+    // An Append writes it only when it's in scope.
+    cx.form.touched |= cx.writes(&key);
     cx.push(key, Object::Dictionary(out));
     cx.form.keys.push(key);
-    cx.form.touched = true;
 }
 
 /// The form's dictionary, its fields emitted: a reference to it, or None
@@ -492,13 +493,25 @@ pub(crate) fn acroform(cx: &mut Cx) -> Option<Object> {
     if !damaged && roots.is_empty() && had {
         return None;
     }
+    // An Append writes the keys the state doesn't own as the saved file
+    // holds them: one a save dropped stays gone, but for an XFA copy save
+    // policy keeps now, the fields as the file had them again (§11.8).
+    let saved = cx.saved().and_then(|record| record.roots.acroform.as_ref());
     let mut out = Dictionary::new();
     for (k, v) in read.iter().flat_map(|(_, d)| d.iter()) {
-        let owned = ACROFORM_OWNED.contains(&k.as_slice()) && !damaged;
-        if !owned && !(k == b"XFA" && drop_xfa.is_some()) {
-            let v = cx.sym(v, &scope);
-            out.set(k.clone(), v);
+        let unowned = !ACROFORM_OWNED.contains(&k.as_slice());
+        if !(unowned || damaged) || (k == b"XFA" && drop_xfa.is_some()) {
+            continue;
         }
+        let v = match saved.filter(|_| unowned && k != b"XFA") {
+            Some(saved) => match saved.get(k) {
+                Ok(v) => v,
+                Err(_) => continue,
+            },
+            None => v,
+        };
+        let v = cx.sym(v, &scope);
+        out.set(k.clone(), v);
     }
     if damaged {
         let pdf = primary.pdf();
@@ -736,7 +749,7 @@ impl Fields {
             && (one.is_none() || tags)
             && self.as_read(cx, node, read, &kids, one)
         {
-            cx.objects.push((key, SymObject::Raw(r.clone())));
+            cx.push_raw(key, r.clone());
             cx.form.keys.push(key);
             return;
         }

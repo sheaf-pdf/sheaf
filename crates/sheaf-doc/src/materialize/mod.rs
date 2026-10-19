@@ -29,6 +29,11 @@
 //! 7. checks what it wrote ([`verify::output`]): the form, and in debug
 //!    builds the encryption. A check that fails stops the save.
 //!
+//! An Append ([`append`]) emits only the closure of what the save's path
+//! changed ([`deps`]) onto the saved file, numbers it through the file's
+//! record and writes it as a section after the file's last byte, once the
+//! [`removal`] check finds it leaves no removed text readable.
+//!
 //! [`plan`] decides a save before any of it, with save policy's form
 //! transforms ([`crate::forms::rules::plan`]), which the emitter applies.
 //! [`write_file`] writes a planned save's file, once the reader answered
@@ -44,19 +49,33 @@
 //! - [`copy`]: copying a closure of objects from one file into another.
 //! - [`graph`]: a source loaded whole, for a Rewrite.
 //! - [`verify`]: what every written file is checked for (§11.9).
+//! - [`deps`]: what an Append writes.
+//! - [`append`]: an Append's section.
+//! - [`removal`]: what an Append would leave readable in the file.
 //!
 //! [`Document::save_input`]: crate::Document::save_input
 //! [`Document::record_save`]: crate::Document::record_save
 
 #[cfg(test)]
 mod annot_form_tests;
+pub mod append;
+#[cfg(test)]
+mod append_rewrite_tests;
+#[cfg(test)]
+mod append_tests;
 pub mod copy;
+pub mod deps;
 pub mod emit;
 pub mod graph;
 pub mod key;
 pub mod number;
 pub mod plan;
+#[cfg(test)]
+mod plan_tests;
 pub mod record;
+pub mod removal;
+#[cfg(test)]
+mod removal_tests;
 #[cfg(test)]
 pub(crate) mod rewrite_tests;
 mod saving;
@@ -73,34 +92,48 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result};
 use in_progress::Progress;
-use lopdf::{Object, ObjectId, Stream, XrefKind};
+use lopdf::{ByteSource as _, Object, ObjectId, Stream, XrefKind};
 
 pub use key::ObjKey;
+#[cfg(any(test, feature = "fixtures"))]
+pub use plan::forced_append;
 pub use plan::{
     AppendAnyway, Ask, AskAnswers, Encryption, Note, Numbering, Onto, Profile, SavePlan, SaveStop,
-    SaveTarget, SaveTransform, Strategy, StrategyKind, Why, plan, unanswered,
+    SaveTarget, SaveTransform, Strategy, StrategyKind, Why, forced_rewrite, plan, unanswered,
 };
-pub use record::{OutputRecord, SaveInput, SaveNote, SaveRecord, SavedSide};
+pub use record::{
+    Came, OutputRecord, PendingTail, SaveInput, SaveNote, SaveRecord, SavedSide, TailFlags,
+};
 #[cfg(any(test, feature = "fixtures"))]
-pub use saving::{How, appended, save_appended};
+pub use saving::{How, appended, save_appended, save_rewritten};
 pub use saving::{SaveReport, Written, save, write_file};
 
 use crate::serialize::crypt::Crypt;
 use crate::serialize::full::{self, Body, Layout};
 use emit::{EmitBase, EmitScope, PdfVersion};
 use record::{BitSet, ObjMap, RootValues, TreeShape};
+use removal::Mode;
 
 /// What a write made: the file's bytes, what the file is for the save that
 /// keeps it, and what the reader should be told.
 pub struct Output {
     pub bytes: Vec<u8>,
+    /// For an Append, the length of the saved file on disk its bytes go
+    /// after (a restored document's pending tail, then the section): None
+    /// for a whole file.
+    pub after: Option<usize>,
     pub record: OutputRecord,
     pub notes: Vec<Note>,
+    /// For an Append's section, what its checks found that its plan didn't
+    /// judge: nothing for a whole file.
+    pub unjudged: append::Unjudged,
 }
 
 /// `plan`'s file of `input`, written as `target` says, `p` counting the
-/// pages emitted and saying when to stop. Rewrites only: Appends and
-/// Unchanged plans come in slice 10.
+/// pages emitted and saying when to stop: a whole file, or for an Append,
+/// the section after the saved file, which fails when it can't follow the
+/// file ([`append::Refused`]: [`write_file`] rewrites it instead). An
+/// Unchanged plan writes nothing, and has no file to make.
 pub fn materialize(
     input: &SaveInput,
     plan: &SavePlan,
@@ -132,11 +165,67 @@ pub fn materialize_then(
 ) -> Result<Output, SaveStop> {
     match plan.strategy {
         Strategy::Rewrite { .. } => rewrite(input, plan, &target, post, p).map_err(stopped),
-        Strategy::Append { .. } => Err(SaveStop::Failed("Append comes in slice 10".into())),
+        Strategy::Append { .. } => append_onto_saved(input, plan, &target, Mode::Veto, p)?
+            .map_err(|refused| SaveStop::Failed(refused.to_string())),
         Strategy::Unchanged => Err(SaveStop::Failed(
-            "an Unchanged save writes nothing, from slice 10".into(),
+            "an Unchanged plan has no file to make".into(),
         )),
     }
+}
+
+/// `plan`'s Append of `input`: its section after the saved file as it is on
+/// disk (§11.7), never a source's bytes, the removal check run in `mode`,
+/// its record the saved file's, or (`Onto::CopyOf`) the copy's at
+/// `target`'s path. A saved file gone, or not the length its record says,
+/// is another program's: the save asks ([`Ask::FileChanged`]). An Append
+/// that can't follow the file is the inner error.
+pub(crate) fn append_onto_saved(
+    input: &SaveInput,
+    plan: &SavePlan,
+    target: &SaveTarget,
+    mode: Mode,
+    p: &dyn Progress,
+) -> Result<Result<Output, append::Refused>, SaveStop> {
+    let saved = (input.saved.as_ref())
+        .ok_or_else(|| SaveStop::Failed("nothing says what the saved file holds".into()))?;
+    let copy = match plan.strategy {
+        Strategy::Append { onto: Onto::CopyOf } => true,
+        _ if target.same_file => false,
+        _ => {
+            return Err(SaveStop::Failed(
+                "an Append in place writes the saved file".into(),
+            ));
+        }
+    };
+    let record = &saved.record;
+    let changed = || {
+        SaveStop::Ask(Ask::FileChanged {
+            path: record.path.clone(),
+        })
+    };
+    let file = match std::fs::File::open(&record.path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(changed()),
+        Err(e) => return Err(stopped(anyhow::Error::new(e))),
+    };
+    let base = lopdf::FileBytes::new(file).map_err(|e| stopped(e.into()))?;
+    if base.len() as u64 != record.stamp.len {
+        return Err(changed());
+    }
+    let mut out = match append::append(input, plan, Arc::new(base), mode, p) {
+        Ok(out) => out,
+        Err(e) => {
+            let refused = e.chain().find_map(|c| c.downcast_ref::<append::Refused>());
+            return match refused {
+                Some(refused) => Ok(Err(refused.clone())),
+                None => Err(stopped(e)),
+            };
+        }
+    };
+    if copy {
+        out.record.path = target.path.clone();
+    }
+    Ok(Ok(out))
 }
 
 /// Why a write that failed with `e` stopped.
@@ -191,7 +280,8 @@ fn rewrite(
     // is built and pruned, for those written as they were.
     let spans = raw.then(|| Spans::find(src));
     let loaded = graph::eager(src)?;
-    let numbers = number::stable(&e, &input.target, src, &loaded, prev)?;
+    let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.0).collect();
+    let numbers = number::stable(&e, &input.target, src, &loaded, &in_use, prev)?;
     let owned = std::mem::take(&mut e.owned);
     let mut version = e.version;
     if src.xref().kind == XrefKind::Stream {
@@ -220,7 +310,6 @@ fn rewrite(
     let kept = crate::kept::keep_only(&mut graph.pdf, &tree);
     notes.extend(kept.notes.into_iter().map(Note));
     graph.pdf.prune_objects();
-    let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.0).collect();
     let encrypt = src.crypt().map(|c| c.at());
     let reads = |id| src.pdf().object_unkept(id).is_ok();
     let checked = verify::Primary {
@@ -335,6 +424,9 @@ fn rewrite(
         path: target.path.clone(),
         at: crate::annot::pdf_date_now(),
         strategy: StrategyKind::Rewrite,
+        sound: true,
+        signatures_hold: false,
+        pdf_version: version,
         xref,
         crypt: match crypt {
             Some(c) if c.at() != encrypt_at => Some(Arc::new(c.moved(encrypt_at))),
@@ -342,15 +434,35 @@ fn rewrite(
         },
         map: Arc::new(map),
         present: Arc::new(present),
-        roots: Arc::new(RootValues::of(&graph.pdf)),
-        tree: Arc::new(TreeShape::of(&graph.pdf)),
+        roots: Arc::new(RootValues {
+            info: graph
+                .pdf
+                .trailer
+                .get(b"Info")
+                .and_then(Object::as_reference)
+                .ok(),
+            ..RootValues::of(&graph.pdf)
+        }),
+        tree: Arc::new(written_tree(&graph.pdf)),
         transforms: plan.transforms.as_slice().into(),
     };
     Ok(Output {
         bytes: out,
+        after: None,
         record,
         notes,
+        unjudged: append::Unjudged::default(),
     })
+}
+
+/// The page tree of `pdf`, a Rewrite's graph, whose nodes hold nothing
+/// but their place in it.
+fn written_tree(pdf: &lopdf::Document) -> TreeShape {
+    let mut tree = TreeShape::of(pdf);
+    for node in &mut tree.nodes {
+        node.from = None;
+    }
+    tree
 }
 
 /// Where an object is in its source's bytes.

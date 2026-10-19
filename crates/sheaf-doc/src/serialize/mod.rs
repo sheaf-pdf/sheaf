@@ -13,7 +13,8 @@
 //!   runs, a deleted object's entry at the next generation, and positions
 //!   counted from the header.
 //! - [`append`]: an update after a file's last section, in the base's
-//!   cross-reference kind, `/Prev` at its real start, `/ID[0]` kept.
+//!   cross-reference kind, `/Prev` at its real start, `/ID[0]` kept, its
+//!   AES IVs keyed by what each object is.
 //! - [`full`]: a whole file, with no `/Prev` and no object streams: an
 //!   object either copied as the source has it, at its own number, or
 //!   written, its AES IVs keyed by what it is.
@@ -73,23 +74,6 @@ impl Error {
 fn in_object(id: &Option<ObjectId>) -> String {
     id.map(|(n, g)| format!(" in object {n} {g}"))
         .unwrap_or_default()
-}
-
-/// Object `id` written at the end of `out`, encrypted under its id when
-/// there's a `crypt`: where it starts.
-fn indirect(
-    out: &mut Vec<u8>,
-    id: ObjectId,
-    obj: &Object,
-    crypt: Option<&Crypt>,
-) -> anyhow::Result<usize> {
-    let Some(crypt) = crypt else {
-        return Ok(object::indirect(out, id, obj)?);
-    };
-    let obj = crypt
-        .encrypt(id, obj)
-        .with_context(|| format!("encrypting object {} {}", id.0, id.1))?;
-    Ok(object::indirect(out, id, &obj)?)
 }
 
 /// Object `id`, which is `key`, written at the end of `out`, encrypted

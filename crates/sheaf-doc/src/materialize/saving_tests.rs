@@ -1,7 +1,8 @@
-//! Saves as outputs (M10.5 §9.1, slice 9): what a save does to the
+//! Saves as outputs (M10.5 §9.1, slices 9 and 10): what a save does to the
 //! document, which is nothing but which version is saved; edits made while
-//! one is written; the file another program changed; Save As; and a
-//! restored document's first save.
+//! one is written; the file another program changed; Save As; a restored
+//! document's first save; Appends in place, one after another, and torn;
+//! what the reader's answers make of a plan; and an Unchanged plan.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -12,7 +13,10 @@ use in_progress::{Level, NoProgress, Progress, Unit};
 use lopdf::{Document as Pdf, Object};
 use sheaf_core::Rotation;
 
-use super::{Ask, AskAnswers, SaveStop, StrategyKind, Why, plan, save, write_file};
+use super::{
+    Ask, AskAnswers, Onto, SavePlan, SaveStop, Strategy, StrategyKind, Why, forced_append, plan,
+    save, save_appended, save_rewritten, write_file,
+};
 use crate::forms::fixture::{Form, row};
 use crate::model::{DocState, Document, Edit, PageId, VersionId};
 use crate::serialize::durable::FileStamp;
@@ -224,8 +228,9 @@ fn undo_across_saves_is_exact() {
         turn(&mut d, i % 2);
         made.push((d.current_version(), d.state().clone()));
         if i == 1 || i == 2 {
+            // A turn removes nothing: it appends.
             let report = save(&mut d, &path, &AskAnswers::default(), &NoProgress).unwrap();
-            assert_eq!(report.strategy, StrategyKind::Rewrite);
+            assert_eq!(report.strategy, Some(StrategyKind::Append));
             let (v, st) = made.last().unwrap();
             assert!(d.current_version() == *v && d.state() == st);
         }
@@ -370,32 +375,26 @@ fn save_as_makes_its_file_the_document_s() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A document restored from its sidecar has no record of its file, so
-/// its first save to it is a Rewrite (`NoSaveRecord`), which checks the
-/// file is still the sidecar's base: asks when another program changed
-/// it, and otherwise writes, its record the file's from then on.
+/// A document restored from its sidecar has its file's record, with the
+/// sidecar's sections pending: it isn't what the file holds, and its first
+/// save to it appends them, then its own, while the file is still the
+/// sidecar's base: it asks when another program changed it, and
+/// otherwise writes, its record the file's from then on.
 #[test]
 fn a_restored_document_s_first_save_checks_the_base() {
     let dir = scratch();
     let path = form_file(&dir, "a.pdf", 2);
+    let original = std::fs::read(&path).unwrap();
     let mut d = opened(&path);
     turn(&mut d, 1);
     let (file, base) = d.file().map(|(f, s)| (f.clone(), *s)).unwrap();
     crate::recovery::write(&d.recovery_input(), &file, &base, &NoProgress).unwrap();
     let rec = crate::recovery::find(&path).unwrap();
     assert_eq!(rec.base, base);
-    let restored = || {
-        let store = crate::store::Store::new();
-        let info = crate::recovery::restore(&store, &path, &rec, None).unwrap();
-        let src = info.src.clone();
-        let mut r = crate::open::start(store, info, None, crate::history::default_policy());
-        r.ready(crate::open::finish(&src, &NoProgress)).unwrap();
-        r.mark_unsaved();
-        r.set_disk_base(&path, rec.base);
-        r
-    };
+    let restored = || crate::recovery::tests::restored(&path, &rec, None);
     let [mut first, mut second] = [restored(), restored()];
-    assert!(first.saved_record().is_none() && first.is_dirty());
+    let record = first.saved_record().unwrap();
+    assert!(record.pending_tail.is_some() && first.is_dirty());
     assert_eq!(
         first.file().map(|(f, s)| (&**f, *s)),
         Some((path.as_path(), base))
@@ -403,23 +402,20 @@ fn a_restored_document_s_first_save_checks_the_base() {
     let target = first.save_target(&path);
     assert!(target.same_file && target.stamp == Some(base));
     let planned = plan(&first.recovery_input(), &target);
-    assert_eq!(
-        planned.strategy,
-        super::Strategy::Rewrite {
-            why: vec![Why::NoSaveRecord]
-        }
-    );
+    assert_eq!(planned.strategy, Strategy::Append { onto: Onto::Saved });
     assert_eq!(planned.asks, []);
     // The first writes, its record the file it wrote.
-    save(&mut first, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = save(&mut first, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
     assert!(!first.is_dirty());
-    assert_eq!(
-        first.saved_record().unwrap().stamp,
-        FileStamp::read(&path).unwrap()
-    );
+    let record = first.saved_record().unwrap();
+    assert!(record.pending_tail.is_none());
+    assert_eq!(record.stamp, FileStamp::read(&path).unwrap());
+    let written = std::fs::read(&path).unwrap();
+    assert!(written.starts_with(&original));
+    assert_eq!(&written[original.len()..], &*rec.bytes);
     assert_eq!(pages_of(&path), [(0, false), (90, false)]);
     // The second's base is gone: it asks, and writes nothing.
-    let written = std::fs::read(&path).unwrap();
     let asks = Err(SaveStop::Ask(Ask::FileChanged {
         path: path.as_path().into(),
     }));
@@ -428,5 +424,300 @@ fn a_restored_document_s_first_save_checks_the_base() {
         asks
     );
     assert_eq!(std::fs::read(&path).unwrap(), written);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A plan of `strategy` for a save of `input`, asking nothing and changing
+/// nothing of the form.
+fn planned(strategy: Strategy) -> SavePlan {
+    SavePlan {
+        strategy,
+        asks: Vec::new(),
+        transforms: Vec::new(),
+        notes: Vec::new(),
+    }
+}
+
+/// Three Appends in a row, each after the last: the file keeps every byte
+/// it had, each section reads as the file's last, and the file reopens
+/// with every page as saved, through `LazyPdf` and lopdf. The records say
+/// what each file is, and its checksum, which an opened file's isn't
+/// known, is carried on once a Rewrite made it: the checksum of the whole
+/// file each time. Signatures hold until the Rewrite.
+#[test]
+fn appends_one_after_another_reopen() {
+    let dir = scratch();
+    let path = form_file(&dir, "a.pdf", 3);
+    let original = std::fs::read(&path).unwrap();
+    let mut d = opened(&path);
+    let opened_record = d.saved_record().unwrap().clone();
+    let primary = d.source(d.primary()).unwrap();
+    assert_eq!(opened_record.sound, primary.src.base_sound());
+    assert!(opened_record.signatures_hold && opened_record.content_hash.is_none());
+    for i in 0..3 {
+        turn(&mut d, i);
+        let was = std::fs::read(&path).unwrap();
+        let report = save_appended(&mut d, &path).unwrap();
+        assert_eq!(report.strategy, Some(StrategyKind::Append));
+        let now = std::fs::read(&path).unwrap();
+        assert!(now.len() > was.len() && now.starts_with(&was), "{i}");
+        let record = d.saved_record().unwrap();
+        assert_eq!(record.stamp, FileStamp::read(&path).unwrap(), "{i}");
+        assert!(
+            record.signatures_hold && record.content_hash.is_none(),
+            "{i}"
+        );
+        assert!(!d.is_dirty());
+    }
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.starts_with(&original));
+    let lazy = lopdf::LazyPdf::open(
+        std::sync::Arc::<[u8]>::from(bytes.as_slice()),
+        None,
+        &crate::source::Limits::DEFAULT.reader,
+    )
+    .unwrap();
+    assert!(lazy.base_sound());
+    assert_eq!(lazy.xref().sections, 4);
+    assert_eq!(pages_of(&path), [(90, false); 3]);
+    let again = opened(&path);
+    assert_eq!(again.state().order().len(), 3);
+    for i in 0..3 {
+        assert_eq!(again.geom(again.page(i).unwrap()).rotate, Rotation::R90);
+    }
+
+    // After a Rewrite, its checksum, carried over each section.
+    turn(&mut d, 0);
+    save_rewritten(&mut d, &path).unwrap();
+    let record = d.saved_record().unwrap().clone();
+    assert_eq!(record.strategy, StrategyKind::Rewrite);
+    assert!(record.sound && !record.signatures_hold);
+    let sum = |d: &Document| {
+        d.saved_record()
+            .unwrap()
+            .content_hash
+            .as_ref()
+            .unwrap()
+            .finish()
+    };
+    assert_eq!(
+        sum(&d),
+        sheaf_core::checksum(&std::fs::read(&path).unwrap())
+    );
+    for i in 1..3 {
+        turn(&mut d, i);
+        save_appended(&mut d, &path).unwrap();
+        assert_eq!(
+            sum(&d),
+            sheaf_core::checksum(&std::fs::read(&path).unwrap()),
+            "{i}"
+        );
+        assert!(!d.saved_record().unwrap().signatures_hold);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Another program changed the file before an Append: a byte appended, or
+/// one of its last cross-reference section changed, 64 KiB and more from
+/// its end, its length and time kept. Nothing is written, the version
+/// stays sealed for the reader's answer, and Overwrite rewrites it.
+#[test]
+fn a_file_changed_before_an_append_asks_and_overwrite_rewrites() {
+    let dir = scratch();
+    let path = dir.join("a.pdf");
+    let blank = crate::serialize::fixture::blank_table(3500);
+    let (at, _) = crate::serialize::durable::startxref(&blank[blank.len() - 64..]).unwrap();
+    assert!(
+        blank.len() as u64 - at > 64 * 1024,
+        "the section is past the tail"
+    );
+    for how in ["appended", "its last section"] {
+        std::fs::write(&path, &blank).unwrap();
+        let mut d = opened(&path);
+        turn(&mut d, 0);
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut theirs = blank.clone();
+        match how {
+            "appended" => theirs.push(b'\n'),
+            _ => theirs[at as usize + 7] = b'1',
+        }
+        std::fs::write(&path, &theirs).unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(mtime).unwrap();
+        drop(file);
+        let v = d.current_version();
+        let input = d.save_input(v).unwrap();
+        let target = d.save_target(&path);
+        let plan = planned(Strategy::Append { onto: Onto::Saved });
+        let stop = write_file(
+            &input,
+            &plan,
+            target.clone(),
+            &AskAnswers::default(),
+            &NoProgress,
+        );
+        let asks = SaveStop::Ask(Ask::FileChanged {
+            path: path.as_path().into(),
+        });
+        assert_eq!(stop.err(), Some(asks), "{how}");
+        assert_eq!(std::fs::read(&path).unwrap(), theirs, "{how}");
+        assert_eq!(names_in(&dir), ["a.pdf"], "{how}: no journal left");
+        assert_eq!(d.sealed(v), 1, "{how}");
+        let overwrite = AskAnswers {
+            overwrite: true,
+            ..Default::default()
+        };
+        let written = write_file(&input, &plan, target, &overwrite, &NoProgress).unwrap();
+        assert_eq!(written.report().strategy, Some(StrategyKind::Rewrite));
+        written.record_in(&mut d).unwrap();
+        assert!(!d.is_dirty() && d.sealed(v) == 0);
+        let saved = std::fs::read(&path).unwrap();
+        assert!(!saved.starts_with(&theirs), "{how}");
+        assert_eq!(pages_of(&path)[0], (90, false), "{how}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the reader's answers make of a plan: an Append or an Unchanged
+/// plan answered Overwrite is a Rewrite, because the file changed, which
+/// asks before it breaks signatures that hold, and not once a Rewrite broke
+/// them. Any other plan, or no Overwrite, is as it was.
+#[test]
+fn overwrite_makes_an_append_a_rewrite() {
+    let dir = scratch();
+    let mut f = Form::new(1);
+    let field = f.text("t", 0, row(0));
+    f.fill(field, "value");
+    let sig = f.signature("sig", 0, row(1));
+    f.sign(sig);
+    let path = dir.join("signed.pdf");
+    std::fs::write(&path, f.bytes()).unwrap();
+    let mut d = opened(&path);
+    turn(&mut d, 0);
+    let overwrite = AskAnswers {
+        overwrite: true,
+        ..Default::default()
+    };
+    let rewrite = Strategy::Rewrite {
+        why: vec![Why::FileChanged],
+    };
+    let target = d.save_target(&path);
+    for strategy in [Strategy::Append { onto: Onto::Saved }, Strategy::Unchanged] {
+        let input = d.recovery_input();
+        let plan = planned(strategy.clone());
+        assert_eq!(plan.answered(&input, &target, &AskAnswers::default()), plan);
+        let answered = plan.answered(&input, &target, &overwrite);
+        assert_eq!(answered.strategy, rewrite, "{strategy:?}");
+        assert!(
+            matches!(
+                &answered.asks[..],
+                [Ask::Signatures {
+                    impact,
+                    append_anyway: None,
+                    reason: Some(Why::FileChanged)
+                }] if impact.len() == 1
+            ),
+            "{:?}",
+            answered.asks
+        );
+    }
+    let plan = planned(rewrite.clone());
+    assert_eq!(
+        plan.answered(&d.recovery_input(), &target, &overwrite),
+        plan
+    );
+    // Once a Rewrite wrote the file, it has no signature that holds.
+    let answers = AskAnswers {
+        break_signatures: true,
+        ..Default::default()
+    };
+    save(&mut d, &path, &answers, &NoProgress).unwrap();
+    turn(&mut d, 0);
+    let plan = planned(Strategy::Append { onto: Onto::Saved });
+    let answered = plan.answered(&d.recovery_input(), &target, &overwrite);
+    assert_eq!((answered.strategy, answered.asks), (rewrite, Vec::new()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An Unchanged plan, the document what its file holds by another route
+/// (a turn and its turn back), writes nothing: the file's bytes and time
+/// are as they were, the version is the saved one, clean, and no save is
+/// noted.
+#[test]
+fn an_unchanged_plan_writes_nothing() {
+    let dir = scratch();
+    let path = form_file(&dir, "a.pdf", 2);
+    let before = std::fs::read(&path).unwrap();
+    let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut d = opened(&path);
+    let saves = |d: &Document| -> usize { d.timeline().iter().map(|v| v.saves.len()).sum() };
+    let noted = saves(&d);
+    let ids = vec![d.page(0).unwrap()];
+    for by in [Rotation::R90, Rotation::R270] {
+        let ids = ids.clone();
+        d.apply(Edit::RotatePages { ids, by }, "Rotate").unwrap();
+    }
+    assert!(d.is_dirty());
+    let v = d.current_version();
+    let input = d.save_input(v).unwrap();
+    let target = d.save_target(&path);
+    let plan = planned(Strategy::Unchanged);
+    let written = write_file(&input, &plan, target, &AskAnswers::default(), &NoProgress).unwrap();
+    assert!(!written.wrote);
+    assert_eq!(written.report().strategy, None);
+    assert_eq!(written.record.version, v);
+    written.record_in(&mut d).unwrap();
+    assert!(!d.is_dirty() && d.sealed(v) == 0);
+    assert_eq!(d.saved_record().unwrap().version, v);
+    assert_eq!(saves(&d), noted);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An Append a crash cuts short (a test hook tears it) leaves the file
+/// with part of its section and the journal: the next open cuts it back
+/// to the file saved before, which is what the document opens, and says
+/// so. The save that tore asks nothing of the file it left.
+#[test]
+fn a_torn_append_is_undone_when_the_file_opens() {
+    let dir = scratch();
+    let path = form_file(&dir, "a.pdf", 2);
+    let before = std::fs::read(&path).unwrap();
+    let mut d = opened(&path);
+    turn(&mut d, 1);
+    crate::serialize::append::tear_next(30);
+    assert!(save_appended(&mut d, &path).is_err());
+    assert!(d.is_dirty());
+    let torn = std::fs::read(&path).unwrap();
+    assert_eq!(torn.len(), before.len() + 30);
+    assert!(crate::serialize::append::journal_path(&path).exists());
+    let reopened = crate::open::file(&path, None).unwrap();
+    assert!(
+        matches!(reopened.torn, Some(crate::serialize::append::Torn::Undone { len }) if len == before.len() as u64)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(names_in(&dir), ["a.pdf"]);
+    assert_eq!(pages_of(&path), [(0, false), (0, false)]);
+    // The file is the one the document saved last: an Append goes after it.
+    save_appended(&mut d, &path).unwrap();
+    assert_eq!(pages_of(&path), [(0, false), (90, false)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A forced Append's plan has save policy's transforms, as "Append anyway"
+/// writes them, and asks nothing.
+#[test]
+fn a_forced_append_writes_the_transforms_and_asks_nothing() {
+    let dir = scratch();
+    let path = form_file(&dir, "a.pdf", 1);
+    let mut d = opened(&path);
+    turn(&mut d, 0);
+    let input = d.recovery_input();
+    let rewrite = plan(&input, &d.save_target(&path));
+    let forced = forced_append(&input, Onto::CopyOf);
+    assert_eq!(forced.strategy, Strategy::Append { onto: Onto::CopyOf });
+    assert!(forced.asks.is_empty());
+    assert_eq!(forced.transforms, rewrite.transforms);
     let _ = std::fs::remove_dir_all(&dir);
 }

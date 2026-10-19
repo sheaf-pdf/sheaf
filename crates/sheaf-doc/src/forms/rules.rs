@@ -8,10 +8,12 @@
 //! catalog as it writes them.
 //!
 //! A Rewrite always takes the usage rights out, and `/SigFlags` with them
-//! when nothing signed needs it; a certification stays. When the form
-//! changed, the XFA copy goes too, its tooltips copied into `/TU` first:
-//! Acrobat would show the XFA's fields and values, not the ones sheaf
-//! wrote. A recovery sidecar applies the same transforms.
+//! when nothing signed needs it; a certification stays. An Append keeps
+//! them when what it changes is within their `/TransformParams` (M10.5
+//! proposal 34): Reader checks later revisions against those. When the
+//! form changed, the XFA copy goes too, its tooltips copied into `/TU`
+//! first: Acrobat would show the XFA's fields and values, not the ones
+//! sheaf wrote. A recovery sidecar applies the same transforms.
 
 use std::collections::HashMap;
 
@@ -19,8 +21,10 @@ use lopdf::ObjectId;
 
 use super::field::{FieldKind, Value};
 use super::read::FileForm;
+use crate::effects::{AnnotOps, SigClass};
 use crate::materialize::{SaveRecord, SaveTransform, Strategy};
 use crate::model::{DocState, FormInst, SourceId};
+use crate::source::Source;
 
 /// What a save took out, for the reader.
 pub const XFA_REMOVED: &str =
@@ -29,47 +33,66 @@ pub const RIGHTS_REMOVED: &str =
     "Removed Reader's usage rights: their signature covers the file as it was";
 
 /// What save policy does to the form of a save of `target` by `strategy`
-/// over `base`, the form of registration `primary` as read, after the save
-/// `rec` recorded, when there's one:
+/// over `src`, the file of registration `primary` as read, after the save
+/// `rec` recorded, when there's one. `class` and `ops` are what an Append
+/// changes: its classes of change (§9.3), but for its transforms', and
+/// what it does to annotations.
 /// - **`DropXfa`** when the XFA copy describes fields the target no longer
 ///   has as they were: the field tree, a name, a value or a widget differs
-///   from `base`'s, or fields came in from elsewhere. The fields' XFA
-///   tooltips go into their `/TU`.
+///   from the form as read, or fields came in from elsewhere. The fields'
+///   XFA tooltips go into their `/TU`.
 /// - **`DropUr3`** when there are usage rights: on a Rewrite always, since
-///   their signature covers the bytes as they were. Slice 10 keeps them on
-///   an Append their `/TransformParams` allow.
+///   their signature covers the bytes as they were; on an Append unless
+///   their `/TransformParams` allow what it changes, the form's dictionary
+///   that dropping the XFA copy writes counting as anything else.
 /// - **`FixSigFlags`** beside it, when `/SigFlags` says there are
 ///   signatures and neither a signed field of the target nor a
 ///   certification needs it.
 ///
-/// An Append (slice 10) never repeats what `rec` says the file lost
-/// already.
+/// An Append never repeats what `rec` says the file lost already.
 pub fn plan(
-    base: &FileForm,
+    src: &Source,
     target: &DocState,
     primary: SourceId,
     rec: Option<&SaveRecord>,
     strategy: &Strategy,
+    class: SigClass,
+    ops: AnnotOps,
 ) -> Vec<SaveTransform> {
-    let facts = &base.facts;
+    let facts = &src.form().facts;
+    let append = matches!(strategy, Strategy::Append { .. });
+    let done = |t: &SaveTransform| append && rec.is_some_and(|rec| rec.transforms.contains(t));
     let mut out = Vec::new();
-    if facts.xfa && form_differs(base, target, primary) {
+    if drops_xfa(src, target, primary) {
         out.push(SaveTransform::DropXfa {
             tooltips_to_tu: true,
         });
     }
     if facts.usage_rights {
-        out.push(SaveTransform::DropUr3);
-        let signed = (target.terminals())
-            .any(|(_, _, t)| t.kind == FieldKind::Signature && t.value == Some(Value::Signed));
-        if facts.sig_flags != 0 && !facts.certified && !signed {
-            out.push(SaveTransform::FixSigFlags);
+        let class = match out.iter().any(|t| !done(t)) {
+            true => class | SigClass::OTHER,
+            false => class,
+        };
+        let rights = src.signatures().usage_rights;
+        if !(append && rights.is_some_and(|r| r.allow(class, ops))) {
+            out.push(SaveTransform::DropUr3);
+            let signed = (target.terminals())
+                .any(|(_, _, t)| t.kind == FieldKind::Signature && t.value == Some(Value::Signed));
+            if facts.sig_flags != 0 && !facts.certified && !signed {
+                out.push(SaveTransform::FixSigFlags);
+            }
         }
     }
-    if let (Strategy::Append { .. }, Some(rec)) = (strategy, rec) {
-        out.retain(|t| !rec.transforms.contains(t));
-    }
+    out.retain(|t| !done(t));
     out
+}
+
+/// Whether save policy drops the XFA copy of `src`, the file of
+/// registration `primary` as read, from a save of `target` ([`plan`]'s
+/// `DropXfa`): it has one, and the fields differ from its.
+pub(crate) fn drops_xfa(src: &Source, target: &DocState, primary: SourceId) -> bool {
+    let base = src.form();
+    base.facts.xfa && form_differs(base, target, primary)
 }
 
 /// Whether `target`'s fields differ from `base`'s, registration

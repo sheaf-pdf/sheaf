@@ -942,10 +942,12 @@ fn save_policy_drops_the_rights_and_a_changed_form_s_xfa() {
     assert!(report.is_clean(), "{:?}", report.findings);
 }
 
-/// The plan asks before a Rewrite: when the saved file changed on disk,
-/// when it breaks signatures (a certification is one), and when the XFA
-/// it drops holds values. Its reasons are the target's, the record's and
-/// the header's.
+/// The plan asks before it breaks or flags signatures that hold: an
+/// approval signature allows a comment after it, and flags a turn, which
+/// an Append anyway may still write; a Rewrite breaks it. It asks when the
+/// saved file changed on disk, which is a Rewrite's reason, and when the
+/// XFA it drops holds values. Its reasons are the target's, the record's
+/// and the header's.
 #[test]
 fn the_plan_asks_before_it_rewrites() {
     let dir = std::env::temp_dir().join(format!("sheaf-plan-{}", std::process::id()));
@@ -960,7 +962,7 @@ fn the_plan_asks_before_it_rewrites() {
     let mut d = Document::new(
         store,
         info,
-        Some(stamp),
+        Some(Came::Read(stamp)),
         &[],
         Box::new(crate::history::FixedCount(10)),
     );
@@ -983,27 +985,55 @@ fn the_plan_asks_before_it_rewrites() {
     let same = d.save_target(&path);
     assert!(same.same_file && same.stamp.is_some());
     let p = plan(&input, &same);
-    assert_eq!(
-        p.strategy,
-        Strategy::Rewrite {
-            why: vec![Why::AlwaysRewrite]
-        }
-    );
+    assert_eq!(p.strategy, Strategy::Append { onto: Onto::Saved });
+    assert_eq!(p.asks, []);
+    d.abandon_save(v);
+    let turn = Edit::RotatePages {
+        ids: vec![page],
+        by: Rotation::R90,
+    };
+    d.apply(turn, "turn").unwrap();
+    let v = d.current_version();
+    let input = d.save_input(v).unwrap();
+    let p = plan(&input, &same);
+    let impact = |verdict| {
+        vec![crate::forms::sigs::SigImpact {
+            signature: "sig".into(),
+            verdict,
+        }]
+    };
+    assert_eq!(p.strategy, Strategy::Append { onto: Onto::Saved });
+    let anyway = AppendAnyway {
+        stays_readable: Vec::new(),
+    };
     assert_eq!(
         p.asks,
         [Ask::Signatures {
-            signatures: 1,
-            append_anyway: None,
+            impact: impact(crate::forms::sigs::Verdict::Flagged),
+            append_anyway: Some(anyway),
             reason: None
         }]
     );
     std::fs::write(&path, b"another program's").unwrap();
     let p = plan(&input, &same);
     assert_eq!(
-        p.asks[0],
-        Ask::FileChanged {
-            path: same.path.clone()
+        p.strategy,
+        Strategy::Rewrite {
+            why: vec![Why::FileChanged]
         }
+    );
+    assert_eq!(
+        p.asks,
+        [
+            Ask::FileChanged {
+                path: same.path.clone()
+            },
+            Ask::Signatures {
+                impact: impact(crate::forms::sigs::Verdict::Invalid),
+                append_anyway: None,
+                reason: Some(Why::FileChanged)
+            }
+        ]
     );
     d.abandon_save(v);
     let other = SaveTarget {
@@ -1051,7 +1081,7 @@ fn a_copy_doesnt_bring_its_file_s_catalog_or_form() {
     let mut f = Form::new(1);
     let sig = f.signature("Signature1", 0, row(0));
     let text = f.text("a", 0, row(1));
-    f.certify(sig);
+    f.certify(sig, 2);
     let v = f.dict(sig).get(b"V").unwrap().as_reference().unwrap();
     let catalog = f.catalog;
     let reference = f.dict(v).get_mut(b"Reference").unwrap();

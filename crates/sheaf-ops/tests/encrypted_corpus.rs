@@ -17,20 +17,20 @@ use in_progress::NoProgress;
 use lopdf::Object;
 use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::forms::corpus::{Corpus, each_entry};
-use sheaf_doc::materialize::How;
+use sheaf_doc::materialize::{Came, How};
 use sheaf_doc::serialize::crypt::Crypt;
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::{Edit, FixedCount, Snapshot, Source, SourceInfo, Store};
+use sheaf_doc::{Document, Edit, FixedCount, Source, SourceInfo, Store};
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
-/// What a save `how` writes of `snap`, or why it didn't, and what the
+/// What a save `how` writes of `doc`, or why it didn't, and what the
 /// save is called.
-fn saved(snap: &Snapshot, how: How) -> (&'static str, anyhow::Result<Vec<u8>>) {
+fn saved(doc: &Document, how: How) -> (&'static str, anyhow::Result<Vec<u8>>) {
     match how {
-        How::Rewritten => ("Rewrite", sheaf_doc::save::rewrite(snap)),
+        How::Rewritten => ("Rewrite", sheaf_doc::save::rewrite(&doc.snapshot())),
         How::Appended => {
-            let appended = sheaf_doc::materialize::appended(snap);
+            let appended = sheaf_doc::materialize::appended(doc);
             ("Append", appended.map_err(anyhow::Error::from))
         }
     }
@@ -229,7 +229,12 @@ fn save_encrypted(path: &Path, save: How) -> Outcome {
         decrypted: decrypted(&src),
         shown: shown(src.bytes().clone()).ok(),
     };
-    let mut doc = sheaf_doc::open::start(store, primary, Some(stamp), Box::new(FixedCount(2)));
+    let mut doc = sheaf_doc::open::start(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        Box::new(FixedCount(2)),
+    );
     let opened = doc
         .ready(sheaf_doc::open::finish(&src, &NoProgress))
         .is_ok();
@@ -247,7 +252,7 @@ fn save_encrypted(path: &Path, save: How) -> Outcome {
         let failed = Saved::Failed("doesn't open to edit".into());
         return Some((how(&was.crypt), vec![("Open", failed)]));
     }
-    let (strategy, written) = saved(&doc.snapshot(), save);
+    let (strategy, written) = saved(&doc, save);
     let saved = match written {
         Ok(bytes) => check(&was, bytes),
         Err(e) if save == How::Appended && !src.base_sound() => Saved::Declined(format!("{e:#}")),

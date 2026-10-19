@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use in_progress::{NoProgress, Progress, Unit};
 use serde::{Deserialize, Serialize};
+use sheaf_doc::materialize::Came;
 use sheaf_doc::open::Facts;
 use sheaf_doc::{
     Document, Edit, FlatOutlineItem, NewOutlineItem, PageId, SourceId, SourceInfo, Store,
@@ -158,7 +159,7 @@ pub fn build(
                 let mut d = sheaf_doc::open::start(
                     store.clone(),
                     info,
-                    Some(stamp),
+                    Some(Came::Read(stamp)),
                     sheaf_doc::history::default_policy(),
                 );
                 d.ready(Facts {

@@ -2,7 +2,7 @@
 //! writers, ported (M10.5 slice 9). Pages and their order, bookmarks,
 //! marks and other tools' comments, stamps and attachments, encryption,
 //! the header and footer, labels and OCR layers. A test that saves both
-//! ways has an Append half, ignored until slice 10 ([`crate::both_ways!`]).
+//! ways has an Append half ([`crate::both_ways!`]).
 //! The fixtures here are the export tests' too (`save::tests`).
 
 use std::collections::HashMap;
@@ -15,7 +15,7 @@ use sheaf_core::{DestView, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::FixedCount;
-use crate::materialize::{self, AskAnswers, How, StrategyKind};
+use crate::materialize::{self, AskAnswers, Came, How, StrategyKind, Why};
 use crate::model::{Document, Edit, FlatOutlineItem, Mark, PageId, SourceInfo};
 use crate::save::{HeaderKept, derived_copy, rewrite, rewrite_to_path, text_string};
 use crate::serialize::crypt::Crypt;
@@ -125,7 +125,7 @@ pub(crate) fn open(
 ) -> Document {
     let store = Store::new();
     let (primary, stamp) = SourceInfo::read(&store, path, None).unwrap();
-    Document::new(store, primary, Some(stamp), outline, policy)
+    Document::new(store, primary, Some(Came::Read(stamp)), outline, policy)
 }
 
 /// (marker text, /Rotate) per page of a written PDF, in order.
@@ -309,6 +309,9 @@ fn bookmark_positions(how: How) {
         ],
         Box::new(FixedCount(10)),
     );
+    // The bookmarks in the file, as an Append writes after them.
+    How::Rewritten.save(&mut model, &a);
+    let mut model = crate::open::file(&a, None).unwrap().doc;
     // Turning the page in sheaf mustn't move the stored position: it's
     // in PageSpace, which a turn leaves alone.
     let p0 = model.page(0).unwrap();
@@ -322,7 +325,7 @@ fn bookmark_positions(how: How) {
         )
         .unwrap();
     let want = ["/XYZ 36 692 null", "/FitH 500", "/XYZ null null null"];
-    assert_eq!(read_dests(&how.write(&model.snapshot())), want);
+    assert_eq!(read_dests(&how.write(&model)), want);
     // A save writes the outline when it changed.
     let p1 = model.page(1).unwrap();
     model
@@ -343,7 +346,7 @@ fn bookmark_positions(how: How) {
         .unwrap();
     let mut want_added = vec!["/XYZ null 792 1.5"];
     want_added.extend(want);
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     assert_eq!(read_dests(&bytes), want_added);
 }
 
@@ -506,21 +509,9 @@ fn appends_onto(modern: bool) {
         save_modern(&a);
     }
     let original = std::fs::read(&a).unwrap();
-    let mut model = open(
-        &a,
-        &[FlatOutlineItem {
-            title: "One".into(),
-            page: Some(2),
-            depth: 0,
-            view: None,
-            color: None,
-            style: Default::default(),
-            open: true,
-            object: None,
-            kept: false,
-        }],
-        Box::new(FixedCount(10)),
-    );
+    // Its bookmark as the open reads it: the file's object.
+    let items = crate::open::outline(&info(&Store::new(), &a).src);
+    let mut model = open(&a, &items, Box::new(FixedCount(10)));
     let ids: Vec<PageId> = model.state().order().iter().copied().collect();
 
     // Rotation only: tree untouched, one page object rewritten.
@@ -533,7 +524,7 @@ fn appends_onto(modern: bool) {
             "rot",
         )
         .unwrap();
-    let bytes = How::Appended.write(&model.snapshot());
+    let bytes = How::Appended.write(&model);
     assert!(bytes.starts_with(&original), "original bytes preserved");
     assert_eq!(
         read_pages(&bytes),
@@ -577,7 +568,7 @@ fn appends_onto(modern: bool) {
             "bm",
         )
         .unwrap();
-    let bytes = How::Appended.write(&model.snapshot());
+    let bytes = How::Appended.write(&model);
     assert!(bytes.starts_with(&original));
     assert_eq!(
         read_pages(&bytes),
@@ -590,15 +581,25 @@ fn appends_onto(modern: bool) {
     );
     assert_eq!(read_outline(&bytes), vec![(0, "Uno".into(), Some(2))]);
 
-    // A page was deleted: saving the primary path is a full rewrite,
-    // so the page isn't left in an earlier revision (bug 14).
-    let report = How::Rewritten.save(&mut model, &a);
-    assert_eq!(report.strategy, StrategyKind::Rewrite);
+    // A page was deleted and a bookmark renamed: saving the primary path
+    // is a full rewrite, so neither is left in an earlier revision (bug
+    // 14, strict removal).
+    let report = materialize::save(&mut model, &a, &AskAnswers::default(), &NoProgress).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    let removed = |kind, count| crate::effects::Removed { kind, count };
+    let why = [
+        Why::Removes(vec![removed(crate::effects::RemovedKind::Pages, 1)]),
+        Why::ReplacesText(vec![removed(
+            crate::effects::RemovedKind::BookmarkTitles,
+            1,
+        )]),
+    ];
+    assert_eq!(report.why, why);
     let saved = std::fs::read(&a).unwrap();
     assert!(!saved.starts_with(&original));
     assert!(!streams_say(&saved, "MARK A 0") && streams_say(&saved, "MARK A 1"));
     let elsewhere = How::Rewritten.save(&mut model, &dir.join("elsewhere.pdf"));
-    assert_eq!(elsewhere.strategy, StrategyKind::Rewrite);
+    assert_eq!(elsewhere.strategy, Some(StrategyKind::Rewrite));
 }
 
 /// Whether the file says `text` anywhere: in its bytes, or in a
@@ -622,13 +623,11 @@ pub(crate) fn streams_say(bytes: &[u8], text: &str) -> bool {
 }
 
 #[test]
-#[ignore = "slice 10"]
 fn a_classic_xref_is_appended_to() {
     appends_onto(false);
 }
 
 #[test]
-#[ignore = "slice 10"]
 fn an_xref_stream_is_appended_to() {
     appends_onto(true);
 }
@@ -679,7 +678,7 @@ fn stale_xrefstm(how: How) {
     std::fs::write(&a, with_trailer_keys(&bytes, &stale)).unwrap();
     let original = std::fs::read(&a).unwrap();
     let model = rotated(&a);
-    let saved = how.write(&model.snapshot());
+    let saved = how.write(&model);
     match how {
         How::Appended => {
             let update = String::from_utf8_lossy(&saved[original.len()..]);
@@ -708,8 +707,9 @@ fn a_file_lopdf_rebuilds_is_rewritten() {
     let mut model = rotated(&a);
 
     // An update would have no section for /Prev to point at.
-    let report = How::Rewritten.save(&mut model, &a);
-    assert_eq!(report.strategy, StrategyKind::Rewrite);
+    let report = materialize::save(&mut model, &a, &AskAnswers::default(), &NoProgress).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    assert_eq!(report.why, [Why::BaseUnsound]);
     let saved = std::fs::read(&a).unwrap();
     assert_ne!(Pdf::load_mem(&saved).unwrap().xref_start, 0);
     assert_eq!(read_pages(&saved), [("A 0".into(), 90)]);
@@ -789,7 +789,7 @@ fn unknown_mark_survives(how: How) {
             "add",
         )
         .unwrap();
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     let out = dir.join(format!("out-{how:?}.pdf"));
     std::fs::write(&out, &bytes).unwrap();
     let back = annots_read(&std::fs::read(&out).unwrap());
@@ -870,7 +870,7 @@ fn bookmark_colors_and_styles(how: How) {
             "rename",
         )
         .unwrap();
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     let back = crate::open::outline(&crate::forms::fixture::source(bytes));
     assert_eq!(back.len(), 3, "{how:?}");
     assert_eq!(back[0].color, Some([255, 0, 0]), "{how:?}");
@@ -942,7 +942,7 @@ fn closed_bookmark_stays_closed(how: How) {
             "rename",
         )
         .unwrap();
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     let pdf = Pdf::load_mem(&bytes).unwrap();
     let root = pdf
         .catalog()
@@ -983,7 +983,6 @@ fn undo_past_a_save_then_save_writes_the_right_pages() {
 }
 
 #[test]
-#[ignore = "slice 10"]
 fn undo_past_a_save_then_save_writes_the_right_pages_appended() {
     undo_past_a_save(true);
 }
@@ -1118,7 +1117,7 @@ fn replies_and_statuses_thread(how: How) {
             .unwrap();
     }
     let want: Vec<Annot> = model.state().marks_on(p0).cloned().collect();
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     let list = page_annots(&bytes);
     assert_eq!(list.len(), 3);
     let (note_id, note_dict) = &list[0];
@@ -1230,7 +1229,7 @@ fn replies_follow_our_marks(how: How) {
             "edit",
         )
         .unwrap();
-    let out = how.write(&model.snapshot());
+    let out = how.write(&model);
     let list = page_annots(&out);
     let note_obj = list
         .iter()
@@ -1364,7 +1363,7 @@ fn made_ours_takes_its_place(how: How) {
         .collect();
     assert_eq!(theirs, ["sq-reply"]);
     assert!(was.is_some() && object(&model, "sq") == was);
-    let out = how.write(&model.snapshot());
+    let out = how.write(&model);
     let list = page_annots(&out);
     let subtypes: Vec<String> = list
         .iter()
@@ -1409,7 +1408,6 @@ fn made_ours_takes_its_place(how: How) {
 /// replacement is what the mark draws, so a save in place appends.
 /// The mark deleted then is something gone.
 #[test]
-#[ignore = "slice 10"]
 fn a_comment_made_ours_is_saved_in_place() {
     let dir = tempdir();
     let path = file_with_their_shapes(&dir);
@@ -1430,7 +1428,7 @@ fn a_comment_made_ours_is_saved_in_place() {
         .collect();
     assert_eq!(theirs, ["sq-reply"]);
     let saved = materialize::save_appended(&mut model, &path).unwrap();
-    assert_eq!(saved.strategy, StrategyKind::Append);
+    assert_eq!(saved.strategy, Some(StrategyKind::Append));
     let sq = (model.state().marks_on(p0))
         .find(|a| a.name == "sq")
         .unwrap()
@@ -1439,7 +1437,7 @@ fn a_comment_made_ours_is_saved_in_place() {
         .apply(Edit::AnnotDelete { page: p0, id: sq }, "delete")
         .unwrap();
     let saved = materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress);
-    assert_eq!(saved.unwrap().strategy, StrategyKind::Rewrite);
+    assert_eq!(saved.unwrap().strategy, Some(StrategyKind::Rewrite));
 }
 
 /// Of two comments of another tool's named alike on a page, the one
@@ -1525,7 +1523,7 @@ fn a_link_a_save_left_out_is_gone_from_its_file() {
             .collect()
     };
     let report = materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress);
-    assert_eq!(report.unwrap().strategy, StrategyKind::Rewrite);
+    assert_eq!(report.unwrap().strategy, Some(StrategyKind::Rewrite));
     assert_eq!(subtypes(&path), ["Text"]);
     assert_eq!(model.state().foreign_on(p0).count(), 2);
     model.undo().unwrap();
@@ -1587,14 +1585,14 @@ fn deleted_comments_stay_out(how: How) {
             "delete ours",
         )
         .unwrap();
-    let save = |m: &Document| how.write(&m.snapshot());
+    let save = |m: &Document| how.write(m);
     let written = save(&model);
     assert!(contents(&written).is_empty(), "{how:?}");
     // Saved in place, it's a Rewrite: something's gone.
     let file = match how {
         How::Appended => {
             let saved = materialize::save(&mut model, &copy, &AskAnswers::default(), &NoProgress);
-            assert_eq!(saved.unwrap().strategy, StrategyKind::Rewrite);
+            assert_eq!(saved.unwrap().strategy, Some(StrategyKind::Rewrite));
             std::fs::read(&copy).unwrap()
         }
         How::Rewritten => written,
@@ -1602,10 +1600,20 @@ fn deleted_comments_stay_out(how: How) {
     for gone in ["No name", "Agreed"] {
         assert!(!says(&file, gone), "{gone}, {how:?}");
     }
-    // Undone, they're all written again.
+    // Undone, they're all written again: after the save in place pruned
+    // them, which no Append can refer to, by a Rewrite.
     model.undo().unwrap().unwrap();
     model.undo().unwrap().unwrap();
-    let mut back = contents(&save(&model));
+    let again = match how {
+        How::Appended => {
+            let refused = materialize::appended(&model).unwrap_err().to_string();
+            assert!(refused.contains("the saved file hasn't got"), "{refused}");
+            materialize::save(&mut model, &copy, &AskAnswers::default(), &NoProgress).unwrap();
+            std::fs::read(&copy).unwrap()
+        }
+        How::Rewritten => save(&model),
+    };
+    let mut back = contents(&again);
     back.sort();
     assert_eq!(back, ["Agreed", "No name", "ours"], "{how:?}");
 }
@@ -1619,7 +1627,6 @@ fn a_save_writes_marks_and_their_comments() {
 }
 
 #[test]
-#[ignore = "slice 10"]
 fn a_save_writes_marks_and_their_comments_appended() {
     saves_marks_and_comments(true);
 }
@@ -1656,7 +1663,7 @@ fn saves_marks_and_comments(in_place: bool) {
         }
     };
     let want = [StrategyKind::Rewrite, StrategyKind::Append][usize::from(in_place)];
-    assert_eq!(report.unwrap().strategy, want);
+    assert_eq!(report.unwrap().strategy, Some(want));
     assert!(*model.state() == before && !model.is_dirty());
     let saved = Pdf::load(&out).unwrap();
     let page = saved.page_iter().next().unwrap();
@@ -1682,7 +1689,7 @@ fn saves_marks_and_comments(in_place: bool) {
         )
         .unwrap();
     let report = materialize::save(&mut model, &out, &AskAnswers::default(), &NoProgress);
-    assert_eq!(report.unwrap().strategy, StrategyKind::Rewrite);
+    assert_eq!(report.unwrap().strategy, Some(StrategyKind::Rewrite));
     let bytes = std::fs::read(&out).unwrap();
     assert!(!says(&bytes, "No name") && says(&bytes, "Agreed"));
 }
@@ -1735,8 +1742,7 @@ fn dup_without_theirs(how: How) {
     assert_eq!(texts(&on1), ["Agreed"]);
     assert_eq!((on0[0].2, on1[0].2), (0, 1));
     assert_ne!(on0[0].0, on1[0].0, "a copy has an id of its own");
-    let snap = model.snapshot();
-    let written = how.write(&snap);
+    let written = how.write(&model);
     let pdf = Pdf::load_mem(&written).unwrap();
     for page in pdf.page_iter() {
         let list = pdf.get_dictionary(page).unwrap().get(b"Annots");
@@ -1752,7 +1758,7 @@ fn dup_without_theirs(how: How) {
     let file = match how {
         How::Appended => {
             let saved = materialize::save(&mut model, &copy, &AskAnswers::default(), &NoProgress);
-            assert_eq!(saved.unwrap().strategy, StrategyKind::Rewrite);
+            assert_eq!(saved.unwrap().strategy, Some(StrategyKind::Rewrite));
             std::fs::read(&copy).unwrap()
         }
         How::Rewritten => written,
@@ -1798,7 +1804,7 @@ fn a_reply_names_a_comment(how: How) {
             "reply",
         )
         .unwrap();
-    let out = how.write(&model.snapshot());
+    let out = how.write(&model);
     let list = page_annots(&out);
     let (theirs_id, theirs) = list
         .iter()
@@ -1948,7 +1954,7 @@ fn a_page_stamp_is_written_once(how: How) {
             .apply(Edit::AnnotAdd { page, annot }, "stamp")
             .unwrap();
     }
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     let pdf = Pdf::load_mem(&bytes).unwrap();
     let mut forms = std::collections::HashSet::new();
     for page in pdf.get_pages().into_values() {
@@ -2078,7 +2084,7 @@ fn survive_an_empty_cache(how: How) {
     };
     let (doc, held) = check(&saved);
     let again = dir.join("again.pdf");
-    std::fs::write(&again, how.write(&doc.snapshot())).unwrap();
+    std::fs::write(&again, how.write(&doc)).unwrap();
     let (_, now) = check(&again);
     if how == How::Appended {
         // An Append draws and embeds them where the file has them.
@@ -2228,7 +2234,7 @@ fn caret_and_strikeout(how: How) {
             .collect();
         (list, ids)
     };
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     let (list, ids) = annots_of(&bytes);
     // Caret, its StrikeOut, the underline.
     let subtypes: Vec<&[u8]> = list
@@ -2287,7 +2293,7 @@ fn caret_and_strikeout(how: How) {
             "edit",
         )
         .unwrap();
-    let bytes2 = how.write(&model2.snapshot());
+    let bytes2 = how.write(&model2);
     let (list2, _) = annots_of(&bytes2);
     assert_eq!(list2.len(), 3);
     assert_eq!(
@@ -2369,7 +2375,7 @@ fn annots_read_back(how: How) {
         )
         .unwrap();
 
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     assert_eq!(bytes.starts_with(&original), how == How::Appended);
     let out = dir.join("inc.pdf");
     std::fs::write(&out, &bytes).unwrap();
@@ -2403,7 +2409,7 @@ fn annots_read_back(how: How) {
             "rm",
         )
         .unwrap();
-    let bytes2 = how.write(&model2.snapshot());
+    let bytes2 = how.write(&model2);
     let pdf = Pdf::load_mem(&bytes2).unwrap();
     let page0 = pdf.get_pages()[&1];
     let annots = pdf
@@ -2505,7 +2511,7 @@ fn connectors_link_in_a_cycle(how: How) {
             })
             .collect()
     };
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     assert_eq!(dests(&bytes), [vec![2], vec![3], vec![1]]);
 
     // Saved, reopened, and a fourth added below the first: page 1's
@@ -2523,7 +2529,7 @@ fn connectors_link_in_a_cycle(how: How) {
             "c",
         )
         .unwrap();
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     assert_eq!(dests(&bytes), [vec![1, 2], vec![3], vec![1]]);
 }
 
@@ -2606,7 +2612,7 @@ fn connectors_link_to_partner(how: How) {
         let back = annots_read(bytes).sheaf();
         assert_eq!(back[&0][0].partner(), Some(back[&2][0].id));
     };
-    check(&how.write(&model.snapshot()));
+    check(&how.write(&model));
 }
 
 crate::both_ways!(
@@ -2652,7 +2658,7 @@ fn encrypted_source_saves(how: How) {
     let mut model = Document::new(
         store,
         primary,
-        Some(stamp),
+        Some(Came::Read(stamp)),
         &[FlatOutlineItem {
             title: "Top".into(),
             page: Some(0),
@@ -2689,7 +2695,7 @@ fn encrypted_source_saves(how: How) {
         // Saved in place, it's appended to, and encrypted the same way.
         let original = std::fs::read(&enc).unwrap();
         let report = How::Appended.save(&mut model, &enc);
-        assert_eq!(report.strategy, StrategyKind::Append);
+        assert_eq!(report.strategy, Some(StrategyKind::Append));
         let bytes = std::fs::read(&enc).unwrap();
         assert!(bytes.starts_with(&original));
         assert!(matches!(
@@ -2705,7 +2711,7 @@ fn encrypted_source_saves(how: How) {
     }
     let out = dir.join("saved.pdf");
     let report = How::Rewritten.save(&mut model, &out);
-    assert_eq!(report.strategy, StrategyKind::Rewrite);
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     let bytes = std::fs::read(&out).unwrap();
     assert!(
         !bytes.windows(6).any(|w| w == b"MARK E"),
@@ -2872,7 +2878,7 @@ fn page_labels_follow_pages(how: How) {
         label_ranges(&pdf).map(|r| labels_for(&r, 4))
     };
     // In place.
-    assert_eq!(how.save(&mut model, &a).strategy, how.strategy());
+    assert_eq!(how.save(&mut model, &a).strategy, Some(how.strategy()));
     assert_eq!(read(&a).unwrap(), vec!["i", "ii", "1", "2"]);
     // Move the decimal range's first page to the front; rewrite.
     model
@@ -3022,7 +3028,6 @@ fn rewrite_writes_invisible_text_layer() {
 }
 
 #[test]
-#[ignore = "slice 10"]
 fn an_append_writes_a_layer_in_an_unchanged_order() {
     let dir = tempdir();
     let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
@@ -3030,7 +3035,7 @@ fn an_append_writes_a_layer_in_an_unchanged_order() {
     let mut model = open(&a, &[], Box::new(FixedCount(10)));
     let ids: Vec<PageId> = model.state().order().iter().copied().collect();
     set_layer(&mut model, ids[0], "Hello");
-    let bytes = How::Appended.write(&model.snapshot());
+    let bytes = How::Appended.write(&model);
     assert!(bytes.starts_with(&original), "original bytes preserved");
     assert_eq!(
         read_pages(&bytes),
@@ -3049,16 +3054,16 @@ fn an_append_writes_a_layer_in_an_unchanged_order() {
     assert!(fonts.has(b"F1") && fonts.has(b"SheafOcr"));
     assert!(!pdf.get_dictionary(pages[1]).unwrap().has(b"Resources"));
     assert_eq!(glyphless_fonts(&pdf), 1);
-    // A save in place appends, and the file reopens with the layer.
+    // Saved in place, as planned (a layer added removes nothing), the file
+    // reopens with the layer.
     let report = materialize::save(&mut model, &a, &AskAnswers::default(), &NoProgress);
-    assert_eq!(report.unwrap().strategy, StrategyKind::Append);
+    assert_eq!(report.unwrap().strategy, Some(StrategyKind::Append));
     let saved = Pdf::load(&a).unwrap();
     let p0 = saved.get_pages()[&1];
     assert_eq!(contents_of(&saved, p0).len(), 3);
 }
 
 #[test]
-#[ignore = "slice 10"]
 fn an_append_writes_a_layer_in_a_changed_tree() {
     let dir = tempdir();
     let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
@@ -3069,7 +3074,7 @@ fn an_append_writes_a_layer_in_a_changed_tree() {
     model
         .apply(Edit::DeletePages { ids: vec![ids[0]] }, "del")
         .unwrap();
-    let bytes = How::Appended.write(&model.snapshot());
+    let bytes = How::Appended.write(&model);
     assert!(bytes.starts_with(&original));
     assert_eq!(
         read_pages(&bytes),

@@ -131,9 +131,7 @@ pub(super) fn insert(d: &mut Document, source: SourceId, index: u32) {
 
 fn rewrite_plan() -> SavePlan {
     SavePlan {
-        strategy: Strategy::Rewrite {
-            why: vec![Why::AlwaysRewrite],
-        },
+        strategy: Strategy::Rewrite { why: Vec::new() },
         asks: Vec::new(),
         transforms: Vec::new(),
         notes: Vec::new(),
@@ -584,8 +582,10 @@ pub(super) fn save(d: &mut Document) -> Output {
         len: out.bytes.len() as u64,
         mtime: SystemTime::UNIX_EPOCH,
         tail: 0,
+        window: 0,
     };
-    d.record_save(out.record.clone().stamped(stamp)).unwrap();
+    d.record_save(out.record.clone().stamped(stamp, None))
+        .unwrap();
     out
 }
 
@@ -834,10 +834,9 @@ fn a_size_at_the_last_number_isnt_reserved() {
     assert_eq!(font.get(b"Gone").unwrap(), &gone);
 }
 
-/// A cancelled write stops as cancelled, and a plan this slice doesn't
-/// write fails.
+/// A cancelled write stops as cancelled.
 #[test]
-fn a_cancel_and_an_append_stop_the_write() {
+fn a_cancel_stops_the_write() {
     let d = open(&bytes(&file("A", 1, false)), None);
     let input = SaveInput::detached(&d.snapshot());
     let tracker = in_progress::Tracker::new();
@@ -853,14 +852,6 @@ fn a_cancel_and_an_append_stop_the_write() {
     assert_eq!(stop, SaveStop::Cancelled(in_progress::Cancelled));
     let e = anyhow::Error::from(stop);
     assert!(e.chain().any(|c| c.is::<in_progress::Cancelled>()));
-    let append = SavePlan {
-        strategy: Strategy::Append { onto: Onto::Saved },
-        ..rewrite_plan()
-    };
-    let stop = materialize(&input, &append, target(Profile::default()), &NoProgress)
-        .err()
-        .unwrap();
-    assert_eq!(stop, SaveStop::Failed("Append comes in slice 10".into()));
 }
 
 /// Every page sits in a balanced tree whose nodes give them nothing: each

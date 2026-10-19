@@ -5,7 +5,8 @@
 //! is one string, and a file whose objects are in an encrypted object
 //! stream, which lopdf can't write; and what the serializer's tests
 //! share: the edit they save, the bytes some writers put before the
-//! header, and a search of the bytes written.
+//! header, a file whose cross-reference table is long, and a search of the
+//! bytes written.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -28,7 +29,7 @@ use super::{full, object};
 use crate::forms::fixture::{Form, note, outline_tree, row};
 use crate::materialize::ObjKey;
 use crate::materialize::emit::PdfVersion;
-use crate::model::{Edit, Snapshot};
+use crate::model::{Document, Edit};
 use crate::store::BlobId;
 
 pub const OWNER: &str = "owner";
@@ -334,6 +335,32 @@ pub fn object_streams_encrypted(pdf: &Pdf, state: &EncryptionState) -> Vec<u8> {
 /// Bytes some writers put before `%PDF-`.
 pub const PREFIX: [u8; 100] = [b'~'; 100];
 
+/// `count` blank pages, written with a cross-reference table: a row an
+/// object, so a long one, which starts further back than a stamp's tail
+/// once there are a few thousand.
+pub fn blank_table(count: usize) -> Vec<u8> {
+    let mut pdf = Pdf::with_version("1.4");
+    let pages = pdf.new_object_id();
+    let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
+    let kids: Vec<Object> = (0..count)
+        .map(|_| {
+            let page = dictionary! {
+                "Type" => "Page", "Parent" => pages, "Contents" => content,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            };
+            pdf.add_object(page).into()
+        })
+        .collect();
+    let tree = dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count as i64 };
+    pdf.objects.insert(pages, tree.into());
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    pdf.trailer.set("Root", catalog);
+    pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
+}
+
 /// Whether `bytes` hold `text` anywhere.
 pub fn holds(bytes: &[u8], text: &[u8]) -> bool {
     bytes.windows(text.len()).any(|w| w == text)
@@ -341,7 +368,7 @@ pub fn holds(bytes: &[u8], text: &[u8]) -> bool {
 
 /// `path` opened as the app opens it, with `password`, its first page
 /// turned a quarter and a note put on it.
-pub fn edited(path: &Path, password: Option<&str>) -> Snapshot {
+pub fn edited(path: &Path, password: Option<&str>) -> Document {
     let mut doc = crate::open::file(path, password).unwrap().doc;
     let page = doc.page(0).unwrap();
     let turn = Edit::RotatePages {
@@ -357,5 +384,5 @@ pub fn edited(path: &Path, password: Option<&str>) -> Snapshot {
         "note",
     )
     .unwrap();
-    doc.snapshot()
+    doc
 }

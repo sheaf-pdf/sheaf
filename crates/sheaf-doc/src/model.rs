@@ -17,7 +17,7 @@ use crate::file::ForeignAnnot;
 use crate::forms::{FieldId, FileForm, full_name_of};
 use crate::geom::Geom;
 use crate::history::{HistoryPolicy, HistoryStats};
-use crate::materialize::{Profile, SaveInput, SaveNote, SaveRecord, SaveTarget, SavedSide};
+use crate::materialize::{Came, Profile, SaveInput, SaveNote, SaveRecord, SaveTarget, SavedSide};
 use crate::open::{Facts, FileAnnot, FileBody, ViewFacts};
 use crate::prim::{HeapSize, Key, Prim, Rec, Val, same};
 use crate::serialize::durable::{self, FileStamp};
@@ -616,7 +616,9 @@ pub struct Document {
     versions: HashMap<VersionId, Version>,
     root: VersionId,
     cursor: VersionId,
-    /// The version the primary file on disk holds, if any.
+    /// The saved version: the one whose record says what the document's
+    /// file holds, or, restored from the file's recovery sidecar, holds
+    /// once its first save writes what the record has pending.
     saved: Option<VersionId>,
     next_version: u64,
     /// Sources registered since the last version was made, for the next.
@@ -627,10 +629,6 @@ pub struct Document {
     next_source: u32,
     policy: Box<dyn HistoryPolicy>,
     next_job: u64,
-    /// A restored document's file and its stamp, the base its recovery
-    /// sidecar was written against, until a save records the file
-    /// ([`Document::set_disk_base`]).
-    disk_base: Option<(Arc<Path>, FileStamp)>,
     /// The reader has been told some text shows as `?` in the file
     /// ([`Document::unencodable_notice`]). Outside history: undo doesn't
     /// make it news again.
@@ -645,18 +643,18 @@ impl Document {
     /// entirety, with `outline`, what its pages hold beside their content
     /// (its source's [`annots`](crate::Source::annots)), and nothing else:
     /// a file sheaf has just made, which says nothing more about itself.
-    /// `stamp` is the file as [`SourceInfo::read`] read it, when it came
-    /// from one (see [`loading`](Self::loading)). A file that's opened
-    /// opens through [`crate::open`], which reads what it says.
+    /// How it `came` is what's known of the file it's of, when it's of one
+    /// (see [`loading`](Self::loading)). A file that's opened opens through
+    /// [`crate::open`], which reads what it says.
     pub fn new(
         store: Arc<Store>,
         primary: SourceInfo,
-        stamp: Option<FileStamp>,
+        came: Option<Came>,
         outline: &[FlatOutlineItem],
         policy: Box<dyn HistoryPolicy>,
     ) -> Self {
         let annots = primary.src.annots().clone();
-        let mut doc = Self::loading(store, primary, stamp, policy);
+        let mut doc = Self::loading(store, primary, came, policy);
         let facts = Facts {
             annots,
             outline: outline.to_vec(),
@@ -674,15 +672,17 @@ impl Document {
 
     /// A document showing `primary` while it opens: its pages, from the
     /// page table its source read as it opened, and nothing else, until
-    /// [`ready`](Self::ready). See [`crate::open::start`]. When the
-    /// primary was read from a file, `stamp` is that file as it was read,
-    /// and the opened version gets the file's record
-    /// ([`SaveRecord::opened`]); a primary made in memory has none, so its
-    /// first save is a Rewrite.
+    /// [`ready`](Self::ready). See [`crate::open::start`]. How it `came`
+    /// gives the opened version its file's record: the file's as it was
+    /// read ([`SaveRecord::opened`]), or, restored from its recovery
+    /// sidecar, the file's with the sidecar's sections pending
+    /// ([`SaveRecord::restored`]), so the document isn't what the file
+    /// holds until a save writes them. A primary made in memory has none,
+    /// so its first save is a Rewrite.
     pub(crate) fn loading(
         store: Arc<Store>,
         primary: SourceInfo,
-        stamp: Option<FileStamp>,
+        came: Option<Came>,
         policy: Box<dyn HistoryPolicy>,
     ) -> Self {
         let source = SourceId(0);
@@ -701,7 +701,6 @@ impl Document {
             next_source: 1,
             policy,
             next_job: 1,
-            disk_base: None,
             told_unencodable: false,
             ready: false,
         };
@@ -722,7 +721,14 @@ impl Document {
             (doc.ids.page(), Arc::new(def), Arc::new(facts.geom))
         });
         let state = DocState::builder().pages(pages).build();
-        let record = stamp.map(|stamp| Arc::new(SaveRecord::opened(VersionId(0), &primary, stamp)));
+        let record = came.map(|came| {
+            Arc::new(match came {
+                Came::Read(stamp) => SaveRecord::opened(VersionId(0), &primary, stamp),
+                Came::Restored { base, pending } => {
+                    SaveRecord::restored(VersionId(0), &primary, base, pending)
+                }
+            })
+        });
         doc.sources.insert(source, Arc::new(primary));
         doc.versions.insert(
             VersionId(0),
@@ -1182,15 +1188,20 @@ impl Document {
         group_members_in(self.state(), group)
     }
 
+    /// Whether the document isn't what its file holds: the current
+    /// version isn't the saved one, or a recovery sidecar restored it with
+    /// sections its file hasn't got yet.
     pub fn is_dirty(&self) -> bool {
-        self.saved != Some(self.cursor)
+        self.on_disk() != Some(self.cursor)
     }
 
-    /// Treat the current state as unsaved even though nothing was edited
-    /// (a recovered document: restored from its sidecar, whose edits its
-    /// file hasn't got).
-    pub fn mark_unsaved(&mut self) {
-        self.saved = None;
+    /// The version the document's file holds: the saved one, unless its
+    /// record has sections pending (§11.10).
+    fn on_disk(&self) -> Option<VersionId> {
+        let pending = self
+            .saved_record()
+            .is_some_and(|r| r.pending_tail.is_some());
+        self.saved.filter(|_| !pending)
     }
 
     /// What a save of version `v` writes from (M10.5 §9.1), and `v` sealed
@@ -1216,23 +1227,105 @@ impl Document {
         self.input(self.cursor)
     }
 
+    /// For tests: what an Append of version `v` writes from, nothing
+    /// sealed. A document made in memory, which has no record, appends
+    /// onto its saved version as though the file it was opened from held
+    /// its primary's bytes: their record as opened, at the primary's name,
+    /// which is never read.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn append_input(&self, v: VersionId) -> SaveInput {
+        let mut input = self.input(v);
+        if input.saved.is_none()
+            && let Some(s) = self.saved
+            && let Some(state) = self.versions[&s].state.clone()
+        {
+            let info = &self.sources[&self.primary];
+            let stamp = FileStamp {
+                len: info.src.bytes().len() as u64,
+                mtime: std::time::SystemTime::UNIX_EPOCH,
+                tail: 0,
+                window: 0,
+            };
+            let record = Arc::new(SaveRecord::opened(s, info, stamp));
+            input.saved = Some(SavedSide { state, record });
+            input.path_keys = Arc::new(self.path_keys(s, v));
+        }
+        input
+    }
+
+    /// For tests: a document made in memory, which has no record, as
+    /// though opened from `path`: its primary's bytes written there, and
+    /// its saved version given their record as opened.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn opened_from(&mut self, path: &Path) -> Result<()> {
+        let s = self.saved.context("nothing is saved")?;
+        let info = SourceInfo {
+            name: path.to_path_buf(),
+            ..SourceInfo::clone(&self.sources[&self.primary])
+        };
+        std::fs::write(path, &**info.src.bytes())?;
+        let stamp = FileStamp::read(path)?;
+        let version = (self.versions.get_mut(&s)).context("the saved version is no longer kept")?;
+        version.record = Some(Arc::new(SaveRecord::opened(s, &info, stamp)));
+        Ok(())
+    }
+
     /// Version `v`'s save input, from its state, which it keeps.
     fn input(&self, v: VersionId) -> SaveInput {
         let saved = self.saved.and_then(|s| {
             let at = &self.versions[&s];
-            Some(SavedSide {
-                state: at.state.clone()?,
-                record: at.record.clone()?,
-            })
+            Some((
+                s,
+                SavedSide {
+                    state: at.state.clone()?,
+                    record: at.record.clone()?,
+                },
+            ))
         });
+        let path_keys = match &saved {
+            Some((s, _)) => self.path_keys(*s, v),
+            None => BTreeSet::new(),
+        };
         SaveInput {
             version: v,
             target: (self.versions[&v].state.clone())
                 .expect("a version being saved keeps its state"),
             primary: self.primary,
             sources: self.sources.clone(),
-            saved,
+            saved: saved.map(|(_, side)| side),
+            path_keys: Arc::new(path_keys),
         }
+    }
+
+    /// The keys any step changed on the tree path from version `saved` to
+    /// version `v`, through the last version both come from (M10.5 §7.2):
+    /// the slots a save of `v` may find changed since `saved`'s file.
+    /// Pruning keeps the saved version, a version being saved, and any
+    /// branch holding either, and the root stops at the saved version or
+    /// where the path turns ([`prune`](Self::prune)), so the path is
+    /// always whole: nothing from before the root is needed (§8.7's
+    /// `keys_to_root`).
+    fn path_keys(&self, saved: VersionId, v: VersionId) -> BTreeSet<Key> {
+        let up = |mut at: VersionId| {
+            let mut line = vec![at];
+            while let Some(p) = self.versions[&at].parent {
+                line.push(p);
+                at = p;
+            }
+            line
+        };
+        let (ours, theirs) = (up(v), up(saved));
+        // Both lines end at the root: what they share is the way down to
+        // where the path turns.
+        let shared = (ours.iter().rev())
+            .zip(theirs.iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let edges = (ours[..ours.len() - shared].iter()).chain(&theirs[..theirs.len() - shared]);
+        edges
+            .flat_map(|id| self.versions[id].steps.iter())
+            .flat_map(|step| step.prims.iter().map(|p| p.key))
+            .collect()
     }
 
     /// A save of `rec.version` wrote `rec`'s file: that version is the
@@ -1240,6 +1333,21 @@ impl Document {
     /// shrinking to the note it has. It's noted among the version's saves
     /// and unsealed. Nothing else changes: no version, state or source.
     pub fn record_save(&mut self, rec: SaveRecord) -> Result<()> {
+        self.attach(rec, true)
+    }
+
+    /// A save of `rec.version` found nothing to write, the version being
+    /// what the saved file holds (an Unchanged plan, M10.5 §9.1): `rec`,
+    /// the saved file's record, is that version's now, so it's the saved
+    /// one and the document is clean. As [`record_save`](Self::record_save),
+    /// but no save is noted.
+    pub fn record_unchanged(&mut self, rec: SaveRecord) -> Result<()> {
+        self.attach(rec, false)
+    }
+
+    /// `rec` the record of its version, the saved one now, noted among its
+    /// saves when `noted`.
+    fn attach(&mut self, rec: SaveRecord, noted: bool) -> Result<()> {
         let v = rec.version;
         if !self.versions.contains_key(&v) {
             bail!("the saved version is no longer kept");
@@ -1250,12 +1358,12 @@ impl Document {
             was.record = None;
         }
         let version = self.versions.get_mut(&v).expect("version");
-        version.saves.push(rec.note());
+        if noted {
+            version.saves.push(rec.note());
+        }
         version.record = Some(Arc::new(rec));
         version.sealed = version.sealed.saturating_sub(1);
         self.saved = Some(v);
-        // The record says what the file is now.
-        self.disk_base = None;
         Ok(())
     }
 
@@ -1281,24 +1389,14 @@ impl Document {
     }
 
     /// The document's file, and that file as sheaf last read or wrote it:
-    /// the saved record's, or a restored document's base
-    /// ([`set_disk_base`](Self::set_disk_base)) until its first save. Never
-    /// the primary's name: a Save As makes another file the document's,
-    /// and the primary stays the file it opened. None for a document no
-    /// file holds.
+    /// the saved record's, a restored document's the file its sidecar was
+    /// written against, which its first save checks is still there (M10.5
+    /// §11.10) and its own sidecars are written against too. Never the
+    /// primary's name: a Save As makes another file the document's, and
+    /// the primary stays the file it opened. None for a document no file
+    /// holds.
     pub fn file(&self) -> Option<(&Arc<Path>, &FileStamp)> {
-        match self.saved_record() {
-            Some(rec) => Some((&rec.path, &rec.stamp)),
-            None => self.disk_base.as_ref().map(|(path, stamp)| (path, stamp)),
-        }
-    }
-
-    /// A document restored from a recovery sidecar is its file's, `path`,
-    /// as `stamp` says the sidecar found it: the base its first save checks
-    /// is still there (M10.5 §11.10), and its own sidecars are written
-    /// against. Its first save's record replaces it.
-    pub fn set_disk_base(&mut self, path: &Path, stamp: FileStamp) {
-        self.disk_base = Some((path.into(), stamp));
+        self.saved_record().map(|rec| (&rec.path, &rec.stamp))
     }
 
     /// Where a save to `path` writes: the document's file
@@ -1927,7 +2025,7 @@ impl Document {
             edits: v.steps.iter().map(|s| s.line.clone()).collect(),
             saves: v.saves.clone(),
             current: id == self.cursor,
-            saved: Some(id) == self.saved,
+            saved: Some(id) == self.on_disk(),
             undone,
             branches: v
                 .children
@@ -3633,7 +3731,9 @@ fn thread_of(st: &DocState, page: PageId, mut names: HashSet<String>) -> HashSet
 /// named so, the one whose id is `from` (the one the mark was made from),
 /// else the first. It goes, with the parts grouped under it (`/RT
 /// /Group`), which the mark draws itself, and the mark is the object it
-/// was. Its replies stay, in the mark's thread.
+/// was; but a copy's object is its original's, so the mark made of a copy
+/// is one of its own, as a copied page's are. Its replies stay, in the
+/// mark's thread.
 fn adopt(rec: &mut Rec, page: PageId, name: &str, from: AnnotId) -> Option<ObjRef> {
     if name.is_empty() {
         return None;
@@ -3644,7 +3744,8 @@ fn adopt(rec: &mut Rec, page: PageId, name: &str, from: AnnotId) -> Option<ObjRe
     let id = (theirs.iter().copied())
         .find(|&id| id == from)
         .or(theirs.first().copied())?;
-    let src = rec.annot(id)?.foreign()?.src.clone();
+    let theirs = rec.annot(id)?.foreign()?;
+    let src = theirs.src.clone().filter(|_| theirs.copy == 0);
     drop_annots(rec, page, |other, a| {
         other == id
             || a.foreign()
@@ -3860,7 +3961,7 @@ fn field_nodes<'a>(names: impl IntoIterator<Item = &'a str>) -> HashSet<&'a str>
 }
 
 #[cfg(test)]
-mod history_tests;
+pub(crate) mod history_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5271,8 +5372,8 @@ mod tests {
             .unwrap()
     }
 
-    /// As [`saved`], by an Append, which slice 10 brings back: until then
-    /// the write fails, and the tests that take it are ignored.
+    /// As [`saved`], by an Append onto the primary's bytes, written there
+    /// as the file it was opened from (`materialize::save_appended`).
     fn appended(d: &mut Document) -> Src {
         let path = scratch().join("saved.pdf");
         crate::materialize::save_appended(d, &path).unwrap();
@@ -5332,7 +5433,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "slice 10"]
     fn a_rotation_survives_a_save_appended() {
         rotation_survives(true);
     }
@@ -5364,7 +5464,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "slice 10"]
     fn a_page_turned_upright_stays_upright_through_a_save_appended() {
         upright_through(true);
     }
@@ -5429,7 +5528,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "slice 10"]
     fn a_mark_on_a_rotated_page_stays_put_through_a_save_appended() {
         mark_stays_put(true);
     }
@@ -5890,7 +5988,7 @@ mod tests {
             style: None,
         };
         d.apply(rename, "Rename").unwrap();
-        assert_eq!(written(how.write(&d.snapshot())), want(0));
+        assert_eq!(written(how.write(&d)), want(0));
         saved(&mut d);
         let site = bookmark(&d, "Site");
         assert_eq!(site.target, Some(Target::Kept));
@@ -6321,7 +6419,7 @@ mod tests {
         d.redo().unwrap();
         d.redo().unwrap();
         check(&d, p0);
-        let back = reopened(how.write(&d.snapshot()));
+        let back = reopened(how.write(&d));
         check(&back, back.page(0).unwrap());
     }
 
@@ -7114,8 +7212,8 @@ mod tests {
     #[test]
     fn the_root_advancing_keeps_its_sources() {
         let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
-        // Unsaved, as a recovered document is: the first version can move.
-        d.mark_unsaved();
+        // Nothing saved: the first version can move.
+        d.saved = None;
         let info = SourceInfo::blank(d.store(), 1);
         let gone = insert_all(&mut d, info);
         d.undo().unwrap();
@@ -7148,6 +7246,7 @@ mod tests {
             len: info.src.bytes().len() as u64,
             mtime: std::time::SystemTime::UNIX_EPOCH,
             tail: 0,
+            window: 0,
         };
         SaveRecord {
             strategy: StrategyKind::Rewrite,
@@ -7237,7 +7336,7 @@ mod tests {
         let max = crate::history::MAX_VERSIONS;
         let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
         // Nothing saved, so nothing else holds the root back.
-        d.mark_unsaved();
+        d.saved = None;
         rotate(&mut d, 0, "rotate");
         let sealed = d.current_version();
         d.save_input(sealed).unwrap();
@@ -7337,8 +7436,14 @@ mod tests {
             len: src.bytes().len() as u64,
             mtime: std::time::SystemTime::UNIX_EPOCH,
             tail: 7,
+            window: 8,
         };
-        let mut d = crate::open::start(store, primary, Some(stamp), Box::new(FixedCount(10)));
+        let mut d = crate::open::start(
+            store,
+            primary,
+            Some(Came::Read(stamp)),
+            Box::new(FixedCount(10)),
+        );
         d.ready(crate::open::finish(&src, &in_progress::NoProgress))
             .unwrap();
         let rec = d.saved_record().unwrap().clone();
@@ -7415,11 +7520,96 @@ mod tests {
     fn a_memory_primary_has_no_record() {
         let mut d = new_doc(3, &[], Box::new(FixedCount(10)));
         assert!(d.saved_record().is_none());
+        rotate(&mut d, 0, "rotate");
+        // Nor any path from a saved file.
         let v = d.current_version();
-        assert!(d.save_input(v).unwrap().saved.is_none());
+        let input = d.save_input(v).unwrap();
+        assert!(input.saved.is_none() && input.path_keys.is_empty());
         assert!(d.recovery_input().saved.is_none());
+        let detached = SaveInput::detached(&d.snapshot());
+        assert!(detached.saved.is_none() && detached.path_keys.is_empty());
         let opened = opened_doc(2, Facts::default(), Box::new(FixedCount(10)));
         assert!(opened.saved_record().is_none());
+    }
+
+    /// `d`'s bookmark `title` titled `to`.
+    fn retitle(d: &mut Document, title: &str, to: &str) {
+        let edit = Edit::OutlineEdit {
+            id: bm(d, title),
+            title: Some(to.into()),
+            target: None,
+            color: None,
+            view: None,
+            style: None,
+        };
+        d.apply(edit, "retitle").unwrap();
+    }
+
+    /// What a save of the current version would find changed since the
+    /// saved file: its path keys, and those judged by value.
+    fn path_of(d: &mut Document) -> (BTreeSet<Key>, crate::effects::PathEffects) {
+        let v = d.current_version();
+        let input = d.save_input(v).unwrap();
+        d.abandon_save(v);
+        let saved = input.saved.expect("a saved side");
+        let path = crate::effects::judge(&saved.state, &input.target, &input.path_keys);
+        (BTreeSet::clone(&input.path_keys), path)
+    }
+
+    /// A save's path keys (M10.5 §7.2) run from the saved version back to
+    /// the version both it and the one being saved come from, and on to
+    /// the one being saved: every key a step on the way changed, and none
+    /// from before.
+    #[test]
+    fn path_keys_run_through_where_the_branches_meet() {
+        use crate::effects::Flags;
+        let mut d = doc();
+        rotate(&mut d, 0, "before");
+        let fork = d.current_version();
+        rotate(&mut d, 1, "saved");
+        let saved = d.current_version();
+        d.record_save(record_for(&d, saved)).unwrap();
+        let (keys, path) = path_of(&mut d);
+        assert!(keys.is_empty() && path.changed.is_empty());
+        d.jump(fork).unwrap();
+        retitle(&mut d, "B", "Bee");
+        rotate(&mut d, 2, "after");
+        let (p1, p2, b) = (id_at(&d, 1), id_at(&d, 2), bm(&d, "Bee"));
+        let (keys, path) = path_of(&mut d);
+        let want = BTreeSet::from([Key::Geom(p1), Key::Geom(p2), Key::Bookmark(b)]);
+        assert_eq!(keys, want);
+        assert_eq!(path.changed, want);
+        let flags = Flags::GEOMETRY | Flags::OUTLINE | Flags::REPLACES_TEXT;
+        assert_eq!(path.flags, flags);
+        // From the saved version's side of the branch, the same keys.
+        d.jump(saved).unwrap();
+        rotate(&mut d, 1, "past it");
+        let (keys, _) = path_of(&mut d);
+        assert_eq!(keys, BTreeSet::from([Key::Geom(p1)]));
+    }
+
+    /// Back at the saved state by another route, a save finds nothing
+    /// changed, since a path's keys are judged by value: what M10.5 §9.1
+    /// plans as Unchanged. So does a value changed and put back.
+    #[test]
+    fn the_saved_state_by_another_route_changes_nothing() {
+        let mut d = doc();
+        rotate(&mut d, 0, "turn");
+        let saved = d.current_version();
+        d.record_save(record_for(&d, saved)).unwrap();
+        // Undone, and turned again: another version, the same state.
+        d.undo().unwrap();
+        rotate(&mut d, 0, "turn again");
+        assert_ne!(d.current_version(), saved);
+        let (keys, path) = path_of(&mut d);
+        assert_eq!(keys, BTreeSet::from([Key::Geom(id_at(&d, 0))]));
+        assert!(path.changed.is_empty() && path.flags.is_empty());
+        // x → y → x.
+        retitle(&mut d, "B", "Bee");
+        retitle(&mut d, "Bee", "B");
+        let (keys, path) = path_of(&mut d);
+        assert_eq!(keys.len(), 2);
+        assert!(path.changed.is_empty() && path.removed.is_empty());
     }
 
     /// A recovery sidecar's input seals nothing: an OCR batch after it

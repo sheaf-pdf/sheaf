@@ -323,8 +323,9 @@ fn import(a: ImportArgs) -> anyhow::Result<()> {
         }
         drop(got.held);
     }
-    // A signed or hybrid file is rewritten, as the command line always
-    // has: it asks nothing.
+    // It asks nothing: a save the file's signatures allow keeps them (an
+    // Append onto a copy of the input), and one they don't, or one that
+    // drops XFA holding values, goes ahead, rewriting the file.
     let answers = sheaf_doc::materialize::AskAnswers {
         break_signatures: true,
         drop_xfa_values: true,

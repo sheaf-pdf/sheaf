@@ -36,8 +36,14 @@
 //! and the incremental save and the flatten replace their file durably,
 //! fsynced with its directory. From slice 9 the Rewrite, Bates' Rewrite
 //! and the flatten are the new writer's (`materialize`), the flatten a
-//! post-pass on its graph, and the incremental save's rows, an Append
-//! through `materialize`, print as skipped until slice 10 brings it back.
+//! post-pass on its graph. From slice 10 the incremental save is one mark
+//! saved as the app saves it: planned, an Append onto the file in place
+//! (the stamp checked again, the journal, the section, four syncs), then
+//! abandoned and the file cut back to its length and time, so the next
+//! run's record holds; its rows say how much of it is the section, made
+//! in memory with every check it has, and how much writing it in place.
+//! Beside it, with neither a baseline nor a gate, the same save of a
+//! one-page form inserted, whose form check reads the whole file.
 //!
 //! A gate is asserted from the slice that changes its path: the geometry
 //! walk (slice 3), ready (4), Rewrite (9), the incremental save of one mark
@@ -63,14 +69,14 @@
 //! since slice 9 deleted the writer), and alone in
 //! `rewrites_on_the_synthetic_and_heavy_7k`; and, with neither a baseline
 //! nor a gate, the opened file's record (part of ready, timed apart), and
-//! on every fixture one mark saved as the app saves it (planned, written
-//! whole and recorded: a Rewrite until slice 10) and the recovery sidecar
-//! of it, Full until slice 10, with the bytes it writes. So far slice 1's
+//! on every fixture the recovery sidecar of the marked document, from
+//! slice 10 an Append section, with the bytes it writes. So far slice 1's
 //! history bench, slice 3's geometry walk, slice 4's ready, slice 5's
-//! ready on 20,000 of sheaf's marks, slice 8's mark adds and slice 9's
-//! Rewrite assert, after their tables print. The 200 OCR versions take
-//! about 5 GB until slice 12 bounds history, and skip with less memory
-//! available.
+//! ready on 20,000 of sheaf's marks, slice 8's mark adds, slice 9's
+//! Rewrite and slice 10's incremental save on the scanned 7k
+//! ([`INCREMENTAL_GATE_MS`]) assert, after their tables print. The 200 OCR
+//! versions take about 5 GB until slice 12 bounds history, and skip with
+//! less memory available.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,9 +86,7 @@ use std::time::{Duration, Instant};
 
 use lopdf::Object;
 use sheaf_core::{PageIndex, Rotation};
-use sheaf_doc::materialize::{
-    AskAnswers, Profile, SaveInput, SaveTarget, StrategyKind, materialize,
-};
+use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
 use sheaf_doc::serialize::fixture::{USER, encrypt_dict, rc4_aes_128_and_aes_256};
 use sheaf_doc::stamps::{Bates, HeaderFooter};
@@ -102,6 +106,11 @@ const PAGES: u32 = 7000;
 /// Timed runs of an operation on the whole file, and of a quicker one.
 const RUNS: usize = 3;
 const QUICK_RUNS: usize = 5;
+/// Timed runs of the incremental save of one mark: a sync can take a
+/// hundred milliseconds now and then, and the median is the gate's.
+const INCREMENTAL_RUNS: usize = 9;
+/// The incremental save of one mark on the scanned 7k, at most (slice 10).
+const INCREMENTAL_GATE_MS: f64 = 50.0;
 /// Previews rendered in a row from one engine.
 const FILL: u32 = 200;
 /// Set in the processes a fixture's gates run in (see [`run`]): the file
@@ -428,7 +437,7 @@ fn gates(kind: Kind) {
     // The document is opened from a copy, so the incremental save can
     // write to its own file.
     let work = dir.join(format!("{}-{PAGES}-work.pdf", kind.name()));
-    let restore = work_copy(&path, &work);
+    work_copy(&path, &work);
     let base = kind.baseline();
     let file_mb = mb(std::fs::metadata(&path).unwrap().len());
     let middle = PAGES / 2;
@@ -569,8 +578,8 @@ fn gates(kind: Kind) {
     });
 
     // An incremental save of one mark, as the app saves to the file it
-    // opened: an Append, the file with the section appended, written over
-    // it. Skipped until slice 10 brings Append back.
+    // opened (slice 10): planned, an Append onto the file in place, then
+    // abandoned and the file cut back. Asserted on the scanned fixture.
     let middle_id = doc.page(middle as usize).unwrap();
     doc.apply(
         Edit::AnnotAdd {
@@ -580,69 +589,49 @@ fn gates(kind: Kind) {
         "mark",
     )
     .unwrap();
-    let snap = doc.snapshot();
-    let appended = appended_one_mark(&snap, &work, &restore);
-    drop(snap);
+    let gate = match kind {
+        Kind::Scanned => format!("< {INCREMENTAL_GATE_MS} ms, asserted"),
+        _ => String::new(),
+    };
+    let (incremental, incremental_rows) = incremental_rows(&mut doc, &work, Some(base), gate);
+    rows.extend(incremental_rows);
     doc.undo().unwrap();
-    let gate = if kind == Kind::Scanned {
-        "< 50 ms, slice 10"
-    } else {
-        ""
-    };
-    match appended {
-        Ok((incremental, incremental_mem)) => {
-            rows.push(Row::time(
-                "incremental save, one mark",
-                incremental,
-                base.incremental_ms,
-                gate,
-            ));
-            rows.push(Row::peak(
-                "incremental save",
-                incremental_mem,
-                base.incremental_rss_mb,
-                "",
-            ));
-            rows.push(Row::added(
-                "incremental save",
-                incremental_mem,
-                base.incremental_added_mb,
-                "",
-            ));
-        }
-        Err(why) => {
-            rows.push(Row::skipped("incremental save, one mark", "ms", &why));
-            rows.push(Row::skipped("incremental save, peak RSS", "MB", &why));
-            rows.push(Row::skipped("incremental save, RSS added", "MB", &why));
-        }
-    }
 
-    // The same mark saved as the app saves from slice 9 (planned, written
-    // whole, put in place and recorded: a Rewrite until slice 10), and the
-    // recovery sidecar of it, which is the whole file too until slice 10.
-    // Informational. The file is put back after each, so the save
-    // overwrites what its record no longer describes.
-    doc.apply(
-        Edit::AnnotAdd {
-            page: middle_id,
-            annot: square(0),
-        },
-        "mark",
-    )
-    .unwrap();
-    let overwrite = AskAnswers {
-        overwrite: true,
-        ..Default::default()
+    // An incremental save that writes form keys: a one-page form inserted
+    // at the end, which an Append writes with the form, so its form check
+    // reads the whole file and the section (`forms::check_latest`, slice
+    // 10's review). Informational: the plan gates only one mark.
+    let form = dir.join("one-field-form.pdf");
+    let mut f = sheaf_doc::forms::fixture::Form::new(1);
+    f.text("field", 0, sheaf_doc::forms::fixture::row(0));
+    std::fs::write(&form, f.bytes()).unwrap();
+    let info = SourceInfo::read(doc.store(), &form, None).unwrap().0;
+    let source = doc.add_source(info);
+    let insert = Edit::InsertPages {
+        source,
+        range: 0..1,
+        before: None,
+        outline: None,
+        annots: Vec::new(),
     };
-    let (saved, saved_mem) = measure(RUNS, || {
-        let save = || sheaf_doc::materialize::save(&mut doc, &work, &overwrite, &NoProgress);
-        let (t, report) = timed(save);
-        assert_eq!(report.unwrap().strategy, StrategyKind::Rewrite);
-        restore();
-        t
-    });
-    rows.push(Row::time("save, one mark (Rewrite)", saved, f64::NAN, ""));
-    rows.push(Row::peak("save, one mark", saved_mem, f64::NAN, ""));
+    doc.apply(insert, "form").unwrap();
+    let (with_form, with_form_mem) = measure(RUNS, || planned_and_put_back(&mut doc, &work));
+    doc.undo().unwrap();
+    rows.push(Row::time(
+        "incremental save, a one-page form",
+        with_form,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row::added(
+        "incremental save, a one-page form",
+        with_form_mem,
+        f64::NAN,
+        "",
+    ));
+
+    // The recovery sidecar of one mark, an Append section against the
+    // file. Informational.
     doc.apply(
         Edit::AnnotAdd {
             page: middle_id,
@@ -663,9 +652,8 @@ fn gates(kind: Kind) {
     sheaf_doc::recovery::discard(&work);
     drop(input);
     doc.undo().unwrap();
-    doc.undo().unwrap();
     rows.push(Row::time(
-        "recovery sidecar, one mark (Full)",
+        "recovery sidecar, one mark (Append section)",
         recovery,
         f64::NAN,
         "",
@@ -673,8 +661,8 @@ fn gates(kind: Kind) {
     rows.push(Row::peak("recovery sidecar", recovery_mem, f64::NAN, ""));
     rows.push(Row {
         what: "recovery sidecar written".into(),
-        now: Some(mb(sidecar as u64)),
-        unit: "MB",
+        now: Some(sidecar as f64 / 1024.0),
+        unit: "KB",
         baseline: f64::NAN,
         gate: String::new(),
     });
@@ -814,16 +802,23 @@ fn gates(kind: Kind) {
     if let Some(gate) = ready_gate {
         assert!(ready < gate, "ready took {ready:?}, over {gate:?}");
     }
+    if kind == Kind::Scanned {
+        assert!(
+            ms(incremental) < INCREMENTAL_GATE_MS,
+            "the incremental save of one mark took {incremental:?}, over {INCREMENTAL_GATE_MS} ms"
+        );
+    }
 }
 
 /// The incremental save of one mark and the Rewrite on [`aes_256`]'s copy
 /// of the `kind` fixture, opened with its password, so every object they
-/// write is encrypted, an AES IV a keyed hash (slice 7). Neither has a
-/// baseline or a gate: the plain rows are what they cost beside.
-fn aes_256_rows(kind: Kind, fixture: &Path) -> [Row; 2] {
+/// write is encrypted, an AES IV a keyed hash of the object's key (slices
+/// 7 and 10). Neither has a baseline or a gate: the plain rows are what
+/// they cost beside.
+fn aes_256_rows(kind: Kind, fixture: &Path) -> Vec<Row> {
     let encrypted = aes_256(kind, fixture);
     let work = fixture.with_file_name(format!("{}-{PAGES}-aes256-work.pdf", kind.name()));
-    let restore = work_copy(&encrypted, &work);
+    work_copy(&encrypted, &work);
     let mut doc = sheaf_doc::open::file(&work, Some(USER)).unwrap().doc;
     let snap = doc.snapshot();
     let primary = snap.source(snap.primary).unwrap();
@@ -837,44 +832,115 @@ fn aes_256_rows(kind: Kind, fixture: &Path) -> [Row; 2] {
         "mark",
     )
     .unwrap();
-    let marked = doc.snapshot();
-    let appended = appended_one_mark(&marked, &work, &restore);
-    drop(marked);
+    let (_, mut rows) = incremental_rows(&mut doc, &work, None, String::new());
     let (rewrite, _) = measure(RUNS, || {
         timed(|| sheaf_doc::save::rewrite(&snap).unwrap()).0
     });
     drop((snap, doc));
     std::fs::remove_file(&work).unwrap();
-    let what = "incremental save, one mark, AES-256";
-    [
-        match appended {
-            Ok((incremental, _)) => Row::time(what, incremental, f64::NAN, ""),
-            Err(why) => Row::skipped(what, "ms", &why),
-        },
-        Row::time("Rewrite, AES-256", rewrite, f64::NAN, ""),
-    ]
+    rows.push(Row::time("Rewrite, AES-256", rewrite, f64::NAN, ""));
+    rows
 }
 
-/// `snap`, a document with one mark more than its file, appended to the
-/// file at `work` (`materialize` with an Append), timed over [`RUNS`] and
-/// put back after each: what it took, or why it can't yet (until slice 10
-/// brings Append back).
-fn appended_one_mark(
-    snap: &sheaf_doc::Snapshot,
+/// The incremental save's rows for `doc`, a document with one mark more
+/// than its file at `work` (slice 10), beside `base`'s when it's slice 2's
+/// fixture, `gate` on its time: the save as the app makes it
+/// ([`planned_and_put_back`]), the median of [`INCREMENTAL_RUNS`], with its
+/// peak and added RSS; then the same save's section made in memory
+/// ([`section_in_memory`]), and the rest, writing it in place: the stamp
+/// checked again, the journal written, the section appended, the journal
+/// removed, and the four syncs of the file, the journal and their
+/// directory between. The save's median time too, for the gate.
+fn incremental_rows(
+    doc: &mut Document,
     work: &Path,
-    restore: &dyn Fn(),
-) -> Result<(Duration, Option<Mem>), String> {
-    if let Err(stop) = sheaf_doc::materialize::appended(snap) {
-        return Err(format!("skipped: {stop}"));
+    base: Option<&Baseline>,
+    gate: String,
+) -> (Duration, Vec<Row>) {
+    let (saved, mem) = measure(INCREMENTAL_RUNS, || planned_and_put_back(doc, work));
+    let (section, _) = measure(INCREMENTAL_RUNS, || section_in_memory(doc, work));
+    let writing = saved.saturating_sub(section);
+    let what = match base {
+        Some(_) => "incremental save, one mark",
+        None => "incremental save, one mark, AES-256",
+    };
+    let baseline = |b: fn(&Baseline) -> f64| base.map_or(f64::NAN, b);
+    let mut rows = vec![Row::time(what, saved, baseline(|b| b.incremental_ms), gate)];
+    if base.is_some() {
+        rows.push(Row::peak(
+            "incremental save",
+            mem,
+            baseline(|b| b.incremental_rss_mb),
+            "",
+        ));
+        rows.push(Row::added(
+            "incremental save",
+            mem,
+            baseline(|b| b.incremental_added_mb),
+            "",
+        ));
     }
-    Ok(measure(RUNS, || {
-        let (t, ()) = timed(|| {
-            let bytes = sheaf_doc::materialize::appended(snap).unwrap();
-            sheaf_doc::serialize::durable::write(work, &bytes, None).unwrap();
-        });
-        restore();
-        t
-    }))
+    rows.push(Row::time("  its section, in memory", section, f64::NAN, ""));
+    rows.push(Row::time(
+        "  writing it in place (journal, syncs)",
+        writing,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row {
+        what: "  writing it in place, of the save".into(),
+        now: Some(100.0 * writing.as_secs_f64() / saved.as_secs_f64()),
+        unit: "%",
+        baseline: f64::NAN,
+        gate: String::new(),
+    });
+    (saved, rows)
+}
+
+/// How long one save of `doc`'s current version to `work`, its file, takes
+/// as the app saves (`save_input`, `plan`, `write_file`): planned, which
+/// must be an Append onto the file, and written so. The save is then
+/// abandoned, and the file cut back to what it was, its time too, so its
+/// record's stamp holds again.
+fn planned_and_put_back(doc: &mut Document, work: &Path) -> Duration {
+    use sheaf_doc::materialize::{Onto, Strategy, plan, write_file};
+    let meta = std::fs::metadata(work).unwrap();
+    let (len, mtime) = (meta.len(), meta.modified().unwrap());
+    let v = doc.current_version();
+    let (t, written) = timed(|| {
+        let input = doc.save_input(v).unwrap();
+        let target = doc.save_target(work);
+        let plan = plan(&input, &target);
+        assert_eq!(plan.strategy, Strategy::Append { onto: Onto::Saved });
+        let answers = AskAnswers::default();
+        write_file(&input, &plan, target, &answers, &NoProgress).unwrap()
+    });
+    assert!(written.wrote, "the save wrote nothing");
+    assert_eq!(written.strategy, Strategy::Append { onto: Onto::Saved });
+    doc.abandon_save(v);
+    let file = std::fs::File::options().write(true).open(work).unwrap();
+    file.set_len(len).unwrap();
+    file.set_modified(mtime).unwrap();
+    file.sync_all().unwrap();
+    t
+}
+
+/// How long the section of that save takes to make in memory, every check
+/// it has included (`save_input`, `plan`, then `append::append` over the
+/// file on disk, as `write_file` reads it), the save then abandoned: the
+/// save of [`planned_and_put_back`] but for writing it in place.
+fn section_in_memory(doc: &mut Document, work: &Path) -> Duration {
+    use sheaf_doc::materialize::{append, plan, removal::Mode};
+    let v = doc.current_version();
+    let (t, ()) = timed(|| {
+        let input = doc.save_input(v).unwrap();
+        let plan = plan(&input, &doc.save_target(work));
+        let file = lopdf::FileBytes::new(std::fs::File::open(work).unwrap()).unwrap();
+        let out = append::append(&input, &plan, Arc::new(file), Mode::Veto, &NoProgress).unwrap();
+        assert!(!out.bytes.is_empty(), "the section is empty");
+    });
+    doc.abandon_save(v);
+    t
 }
 
 /// The flatten's rows on the `kind` fixture, from the file as opened:
@@ -1478,20 +1544,10 @@ fn aes_256(kind: Kind, fixture: &Path) -> PathBuf {
 }
 
 /// `fixture` copied to `work`, for a document to be opened from and saved
-/// to, and what puts it back after each save: the fixture's bytes, with
-/// the time the copy was made, so the next save finds the file it read.
-/// Each copy is synced, so a save's fsync doesn't write it out too.
-fn work_copy(fixture: &Path, work: &Path) -> impl Fn() + use<> {
+/// to: synced, so a save's sync doesn't write the copy out too.
+fn work_copy(fixture: &Path, work: &Path) {
     std::fs::copy(fixture, work).unwrap();
     std::fs::File::open(work).unwrap().sync_all().unwrap();
-    let made = std::fs::metadata(work).unwrap().modified().unwrap();
-    let (fixture, work) = (fixture.to_path_buf(), work.to_path_buf());
-    move || {
-        std::fs::copy(&fixture, &work).unwrap();
-        let file = std::fs::File::options().write(true).open(&work).unwrap();
-        file.set_modified(made).unwrap();
-        file.sync_all().unwrap();
-    }
 }
 
 /// Where the fixtures go: `$SHEAF_GATE_DIR`, else `target/gate-7k/`.
@@ -1625,17 +1681,6 @@ impl Row {
             unit: "ms",
             baseline: baseline_ms,
             gate: gate.into(),
-        }
-    }
-
-    /// A row not measured, and why.
-    fn skipped(what: &str, unit: &'static str, why: &str) -> Row {
-        Row {
-            what: what.into(),
-            now: None,
-            unit,
-            baseline: f64::NAN,
-            gate: why.into(),
         }
     }
 

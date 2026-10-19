@@ -115,7 +115,7 @@ fn pages_under_a_turned_cropped_node_keep_how_they_show() {
         .unwrap();
     let plan = SavePlan {
         strategy: Strategy::Rewrite {
-            why: vec![Why::AlwaysRewrite],
+            why: vec![Why::OtherTarget, Why::NoSaveRecord],
         },
         asks: Vec::new(),
         transforms: Vec::new(),

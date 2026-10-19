@@ -15,13 +15,15 @@
 //! into lopdf's graph by number ([`copy_object`], [`remap`]) until they
 //! go.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use anyhow::Result;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
 use super::emit::Syms;
 use super::key::ObjKey;
+use super::record::ObjMap;
 use crate::attachments::Objects;
 use crate::model::PageId;
 use crate::store::{BlobId, Src};
@@ -50,6 +52,14 @@ pub(crate) struct Closure {
     levels: HashMap<BlobId, HashMap<ObjectId, Option<ObjKey>>>,
     /// How many objects reached couldn't be read, and were copied as null.
     pub(crate) unreadable: usize,
+    /// An Append's saved file's map: an object it has is referred to there,
+    /// never copied again, unless it's of one of `relinked`.
+    saved: Option<Arc<ObjMap>>,
+    /// The sources whose pages a copy's reference names otherwise than the
+    /// saved file's copies of their objects do (a copy of the page came or
+    /// went): the objects an Append copies of them are copied again, so
+    /// what they name is the page written as now (§11.2).
+    relinked: BTreeSet<BlobId>,
 }
 
 impl Closure {
@@ -67,7 +77,22 @@ impl Closure {
             claimed: HashSet::new(),
             levels: HashMap::new(),
             unreadable: 0,
+            saved: None,
+            relinked: BTreeSet::new(),
         }
+    }
+
+    /// The closure of an Append onto the file whose map is `map`, copying
+    /// the objects of `relinked`'s sources again.
+    pub(crate) fn saved(&mut self, map: Arc<ObjMap>, relinked: &BTreeSet<BlobId>) {
+        self.saved = Some(map);
+        self.relinked = relinked.clone();
+    }
+
+    /// Whether `key` is an object of a source whose objects an Append
+    /// copies again, though the saved file has them.
+    pub(crate) fn relinks(&self, key: &ObjKey) -> bool {
+        matches!(key, ObjKey::Base { blob, .. } if self.relinked.contains(blob))
     }
 
     /// `key`, an object of a source the emitter writes itself (another
@@ -76,6 +101,19 @@ impl Closure {
     /// claimed already.
     pub(crate) fn claim(&mut self, key: ObjKey) -> bool {
         self.claimed.insert(key)
+    }
+
+    /// Whether page `page` of `scope`'s source is written, as a reference
+    /// to it from `scope` resolves: as the primary's copy 0 itself, or
+    /// else as any copy.
+    pub(crate) fn writes_page(&self, page: ObjectId, scope: &Scope) -> bool {
+        let blob = scope.src.id();
+        if blob == self.primary && scope.copy == 0 {
+            return self.pages.contains_key(&(blob, page, 0));
+        }
+        (self.pages.range((blob, page, 0)..=(blob, page, u32::MAX)))
+            .next()
+            .is_some()
     }
 
     /// `obj`, an object of `scope`'s source, with each reference a
@@ -156,7 +194,9 @@ impl Closure {
             obj: r,
             copy: scope.copy,
         };
-        if self.queued.insert(key) {
+        let had = !self.relinked.contains(&blob)
+            && (self.saved.as_ref()).is_some_and(|map| map.get(&key).is_some());
+        if !had && self.queued.insert(key) {
             self.queue.push_back((scope.src.clone(), r, scope.copy));
         }
         syms.placeholder(key)

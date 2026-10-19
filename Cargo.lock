@@ -6614,6 +6614,7 @@ name = "sheaf-doc"
 version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
+ "bitflags 2.13.2",
  "env_logger",
  "fastrand",
  "flate2",

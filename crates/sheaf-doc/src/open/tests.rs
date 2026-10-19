@@ -15,7 +15,7 @@ use crate::forms::corpus::{Corpus, Entry, each_entry};
 use crate::forms::fixture::{Form, every_fact, note, outline_tree};
 use crate::labels::Style;
 use crate::materialize::rewrite_tests::annots_read;
-use crate::materialize::{How, ObjKey};
+use crate::materialize::{Came, How, ObjKey};
 use crate::model::{DocState, Edit, Invariant, Mark, NotReady, PageId};
 use crate::store::{BlobKind, Src};
 
@@ -257,7 +257,11 @@ fn opened(bytes: Vec<u8>) -> Opened {
     let src = primary.src.clone();
     let mut doc = start(store, primary, None, crate::history::default_policy());
     let view = doc.ready(finish(&src, &NoProgress)).unwrap();
-    Opened { doc, view }
+    Opened {
+        doc,
+        view,
+        torn: None,
+    }
 }
 
 /// Every kind of mark, written by the writer a save uses on a page turned
@@ -419,7 +423,7 @@ fn stale_mark_is_theirs(how: How) {
         note.contents = "Edited in sheaf".into();
         doc.apply(Edit::AnnotUpdate { page, annot: note }, "Edit")
             .unwrap();
-        let saved = how.write(&doc.snapshot());
+        let saved = how.write(&doc);
         let case = format!("{case}, {how:?}");
         let pdf = Pdf::load_mem(&saved).unwrap();
         let page = pdf.page_iter().next().unwrap();
@@ -486,7 +490,7 @@ fn a_mark_holding_nothing(how: How) {
     note.contents = "Edited in sheaf".into();
     doc.apply(Edit::AnnotUpdate { page, annot: note }, "Edit")
         .unwrap();
-    let found = annots_read(&how.write(&doc.snapshot()));
+    let found = annots_read(&how.write(&doc));
     assert_eq!(found.sheaf()[&0].len(), 1);
     let foreign = found.foreign().into_iter().map(|(_, f)| f).collect();
     assert_eq!(names(foreign), want);
@@ -659,7 +663,7 @@ fn a_copied_page_gets_fresh_ids(how: How) {
     f.set_annots(1, &copies);
     let bytes = f.bytes();
 
-    let Opened { mut doc, view } = opened(bytes.clone());
+    let Opened { mut doc, view, .. } = opened(bytes.clone());
     let st = doc.state();
     let [first, copy] = [0, 1].map(|i| st.order()[i]);
     let ids = |page| -> Vec<AnnotId> { st.marks_on(page).map(|a| a.id).collect() };
@@ -689,7 +693,7 @@ fn a_copied_page_gets_fresh_ids(how: How) {
 
     // Nothing else changed, and a save writes them, a page's annotations
     // in the records' order.
-    let saved = how.write(&doc.snapshot());
+    let saved = how.write(&doc);
     let copies: Vec<String> = new.iter().map(|id| format!("sheaf:{}", id.0)).collect();
     let in_order: Vec<String> = (copies.iter().cloned())
         .chain(["acro-reply".to_string()])
@@ -720,7 +724,7 @@ fn a_copied_page_gets_fresh_ids(how: How) {
         "Delete",
     )
     .unwrap();
-    let reopened = opened(how.write(&doc.snapshot()));
+    let reopened = opened(how.write(&doc));
     let foreign = theirs_in(reopened.doc.state());
     assert!(foreign.is_empty(), "{foreign:?}");
 }
@@ -982,7 +986,12 @@ fn compare(corpus: &Corpus, entry: &Entry) -> Outcome {
     };
     let src = &info.src.clone();
     let facts = finish(src, &NoProgress);
-    let mut doc = start(store, info, Some(stamp), crate::history::default_policy());
+    let mut doc = start(
+        store,
+        info,
+        Some(Came::Read(stamp)),
+        crate::history::default_policy(),
+    );
     doc.ready(finish(src, &NoProgress)).unwrap();
     // The opened file's record (slice 9): the opened version's, its
     // catalog and page tree's root among the numbers in use.

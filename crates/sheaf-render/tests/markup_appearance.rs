@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::annot::caret_box;
+use sheaf_doc::materialize::Came;
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::{
     Annot, AnnotId, AnnotKind, Blob, Box2, Document, Edit, FixedCount, Pt, SourceInfo, Store,
@@ -135,7 +136,13 @@ fn check(rotate: i64) {
     .rotated(Rotation::from_degrees(rotate as i32));
     let store = Store::new();
     let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, Some(stamp), &[], Box::new(FixedCount(10)));
+    let mut model = Document::new(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        &[],
+        Box::new(FixedCount(10)),
+    );
     let page = model.page(0).unwrap();
     let replaced = row(300.0);
     let red = red_stamp(&model);
@@ -380,7 +387,13 @@ fn tapes_draw_turned_and_from_old_text() {
     blank_pdf(&src, 0);
     let store = Store::new();
     let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, Some(stamp), &[], Box::new(FixedCount(10)));
+    let mut model = Document::new(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        &[],
+        Box::new(FixedCount(10)),
+    );
     let page = model.page(0).unwrap();
     let mut tape = Tape {
         lines: vec![
@@ -488,7 +501,13 @@ fn clouds_and_callouts_draw() {
     blank_pdf(&src, 0);
     let store = Store::new();
     let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, Some(stamp), &[], Box::new(FixedCount(10)));
+    let mut model = Document::new(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        &[],
+        Box::new(FixedCount(10)),
+    );
     let page = model.page(0).unwrap();
     let mut cloud = mark(
         AnnotKind::Square {
@@ -570,7 +589,13 @@ fn free_text_reads_back_from_its_appearance() {
     blank_pdf(&src, 0);
     let store = Store::new();
     let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
-    let mut model = Document::new(store, primary, Some(stamp), &[], Box::new(FixedCount(10)));
+    let mut model = Document::new(
+        store,
+        primary,
+        Some(Came::Read(stamp)),
+        &[],
+        Box::new(FixedCount(10)),
+    );
     let page = model.page(0).unwrap();
     let text = "é € — “ ”";
     let mut note = mark(

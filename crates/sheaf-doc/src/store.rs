@@ -115,8 +115,8 @@ pub enum MemoryKind {
     /// placed stamp's page, as one placed or pasted is.
     Library,
     /// A file restored after a crash from its recovery sidecar (M10.5
-    /// §11.10): the whole file, while sidecars are Full (slice 10's are its
-    /// saved bytes with the sidecar's sections after them).
+    /// §11.10): its bytes on disk with the sidecar's sections after them,
+    /// or a Full sidecar's whole document.
     Recovered,
 }
 

@@ -15,8 +15,9 @@ use lopdf::{
     Document as Pdf, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions, dictionary,
 };
 use sheaf_doc::forms::fixture::{Form, note, outline_tree};
+use sheaf_doc::forms::sigs::Verdict;
 use sheaf_doc::forms::{Finding, Value, check};
-use sheaf_doc::materialize::{Ask, AskAnswers, Note, SaveReport, SaveStop};
+use sheaf_doc::materialize::{Ask, AskAnswers, Note, SaveReport, SaveStop, Why};
 use sheaf_doc::{AnnotBody, AnnotId, Document, Edit, ObjRef, SourceInfo};
 
 mod common;
@@ -163,7 +164,10 @@ fn unchanged_hybrid_keeps_xfa(how: How) {
 
 #[test]
 fn a_form_brought_into_a_hybrid_one_is_saved_in_full() {
-    // An insert changes the form: a save takes the XFA copy out.
+    // An insert changes the form: a save takes the XFA copy out. The plan
+    // appends, dropping it in the section (M10.5 §11.8), but the removal
+    // check finds the XFA's text would stay readable in the earlier
+    // revision, so the save is a Rewrite (§11.9).
     let dir = scratch("saves-xfa-insert");
     let path = write(&dir, "form.pdf", &mut hybrid());
     let other = write(&dir, "other.pdf", &mut Form::new(1));
@@ -191,7 +195,11 @@ fn a_form_brought_into_a_hybrid_one_is_saved_in_full() {
         ..Default::default()
     };
     let report = save(&mut doc, &path, drop_xfa).unwrap();
-    assert_eq!(report.strategy, StrategyKind::Rewrite);
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    let found = Why::RemovalCheck {
+        key: sheaf_doc::materialize::ObjKey::AcroForm,
+    };
+    assert_eq!(report.why, [found]);
     let removed = Note(sheaf_doc::forms::rules::XFA_REMOVED.into());
     assert!(report.notes.contains(&removed), "{:?}", report.notes);
     let bytes = std::fs::read(&path).unwrap();
@@ -223,12 +231,10 @@ fn usage_rights_go(how: How) {
         "Rotate",
     )
     .unwrap();
-    // Saved as it is: an Append keeps them, still signing the original.
-    let want = match how {
-        // No signature needs `/SigFlags` now; the form is as it was.
-        How::Rewritten => (true, false, false),
-        How::Appended => (true, true, true),
-    };
+    // A turn is neither a fill nor a comment, which are all usage rights
+    // allow (M10.5 §9.3): a save by either strategy takes them out. No
+    // signature needs `/SigFlags` now; the form is as it was.
+    let want = (true, false, false);
     let written = (how.strategy(), written(&doc, how));
     for (strategy, bytes) in [written, saved(&mut doc, &path, how)] {
         let what = format!("{strategy:?}");
@@ -281,10 +287,24 @@ fn save(doc: &mut Document, path: &Path, answers: AskAnswers) -> Result<SaveRepo
     sheaf_doc::materialize::save(doc, path, &answers, &sheaf_ops::NoProgress)
 }
 
-/// A save of a signed file asks first, Rewrite or Cancel (M10.5 §9.3):
-/// asked, nothing's written and the document is as unsaved as it was;
-/// rewritten, the signature breaks and the deleted page's value goes. An
-/// unsigned file isn't asked about.
+/// Whether `stop` asks before a Rewrite breaks the file's one signature,
+/// for what the save removes, offering an Append anyway.
+fn asks_for_removal(stop: &SaveStop) -> bool {
+    matches!(
+        stop,
+        SaveStop::Ask(Ask::Signatures {
+            impact,
+            append_anyway: Some(_),
+            reason: Some(Why::Removes(_)),
+        }) if impact.len() == 1 && impact[0].verdict == Verdict::Invalid
+    )
+}
+
+/// A save of a signed file that removes something asks first (M10.5
+/// §9.2–9.3): Append anyway, Rewrite or Cancel. Asked, nothing's written
+/// and the document is as unsaved as it was; rewritten, the signature
+/// breaks and the deleted page's value goes. An unsigned file isn't asked
+/// about.
 #[test]
 fn a_save_that_would_rewrite_a_signed_file_asks() {
     let dir = scratch("saves-signed");
@@ -296,12 +316,8 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
     // Asked: nothing's written.
-    let asks = SaveStop::Ask(Ask::Signatures {
-        signatures: 1,
-        append_anyway: None,
-        reason: None,
-    });
-    assert_eq!(save(&mut doc, &path, AskAnswers::default()), Err(asks));
+    let stop = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
+    assert!(asks_for_removal(&stop), "{stop:?}");
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert!(doc.is_dirty());
     // Rewritten elsewhere: the signature breaks, and the value goes.
@@ -311,15 +327,16 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
         ..Default::default()
     };
     let report = save(&mut doc, &copy, rewrite).unwrap();
-    assert_eq!(report.strategy, StrategyKind::Rewrite);
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     assert!(!doc.is_dirty());
     let rewritten = std::fs::read(&copy).unwrap();
     assert!(!signature_fits(&rewritten));
     assert!(!holds(&rewritten, b"LEAKVALUE123"));
     assert_eq!(std::fs::read(&path).unwrap(), original);
     // Saved onto the file that Rewrite wrote, it isn't asked again: that
-    // file has no signature left to break. Saved over the signed file
-    // again, it is.
+    // file has no signature left to break. Nor saved over the signed file
+    // again: the document's signatures stopped holding with the Rewrite,
+    // whatever file it writes (`SaveRecord::signatures_hold`).
     let first = doc.state().order()[0];
     doc.apply(
         Edit::RotatePages {
@@ -339,12 +356,10 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
         "Rotate",
     )
     .unwrap();
-    let again = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
-    assert!(
-        matches!(again, SaveStop::Ask(Ask::Signatures { .. })),
-        "{again:?}"
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let report = save(&mut doc, &path, AskAnswers::default()).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    assert_eq!(report.why, [Why::OtherTarget]);
+    assert!(!signature_fits(&std::fs::read(&path).unwrap()));
     // An unsigned file isn't asked about.
     let plain = write(&dir, "plain.pdf", &mut hybrid());
     let mut doc = open(&plain);
@@ -361,9 +376,8 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
 
 /// Appended, a signed file's bytes are as they were and its signature
 /// fits; the deleted page's value stays in the earlier revision, as the
-/// reader is told. Slice 10 brings the Append back.
+/// reader is told.
 #[test]
-#[ignore = "slice 10"]
 fn a_signed_file_appended_keeps_its_signature() {
     let dir = scratch("saves-signed-appended");
     let path = write(&dir, "signed.pdf", &mut signed());
@@ -373,7 +387,7 @@ fn a_signed_file_appended_keeps_its_signature() {
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
     let report = sheaf_doc::materialize::save_appended(&mut doc, &path).unwrap();
-    assert_eq!(report.strategy, StrategyKind::Append);
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
     let appended = std::fs::read(&path).unwrap();
     assert!(appended.starts_with(&original));
     assert!(signature_fits(&appended));
@@ -382,9 +396,65 @@ fn a_signed_file_appended_keeps_its_signature() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Slice 10 brings the Append back.
+/// A signed file saved as another (`Onto::CopyOf`) is a copy of the file
+/// with a section after it: the copy starts with the signed bytes, the
+/// signature fits it, and the file it copied is untouched. With that file
+/// changed by another program since it was read, nothing is written, and
+/// the save asks about it.
 #[test]
-#[ignore = "slice 10"]
+fn a_signed_file_saved_as_another_copies_and_appends() {
+    let dir = scratch("saves-signed-copy");
+    let path = write(&dir, "signed.pdf", &mut signed());
+    let original = std::fs::read(&path).unwrap();
+    let copy = dir.join("copy.pdf");
+    let mut doc = open(&path);
+    let first = doc.state().order()[0];
+    doc.apply(
+        Edit::AnnotAdd {
+            page: first,
+            annot: note(),
+        },
+        "Note",
+    )
+    .unwrap();
+    let report = sheaf_doc::materialize::save_appended(&mut doc, &copy).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
+    let copied = std::fs::read(&copy).unwrap();
+    assert!(copied.len() > original.len() && copied.starts_with(&original));
+    assert!(signature_fits(&copied));
+    assert_eq!(check(&copied, None).unwrap().signed, 1);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    // The copy is the document's file now, its stamp what was written.
+    let (file, stamp) = doc.file().unwrap();
+    assert_eq!(&**file, copy.as_path());
+    assert!(stamp.holds(&copy).unwrap() && !doc.is_dirty());
+
+    // Its file changed since: refused, nothing written.
+    let mut doc = open(&path);
+    doc.apply(
+        Edit::AnnotAdd {
+            page: first,
+            annot: note(),
+        },
+        "Note",
+    )
+    .unwrap();
+    let mut theirs = original.clone();
+    theirs.extend_from_slice(b"\n");
+    std::fs::write(&path, &theirs).unwrap();
+    let elsewhere = dir.join("elsewhere.pdf");
+    let stop = sheaf_doc::materialize::save_appended(&mut doc, &elsewhere);
+    let asks = SaveStop::Ask(Ask::FileChanged {
+        path: path.as_path().into(),
+    });
+    assert_eq!(stop, Err(asks));
+    assert!(!elsewhere.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), theirs);
+    assert!(doc.is_dirty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_encrypted_signed_file_appends_and_keeps_its_signature() {
     // Opened with its empty user password, asked about, then appended to,
     // encrypted with the file's own key (M10.5 slice 7).
@@ -420,16 +490,18 @@ fn an_encrypted_signed_file_appends_and_keeps_its_signature() {
     .unwrap();
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
-    let asks = SaveStop::Ask(Ask::Signatures {
-        signatures: 1,
-        append_anyway: None,
-        reason: None,
-    });
-    assert_eq!(save(&mut doc, &path, AskAnswers::default()), Err(asks));
+    let stop = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
+    assert!(asks_for_removal(&stop), "{stop:?}");
     assert_eq!(std::fs::read(&path).unwrap(), original);
-    // Appended: the signed bytes are as they were, and the signature fits.
-    let report = sheaf_doc::materialize::save_appended(&mut doc, &path).unwrap();
-    assert_eq!(report.strategy, StrategyKind::Append);
+    // Appended anyway: the signed bytes are as they were, and the
+    // signature fits.
+    let anyway = AskAnswers {
+        append_anyway: true,
+        stays_readable: true,
+        ..Default::default()
+    };
+    let report = save(&mut doc, &path, anyway).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
     let appended = std::fs::read(&path).unwrap();
     assert!(appended.starts_with(&original));
     assert!(signature_fits(&appended));
@@ -451,7 +523,7 @@ fn a_certified_file_asks_too() {
     let dir = scratch("saves-certified");
     let mut f = Form::new(2);
     let sig = f.signature("cert", 0, row(0));
-    f.certify(sig);
+    f.certify(sig, 2);
     let path = write(&dir, "certified.pdf", &mut f);
     let mut doc = open(&path);
     let second = doc.state().order()[1];
@@ -459,10 +531,7 @@ fn a_certified_file_asks_too() {
         .unwrap();
     let original = std::fs::read(&path).unwrap();
     let err = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
-    assert!(
-        matches!(err, SaveStop::Ask(Ask::Signatures { signatures: 1, .. })),
-        "{err:?}"
-    );
+    assert!(asks_for_removal(&err), "{err:?}");
     assert_eq!(std::fs::read(&path).unwrap(), original);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -669,15 +738,16 @@ fn all_in_the_primary(doc: &Document, what: &str) {
     }
 }
 
-/// `doc` saved to `path` as the app saves, by a Rewrite, or by an Append
-/// when `incremental`. The document shows what it did.
+/// `doc` saved to `path` by a Rewrite, or by an Append when
+/// `incremental`, whatever the plan would decide. The document shows what
+/// it did.
 fn save_by(doc: &mut Document, path: &Path, incremental: bool) {
     let report = match incremental {
         true => sheaf_doc::materialize::save_appended(doc, path),
-        false => save(doc, path, AskAnswers::default()),
+        false => sheaf_doc::materialize::save_rewritten(doc, path),
     };
     let want = [StrategyKind::Rewrite, StrategyKind::Append][usize::from(incremental)];
-    assert_eq!(report.unwrap().strategy, want);
+    assert_eq!(report.unwrap().strategy, Some(want));
 }
 
 /// A save changes nothing in the document (M10.5 §9.1): every record is
@@ -689,7 +759,6 @@ fn a_save_an_edit_and_a_second_save_keep_everything() {
 }
 
 #[test]
-#[ignore = "slice 10"]
 fn a_save_an_edit_and_a_second_save_keep_everything_appended() {
     saved_again(true);
 }
@@ -756,7 +825,6 @@ fn fields_named_alike_stay_two_across_saves() {
 }
 
 #[test]
-#[ignore = "slice 10"]
 fn fields_named_alike_stay_two_across_saves_appended() {
     named_alike(true);
 }

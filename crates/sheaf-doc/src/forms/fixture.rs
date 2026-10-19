@@ -350,20 +350,39 @@ impl Form {
         self.pdf.prune_objects();
     }
 
-    /// Reader usage rights: `/Perms /UR3`, a signature over the whole
-    /// file, and `/SigFlags 2`.
+    /// Reader usage rights that allow filling in: [`Form::usage_rights_for`]
+    /// `/Form [/FillIn]`, and no `/Annots`.
     pub fn usage_rights(&mut self) {
+        self.usage_rights_for(&["FillIn"], &[]);
+    }
+
+    /// Reader usage rights: `/Perms /UR3`, a signature over the whole file
+    /// whose `/TransformParams` grant `form` (`/Form`) and `annots`
+    /// (`/Annots`, when there are some), and `/SigFlags`' AppendOnly (2).
+    pub fn usage_rights_for(&mut self, form: &[&str], annots: &[&str]) {
+        let names = |names: &[&str]| -> Vec<Object> {
+            (names.iter())
+                .map(|n| Object::Name(n.as_bytes().to_vec()))
+                .collect()
+        };
+        let mut params = dictionary! {
+            "Type" => "TransformParams", "V" => "2.2",
+            "Form" => names(form),
+            "Document" => vec![Object::Name(b"FullSave".to_vec())],
+        };
+        if !annots.is_empty() {
+            params.set("Annots", names(annots));
+        }
         let sig = self.signature_dict(dictionary! {
-            "Type" => "SigRef", "TransformMethod" => "UR3",
-            "TransformParams" => dictionary! {
-                "Type" => "TransformParams", "V" => "2.2",
-                "Form" => vec![Object::Name(b"FillIn".to_vec())],
-                "Document" => vec![Object::Name(b"FullSave".to_vec())],
-            },
+            "Type" => "SigRef", "TransformMethod" => "UR3", "TransformParams" => params,
         });
-        self.dict(self.catalog)
-            .set("Perms", dictionary! { "UR3" => sig });
-        self.dict(self.acroform).set("SigFlags", 2);
+        self.perm("UR3", sig);
+        let flags = self
+            .dict(self.acroform)
+            .get(b"SigFlags")
+            .and_then(Object::as_i64);
+        self.dict(self.acroform)
+            .set("SigFlags", flags.unwrap_or(0) | 2);
     }
 
     /// Sign signature field `field`: a `/V` over the whole file, and
@@ -375,16 +394,53 @@ impl Form {
     }
 
     /// Certify with signature field `field`: [`Form::sign`], with a
-    /// DocMDP reference that allows filling, and `/Perms /DocMDP`.
-    pub fn certify(&mut self, field: ObjectId) {
+    /// DocMDP reference that permits `p` (1 nothing, 2 filling in, 3
+    /// filling in and comments), and `/Perms /DocMDP`.
+    pub fn certify(&mut self, field: ObjectId, p: i64) {
         let sig = self.signature_dict(dictionary! {
             "Type" => "SigRef", "TransformMethod" => "DocMDP",
-            "TransformParams" => dictionary! { "Type" => "TransformParams", "P" => 2, "V" => "1.2" },
+            "TransformParams" => dictionary! { "Type" => "TransformParams", "P" => p, "V" => "1.2" },
         });
         self.dict(field).set("V", sig);
-        self.dict(self.catalog)
-            .set("Perms", dictionary! { "DocMDP" => sig });
+        self.perm("DocMDP", sig);
         self.dict(self.acroform).set("SigFlags", 3);
+    }
+
+    /// Sign signature field `field` locking fields, as a FieldMDP
+    /// signature does: its `/Lock` (`/Action` `action`, which locks
+    /// `/All`, or the full names `fields` `/Include` or `/Exclude`, and
+    /// PDF 2.0's `/P` when `p` is some), and a `/V` whose FieldMDP
+    /// reference says the same.
+    pub fn sign_locking(&mut self, field: ObjectId, action: &str, fields: &[&str], p: Option<i64>) {
+        let mut params =
+            dictionary! { "Type" => "TransformParams", "Action" => action, "V" => "1.2" };
+        if action != "All" {
+            let names: Vec<Object> = fields.iter().map(|&f| Object::string_literal(f)).collect();
+            params.set("Fields", names);
+        }
+        let mut lock = params.clone();
+        lock.set("Type", "SigFieldLock");
+        lock.remove(b"V");
+        if let Some(p) = p {
+            lock.set("P", p);
+        }
+        let sig = self.signature_dict(dictionary! {
+            "Type" => "SigRef", "TransformMethod" => "FieldMDP", "TransformParams" => params,
+        });
+        let d = self.dict(field);
+        d.set("V", sig);
+        d.set("Lock", lock);
+        self.dict(self.acroform).set("SigFlags", 3);
+    }
+
+    /// `/Perms /key`: `sig`, beside what it holds.
+    fn perm(&mut self, key: &str, sig: ObjectId) {
+        let catalog = self.dict(self.catalog);
+        let mut perms = (catalog.get(b"Perms").and_then(Object::as_dict))
+            .cloned()
+            .unwrap_or_default();
+        perms.set(key, sig);
+        catalog.set("Perms", perms);
     }
 
     /// A structure tree, as Acrobat tags a form: a `/Form` element per
@@ -624,7 +680,12 @@ pub fn row(i: usize) -> Rect {
 /// list box `kind[0]` (both filled), a push button `print[0]` and the
 /// signature field `sig[0]`.
 pub fn every_kind() -> Form {
-    let mut f = Form::new(2);
+    every_kind_in(2)
+}
+
+/// [`every_kind`]'s fields on the first two of `pages` pages (two or more).
+pub fn every_kind_in(pages: usize) -> Form {
+    let mut f = Form::new(pages);
     let name = f.text("name[0]", 0, row(0));
     f.fill(name, "Ann Lee");
     let empty = f.text("empty[0]", 0, row(1));
@@ -683,26 +744,45 @@ pub fn every_fact() -> Form {
 
 /// `items` as `f`'s outline: each (depth, item) in pre-order, a depth at
 /// most one below the item before's. The links between them are filled
-/// in, and `/Count` where an item has none: how many items are below it.
-/// The items' ids, in order.
+/// in, and `/Count` where an item has none: how many items show below it,
+/// an item given a negative one being closed. The items' ids, in order.
 pub fn outline_tree(f: &mut Form, items: Vec<(u16, Dictionary)>) -> Vec<ObjectId> {
     let root = f.pdf.new_object_id();
     let ids: Vec<ObjectId> = items.iter().map(|_| f.pdf.new_object_id()).collect();
     let depths: Vec<u16> = items.iter().map(|(depth, _)| *depth).collect();
     let mut dicts: Vec<Dictionary> = items.into_iter().map(|(_, item)| item).collect();
-    // The items below `at` (None: the root), and those of them a level down.
-    let below = |at: Option<usize>| {
+    let closed: Vec<bool> = (dicts.iter())
+        .map(|d| {
+            d.get(b"Count")
+                .and_then(Object::as_i64)
+                .is_ok_and(|c| c < 0)
+        })
+        .collect();
+    // The items a level below `at` (None: the root).
+    let kids = |at: Option<usize>| -> Vec<usize> {
         let (from, depth) = at.map_or((0, 0), |i| (i + 1, depths[i] + 1));
-        let all: Vec<usize> = (from..depths.len())
+        (from..depths.len())
             .take_while(|&j| depths[j] >= depth)
-            .collect();
-        let kids: Vec<usize> = all
-            .iter()
-            .copied()
             .filter(|&j| depths[j] == depth)
-            .collect();
-        (all.len(), kids)
+            .collect()
     };
+    // How many items show below `at` while it's open.
+    fn shown(
+        at: Option<usize>,
+        kids: &dyn Fn(Option<usize>) -> Vec<usize>,
+        closed: &[bool],
+    ) -> usize {
+        (kids(at).into_iter())
+            .map(|k| {
+                1 + if closed[k] {
+                    0
+                } else {
+                    shown(Some(k), kids, closed)
+                }
+            })
+            .sum()
+    }
+    let below = |at: Option<usize>| (shown(at, &kids, &closed), kids(at));
     let link = |dicts: &mut [Dictionary], parent: Option<usize>, root_dict: &mut Dictionary| {
         let (count, kids) = below(parent);
         for pair in kids.windows(2) {

@@ -9,13 +9,15 @@
 //! tool's link and comments come through a reorder by both strategies,
 //! and a comment sheaf deleted doesn't.
 //!
+//! From slice 10 every save's Append half is an Append again, and three
+//! Appends in a row, each after the last, pass `qpdf --check` too, as does
+//! a delete undone after its save, whose planned Append is a Rewrite for
+//! the objects the first save pruned.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`. A test
 //! whose tools are missing says so and passes. Run with
-//! `cargo test -p sheaf-ops --test interop -- --ignored --skip append
-//! --nocapture`: until slice 10 brings Append back, the ignored tier also
-//! holds the Append tests, which fail by design, every one with `append`
-//! in its name but `a_comment_made_ours_is_saved_in_place`.
+//! `cargo test -p sheaf-ops --test interop -- --ignored --nocapture`.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -100,13 +102,17 @@ fn qpdf_with(qpdf: &Path, password: Option<&str>) -> Command {
     command
 }
 
-/// Every file to save: [`form`] unencrypted, with a table, a stream, and
-/// object streams; with bytes before its header; encrypted with RC4-128,
-/// AES-128, AES-256 and, for its attachment only, `/EFF`; and encrypted
-/// with AES-256 in an object stream. Each with its name and the password
-/// it opens with.
+/// Every file to save: [`form`] as each of [`bases_of`].
 fn bases() -> Vec<(String, Vec<u8>, Option<&'static str>)> {
-    let plain = form();
+    bases_of(&form())
+}
+
+/// `plain` unencrypted, with a table, a stream, and object streams; with
+/// bytes before its header; encrypted with RC4-128, AES-128, AES-256 and,
+/// for its attachment only, `/EFF`; and encrypted with AES-256 in an
+/// object stream. Each with its name and the password it opens with.
+fn bases_of(plain: &lopdf::Document) -> Vec<(String, Vec<u8>, Option<&'static str>)> {
+    let plain = plain.clone();
     let [table, stream] = written(&plain);
     let mut packed = Vec::new();
     plain.clone().save_modern(&mut packed).unwrap();
@@ -160,14 +166,15 @@ fn qpdf_checks(how: How) {
         let file = name.replace([',', ' ', '/'], "");
         let base = dir.join(format!("{file}.pdf"));
         std::fs::write(&base, &bytes).unwrap();
-        let snap = edited(&base, password);
+        let doc = edited(&base, password);
+        let snap = doc.snapshot();
         let ids: Vec<PageId> = snap.state.order().iter().copied().collect();
         let exported = |export: fn(&Snapshot, &Path) -> anyhow::Result<()>, how: &str| {
             let path = dir.join(format!("{file}-{how}.pdf"));
             export(&snap, &path).unwrap();
             std::fs::read(&path).unwrap()
         };
-        let saved = (format!("{how:?}"), how.write(&snap));
+        let saved = (format!("{how:?}"), how.write(&doc));
         if how == How::Appended {
             outputs_checked(
                 &qpdf,
@@ -269,7 +276,6 @@ for (let n = 1; n <= doc.numPages; n++) {
 
 /// Needs qpdf, or node and pdf.js, too.
 #[test]
-#[ignore = "slice 10"]
 fn a_prefixed_append_opens_identically_in_pdfjs_and_qpdf() {
     let (qpdf, pdfjs) = (qpdf(), pdfjs());
     if qpdf.is_none() && pdfjs.is_none() {
@@ -308,6 +314,89 @@ fn a_prefixed_append_opens_identically_in_pdfjs_and_qpdf() {
             println!("pdf.js, {kind}: {want}");
         }
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Three Appends in a row onto each base, each after the last (a page
+/// turned, a note put on it, the pages moved): the file passes `qpdf
+/// --check` after each, and has its pages.
+#[test]
+#[ignore = "needs qpdf"]
+fn three_appends_pass_qpdf_check() {
+    let Some(qpdf) = qpdf() else {
+        return;
+    };
+    let dir = scratch("interop-three-appends");
+    let mut failed = Vec::new();
+    for (name, bytes, password) in bases() {
+        let path = dir.join(format!("{}.pdf", name.replace([',', ' ', '/'], "")));
+        std::fs::write(&path, &bytes).unwrap();
+        let mut doc = edited(&path, password);
+        for i in 0..3 {
+            if i > 0 {
+                let ids = vec![doc.page(0).unwrap()];
+                let by = sheaf_core::Rotation::R90;
+                doc.apply(Edit::RotatePages { ids, by }, "turn").unwrap();
+            }
+            sheaf_doc::materialize::save_appended(&mut doc, &path).unwrap();
+            if let Err(e) = run(qpdf_with(&qpdf, password).arg("--check").arg(&path)) {
+                failed.push(format!("{name}, Append {}: {e}", i + 1));
+            }
+        }
+        let pages = run(qpdf_with(&qpdf, password).arg("--show-npages").arg(&path)).unwrap();
+        assert_eq!(pages.trim(), doc.page_count().to_string(), "{name}");
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+    println!(
+        "qpdf --check: three Appends onto each of {} bases",
+        bases().len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Of each base made of a form of three pages, the second with a field,
+/// that page deleted and saved (a Rewrite, which prunes its objects), and
+/// the delete undone and saved again as the plan says: the Append it
+/// plans refers to objects the file hasn't got, so the save is a Rewrite
+/// instead, which passes `qpdf --check` and has every page.
+#[test]
+#[ignore = "needs qpdf"]
+fn pages_deleted_saved_and_undone_pass_qpdf_check() {
+    use sheaf_doc::materialize::{AskAnswers, Why, save};
+    let Some(qpdf) = qpdf() else {
+        return;
+    };
+    let dir = scratch("interop-undone-delete");
+    let mut f = Form::new(3);
+    let field = f.text("t", 1, sheaf_doc::forms::fixture::row(0));
+    f.fill(field, "value");
+    let id = Object::string_literal("0123456789abcdef");
+    f.pdf.trailer.set("ID", vec![id.clone(), id]);
+    let plain = f.pdf;
+    let mut failed = Vec::new();
+    let answers = AskAnswers::default();
+    for (name, bytes, password) in bases_of(&plain) {
+        let path = dir.join(format!("{}.pdf", name.replace([',', ' ', '/'], "")));
+        std::fs::write(&path, &bytes).unwrap();
+        let mut doc = sheaf_doc::open::file(&path, password).unwrap().doc;
+        let gone = doc.page(1).unwrap();
+        doc.apply(Edit::DeletePages { ids: vec![gone] }, "delete")
+            .unwrap();
+        save(&mut doc, &path, &answers, &sheaf_ops::NoProgress).unwrap();
+        doc.undo().unwrap();
+        let report = save(&mut doc, &path, &answers, &sheaf_ops::NoProgress).unwrap();
+        assert_eq!(report.why, [Why::BaseObjectsMissing], "{name}");
+        if let Err(e) = run(qpdf_with(&qpdf, password).arg("--check").arg(&path)) {
+            failed.push(format!("{name}: {e}"));
+        }
+        let pages = run(qpdf_with(&qpdf, password).arg("--show-npages").arg(&path)).unwrap();
+        assert_eq!(pages.trim(), "3", "{name}");
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+    println!(
+        "qpdf --check: pages deleted, saved and undone on each of {} bases",
+        bases_of(&plain).len()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -436,7 +525,7 @@ fn records_come_through(how: How) {
     }
     let strategy = format!("{how:?}");
     let path = dir.join(format!("records-{strategy}.pdf"));
-    std::fs::write(&path, how.write(&doc.snapshot())).unwrap();
+    std::fs::write(&path, how.write(&doc)).unwrap();
     let outputs = [(strategy, path)];
     for (strategy, path) in &outputs {
         if let Some(qpdf) = &qpdf {

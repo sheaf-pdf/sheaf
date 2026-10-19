@@ -29,7 +29,7 @@ use im::Vector;
 use lopdf::{Dictionary, Object};
 use sheaf_core::DestView;
 
-use super::{Cx, SymObject};
+use super::Cx;
 use crate::materialize::copy::Scope;
 use crate::materialize::key::ObjKey;
 use crate::materialize::record::OUTLINES_OWNED;
@@ -71,7 +71,10 @@ pub(crate) fn outline(cx: &mut Cx) -> Option<Object> {
         src: primary,
         copy: 0,
     };
-    for (key, value) in read.into_iter().flat_map(|d| d.iter()) {
+    // An Append writes the keys the state doesn't own as the saved file
+    // holds them.
+    let saved = cx.saved().and_then(|record| record.roots.outlines.as_ref());
+    for (key, value) in saved.or(read).into_iter().flat_map(|d| d.iter()) {
         if !OUTLINES_OWNED.contains(&key.as_slice()) {
             let value = cx.sym(value, &scope);
             root.set(key.clone(), value);
@@ -95,7 +98,7 @@ pub(crate) fn outline(cx: &mut Cx) -> Option<Object> {
                 src: primary.clone(),
                 id: at,
             };
-            cx.objects.push((ObjKey::OutlinesRoot, SymObject::Raw(raw)));
+            cx.push_raw(ObjKey::OutlinesRoot, raw);
         }
         _ => cx.push(ObjKey::OutlinesRoot, Object::Dictionary(root)),
     }
@@ -199,7 +202,7 @@ impl<'a> Items<'a> {
             let (mut out, untouched) = self.item(cx, id, b);
             match untouched {
                 Some((r, item)) if place.is(cx, item, &STRUCTURE) => {
-                    cx.objects.push((keys[i], SymObject::Raw(r.clone())));
+                    cx.push_raw(keys[i], r.clone());
                 }
                 _ => {
                     place.write(cx, &mut out);

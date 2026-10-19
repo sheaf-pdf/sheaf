@@ -22,7 +22,7 @@ use gpui::{
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::geom::{Affine, Geom};
-use sheaf_doc::serialize::durable::FileStamp;
+use sheaf_doc::materialize::Came;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, FormRef, Pt};
 use sheaf_doc::{materialize, save};
 use sheaf_ui::button::Button;
@@ -332,7 +332,7 @@ impl Doc {
         self.saving = false;
         let report = written.report();
         let version = written.record.version;
-        if let Err(e) = self.model.record_save(written.record) {
+        if let Err(e) = written.record_in(&mut self.model) {
             self.model.abandon_save(version);
             return Err(e);
         }
@@ -775,15 +775,6 @@ pub struct DocView {
     pub(crate) plugin_calls: crate::plugins::Waiting,
 }
 
-/// How a document's primary came to the view.
-#[derive(Clone, Copy)]
-enum Came {
-    /// Read from its file, as the stamp found it.
-    Read(FileStamp),
-    /// Restored from its file's recovery sidecar, written against `base`.
-    Restored { base: FileStamp },
-}
-
 /// A save between its seal and its record (M10.5 §9.1): the version it
 /// writes, sealed ([`Document::save_input`]), where it writes, what the
 /// plan decided, what the reader has answered of what it asks, and when
@@ -945,6 +936,12 @@ impl DocView {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
+                    // A save a crash cut short is undone first, so the file
+                    // is the one its recovery sidecar was written against.
+                    let torn = sheaf_doc::serialize::append::undo_torn(&path)
+                        .inspect_err(|e| log::warn!("undoing the last save to {}: {e}", path.display()))
+                        .ok()
+                        .flatten();
                     let recovery = sheaf_doc::recovery::find(&path);
                     let store = Store::new();
                     // The bytes, read once, and the geometry walk: the
@@ -953,12 +950,12 @@ impl DocView {
                     let (primary, stamp) = SourceInfo::read(&store, &path, password.as_deref())?;
                     let walk = t.elapsed();
                     let handle = RenderHandle::open_bytes(primary.src.bytes().clone(), password)?;
-                    anyhow::Ok((store, primary, stamp, handle, walk, recovery))
+                    anyhow::Ok((store, primary, stamp, handle, walk, recovery, torn))
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((store, primary, stamp, handle, walk, recovery)) => {
+                    Ok((store, primary, stamp, handle, walk, recovery, torn)) => {
                         if timing {
                             eprintln!(
                                 "[timing] open: {walk:?} source, {:?} engine, {:?} since launch, {} pages",
@@ -969,6 +966,9 @@ impl DocView {
                         }
                         viewer.pending_recovery = recovery;
                         viewer.install(store, primary, Came::Read(stamp), handle, cx);
+                        if let (Some(torn), State::Ready(doc)) = (torn, &mut viewer.state) {
+                            doc.notice = Some(torn.to_string());
+                        }
                     }
                     Err(e) if needs_password(&e) => viewer.lock(cx),
                     Err(e) => viewer.state = State::Failed(format!("{e:#}")),
@@ -1005,8 +1005,9 @@ impl DocView {
     /// Show a file as it opens, a source in `store` with `handle` rendering
     /// it, as the primary source, and read the rest of it on a background
     /// thread (see [`Self::finish_open`]). How it `came` says what the
-    /// document knows of its file: the file as it was read, for its record,
-    /// or a restored document's base.
+    /// document knows of its file, for its record: the file as it was
+    /// read, or a restored document's base with what its recovery sidecar
+    /// holds that the file hasn't got.
     fn install(
         &mut self,
         store: Arc<Store>,
@@ -1016,18 +1017,9 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let src = primary.src.clone();
-        let stamp = match came {
-            Came::Read(stamp) => Some(stamp),
-            Came::Restored { .. } => None,
-        };
-        let mut model = opening_model(store, primary, stamp, crate::prefs::get(cx).identity.name());
-        let recovered = match came {
-            Came::Read(_) => false,
-            Came::Restored { base } => {
-                model.set_disk_base(&self.path, base);
-                true
-            }
-        };
+        let recovered = matches!(came, Came::Restored { .. });
+        let author = crate::prefs::get(cx).identity.name();
+        let model = opening_model(store, primary, Some(came), author);
         self.sidecar_of = None;
         let opened = self.path.clone();
         cx.defer(move |cx| crate::recent::add(&opened, cx));
@@ -1078,9 +1070,10 @@ impl DocView {
         .detach();
     }
 
-    /// Open the document `rec` recovers, from memory, with no record of
-    /// its file: it stays unsaved, and its first save checks that the file
-    /// is still the one the sidecar was written against (M10.5 §11.10).
+    /// Open the document `rec` recovers, from memory, its record the file's
+    /// with the sidecar's sections pending: it stays unsaved until its first
+    /// save writes them, which checks that the file is still the one the
+    /// sidecar was written against (M10.5 §11.10).
     fn recover(&mut self, rec: sheaf_doc::recovery::Recovery, cx: &mut Context<Self>) {
         let path = self.path.clone();
         let password = self.password.clone();
@@ -1088,25 +1081,24 @@ impl DocView {
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
             let t = Instant::now();
-            let base = rec.base;
             let opened = cx
                 .background_executor()
                 .spawn({
                     let path = path.clone();
                     async move {
                         let store = Store::new();
-                        let primary =
+                        let (primary, came) =
                             sheaf_doc::recovery::restore(&store, &path, &rec, password.as_deref())?;
                         let handle =
                             RenderHandle::open_bytes(primary.src.bytes().clone(), password)?;
-                        anyhow::Ok((store, primary, handle))
+                        anyhow::Ok((store, primary, came, handle))
                     }
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((store, primary, handle)) => {
-                        viewer.install(store, primary, Came::Restored { base }, handle, cx);
+                    Ok((store, primary, came, handle)) => {
+                        viewer.install(store, primary, came, handle, cx);
                         if timing {
                             eprintln!("[timing] recovered unsaved changes in {:?}", t.elapsed());
                         }
@@ -1150,13 +1142,12 @@ impl DocView {
     }
 
     /// Bring the recovery sidecar up to date: gone when nothing is unsaved;
-    /// otherwise the current version written whole beside the document's
-    /// file, against that file as sheaf last read or wrote it (its record,
-    /// or a restored document's base), unless the last sidecar holds it
-    /// already. It waits for a save in flight, whose file it would be
-    /// written against, and for the sidecar being written. A document no
-    /// file of this path holds has none, nor, until slice 10, one that
-    /// needs a password.
+    /// otherwise what the current version changed, written beside the
+    /// document's file against that file as sheaf last read or wrote it
+    /// (its record's), unless the last sidecar holds it already. It waits
+    /// for a save in flight, whose file it would be written against, and
+    /// for the sidecar being written. A document no file of this path holds
+    /// has none. A sidecar is encrypted as its file is.
     fn write_recovery(&mut self, cx: &mut Context<Self>) {
         self.autosave = None;
         self.autosave_since = None;
@@ -1181,9 +1172,6 @@ impl DocView {
         else {
             return;
         };
-        if self.password.is_some() {
-            return;
-        }
         let (file, base) = (file.clone(), *base);
         let input = doc.model.recovery_input();
         let timing = self.timing;
@@ -1244,8 +1232,8 @@ impl DocView {
             return;
         };
         let file = (doc.model.file()).filter(|(file, _)| &***file == path.as_path());
-        let blocked = self.sidecar_writing || self.password.is_some();
-        let (Some((file, base)), false, true) = (file, blocked, doc.model.is_dirty()) else {
+        let (Some((file, base)), false, true) = (file, self.sidecar_writing, doc.model.is_dirty())
+        else {
             return self.write_recovery(cx);
         };
         self.autosave = None;
@@ -1310,8 +1298,8 @@ impl DocView {
     /// view still shows that file as it opens (a recovery, a reopen or a
     /// close can come between), they make its opened version, and the
     /// view takes what it shows beside the model; then listeners hear the
-    /// file opened, and the dev hooks that edit or save run. A
-    /// `recovered` file stays unsaved until it's saved.
+    /// file opened, and the dev hooks that edit or save run. A `recovered`
+    /// file says it stays unsaved until it's saved.
     fn ready(
         &mut self,
         blob: sheaf_doc::BlobId,
@@ -1323,7 +1311,7 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(view) = take_facts(&mut doc.model, blob, facts, recovered) else {
+        let Some(view) = take_facts(&mut doc.model, blob, facts) else {
             return;
         };
         doc.reading = None;
@@ -1931,7 +1919,10 @@ impl DocView {
 
     /// Ask the reader what `ask`, from `saving`'s plan or its write, needs,
     /// and go on saving as they choose; any other answer ends the save,
-    /// nothing written.
+    /// nothing written. A signed file's ask offers what the plan allows:
+    /// an Append anyway, which keeps the signed revision as it was signed
+    /// and what the save removes readable in it, and a Rewrite, which
+    /// breaks every signature.
     fn ask_before_saving(
         &mut self,
         mut saving: Saving,
@@ -1941,64 +1932,117 @@ impl DocView {
     ) {
         use gpui::PromptButton;
         use materialize::Ask;
+        /// What a button of the ask does: the last, Cancel, ends the save.
+        #[derive(Clone, Copy)]
+        enum Choice {
+            SaveAs,
+            Overwrite,
+            AppendAnyway,
+            Rewrite,
+            DropXfa,
+        }
         let name = self.file_name();
-        let (message, detail, buttons) = match &ask {
+        let (message, detail, choices) = match &ask {
             Ask::FileChanged { .. } => (
                 format!("\"{name}\" changed on disk"),
-                "Another program changed it since sheaf read it.",
+                "Another program changed it since sheaf read it.".to_string(),
                 vec![
-                    PromptButton::ok("Save As…"),
-                    PromptButton::new("Overwrite"),
-                    PromptButton::cancel("Cancel"),
+                    (PromptButton::ok("Save As…"), Choice::SaveAs),
+                    (PromptButton::new("Overwrite"), Choice::Overwrite),
                 ],
             ),
-            Ask::Signatures { signatures: n, .. } => (
-                format!("\"{name}\" is signed"),
-                "Saving rewrites the whole file, which breaks its signatures.",
-                vec![
-                    PromptButton::new(format!(
-                        "Rewrite (breaks {n} signature{})",
-                        if *n == 1 { "" } else { "s" }
-                    )),
-                    PromptButton::cancel("Cancel"),
-                ],
-            ),
+            Ask::Signatures {
+                impact,
+                append_anyway,
+                reason,
+            } => {
+                let n = impact.len();
+                let s = if n == 1 { "" } else { "s" };
+                let mut detail = match reason {
+                    Some(why) => {
+                        format!(
+                            "Saving rewrites the whole file ({why}), which breaks its signature{s}."
+                        )
+                    }
+                    None if n == 1 => "Its signature doesn't allow these changes after it: \
+                                       an update would show as breaking it."
+                        .to_string(),
+                    None => "Its signatures don't allow these changes after them: \
+                             an update would show as breaking them."
+                        .to_string(),
+                };
+                let mut choices = Vec::new();
+                if let Some(anyway) = append_anyway {
+                    detail.push_str(
+                        " Append Anyway adds the changes after the signed revision, \
+                         which stays as it was signed",
+                    );
+                    match anyway.stays_readable.as_slice() {
+                        [] => detail.push('.'),
+                        kept => {
+                            let kept: Vec<String> = kept.iter().map(|r| r.to_string()).collect();
+                            detail.push_str(&format!(
+                                ", but what the save removes stays readable in it: {}.",
+                                kept.join(", ")
+                            ));
+                        }
+                    }
+                    choices.push((PromptButton::new("Append Anyway"), Choice::AppendAnyway));
+                }
+                choices.push((
+                    PromptButton::new(format!("Rewrite (breaks {n} signature{s})")),
+                    Choice::Rewrite,
+                ));
+                (format!("\"{name}\" is signed"), detail, choices)
+            }
             Ask::XfaHoldsValues { .. } => (
                 "Remove the form's XFA part?".to_string(),
                 "It holds values sheaf doesn't show, which Adobe Acrobat or Reader shows. \
-                 Saving the form as it is now removes it, and them.",
-                vec![
-                    PromptButton::new("Save and Remove It"),
-                    PromptButton::cancel("Cancel"),
-                ],
+                 Saving the form as it is now removes it, and them."
+                    .to_string(),
+                vec![(PromptButton::new("Save and Remove It"), Choice::DropXfa)],
             ),
         };
+        let offer = match &ask {
+            Ask::Signatures { append_anyway, .. } => append_anyway.clone(),
+            _ => None,
+        };
+        let mut buttons: Vec<PromptButton> = choices.iter().map(|(b, _)| b.clone()).collect();
+        buttons.push(PromptButton::cancel("Cancel"));
         let rx = sheaf_ui::prompts::ask(
             window,
             cx,
             gpui::PromptLevel::Warning,
             &message,
-            Some(detail),
+            Some(&detail),
             &buttons,
         );
         cx.spawn(async move |this, cx| {
             let answer = rx.await.ok();
             this.update(cx, |view, cx| {
-                match (&ask, answer) {
-                    (Ask::FileChanged { .. }, Some(0)) => {
+                match answer
+                    .and_then(|i| choices.get(i))
+                    .map(|(_, choice)| *choice)
+                {
+                    Some(Choice::SaveAs) => {
                         view.abandon_save(saving, cx);
                         view.save_as(cx);
                         return;
                     }
-                    (Ask::FileChanged { .. }, Some(1)) => saving.answers.overwrite = true,
-                    (Ask::Signatures { .. }, Some(0)) => saving.answers.break_signatures = true,
-                    (Ask::XfaHoldsValues { .. }, Some(0)) => {
+                    Some(Choice::Overwrite) => saving.answers.overwrite = true,
+                    Some(Choice::AppendAnyway) => {
+                        if let Some(offer) = &offer {
+                            saving.answers.take(offer);
+                        }
+                    }
+                    Some(Choice::Rewrite) => saving.answers.break_signatures = true,
+                    Some(Choice::DropXfa) => {
                         saving.answers.drop_xfa_values = true;
                         if let State::Ready(doc) = &mut view.state {
                             doc.forms.xfa_values_dropped = true;
                         }
                     }
-                    _ => {
+                    None => {
                         view.abandon_save(saving, cx);
                         return;
                     }
@@ -2067,16 +2111,21 @@ impl DocView {
         };
         let path = report.path.to_path_buf();
         let took = saving.started.elapsed();
-        doc.notice = Some(format!(
-            "Saved {} ({:?}) in {took:?}{}",
-            path.display(),
-            report.strategy,
-            report
-                .notes
-                .iter()
-                .map(|n| format!(" — {n}"))
-                .collect::<String>()
-        ));
+        let notes: String = (report.notes.iter()).map(|n| format!(" — {n}")).collect();
+        doc.notice = Some(match report.strategy {
+            // A Rewrite says why (M10.5 §7.3).
+            Some(strategy) if !report.why.is_empty() => {
+                let why: Vec<String> = report.why.iter().map(|w| w.to_string()).collect();
+                format!(
+                    "Saved {} ({strategy:?}: {}) in {took:?}{notes}",
+                    path.display(),
+                    why.join("; ")
+                )
+            }
+            Some(strategy) => format!("Saved {} ({strategy:?}) in {took:?}{notes}", path.display()),
+            // The file holds the document already: nothing was written.
+            None => format!("Nothing to save{notes}"),
+        });
         if self.timing {
             eprintln!(
                 "[timing] saved {} ({} pages, {:?}) in {took:?}",
@@ -3796,34 +3845,29 @@ fn renamed_notice(n: usize) -> Option<String> {
 pub(crate) fn opening_model(
     store: Arc<Store>,
     primary: SourceInfo,
-    stamp: Option<FileStamp>,
+    came: Option<Came>,
     author: String,
 ) -> Document {
     let mut model =
-        sheaf_doc::open::start(store, primary, stamp, sheaf_doc::history::default_policy());
+        sheaf_doc::open::start(store, primary, came, sheaf_doc::history::default_policy());
     model.set_author(author);
     model
 }
 
 /// `facts`, read from the file `blob`, made `model`'s opened version, and
-/// what the view shows beside it; a `recovered` file stays unsaved. None
-/// when `model` no longer shows that file, or has opened already: another
-/// open of the same bytes had its facts first.
+/// what the view shows beside it. None when `model` no longer shows that
+/// file, or has opened already: another open of the same bytes had its
+/// facts first.
 pub(crate) fn take_facts(
     model: &mut Document,
     blob: sheaf_doc::BlobId,
     facts: sheaf_doc::open::Facts,
-    recovered: bool,
 ) -> Option<sheaf_doc::open::ViewFacts> {
     let primary = model.primary();
     if model.source(primary).is_none_or(|s| s.src.id() != blob) {
         return None;
     }
-    let view = model.ready(facts).ok()?;
-    if recovered {
-        model.mark_unsaved();
-    }
-    Some(view)
+    model.ready(facts).ok()
 }
 
 /// The status line while a file's facts are read: the page its first
@@ -6126,11 +6170,21 @@ mod tests {
         let store = Store::new();
         let (primary, stamp) = SourceInfo::read(&store, path, None)?;
         let (src, blob) = (primary.src.clone(), primary.src.id());
-        // As the app opens it: a recovered file has no record.
-        let stamp = (!recovered).then_some(stamp);
-        let mut model = opening_model(store, primary, stamp, "Me".into());
+        // As the app opens it: a recovered file's record has its sidecar's
+        // sections pending (none, here).
+        let came = match recovered {
+            false => Came::Read(stamp),
+            true => Came::Restored {
+                base: stamp,
+                pending: materialize::PendingTail {
+                    bytes: Some(Arc::from([])),
+                    flags: materialize::TailFlags::default(),
+                },
+            },
+        };
+        let mut model = opening_model(store, primary, Some(came), "Me".into());
         let facts = sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
-        let view = take_facts(&mut model, blob, facts, recovered).context("not taken")?;
+        let view = take_facts(&mut model, blob, facts).context("not taken")?;
         Ok((model, view))
     }
 
@@ -6199,13 +6253,13 @@ mod tests {
         let store = Store::new();
         let (primary, stamp) = SourceInfo::read(&store, &path, None).unwrap();
         let src = primary.src.clone();
-        let mut model = opening_model(store, primary, Some(stamp), "Me".into());
+        let mut model = opening_model(store, primary, Some(Came::Read(stamp)), "Me".into());
         let other = sheaf_doc::forms::fixture::every_kind().source();
         let facts = || sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
-        assert!(take_facts(&mut model, other.id(), facts(), false).is_none());
+        assert!(take_facts(&mut model, other.id(), facts()).is_none());
         assert!(!model.is_ready());
-        assert!(take_facts(&mut model, src.id(), facts(), false).is_some());
-        assert!(take_facts(&mut model, src.id(), facts(), false).is_none());
+        assert!(take_facts(&mut model, src.id(), facts()).is_some());
+        assert!(take_facts(&mut model, src.id(), facts()).is_none());
 
         let Some(corpus) = sheaf_doc::forms::corpus::Corpus::or_skip() else {
             return;

@@ -1,7 +1,7 @@
 //! Helpers the forms tests share: fixtures, saving both ways, and what a
 //! saved file holds. A test that saves both ways is a case taking its
 //! [`How`], run twice by `sheaf_doc::both_ways!`: by a Rewrite, and by an
-//! Append, which is ignored until slice 10 brings Append back.
+//! Append.
 
 #![allow(dead_code)]
 
@@ -133,21 +133,38 @@ pub fn clean(bytes: &[u8], what: &str) -> Report {
     report
 }
 
-/// `doc` saved to `path`, its own file, `how`: as the save's plan says
-/// (`materialize::save`, a Rewrite until slice 10, and one whenever
-/// something's gone from the file: M9 bug 14), or by an Append. What it
-/// was saved as, and the file.
+/// `doc` saved to `path`, its own file, `how`, whatever the plan would
+/// decide: by a Rewrite, or by an Append. What it was saved as, and the
+/// file.
 pub fn saved(doc: &mut Document, path: &Path, how: How) -> (StrategyKind, Vec<u8>) {
     let report = how.save(doc, path);
-    (report.strategy, std::fs::read(path).unwrap())
+    let strategy = report.strategy.expect("the file was written");
+    (strategy, std::fs::read(path).unwrap())
+}
+
+/// `doc` saved to `path`, its own file, as the save's plan says
+/// (`materialize::save`), a signature or an XFA part's values given up
+/// when it asks. What it was saved as, and the file.
+pub fn planned(doc: &mut Document, path: &Path) -> (StrategyKind, Vec<u8>) {
+    let answers = sheaf_doc::materialize::AskAnswers {
+        break_signatures: true,
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    let report = sheaf_doc::materialize::save(doc, path, &answers, &sheaf_ops::NoProgress);
+    let strategy = report.unwrap().strategy.expect("the file was written");
+    (strategy, std::fs::read(path).unwrap())
 }
 
 /// `doc` written by a Rewrite, then saved to `path`, its file, as the
-/// save's plan says: what each wrote, and how. For a document something's
-/// gone from, which a save in place rewrites too (M9 bug 14).
+/// save's plan says, which must be a Rewrite too: what each wrote. For a
+/// document something's gone from, which strict removal rewrites (M9 bug
+/// 14, M10.5 proposal 9).
 pub fn rewritten_and_saved(doc: &mut Document, path: &Path) -> [(StrategyKind, Vec<u8>); 2] {
     let written = (StrategyKind::Rewrite, rewritten(doc));
-    [written, saved(doc, path, How::Rewritten)]
+    let saved = planned(doc, path);
+    assert_eq!(saved.0, StrategyKind::Rewrite, "something's gone");
+    [written, saved]
 }
 
 /// What `doc` writes by a Rewrite: a save's bytes.
@@ -156,9 +173,9 @@ pub fn rewritten(doc: &Document) -> Vec<u8> {
 }
 
 /// What `doc` writes by an Append onto its file, whatever a save would
-/// plan: a recovery section's shape too. It fails until slice 10.
+/// plan: a recovery section's shape too.
 pub fn appended(doc: &Document) -> Vec<u8> {
-    sheaf_doc::materialize::appended(&doc.snapshot()).unwrap()
+    sheaf_doc::materialize::appended(doc).unwrap()
 }
 
 /// Whether a save of `doc` to `path`, its file, drops the form's XFA

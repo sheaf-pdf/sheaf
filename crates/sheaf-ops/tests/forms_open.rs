@@ -179,14 +179,14 @@ fn hybrid_saves_whole(how: How) {
         doc.apply(rotate, "rotate").unwrap();
         doc
     };
-    // Saved as another file, it's a Rewrite.
+    // Saved as another file by a Rewrite.
     let copy = dir.join("copy.pdf");
     let report = How::Rewritten.save(&mut rotated(&path), &copy);
-    assert_eq!(report.strategy, StrategyKind::Rewrite);
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     assert_eq!(names(&copy), ["name", "city", "sig"]);
     // Saved in place.
     let report = how.save(&mut rotated(&path), &path);
-    assert_eq!(report.strategy, how.strategy());
+    assert_eq!(report.strategy, Some(how.strategy()));
     assert_eq!(names(&path), ["name", "city", "sig"]);
     let _ = std::fs::remove_dir_all(&dir);
 }

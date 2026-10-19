@@ -25,8 +25,25 @@ use lopdf::Dictionary;
 
 use super::{Cx, PdfVersion};
 use crate::geom::Geom;
-use crate::model::{PageDef, PageId};
+use crate::model::{DocState, PageDef, PageId};
 use crate::stamps;
+
+/// The PDF version what sheaf draws over a page showing `def` needs, the
+/// header and footer's aside (a Rewrite draws it, until slice 17): its OCR
+/// text's fonts. The planner reads it too, as an Append that needs a later
+/// version than its file says so in the catalog (§11.7), which a
+/// signature counts as any other change (§9.3).
+pub(crate) fn needs(def: &PageDef) -> Option<PdfVersion> {
+    def.content.ocr_text().map(|_| PdfVersion::CID_FONTS)
+}
+
+/// Whether what sheaf draws over `st`'s pages needs a later PDF version
+/// than `version` ([`needs`]): nothing needs a later one than OCR text's
+/// fonts.
+pub(crate) fn needs_after(st: &DocState, version: PdfVersion) -> bool {
+    version < PdfVersion::CID_FONTS
+        && (st.pages()).any(|(_, def, _)| needs(def).is_some_and(|v| v > version))
+}
 
 /// What sheaf draws over page `id`, which shows `def` with `geom` at
 /// place `pos`, drawn into `page`, its dictionary as emitted.
@@ -40,7 +57,9 @@ pub(crate) fn page(
 ) {
     if let Some(layer) = def.content.ocr_text() {
         crate::text_layer::install(cx, page, layer);
-        cx.needs(PdfVersion::CID_FONTS);
+    }
+    if let Some(version) = needs(def) {
+        cx.needs(version);
     }
     let input = cx.input;
     let st = &input.target;

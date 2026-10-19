@@ -7,7 +7,10 @@
 //!   places every page in a new tree whose nodes carry nothing, so all
 //!   four inheritable keys are written, `/Rotate` even when it's 0: the
 //!   boxes as the file had them while the state keeps them, else the
-//!   state's.
+//!   state's. An Append places it in the saved file's tree, whose nodes
+//!   may hold any of them, so a page with no `/CropBox` of its own writes
+//!   its media box as one, and one whose turn the state keeps keeps its
+//!   own `/Rotate` as it says it.
 //! - **`/StructParents`** stays only on copy 0 of a primary page, whose
 //!   structure tree is written; a copy and a page from another file lose
 //!   it, with a note when their file was tagged.
@@ -138,7 +141,22 @@ pub(crate) fn page(
     } else if geom.crop != geom.media {
         out.set("CropBox", rect(geom.crop));
     }
-    out.set("Rotate", i64::from(geom.rotate.degrees()));
+    // An Append places the page in the saved file's tree, whose nodes may
+    // crop what's under them: a page with no crop of its own says so.
+    if cx.saved().is_some()
+        && !out.has(b"CropBox")
+        && let Ok(media) = out.get(b"MediaBox").cloned()
+    {
+        out.set("CropBox", media);
+    }
+    // An Append keeps a turn the state left as the page's own `/Rotate`
+    // says it, however it says it (a 135 reads as 90).
+    let own =
+        (base.get(b"Rotate").ok()).filter(|_| cx.saved().is_some() && geom.rotate == was.rotate);
+    match own {
+        Some(rotate) => out.set("Rotate", cx.sym(rotate, &shared)),
+        None => out.set("Rotate", i64::from(geom.rotate.degrees())),
+    }
     let others = [
         (b"TrimBox".as_slice(), geom.trim, was.trim),
         (b"BleedBox", geom.bleed, was.bleed),

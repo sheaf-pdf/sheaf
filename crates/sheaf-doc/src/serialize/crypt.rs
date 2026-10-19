@@ -80,23 +80,10 @@ impl Crypt {
     /// their formats. The same object under the same key and number
     /// encrypts to the same bytes.
     pub fn encrypt_as(&self, id: ObjectId, key: &ObjKey, obj: &Object) -> lopdf::Result<Object> {
-        self.encrypt_keyed(id, &key.bytes(), obj)
-    }
-
-    /// `obj` encrypted as object `id`, its IVs keyed by the number and
-    /// generation it's written as: the old writers', which have no keys,
-    /// until they go.
-    pub fn encrypt(&self, id: ObjectId, obj: &Object) -> lopdf::Result<Object> {
-        let (num, generation) = id;
-        let mut at = num.to_be_bytes().to_vec();
-        at.extend(generation.to_be_bytes());
-        self.encrypt_keyed(id, &at, obj)
-    }
-
-    fn encrypt_keyed(&self, id: ObjectId, iv_key: &[u8], obj: &Object) -> lopdf::Result<Object> {
+        let iv_key = key.bytes();
         let mut obj = obj.clone();
         encryption::encrypt_object_with(&self.state, id, &mut obj, &mut |payload| {
-            self.iv(iv_key, payload)
+            self.iv(&iv_key, payload)
         })
         .map_err(lopdf::Error::Decryption)?;
         Ok(obj)

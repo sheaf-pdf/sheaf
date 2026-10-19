@@ -1639,7 +1639,8 @@ mod tests {
         let store = Store::new();
         let (primary, stamp) = SourceInfo::read(&store, &path, None).unwrap();
         let (src, blob) = (primary.src.clone(), primary.src.id());
-        let mut doc = crate::docview::opening_model(store, primary, Some(stamp), "Me".into());
+        let came = Some(sheaf_doc::materialize::Came::Read(stamp));
+        let mut doc = crate::docview::opening_model(store, primary, came, "Me".into());
         let mut waiting = Waiting::default();
         let wants = || vec!["notes".to_string()];
         waiting.hold("tax", command("scan"));
@@ -1648,7 +1649,7 @@ mod tests {
         waiting.hold("tax", command("tick"));
         assert!(waiting.release(&doc, wants()).is_empty(), "read, not taken");
         assert!(!waiting.opened());
-        crate::docview::take_facts(&mut doc, blob, facts, false).unwrap();
+        crate::docview::take_facts(&mut doc, blob, facts).unwrap();
         let opened = Call::Event(sheaf_plugin::DocEvent::Opened);
         assert_eq!(
             waiting.release(&doc, wants()),

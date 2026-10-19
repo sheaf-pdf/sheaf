@@ -9,7 +9,8 @@
 //!   a derived copy's page as the page it was made from ([`Shown`]).
 //! - [`content`]: what sheaf draws over a page, OCR text and the header
 //!   and footer, through the legacy installers.
-//! - [`tree`]: the balanced page tree a Rewrite writes.
+//! - [`tree`]: the balanced page tree a Rewrite writes, and the saved
+//!   file's tree an Append splices the pages into.
 //! - [`catalog`]: the catalog by its ownership table (§9.1), and
 //!   `/PageLabels`.
 //! - [`outline`]: the bookmarks, in place by provenance.
@@ -24,6 +25,21 @@
 //! claimed before anything is emitted, so any key can refer to them by
 //! number; one of them nothing changed is the file's object as it is
 //! ([`SymObject::Raw`]).
+//!
+//! **An Append** ([`EmitScope::Keys`] onto [`EmitBase::Saved`]) emits only
+//! the keys in its scope, the closure of what its path changed
+//! (`materialize::deps`), as a Rewrite would emit them, and what they reach
+//! that the saved file hasn't got. Only the pages whose dictionaries or
+//! annotations are in scope are visited, and the form, the outline and the
+//! catalog only when any of theirs is. Of what a visit builds, a key the
+//! state derives that's out of scope is left out, its object the saved
+//! file's: a placeholder to it is its number there. A resource, a block or
+//! a source's object the saved file has already (in its map) is referred
+//! to, never built again. What only a left-out object reached is left out
+//! too. The root objects' keys the state doesn't own are the saved file's
+//! ([`RootValues`](super::record::RootValues)), so a key a save dropped
+//! stays gone, and the catalog says `/Version` when the section needs a
+//! later one than the file is (§11.7).
 
 pub mod annots;
 pub mod catalog;
@@ -37,18 +53,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use in_progress::Progress;
 use lopdf::{Dictionary, Object, ObjectId};
 
 use super::copy::{Closure, Scope};
-use super::key::ObjKey;
+use super::key::{NameTree, ObjKey};
 use super::plan::{Note, SaveTransform};
-use super::record::SaveInput;
+use super::record::{SaveInput, SaveRecord};
 use crate::annot::{Annot, AnnotId, StampForm};
 use crate::content::sink::{self, Sink};
 use crate::content::{Res, ResBody, ResId, Reserved};
-use crate::model::{AnnotBody, FormRef, PageId, SourceId, SourceInfo};
+use crate::model::{AnnotBody, DocState, FormRef, PageId, SourceId, SourceInfo};
 use crate::source::ObjRef;
 use crate::store::{BlobId, Src};
 
@@ -121,21 +137,44 @@ pub struct Deferred {
     pub data: Arc<dyn Fn() -> Result<Vec<u8>> + Send + Sync>,
 }
 
-/// What an emission covers. Slice 10's Appends and recovery sections
-/// emit only some keys, and slice 13's overlays some pages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What an emission covers. Slice 13's overlays add some pages.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmitScope {
     /// The whole document.
     All,
+    /// The keys an Append writes: the closure of what its path changed
+    /// under what each depends on (`materialize::deps`).
+    Keys(Arc<BTreeSet<ObjKey>>),
 }
 
 /// What an emission is written onto.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmitBase {
+#[derive(Clone, Copy)]
+pub enum EmitBase<'a> {
     /// A whole new file over the primary's objects: every page placed in
     /// a new tree, the root objects' unowned keys from the primary.
-    /// Slice 10 adds the saved file an Append writes after.
     Rewrite,
+    /// The saved file an Append writes after, as `record` says it is: the
+    /// node each page written goes under, its page tree with the target's
+    /// pages placed in it when that changed it, and the sources whose
+    /// objects it has are copied again, their pages named otherwise now
+    /// ([`Closure::relinked`](super::deps::Closure::relinked)).
+    Saved {
+        record: &'a SaveRecord,
+        parents: &'a BTreeMap<PageId, ObjKey>,
+        tree: Option<&'a tree::Spliced>,
+        relinked: &'a BTreeSet<BlobId>,
+    },
+}
+
+/// An Append's emission, as the emitters see it.
+pub(crate) struct Append<'a> {
+    pub(crate) keys: &'a BTreeSet<ObjKey>,
+    pub(crate) record: &'a SaveRecord,
+    pub(crate) parents: &'a BTreeMap<PageId, ObjKey>,
+    pub(crate) tree: Option<&'a tree::Spliced>,
+    /// Keys the emission found it must write too: the catalog, for a later
+    /// `/Version` or a form or an outline that came or went.
+    extra: BTreeSet<ObjKey>,
 }
 
 /// Placeholder references: `(i, PLACEHOLDER)` names the `i`th key.
@@ -197,6 +236,18 @@ impl PdfVersion {
         PdfVersion { major, minor }
     }
 
+    /// The version `src` says it is: its header's, or its catalog's
+    /// `/Version` when that's later (ISO 32000-1 7.7.2).
+    pub fn of(src: &crate::source::Source) -> PdfVersion {
+        let pdf = src.pdf();
+        let header = PdfVersion::parse(pdf.version().as_bytes()).unwrap_or(PdfVersion::new(1, 4));
+        let catalog = (pdf.catalog().ok())
+            .and_then(|c| c.get(b"Version").ok())
+            .and_then(|v| v.as_name().ok())
+            .and_then(PdfVersion::parse);
+        header.max(catalog.unwrap_or(header))
+    }
+
     /// `text` read as `1.7` is: None for anything else.
     pub fn parse(text: &[u8]) -> Option<PdfVersion> {
         let text = std::str::from_utf8(text).ok()?;
@@ -231,6 +282,8 @@ pub(crate) struct Shown {
 /// What the emitters share while they emit.
 pub(crate) struct Cx<'a> {
     pub(crate) input: &'a SaveInput,
+    /// An Append's scope and saved file: None for a whole file.
+    pub(crate) append: Option<Append<'a>>,
     /// What save policy does to the form as it's written.
     pub(crate) transforms: &'a [SaveTransform],
     pub(crate) primary: Src,
@@ -281,7 +334,38 @@ impl<'a> Cx<'a> {
     }
 
     pub(crate) fn push(&mut self, key: ObjKey, obj: Object) {
-        self.objects.push((key, SymObject::Built(obj)));
+        if self.writes(&key) {
+            self.objects.push((key, SymObject::Built(obj)));
+        }
+    }
+
+    /// `key` as `r`, the primary's object it is, as the file has it.
+    pub(crate) fn push_raw(&mut self, key: ObjKey, r: ObjRef) {
+        if self.writes(&key) {
+            self.objects.push((key, SymObject::Raw(r)));
+        }
+    }
+
+    /// Whether `key`'s object is emitted: every one in a whole file; in an
+    /// Append, a key the state derives when it's in scope, and any other
+    /// when the saved file hasn't got it.
+    pub(crate) fn writes(&self, key: &ObjKey) -> bool {
+        match &self.append {
+            None => true,
+            Some(a) if key.of_state() => a.keys.contains(key) || a.extra.contains(key),
+            Some(a) => a.record.map.get(key).is_none(),
+        }
+    }
+
+    /// An Append writes `key` too, whatever its scope.
+    fn write_too(&mut self, key: ObjKey) {
+        let append = self.append.as_mut().expect("an Append");
+        append.extra.insert(key);
+    }
+
+    /// The saved file an Append writes after: None for a whole file.
+    pub(crate) fn saved(&self) -> Option<&'a SaveRecord> {
+        self.append.as_ref().map(|a| a.record)
     }
 
     /// `key` written at `at`, the number of the primary's object it is,
@@ -395,9 +479,10 @@ impl<'a> Cx<'a> {
         self.closure.sym_dict(&mut self.syms, d, &scope, stream)
     }
 
-    /// `obj` pushed under `key` unless it was already: the placeholder.
+    /// `obj` pushed under `key` unless it was already, or an Append's saved
+    /// file has it: the placeholder.
     fn push_once(&mut self, key: ObjKey, obj: impl FnOnce(&mut Self) -> Object) -> ObjectId {
-        if self.made.insert(key) {
+        if self.writes(&key) && self.made.insert(key) {
             let obj = obj(self);
             self.push(key, obj);
         }
@@ -480,17 +565,21 @@ fn part(cx: &mut Cx, obj: &Object, key: &dyn Fn(usize) -> ObjKey) -> Object {
     obj
 }
 
-/// What each page of `input`'s target is written as ([`Shown`]): itself,
-/// or for a derived copy's page the page it was made from, through copies
-/// of copies, as the copy whose number no other page of it has.
-fn shown(input: &SaveInput) -> HashMap<PageId, Shown> {
+/// What each page of `st`, its registrations `sources`, is written as
+/// ([`Shown`]): itself, or for a derived copy's page the page it was made
+/// from, through copies of copies, as the copy whose number no other page
+/// of it has.
+pub(crate) fn shown(
+    st: &DocState,
+    sources: &HashMap<SourceId, Arc<SourceInfo>>,
+) -> HashMap<PageId, Shown> {
     let mut out = HashMap::new();
     let mut taken = HashSet::new();
     let mut derived = Vec::new();
-    for (id, def, _) in input.target.pages() {
+    for (id, def, _) in st.pages() {
         let made_from =
-            origin(&input.sources, def.base.source, def.base.index).and_then(|(source, index)| {
-                let src = &input.sources.get(&source)?.src;
+            origin(sources, def.base.source, def.base.index).and_then(|(source, index)| {
+                let src = &sources.get(&source)?.src;
                 src.page(index)?;
                 Some((src.clone(), index))
             });
@@ -527,6 +616,25 @@ fn shown(input: &SaveInput) -> HashMap<PageId, Shown> {
     out
 }
 
+/// The page of `st` each source page's copy is written as, shown as
+/// `shown` says, by the source's blob, the page's object and the copy: the
+/// first in order that shows it. What a reference to a source's page from
+/// that source's objects is written as ([`Closure`]).
+pub(crate) fn written_pages(
+    st: &DocState,
+    shown: &HashMap<PageId, Shown>,
+) -> BTreeMap<(BlobId, ObjectId, u32), PageId> {
+    let mut pages = BTreeMap::new();
+    for (id, _, _) in st.pages() {
+        let page = &shown[&id];
+        if let Some(facts) = page.src.page(page.index) {
+            let at = (page.src.id(), facts.id, page.copy);
+            pages.entry(at).or_insert(id);
+        }
+    }
+    pages
+}
+
 /// The page page `index` of registration `source` was made from, when
 /// it's a derived copy's (its `derived` record), through copies of
 /// copies: None for a page that isn't a copy's.
@@ -553,7 +661,8 @@ fn origin(
 
 /// `input`'s target state as `base` writes it, `scope` of it, with save
 /// policy's `transforms` applied, and `p` counting the pages and saying
-/// when to stop.
+/// when to stop. A whole file is written as a Rewrite, and some keys onto
+/// a saved file.
 pub fn emit(
     input: &SaveInput,
     scope: EmitScope,
@@ -561,22 +670,27 @@ pub fn emit(
     transforms: &[SaveTransform],
     p: &dyn Progress,
 ) -> Result<Emission> {
-    let (EmitScope::All, EmitBase::Rewrite) = (scope, base);
+    let (keys, saved) = match (&scope, base) {
+        (EmitScope::All, EmitBase::Rewrite) => (None, None),
+        (
+            EmitScope::Keys(keys),
+            EmitBase::Saved {
+                record,
+                parents,
+                tree,
+                relinked,
+            },
+        ) => (Some(&**keys), Some((record, parents, tree, relinked))),
+        _ => bail!("only an Append emits some keys, and only onto the saved file"),
+    };
     let st = &input.target;
     let primary = (input.sources.get(&input.primary))
         .context("the primary isn't registered")?
         .src
         .clone();
-    let version = base_version(&primary);
-    let shown = shown(input);
-    let mut pages = BTreeMap::new();
-    for (id, _, _) in st.pages() {
-        let page = &shown[&id];
-        if let Some(facts) = page.src.page(page.index) {
-            let at = (page.src.id(), facts.id, page.copy);
-            pages.entry(at).or_insert(id);
-        }
-    }
+    let version = PdfVersion::of(&primary);
+    let shown = shown(st, &input.sources);
+    let pages = written_pages(st, &shown);
     let order: Vec<PageId> = st.order().iter().copied().collect();
     let bates = match st.header_footer() {
         Some(hf) => hf.bates_numbers(&order),
@@ -585,10 +699,24 @@ pub fn emit(
     let srcs = (input.sources.values())
         .map(|info| (info.src.id(), info.src.clone()))
         .collect();
+    let mut closure = Closure::new(primary.id(), pages);
+    if let Some((record, _, _, relinked)) = saved {
+        closure.saved(record.map.clone(), relinked);
+    }
+    let append = keys
+        .zip(saved)
+        .map(|(keys, (record, parents, tree, _))| Append {
+            keys,
+            record,
+            parents,
+            tree,
+            extra: BTreeSet::new(),
+        });
     let mut cx = Cx {
         input,
+        append,
         transforms,
-        closure: Closure::new(primary.id(), pages),
+        closure,
         primary,
         srcs,
         shown,
@@ -608,26 +736,38 @@ pub fn emit(
         groups: HashMap::new(),
     };
     claim(&mut cx);
-    p.set_total(Some(st.page_count() as u64), crate::PAGES);
-    let shape = tree::balanced(&order);
-    for (pos, (id, def, geom)) in st.pages().enumerate() {
-        p.check()?;
-        let parent = ObjKey::PagesNode(shape.leaf[pos]);
-        pages::page(&mut cx, id, def, geom, pos, parent)?;
-        p.inc(1);
+    if cx.append.is_some() {
+        appended(&mut cx, &order, p)?;
+    } else {
+        p.set_total(Some(st.page_count() as u64), crate::PAGES);
+        let shape = tree::balanced(&order);
+        for (pos, (id, def, geom)) in st.pages().enumerate() {
+            p.check()?;
+            let parent = ObjKey::PagesNode(shape.leaf[pos]);
+            pages::page(&mut cx, id, def, geom, pos, parent)?;
+            p.inc(1);
+        }
+        tree::nodes(&mut cx, &shape);
+        catalog::catalog(&mut cx, &order);
     }
-    tree::nodes(&mut cx, &shape);
-    catalog::catalog(&mut cx, &order);
     while let Some(next) = cx.closure.next(&mut cx.syms) {
         p.check()?;
         let (key, obj) = next?;
-        cx.push(key, obj);
+        // An object the file has, of a source whose pages it names
+        // otherwise now, is written again.
+        match cx.closure.relinks(&key) {
+            true => cx.objects.push((key, SymObject::Built(obj))),
+            false => cx.push(key, obj),
+        }
     }
     if cx.closure.unreadable > 0 {
         cx.notes.push(Note(format!(
             "{} objects the copied pages refer to couldn't be read, and were left out",
             cx.closure.unreadable
         )));
+    }
+    if cx.append.is_some() {
+        reached(&mut cx.objects, &cx.syms);
     }
     let aliases = cx.form.aliases().collect();
     let form_keys = std::mem::take(&mut cx.form.keys);
@@ -646,6 +786,174 @@ pub fn emit(
     })
 }
 
+/// An Append's objects, into `cx`: the pages whose dictionaries are in
+/// scope, under their nodes in the spliced tree; the annotations in scope
+/// of the other pages, their pages' `/Annots` the saved file's; the nodes
+/// that changed; the form, the outline, the document scripts and the page
+/// labels when any of theirs is in scope; and the catalog when it is, or
+/// when the section needs a later version than the file is, or the form
+/// or the outline came or went. `order` is the pages'.
+fn appended(cx: &mut Cx, order: &[PageId], p: &dyn Progress) -> Result<()> {
+    let input = cx.input;
+    let st = &input.target;
+    let append = cx.append.as_ref().expect("an Append");
+    let (keys, record, parents, spliced) =
+        (append.keys, append.record, append.parents, append.tree);
+    let annotated: HashSet<PageId> = (keys.iter())
+        .filter_map(|key| match key {
+            ObjKey::Annot(a) | ObjKey::AnnotPart(a, _) => Some(st.annot(*a)?.page),
+            _ => None,
+        })
+        .collect();
+    let visited = |id: PageId| keys.contains(&ObjKey::Page(id)) || annotated.contains(&id);
+    let total = st.pages().filter(|&(id, _, _)| visited(id)).count();
+    p.set_total(Some(total as u64), crate::PAGES);
+    for (pos, (id, def, geom)) in st.pages().enumerate() {
+        if keys.contains(&ObjKey::Page(id)) {
+            p.check()?;
+            let parent = (parents.get(&id).copied())
+                .with_context(|| format!("{id:?} has no place in the saved file's page tree"))?;
+            pages::page(cx, id, def, geom, pos, parent)?;
+            p.inc(1);
+        } else if annotated.contains(&id) {
+            p.check()?;
+            let shown = cx.shown[&id].clone();
+            let tags = cx.keeps_tags(id);
+            annots::page(cx, id, &shown, tags);
+            p.inc(1);
+        }
+    }
+    if let Some(spliced) = spliced {
+        tree::spliced_nodes(cx, spliced);
+    }
+    let any = |of: fn(&ObjKey) -> bool| keys.iter().any(of);
+    let mut form = (keys.contains(&ObjKey::AcroForm) || any(|k| matches!(k, ObjKey::Field(_))))
+        .then(|| form::acroform(cx));
+    let mut outline = (keys.contains(&ObjKey::OutlinesRoot)
+        || any(|k| matches!(k, ObjKey::Bookmark(_))))
+    .then(|| outline::outline(cx));
+    let scripts = (keys.contains(&ObjKey::Names(NameTree::JavaScript))).then(|| form::scripts(cx));
+    let came_or_went = |now: &Option<Option<Object>>, was: bool| {
+        now.as_ref().is_some_and(|now| now.is_some() != was)
+    };
+    if cx.version > record.pdf_version
+        || came_or_went(&form, record.roots.acroform.is_some())
+        || came_or_went(&outline, record.roots.outlines.is_some())
+    {
+        cx.write_too(ObjKey::Catalog);
+    }
+    let labels = st.label_ranges().filter(|r| !r.is_empty());
+    if cx.writes(&ObjKey::Catalog) {
+        // What the saved catalog holds in itself rather than by number is
+        // written anew with it: a form, an outline or page labels the map
+        // has no number for.
+        let unnumbered = |cx: &Cx, key: ObjKey| !cx.writes(&key) && record.map.get(&key).is_none();
+        if form.is_none() && record.roots.acroform.is_some() && unnumbered(cx, ObjKey::AcroForm) {
+            cx.write_too(ObjKey::AcroForm);
+            form = Some(form::acroform(cx));
+        }
+        if outline.is_none()
+            && !st.outline_roots().is_empty()
+            && unnumbered(cx, ObjKey::OutlinesRoot)
+        {
+            cx.write_too(ObjKey::OutlinesRoot);
+            outline = Some(outline::outline(cx));
+        }
+        if labels.is_some() && unnumbered(cx, ObjKey::Labels) {
+            cx.write_too(ObjKey::Labels);
+        }
+    }
+    if let Some(ranges) = labels.filter(|_| cx.writes(&ObjKey::Labels)) {
+        cx.push(
+            ObjKey::Labels,
+            Object::Dictionary(crate::labels::number_tree(&ranges)),
+        );
+    }
+    if cx.writes(&ObjKey::Catalog) {
+        let root = match spliced {
+            Some(t) => t.root(),
+            None => tree::saved_root(record)?,
+        };
+        let parts = catalog::Parts {
+            root,
+            form,
+            outline,
+            scripts,
+        };
+        catalog::appended(cx, order, parts);
+    }
+    Ok(())
+}
+
+/// `objects`, an Append's, without what nothing it writes of the state
+/// reaches: an object a key out of scope reached as it was built, a
+/// resource or a copy, which only the saved file's object of it names.
+fn reached(objects: &mut Vec<(ObjKey, SymObject)>, syms: &Syms) {
+    let at: HashMap<ObjKey, usize> = (objects.iter().enumerate())
+        .map(|(i, (key, _))| (*key, i))
+        .collect();
+    let mut seen = vec![false; objects.len()];
+    let mut stack: Vec<usize> = (objects.iter().enumerate())
+        .filter(|(_, (key, _))| key.of_state())
+        .map(|(i, _)| i)
+        .collect();
+    while let Some(i) = stack.pop() {
+        if std::mem::replace(&mut seen[i], true) {
+            continue;
+        }
+        let mut next = Vec::new();
+        let mut named = |r: ObjectId| {
+            if let Some(&j) = syms.key(r).and_then(|key| at.get(&key)) {
+                next.push(j);
+            }
+        };
+        match &objects[i].1 {
+            SymObject::Built(obj) => refs(obj, &mut named),
+            SymObject::Deferred(d) => d.dict.iter().for_each(|(_, v)| refs(v, &mut named)),
+            SymObject::Raw(_) => {}
+        }
+        stack.extend(next.into_iter().filter(|&j| !seen[j]));
+    }
+    let mut keep = seen.into_iter();
+    objects.retain(|_| keep.next().expect("one each"));
+}
+
+/// Each reference in `obj`, to `to`.
+fn refs(obj: &Object, to: &mut dyn FnMut(ObjectId)) {
+    match obj {
+        Object::Reference(r) => to(*r),
+        Object::Array(items) => items.iter().for_each(|o| refs(o, to)),
+        Object::Dictionary(d) => d.iter().for_each(|(_, o)| refs(o, to)),
+        Object::Stream(s) => s.dict.iter().for_each(|(_, o)| refs(o, to)),
+        _ => {}
+    }
+}
+
+/// The primary's page objects the pages of `st` are written at (§11.5, bug
+/// 3), shown as `shown` says: each page that's copy 0 of a primary page,
+/// at the first of the page table's listings of it, the first such page in
+/// order taking it.
+pub(crate) fn owned_pages(
+    st: &DocState,
+    shown: &HashMap<PageId, Shown>,
+    primary: BlobId,
+) -> Vec<(PageId, ObjectId)> {
+    let mut taken = HashSet::new();
+    let mut out = Vec::new();
+    for (id, _, _) in st.pages() {
+        let page = &shown[&id];
+        if page.src.id() == primary
+            && page.copy == 0
+            && let Some(facts) = page.src.page(page.index)
+            && facts.repeat == 0
+            && taken.insert(facts.id)
+        {
+            out.push((id, facts.id));
+        }
+    }
+    out
+}
+
 /// The primary's numbers the keys that are its objects keep (§11.5),
 /// claimed before anything is emitted, in a fixed order, so whichever
 /// emitter refers to one first, it's numbered alike: copy 0 of each primary
@@ -657,15 +965,8 @@ fn claim(cx: &mut Cx) {
     let input = cx.input;
     let st = &input.target;
     let primary = cx.primary.id();
-    for (id, _, _) in st.pages() {
-        let page = &cx.shown[&id];
-        if page.src.id() == primary
-            && page.copy == 0
-            && let Some(facts) = page.src.page(page.index)
-            && facts.repeat == 0
-        {
-            cx.own(ObjKey::Page(id), facts.id);
-        }
+    for (id, at) in owned_pages(st, &cx.shown, primary) {
+        cx.own(ObjKey::Page(id), at);
     }
     cx.form = form::prepare(cx);
     for (id, _, _) in st.pages() {
@@ -691,18 +992,6 @@ fn claim(cx: &mut Cx) {
             }
         }
     }
-}
-
-/// The version `src` says it is: its header's, or its catalog's
-/// `/Version` when that's later (ISO 32000-1 7.7.2).
-fn base_version(src: &Src) -> PdfVersion {
-    let pdf = src.pdf();
-    let header = PdfVersion::parse(pdf.version().as_bytes()).unwrap_or(PdfVersion::new(1, 4));
-    let catalog = (pdf.catalog().ok())
-        .and_then(|c| c.get(b"Version").ok())
-        .and_then(|v| v.as_name().ok())
-        .and_then(PdfVersion::parse);
-    header.max(catalog.unwrap_or(header))
 }
 
 #[cfg(test)]

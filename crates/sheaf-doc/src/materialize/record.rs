@@ -1,25 +1,29 @@
 //! What sheaf knows about the file it last wrote (M10.5 §9.1): a
 //! [`SaveRecord`], attached to the version a save wrote, which drives the
 //! next save. The opened file's is synthesized at open
-//! ([`SaveRecord::opened`]); an older record shrinks to its [`SaveNote`],
-//! what the History panel shows of a save. And a save's input
-//! ([`SaveInput`]): the state it writes, and the saved side it writes
-//! after.
+//! ([`SaveRecord::opened`]), and a document restored from its file's
+//! recovery sidecar gets one of the file with the sidecar's sections
+//! pending ([`SaveRecord::restored`], §11.10); an older record shrinks to
+//! its [`SaveNote`], what the History panel shows of a save. And a save's
+//! input ([`SaveInput`]): the state it writes, and the saved side it
+//! writes after.
 //!
-//! Slice 9 builds what slice 9 produces: the whole file's hash, a restored
-//! document's pending tail and the keys a path changed are slice 10's, and
-//! what generators drew (`drawn`) stays empty until slices 16 and 17.
+//! What generators drew (`drawn`) stays empty until slices 16 and 17.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId, XrefFacts};
+use sheaf_core::Checksum;
 
+use super::emit::PdfVersion;
 use super::key::ObjKey;
 use super::plan::{SaveTransform, StrategyKind};
 use crate::attachments::Objects;
+use crate::effects::SigClass;
 use crate::model::{DocState, GenId, PageId, Snapshot, SourceId, SourceInfo, VersionId};
+use crate::prim::Key;
 use crate::serialize::crypt::Crypt;
 use crate::serialize::durable::FileStamp;
 use crate::store::BlobId;
@@ -36,6 +40,24 @@ pub struct SaveRecord {
     /// The file as it was written or read: a save to it writes only while
     /// it's still that file (M10.5 proposal 33).
     pub stamp: FileStamp,
+    /// The checksum of the whole file, so far: made as a Rewrite writes
+    /// it, a copy's as it's copied, and carried on over each section
+    /// appended. None for a file as opened, and an Append onto one: a sum
+    /// taken later would say nothing of the file being the one sheaf read.
+    /// A copy of the file is checked against it (`Onto::CopyOf`).
+    pub content_hash: Option<Checksum>,
+    /// Whether the file reads as its cross-reference sections say (its
+    /// base is sound), which an update after it needs: as opened, the
+    /// source's say; a file a Rewrite wrote is.
+    pub sound: bool,
+    /// Whether the file's signatures, when it has any, still hold as they
+    /// were signed: as opened, and after an update or a copy of the file,
+    /// but not once a Rewrite wrote it.
+    pub signatures_hold: bool,
+    /// The PDF version it says it is: its header's, or its catalog's
+    /// `/Version` when that's later. An Append that needs a later one says
+    /// so in the catalog (§11.7).
+    pub pdf_version: PdfVersion,
     pub xref: XrefFacts,
     /// How it's encrypted, which saves keep. None when it isn't.
     pub crypt: Option<Arc<Crypt>>,
@@ -53,6 +75,51 @@ pub struct SaveRecord {
     /// What save policy already did to the file (§11.8), so a later save
     /// never repeats it.
     pub transforms: Arc<[SaveTransform]>,
+    /// What a document restored from the file's recovery sidecar holds
+    /// that the file hasn't got, until a save writes it (§11.10): the
+    /// document isn't what the file holds while there's one.
+    pub pending_tail: Option<PendingTail>,
+}
+
+/// What a recovery sidecar holds that its file hasn't got (M10.5 §11.10),
+/// which a document restored from it carries until its first save.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingTail {
+    /// The sidecar's sections, which go after the file's bytes before the
+    /// next Append's own: None when it held the whole document (Full),
+    /// which no section follows, so nothing says what the file holds and
+    /// the next save is a Rewrite.
+    pub bytes: Option<Arc<[u8]>>,
+    pub flags: TailFlags,
+}
+
+/// What sections a file hasn't got yet do to it, as a recovery sidecar's
+/// flags say (§11.10): what the save that writes them judges beside its
+/// own path, since the saved state a restored document opened as holds
+/// them already.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TailFlags {
+    /// They remove or replace text the file has (strict removal, §9.2), or
+    /// a save transform in them would need a Rewrite, or the removal check
+    /// found text they leave readable: the save is a Rewrite, or asks.
+    pub removes: bool,
+    /// Their classes of change, for the file's signatures (§9.3).
+    pub sig: SigClass,
+    /// The full names of the fields they touch, for FieldMDP.
+    pub fields: BTreeSet<String>,
+}
+
+/// What a document knows of its file as it opens (§9.1): the file as it
+/// was read; or, restored from the file's recovery sidecar (§11.10), the
+/// file as the sidecar was written against it, `base`, and what the
+/// sidecar holds that the file hasn't got.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Came {
+    Read(FileStamp),
+    Restored {
+        base: FileStamp,
+        pending: PendingTail,
+    },
 }
 
 impl SaveRecord {
@@ -71,15 +138,58 @@ impl SaveRecord {
             at: crate::annot::pdf_date_now(),
             strategy: StrategyKind::Opened,
             stamp,
+            content_hash: None,
+            sound: src.base_sound(),
+            signatures_hold: true,
+            pdf_version: PdfVersion::of(src),
             xref: src.xref().clone(),
             crypt: src.crypt().cloned(),
             map: Arc::new(ObjMap::opened(pdf, src.id(), &tree)),
             present: Arc::new(pdf.ids().map(|(n, _)| n).collect()),
-            roots: Arc::new(RootValues::of(pdf)),
+            roots: Arc::new(RootValues {
+                info: pdf
+                    .trailer()
+                    .get(b"Info")
+                    .and_then(Object::as_reference)
+                    .ok(),
+                ..RootValues::of(pdf)
+            }),
             tree: Arc::new(tree),
             drawn: Arc::default(),
             transforms: Arc::from([]),
+            pending_tail: None,
         }
+    }
+
+    /// The record of a document restored from its file's recovery sidecar
+    /// (§11.10) at `version`: `info` is what the sidecar recovers, the
+    /// file's bytes and its sections after them read as one (or its whole
+    /// document), named as the file is; `base` is the file as the sidecar
+    /// was written against it; and `pending`, what the file hasn't got. The
+    /// record of `info` as opened, but the file's stamp, so its first save
+    /// writes `pending` after the file's bytes, while they're still those.
+    pub fn restored(
+        version: VersionId,
+        info: &SourceInfo,
+        base: FileStamp,
+        pending: PendingTail,
+    ) -> SaveRecord {
+        SaveRecord {
+            pending_tail: Some(pending),
+            ..SaveRecord::opened(version, info, base)
+        }
+    }
+
+    /// Whether it says what its file holds: not when a recovery sidecar
+    /// restored the whole document in its place (§11.10).
+    pub fn knows_file(&self) -> bool {
+        (self.pending_tail.as_ref()).is_none_or(|tail| tail.bytes.is_some())
+    }
+
+    /// Whether an update can follow the file: it says what the file holds,
+    /// which reads as its cross-reference sections say, and has some.
+    pub fn takes_updates(&self) -> bool {
+        self.knows_file() && self.sound && self.xref.sections > 0
     }
 
     /// What the History panel shows of the save that wrote it.
@@ -93,8 +203,8 @@ impl SaveRecord {
 }
 
 /// What a write says of the file it made, before the file is on disk: its
-/// [`SaveRecord`] but for the file's stamp, which only the write to disk
-/// gives.
+/// [`SaveRecord`] but for the file's stamp and checksum, which the write to
+/// disk gives.
 #[derive(Clone)]
 pub struct OutputRecord {
     pub version: VersionId,
@@ -102,6 +212,9 @@ pub struct OutputRecord {
     /// When it was made: a PDF date string.
     pub at: String,
     pub strategy: StrategyKind,
+    pub sound: bool,
+    pub signatures_hold: bool,
+    pub pdf_version: PdfVersion,
     pub xref: XrefFacts,
     pub crypt: Option<Arc<Crypt>>,
     pub map: Arc<ObjMap>,
@@ -112,14 +225,19 @@ pub struct OutputRecord {
 }
 
 impl OutputRecord {
-    /// The record of the file, once written, as `stamp` found it.
-    pub fn stamped(self, stamp: FileStamp) -> SaveRecord {
+    /// The record of the file, once written, as `stamp` found it, its
+    /// checksum `content_hash` when that's known.
+    pub fn stamped(self, stamp: FileStamp, content_hash: Option<Checksum>) -> SaveRecord {
         SaveRecord {
             version: self.version,
             path: self.path,
             at: self.at,
             strategy: self.strategy,
             stamp,
+            content_hash,
+            sound: self.sound,
+            signatures_hold: self.signatures_hold,
+            pdf_version: self.pdf_version,
             xref: self.xref,
             crypt: self.crypt,
             map: self.map,
@@ -128,6 +246,7 @@ impl OutputRecord {
             tree: self.tree,
             drawn: Arc::default(),
             transforms: self.transforms,
+            pending_tail: None,
         }
     }
 }
@@ -228,6 +347,12 @@ impl BitSet {
         self.words.iter().all(|&w| w == 0)
     }
 
+    /// The largest number, when there's one.
+    pub fn last(&self) -> Option<u32> {
+        let (i, w) = self.words.iter().enumerate().rfind(|(_, w)| **w != 0)?;
+        Some(i as u32 * 64 + 63 - w.leading_zeros())
+    }
+
     /// The numbers, in order.
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         (0u32..).zip(&self.words).flat_map(|(i, &w)| {
@@ -285,29 +410,35 @@ pub struct RootValues {
     pub outlines: Option<Dictionary>,
     /// The name dictionary's, every one, when there's one.
     pub names: Option<Dictionary>,
+    /// The trailer's `/Info`, which a save keeps as it is: what an Append's
+    /// trailer names.
+    pub info: Option<ObjectId>,
 }
 
 impl RootValues {
-    /// `pdf`'s, as it holds them.
+    /// `pdf`'s, as it holds them, but the trailer's.
     pub fn of<P: Objects + ?Sized>(pdf: &P) -> RootValues {
         let catalog = pdf.catalog().ok();
         let dict = |key: &[u8]| {
             let at = catalog?.get(key).ok()?;
             pdf.dereference(at).ok()?.1.as_dict().ok()
         };
-        let unowned = |d: &Dictionary, owned: &[&[u8]]| -> Dictionary {
-            (d.iter())
-                .filter(|(k, _)| !owned.contains(&k.as_slice()))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
         RootValues {
             catalog: catalog.map_or_else(Dictionary::new, |c| unowned(c, CATALOG_OWNED)),
             acroform: dict(b"AcroForm").map(|d| unowned(d, ACROFORM_OWNED)),
             outlines: dict(b"Outlines").map(|d| unowned(d, OUTLINES_OWNED)),
             names: dict(b"Names").cloned(),
+            info: None,
         }
     }
+}
+
+/// `d`'s keys but `owned`.
+pub(crate) fn unowned(d: &Dictionary, owned: &[&[u8]]) -> Dictionary {
+    (d.iter())
+        .filter(|(k, _)| !owned.contains(&k.as_slice()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 /// A file's page tree: its nodes, the root first, each before the nodes
@@ -327,11 +458,16 @@ pub struct TreeNode {
     /// How many kids it had when the file was opened: an Append splits it
     /// only once it's grown past max(128, this) (§11.6).
     pub size: usize,
+    /// The primary's node whose keys but its place in the tree it holds,
+    /// its inheritable ones among them: its own in the file as opened, the
+    /// node it was split from for one an Append split off, and none in a
+    /// tree a Rewrite wrote, whose nodes hold nothing else.
+    pub from: Option<ObjectId>,
 }
 
 impl TreeShape {
-    /// `pdf`'s, from the catalog's `/Pages`. A node met again is listed
-    /// once.
+    /// `pdf`'s, from the catalog's `/Pages`, each node holding its own
+    /// keys. A node met again is listed once.
     pub fn of<P: Objects + ?Sized>(pdf: &P) -> TreeShape {
         let root = pdf
             .catalog()
@@ -365,6 +501,7 @@ impl TreeShape {
                 id,
                 size: kids.len(),
                 kids,
+                from: Some(id),
             });
         }
         TreeShape { nodes }
@@ -373,7 +510,7 @@ impl TreeShape {
 
 /// What a save writes from: the state of the version it writes, the
 /// registrations its pages and forms come from, and the saved side it
-/// writes after, when there's one.
+/// writes after, when there's one, with the keys changed on the way.
 #[derive(Clone)]
 pub struct SaveInput {
     pub version: VersionId,
@@ -384,6 +521,10 @@ pub struct SaveInput {
     /// derived copy's says which pages it was made from.
     pub sources: HashMap<SourceId, Arc<SourceInfo>>,
     pub saved: Option<SavedSide>,
+    /// The keys any step changed on the history tree's path from the saved
+    /// version to this one (M10.5 §7.2), which the planner judges by value
+    /// ([`crate::effects::judge`]). Empty with no saved side.
+    pub path_keys: Arc<BTreeSet<Key>>,
 }
 
 /// The saved version's state, and its record.
@@ -404,6 +545,7 @@ impl SaveInput {
             primary: snap.primary,
             sources: snap.sources.clone(),
             saved: None,
+            path_keys: Arc::default(),
         }
     }
 }
@@ -417,6 +559,9 @@ mod tests {
         let set: BitSet = [0, 63, 64, 1000, 64].into_iter().collect();
         assert_eq!(set.iter().collect::<Vec<_>>(), [0, 63, 64, 1000]);
         assert_eq!(set.len(), 4);
+        assert_eq!(set.last(), Some(1000));
+        assert_eq!(BitSet::from_iter([63]).last(), Some(63));
+        assert_eq!(BitSet::default().last(), None);
         assert!(set.contains(1000) && !set.contains(999) && !set.contains(100_000));
         assert!(BitSet::default().is_empty() && !set.is_empty());
     }

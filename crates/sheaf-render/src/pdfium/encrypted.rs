@@ -111,7 +111,7 @@ sheaf_doc::both_ways!(
 /// the password, each shows with it what the same edit of the
 /// unencrypted file shows, and each keeps its `/P` and `/ID[0]`.
 fn reopen_in_pdfium(how: How) {
-    let dir = scratch("both");
+    let dir = scratch(&format!("both-{how:?}"));
     let plain = form();
     for (version, state) in rc4_aes_128_and_aes_256(&plain) {
         let files = encrypted(&plain, &state, |_| {})
@@ -183,7 +183,6 @@ fn an_aes256_object_stream_base_rewrites() {
 /// don't: `LazyPdf` (sheaf-doc's `serialize::tests`) and qpdf (sheaf-ops'
 /// interop tests).
 #[test]
-#[ignore = "slice 10"]
 fn a_prefixed_file_appends_as_pdfium_reads_it() {
     let dir = scratch("prefixed");
     let plain = form();

@@ -111,6 +111,49 @@ pub enum Shared {
 }
 
 impl ObjKey {
+    /// Whether its object is one the state derives: a root object, a page,
+    /// an annotation and what it writes beside it, a field or a bookmark.
+    /// An Append writes such a key only when it's in scope (M10.5 §7.2);
+    /// every other is a resource or a block, by its digest, or an object of
+    /// a source, which a file has once.
+    pub fn of_state(&self) -> bool {
+        match self {
+            ObjKey::Catalog
+            | ObjKey::PagesNode(_)
+            | ObjKey::OutlinesRoot
+            | ObjKey::AcroForm
+            | ObjKey::Info
+            | ObjKey::Page(_)
+            | ObjKey::Annot(_)
+            | ObjKey::AnnotPart(..)
+            | ObjKey::Field(_)
+            | ObjKey::Bookmark(_)
+            | ObjKey::Labels
+            | ObjKey::Names(_) => true,
+            ObjKey::Base { .. }
+            | ObjKey::Res(_)
+            | ObjKey::Shared(_)
+            | ObjKey::ResPart(..)
+            | ObjKey::Block(_) => false,
+        }
+    }
+
+    /// Whether it's one of the file's root objects, which the state owns
+    /// wherever they're numbered: the catalog, the page tree's nodes, the
+    /// outline's root, the form, the page labels and the document
+    /// information.
+    pub fn is_root(&self) -> bool {
+        matches!(
+            self,
+            ObjKey::Catalog
+                | ObjKey::PagesNode(_)
+                | ObjKey::OutlinesRoot
+                | ObjKey::AcroForm
+                | ObjKey::Labels
+                | ObjKey::Info
+        )
+    }
+
     /// The key as bytes, the same in every build and session: a tag for
     /// the kind, then its fields, big-endian. What an AES IV is keyed by
     /// (§11.7). A tag is never reused: a new kind takes the next.

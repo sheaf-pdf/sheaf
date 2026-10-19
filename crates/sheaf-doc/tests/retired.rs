@@ -7,7 +7,8 @@
 //! `model::Document::marginal`. Every `.rs` file under `crates/` (but not
 //! under a `target`) is parsed with `syn`, and a row fails on:
 //! - **a definition at that path:** an item, an impl's or trait's item as
-//!   `Type::item`, a field as `Type::field`, a variant as `Type::Variant`.
+//!   `Type::item`, a field as `Type::field`, a variant as `Type::Variant`,
+//!   a variant's field as `Type::Variant::field`.
 //!   A file's module comes from its path, and inline `mod`s nest;
 //! - **a path that names it:** one that holds the row's last two segments
 //!   in a row, after a leading `crate`, `self`, `super` or `sheaf_*`, in
@@ -425,12 +426,33 @@ const RETIRED: &[(&str, u8)] = &[
     // Moved to `materialize::plan`, which asks before a Rewrite breaks
     // them.
     ("save::signatures_broken", 9),
+    // AES IVs keyed by the number an object is written at: an update's
+    // section keys them by what it is.
+    ("serialize::indirect", 10),
+    ("serialize::crypt::Crypt::encrypt", 10),
+    // A stamp in hex is the stamp's own (`FileStamp::hex`), which an
+    // append's journal says it in too.
+    ("recovery::stamp_hex", 10),
+    ("recovery::parse_stamp", 10),
+    // Every save a Rewrite, and a signed file's ask by a count: the
+    // planner decides, and asks by each signature's impact.
+    ("materialize::plan::Why::AlwaysRewrite", 10),
+    ("materialize::plan::signatures_broken", 10),
+    ("materialize::plan::Ask::Signatures::signatures", 10),
+    // A restored document's file, and its being unsaved, are its record's:
+    // the file's, with the recovery sidecar's sections pending.
+    ("model::Document::disk_base", 10),
+    ("model::Document::set_disk_base", 10),
+    ("model::Document::mark_unsaved", 10),
+    // An update frees nothing: an object it unlinks stays in use.
+    ("serialize::xref::Entry::deleted", 10),
 ];
 
 /// Last segments only a path matches: names the new design uses again
 /// (§17), and words common enough to name other things.
 const QUALIFIED_ONLY: &[&str] = &[
     "Mode",
+    "deleted",
     "Step",
     "PageRef",
     "LabelSpec",
@@ -522,6 +544,16 @@ const QUALIFIED_ONLY: &[&str] = &[
     "stamp",
     "signatures_broken",
     "has",
+    // What a save's path removed (§9.2's `Removed`, and its kinds'
+    // `Widgets`), not slice 8's removed slot value and widgets' slot.
+    "Removed",
+    "Widgets",
+    // `serialize::object::indirect` writes an object's frame, and
+    // lopdf's `Document::encrypt` encrypts a whole file.
+    "indirect",
+    "encrypt",
+    // `Source::signatures` reads them; `Ask::Signatures`' count is gone.
+    "signatures",
 ];
 
 #[test]
@@ -591,6 +623,20 @@ mod tests {
             (11, "incremental::Mode", 9),
         ]
     );
+}
+
+#[test]
+fn a_variant_s_field_is_named_from_its_enum() {
+    const ROWS: &[(&str, u8)] = &[("plan::Ask::Signatures::count", 10)];
+    let src = r#"
+enum Ask {
+    Signatures { count: usize },
+    Other { count: usize },
+}
+"#;
+    let hits = scan(src, vec!["plan".into()], ROWS).unwrap();
+    // Not line 4's, another variant's.
+    assert_eq!(hits, [(3, "plan::Ask::Signatures::count", 10)]);
 }
 
 #[test]
@@ -723,13 +769,14 @@ impl Scan {
         self.hits.insert((at.span().start().line, row, slice));
     }
 
-    /// A definition of `name`, in `within` (a type or trait) if given.
-    fn defines(&mut self, within: Option<&Ident>, name: &Ident) {
+    /// A definition of `name`, in `within` (a type or trait, and a
+    /// variant of it).
+    fn defines(&mut self, within: &[&Ident], name: &Ident) {
         let path: Vec<String> = self
             .module
             .iter()
             .cloned()
-            .chain(within.map(Ident::to_string))
+            .chain(within.iter().map(|i| i.to_string()))
             .chain([name.to_string()])
             .collect();
         for &(row, slice) in self.rows {
@@ -809,52 +856,57 @@ impl Scan {
 
 impl<'ast> Visit<'ast> for Scan {
     fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
-        self.defines(None, &m.ident);
+        self.defines(&[], &m.ident);
         self.module.push(m.ident.to_string());
         visit::visit_item_mod(self, m);
         self.module.pop();
     }
 
     fn visit_item_struct(&mut self, s: &'ast syn::ItemStruct) {
-        self.defines(None, &s.ident);
+        self.defines(&[], &s.ident);
         for field in &s.fields {
             if let Some(name) = &field.ident {
-                self.defines(Some(&s.ident), name);
+                self.defines(&[&s.ident], name);
             }
         }
         visit::visit_item_struct(self, s);
     }
 
     fn visit_item_enum(&mut self, e: &'ast syn::ItemEnum) {
-        self.defines(None, &e.ident);
+        self.defines(&[], &e.ident);
         for variant in &e.variants {
-            self.defines(Some(&e.ident), &variant.ident);
+            self.defines(&[&e.ident], &variant.ident);
+            for field in &variant.fields {
+                if let Some(name) = &field.ident {
+                    self.defines(&[&e.ident, &variant.ident], name);
+                }
+            }
         }
         visit::visit_item_enum(self, e);
     }
 
     fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-        self.defines(None, &f.sig.ident);
+        self.defines(&[], &f.sig.ident);
         visit::visit_item_fn(self, f);
     }
 
     fn visit_item_const(&mut self, c: &'ast syn::ItemConst) {
-        self.defines(None, &c.ident);
+        self.defines(&[], &c.ident);
         visit::visit_item_const(self, c);
     }
 
     fn visit_item_static(&mut self, s: &'ast syn::ItemStatic) {
-        self.defines(None, &s.ident);
+        self.defines(&[], &s.ident);
         visit::visit_item_static(self, s);
     }
 
     fn visit_item_type(&mut self, t: &'ast syn::ItemType) {
-        self.defines(None, &t.ident);
+        self.defines(&[], &t.ident);
         visit::visit_item_type(self, t);
     }
 
     fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
-        self.defines(None, &t.ident);
+        self.defines(&[], &t.ident);
         for item in &t.items {
             let name = match item {
                 TraitItem::Fn(f) => &f.sig.ident,
@@ -862,7 +914,7 @@ impl<'ast> Visit<'ast> for Scan {
                 TraitItem::Type(t) => &t.ident,
                 _ => continue,
             };
-            self.defines(Some(&t.ident), name);
+            self.defines(&[&t.ident], name);
         }
         visit::visit_item_trait(self, t);
     }
@@ -878,7 +930,7 @@ impl<'ast> Visit<'ast> for Scan {
                     ImplItem::Type(t) => &t.ident,
                     _ => continue,
                 };
-                self.defines(Some(&ty.ident), name);
+                self.defines(&[&ty.ident], name);
             }
         }
         visit::visit_item_impl(self, i);

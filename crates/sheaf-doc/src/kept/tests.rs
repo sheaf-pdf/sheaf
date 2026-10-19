@@ -8,7 +8,10 @@ use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_core::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
-use crate::materialize::{AskAnswers, How, StrategyKind, save, save_appended};
+use crate::effects::{Removed, RemovedKind};
+use crate::materialize::{
+    AskAnswers, How, StrategyKind, Why, forced_rewrite, materialize, removal, save,
+};
 use crate::model::{Document, Edit, SourceInfo};
 use crate::save::rewrite;
 use in_progress::NoProgress;
@@ -286,7 +289,7 @@ fn inserting_one_page(how: How) {
             )
             .unwrap();
     }
-    let bytes = how.write(&model.snapshot());
+    let bytes = how.write(&model);
     assert!(!says(&bytes, "MARK B 1"), "{how:?}");
     assert!(says(&bytes, "MARK B 0") && says(&bytes, "MARK B 2"));
     let pdf = Pdf::load_mem(&bytes).unwrap();
@@ -503,132 +506,361 @@ fn note(text: &str) -> Annot {
     }
 }
 
+// ----- Removed text, every feature both ways (M10.5 slice 10) ---------------
+
+/// The bytes `text` may be written as: itself, and in UTF-16 (a text
+/// string's other encoding, and the codes OCR text is shown in), each also
+/// as a hex string's digits, in either case.
+fn written_as(text: &str) -> Vec<Vec<u8>> {
+    let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    let mut out = Vec::new();
+    for bytes in [text.as_bytes().to_vec(), utf16] {
+        let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
+        out.push(hex.to_lowercase().into_bytes());
+        out.push(hex.into_bytes());
+        out.push(bytes);
+    }
+    out
+}
+
+/// Whether `text` can be read in the file `bytes`, as any of the bytes
+/// [`written_as`] gives: in the file as it is, in a stream decoded (an
+/// object stream's too) or in a string any object holds, decoded. Every
+/// object of the file's newest revision, which is all of a Rewrite's.
+fn readable(bytes: &[u8], text: &str) -> bool {
+    let forms = written_as(text);
+    let found = |hay: &[u8]| (forms.iter()).any(|f| hay.windows(f.len()).any(|w| w == &f[..]));
+    found(bytes) || (Pdf::load_mem(bytes).unwrap().objects.values()).any(|o| holds_in(o, &found))
+}
+
+/// Whether `found` finds what it looks for in `o`: in its strings, and its
+/// stream's data decoded.
+fn holds_in(o: &Object, found: &dyn Fn(&[u8]) -> bool) -> bool {
+    match o {
+        Object::String(s, _) => found(s),
+        Object::Array(items) => items.iter().any(|o| holds_in(o, found)),
+        Object::Dictionary(d) => d.iter().any(|(_, o)| holds_in(o, found)),
+        Object::Stream(s) => {
+            let data = (s.decompressed_content()).unwrap_or_else(|_| s.content.clone());
+            found(&data) || s.dict.iter().any(|(_, o)| holds_in(o, found))
+        }
+        _ => false,
+    }
+}
+
+/// `model` saved to `path` `how`, whatever the plan would decide: `text`
+/// can be read in the file.
+fn saved_first(how: How, model: &mut Document, path: &Path, text: &str) {
+    let first = how.save(model, path);
+    assert_eq!(first.strategy, Some(how.strategy()));
+    assert!(
+        readable(&std::fs::read(path).unwrap(), text),
+        "{how:?}: {text}"
+    );
+}
+
+/// `model` saved to `path` as the plan says, after `text` went from it: a
+/// Rewrite, which the removal check, run over it as a test oracle (§11.9),
+/// finds took text out of the file, and after which `text` can't be read
+/// in the file. Why it rewrote.
+fn saved_without(model: &mut Document, path: &Path, text: &str) -> Vec<Why> {
+    let v = model.current_version();
+    let input = model.save_input(v).unwrap();
+    let target = model.save_target(path);
+    // The Rewrite the save writes, whether planned or the Append the
+    // removal check stops.
+    let rewrite = forced_rewrite(&input, &target);
+    let out = materialize(&input, &rewrite, target, &NoProgress).unwrap();
+    let file = std::fs::read(path).unwrap().into();
+    let found = removal::of_rewrite(&input, &out, file).unwrap();
+    assert!(found.is_some(), "the removal check finds {text} gone");
+    model.abandon_save(v);
+    let report = save(model, path, &AskAnswers::default(), &NoProgress).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    assert!(!readable(&std::fs::read(path).unwrap(), text), "{text}");
+    report.why
+}
+
+/// `count` of `kind`, as a save's reasons say what went.
+fn gone(kind: RemovedKind, count: usize) -> Vec<Removed> {
+    vec![Removed { kind, count }]
+}
+
+crate::both_ways!(
+    a_deleted_page_is_gone_from_the_saved_bytes,
+    a_deleted_page_is_gone_from_the_saved_bytes_appended: deleted_page_gone
+);
+
+/// A page brought in from another file and saved, then deleted: the next
+/// save is a Rewrite, and what the page said is gone from the file.
+fn deleted_page_gone(how: How) {
+    let dir = tempdir();
+    let path = file(&dir, "a.pdf", "A", 2, |_, _| {});
+    let other = file(&dir, "b.pdf", "PAGESECRET", 1, |_, _| {});
+    let mut model = opened(&path);
+    let info = SourceInfo::read(model.store(), &other, None).unwrap().0;
+    let source = model.add_source(info);
+    let insert = Edit::InsertPages {
+        source,
+        range: 0..1,
+        before: None,
+        outline: None,
+        annots: Vec::new(),
+    };
+    model.apply(insert, "insert").unwrap();
+    saved_first(how, &mut model, &path, "MARK PAGESECRET");
+    let page = model.page(2).unwrap();
+    model
+        .apply(Edit::DeletePages { ids: vec![page] }, "delete")
+        .unwrap();
+    let why = saved_without(&mut model, &path, "MARK PAGESECRET");
+    assert_eq!(why, [Why::Removes(gone(RemovedKind::Pages, 1))]);
+}
+
+crate::both_ways!(
+    a_deleted_mark_is_gone_from_the_saved_bytes,
+    a_deleted_mark_is_gone_from_the_saved_bytes_appended: deleted_mark_gone
+);
+
 /// A mark deleted after a save is gone from the next save's bytes: the
 /// second save is a Rewrite, whatever the first was.
-#[test]
-fn a_deleted_mark_is_gone_from_the_saved_bytes() {
-    deleted_mark_gone(false);
-}
-
-#[test]
-#[ignore = "slice 10"]
-fn a_deleted_mark_is_gone_from_the_saved_bytes_appended() {
-    deleted_mark_gone(true);
-}
-
-fn deleted_mark_gone(appended: bool) {
+fn deleted_mark_gone(how: How) {
     let dir = tempdir();
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
     let mut model = opened(&path);
     let p0 = model.page(0).unwrap();
-    model
-        .apply(
-            Edit::AnnotAdd {
-                page: p0,
-                annot: note("SECRET-NOTE-TEXT"),
-            },
-            "note",
-        )
-        .unwrap();
-    let first = match appended {
-        true => save_appended(&mut model, &path).unwrap(),
-        false => save(&mut model, &path, &AskAnswers::default(), &NoProgress).unwrap(),
+    let add = Edit::AnnotAdd {
+        page: p0,
+        annot: note("SECRET-NOTE-TEXT"),
     };
-    let want = [StrategyKind::Rewrite, StrategyKind::Append][usize::from(appended)];
-    assert_eq!(first.strategy, want);
-    let needle = b"SECRET-NOTE-TEXT";
-    let holds = |bytes: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
-    assert!(holds(&std::fs::read(&path).unwrap()));
+    model.apply(add, "note").unwrap();
+    saved_first(how, &mut model, &path, "SECRET-NOTE-TEXT");
     let id = model.state().marks_on(p0).next().unwrap().id;
     model
         .apply(Edit::AnnotDelete { page: p0, id }, "delete")
         .unwrap();
-    let second = save(&mut model, &path, &AskAnswers::default(), &NoProgress).unwrap();
-    assert_eq!(second.strategy, StrategyKind::Rewrite);
-    let bytes = std::fs::read(&path).unwrap();
-    assert!(!holds(&bytes));
-    assert!(!says(&bytes, "SECRET-NOTE-TEXT"));
+    let why = saved_without(&mut model, &path, "SECRET-NOTE-TEXT");
+    assert_eq!(why, [Why::Removes(gone(RemovedKind::Comments, 1))]);
 }
 
-/// A page recognized again after a save has one layer in the next save,
-/// the new one: the old text is gone from the bytes.
-#[test]
-fn replacing_saved_ocr_text_takes_the_old_out() {
-    replaced_ocr_text(false);
-}
+crate::both_ways!(
+    a_deleted_reply_is_gone_from_the_saved_bytes,
+    a_deleted_reply_is_gone_from_the_saved_bytes_appended: deleted_reply_gone
+);
 
-#[test]
-#[ignore = "slice 10"]
-fn replacing_saved_ocr_text_takes_the_old_out_appended() {
-    replaced_ocr_text(true);
-}
-
-fn replaced_ocr_text(appended: bool) {
-    use crate::text_layer::{OcrWord, TextLayer};
+/// A reply to a note, saved, then deleted: gone from the next save, the
+/// note it answered kept.
+fn deleted_reply_gone(how: How) {
     let dir = tempdir();
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
     let mut model = opened(&path);
     let p0 = model.page(0).unwrap();
-    let layer = |text: &str| {
-        std::sync::Arc::new(TextLayer::from_engine(
-            vec![OcrWord {
-                text: text.into(),
-                rect: crate::annot::Box2 {
-                    x: 72.0,
-                    y: 100.0,
-                    w: 60.0,
-                    h: 12.0,
-                },
-                confidence: 0.9,
-            }],
-            &crate::geom::Geom::read(None, None, 0),
-            "test",
-        ))
+    let add = Edit::AnnotAdd {
+        page: p0,
+        annot: note("the note"),
     };
-    let layers = |pdf: &[u8]| {
-        Pdf::load_mem(pdf)
+    model.apply(add, "note").unwrap();
+    let parent = model.state().marks_on(p0).next().unwrap().name();
+    let reply = Annot {
+        kind: AnnotKind::Reply { parent },
+        ..note("SECRET-REPLY-TEXT")
+    };
+    let add = Edit::AnnotAdd {
+        page: p0,
+        annot: reply,
+    };
+    model.apply(add, "reply").unwrap();
+    saved_first(how, &mut model, &path, "SECRET-REPLY-TEXT");
+    let id = (model.state().marks_on(p0))
+        .find(|a| a.contents == "SECRET-REPLY-TEXT")
+        .unwrap()
+        .id;
+    model
+        .apply(Edit::AnnotDelete { page: p0, id }, "delete")
+        .unwrap();
+    let why = saved_without(&mut model, &path, "SECRET-REPLY-TEXT");
+    assert_eq!(why, [Why::Removes(gone(RemovedKind::Comments, 1))]);
+    assert!(readable(&std::fs::read(&path).unwrap(), "the note"));
+}
+
+crate::both_ways!(
+    another_tool_s_deleted_comment_is_gone_from_the_saved_bytes,
+    another_tool_s_deleted_comment_is_gone_from_the_saved_bytes_appended: deleted_theirs_gone
+);
+
+/// Another tool's comment, in the file when it opened, kept by a save of
+/// a note beside it, then deleted: gone from the next save.
+fn deleted_theirs_gone(how: How) {
+    let dir = tempdir();
+    let path = file(&dir, "a.pdf", "A", 1, |pdf, p| {
+        let theirs = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "NM" => Object::string_literal("theirs"),
+            "Rect" => vec![72.into(), 72.into(), 96.into(), 96.into()],
+            "Contents" => Object::string_literal("THEIR-SECRET-TEXT"),
+        });
+        pdf.get_dictionary_mut(p[0])
             .unwrap()
-            .objects
-            .values()
-            .filter(|o| {
-                // The layer's text, not the `q` that sets it apart.
-                o.as_stream().is_ok_and(|s| {
-                    s.dict.has(b"SheafOcrLayer")
-                        && s.decompressed_content()
-                            .unwrap_or_else(|_| s.content.clone())
-                            != b"q\n"
-                })
-            })
-            .count()
+            .set("Annots", vec![theirs.into()]);
+    });
+    let mut model = opened(&path);
+    let p0 = model.page(0).unwrap();
+    let add = Edit::AnnotAdd {
+        page: p0,
+        annot: note("ours"),
+    };
+    model.apply(add, "note").unwrap();
+    saved_first(how, &mut model, &path, "THEIR-SECRET-TEXT");
+    let delete = Edit::CommentsDelete {
+        page: p0,
+        names: vec!["theirs".into()],
+    };
+    model.apply(delete, "delete").unwrap();
+    let why = saved_without(&mut model, &path, "THEIR-SECRET-TEXT");
+    assert_eq!(why, [Why::Removes(gone(RemovedKind::Comments, 1))]);
+}
+
+crate::both_ways!(
+    a_deleted_bookmark_is_gone_from_the_saved_bytes,
+    a_deleted_bookmark_is_gone_from_the_saved_bytes_appended: deleted_bookmark_gone
+);
+
+/// A bookmark saved, then deleted: gone from the next save.
+fn deleted_bookmark_gone(how: How) {
+    let dir = tempdir();
+    let path = file(&dir, "a.pdf", "A", 2, |_, _| {});
+    let mut model = opened(&path);
+    let insert = Edit::OutlineInsert {
+        parent: None,
+        after: None,
+        title: "SECRET-BOOKMARK".into(),
+        target: Some(model.page(1).unwrap()),
+        view: None,
+    };
+    model.apply(insert, "bookmark").unwrap();
+    saved_first(how, &mut model, &path, "SECRET-BOOKMARK");
+    let id = model.state().bookmarks_preorder()[0].1;
+    model.apply(Edit::OutlineDelete { id }, "delete").unwrap();
+    let why = saved_without(&mut model, &path, "SECRET-BOOKMARK");
+    assert_eq!(why, [Why::Removes(gone(RemovedKind::Bookmarks, 1))]);
+}
+
+crate::both_ways!(
+    a_mark_s_replaced_text_is_gone_from_the_saved_bytes,
+    a_mark_s_replaced_text_is_gone_from_the_saved_bytes_appended: replaced_mark_text
+);
+
+/// A note saved, then its text replaced: the next save is a Rewrite, with
+/// the new text and without the old.
+fn replaced_mark_text(how: How) {
+    let dir = tempdir();
+    let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
+    let mut model = opened(&path);
+    let p0 = model.page(0).unwrap();
+    let add = Edit::AnnotAdd {
+        page: p0,
+        annot: note("OLD-NOTE-TEXT"),
+    };
+    model.apply(add, "note").unwrap();
+    saved_first(how, &mut model, &path, "OLD-NOTE-TEXT");
+    let annot = Annot {
+        contents: "NEW-NOTE-TEXT".into(),
+        ..model.state().marks_on(p0).next().unwrap().clone()
     };
     model
-        .apply(
-            Edit::SetTextLayers {
-                layers: vec![(p0, layer("first"))],
-            },
-            "ocr",
-        )
+        .apply(Edit::AnnotUpdate { page: p0, annot }, "edit")
         .unwrap();
-    let first = match appended {
-        true => save_appended(&mut model, &path).unwrap(),
-        false => save(&mut model, &path, &AskAnswers::default(), &NoProgress).unwrap(),
+    let why = saved_without(&mut model, &path, "OLD-NOTE-TEXT");
+    assert_eq!(why, [Why::ReplacesText(gone(RemovedKind::CommentText, 1))]);
+    assert!(readable(&std::fs::read(&path).unwrap(), "NEW-NOTE-TEXT"));
+}
+
+/// OCR text saying `text`.
+fn ocr_layer(text: &str) -> std::sync::Arc<crate::text_layer::TextLayer> {
+    use crate::text_layer::{OcrWord, TextLayer};
+    std::sync::Arc::new(TextLayer::from_engine(
+        vec![OcrWord {
+            text: text.into(),
+            rect: crate::annot::Box2 {
+                x: 72.0,
+                y: 100.0,
+                w: 60.0,
+                h: 12.0,
+            },
+            confidence: 0.9,
+        }],
+        &crate::geom::Geom::read(None, None, 0),
+        "test",
+    ))
+}
+
+/// How many streams of the file `pdf` hold an OCR layer's text (not the
+/// `q` that sets it apart).
+fn ocr_layers(pdf: &[u8]) -> usize {
+    (Pdf::load_mem(pdf).unwrap().objects.values())
+        .filter(|o| {
+            o.as_stream().is_ok_and(|s| {
+                s.dict.has(b"SheafOcrLayer")
+                    && s.decompressed_content()
+                        .unwrap_or_else(|_| s.content.clone())
+                        != b"q\n"
+            })
+        })
+        .count()
+}
+
+crate::both_ways!(
+    replacing_saved_ocr_text_takes_the_old_out,
+    replacing_saved_ocr_text_takes_the_old_out_appended: replaced_ocr_text
+);
+
+/// A page recognized again after a save has one layer in the next save,
+/// the new one: the old text is gone from the bytes.
+fn replaced_ocr_text(how: How) {
+    let dir = tempdir();
+    let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
+    let mut model = opened(&path);
+    let p0 = model.page(0).unwrap();
+    let ocr = |text: &str| Edit::SetTextLayers {
+        layers: vec![(p0, ocr_layer(text))],
     };
-    let want = [StrategyKind::Rewrite, StrategyKind::Append][usize::from(appended)];
-    assert_eq!(first.strategy, want);
-    assert_eq!(layers(&std::fs::read(&path).unwrap()), 1);
+    model.apply(ocr("OCRFIRSTWORD"), "ocr").unwrap();
+    saved_first(how, &mut model, &path, "OCRFIRSTWORD");
+    assert_eq!(ocr_layers(&std::fs::read(&path).unwrap()), 1);
     // Recognized again: the old text would stay in an earlier revision,
     // so it's a full save.
-    model
-        .apply(
-            Edit::SetTextLayers {
-                layers: vec![(p0, layer("second"))],
-            },
-            "ocr",
-        )
-        .unwrap();
-    let second = save(&mut model, &path, &AskAnswers::default(), &NoProgress).unwrap();
-    assert_eq!(second.strategy, StrategyKind::Rewrite);
-    assert_eq!(layers(&std::fs::read(&path).unwrap()), 1);
+    model.apply(ocr("OCRSECONDWORD"), "ocr").unwrap();
+    let why = saved_without(&mut model, &path, "OCRFIRSTWORD");
+    assert_eq!(why, [Why::ReplacesText(gone(RemovedKind::OcrLayers, 1))]);
+    let now = std::fs::read(&path).unwrap();
+    assert_eq!(ocr_layers(&now), 1);
+    assert!(readable(&now, "OCRSECONDWORD"));
+}
+
+crate::both_ways!(
+    a_re_ocr_over_an_earlier_session_s_layer_takes_the_old_out,
+    a_re_ocr_over_an_earlier_session_s_layer_takes_the_old_out_appended: re_ocr_reopened
+);
+
+/// A layer saved in an earlier session, part of the page's own content
+/// once the file opens again, recognized over: the removal check finds
+/// the old words in what the Append would unlink, so the save is a
+/// Rewrite, which takes them out.
+fn re_ocr_reopened(how: How) {
+    let dir = tempdir();
+    let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
+    let mut model = opened(&path);
+    let layer = |model: &Document, text: &str| Edit::SetTextLayers {
+        layers: vec![(model.page(0).unwrap(), ocr_layer(text))],
+    };
+    model.apply(layer(&model, "OCROLDWORD"), "ocr").unwrap();
+    saved_first(how, &mut model, &path, "OCROLDWORD");
+    let mut model = opened(&path);
+    model.apply(layer(&model, "OCRNEWWORD"), "ocr").unwrap();
+    let why = saved_without(&mut model, &path, "OCROLDWORD");
+    assert!(matches!(why[..], [Why::RemovalCheck { .. }]), "{why:?}");
+    let now = std::fs::read(&path).unwrap();
+    assert_eq!(ocr_layers(&now), 1);
+    assert!(readable(&now, "OCRNEWWORD"));
 }
 
 /// `keep_only` names every object it changed, and those it added, and

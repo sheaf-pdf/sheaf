@@ -1,7 +1,8 @@
 //! Cross-reference sections, as a table or a stream. A full write's
 //! section is one subsection, `[0, Size)`, listing every number it doesn't
-//! write as free; an append's is runs of the numbers it writes or deletes.
-//! Free entries are linked in a list from entry 0. Positions are written
+//! write as free; an append's is runs of the numbers it lists, which for
+//! an update are only those it writes: an update frees nothing (M10.5
+//! slice 10). Free entries are linked in a list from entry 0. Positions are written
 //! from the header: PDFium, pdf.js and qpdf count them from `%PDF-`, past
 //! any bytes a writer put before it.
 
@@ -19,16 +20,6 @@ pub enum Entry {
     InUse { pos: usize, generation: u16 },
     /// Free, to be used next at `generation`.
     Free { generation: u16 },
-}
-
-impl Entry {
-    /// The entry of an object deleted at `generation`: free, and used
-    /// next at the generation after, or never again once that's 65,535.
-    pub fn deleted(generation: u16) -> Entry {
-        Entry::Free {
-            generation: generation.saturating_add(1),
-        }
-    }
 }
 
 /// A cross-reference section's entries, by object number.

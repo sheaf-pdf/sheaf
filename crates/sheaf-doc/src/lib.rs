@@ -12,6 +12,7 @@ pub mod annot;
 pub mod attachments;
 pub mod content;
 pub mod describe;
+pub mod effects;
 pub mod exchange;
 pub mod file;
 pub mod forms;

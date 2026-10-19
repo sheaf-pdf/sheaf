@@ -2,13 +2,14 @@
 //! edit, with batches, jobs, undo, redo, jumps, trims and saves, each version
 //! rebuilt from its prims is the state it was made as, and every file it
 //! refers to is still registered (slice 3). Every state on the way keeps
-//! the records' invariants (slice 8), and a version being saved resolves
-//! to the state it was sealed with until its save ends (slice 9). Each
-//! kind's no-op makes no version.
+//! the records' invariants (slice 8), a version being saved resolves to
+//! the state it was sealed with until its save ends (slice 9), and a save
+//! of the current version would find changed exactly what differs from
+//! the saved state (slice 10). Each kind's no-op makes no version.
 
 use std::collections::BTreeSet;
 
-use lopdf::{Object, dictionary};
+use lopdf::{Object, ObjectId, dictionary};
 use proptest::prelude::*;
 
 use super::tests::{connector, flat, header, opened_doc, square, tl};
@@ -28,7 +29,7 @@ const JOB: u8 = 22;
 const UNDO: u8 = 23;
 const REDO: u8 = 24;
 const JUMP: u8 = 25;
-const TRIM: u8 = 26;
+pub(crate) const TRIM: u8 = 26;
 const SAVE: u8 = 27;
 const SEAL: u8 = 28;
 const UNSEAL: u8 = 29;
@@ -62,8 +63,8 @@ fn kind(edit: &Edit) -> &'static str {
 }
 
 /// A document, and what a run of actions did to it.
-struct Run {
-    d: Document,
+pub(crate) struct Run {
+    pub(crate) d: Document,
     /// The opened file, and another with a form, whose pages come in.
     opened: SourceId,
     other: SourceId,
@@ -79,8 +80,8 @@ struct Run {
 
 /// Other tools' annotations on page `page` of `f`: a comment named
 /// `name`, Acrobat's replace-text edit (a Caret, its StrikeOut grouped
-/// under it), with a reply, and a link.
-fn with_theirs(f: &mut Form, page: usize, name: &str) {
+/// under it), with a reply, and a link: its object.
+pub(crate) fn with_theirs(f: &mut Form, page: usize, name: &str) -> ObjectId {
     let rect = |x: i64| vec![x.into(), 10.into(), (x + 20).into(), 30.into()];
     let caret = f.pdf.add_object(dictionary! {
         "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(10),
@@ -102,6 +103,7 @@ fn with_theirs(f: &mut Form, page: usize, name: &str) {
     let mut annots = f.annots(page);
     annots.extend([caret, strike, reply, link]);
     f.set_annots(page, &annots);
+    link
 }
 
 /// The annotations of a file of six pages, each with other tools'
@@ -130,10 +132,16 @@ impl Run {
             annots: their_annots(),
             ..Default::default()
         };
-        let mut d = opened_doc(6, facts, Box::new(FixedCount(1)));
+        let d = opened_doc(6, facts, Box::new(FixedCount(1)));
+        Self::over(d, bytes)
+    }
+
+    /// A run over `d`, as opened, beside the file `other`, a form, whose
+    /// pages come in.
+    pub(crate) fn over(mut d: Document, other: Vec<u8>) -> Self {
         let kind = BlobKind::file(Path::new("form.pdf"), None);
         let other = SourceInfo {
-            src: d.store().open(bytes.into(), kind).unwrap(),
+            src: d.store().open(other.into(), kind).unwrap(),
             name: "form.pdf".into(),
             derived: None,
         };
@@ -158,7 +166,7 @@ impl Run {
 
     /// Runs `action`, its choices drawn from `seed`: the state it leaves
     /// keeps the invariants.
-    fn act(&mut self, (action, seed): (u8, u64)) {
+    pub(crate) fn act(&mut self, (action, seed): (u8, u64)) {
         let rng = &mut fastrand::Rng::with_seed(seed);
         match action {
             0..KINDS => {
@@ -234,6 +242,16 @@ impl Run {
             let kept = self.d.versions.get(v).and_then(|v| v.state.as_ref());
             assert_eq!(kept, Some(st), "{v:?}, sealed, after action {action}");
         }
+        // A save of the current version finds changed exactly the slots
+        // that differ from the saved state: its path keys reach every one,
+        // and are judged by value.
+        let input = self.d.input(self.d.cursor);
+        if let Some(saved) = &input.saved {
+            let path = crate::effects::judge(&saved.state, &input.target, &input.path_keys);
+            let differ = differing(&saved.state, &input.target);
+            assert_eq!(path.changed, differ, "after action {action}");
+            assert_eq!(path.flags.is_empty(), differ.is_empty(), "{:?}", path.flags);
+        }
     }
 
     /// A save of version `v`, sealed, wrote a file: `v` is the saved one,
@@ -244,6 +262,7 @@ impl Run {
             len: 0,
             mtime: std::time::SystemTime::UNIX_EPOCH,
             tail: 0,
+            window: 0,
         };
         let rec = SaveRecord {
             strategy: StrategyKind::Rewrite,
@@ -630,6 +649,27 @@ impl Run {
         assert_eq!(drawn(d), ids, "a replay draws no ids");
         self.kinds
     }
+}
+
+/// Every slot `st` holds a value in.
+fn keys_of(st: &DocState) -> BTreeSet<Key> {
+    let mut keys = BTreeSet::from([Key::Order, Key::OutlineRoots, Key::Form, Key::Labels]);
+    for (id, _, _) in st.pages() {
+        keys.extend([Key::Page(id), Key::Geom(id), Key::PageAnnots(id)]);
+    }
+    keys.extend(st.annots().map(|(id, _)| Key::Annot(id)));
+    keys.extend((st.bookmarks_preorder().into_iter()).map(|(_, id, _)| Key::Bookmark(id)));
+    keys.extend(st.fields().map(|(id, _)| Key::Field(id)));
+    keys.extend(st.generators().keys().map(|&id| Key::Generator(id)));
+    keys
+}
+
+/// The slots whose values differ between `a` and `b`.
+fn differing(a: &DocState, b: &DocState) -> BTreeSet<Key> {
+    (keys_of(a).union(&keys_of(b)))
+        .filter(|k| !same(a.get(k).as_ref(), b.get(k).as_ref()))
+        .copied()
+        .collect()
 }
 
 /// Version `id` rebuilt from the opened version's state by the prims of

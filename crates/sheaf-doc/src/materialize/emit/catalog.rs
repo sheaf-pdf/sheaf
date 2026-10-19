@@ -10,8 +10,17 @@
 //! forms from other files bring document scripts, and `/Perms` without
 //! Reader's usage rights when the save drops them (`DropUr3`). The header
 //! gives the version (§11.7), so a Rewrite writes no `/Version`.
+//!
+//! An Append's catalog ([`appended`]) holds the keys the state doesn't own
+//! as the saved file holds them ([`RootValues`]), so a key a save dropped
+//! stays gone, and says `/Version`: the later of the file's and what the
+//! section needs.
+//!
+//! [`RootValues`]: crate::materialize::record::RootValues
 
 use lopdf::{Dictionary, Object};
+
+use super::PdfVersion;
 
 use super::Cx;
 use crate::materialize::copy::Scope;
@@ -78,5 +87,92 @@ pub(crate) fn catalog(cx: &mut Cx, order: &[PageId]) {
         let settings = crate::stamps::to_catalog(hf, order);
         out.set(crate::stamps::CATALOG_KEY, settings);
     }
+    cx.push(ObjKey::Catalog, Object::Dictionary(out));
+}
+
+/// What an Append's catalog names that its emission decided: the page
+/// tree's root, and the form, the outline and the document scripts when
+/// they were emitted (a reference, or None when there's none). One not
+/// emitted is the saved file's.
+pub(crate) struct Parts {
+    pub(crate) root: ObjKey,
+    pub(crate) form: Option<Option<Object>>,
+    pub(crate) outline: Option<Option<Object>>,
+    pub(crate) scripts: Option<Option<Object>>,
+}
+
+/// An Append's catalog, over `parts`: the saved file's keys the state
+/// doesn't own, `/Perms` without Reader's usage rights when the save drops
+/// them and `/Names` with the document scripts when they were emitted; the
+/// owned keys from the target state; and `/Version`, the later of the
+/// file's and what the section needs. `order` is the pages'.
+pub(crate) fn appended(cx: &mut Cx, order: &[PageId], parts: Parts) {
+    let record = cx.saved().expect("an Append");
+    let primary = cx.primary.clone();
+    let scope = Scope {
+        src: &primary,
+        copy: 0,
+    };
+    // Other files' document scripts that went leave the primary's names.
+    let restore = matches!(parts.scripts, Some(None));
+    let scripts = parts.scripts.flatten();
+    let mut out = Dictionary::new();
+    for (key, value) in record.roots.catalog.iter() {
+        let value = match key.as_slice() {
+            b"Perms" => match super::form::perms(cx, value) {
+                Some(perms) => perms,
+                None => continue,
+            },
+            b"Names" if restore => continue,
+            b"Names" if scripts.is_some() => {
+                let names = record.roots.names.clone().unwrap_or_default();
+                let mut out = Dictionary::new();
+                for (k, v) in names.iter().filter(|(k, _)| k.as_slice() != b"JavaScript") {
+                    let v = cx.sym(v, &scope);
+                    out.set(k.clone(), v);
+                }
+                out.set("JavaScript", scripts.clone().expect("scripts"));
+                Object::Dictionary(out)
+            }
+            _ => cx.sym(value, &scope),
+        };
+        out.set(key.clone(), value);
+    }
+    if let Some(scripts) = scripts.filter(|_| !record.roots.catalog.has(b"Names")) {
+        let mut names = Dictionary::new();
+        names.set("JavaScript", scripts);
+        out.set("Names", names);
+    }
+    let names = (primary.pdf().catalog().ok()).and_then(|c| c.get(b"Names").ok());
+    if let Some(names) = names.filter(|_| restore) {
+        let names = cx.sym(names, &scope);
+        out.set("Names", names);
+    }
+    out.set("Type", Object::Name(b"Catalog".to_vec()));
+    out.set("Pages", cx.placeholder(parts.root));
+    let st = &cx.input.target;
+    let outline = match parts.outline {
+        Some(outline) => outline,
+        None => (!st.outline_roots().is_empty()).then(|| cx.placeholder(ObjKey::OutlinesRoot)),
+    };
+    if let Some(root) = outline {
+        out.set("Outlines", root);
+    }
+    let form = match parts.form {
+        Some(form) => form,
+        None => (record.roots.acroform.is_some()).then(|| cx.placeholder(ObjKey::AcroForm)),
+    };
+    if let Some(form) = form {
+        out.set("AcroForm", form);
+    }
+    if st.label_ranges().is_some_and(|r| !r.is_empty()) {
+        out.set("PageLabels", cx.placeholder(ObjKey::Labels));
+    }
+    if let Some(hf) = st.header_footer() {
+        let settings = crate::stamps::to_catalog(hf, order);
+        out.set(crate::stamps::CATALOG_KEY, settings);
+    }
+    let version: PdfVersion = cx.version.max(record.pdf_version);
+    out.set("Version", Object::Name(version.to_string().into_bytes()));
     cx.push(ObjKey::Catalog, Object::Dictionary(out));
 }

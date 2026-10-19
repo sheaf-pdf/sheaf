@@ -46,19 +46,37 @@
 //!   encryption, so no string or stream went out in the clear, and an
 //!   object copied as its bytes were says what the checked graph says.
 //!
+//! On an Append's section ([`section`]):
+//! - **Copy-on-write**: an object is written over a number the saved file
+//!   uses only when it's the key the file's map numbers there, or the
+//!   primary object it is (a model-owned identity, §11.5), and no key of
+//!   the map stays at that number: none is but, for a field, the widget
+//!   merged with it now, a key the section writes elsewhere, or a record
+//!   the state saved no longer has.
+//! - **Every reference resolves**: to an object of the section, one the
+//!   saved file's map numbers, a number in use in the file, or the
+//!   encryption dictionary; or to a number the primary never used, the
+//!   input's damage.
+//! - **Forms**, as on a whole file, on the file with the section after it,
+//!   when the section writes any of the form ([`form`]).
+//! - **Reading back**, in debug builds: every object of the section reads
+//!   back from the file with it as written ([`reads_back_section`]).
+//!
 //! [`release_written`]: super::graph::release_written
 //! [`Graph::followed`]: super::graph::Graph::followed
 //!
 //! [`Emission::owned`]: super::emit::Emission::owned
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
 use super::graph::Graph;
 use super::key::ObjKey;
+use super::record::SaveRecord;
 use crate::forms::{Finding, Report};
+use crate::model::DocState;
 use crate::source::Source;
 
 /// The primary a Rewrite's graph was made over, as the checks see it.
@@ -86,7 +104,7 @@ pub(crate) fn graph(
 ) -> Result<()> {
     if stable {
         for (&at, &key) in &graph.keys {
-            if primary.in_use.contains(&at.0) && !root(key) && owned.get(&key) != Some(&at) {
+            if primary.in_use.contains(&at.0) && !key.is_root() && owned.get(&key) != Some(&at) {
                 bail!(
                     "{key:?} would be written over the file's object {} {}",
                     at.0,
@@ -241,22 +259,6 @@ pub(crate) fn links(
     Ok(())
 }
 
-/// Whether `key` is one of the file's root objects, which the state owns
-/// wherever they're numbered: the catalog, the page tree's nodes, the
-/// outline's root, the form, the page labels and the document
-/// information.
-fn root(key: ObjKey) -> bool {
-    matches!(
-        key,
-        ObjKey::Catalog
-            | ObjKey::PagesNode(_)
-            | ObjKey::OutlinesRoot
-            | ObjKey::AcroForm
-            | ObjKey::Labels
-            | ObjKey::Info
-    )
-}
-
 /// Each reference in `obj`, to `to`.
 fn refs(obj: &Object, to: &mut dyn FnMut(ObjectId)) {
     match obj {
@@ -334,24 +336,10 @@ pub(crate) struct Written<'a> {
 /// forms of `inputs` (each source the form's instances came from), when it
 /// has one; in debug builds, every object read back as it was written.
 pub(crate) fn output(out: &Written, graph: &Graph, inputs: &[&Source]) -> Result<()> {
-    let (bytes, password) = (out.bytes, out.password);
     let has_form = (graph.pdf.catalog().ok()).is_some_and(|c| c.has(b"AcroForm"));
     if has_form && out.form_changed {
-        let report = crate::forms::check(bytes, password)?;
-        let new = new_findings(&report, inputs);
-        if !new.is_empty() {
-            let mut kinds: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-            for (kind, item) in &new {
-                kinds.entry(kind).or_default().extend(*item);
-            }
-            let said: Vec<String> = (kinds.into_iter())
-                .map(|(kind, items)| match items.len() {
-                    0 => kind.to_string(),
-                    _ => format!("{kind} ({})", shown(&items)),
-                })
-                .collect();
-            bail!("the written form has {}", said.join(", "));
-        }
+        let report = crate::forms::check(out.bytes, out.password)?;
+        form(&report, inputs)?;
     }
     #[cfg(debug_assertions)]
     reads_back(out, graph).map_err(|e| match out.encrypted {
@@ -360,6 +348,169 @@ pub(crate) fn output(out: &Written, graph: &Graph, inputs: &[&Source]) -> Result
     })?;
     #[cfg(not(debug_assertions))]
     let _ = out.encrypted;
+    Ok(())
+}
+
+/// A written file's form, as `forms::check` found it (`report`), with
+/// nothing the forms of `inputs` (each source the form's instances came
+/// from) didn't have.
+pub(crate) fn form(report: &Report, inputs: &[&Source]) -> Result<()> {
+    let new = new_findings(report, inputs);
+    if new.is_empty() {
+        return Ok(());
+    }
+    let mut kinds: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (kind, item) in &new {
+        kinds.entry(kind).or_default().extend(*item);
+    }
+    let said: Vec<String> = (kinds.into_iter())
+        .map(|(kind, items)| match items.len() {
+            0 => kind.to_string(),
+            _ => format!("{kind} ({})", shown(&items)),
+        })
+        .collect();
+    bail!("the written form has {}", said.join(", "))
+}
+
+/// An Append's section, as the checks see it.
+pub(crate) struct Section<'a> {
+    /// Its objects, by where they're written, each with its key.
+    pub(crate) objects: &'a BTreeMap<ObjectId, (ObjKey, Object)>,
+    /// The saved file's.
+    pub(crate) record: &'a SaveRecord,
+    /// The keys written at the number of the primary's object they are.
+    pub(crate) owned: &'a BTreeMap<ObjKey, ObjectId>,
+    /// The first number given to a key new to the file.
+    pub(crate) start: u32,
+    /// The numbers the saved file's map has a key at.
+    pub(crate) mapped: &'a HashSet<u32>,
+    /// Each widget merged with its field, and the field: the map lists the
+    /// pair's object by either.
+    pub(crate) aliases: &'a [(ObjKey, ObjKey)],
+    /// The state saved.
+    pub(crate) target: &'a DocState,
+    /// Whether the primary used number `n`: a reference to one it never
+    /// did is its damage, which the section keeps.
+    pub(crate) used: &'a dyn Fn(u32) -> bool,
+}
+
+/// What [`section`] looks up of a section `s` that writes a primary object
+/// over a number its map lists another key at, found once.
+struct Moved<'a> {
+    /// The keys the section writes.
+    written: HashSet<&'a ObjKey>,
+    /// The map's keys at each number.
+    at: HashMap<ObjectId, Vec<&'a ObjKey>>,
+    /// The section's merged widgets, each with its field.
+    merged: HashSet<(ObjKey, ObjKey)>,
+}
+
+impl<'a> Moved<'a> {
+    fn new(s: &Section<'a>) -> Moved<'a> {
+        let mut at: HashMap<ObjectId, Vec<&ObjKey>> = HashMap::new();
+        for (k, &n) in &s.record.map.keys {
+            at.entry(n).or_default().push(k);
+        }
+        Moved {
+            written: s.objects.values().map(|(k, _)| k).collect(),
+            at,
+            merged: s.aliases.iter().copied().collect(),
+        }
+    }
+
+    /// Whether every key the saved file's map has at `at`, where the
+    /// section writes `key`, the primary object it is, has gone from there:
+    /// the widget merged with `key`, a field, now (the field's object, which
+    /// the map lists by its widget alone), a key the section writes
+    /// elsewhere, or a record `target` no longer holds.
+    fn from(&self, key: &ObjKey, at: ObjectId, target: &DocState) -> bool {
+        (self.at.get(&at).into_iter().flatten()).all(|k| {
+            self.merged.contains(&(**k, *key)) || self.written.contains(k) || !holds(target, k)
+        })
+    }
+}
+
+/// Whether `st` holds `key`'s record: false only for an annotation, a
+/// field or a page it no longer has.
+fn holds(st: &DocState, key: &ObjKey) -> bool {
+    match *key {
+        ObjKey::Annot(a) | ObjKey::AnnotPart(a, _) => st.annot(a).is_some(),
+        ObjKey::Field(f) => st.field(f).is_some(),
+        ObjKey::Page(p) => st.def(p).is_some(),
+        _ => true,
+    }
+}
+
+/// An Append's section: copy-on-write against the saved file, and every
+/// reference resolved.
+pub(crate) fn section(s: &Section) -> Result<()> {
+    let map = &s.record.map;
+    let mut moved = None;
+    for (&at, (key, _)) in s.objects {
+        if at.0 >= s.start || map.keys.get(key) == Some(&at) {
+            continue;
+        }
+        let owned = key.of_state()
+            && s.owned.get(key) == Some(&at)
+            && (!s.mapped.contains(&at.0)
+                || moved
+                    .get_or_insert_with(|| Moved::new(s))
+                    .from(key, at, s.target));
+        if !owned {
+            bail!(
+                "{key:?} would be written over the file's object {} {}",
+                at.0,
+                at.1
+            );
+        }
+    }
+    let encrypt = s.record.crypt.as_ref().map(|c| c.at());
+    let resolves = |r: ObjectId| {
+        s.objects.contains_key(&r)
+            || s.mapped.contains(&r.0)
+            || s.record.present.contains(r.0)
+            || Some(r) == encrypt
+            || !(s.used)(r.0)
+    };
+    for (&id, (_, obj)) in s.objects {
+        let mut dangling = None;
+        refs(obj, &mut |r| {
+            if dangling.is_none() && !resolves(r) {
+                dangling = Some(r);
+            }
+        });
+        if let Some(r) = dangling {
+            bail!(
+                "object {} {} refers to {} {}, which neither the section nor the file has",
+                id.0,
+                id.1,
+                r.0,
+                r.1
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Every object of `objects`, an Append's section, read back as written
+/// from `file`, the saved file with the section after it, read with
+/// `password`: an object that reads otherwise went out unencrypted or
+/// encrypted wrong.
+#[cfg(debug_assertions)]
+pub(crate) fn reads_back_section(
+    file: impl lopdf::ByteSource + 'static,
+    password: Option<&str>,
+    objects: &BTreeMap<ObjectId, (ObjKey, Object)>,
+) -> Result<()> {
+    let read = lopdf::LazyPdf::open(file, password, &crate::source::Limits::DEFAULT.reader)?;
+    for (&id, (_, obj)) in objects {
+        let Ok(back) = read.object_unkept(id) else {
+            bail!("object {} {} doesn't read back", id.0, id.1);
+        };
+        if !plain_eq(obj, &back, false) {
+            bail!("object {} {} reads back otherwise", id.0, id.1);
+        }
+    }
     Ok(())
 }
 
@@ -518,5 +669,97 @@ fn plain_eq(a: &Object, b: &Object, deferred: bool) -> bool {
             *x as f64 == *y
         }
         (x, y) => x == y,
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+    use crate::annot::AnnotId;
+    use crate::forms::fixture::{Form, row};
+    use crate::materialize::removal_tests::{note, opened, scratch};
+    use crate::model::Edit;
+
+    /// The keys of a one-page form's text field, its widget, merged with
+    /// it, and a comment beside them; and the form's state.
+    fn form() -> ([ObjKey; 3], DocState) {
+        let dir = scratch();
+        let mut f = Form::new(1);
+        f.text("t", 0, row(0));
+        let (_, mut doc) = opened(&dir, "a.pdf", &f.bytes());
+        let _ = std::fs::remove_dir_all(&dir);
+        let page = doc.page(0).unwrap();
+        let add = Edit::AnnotAdd {
+            page,
+            annot: note("a comment"),
+        };
+        doc.apply(add, "add").unwrap();
+        let st = doc.state().clone();
+        let (field, _, term) = st.terminals().next().unwrap();
+        let widget = term.widgets[0];
+        let comment = st.marks_on(page).next().unwrap().id;
+        let keys = [
+            ObjKey::Field(field),
+            ObjKey::Annot(widget),
+            ObjKey::Annot(comment),
+        ];
+        (keys, st)
+    }
+
+    /// Whether a section writing `key` alone at `at`, the primary object
+    /// it is, passes copy-on-write over a file whose map lists `listed` at
+    /// `at` too, `aliases` the section's merged widgets.
+    fn passes(
+        key: ObjKey,
+        listed: &[ObjKey],
+        aliases: &[(ObjKey, ObjKey)],
+        target: &DocState,
+    ) -> bool {
+        let dir = scratch();
+        let (_, doc) = opened(&dir, "a.pdf", &Form::new(1).bytes());
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut record = SaveRecord::clone(doc.saved_record().unwrap());
+        let at = ObjectId::from((40, 0));
+        let map = std::sync::Arc::make_mut(&mut record.map);
+        for &k in listed {
+            map.keys.insert(k, at);
+        }
+        let objects = BTreeMap::from([(at, (key, Object::Null))]);
+        let owned = BTreeMap::from([(key, at)]);
+        let mapped = HashSet::from([at.0]);
+        section(&Section {
+            objects: &objects,
+            record: &record,
+            owned: &owned,
+            start: 100,
+            mapped: &mapped,
+            aliases,
+            target,
+            used: &|_| true,
+        })
+        .is_ok()
+    }
+
+    /// A key the map numbers where the section writes it passes as it is,
+    /// whatever else the map has there.
+    #[test]
+    fn a_key_written_over_its_own_number_passes() {
+        let ([field, _, comment], st) = form();
+        assert!(passes(field, &[field], &[], &st));
+        assert!(passes(field, &[field, comment], &[], &st));
+    }
+
+    /// A field written at its own number, which the map lists by its
+    /// widget, passes while the widget is merged with it, or once the
+    /// widget is gone; a comment the map has there, or a widget no longer
+    /// merged with it, would be overwritten, and is refused.
+    #[test]
+    fn only_the_field_s_merged_widget_may_stay_at_its_number() {
+        let ([field, widget, comment], st) = form();
+        let merged = [(widget, field)];
+        assert!(passes(field, &[widget], &merged, &st));
+        assert!(passes(field, &[ObjKey::Annot(AnnotId(1))], &[], &st));
+        assert!(!passes(field, &[comment], &merged, &st));
+        assert!(!passes(field, &[widget], &[], &st));
     }
 }

@@ -291,17 +291,15 @@ fn a_font_of_the_same_name_comes_in_renamed_by(how: How) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Save `doc` in place as the app does, by an Append when `appended`:
-/// how it was written. The document shows what it did.
+/// Save `doc` in place by a Rewrite, or by an Append when `appended`,
+/// whatever the plan would decide: how it was written. The document shows
+/// what it did.
 fn save_in_place(doc: &mut Document, path: &Path, appended: bool) -> StrategyKind {
     let report = match appended {
         true => sheaf_doc::materialize::save_appended(doc, path),
-        false => {
-            let answers = sheaf_doc::materialize::AskAnswers::default();
-            sheaf_doc::materialize::save(doc, path, &answers, &sheaf_ops::NoProgress)
-        }
+        false => sheaf_doc::materialize::save_rewritten(doc, path),
     };
-    report.unwrap().strategy
+    report.unwrap().strategy.expect("the file was written")
 }
 
 sheaf_doc::both_ways!(
@@ -349,7 +347,6 @@ fn saving_twice_writes_each_field_once() {
 }
 
 #[test]
-#[ignore = "slice 10"]
 fn saving_twice_writes_each_field_once_appended() {
     saved_twice(true);
 }
@@ -380,7 +377,8 @@ fn saved_twice(appended: bool) {
     .unwrap();
     let copy = dir.join("rewritten.pdf");
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &copy).unwrap();
-    assert_eq!(save_in_place(&mut doc, &path, false), StrategyKind::Rewrite);
+    // A turn removes nothing: the plan appends it.
+    assert_eq!(planned(&mut doc, &path).0, StrategyKind::Append);
     for (what, at) in [("rewritten", &copy), ("in place", &path)] {
         let report = clean(&std::fs::read(at).unwrap(), what);
         assert_eq!((report.fields, report.widgets), (5, 6), "{what}");
@@ -478,7 +476,7 @@ fn replaced_pages_bring_their_form_by(how: How) {
     // Written first: saving in place changes the file an Append reads.
     let written = (how.strategy(), written(&doc, how));
     // In place, it's a Rewrite: a page is gone (M9 bug 14).
-    let in_place = saved(&mut doc, &a, How::Rewritten);
+    let in_place = planned(&mut doc, &a);
     assert_eq!(in_place.0, StrategyKind::Rewrite);
     for (strategy, bytes) in [written, in_place] {
         let what = format!("{strategy:?}");
