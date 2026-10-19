@@ -178,14 +178,8 @@ impl Closure {
             return to.map_or(Object::Null, |key| syms.placeholder(key));
         }
         if is_page_node(pdf, r) {
-            let page = (self.pages.get(&(blob, r, scope.copy))).or_else(|| {
-                self.pages
-                    .range((blob, r, 0)..=(blob, r, u32::MAX))
-                    .next()
-                    .map(|(_, p)| p)
-            });
-            return match page {
-                Some(&page) => syms.placeholder(ObjKey::Page(page)),
+            return match page_named(&self.pages, blob, r, scope.copy) {
+                Some(page) => syms.placeholder(ObjKey::Page(page)),
                 None => Object::Null,
             };
         }
@@ -247,6 +241,27 @@ impl Closure {
     }
 }
 
+/// The page of `pages` (the pages written, by their source's blob, their
+/// object and their copy) a reference to page `page` of `blob`, read as
+/// `copy` of it, names: the page written as that copy, else as its lowest
+/// copy written; None when no copy is. What [`Closure::sym`] writes for
+/// one, but from the primary's copy 0, whose references are its own
+/// objects' numbers.
+pub(crate) fn page_named(
+    pages: &BTreeMap<(BlobId, ObjectId, u32), PageId>,
+    blob: BlobId,
+    page: ObjectId,
+    copy: u32,
+) -> Option<PageId> {
+    (pages.get(&(blob, page, copy)))
+        .or_else(|| {
+            (pages.range((blob, page, 0)..=(blob, page, u32::MAX)))
+                .next()
+                .map(|(_, p)| p)
+        })
+        .copied()
+}
+
 /// What a copy's reference to each of `pdf`'s document-level objects is:
 /// its catalog the written catalog, its form the written form (null when
 /// the file has none); its page tree's root, outline, structure tree, name
@@ -254,7 +269,7 @@ impl Closure {
 /// and its information dictionary, null. The written file has its own of
 /// each, and a copy of one would bring its file's whole structure along.
 /// Any other dictionary typed `/Catalog` is the written catalog too.
-fn document_level(pdf: &lopdf::LazyPdf) -> HashMap<ObjectId, Option<ObjKey>> {
+pub(crate) fn document_level(pdf: &lopdf::LazyPdf) -> HashMap<ObjectId, Option<ObjKey>> {
     let mut out = HashMap::new();
     let trailer = pdf.trailer();
     if let Ok(info) = trailer.get(b"Info").and_then(Object::as_reference) {

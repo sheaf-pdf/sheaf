@@ -101,8 +101,9 @@ pub enum Why {
     ReplacesText(Vec<Removed>),
     /// The Append refers to objects the saved file hasn't got (§9.1's
     /// `present`): a Rewrite pruned them, a form instance's objects in it
-    /// are another instance's now (until slice 11), or a primary object's
-    /// place in it is another record's of that object now.
+    /// are another instance's now (until slice 11), a primary object's
+    /// place in it is another record's of that object now, or what it has
+    /// names a page that's another page now.
     BaseObjectsMissing,
     /// A save transform an Append can't carry (§11.8): dropping an XFA part
     /// whose datasets hold values the save replaced, which would stay in
@@ -254,26 +255,41 @@ pub struct AskAnswers {
     pub append_anyway: bool,
     /// And what the offer said stays readable in the earlier revision
     /// may, when it said anything: the removal check reports what it
-    /// finds rather than stopping the Append. An offer that said nothing
-    /// stays readable is answered without it, and the removal check, which
-    /// finds what the save's path didn't say, asks again.
+    /// finds of that rather than stopping the Append. An offer that said
+    /// nothing stays readable is answered without it, and the removal
+    /// check, which finds what the save's path didn't say, asks again.
     pub stays_readable: bool,
+    /// And what the removal check found, when the offer said that stays
+    /// readable too ([`RemovedKind::Found`]): it reports whatever it
+    /// finds. Without it, what it finds of a derived object that the
+    /// save's path didn't say removes text is a misclassification, which
+    /// stops the Append and asks again, saying so (§11.9).
+    pub found: bool,
     /// Drop XFA that holds values ([`Ask::XfaHoldsValues`]).
     pub drop_xfa_values: bool,
 }
 
 impl AskAnswers {
     /// The Append anyway `offer` offers, taken: what it says stays
-    /// readable, when it says anything, may.
+    /// readable, when it says anything, may, and what the removal check
+    /// found, when it says so.
     pub fn take(&mut self, offer: &AppendAnyway) {
         self.append_anyway = true;
         self.stays_readable |= !offer.stays_readable.is_empty();
+        self.found |= finds(offer);
     }
 
     /// Whether these answers take the Append anyway `offer` offers.
     fn takes(&self, offer: &AppendAnyway) -> bool {
-        self.append_anyway && (self.stays_readable || offer.stays_readable.is_empty())
+        self.append_anyway
+            && (self.stays_readable || offer.stays_readable.is_empty())
+            && (self.found || !finds(offer))
     }
+}
+
+/// Whether `offer` says text the removal check found stays readable.
+fn finds(offer: &AppendAnyway) -> bool {
+    (offer.stays_readable.iter()).any(|r| r.kind == RemovedKind::Found)
 }
 
 /// Where a save writes, and how ([`Document::save_target`] says for a

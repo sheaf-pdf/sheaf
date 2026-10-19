@@ -18,7 +18,9 @@
 //!   other is numbered past every number the file uses, its `/Size`, its
 //!   cross-reference streams' and its map's (slice 2's 5801985: an object
 //!   numbered at the base's cross-reference stream's number was read as
-//!   it), the section's own cross-reference stream after them.
+//!   it), and past every primary number the section names, as the stable
+//!   numbering is, so a reference to one that nothing is stays one; the
+//!   section's own cross-reference stream after them.
 //!
 //! No number is kept, or given, past what a file may use
 //! ([`NUMBERS`](crate::serialize::NUMBERS), Annex C's 8,388,607): a primary
@@ -34,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use anyhow::{Result, bail};
 use lopdf::{Document as Pdf, Object, ObjectId};
 
+use super::append::Refused;
 use super::emit::Emission;
 use super::key::ObjKey;
 use super::record::{ObjMap, SaveRecord};
@@ -182,7 +185,8 @@ pub fn stable(
 pub struct Appended {
     /// Each emitted key's number.
     pub by_key: HashMap<ObjKey, ObjectId>,
-    /// The first number given to a key new to the file.
+    /// The first number given to a key new to the file: past every number
+    /// the file uses and every primary number the section names.
     pub start: u32,
     /// The section's cross-reference stream's number, past them all.
     pub xref: u32,
@@ -191,10 +195,22 @@ pub struct Appended {
 /// The numbers an Append of `e` onto the file `record` says writes its
 /// objects at: each key the file's map has at its number there, each the
 /// emission says is a primary object ([`Emission::owned`]) at its own, and
-/// the rest from past every number the file uses, the pages in order, then
-/// the rest by key, and the section's cross-reference stream after them.
-/// An error when no numbers are left for them.
-pub fn appended(e: &Emission, record: &SaveRecord) -> Result<Appended> {
+/// the rest from past every number the file uses and every primary number
+/// the section names, the pages in order, then the rest by key, and the
+/// section's cross-reference stream after them. What it names is what its
+/// placeholders name and `raw`, what the primary's objects it writes as
+/// the file has them refer to: a reference to a number that nothing is
+/// (the input's damage, which the section keeps) stays one, as a
+/// Rewrite's does ([`stable`]). An error when no numbers are left for
+/// them; refused ([`Refused::Unsound`]) when only the numbers it names
+/// leave too few, so the save is a Rewrite, which numbers it for itself
+/// and stops too when its own numbering runs out as well (a reference to
+/// a number next to the last a file may use: nothing can be saved).
+pub fn appended(
+    e: &Emission,
+    record: &SaveRecord,
+    raw: impl IntoIterator<Item = ObjectId>,
+) -> Result<Appended> {
     let mut by_key = HashMap::new();
     let mut taken = HashSet::new();
     let mut pages = Vec::new();
@@ -218,7 +234,7 @@ pub fn appended(e: &Emission, record: &SaveRecord) -> Result<Appended> {
         }
     }
     let xref = &record.xref;
-    let start = [
+    let used = [
         1,
         xref.size,
         xref.max_stream.map_or(0, |n| n.saturating_add(1)),
@@ -229,8 +245,23 @@ pub fn appended(e: &Emission, record: &SaveRecord) -> Result<Appended> {
     .max()
     .unwrap_or(1);
     let needed = (pages.len() + fresh.len()) as u64 + 1;
-    if u64::from(start) + needed > u64::from(NUMBERS) {
+    if u64::from(used) + needed > u64::from(NUMBERS) {
         bail!("no object number left for an update");
+    }
+    // Past every primary number the section names, as the stable
+    // numbering's `named` is (none past what a file may use): copy 0 of
+    // the file's own blob, what's written at a primary object's number,
+    // and what the primary's objects written as they are refer to.
+    let own = |key: &ObjKey| match *key {
+        ObjKey::Base { blob, obj, copy: 0 } if record.map.identity == Some(blob) => Some(obj),
+        key => e.owned.get(&key).copied(),
+    };
+    let keys = (e.objects.iter().map(|(key, _)| key)).chain(e.syms.keys());
+    let named = past((keys.filter_map(own).chain(raw)).filter(|id| id.0 < NUMBERS));
+    let start = used.max(named);
+    if u64::from(start) + needed > u64::from(NUMBERS) {
+        let why = "too few object numbers are left past those its objects name";
+        return Err(Refused::Unsound(why.into()).into());
     }
     let mut next = start;
     for key in pages.into_iter().chain(fresh) {

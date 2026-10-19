@@ -56,7 +56,8 @@
 //! - **Every reference resolves**: to an object of the section, one the
 //!   saved file's map numbers, a number in use in the file, or the
 //!   encryption dictionary; or to a number the primary never used, the
-//!   input's damage.
+//!   input's damage, but none the section gave (at or past its first new
+//!   number, which is past every primary number it names).
 //! - **Forms**, as on a whole file, on the file with the section after it,
 //!   when the section writes any of the form ([`form`]).
 //! - **Reading back**, in debug builds: every object of the section reads
@@ -380,7 +381,8 @@ pub(crate) struct Section<'a> {
     pub(crate) record: &'a SaveRecord,
     /// The keys written at the number of the primary's object they are.
     pub(crate) owned: &'a BTreeMap<ObjKey, ObjectId>,
-    /// The first number given to a key new to the file.
+    /// The first number given to a key new to the file: past every number
+    /// the file uses and every primary number the section names.
     pub(crate) start: u32,
     /// The numbers the saved file's map has a key at.
     pub(crate) mapped: &'a HashSet<u32>,
@@ -465,12 +467,17 @@ pub(crate) fn section(s: &Section) -> Result<()> {
         }
     }
     let encrypt = s.record.crypt.as_ref().map(|c| c.at());
+    // A number the section gave, which it writes: its new numbers start
+    // past every number the file uses and every primary number it names,
+    // so a reference at or past them to what it doesn't write is lost, as
+    // the Rewrite's `given` is ([`links`]). None past what a file may use
+    // is given.
+    let given = |n: u32| n >= s.start && n < crate::serialize::NUMBERS;
     let resolves = |r: ObjectId| {
         s.objects.contains_key(&r)
-            || s.mapped.contains(&r.0)
-            || s.record.present.contains(r.0)
             || Some(r) == encrypt
-            || !(s.used)(r.0)
+            || (!given(r.0)
+                && (s.mapped.contains(&r.0) || s.record.present.contains(r.0) || !(s.used)(r.0)))
     };
     for (&id, (_, obj)) in s.objects {
         let mut dangling = None;
@@ -761,5 +768,45 @@ mod section_tests {
         assert!(passes(field, &[ObjKey::Annot(AnnotId(1))], &[], &st));
         assert!(!passes(field, &[comment], &merged, &st));
         assert!(!passes(field, &[widget], &[], &st));
+    }
+
+    /// Whether a section writing one new object at 100 0, its first new
+    /// number, that refers to `to`, passes over a one-page file.
+    fn refers(to: ObjectId) -> bool {
+        let dir = scratch();
+        let (_, doc) = opened(&dir, "a.pdf", &Form::new(1).bytes());
+        let _ = std::fs::remove_dir_all(&dir);
+        let record = doc.saved_record().unwrap();
+        assert!(record.xref.size < 100);
+        let at = ObjectId::from((100, 0));
+        let obj = Object::Dictionary(lopdf::dictionary! { "A" => to });
+        let objects = BTreeMap::from([(at, (ObjKey::Annot(AnnotId(7)), obj))]);
+        let mapped = (record.map.keys.values()).map(|id| id.0).collect();
+        let used = |n: u32| record.present.contains(n);
+        section(&Section {
+            objects: &objects,
+            record,
+            owned: &BTreeMap::new(),
+            start: 100,
+            mapped: &mapped,
+            aliases: &[],
+            target: doc.state(),
+            used: &used,
+        })
+        .is_ok()
+    }
+
+    /// A reference to a number the section gave that it doesn't write is
+    /// lost, though the primary never used it, as the Rewrite's is (review
+    /// finding 5, after the commit): before the first new number, that's
+    /// the input's damage, and passes, as one to what the section writes,
+    /// or past what a file may use, does.
+    #[test]
+    fn a_reference_to_a_number_the_section_gave_and_doesn_t_write_fails() {
+        assert!(!refers((101, 0)));
+        assert!(!refers((100, 3)));
+        assert!(refers((100, 0)));
+        assert!(refers((99, 0)));
+        assert!(refers((crate::serialize::NUMBERS, 0)));
     }
 }

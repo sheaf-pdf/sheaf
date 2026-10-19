@@ -231,6 +231,11 @@ pub struct PathEffects {
     /// The slots whose values differ: none when the state being saved is
     /// the saved one.
     pub changed: BTreeSet<Key>,
+    /// The slots whose change removes or replaces text, each with which
+    /// (`REMOVES`, `REPLACES_TEXT`): what `removed` counts, slot by slot.
+    /// What the removal check tells an Append anyway's listed removals by
+    /// from what the planner missed (§11.9).
+    pub removing: BTreeMap<Key, Flags>,
 }
 
 /// What [`classify`] judges a change against: the saved file's state, and
@@ -311,6 +316,10 @@ pub fn judge(saved: &DocState, target: &DocState, keys: &BTreeSet<Key>) -> PathE
         path.flags |= e.flags;
         path.sig |= e.sig;
         path.changed.insert(*key);
+        let text = e.flags & (Flags::REMOVES | Flags::REPLACES_TEXT);
+        if !text.is_empty() {
+            path.removing.insert(*key, text);
+        }
         touched_fields(key, before, after, &cx, &mut path.fields);
     }
     path.removed = (found.removed.into_iter())

@@ -5,8 +5,10 @@
 //! fresh Rewrite of the same state does. What's compared ([`Reopened`]):
 //! the pages in order, each with its boxes, its content and resources by
 //! value, and its annotations by name, with what they say and where links
-//! go; the outline; the page labels; the field tree and values; the form's
-//! own keys and whether it has an XFA part; and the header and footer.
+//! and widgets' actions go, and where each annotation that goes somewhere
+//! goes, the records' or not; the outline; the page labels; the field tree
+//! and values; the form's own keys and whether it has an XFA part; the
+//! header and footer; and where the open action goes.
 //!
 //! Over `Edit`s until slice 11 ports it to `Op`, with fixed cases beside it:
 //! labels moved with their first page, links to pages a later Append
@@ -17,7 +19,10 @@
 //! widgets or written over them, save policy's XFA drop applied and taken
 //! back, a header's pages and the labels after a delete, a primary
 //! object's place taken by another record of it, and a comment made
-//! editable on a copy.
+//! editable on a copy. And for the gaps slice 10's review found: a crop's
+//! copy made the page's copy 0 by a move, and a copy's action, inline
+//! link or screen annotation going to a page brought in or duplicated
+//! after it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,7 +31,9 @@ use in_progress::NoProgress;
 use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use proptest::prelude::*;
 
+use super::append::Refused;
 use super::plan::{Onto, Strategy, forced_append};
+use super::removal::Mode;
 use super::removal_tests::scratch;
 use super::{
     AskAnswers, How, ObjKey, SaveReport, StrategyKind, Why, materialize, plan, removal, save,
@@ -51,17 +58,47 @@ fn link_to(f: &mut Form, link: ObjectId, to: usize) {
     f.dict(link).set("Dest", vec![to.into(), "Fit".into()]);
 }
 
+/// [`every_kind`]'s push button, on the second page of `f`, its action a
+/// GoTo of its own to page `to`.
+fn button_to(f: &mut Form, to: usize) {
+    let named = |d: &Dictionary| d.get(b"T").and_then(Object::as_str).ok() == Some(b"print[0]");
+    let button = (f.annots(1).into_iter())
+        .find(|&w| f.pdf.get_dictionary(w).is_ok_and(named))
+        .expect("the push button");
+    let to = f.pages[to];
+    let action = f.pdf.add_object(dictionary! {
+        "S" => "GoTo", "D" => vec![to.into(), "Fit".into()],
+    });
+    f.dict(button).set("A", action);
+}
+
 /// The files a run saves: the document's, six pages with [`every_kind`]'s
-/// form on the first two, with an XFA part when `xfa` (which a change to
-/// the form drops, so a save rewrites), other tools' annotations on each
-/// page ([`with_theirs`]), each page's link going two pages on, and
-/// bookmarks to its first and fourth pages; and the form whose pages come
-/// in, its two pages' links to each other.
+/// form on the first two, its push button going to the sixth page, with an
+/// XFA part when `xfa` (which a change to the form drops, so a save
+/// rewrites), other tools' annotations on each page ([`with_theirs`]),
+/// each page's link going two pages on, and bookmarks to its first and
+/// fourth pages; and the form whose pages come in, its two pages' links
+/// to each other and its push button going to its first page. The fixed
+/// cases' document, which has no open action ([`files_opening`]).
 fn files(xfa: bool) -> (Vec<u8>, Vec<u8>) {
+    files_opening(xfa, false)
+}
+
+/// [`files`], the document's open action going to its second page when
+/// `open` (the property's: the fixed cases that append a page's delete,
+/// replacement or rebase, which would leave the open action naming a page
+/// outside the tree, are refused for it, slice 10's review).
+fn files_opening(xfa: bool, open: bool) -> (Vec<u8>, Vec<u8>) {
     let mut f = every_kind_in(6);
     for page in 0..6 {
         let link = with_theirs(&mut f, page, ["theirs-1", "theirs-2"][page % 2]);
         link_to(&mut f, link, (page + 2) % 6);
+    }
+    button_to(&mut f, 5);
+    if open {
+        let (catalog, to) = (f.catalog, f.pages[1]);
+        f.dict(catalog)
+            .set("OpenAction", vec![to.into(), "Fit".into()]);
     }
     if xfa {
         f.xfa();
@@ -82,6 +119,7 @@ fn files(xfa: bool) -> (Vec<u8>, Vec<u8>) {
         let link = with_theirs(&mut other, page, ["theirs-1", "theirs-2"][page]);
         link_to(&mut other, link, 1 - page);
     }
+    button_to(&mut other, 0);
     (f.bytes(), other.bytes())
 }
 
@@ -99,8 +137,9 @@ enum Dest {
 enum AnnotSays {
     Mark(Box<Annot>),
     Foreign(Box<ForeignAnnot>, Option<Dest>),
-    /// A widget: its field's full name, and what it is beside it.
-    Widget(String, String),
+    /// A widget: its field's full name, what it is beside it, and where
+    /// its action goes.
+    Widget(String, String, Option<Dest>),
 }
 
 /// A page, as a file reopened holds it.
@@ -112,6 +151,11 @@ struct PageSays {
     /// Its resources, references followed.
     resources: String,
     annots: Vec<AnnotSays>,
+    /// Where each entry of its `/Annots` that goes somewhere goes, by its
+    /// subtype, in order: the records' and those the records don't hold
+    /// (a screen's action), a dictionary written straight into the array
+    /// among them.
+    goes: Vec<(String, Dest)>,
 }
 
 /// A bookmark: its depth, title, the place of the page it goes to and
@@ -155,6 +199,8 @@ struct Reopened {
     form: (Vec<String>, Option<Arc<str>>, u8, bool, i64, XfaState),
     /// The header and footer, and the places of the pages it's on.
     header: Option<(HeaderFooter, Option<Vec<usize>>)>,
+    /// Where the catalog's `/OpenAction` goes, when it has one.
+    open: Option<Dest>,
 }
 
 /// `o` of `pdf` written out by value, references followed `depth` deep,
@@ -196,7 +242,12 @@ fn decoded(s: &Stream) -> String {
 
 /// Where the link `id` of `pdf`, among `pages`, goes.
 fn dest(pdf: &LazyPdf, id: ObjectId, pages: &[ObjectId]) -> Option<Dest> {
-    let link = pdf.get_dictionary(id).ok()?;
+    dest_of(pdf, pdf.get_dictionary(id).ok()?, pages)
+}
+
+/// Where `link`, an annotation of `pdf` (a link, or one with an action),
+/// among `pages`, goes: its `/Dest`, or its action's `/D`.
+fn dest_of(pdf: &LazyPdf, link: &Dictionary, pages: &[ObjectId]) -> Option<Dest> {
     let dest = match link.get(b"Dest") {
         Ok(dest) => dest,
         Err(_) => {
@@ -238,18 +289,40 @@ fn reopened(path: &Path) -> Reopened {
                 .collect();
             let resources =
                 (facts.resources.as_deref()).map_or_else(String::new, |r| canon(pdf, r, 8));
+            // The page's `/Annots`, as its file has it.
+            let listed: &[Object] = (pdf.get_dictionary(facts.id).ok())
+                .and_then(|d| d.get(b"Annots").ok())
+                .and_then(|a| pdf.dereference(a).ok())
+                .and_then(|(_, a)| a.as_array().ok())
+                .map_or(&[], Vec::as_slice);
             let annots = (st.annots_on(id))
                 .map(|(_, rec)| match &rec.body {
                     AnnotBody::Mark(m) => AnnotSays::Mark(Box::new(m.annot.clone())),
                     AnnotBody::Foreign(f) => {
-                        let to = (f.src.as_ref()).and_then(|r| dest(r.src.pdf(), r.id, &ids));
+                        let to = match &f.src {
+                            Some(r) => dest(r.src.pdf(), r.id, &ids),
+                            // Written straight into `/Annots`.
+                            None => (listed.get(f.summary.slot))
+                                .and_then(|e| e.as_dict().ok())
+                                .and_then(|d| dest_of(pdf, d, &ids)),
+                        };
                         AnnotSays::Foreign(Box::new((*f.summary).clone()), to)
                     }
                     AnnotBody::Widget(w) => {
                         let field = st.full_name(w.field).unwrap_or_default();
                         let says = (w.merged, w.rect, w.flags, &w.mk, &w.da, &w.state, &w.states);
-                        AnnotSays::Widget(field, format!("{says:?} {:?}", w.props))
+                        let to = (w.src.as_ref()).and_then(|r| dest(r.src.pdf(), r.id, &ids));
+                        AnnotSays::Widget(field, format!("{says:?} {:?}", w.props), to)
                     }
+                })
+                .collect();
+            let goes = (listed.iter())
+                .filter_map(|e| {
+                    let d = pdf.dereference(e).ok()?.1.as_dict().ok()?;
+                    let subtype = (d.get(b"Subtype").ok())
+                        .and_then(|s| s.as_name().ok())
+                        .map(|s| String::from_utf8_lossy(s).into_owned());
+                    Some((subtype.unwrap_or_default(), dest_of(pdf, d, &ids)?))
                 })
                 .collect();
             PageSays {
@@ -257,6 +330,7 @@ fn reopened(path: &Path) -> Reopened {
                 content,
                 resources,
                 annots,
+                goes,
             }
         })
         .collect();
@@ -321,7 +395,22 @@ fn reopened(path: &Path) -> Reopened {
             form.xfa,
         ),
         header,
+        open: opened_at(&opened.doc),
     }
+}
+
+/// Where `doc`'s file's catalog's `/OpenAction`, an explicit destination
+/// or an action, goes among its pages.
+fn opened_at(doc: &Document) -> Option<Dest> {
+    let src = &doc.source(doc.primary())?.src;
+    let pdf = src.pdf();
+    let open = pdf.catalog().ok()?.get(b"OpenAction").ok()?;
+    let as_link = match pdf.dereference(open).ok()?.1 {
+        Object::Array(_) => dictionary! { "Dest" => open.clone() },
+        _ => dictionary! { "A" => open.clone() },
+    };
+    let pages: Vec<ObjectId> = src.page_ids().collect();
+    dest_of(pdf, &as_link, &pages)
 }
 
 /// The file `doc` just saved reopens as a fresh Rewrite of its state does,
@@ -366,7 +455,7 @@ fn differences(saved: &Reopened, fresh: &Reopened) -> Vec<String> {
                     .map(|a| match a {
                         AnnotSays::Mark(m) => format!("mark {}", m.name()),
                         AnnotSays::Foreign(f, to) => format!("{} {} {to:?}", f.subtype, f.name),
-                        AnnotSays::Widget(field, _) => format!("widget {field}"),
+                        AnnotSays::Widget(field, ..) => format!("widget {field}"),
                     })
                     .collect()
             };
@@ -380,6 +469,7 @@ fn differences(saved: &Reopened, fresh: &Reopened) -> Vec<String> {
         for (j, (x, y)) in a.annots.iter().zip(&b.annots).enumerate() {
             part(format!("page {i}'s annotation {j}"), x, y);
         }
+        part(format!("where page {i}'s annotations go"), &a.goes, &b.goes);
     }
     for (name, a, b) in [
         ("bookmark", list(&saved.outline), list(&fresh.outline)),
@@ -394,6 +484,7 @@ fn differences(saved: &Reopened, fresh: &Reopened) -> Vec<String> {
     part("labels".into(), &saved.labels, &fresh.labels);
     part("form".into(), &saved.form, &fresh.form);
     part("header".into(), &saved.header, &fresh.header);
+    part("the open action".into(), &saved.open, &fresh.open);
     out
 }
 
@@ -459,6 +550,7 @@ fn forced(doc: &mut Document, path: &Path) -> Strategy {
     let answers = AskAnswers {
         append_anyway: true,
         stays_readable: true,
+        found: true,
         ..answers()
     };
     match write_file(&input, &plan, target, &answers, &NoProgress) {
@@ -487,7 +579,7 @@ fn run(xfa: bool, actions: &[(u8, u64)]) {
     // Mark ids come from the thread's generator: the same ones each run.
     fastrand::seed(1);
     let dir = scratch();
-    let (primary, other) = files(xfa);
+    let (primary, other) = files_opening(xfa, true);
     let a = dir.join("a.pdf");
     std::fs::write(&a, primary).unwrap();
     let b = dir.join("b.pdf");
@@ -1105,4 +1197,428 @@ fn append_rewrite_a_copy_s_link_action_follows_its_page() {
         reopens_as_rewritten(&doc, &dir, "inserted");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file of two pages, the first named by what `holder` puts in it,
+/// given the file and its first page's object. The first page duplicated,
+/// and both cropped by one crop, whose two pages are both made from the
+/// first page: the first in order is its copy 0, the page its object is,
+/// and the duplicate copy 1. Saved; then the duplicate moved first, which
+/// makes it copy 0 and the first copy 1, though neither is written (one
+/// node holds both). The file's number for the first page's object still
+/// holds the first, where what names it by number goes, while a Rewrite
+/// writes the duplicate there: the Append is refused (finding 6 of slice
+/// 10's review), and the save is a Rewrite.
+fn a_crop_s_copy_made_copy_0_by_a_move(
+    holder: impl FnOnce(&mut Form, ObjectId),
+    want: impl FnOnce(&Document, PageId) -> Refused,
+) {
+    use crate::store::{BlobKind, MemoryKind, Origin};
+    let dir = scratch();
+    let path = dir.join("a.pdf");
+    let mut f = Form::new(2);
+    let to = f.pages[0];
+    holder(&mut f, to);
+    std::fs::write(&path, f.bytes()).unwrap();
+    let mut doc = crate::open::file(&path, None).unwrap().doc;
+    let first = doc.page(0).unwrap();
+    doc.apply(Edit::DuplicatePages { ids: vec![first] }, "duplicate")
+        .unwrap();
+    let copy = doc.page(1).unwrap();
+    assert_eq!(doc.state().def(copy).unwrap().copy, 1);
+    let primary = doc.primary();
+    let info = SourceInfo::clone(doc.source(primary).unwrap());
+    let crop = [0.0, 0.0, 400.0, 500.0];
+    let bytes = crate::save::cropped_copy(&info, &[(0, crop), (0, crop)]).unwrap();
+    let kind = BlobKind::Pdf {
+        password: None,
+        origin: Origin::Memory(MemoryKind::Derived),
+    };
+    let cropped = SourceInfo {
+        src: doc.store().open(Arc::from(bytes), kind).unwrap(),
+        name: "a.pdf".into(),
+        derived: Some(crate::Derived {
+            from: primary,
+            pages: vec![0, 0],
+        }),
+    };
+    let source = doc.add_source(cropped);
+    let pages = vec![
+        Rebase {
+            id: first,
+            source,
+            index: 0,
+        },
+        Rebase {
+            id: copy,
+            source,
+            index: 1,
+        },
+    ];
+    doc.apply(Edit::RebasePages { pages }, "crop").unwrap();
+    planned(&mut doc, &path);
+    reopens_as_rewritten(&doc, &dir, "cropped");
+    let moved = Edit::MovePages {
+        ids: vec![copy],
+        before: Some(first),
+    };
+    doc.apply(moved, "move").unwrap();
+    // `Refused::why` is `BaseObjectsMissing` for several refusals: which
+    // one stops it.
+    let want = want(&doc, copy);
+    assert_eq!(refusal(&doc), Some(want));
+    let report = planned(&mut doc, &path);
+    reopens_as_rewritten(&doc, &dir, "moved");
+    assert_eq!(
+        (report.strategy, report.why),
+        (Some(StrategyKind::Rewrite), vec![Why::BaseObjectsMissing])
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Why an Append of `doc`'s state onto the file it was saved as, the
+/// removal check vetoing, is refused ([`Refused`]): None when it isn't.
+fn refusal(doc: &Document) -> Option<Refused> {
+    let input = doc.recovery_input();
+    let path = doc.file().expect("a file").0.to_path_buf();
+    let plan = forced_append(&input, Onto::Saved);
+    let base: Arc<[u8]> = std::fs::read(&path).unwrap().into();
+    let out = super::append::append(&input, &plan, Arc::new(base), Mode::Veto, &NoProgress);
+    let e = out.err()?;
+    let refused = e.chain().find_map(|c| c.downcast_ref::<Refused>()).cloned();
+    Some(refused.unwrap_or_else(|| panic!("not refused: {e:#}")))
+}
+
+/// The second page's link going to the first, which the Append writes
+/// again (the first page's copies came and went), its destination the
+/// first page's object. It's the primary's copy 0, whose references are
+/// numbers, so `Closure::stale` refuses it before `held` would: the
+/// open action's case below is `held`'s.
+#[test]
+fn append_rewrite_a_crop_s_copy_made_copy_0_by_a_move_rewrites() {
+    a_crop_s_copy_made_copy_0_by_a_move(
+        |f, to| {
+            let link = f.pdf.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "Link",
+                "Rect" => vec![100.into(), 10.into(), 120.into(), 30.into()],
+                "Dest" => vec![to.into(), "Fit".into()],
+            });
+            f.set_annots(1, &[link]);
+        },
+        |doc, _| {
+            // The link's page, third now.
+            let st = doc.state();
+            let (link, _) = st.foreign_on(doc.page(2).unwrap()).next().unwrap();
+            Refused::Stale(ObjKey::Annot(link))
+        },
+    );
+}
+
+/// The catalog's `/OpenAction` going to the first page, which the
+/// catalog's keys sheaf doesn't own keep as the file has them: `held`
+/// refuses it, the duplicate's page not at the first page's object.
+#[test]
+fn append_rewrite_an_open_action_to_a_crop_s_copy_made_copy_0_rewrites() {
+    a_crop_s_copy_made_copy_0_by_a_move(
+        |f, to| {
+            let catalog = f.catalog;
+            f.dict(catalog)
+                .set("OpenAction", vec![to.into(), "Fit".into()]);
+        },
+        |_, copy| Refused::Held(ObjKey::Page(copy)),
+    );
+}
+
+/// [`append_rewrite_a_copy_s_link_action_follows_its_page`] with what
+/// `holder` puts on the other file's first page in place of the link,
+/// given the file and a GoTo action to its second page. Its two pages
+/// brought in, then its first page again, whose copy of the action goes
+/// to the second page's only copy, saved so; then its second page again.
+/// When the copy's action is read as the page's copy, it goes to that
+/// copy now, which the Append wouldn't write again (finding 7 of slice
+/// 10's review): `refused`, and the save is a Rewrite. Else it's an
+/// Append.
+fn a_copy_s_action_follows_its_page(holder: impl FnOnce(&mut Form, ObjectId), refused: bool) {
+    let dir = scratch();
+    let path = dir.join("a.pdf");
+    std::fs::write(&path, pages_file(1)).unwrap();
+    let mut doc = crate::open::file(&path, None).unwrap().doc;
+    let mut f = Form::new(2);
+    let to = f.pages[1];
+    let action = f.pdf.add_object(dictionary! {
+        "S" => "GoTo", "D" => vec![to.into(), "Fit".into()],
+    });
+    holder(&mut f, action);
+    let b = dir.join("b.pdf");
+    std::fs::write(&b, f.bytes()).unwrap();
+    let other = SourceInfo::read(doc.store(), &b, None).unwrap().0;
+    let other = doc.add_source(other);
+    for (i, range) in [0..2, 0..1, 1..2].into_iter().enumerate() {
+        let insert = Edit::InsertPages {
+            source: other,
+            range,
+            before: None,
+            outline: None,
+            annots: Vec::new(),
+        };
+        doc.apply(insert, "insert").unwrap();
+        let report = planned(&mut doc, &path);
+        reopens_as_rewritten(&doc, &dir, &format!("insert {i}"));
+        if i == 2 {
+            let want = match refused {
+                true => (Some(StrategyKind::Rewrite), vec![Why::BaseObjectsMissing]),
+                false => (Some(StrategyKind::Append), vec![]),
+            };
+            assert_eq!((report.strategy, report.why), want);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A push button whose action goes to the other page: the pages brought in
+/// again join the form's instance the first brought, so the copy's button
+/// is read as that instance's, copy 0, and its action goes to the second
+/// page's copy 0 still, which both write: an Append.
+#[test]
+fn append_rewrite_a_copy_s_button_of_the_first_instance_appends() {
+    a_copy_s_action_follows_its_page(
+        |f, action| {
+            let button = f.push_button("go", 0, crate::forms::fixture::row(0), "Go");
+            f.dict(button).set("A", action);
+        },
+        false,
+    );
+}
+
+/// A link written straight into the page's `/Annots`, its action going to
+/// the other page.
+#[test]
+fn append_rewrite_a_copy_s_inline_link_follows_its_page() {
+    a_copy_s_action_follows_its_page(
+        |f, action| {
+            let link = dictionary! {
+                "Type" => "Annot", "Subtype" => "Link",
+                "Rect" => vec![100.into(), 10.into(), 120.into(), 30.into()],
+                "A" => action,
+            };
+            let page = f.pages[0];
+            f.dict(page).set("Annots", vec![Object::Dictionary(link)]);
+        },
+        true,
+    );
+}
+
+/// A screen annotation, which the records don't hold, its action going to
+/// the other page.
+#[test]
+fn append_rewrite_a_copy_s_screen_action_follows_its_page() {
+    a_copy_s_action_follows_its_page(
+        |f, action| {
+            let screen = f.pdf.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "Screen",
+                "Rect" => vec![100.into(), 10.into(), 120.into(), 30.into()],
+                "A" => action,
+            });
+            f.set_annots(0, &[screen]);
+        },
+        true,
+    );
+}
+
+/// A push button on the first page whose action goes to the second. The
+/// first page duplicated: the copy's button is a new instance of the
+/// form's, copy 1, whose action goes to the second page's only copy, and
+/// that's saved. The second page duplicated: the copy's action goes to
+/// that duplicate now, as a Rewrite names it, which the Append wouldn't
+/// write again (finding 7 of slice 10's review): refused, and the save is
+/// a Rewrite.
+#[test]
+fn append_rewrite_a_duplicate_s_button_action_follows_its_page() {
+    let dir = scratch();
+    let path = dir.join("a.pdf");
+    let mut f = Form::new(2);
+    let button = f.push_button("go", 0, crate::forms::fixture::row(0), "Go");
+    let to = f.pages[1];
+    let action = f.pdf.add_object(dictionary! {
+        "S" => "GoTo", "D" => vec![to.into(), "Fit".into()],
+    });
+    f.dict(button).set("A", action);
+    std::fs::write(&path, f.bytes()).unwrap();
+    let mut doc = crate::open::file(&path, None).unwrap().doc;
+    let [first, second] = [0, 1].map(|i| doc.page(i).unwrap());
+    doc.apply(Edit::DuplicatePages { ids: vec![first] }, "duplicate")
+        .unwrap();
+    appends(&mut doc, &path);
+    reopens_as_rewritten(&doc, &dir, "the first duplicated");
+    doc.apply(Edit::DuplicatePages { ids: vec![second] }, "duplicate")
+        .unwrap();
+    let report = planned(&mut doc, &path);
+    reopens_as_rewritten(&doc, &dir, "the second duplicated");
+    assert_eq!(
+        (report.strategy, report.why),
+        (Some(StrategyKind::Rewrite), vec![Why::BaseObjectsMissing])
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A GoTo action to `to`, as an object of `f`.
+fn go_to(f: &mut Form, to: ObjectId) -> ObjectId {
+    f.pdf.add_object(dictionary! {
+        "S" => "GoTo", "D" => vec![to.into(), "Fit".into()],
+    })
+}
+
+/// A file of four pages, the last drawing nothing (a blank page, whose
+/// object the removal check finds no text in) and named by what `holder`
+/// puts in it, given the file and the last page's object. The last page
+/// duplicated, copy 1 of it, and saved (`between`: else the two edits are
+/// saved as one); then the last page itself deleted, which removes
+/// nothing, as its duplicate draws what it drew, so the plan appends. But
+/// no page is the last page's copy 0 now: what names it by number names a
+/// page outside the tree, which a Rewrite prunes (slice 10's review, after
+/// the commit). The Append is refused (`want`, given the document before
+/// the delete), and the save is a Rewrite.
+fn a_page_deleted_after_its_duplicate(
+    holder: impl Fn(&mut Form, ObjectId),
+    want: impl Fn(&Document) -> Refused,
+) {
+    for between in [true, false] {
+        let dir = scratch();
+        let path = dir.join("a.pdf");
+        let mut f = Form::new(4);
+        let to = f.pages[3];
+        f.dict(to).remove(b"Contents");
+        holder(&mut f, to);
+        std::fs::write(&path, f.bytes()).unwrap();
+        let mut doc = crate::open::file(&path, None).unwrap().doc;
+        let want = want(&doc);
+        let last = doc.page(3).unwrap();
+        doc.apply(Edit::DuplicatePages { ids: vec![last] }, "duplicate")
+            .unwrap();
+        let copy = doc.page(4).unwrap();
+        assert_eq!(doc.state().def(copy).unwrap().copy, 1);
+        if between {
+            appends(&mut doc, &path);
+            reopens_as_rewritten(&doc, &dir, "duplicated");
+        }
+        doc.apply(Edit::DeletePages { ids: vec![last] }, "delete")
+            .unwrap();
+        assert_eq!(doc.state().def(copy).unwrap().copy, 1);
+        let target = doc.save_target(&path);
+        let strategy = plan(&doc.recovery_input(), &target).strategy;
+        assert_eq!(
+            strategy,
+            Strategy::Append { onto: Onto::Saved },
+            "{between}"
+        );
+        let refused = refusal(&doc);
+        let report = planned(&mut doc, &path);
+        reopens_as_rewritten(&doc, &dir, "deleted");
+        assert_eq!(refused, Some(want), "{between}");
+        assert_eq!(
+            (report.strategy, report.why),
+            (Some(StrategyKind::Rewrite), vec![Why::BaseObjectsMissing]),
+            "{between}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The catalog's `/OpenAction` going to the last page.
+#[test]
+fn append_rewrite_an_open_action_to_a_page_deleted_after_its_duplicate_rewrites() {
+    a_page_deleted_after_its_duplicate(
+        |f, to| {
+            let catalog = f.catalog;
+            f.dict(catalog)
+                .set("OpenAction", vec![to.into(), "Fit".into()]);
+        },
+        |_| Refused::Stale(ObjKey::Catalog),
+    );
+}
+
+/// A named destination of the name dictionary's `/Dests` going to the
+/// last page, and the structure tree's element on it.
+#[test]
+fn append_rewrite_names_of_a_page_deleted_after_its_duplicate_rewrite() {
+    a_page_deleted_after_its_duplicate(
+        |f, to| {
+            let dests = f.pdf.add_object(dictionary! {
+                "Names" => vec![Object::string_literal("last"), vec![to.into(), "Fit".into()].into()],
+            });
+            let catalog = f.catalog;
+            f.dict(catalog)
+                .set("Names", dictionary! { "Dests" => dests });
+        },
+        |_| Refused::Stale(ObjKey::Catalog),
+    );
+    a_page_deleted_after_its_duplicate(
+        |f, to| {
+            let element = f.pdf.add_object(dictionary! {
+                "Type" => "StructElem", "S" => "P", "Pg" => to,
+            });
+            let root = f.pdf.add_object(dictionary! {
+                "Type" => "StructTreeRoot", "K" => vec![element.into()],
+            });
+            let catalog = f.catalog;
+            f.dict(catalog).set("StructTreeRoot", root);
+        },
+        |_| Refused::Stale(ObjKey::Catalog),
+    );
+}
+
+/// The first page's own `/AA`, its open action going to the last page:
+/// a page's own keys, read as copy 0.
+#[test]
+fn append_rewrite_a_page_s_action_to_a_page_deleted_after_its_duplicate_rewrites() {
+    a_page_deleted_after_its_duplicate(
+        |f, to| {
+            let action = go_to(f, to);
+            let first = f.pages[0];
+            f.dict(first).set("AA", dictionary! { "O" => action });
+        },
+        |doc| Refused::Stale(ObjKey::Page(doc.page(0).unwrap())),
+    );
+}
+
+/// A radio group on the first page, a field apart from its widgets, its
+/// own `/AA` going to the last page: the fields' walk.
+#[test]
+fn append_rewrite_a_field_s_action_to_a_page_deleted_after_its_duplicate_rewrites() {
+    use crate::forms::fixture::row;
+    a_page_deleted_after_its_duplicate(
+        |f, to| {
+            let field = f.radio("pick", 0, &[row(0), row(1)], Some(0));
+            let action = go_to(f, to);
+            f.dict(field).set("AA", dictionary! { "Fo" => action });
+        },
+        |doc| {
+            let st = doc.state();
+            let (pick, _) = (st.fields()).find(|(_, n)| &*n.partial == "pick").unwrap();
+            Refused::Stale(ObjKey::Field(pick))
+        },
+    );
+}
+
+/// A note of sheaf's on the first page, as a save writes it, with an
+/// action going to the last page: a mark read from a file.
+#[test]
+fn append_rewrite_a_mark_s_action_to_a_page_deleted_after_its_duplicate_rewrites() {
+    a_page_deleted_after_its_duplicate(
+        |f, to| {
+            let first = f.pages[0];
+            let mut page = f.dict(first).clone();
+            let marks = crate::forms::fixture::holding(&[crate::forms::fixture::note()]);
+            crate::forms::fixture::write_marks(&mut f.pdf, &mut page, &marks);
+            *f.dict(first) = page;
+            let note = *f.annots(0).last().unwrap();
+            let action = go_to(f, to);
+            f.dict(note).set("A", action);
+        },
+        |doc| {
+            let st = doc.state();
+            let note = st.marks_on(doc.page(0).unwrap()).next().unwrap().id;
+            Refused::Stale(ObjKey::Annot(note))
+        },
+    );
 }

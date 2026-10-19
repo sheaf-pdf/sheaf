@@ -16,7 +16,7 @@ use in_progress::NoProgress;
 use lopdf::{Document as Pdf, Object, ObjectId};
 use sheaf_core::Rotation;
 
-use super::removal_tests::{note, opened, said, scratch, text_file, warned};
+use super::removal_tests::{layer, note, opened, said, scratch, text_file, warned};
 use super::rewrite_tests::says;
 use super::{
     AppendAnyway, Ask, AskAnswers, Note, Onto, SavePlan, SaveReport, SaveStop, Strategy,
@@ -159,6 +159,8 @@ fn a_certification_permits_what_its_p_says() {
 /// an Append anyway that leaves the comment readable in the signed
 /// revision. Taken, it appends: the signed bytes are the file's first,
 /// the signature fits them, and the reader is told what stays readable.
+/// The removal check's find is the comment the offer listed: no
+/// misclassification is logged or counted.
 #[test]
 fn a_comment_deleted_from_a_signed_file_offers_append_anyway() {
     let dir = scratch();
@@ -198,10 +200,14 @@ fn a_comment_deleted_from_a_signed_file_offers_append_anyway() {
         Err(SaveStop::Ask(asks))
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    let report = saved(&mut doc, &path, anyway()).unwrap();
+    let counted = super::removal::vetoes_here();
+    let (report, warnings) = warned(|| saved(&mut doc, &path, anyway()));
+    let report = report.unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Append));
     let stays = super::Note(append::STAYS_READABLE.into());
     assert!(report.notes.contains(&stays), "{:?}", report.notes);
+    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(super::removal::vetoes_here(), counted);
     let now = std::fs::read(&path).unwrap();
     assert!(now.starts_with(&before) && signatures_fit(&now));
     assert!(!doc.is_dirty());
@@ -525,6 +531,7 @@ fn a_file_changed_on_disk_plans_a_rewrite_that_asks() {
 fn removes_nothing(path: &mut PathEffects) {
     path.flags.remove(Flags::REMOVES | Flags::REPLACES_TEXT);
     path.removed.clear();
+    path.removing.clear();
 }
 
 /// A deleted mark the planner misjudges as removing nothing: it plans an
@@ -619,6 +626,167 @@ fn an_append_anyway_the_signatures_asked_still_stops_on_removed_text() {
     });
     let now = std::fs::read(&path).unwrap();
     assert!(now.starts_with(&bytes) && signatures_fit(&now));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A path judged as replacing no text: what it removes whole is still
+/// said, but not a comment whose text it replaced.
+fn replaces_nothing(path: &mut PathEffects) {
+    path.flags.remove(Flags::REPLACES_TEXT);
+    path.removed.retain(|r| !r.kind.is_text());
+    path.removing.retain(|_, flags| {
+        flags.remove(Flags::REPLACES_TEXT);
+        !flags.is_empty()
+    });
+}
+
+/// On a P2-certified file, whose signature allows no comment: two comments
+/// appended anyway, then one deleted and the other's text replaced, the
+/// planner misjudging the replaced text as none (§11.9). The plan is a
+/// Rewrite for the comment removed, whose ask offers an Append anyway that
+/// lists it alone; taken, the removal check finds the other's old text
+/// too, which the offer didn't list: a misclassification, logged and
+/// counted, so the save asks again, saying the text it found stays
+/// readable, and writes nothing. Taken again, it appends, and the reader
+/// is told; the misclassification is logged and counted again.
+#[test]
+fn an_append_anyway_that_listed_a_removal_still_stops_on_one_it_did_not() {
+    let dir = scratch();
+    let bytes = signed(|f, sig| f.certify(sig, 2), None);
+    let (path, mut doc) = opened(&dir, "p2.pdf", &bytes);
+    comment(&mut doc, "a secret note");
+    comment(&mut doc, "another secret");
+    let signatures = AskAnswers {
+        append_anyway: true,
+        ..Default::default()
+    };
+    let report = saved(&mut doc, &path, signatures).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
+    let page = doc.page(0).unwrap();
+    let mark = |text: &str| {
+        (doc.state().marks_on(page))
+            .find(|a| a.contents == text)
+            .unwrap()
+            .clone()
+    };
+    let (gone, mut kept) = (mark("a secret note").id, mark("another secret"));
+    doc.apply(Edit::AnnotDelete { page, id: gone }, "delete")
+        .unwrap();
+    kept.contents = "a harmless note".into();
+    let annot = kept.clone();
+    doc.apply(Edit::AnnotUpdate { page, annot }, "edit")
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(holds(&before, b"another secret"));
+    let key = ObjKey::Annot(kept.id);
+    let logged = super::removal::RemovalMisclassified { key }.to_string();
+    let counted = super::removal::vetoes_here().derived;
+    misjudged(replaces_nothing, || {
+        let listed = vec![Removed {
+            kind: RemovedKind::Comments,
+            count: 1,
+        }];
+        let why = Why::Removes(listed.clone());
+        let planned = planned(&doc, &path);
+        assert_eq!(
+            planned.strategy,
+            Strategy::Rewrite {
+                why: vec![why.clone()]
+            }
+        );
+        let offer = AppendAnyway {
+            stays_readable: listed.clone(),
+        };
+        let offered = Ask::Signatures {
+            impact: impact(Verdict::Invalid),
+            append_anyway: Some(offer.clone()),
+            reason: Some(why),
+        };
+        assert_eq!(planned.asks, [offered]);
+        let mut answers = AskAnswers::default();
+        answers.take(&offer);
+        let (stop, warnings) = warned(|| saved(&mut doc, &path, answers));
+        let mut found = listed;
+        found.push(Removed {
+            kind: RemovedKind::Found,
+            count: 1,
+        });
+        let offer = AppendAnyway {
+            stays_readable: found,
+        };
+        let asks = Ask::Signatures {
+            impact: impact(Verdict::Invalid),
+            append_anyway: Some(offer.clone()),
+            reason: Some(Why::RemovalCheck { key }),
+        };
+        assert_eq!(stop, Err(SaveStop::Ask(asks)));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(warnings, std::slice::from_ref(&logged));
+        assert_eq!(super::removal::vetoes_here().derived, counted + 1);
+        answers.take(&offer);
+        let (report, warnings) = warned(|| saved(&mut doc, &path, answers));
+        let report = report.unwrap();
+        assert_eq!(report.strategy, Some(StrategyKind::Append));
+        let told = Note(append::STAYS_READABLE.into());
+        assert!(report.notes.contains(&told), "{:?}", report.notes);
+        assert_eq!(warnings, [logged]);
+        assert_eq!(super::removal::vetoes_here().derived, counted + 2);
+    });
+    let now = std::fs::read(&path).unwrap();
+    assert!(now.starts_with(&before) && signatures_fit(&now));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// On a signed file, a page's recognized text appended anyway, then
+/// recognized again: the plan is a Rewrite for the layer it replaces, its
+/// ask offering an Append anyway that lists it. Taken, the removal check
+/// finds the old layer's words gone from what's drawn over the page, which
+/// the page's slot said (the recognized text, not a generator's header
+/// and footer): reported, with nothing logged or counted (slice 10's
+/// review, after the commit).
+#[test]
+fn a_page_recognized_again_on_a_signed_file_appends_anyway_as_listed() {
+    let dir = scratch();
+    let bytes = signed(|f, sig| f.sign(sig), None);
+    let (path, mut doc) = opened(&dir, "signed.pdf", &bytes);
+    let page = doc.page(0).unwrap();
+    let ocr = |text: &str| Edit::SetTextLayers {
+        layers: vec![(page, layer(text))],
+    };
+    doc.apply(ocr("firstwords"), "ocr").unwrap();
+    let report = saved(&mut doc, &path, anyway()).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
+    doc.apply(ocr("secondwords"), "ocr").unwrap();
+    let planned = planned(&doc, &path);
+    let removed = vec![Removed {
+        kind: RemovedKind::OcrLayers,
+        count: 1,
+    }];
+    let Strategy::Rewrite { why } = &planned.strategy else {
+        panic!("{:?}", planned.strategy);
+    };
+    assert_eq!(why, &[Why::ReplacesText(removed.clone())]);
+    let offered = planned.asks.iter().find_map(|a| match a {
+        Ask::Signatures { append_anyway, .. } => append_anyway.clone(),
+        _ => None,
+    });
+    let offer = AppendAnyway {
+        stays_readable: removed,
+    };
+    assert_eq!(offered, Some(offer.clone()));
+    let before = std::fs::read(&path).unwrap();
+    let counted = super::removal::vetoes_here();
+    let mut answers = AskAnswers::default();
+    answers.take(&offer);
+    let (report, warnings) = warned(|| saved(&mut doc, &path, answers));
+    let report = report.unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
+    let stays = Note(append::STAYS_READABLE.into());
+    assert!(report.notes.contains(&stays), "{:?}", report.notes);
+    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(super::removal::vetoes_here(), counted);
+    let now = std::fs::read(&path).unwrap();
+    assert!(now.starts_with(&before) && signatures_fit(&now));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -4,7 +4,7 @@
 //! and what the removal check reads as text, of what a section unlinks and
 //! of what it writes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -717,6 +717,7 @@ fn checked(
         target: &input.target,
         primary,
         allowed: &[],
+        said: &BTreeSet::new(),
         lim: &Limits::DEFAULT,
     })
 }
@@ -744,6 +745,7 @@ fn an_unlinked_form_s_text_is_read() {
             copy: 0,
         },
         derived: false,
+        said: false,
     };
     assert_eq!(checked(&path, &doc, page, &[]), Some(gone));
     let again = [(helvetica(), None, "(words hidden)")];

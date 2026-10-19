@@ -740,8 +740,10 @@ pub(crate) mod tests {
     }
 
     /// The sidecar of an encrypted file opened without a password is
-    /// encrypted as the file is: a mark's note isn't in it in the clear,
-    /// and it restores, encrypted, with the mark.
+    /// encrypted as the file is: neither the page's string (the turned
+    /// page's dictionary, which its section writes again) nor a mark's
+    /// note is in it in the clear, and it restores, encrypted, with the
+    /// turn and the mark.
     #[test]
     fn an_encrypted_sidecar_holds_no_plaintext() {
         use std::collections::BTreeMap;
@@ -751,7 +753,7 @@ pub(crate) mod tests {
 
         use crate::serialize::fixture::{OWNER, encrypted, whole};
         use crate::serialize::tests::{NOTE, mark, notes};
-        use crate::source::lazy_tests::plaintext;
+        use crate::source::lazy_tests::{PAGE_STRING, plaintext};
 
         let dir = scratch();
         let plain = plaintext();
@@ -780,9 +782,12 @@ pub(crate) mod tests {
             mark(&mut model);
             sidecar_of(&model);
             assert_eq!(kind_of(&pdf), "append");
-            // The mark's note, in the clear only when the file is.
+            // The turned page's string and the mark's note, in the clear
+            // only when the file is.
             let sidecar = std::fs::read(sidecar_path(&pdf)).unwrap();
-            assert_eq!(holds(&sidecar, NOTE), !encrypted, "{encrypted}");
+            for text in [PAGE_STRING, NOTE] {
+                assert_eq!(holds(&sidecar, text), !encrypted, "{encrypted}");
+            }
             let rec = find(&pdf).expect("sidecar found");
             let bytes: Arc<[u8]> = with_sections(&pdf, &rec).into();
             let lazy = LazyPdf::open(bytes, None, &Limits::DEFAULT.reader).unwrap();

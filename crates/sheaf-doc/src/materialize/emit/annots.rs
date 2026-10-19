@@ -125,7 +125,7 @@ fn named(st: &crate::DocState, id: PageId, m: &Mark) -> bool {
 }
 
 /// The entries of `shown`'s page's own `/Annots`, as its file has them.
-fn base_annots(shown: &Shown) -> Vec<Object> {
+pub(crate) fn base_annots(shown: &Shown) -> Vec<Object> {
     let pdf = shown.src.pdf();
     let Some(facts) = shown.src.page(shown.index) else {
         return Vec::new();
@@ -301,7 +301,10 @@ impl Page<'_> {
         let scope = Scope { src, copy: f.copy };
         // A link to a page that isn't written leads nowhere: a Rewrite's
         // `keep_only` drops it, and an Append leaves it out as that would.
-        if cx.saved().is_some() && f.summary.subtype == "Link" && leads_nowhere(cx, dict, &scope) {
+        if cx.saved().is_some()
+            && f.summary.subtype == "Link"
+            && leads_nowhere(src.pdf(), dict, |page| cx.closure.writes_page(page, &scope))
+        {
             return (Vec::new(), None);
         }
         let parent = (f.summary.parent.as_deref())
@@ -583,12 +586,18 @@ impl Page<'_> {
     }
 }
 
-/// Whether link `dict`, of `scope`'s source, goes to a page that isn't
-/// written, or nowhere: its explicit destination's (its `/Dest`, or its
-/// GoTo action's `/D`) first entry is a page the save doesn't write, or
-/// null. A named destination is the name tree's to resolve.
-fn leads_nowhere(cx: &Cx, dict: &Dictionary, scope: &Scope) -> bool {
-    let pdf = scope.src.pdf();
+/// Whether link `dict`, of `pdf`, goes to a page that isn't written, or
+/// nowhere: its explicit destination's (its `/Dest`, or its GoTo action's
+/// `/D`) first entry is a page `written` says the save doesn't write (as
+/// the copy reading it resolves it, [`Closure::writes_page`]), or null. A
+/// named destination is the name tree's to resolve.
+///
+/// [`Closure::writes_page`]: crate::materialize::copy::Closure::writes_page
+pub(crate) fn leads_nowhere(
+    pdf: &lopdf::LazyPdf,
+    dict: &Dictionary,
+    written: impl Fn(ObjectId) -> bool,
+) -> bool {
     let deref = |o: &Object| pdf.dereference(o).ok().map(|(_, o)| o.clone());
     let dest = match dict.get(b"Dest") {
         Ok(dest) => deref(dest),
@@ -606,8 +615,7 @@ fn leads_nowhere(cx: &Cx, dict: &Dictionary, scope: &Scope) -> bool {
     match dest.first() {
         None | Some(Object::Null) => true,
         Some(Object::Reference(page)) => {
-            crate::materialize::copy::is_page_node(pdf, *page)
-                && !cx.closure.writes_page(*page, scope)
+            crate::materialize::copy::is_page_node(pdf, *page) && !written(*page)
         }
         Some(_) => false,
     }
