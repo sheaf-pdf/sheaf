@@ -301,8 +301,8 @@ fn a_form_with_its_header_and_footer_removed_keeps_its_fields() {
         pages: PageSel::All,
     };
     tx.apply(remove, &sheaf_ops::NoProgress).unwrap();
-    let label = Some("Remove header & footer".into());
-    doc.commit(tx, CommitOpts { label }).unwrap();
+    doc.commit(tx, CommitOpts::labelled("Remove header & footer"))
+        .unwrap();
     // The footer's gone from the file: a save is a Rewrite.
     let saved = rewritten_and_saved(&mut doc, &footed);
     assert_eq!(saved[1].0, StrategyKind::Rewrite);

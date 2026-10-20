@@ -8,7 +8,8 @@
 //! |---|---|
 //! | `Order` | the page tree's nodes it changed, and the pages put under another node ([`tree::spliced`]); the page labels, and the catalog when there are none now or were none; every connector (its `/Dest` is the next in order); each page the header and footer draws on (its numbers count the pages), and the catalog when it's on some pages (their places); a link to a source page another page, or none, is written as now, and its page |
 //! | `Page(p)` | `p`'s dictionary; when its base page or copy changed, its annotations (they're copied as its), each bookmark to it (it may be written at another number) and each link to a source page another page, or none, is written as now |
-//! | `Geom(p)`, `PageAnnots(p)` | `p`'s dictionary |
+//! | `Geom(p)` | `p`'s dictionary; every connector of each group with one on `p` (a group's order is how its connectors show on their pages) |
+//! | `PageAnnots(p)` | `p`'s dictionary |
 //! | `Annot(a)` | `a`'s objects; for a widget, its field's (a merged pair is one object); its replies (a mark's reply takes its `/Rect`, and each its `/IRT`); every connector of its group, for one; its page, when it's a replacement now and wasn't or the other way round (a replacement's StrikeOut is beside it in `/Annots`) |
 //! | `Field(f)` | `f`'s dictionary, its widgets, every node above it (a node left with no widgets isn't written, nor the parents it empties); the form's dictionary when `f` came, went, moved or shows other widgets (its `/Fields` and `/CO` list what's written); the pages its widgets are on when one was its object and isn't, or the other way round |
 //! | `Form` | the form's dictionary; when the files the forms come from changed, every field and widget of the other files (their fonts' renames in `/DR`), their document scripts and the catalog; when `/DA` or `/Q` changed, the other files' roots (theirs are pushed down) |
@@ -105,6 +106,8 @@ pub fn closure(
         fields: HashSet::new(),
         relinked: BTreeSet::new(),
         relinking: None,
+        connected: HashSet::new(),
+        every_connector: false,
     };
     let changed =
         (input.path_keys.iter()).filter(|key| !same(was.get(key).as_ref(), now.get(key).as_ref()));
@@ -125,7 +128,11 @@ pub fn closure(
                     rebased.insert(p);
                 }
             }
-            Key::Geom(p) | Key::PageAnnots(p) => {
+            Key::Geom(p) => {
+                cx.keys.insert(ObjKey::Page(p));
+                cx.connectors_on(p);
+            }
+            Key::PageAnnots(p) => {
                 cx.keys.insert(ObjKey::Page(p));
             }
             Key::Annot(a) => cx.annot(a),
@@ -293,6 +300,10 @@ struct Deps<'a> {
     fields: HashSet<crate::forms::FieldId>,
     relinked: BTreeSet<BlobId>,
     relinking: Option<Relinking>,
+    /// The connector groups taken whole, by label, or whether every
+    /// connector was ([`connectors`](Self::connectors)).
+    connected: HashSet<String>,
+    every_connector: bool,
 }
 
 /// The pages written as each copy of each source page ([`emit::written_pages`]),
@@ -559,8 +570,16 @@ impl<'a> Deps<'a> {
     }
 
     /// Every connector, or those labelled `label`, now: each one's `/Dest`
-    /// is the next of its group in order.
+    /// is the next of its group in order. Once for each group: a page
+    /// turned, or a connector, of a group already taken adds nothing.
     fn connectors(&mut self, label: Option<&str>) {
+        let done = match label {
+            None => std::mem::replace(&mut self.every_connector, true),
+            Some(l) => self.every_connector || !self.connected.insert(l.to_owned()),
+        };
+        if done {
+            return;
+        }
         let of_label = |rec: &AnnotRec| match rec.mark().map(|m| &m.kind) {
             Some(AnnotKind::Connector { label: l, .. }) => label.is_none_or(|label| l == label),
             _ => false,
@@ -573,6 +592,22 @@ impl<'a> Deps<'a> {
             if !self.keys.contains(&ObjKey::Annot(a)) {
                 self.annot(a);
             }
+        }
+    }
+
+    /// The connectors of each group with one on page `p` now, whose turn
+    /// or boxes changed: a group goes in the order its connectors show in
+    /// on their pages, so each one's next may be another
+    /// ([`connectors`](Self::connectors)).
+    fn connectors_on(&mut self, p: PageId) {
+        let labels: BTreeSet<String> = (self.now.annots_on(p))
+            .filter_map(|(_, rec)| match rec.mark().map(|m| &m.kind) {
+                Some(AnnotKind::Connector { label, .. }) => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        for label in labels {
+            self.connectors(Some(&label));
         }
     }
 

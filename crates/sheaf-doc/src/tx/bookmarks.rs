@@ -20,7 +20,7 @@ pub(crate) fn add(
     at: At,
     b: Bookmark,
 ) -> Result<(), EditError> {
-    let id = lw.cx.alloc.outline();
+    let id = lw.outline_id();
     lw.rec
         .put(Key::Bookmark(id), Some(Val::Bookmark(Arc::new(b))));
     insert(lw, parent, at, id)?;

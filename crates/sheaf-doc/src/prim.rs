@@ -736,6 +736,7 @@ impl HeapSize for ResolvedOp {
                 spec.texts.iter().map(String::heap_size).sum::<usize>() + scope.heap_size()
             }
             R::SetPageBase { pages, .. } => buf(pages),
+            R::Revert { label } => label.heap_size(),
         }
     }
 }

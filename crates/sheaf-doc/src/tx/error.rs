@@ -2,9 +2,11 @@
 //! reader beside it (§6.5): fail, never repair.
 
 use std::fmt;
+use std::sync::Arc;
 
 use super::caps::Cap;
 use crate::model::VersionId;
+use crate::prim::Key;
 
 /// Why an op, a commit, or a move through history didn't happen. `op`
 /// names the op as Op JSON does (`delete-pages`). Nothing changed.
@@ -30,6 +32,17 @@ pub enum EditError {
     /// Its progress was canceled.
     #[error("canceled")]
     Cancelled,
+    /// A transaction made on an earlier version depends on slot `key`,
+    /// which no longer holds what it held there, or would break a rule
+    /// once its changes are put on the current version (§8.5): changed
+    /// last by the version labelled `by`, of those on the way to the
+    /// current one, when one is known.
+    #[error("{} changed the same data", changed_by(.by))]
+    Conflict { key: Key, by: Option<Arc<str>> },
+    /// A commit in a group whose edits were undone, or jumped away from,
+    /// or which has ended (§8.4): what it adds is never put back.
+    #[error("the edits it adds to were undone")]
+    GroupEnded,
     /// A version's prims don't fit the state they were made from: a bug,
     /// never the reader's. The version can't be rebuilt.
     #[error("History is damaged at version {}", .version.0)]
@@ -38,6 +51,14 @@ pub enum EditError {
     /// stop where it's made ([`EditError::internal`]).
     #[error("internal error: {what}")]
     Internal { what: String },
+}
+
+/// Who made a [`EditError::Conflict`]'s change, as its text says.
+fn changed_by(by: &Option<Arc<str>>) -> String {
+    match by {
+        Some(label) => format!("“{label}”"),
+        None => "another edit".into(),
+    }
 }
 
 impl EditError {

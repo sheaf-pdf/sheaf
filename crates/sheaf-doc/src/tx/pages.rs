@@ -100,7 +100,7 @@ pub(crate) fn duplicate(lw: &mut Lower, pages: &[PageId]) -> Result<(), EditErro
         lw.read(Key::Page(id));
         lw.read(Key::Geom(id));
         lw.read(Key::PageAnnots(id));
-        let copy = lw.cx.alloc.page();
+        let copy = lw.page_id();
         let def = PageDef {
             copy: copies.take(&def.base),
             ..PageDef::clone(&def)
@@ -182,7 +182,7 @@ pub(crate) fn insert(
     let mut shown = Vec::with_capacity(pages.len());
     for (i, &index) in pages.iter().enumerate() {
         lw.pages_done(i, pages.len())?;
-        let id = lw.cx.alloc.page();
+        let id = lw.page_id();
         let (def, geom) = copies.page(from, index);
         lw.rec.put(Key::Page(id), Some(Val::Page(def)));
         lw.rec.put(Key::Geom(id), Some(Val::Geom(geom)));
@@ -198,7 +198,7 @@ pub(crate) fn insert(
             // Bookmarks to pages that didn't come go nowhere.
             let page = |index: u32| by_index.get(&index).copied();
             let incoming =
-                crate::model::outline_from_flat(&lw.cx.alloc, from.outline(), page, from);
+                crate::model::outline_from_flat(|| lw.outline_id(), from.outline(), page, from);
             merge_by_title(lw, incoming);
         }
     }
@@ -249,7 +249,7 @@ pub(crate) fn replace(
     let mut extra = Vec::new();
     for index in replacements {
         lw.pages_done(pages.len() + extra.len(), total)?;
-        let id = lw.cx.alloc.page();
+        let id = lw.page_id();
         let (def, geom) = copies.page(from, index);
         lw.rec.put(Key::Page(id), Some(Val::Page(def)));
         lw.rec.put(Key::Geom(id), Some(Val::Geom(geom)));

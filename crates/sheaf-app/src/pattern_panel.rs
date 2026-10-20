@@ -12,7 +12,7 @@ use gpui::{
     AnchoredPositionMode, AnyElement, Context, Entity, Focusable, MouseButton, Pixels, Point,
     Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
-use sheaf_doc::PageId;
+use sheaf_doc::{CommitOpts, PageId};
 use sheaf_edit::{BookmarkRef, Local, Op, Sibling};
 use sheaf_render::SearchEvent;
 use sheaf_ui::list::ListLayout;
@@ -724,7 +724,9 @@ impl DocView {
         }
         let n = ps.hits.len();
         let label = format!("Bookmark {n} match{}", if n == 1 { "" } else { "es" });
-        self.submit(tx, ops, &label, cx);
+        if let Some(tx) = self.lower_in(tx, ops, &label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         self.wanted_panel = Some("bookmarks");
     }
 }

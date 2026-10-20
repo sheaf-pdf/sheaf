@@ -1,14 +1,18 @@
 //! The wasmtime side: one shared engine, one worker thread and `Store` per
 //! plugin, and the host half of the WIT interfaces.
 
+use std::cell::OnceCell;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
+use arc_swap::ArcSwap;
 use futures::channel::oneshot;
-use sheaf_doc::{Actor, Document, EditError, Grant, PageId, Snapshot, SourceId, Tx};
+use sheaf_doc::prim::Key;
+use sheaf_doc::{Document, EditError, Grant, PageId, Snapshot, SourceId, Tx};
 use sheaf_edit::Op;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline};
@@ -190,7 +194,11 @@ impl std::fmt::Display for Call {
 #[derive(Clone)]
 pub struct DocContext {
     pub path: PathBuf,
-    pub snapshot: Snapshot,
+    /// The document as it is now, which the app swaps at every change: a
+    /// call takes its base from it at its first read or submit (M10.5
+    /// §14.3), so one that waited in the queue, or on a form, reads the
+    /// document as it is by then.
+    pub cell: Arc<ArcSwap<Snapshot>>,
     /// In document order.
     pub selection: Vec<PageId>,
     pub current_page: Option<PageId>,
@@ -226,10 +234,10 @@ pub enum Held {
 }
 
 impl EditBatch {
-    /// The batch's ops lowered in one transaction of `actor`'s on `doc`'s
-    /// current version, what they hold found where the host finds it:
-    /// all of them, or none and why.
-    pub fn lowered(self, doc: &Document, actor: Actor) -> Result<Tx, EditError> {
+    /// The batch's ops lowered into `tx`, a transaction of the plugin's on
+    /// `doc` that holds no grants yet, what they hold found where the host
+    /// finds it in `doc`: all of them, or none and why.
+    pub fn lowered(self, tx: &mut Tx, doc: &Document) -> Result<(), EditError> {
         if let Some(e) = self.invalid {
             return Err(e);
         }
@@ -237,7 +245,6 @@ impl EditBatch {
             op: "add-mark",
             what,
         };
-        let mut tx = doc.tx(actor);
         for held in self.held {
             let grant = match held {
                 Held::Stamp(stem) => {
@@ -253,14 +260,36 @@ impl EditBatch {
             tx.grant(grant);
         }
         tx.apply_batch(self.ops, &in_progress::NoProgress)?;
-        Ok(tx)
+        Ok(())
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CallOutput {
-    /// In submission order. Applied by the app after the call returns.
+    /// In submission order. Committed by the app after the call returns.
     pub batches: Vec<EditBatch>,
+    /// The document the call read and said its batches against: the
+    /// cell's at its first read or submit ([`DocContext::cell`]). None
+    /// when it did neither, or no document was open.
+    pub base: Option<Arc<Snapshot>>,
+    /// What it read there, as the slots it decided by (M10.5 §14.3): its
+    /// pages' order, what they show and their boxes; a page's annotations
+    /// and each mark it was shown; the outline and each bookmark; what a
+    /// page shows, for its text, OCR, search or render; a mark its update
+    /// keeps parts of. Its first batch commits only while each holds what
+    /// it held in `base`. Recorded for the 0.2 and 0.3 reads until API 0.4
+    /// records them in the call's transaction (slice 20).
+    pub reads: BTreeSet<Key>,
+}
+
+impl std::fmt::Debug for CallOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallOutput")
+            .field("batches", &self.batches)
+            .field("base", &self.base.as_ref().map(|s| s.version))
+            .field("reads", &self.reads)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -503,11 +532,11 @@ impl World {
                 w.call_panel_action(store, panel, row, action)
             }
             (World::V03(w), Call::Event(e)) => {
-                let e = api::v03::event_to_wit(store.data().doc().map(|d| &d.snapshot), e);
+                let e = api::v03::event_to_wit(store.data(), e);
                 w.call_on_event(store, &e)
             }
             (World::V02(w), Call::Event(e)) => {
-                let e = api::v02::event_to_wit(store.data().doc().map(|d| &d.snapshot), e);
+                let e = api::v02::event_to_wit(store.data(), e);
                 w.call_on_event(store, &e)
             }
         }
@@ -547,6 +576,8 @@ impl Instance {
             render_handles: Default::default(),
             task_handles: Vec::new(),
             call: None,
+            base: OnceCell::new(),
+            reads: BTreeSet::new(),
             batches: Vec::new(),
             deadline: Instant::now() + rt.limits.call_timeout,
         };
@@ -597,6 +628,8 @@ impl Instance {
         let data = store.data_mut();
         data.call = Some(ctx);
         data.batches.clear();
+        data.base = OnceCell::new();
+        data.reads.clear();
         data.deadline = Instant::now() + self.timeout;
         data.credit.store(0, std::sync::atomic::Ordering::Relaxed);
         store.set_epoch_deadline(1);
@@ -606,8 +639,13 @@ impl Instance {
         data.drop_task_handles();
         data.call = None;
         let batches = std::mem::take(&mut data.batches);
+        let (base, reads) = (data.base.take(), std::mem::take(&mut data.reads));
         match result {
-            Ok(Ok(())) => Ok(CallOutput { batches }),
+            Ok(Ok(())) => Ok(CallOutput {
+                batches,
+                base,
+                reads,
+            }),
             Ok(Err(msg)) => Err(PluginError::Failed(msg)),
             Err(e) => Err(PluginError::Trapped(describe_trap(&e, self.timeout))),
         }
@@ -722,6 +760,10 @@ pub(crate) struct HostState {
     /// `progress.task` handles this call made, freed when it returns.
     pub(crate) task_handles: Vec<u32>,
     pub(crate) call: Option<CallContext>,
+    /// The running call's base ([`HostState::base`]).
+    base: OnceCell<Arc<Snapshot>>,
+    /// What the running call read of it ([`CallOutput::reads`]).
+    reads: BTreeSet<Key>,
     pub(crate) batches: Vec<EditBatch>,
     /// When the running call times out.
     pub(crate) deadline: Instant,
@@ -738,6 +780,19 @@ impl HostState {
 
     pub(crate) fn ui(&self) -> Option<Arc<dyn Ui>> {
         self.call.as_ref()?.ui.clone()
+    }
+
+    /// The document as the call reads it: the cell's at its first read or
+    /// submit, and the same one for every one after (M10.5 §14.3). None
+    /// when no document is open.
+    pub(crate) fn base(&self) -> Option<&Snapshot> {
+        let d = self.doc()?;
+        Some(self.base.get_or_init(|| d.cell.load_full()))
+    }
+
+    /// The call decided by what `keys` hold in its base.
+    pub(crate) fn read(&mut self, keys: impl IntoIterator<Item = Key>) {
+        self.reads.extend(keys);
     }
 }
 
@@ -761,15 +816,21 @@ impl wasmtime_wasi_http::WasiHttpView for HostState {
 }
 
 impl HostState {
-    /// The page, and the source page it shows, for text calls.
+    /// The call's document and base, the page, and the source page it
+    /// shows, for text calls, which read what the page shows.
     pub(crate) fn page_base(
-        &self,
+        &mut self,
         page: u64,
-    ) -> Result<(&DocContext, PageId, &sheaf_doc::PageBase), String> {
-        let d = self.doc().ok_or("no document is open")?;
+    ) -> Result<(&DocContext, &Snapshot, PageId, &sheaf_doc::PageBase), String> {
         let id = PageId(page);
-        let def = d.snapshot.state.def(id);
+        if self.base().is_some() {
+            self.read([Key::Page(id)]);
+        }
+        let (Some(d), Some(snap)) = (self.doc(), self.base()) else {
+            return Err("no document is open".into());
+        };
+        let def = snap.state.def(id);
         let def = def.ok_or_else(|| format!("no page {page}"))?;
-        Ok((d, id, &def.base))
+        Ok((d, snap, id, &def.base))
     }
 }

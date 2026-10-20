@@ -6,7 +6,7 @@
 //! save puts it where the comment was.
 
 use gpui::{Context, Window};
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, PageId, Pt};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, CommitOpts, PageId, Pt};
 use sheaf_edit::{AnnotRef, Op};
 
 use crate::docview::{DocView, State};
@@ -75,7 +75,8 @@ impl DocView {
         let adopt = Op::AdoptAnnotations {
             annots: vec![AnnotRef::Id(id)],
         };
-        self.apply_batch([adopt].into_iter().chain(then).collect(), label, cx)?;
+        let tx = self.lower([adopt].into_iter().chain(then).collect(), label, cx)?;
+        self.commit(tx, CommitOpts::labelled(label), cx).ok()?;
         let State::Ready(doc) = &mut self.state else {
             return None;
         };

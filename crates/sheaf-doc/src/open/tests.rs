@@ -248,7 +248,7 @@ fn opened(bytes: Vec<u8>) -> Opened {
     let src = primary.clone();
     let policy = crate::history::default_policy();
     let mut doc = start(store, primary, "marks.pdf".into(), None, policy);
-    let view = doc.ready(finish(&src, &NoProgress)).unwrap();
+    let (view, _) = doc.ready(finish(&src, &NoProgress)).unwrap();
     Opened {
         doc,
         view,

@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 6dfbb569819f6db056be0e4a5c806bb832d3bc45a18c54fdb5cb7aaed89488f7 # shrinks to xfa = false, actions = [(3, 0), (3, 0), (16, 454217395689657221), (28, 0), (24, 0), (35, 0)]

@@ -434,6 +434,9 @@ fn every_op(d: &Document) -> Vec<ResolvedOp> {
             pages: vec![(page, src, 0)],
             why: Derive::Crop,
         },
+        R::Revert {
+            label: "Recognize text".into(),
+        },
     ]
 }
 
@@ -448,7 +451,7 @@ fn caps_cover_every_op_target_and_actor() {
     let ops = every_op(&d);
     let names: std::collections::BTreeSet<&str> = ops.iter().map(ResolvedOp::name).collect();
     assert_eq!(names.len(), ops.len(), "one op of each kind");
-    assert_eq!(names.len(), 22, "every kind there is");
+    assert_eq!(names.len(), 23, "every kind there is");
     let actors = [
         Actor::User,
         Actor::Cli,
@@ -474,7 +477,8 @@ fn caps_cover_every_op_target_and_actor() {
                     R::InsertPages { .. }
                     | R::ReplacePages { .. }
                     | R::SetOcrText { .. }
-                    | R::SetPageBase { .. },
+                    | R::SetPageBase { .. }
+                    | R::Revert { .. },
                     _,
                 ) => Cap::User,
                 _ => Cap::Plugin,

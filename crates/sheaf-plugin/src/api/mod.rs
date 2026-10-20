@@ -50,6 +50,7 @@ pub(crate) mod v02 {
 #[cfg(test)]
 mod tests {
     use sheaf_doc::measure::{Measured, Scale};
+    use sheaf_doc::prim::Key;
     use sheaf_doc::tx::fixture;
     use sheaf_doc::tx::mark_style;
     use sheaf_doc::{
@@ -151,7 +152,7 @@ mod tests {
             view: None,
         }));
         assert_eq!(
-            ops.finish().ops,
+            ops.finish().0.ops,
             [Op::PatchBookmarks {
                 bookmarks: vec![BookmarkRef::Id(OutlineId(3))],
                 patch: BookmarkPatch {
@@ -182,7 +183,7 @@ mod tests {
                 after: None,
                 items,
             }));
-            ops.finish()
+            ops.finish().0
         };
         let named = |ops: &[Op]| {
             let named = |op: &&Op| matches!(op, Op::AddBookmark { local: Some(_), .. });
@@ -204,7 +205,8 @@ mod tests {
             id: "outliner".into(),
             version: "1.0.0".into(),
         };
-        let tx = batch.lowered(&d, plugin).unwrap();
+        let mut tx = d.tx(plugin);
+        batch.lowered(&mut tx, &d).unwrap();
         d.commit(tx, CommitOpts::default()).unwrap();
         let st = d.state();
         let mut placed = Vec::new();
@@ -275,7 +277,10 @@ mod tests {
                 id: "checker".into(),
                 version: "1.0.0".into(),
             };
-            let tx = ops.finish().lowered(d, plugin).unwrap();
+            let (batch, read) = ops.finish();
+            assert_eq!(read, [Key::Annot($id)], "the mark it keeps parts of");
+            let mut tx = d.tx(plugin);
+            batch.lowered(&mut tx, d).unwrap();
             d.commit(tx, CommitOpts::default()).unwrap();
             d.state().find_annot($id).unwrap().1.clone()
         }};
@@ -284,7 +289,8 @@ mod tests {
     /// A plugin's update says what its API shows of a mark, and no more:
     /// the mark's creation date, name and turn, and a tape's rows and
     /// look, stay as they were; so do a 0.2 plugin's fill, dashes, cloud
-    /// and start arrowhead, which 0.2 can't show.
+    /// and start arrowhead, which 0.2 can't show. What it keeps is the mark
+    /// as the call read it, so the update reads the mark.
     #[test]
     fn a_plugin_update_keeps_what_it_cant_see() {
         use super::bindings_v02::sheaf::plugin::types as w02;

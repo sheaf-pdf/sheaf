@@ -283,7 +283,7 @@ three steps in a row):
   is never asked for the outline.
 - **`Document::ready(facts)` builds the complete opened version once**
   and puts it in the loading version's place under a new `VersionId`,
-  the way a job's amend does. The pages keep their ids, and the current
+  the way a group's amend does. The pages keep their ids, and the current
   and saved versions follow it, with the opened file's `SaveRecord`
   (synthesized at open, see Saving), so the document isn't dirty and
   there's nothing to undo. It is records (M10.5 slice 8; see the Core
@@ -306,9 +306,8 @@ three steps in a row):
   the portfolio, layers, what sheaf says about the form, and the marks
   given new ids, whose pages the next save writes. A second call is
   refused.
-- **Until then the document is loading.** A transaction's ops, and
-  `commit` and `apply_in_job`, return `NotReady`, making no version and
-  drawing no ids.
+- **Until then the document is loading.** A transaction's ops and
+  `commit` return `NotReady`, making no version and drawing no ids.
   The app greys out what edits the document or writes it out (saves,
   exports, print, split, extract, comment import, page and bookmark
   edits, the markup tools, undo and redo) and every plugin command, says
@@ -727,10 +726,12 @@ dropped to save memory is rebuilt exactly, never by running the edit again:
 Version   { parent, children, redo_to,   // undo goes to the parent, redo to redo_to
             label, actor, author, at,    // who made it (M10.5 slice 11)
             steps: Vec<Step>,            // the ops from the parent
+            keys: Arc<BTreeSet<Key>>,    // the slots they changed (M10.5 slice 12)
             blobs: HashSet<BlobId>,      // the sources its steps bring, noted once
             state: Option<DocState>,     // the snapshot, unless trimmed
             snapshot_bytes, step_bytes,  // what it holds (see Decisions)
-            job, damaged,
+            group, damaged,              // the group it's of: an OCR run, a plugin call
+            on_line,                     // on the line from the first version kept to the current one
             sealed,                      // saves of it in flight
             record,                      // the saved version's SaveRecord
             saves: Vec<SaveNote> }       // { path, at, strategy } of each save
@@ -755,8 +756,8 @@ Prim      { key: Key, before: Option<Val>, after: Option<Val> }
   entry, and a `Field` whose partial name, parent or kids changed finds
   the full names under it again.
 - **A no-op makes no version.** A slot written back to what it held makes
-  no prim (the same im nodes or `Arc`, else equal), and a batch's or job's
-  prims are coalesced per key into one, from the first before to the last
+  no prim (the same im nodes or `Arc`, else equal), and a batch's or a
+  group's prims are coalesced per key into one, from the first before to the last
   after, on the last step that changed the slot. So a batch that rotates a
   page and rotates it back has none, and nothing is pushed. No whole state
   is ever compared.
@@ -770,10 +771,11 @@ Prim      { key: Key, before: Option<Val>, after: Option<Val> }
   the History panel shows "History is damaged at version N", undo and redo
   return `EditError::Mismatch { version }` instead of doing nothing, and
   a debug build panics.
-- **A VersionId names one state, which never changes.** A job's amend
-  (see Text layers) and the end of a file's opening (`Document::ready`)
-  each put a new version, with a new id, in the old one's place under the
-  same parent, and the old id stops resolving. A save puts none.
+- **A VersionId names one state, which never changes.** A group's amend
+  (see One funnel and the history budget) and the end of a file's
+  opening (`Document::ready`) each put a new version, with a new id, in
+  the old one's place under the same parent, and the old id stops
+  resolving. A save puts none.
 - **One `IdAlloc`.** Page, bookmark and field ids come from counters that
   only go up, so an id is never handed out twice, whatever undo does (the
   opened file's field nodes keep the ids its tree numbers them with). The
@@ -790,12 +792,13 @@ Prim      { key: Key, before: Option<Val>, after: Option<Val> }
   its version over the saved file, which pinned that version's snapshot
   and its children's; now each version replays across a save as any
   does, and only the saved version keeps its snapshot for the save after
-  it (`keeps_snapshot`: the opened, current, saved and sealed ones).
+  it (`keeps_snapshot`: the first kept, current, saved and sealed ones).
 - **A save seals its version** (M10.5 slice 9; see Saving). A sealed
-  version keeps its snapshot, a job's next batch makes a version after it
-  instead of amending it, and pruning never removes it, nor the saved
-  version: a branch holding either stays whole, and the opened version
-  doesn't move past it.
+  version keeps its snapshot, a group's next commit makes a version after
+  it instead of amending it, and pruning never removes it: a branch
+  holding one stays, and the first version kept doesn't move past it.
+  The saved version may go once it's old (M10.5 slice 12): it detaches,
+  its state and record kept as an anchor.
 - **A save is judged by its path** (M10.5 slice 10). The keys the steps
   changed on the tree's path from the saved version to the one being
   saved, through where the two branches meet, are what a save compares,
@@ -803,16 +806,21 @@ Prim      { key: Key, before: Option<Val>, after: Option<Val> }
   So undo back to the saved state, by whatever route (undo, a jump, or
   edits that set every slot back), is an Unchanged save: nothing is
   written, the saved record is attached to the version
-  (`record_unchanged`, no save note) and the document is clean. Pruning
-  keeps the path, since the root never moves past the saved version.
+  (`record_unchanged`, no save note) and the document is clean. Once
+  pruning has taken the saved version, its anchor keeps the keys from it
+  to the first version kept, so the path is never lost (M10.5 slice 12).
 
 `model/history_tests.rs` is the proof: over random runs of every op (from
 M10.5 slice 11 generated as `Op`s, 22 kinds with the internal page base,
 naming what they act on by id, position, local, `/NM` and title path),
 with batches (one transaction, each op against what the ones before it
-made), jobs, undo, redo, jumps and trims down to one snapshot, every
-version rebuilt from its prims equals the state it was made as, ids
-included, and each kind's no-op pushes nothing.
+made), groups (amends, fragments, reverts and rollbacks), transactions
+made on earlier versions landed by value or lowered again, undo, redo,
+jumps, trims down to one snapshot and pruning to a byte budget (M10.5
+slice 12), every version rebuilt from its prims equals the state it was
+made as, ids included, and each kind's no-op pushes nothing; and what
+history counts it holds, after every action, is what it holds, counted
+again.
 
 Costs and how they're bounded:
 
@@ -822,26 +830,28 @@ Costs and how they're bounded:
   records, each record its own key, so per-page edits don't scale with
   document size, and nothing is found by a scan: a page's position, an
   annotation by id or `/NM`, and a field by its full name are index
-  lookups. At 7,000 pages and 20,000 marks, adding a mark takes 0.022 ms
-  and moving half the pages before the first 1.0 ms, each an op in a
+  lookups. At 7,000 pages and 20,000 marks, adding a mark takes 0.019 ms
+  and moving half the pages before the first 0.94 ms, each an op in a
   transaction committed (release; `history_at_7k_pages_and_20k_marks` in
   the 7k gate harness, `crates/sheaf-ops/tests/gate_7k.rs`; 0.015 and 0.74
   ms from slice 8 until ops; 0.7 and 0.95 ms before slice 8, when an add
   looked through every mark). 1,000 adds on the heavy 7k,
   21,000 annotations held, cost what they cost on blank pages, about
-  0.15 ms each, most of it history's: a push walks the versions to trim
-  them, so it grows from 0.03 to 0.18 ms as history fills towards
-  `MAX_VERSIONS` (`mark_adds_on_the_heavy_7k`; slice 12 bounds history by
-  bytes).
+  0.03 ms each, and a push doesn't walk history (M10.5 slice 12): with
+  200 snapshots held, which the default policy weighs at every push, the
+  last 100 adds on blank pages take 0.021 ms against the first 100's
+  0.019 (`mark_adds_on_the_heavy_7k`, asserted within 1.5×; before slice
+  12 a push walked the versions to trim them, and the last 100 took
+  0.18 ms).
 - Sources referenced only by undone versions are counted and freed. Each
   version notes once, as it's made, the blobs its steps bring (a page
   shown from another source), so counting them walks no step, and a blob
   goes when the last record holding it does.
   `HistoryStats` counts every live blob once (`blob_bytes`) and those only
   versions off the current line bring (`undone_source_bytes`), and
-  `MemoryBudget` weighs the second (see Decisions). Pruning is by count
-  until M10.5 slice 12 prunes by bytes. Inserting a 400-page scan, undoing
-  it and editing past `MAX_VERSIONS` frees its bytes
+  `MemoryBudget` weighs the second (see Decisions), and prunes the
+  versions that hold them when it must (M10.5 slice 12). Inserting a
+  400-page scan, undoing it and editing on frees its bytes
   (`pruning_an_undone_400_page_scan_frees_its_bytes`).
 
 ## Ops and transactions (M10.5 slice 11)
@@ -887,9 +897,9 @@ impl Document {
     // ops lowered as they come, by `actor`; one commit is one version
     pub fn tx(&self, actor: Actor) -> Tx;
     pub fn commit(&mut self, tx: Tx, opts: CommitOpts) -> Result<Commit, EditError>;
-    // the label of what was undone, or None with nothing to undo
-    pub fn undo(&mut self) -> Result<Option<&str>, EditError>;
-    pub fn redo(&mut self) -> Result<Option<&str>, EditError>;
+    // what it changed, or None with nothing to undo (from slice 12)
+    pub fn undo(&mut self) -> Result<Option<ChangeSet>, EditError>;
+    pub fn redo(&mut self) -> Result<Option<ChangeSet>, EditError>;
     pub fn state(&self) -> &DocState;
 }
 
@@ -981,7 +991,8 @@ targets to sit after the preceding bookmark's pages.
   transaction's state, sources' facts, the store, the host's attributes
   and the id allocator; what it reads without writing is kept by value,
   and so is what a caller decided its ops on (`Tx::read`, `Tx::reader`,
-  which the app's macros read through), for slice 12's stale bases. A
+  which the app's macros read through), which a commit on another
+  version checks (slice 12's stale bases, below). A
   canceled op leaves the transaction as it was; inserts, replaces,
   duplicates and deletes report progress by page.
 - **Actors and caps** (§6.7). `Actor::{User, Plugin { id, version },
@@ -1040,19 +1051,19 @@ targets to sit after the preceding bookmark's pages.
   signature class) with the pages and keys it touched, judged on the step
   alone (`ClassifyCx::of_step`), so it too costs what the op touched; a
   save still judges its whole path (`judge`, slice 10).
-- **Commits** at the cursor (`Document::commit`): refused while the file
-  opens (`NotReady`) or for a transaction made on another version
-  (`Internal`, until slice 12's stale bases); prims coalesced per key; no
+- **Commits** (`Document::commit`): refused while the file opens
+  (`NotReady`); a transaction made on another version lands as its
+  commit says (from slice 12, below); prims coalesced per key; no
   version when nothing changed. `Commit { version, amended, created,
   effects, lines, cascades, notices }`: `created` is what each op made
   and what each local names, which the app selects or opens (a new mark,
   bookmark, reply or paste, a text editor) instead of guessing; the
   notices are typed (`Notice::{FormRenamed, CopiesRenamed,
   SignatureNotValidHere, ScriptsOff, Unencodable}`, the last once a
-  document), and `notice_text` gives the texts M10 pinned. A job's
-  batches commit through `apply_in_job(job, tx, label)` (see Text
-  layers). Undo, redo and jumps return `EditError` (`Mismatch` for a
-  damaged version, `NotFound` for one no longer kept).
+  document), and `notice_text` gives the texts M10 pinned. A group's
+  commits join its version (slice 12, below). Undo, redo and jumps
+  return `EditError` (`Mismatch` for a damaged version, `NotFound` for
+  one no longer kept).
 - **A source is its blob; a form instance is its op's.** `SourceId =
   BlobId`: nothing registers a file, and records hold their `Src`.
   `InsertPages { from: PageSource::File { file: BlobSel, name }, .. }`
@@ -1074,8 +1085,8 @@ targets to sit after the preceding bookmark's pages.
   notes once the blobs its steps bring, so `undone_source_bytes` walks no
   step.
 - **Callers.** The app commits through `DocView::commit(tx, opts) ->
-  Result<Commit, EditError>` (and `apply`/`apply_batch` for an op or a
-  few, until slice 12's single funnel): a drag is `MoveMarks`, a handle,
+  Result<Commit, EditError>`, from slice 12 the only way it changes the
+  document but for OCR's flushes (below): a drag is `MoveMarks`, a handle,
   style or text change a `PatchMarks` naming only what changed
   (`mark_changes`). Crop, Remove Header/Footer and the watermark show
   pages of derived copies through the internal `Tx::set_page_base(pages,
@@ -1087,7 +1098,8 @@ targets to sit after the preceding bookmark's pages.
   ops (an update a `PatchMarks` naming only the record's fields, so what
   the API doesn't show stays), the host resolves a mark's stamp or file
   stem into a grant, and the batch is one transaction of
-  `Actor::Plugin`. A comment import is `PatchMarks`, `AdoptAnnotations`
+  `Actor::Plugin` (from slice 12 a call's batches are one group, the
+  first landed on what the call read). A comment import is `PatchMarks`, `AdoptAnnotations`
   and `AddMark` with `Imported` (`Actor::Job(Import)`; `Actor::Cli` on
   the command line).
 
@@ -1096,6 +1108,251 @@ and draws no id (asserted under 1 ms on the synthetic and heavy
 fixtures); one transaction of 7,000 `SetOcrText` lowers in 38 ms and
 commits in 6 ms as one History line; with 20,000 marks, an `AddMark`
 committed takes 0.022 ms and a full reorder 1.0 ms (gates 1 and 2 ms).
+
+## One funnel and the history budget (M10.5 slice 12)
+
+A transaction can be made on one version and committed on another, so
+the work that plans an edit runs off the UI thread and a dialog commits
+on the version it opened on. Every transition between versions says
+what it changed, as a `ChangeSet`, which is how the app (one door, one
+refresh), its panels and plugins follow the document. An OCR run and a
+plugin call are each a group of versions that undo as one step. History
+is kept to a byte budget, pruning the oldest versions, the saved one
+too (§8 and §14 of `todos/m10.5-edit-api.md`).
+
+```rust
+pub enum Base { Current, At(VersionId) }          // the version a Tx was made on
+pub enum Stale { Validate, Relower }              // how it lands on another
+pub struct CommitOpts { label, base: Base, stale: Stale, group: Option<GroupId> }
+pub enum GroupKind { Ocr, PluginCall { plugin: Arc<str> } }
+
+impl Document {
+    pub fn tx_at(snap: &Snapshot, cx: Arc<LowerCx>) -> Tx;   // on snap's version, off the UI thread
+    pub fn commit(&mut self, tx: Tx, opts: CommitOpts) -> Result<Commit, EditError>; // Commit.change
+    pub fn undo(&mut self) -> Result<Option<ChangeSet>, EditError>; // and redo, jump
+    pub fn record_save(&mut self, rec: SaveRecord) -> Result<ChangeSet>;
+    pub fn begin_group(&mut self, kind: GroupKind) -> GroupId;
+    pub fn end_group(&mut self, g: GroupId);
+    pub fn revert_group(&mut self, g: GroupId, label: &str) -> Result<Commit, EditError>;
+    pub fn rollback_group(&mut self, g: GroupId) -> Result<Option<ChangeSet>, EditError>;
+}
+impl Tx { pub fn preview(&self) -> Preview; }       // lines, effects, created
+pub struct ChangeSet { from, to, cause: Cause, actor, label, keys,
+                       order, pages_added, pages_removed, geometry, content,
+                       annots, fields, outline, labels, form, generators }
+impl DocView {
+    fn lower(&mut self, ops, label, cx) -> Option<Tx>;   // and lower_in(tx, ops, label, cx)
+    fn commit(&mut self, tx, opts, cx) -> Result<Commit, EditError>;
+    fn on_change(&mut self, ch: &ChangeSet, cx);         // the one refresh
+}
+```
+
+- **ChangeSets** (`change.rs`). Every transition gives one: a commit
+  (`Commit.change`), an amend, an undo, a redo, a jump, a save
+  (`record_save` and `record_unchanged`, from and to the current
+  version, nothing changed), a rollback, a revert, and the file's facts
+  coming in (`ready`, `Cause::Opened`: every page and field in its sets,
+  no keys). `Cause` says which, `actor` who (a commit's or an amend's
+  transaction's, a rollback's group's, the user's otherwise) and `label`
+  what, in words. It's made from the slots that changed, a lookup or two
+  each, never by comparing the states: a `Page` slot that came is a page
+  added, one that went a page removed, one in both content (looked up
+  only when the order changed, since every page is in the order);
+  `Geom` is geometry; `PageAnnots` and each `Annot`'s page in either
+  state are annotations; the other keys set their flag or list. Each
+  version keeps its keys (`Version.keys`, the union of its coalesced
+  steps' prims' keys, shared with its step when it has only one), and an
+  undo, a redo or a jump names those on the tree path, walked up from
+  both ends until they meet (`edges_between`), which is a save's path
+  too (see Saving).
+- **Stale bases** (`model/stale.rs`, §8.5). `Document::tx_at(snapshot,
+  cx)` makes a transaction on a snapshot's version, and its commit says
+  so (`Base::At(v)`; a mismatch is a bug, `Internal`). A snapshot names
+  its document too (`Snapshot.instance`, a number no other document in
+  the process has, which the transaction keeps): version ids are counted
+  per document, so one made on another document, such as the one a
+  recovery replaced, is a bug too, whatever its version's number. On the
+  version it
+  was made on it commits as any does. On another, what its caller
+  decided by (`Tx::read`) must hold the same values there (by value, so
+  a change undone since is none), and then:
+  - **`Validate`** (a dialog's, an OCR flush's): every slot its ops read
+    while lowering (`seen`), and the first before-value of every slot
+    they wrote, must hold there too. Its steps' prims are put on the
+    current state in order (`merge`), each line said again against what
+    it lands on and its effects worked out again, and the post-merge
+    check looks for anything the cascades, the uniqueness rules or the
+    references would still change or break: one round of every cascade
+    rule over what the merge wrote (`cascade::unsettled`); one generator
+    per kind and place (`GenSpec::same_place`; a header and footer has
+    no z, so a document has one), a source page's copy shown once,
+    `/NM`s per page and full names over the written fields
+    (`DocState::unique_after`); and every page a written slot names
+    still there (`resolves_after`: a mark's, a bookmark's, a label
+    range's start, the header's pages). Debug builds check the
+    invariants too.
+  - **`Relower`** (a planner's, a plugin call's): the ops are lowered
+    again on the current version, in a new transaction with the same
+    context, grants, names and pins, each op drawing first the ids it
+    drew before (`Entry::Op { op, drawn, positional }`; every id is
+    drawn through `Lower`: pages, bookmarks, fields, annotations and
+    generators), so what it made keeps its ids. An op whose reference
+    no longer resolves fails as it would have (`NotFound` for an insert
+    before a page deleted since). An op that resolved a position or a
+    span (it read the order) needs the order unchanged.
+
+  Anything else is `EditError::Conflict { key, by }` and changes
+  nothing: the slot, and the label of the newest edit on the current
+  line, since the two lines met, that changed it ("“Crop page 1”
+  changed the same data"); none when an undo did. `Tx::preview()` says
+  what a commit on its own version would do (`Preview { lines, effects,
+  created }`).
+- **Groups** (§8.4). `begin_group(GroupKind::Ocr | PluginCall { plugin
+  })` starts a group of versions that undo as one step. It takes commits
+  (`CommitOpts.group`) from the actor its kind names, the OCR job or the
+  plugin called (another's is a bug), until `end_group`. A commit joins
+  the group's version, an amend (steps added and coalesced, a new id in
+  its place, `Cause::Amend` with the commit's own keys), when that's
+  the current version, has nothing after it, was never saved, isn't
+  being saved and has a parent; otherwise it pushes another version of
+  the group's, "… (continued)" once the group has one. A commit after
+  the group's newest version was undone or jumped away from (it's
+  neither the current version nor before it), or after the group
+  ended, is `EditError::GroupEnded` and changes nothing. History's
+  "Undo all of …" (`revert_group`) takes the group's versions on the
+  current line back as one version after the current one, the user's
+  (`Cause::Revert`, `ResolvedOp::Revert`): their prims inverted on the
+  current state, newest first, every before-value checked, coalesced,
+  then put through `Validate`'s merge, so an edit since to what they
+  wrote, or a rule their going would break, is a Conflict naming that
+  edit, and edits between the fragments stay. `rollback_group` (a
+  plugin call that failed) takes the group's only version out when it
+  could still amend it, leaving nothing to redo; otherwise it reverts
+  by the group's actor (`Cause::Rollback`), a saved version staying.
+  Either ends the group. Once pruning has taken a version of the group,
+  or the prims of the first version kept, which is of it, either is
+  `Invalid` ("older than the history kept") and History offers no "Undo
+  all of" for it (`Document.cut_groups`): what's left would take back
+  only part of it. An amend whose keys don't meet its version's
+  counts only its new steps' bytes (`join`), so 700 flushes of 10 pages
+  take 79 ms together and the last ones 0.12 ms each.
+- **The history budget** (§8.7, `history.rs`). After each push or amend,
+  `trim` weighs history only when the policy could act on what it holds
+  (`HistoryPolicy::could_act`, from running totals). It prunes versions
+  one at a time while there are more than `MAX_VERSIONS` or the policy
+  says (`prunes`; `MemoryBudget`'s is `untrimmable_bytes() > budget`),
+  weighing again after each, then drops snapshots. `prune_one` takes the
+  oldest leaf off the current line, never the saved or a sealed version,
+  and otherwise moves the first version kept on along the line
+  (`advance_root`): never past the current version or a sealed one, nor
+  while a branch off it holds a sealed one; the other branches off it go
+  with it. The new first version keeps its steps' lines, effects and
+  keys but not their prims, since nothing is rebuilt into it, and its
+  bytes are counted again; a group it takes a version or the prims of
+  can no longer be undone all at once (above). The saved version may go, as the first
+  version or on a pruned branch: it detaches
+  (`SavedVersion::Detached(Anchor { state, record, keys_to_root })`),
+  keeping what the next save needs, and each later first version adds
+  its keys; a save replaces it. One made in memory has no record, so
+  nothing is kept and the next save is `NoSaveRecord`'s Rewrite. A push
+  doesn't walk history: what history holds is counted as versions come
+  and go and snapshots are dropped and rebuilt (`Held`: the versions
+  keeping snapshots, their bytes, the steps' bytes, and the undone
+  sources' bytes until the line or a version bringing a source
+  changes); each version says whether it's on the current line
+  (`on_line`, set along the path a move walks); and the snapshots the
+  policy may drop are found in one pass over those held (`weigh`). 200
+  OCR versions of a 1,000-page scan keep within 256 MB (4,254 MB of
+  steps before): history gets shorter instead.
+- **The app: one door, one refresh** (§14.1). `DocView::lower(ops,
+  label)` and `lower_in(tx, ops, label)` lower and say why an op
+  failed. `DocView::commit(tx, opts)` commits, says what it did or why
+  not (a Conflict among them), brings the bookmarks it made into view
+  (walking up from each), and calls `on_change`, as undo, redo, a
+  History jump, "Undo all of …", a save's end, a plugin call's rollback,
+  OCR's flushes and the file's opening do with their changes. OCR's
+  flushes commit on the model in their run's group and call `on_change`
+  themselves: the door's notice would replace the run's own, and a
+  page-by-page retry's conflicts are pages left out, not errors to
+  show; they make no bookmarks. No view
+  method both lowers and commits. `on_change` catches up what follows
+  the document (`Doc::follow`). `Doc.changes` counts changes, and keys
+  the Comments view, the History rows and the labels cache. What's
+  selected of removed pages and annotations goes, looked at only when
+  the change touched them, and the images of pages now shown from
+  another source page go. The panes lay the pages out again
+  (`Doc.layout`) only on an order, a geometry or such a page, so a
+  mark's edit lays nothing out. Then the plugin cell takes the new
+  snapshot, autosave is scheduled (not for a save or the opening), and
+  listeners hear once: `DocEvent::Opened` when the file opened, else
+  `DocEvent::Changed { change }`. Plugins hear it as `edited` ("Undo:
+  …", "Redo: …", "Go to: …" or the label), never of their own edits (by
+  the change's actor) or of saves. A recovery sidecar is keyed by its
+  `VersionId` alone. The `--script` harness's `dump` gains `"version"`
+  (the version, the change and layout counts, whether it's dirty) and
+  `"changes"` (the count, and the last change).
+- **Planners and dialogs.** `DocView::run_planner(name, work, status,
+  land)` plans an edit off the UI thread on a snapshot and lands it on
+  the UI thread. Any number run at once, beside a file job (`run_job`,
+  now only Export and Split) and OCR; Escape stops the newest, and
+  opening or recovering another document forgets them, and blank
+  review's pages (`forget_planners`), and closes the dialogs opened on
+  the document it replaced (`Workspace::close_dialogs_of_another`, by
+  `Snapshot.instance`). Inserting a PDF's pages, blank pages or images,
+  and replacing pages, read the file into the store, open its engine
+  and lower `InsertPages` or `ReplacePages` on the snapshot off the UI
+  thread (`plan_insert`, `plan_replace`), then land with `Relower`
+  (`CommitOpts::based(v, stale, label)`), keeping the engine only once
+  committed. Crop, Watermark / Background and Header & Footer resolve
+  their pages to ids on the version their dialog opened on, make the
+  copies off the UI thread, show them (`Tx::set_page_base` on
+  `tx_at(opened)`), commit with `Validate`, and only then keep the
+  copies; their dialogs show no preview of the document until slice
+  13's rendered previews. The labels dialog previews its op lowered on
+  the current version (`Tx::preview`), again at each change, and
+  commits on the version it opened on with `Validate`; once the labels
+  changed since it opened, which that commit would find, it says it
+  can't apply. Blank review's
+  delete reads each confirmed page (`Tx::read(Key::Page(p))`, until
+  slice 13's `read_render`) and lands with `Relower`, so a page whose
+  content changed since is a Conflict, and one given a bookmark, a
+  connector or a header since has the cascades applied. A comment
+  import is planned off the UI thread (`Actor::Job(Import)`) and lands
+  with `Relower`, reading what its matching decided by
+  (`Imported.reads`, read by `ops_in`): the order, each page it brings
+  comments onto (its `Geom` and `PageAnnots`) and each comment it
+  updates, so two imports of one file planned together don't both add
+  its comments: the second is a Conflict.
+- **OCR** is a group (see Text layers): flushes made on the run's first
+  version, deciding by each page as it was rendered, landed with
+  `Validate`.
+- **Plugins** (§14.3; WIT 0.2 and 0.3 until 0.4). Each document has a
+  cell (`Doc.plugin_cell`, an `ArcSwap<Snapshot>`) that `on_change`
+  stores the new snapshot in. A call loads its base from it at its first
+  read or submit (`HostState::base`), so a queued call, or one that
+  showed a form first, starts from the document as it is then, and its
+  reads record the slots it decided by (`HostState::read`,
+  `CallOutput.reads`): `pages()` the order and each page's `Page` and
+  `Geom`; `annotations(p)` `PageAnnots(p)` and each mark shown; the
+  outline its roots and each bookmark; text, search, words, recognition
+  and renders `Page(p)`; an update the mark it keeps parts of. When the
+  call returns, `plugins::land` begins a `GroupKind::PluginCall` group
+  and commits the first batch on the base (`tx_at`, each read,
+  `Relower`) and later ones at the current version in the group
+  (`EditBatch::lowered(tx, doc)`). The first failure rolls the group
+  back; if the user changed meanwhile what the call wrote (a Conflict),
+  its edits stay, and the notice says "its partial edits were kept". A
+  call whose cell is no longer its view's (the view opened another file)
+  changes nothing.
+
+At 7,000 pages a snapshot takes about 0.2 µs (asserted under 50 µs on
+every fixture). A crop of every page but one, landed by value after the
+user deleted that page, takes 27–31 ms, against 14–15 ms on the current
+version. An insert of 10 pages lowered again after a move commits in
+1.5 ms. One transaction of 7,000 `SetOcrText` lowers in 36 ms and
+commits as an OCR group's version in 9.5 ms, about 4.5 ms of it pruning
+the previous run's version, which doesn't fit the budget beside it (the
+bench gives every page one shared layer, which each step counts).
 
 ## What the viewer changes
 
@@ -1326,10 +1583,11 @@ below).
   `SaveInput`: the version's state, the primary, the derived copies'
   table (see Ops and transactions), and the saved
   version's state and record when there is one) and seals `v`: an OCR
-  batch or a typing commit during the save makes a version after it, which
+  flush or a typing commit during the save makes a version after it, which
   stays dirty, and pruning keeps it. `record_save(rec)` makes the version
   saved and holds its record (the version saved before keeps only its
-  `SaveNote`, the History panel's `{ path, at, strategy }`), and
+  `SaveNote`, the History panel's `{ path, at, strategy }`, and a saved
+  version pruning detached goes with its anchor, M10.5 slice 12), and
   `abandon_save(v)` ends a failed or canceled one; either unseals.
   `recovery_input()` seals nothing, and `SaveInput::detached(&Snapshot)`
   is an export's, with no saved side.
@@ -1731,12 +1989,18 @@ about 21 ms, its fsyncs included.
 - **The path** (`SaveInput.path_keys`). `Document::input(v)` gives the
   keys any step changed on the history tree's path from the saved
   version to `v`, through the version where their branches meet, both
-  sides. Pruning keeps the saved version, the sealed ones and any branch
-  holding them, and the root stops at the saved version or the branch
-  point, so the path is always in history and no `keys_to_root` is
-  needed. Each key is judged by value, the saved state's against the
-  target's, so undoing back to the saved state by any route changes
-  nothing.
+  sides: each version's own keys (`Version.keys`, from M10.5 slice 12),
+  walked up from both ends until they meet (`edges_between`). Until
+  slice 12 the root stopped at the saved version or the branch point
+  holding it, so the path was always in history. Now pruning may take
+  the saved version, which detaches into an anchor (`SavedVersion::
+  Detached(Anchor { state, record, keys_to_root })`): its state and
+  record, and the keys from it to the first version kept, which grow as
+  that first version moves on; the path is then the anchor's keys and
+  those from the first version kept to `v` (see One funnel and the
+  history budget). Each key is judged by value, the saved state's
+  against the target's, so undoing back to the saved state by any route
+  changes nothing.
 - **The plan** (`plan`), in order: an Append onto a copy (`Onto::CopyOf`)
   for a save to another path when the primary has signatures or usage
   rights, they hold (`SaveRecord.signatures_hold`: true when opened,
@@ -1802,7 +2066,16 @@ about 21 ms, its fsyncs included.
   keys of the path whose values differ, closed over what each one's
   object depends on (the module's table): a page's dictionary and, when
   its base or copy changed, its annotations, the bookmarks to it and the
-  links to the page written for a source page; an annotation's parts,
+  links to the page written for a source page; when it turns or its
+  boxes change, every connector of each group with one on it (a group
+  goes in the order its connectors show on their pages, so a turn may
+  change each one's next; found by the Append ≡ Rewrite property in
+  M10.5 slice 12, `append_rewrite_a_connector_s_next_follows_a_turned_page`;
+  each group is taken once, however many of its pages turned or of its
+  connectors are written, so neither scans the annotations again nor
+  recurses as deep as the group is long,
+  `append_rewrite_a_long_connector_group_is_taken_once`);
+  an annotation's parts,
   replies and connector group; a field's widgets, every node over it, and
   the form's dictionary when the node came, went, moved or shows other
   widgets; the pages of a widget that stops or starts being its field's
@@ -2006,8 +2279,9 @@ about 21 ms, its fsyncs included.
   rewrite); a document made in memory appends as though opened from its
   primary's bytes (`Document::append_input`, `opened_from`). The Append ≡
   Rewrite property (`materialize/append_rewrite_tests.rs`, 32 cases by
-  default and 1,024 ignored) runs history's 21 edit kinds, batches, jobs,
-  undo, redo, jumps and trims over a real form file with planned saves,
+  default and 1,024 ignored) runs history's edit kinds, batches, groups,
+  undo, redo, jumps, trims and, from M10.5 slice 12, pruning to a byte
+  budget over a real form file with planned saves,
   Save As and forced Appends between, and after each save compares the
   reopened file's facts (pages' boxes, content and resources by value,
   annotations, outline, labels, the field tree, the form's dictionary,
@@ -2376,8 +2650,13 @@ prints today's numbers on the three fixtures beside slice 2's baselines.
 
   ```rust
   pub trait HistoryPolicy {
+      /// Whether it might act on this many snapshots and bytes: when it
+      /// can't, no stats are worked out (M10.5 slice 12).
+      fn could_act(&self, snapshots: usize, bytes: usize) -> bool { true }
       /// How many of the oldest snapshots to drop, given current stats.
       fn trim(&self, stats: &HistoryStats) -> usize;
+      /// Whether to prune a version first (M10.5 slice 12).
+      fn prunes(&self, stats: &HistoryStats) -> bool { false }
   }
   pub struct FixedCount(pub usize);
   pub struct MemoryBudget(pub usize);
@@ -2411,12 +2690,18 @@ prints today's numbers on the three fixtures beside slice 2's baselines.
   fields their props without counting them twice there, but a version
   that copies a page an earlier one recognized counts the stack again.
   Trimming frees snapshot bytes only; a version's step bytes, and the
-  sources it holds, go when it is pruned (past
-  `MAX_VERSIONS`, and by bytes from M10.5 slice 12), and a blob goes with
-  the last record holding it (an engine opened on it keeps its
-  bytes until M10.5 slice 13's engine pool closes it). A policy weighs
-  undone sources but not `blob_bytes`, so a large undone insert makes
-  `MemoryBudget` drop every snapshot it may until its branch is pruned.
+  sources it holds, go when it is pruned (past `MAX_VERSIONS`, and from
+  M10.5 slice 12 when `MemoryBudget` says: when what dropping every
+  snapshot it may would leave, `untrimmable_bytes`, is over it, versions
+  are pruned one at a time, weighed again after each, before snapshots
+  are dropped), and a blob goes with the last record holding it (an
+  engine opened on it keeps its bytes until M10.5 slice 13's engine
+  pool closes it). A policy weighs undone sources but not `blob_bytes`,
+  most of which is the files the document shows, which no pruning frees
+  (slice 12's plan said `step_bytes + blob_bytes`, which would have
+  pruned every version of a document opened on a 500 MB scan); so a
+  large undone insert has its branch pruned, the oldest first, and its
+  bytes freed, when it puts history over the budget.
   Default: `AllOf([FixedCount(200), MemoryBudget(256 MB)])`.
 - **Deleting pages cascades to bookmarks that target them**, with a
   non-modal notice ("Deleted 3 pages and 2 bookmarks — Undo"). No modal;
@@ -2468,20 +2753,29 @@ put with the page's `PageDef`.
   (the page shows other content, under the empty stack), Move and Rotate
   leave it alone, and Crop re-points the page's base and keeps its
   content.
-- **Coalesced undo.** Results arrive in batches over minutes, but a run is
-  one undo step: `Document::begin_job` returns a `JobId`, and
-  `apply_in_job(job, tx, label)` commits a batch's transaction (from M10.5
-  slice 11 of `Actor::Job(JobKind::Ocr)`, which may only set and clear
-  OCR text) by amending the newest version when that version belongs to
-  the job, has nothing after it, was never saved and isn't being saved
-  (sealed, see Saving); otherwise it pushes
-  and tags the new version. An amend coalesces the run's prims and
-  replaces the version with a new `VersionId` under the same parent (an id
-  names one state), and a run whose batches put back all they did leaves
-  no version. A save or an unrelated edit mid-run splits the run into two
-  steps; a batch during a save lands in a version after the sealed one,
-  which stays unsaved. `job_is_undone` tells the runner to stop rather than put undone
-  results back.
+- **Coalesced undo.** Results arrive in flushes over minutes (every 10
+  pages or 2 s), but a run is one undo step: from M10.5 slice 12 it's a
+  group (`Document::begin_group(GroupKind::Ocr)`, which takes commits of
+  `Actor::Job(JobKind::Ocr)` only, which may only set and clear OCR text;
+  see One funnel and the history budget). Each flush is a transaction
+  made on the version the run began on, which its pages were rendered
+  from, that reads each page's slot (`Tx::read(Key::Page(p))`, until
+  slice 13's `read_render`) and lands by value (`Stale::Validate`) in the
+  group: it amends the group's version when that's the current one, has
+  nothing after it, was never saved and isn't being saved (sealed, see
+  Saving), and pushes a version "… (continued)" otherwise. An amend
+  coalesces the run's prims and replaces the version with a new
+  `VersionId` under the same parent (an id names one state), and a run
+  whose flushes put back all they did leaves no version. A save or an
+  unrelated edit mid-run splits the run into fragments, which History's
+  "Undo all of …" takes back at once (`revert_group`); a flush during a
+  save lands in a version after the sealed one, which stays unsaved. A
+  page whose slot changed since (a crop, until slice 15 makes crop
+  geometry) is a Conflict: the flush is retried page by page, the other
+  pages keep their text, and the run's message counts the changed ones.
+  Undoing the run, or jumping away from it, makes its next flush
+  `GroupEnded`: the run stops ("OCR stopped: its results were undone")
+  rather than put undone results back.
 - **Search.** PDFium can't see unsaved layers, so Find and Patterns run the
   same literal/regex search over the pages' `OcrText` layers
   (`text_layer::search`, `pattern_search`, until slice 14's text service)

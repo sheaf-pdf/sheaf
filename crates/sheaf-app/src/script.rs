@@ -22,8 +22,12 @@
 //!   take a screenshot first.
 //! - `{"dump": "outline" | "notice" | "selection" | "annots" | "marks" | "pages" |
 //!   "panels" | "plugins" | "region" | "view" | "layout" | "toolbar" | "focus" |
-//!   "form"}`: print state as `SCRIPT <what>: …` lines. `"marks"` is the
-//!   selected marks.
+//!   "form" | "version" | "changes"}`: print state as `SCRIPT <what>: …` lines.
+//!   `"marks"` is the selected marks. `"version"` is the current version,
+//!   how many changes the document went through, how many times its pages
+//!   were laid out anew, and whether it's saved; `"changes"` is how many
+//!   changes, and what the last changed, so a script can check that each
+//!   step made one change, and a mark's edit no layout.
 //! - `{"quit": true}`
 //!
 //! File pickers can't be driven; set `SHEAF_SCRIPT_PICK=<path>` and every
@@ -457,6 +461,27 @@ impl Workspace {
                 view.selected_text().map(|(_, text, _)| text)
             ),
             "pages" => eprintln!("SCRIPT pages: {}", st.page_count()),
+            "version" => eprintln!(
+                "SCRIPT version: {} changes {} layout {} dirty {}",
+                d.model.current_version().0,
+                d.changes,
+                d.layout,
+                d.model.is_dirty()
+            ),
+            "changes" => match &d.last_change {
+                Some(ch) => eprintln!(
+                    "SCRIPT changes: {}; last {:?} {} -> {} by {:?} {:?}: {} keys{}",
+                    d.changes,
+                    ch.cause,
+                    ch.from.0,
+                    ch.to.0,
+                    ch.actor,
+                    ch.label,
+                    ch.keys.len(),
+                    changed(ch)
+                ),
+                None => eprintln!("SCRIPT changes: {}", d.changes),
+            },
             "view" => eprintln!(
                 "SCRIPT view: page {} {:?} selected {:?}",
                 view.current_page() + 1,
@@ -546,4 +571,31 @@ impl Workspace {
             other => eprintln!("SCRIPT {other}: unknown dump"),
         }
     }
+}
+
+/// What `ch` changed, as the `"changes"` dump lists it: ", order, removed
+/// 2, geometry 1", and so on; nothing when it changed nothing.
+fn changed(ch: &sheaf_doc::ChangeSet) -> String {
+    let counts = [
+        ("added", ch.pages_added.len()),
+        ("removed", ch.pages_removed.len()),
+        ("geometry", ch.geometry.len()),
+        ("content", ch.content.len()),
+        ("annots", ch.annots.len()),
+        ("fields", ch.fields.len()),
+    ];
+    let flags = [
+        ("order", ch.order),
+        ("outline", ch.outline),
+        ("labels", ch.labels),
+        ("form", ch.form),
+        ("generators", ch.generators),
+    ];
+    let counts = (counts.into_iter())
+        .filter(|&(_, n)| n > 0)
+        .map(|(what, n)| format!(", {what} {n}"));
+    let flags = (flags.into_iter())
+        .filter(|&(_, set)| set)
+        .map(|(what, _)| format!(", {what}"));
+    counts.chain(flags).collect()
 }

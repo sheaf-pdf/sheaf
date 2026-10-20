@@ -8,7 +8,7 @@ use gpui::{
 };
 use std::collections::BTreeMap;
 
-use sheaf_doc::{OutlineId, PageId};
+use sheaf_doc::{CommitOpts, OutlineId, PageId};
 use sheaf_edit::{BookmarkPatch, BookmarkRef, Local, Op, Patch, Sibling};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
@@ -332,7 +332,9 @@ impl DocView {
         }
         let n = ids.len();
         let label = format!("Bookmark {n} page{}", if n == 1 { "" } else { "s" });
-        self.submit(tx, ops, &label, cx);
+        if let Some(tx) = self.lower_in(tx, ops, &label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         self.wanted_panel = Some("bookmarks");
     }
 
@@ -373,7 +375,10 @@ impl DocView {
                 },
             })
             .collect();
-        self.submit(tx, ops, "Color bookmarks by level", cx);
+        let label = "Color bookmarks by level";
+        if let Some(tx) = self.lower_in(tx, ops, label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         self.wanted_panel = Some("bookmarks");
     }
 }

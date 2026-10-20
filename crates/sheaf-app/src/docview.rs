@@ -9,7 +9,7 @@
 //! of its source files, each file with its own render worker. Caches key by
 //! `PageId`, so reordering pages costs nothing visually.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,6 +22,7 @@ use gpui::{
 };
 use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::materialize::Came;
+use sheaf_doc::prim::Key;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, FormRef, Pt};
 use sheaf_doc::{materialize, save};
 use sheaf_edit::{PageSize, Rotation};
@@ -38,12 +39,10 @@ use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Shown, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
 use sheaf_doc::tx::{CommitOpts, Grant, Rule, Tx, mark_kind, mark_style};
 use sheaf_doc::{
-    Actor, Commit, Document, EditError, Identity, JobKind, OutlineId, PageId, SourceId, Src, Store,
+    Actor, Cause, ChangeSet, Commit, Document, EditError, Identity, OutlineId, PageId, SourceId,
+    Src, Store,
 };
-use sheaf_edit::{
-    Anchor, AnnotRef, BlobSel, Bring, FormBring, MarkPatch, NewMark, Op, OutlineBring, PageRef,
-    PageSel, PageSource, Turn,
-};
+use sheaf_edit::{Anchor, AnnotRef, BlobSel, MarkPatch, NewMark, Op, PageRef, PageSel, Turn};
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::{Job, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit};
 
@@ -110,8 +109,22 @@ type TileKey = (PageId, Job);
 pub(crate) struct Doc {
     pub(crate) model: Document,
     pub(crate) handles: HashMap<SourceId, RenderHandle>,
-    /// Bumped on every model change so layouts and lookups can tell.
-    pub(crate) version: u64,
+    /// Bumped on every change the document goes through
+    /// ([`DocView::on_change`]), so what's made from it (the Comments
+    /// panel's view, the History rows, the page labels) can tell.
+    pub(crate) changes: u64,
+    /// The last change, for the `--script` dump.
+    pub(crate) last_change: Option<Arc<ChangeSet>>,
+    /// The document as plugin calls read it, swapped at every change
+    /// ([`DocView::on_change`]): a call takes its base from it at its first
+    /// read (M10.5 §14.3). Each document has its own, so a call can tell
+    /// when the view was reopened on another meanwhile.
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_cell: Arc<arc_swap::ArcSwap<sheaf_doc::Snapshot>>,
+    /// Bumped when where the pages go changed: their order, their boxes,
+    /// or the source page one shows. The panes' layouts are built at one
+    /// count, and again at the next.
+    pub(crate) layout: u64,
     /// One view of the document, or two when the window is split.
     pub(crate) panes: Vec<Pane>,
     /// The pane keys, menus and the status bar act on.
@@ -120,8 +133,9 @@ pub(crate) struct Doc {
     /// thumbnails and a rotated view of the same page need both.
     pub(crate) previews: HashMap<(PageId, Rotation), Arc<RenderImage>>,
     pub(crate) tiles: HashMap<TileKey, Arc<RenderImage>>,
-    /// The source page each page id showed when last checked: a page that
-    /// now shows another (replaced, cropped, or undone) drops its images.
+    /// The source page each page shows, as last checked: a page that now
+    /// shows another (replaced, cropped, or undone) drops its images, and
+    /// the pages are laid out again.
     pub(crate) shown: HashMap<PageId, (SourceId, u32)>,
     /// Dropping the task drops the oneshot receiver, which tells the worker
     /// to skip the render if it hasn't started.
@@ -220,7 +234,7 @@ pub(crate) struct Doc {
     /// index: PDFium is told not to draw them, again whenever its renderer
     /// is reopened.
     pub(crate) drawn_marks: Vec<(u32, Vec<String>)>,
-    /// Every page's label (from the model), and the version it's for.
+    /// Every page's label (from the model), and the change count it's for.
     pub(crate) labels: std::cell::RefCell<(u64, Option<std::sync::Arc<Vec<String>>>)>,
     /// With two panes: the top pane's share of the height.
     pub(crate) split: f32,
@@ -237,15 +251,24 @@ impl Doc {
         outline_focus: FocusHandle,
         measure_scale: sheaf_doc::measure::Scale,
     ) -> Doc {
+        let shown = (model.state().pages())
+            .map(|(id, def, _)| (id, (def.base.src.id(), def.base.index)))
+            .collect();
+        #[cfg(feature = "plugins")]
+        let plugin_cell = Arc::new(arc_swap::ArcSwap::from_pointee(model.snapshot()));
         Doc {
             model,
             handles,
-            version: 0,
+            changes: 0,
+            last_change: None,
+            #[cfg(feature = "plugins")]
+            plugin_cell,
+            layout: 0,
             panes: vec![Pane::new(Zoom::FitWidth, PageMode::default())],
             active: 0,
             previews: HashMap::new(),
             tiles: HashMap::new(),
-            shown: HashMap::new(),
+            shown,
             inflight: HashMap::new(),
             retired: Vec::new(),
             tiles_invalidated: 0,
@@ -302,21 +325,24 @@ impl Doc {
     }
 
     /// A save's file is written: its version is the saved one now, with
-    /// the file's record, and the save is over. Nothing the document shows
+    /// the file's record, and the save is over: what it wrote, and the
+    /// change, which is in what's saved alone. Nothing the document shows
     /// changes (M10.5 §9.1), so nothing rendered goes: every tile and
     /// preview stays.
     pub(crate) fn take_save(
         &mut self,
         written: materialize::Written,
-    ) -> anyhow::Result<materialize::SaveReport> {
+    ) -> anyhow::Result<(materialize::SaveReport, ChangeSet)> {
         self.saving = false;
         let report = written.report();
         let version = written.record.version;
-        if let Err(e) = written.record_in(&mut self.model) {
-            self.model.abandon_save(version);
-            return Err(e);
+        match written.record_in(&mut self.model) {
+            Ok(change) => Ok((report, change)),
+            Err(e) => {
+                self.model.abandon_save(version);
+                Err(e)
+            }
         }
-        Ok(report)
     }
 
     /// The mark picked last, if any: the one with handles.
@@ -502,18 +528,61 @@ impl Doc {
         }
     }
 
-    pub(crate) fn touched(&mut self) {
-        self.version += 1;
-        for p in &mut self.panes {
-            p.layout = None;
+    /// Catch up with `ch`, a change the document went through: what's
+    /// selected or read of what it removed goes, the images of pages that
+    /// show another source page now go, and the panes lay the pages out
+    /// again when they go elsewhere: their order, their boxes, or the
+    /// source page one shows changed (a layout holds each page's). Nothing
+    /// else is laid out again: a mark's edit isn't. Whether the page
+    /// selection changed.
+    pub(crate) fn follow(&mut self, ch: &ChangeSet) -> bool {
+        self.changes += 1;
+        let selection = self.prune(ch);
+        let rebased = self.drop_stale_images(ch);
+        if ch.order || !ch.geometry.is_empty() || rebased {
+            self.layout += 1;
+            for p in &mut self.panes {
+                p.layout = None;
+            }
         }
-        self.drop_stale_images();
+        selection
     }
 
-    /// Forget images of pages that now show a different source page.
-    fn drop_stale_images(&mut self) {
+    /// What's selected or read of the pages and annotations `ch` removed
+    /// goes; nothing is looked at when it removed no page and changed no
+    /// annotation. Whether the page selection changed.
+    fn prune(&mut self, ch: &ChangeSet) -> bool {
+        if !ch.annots.is_empty() {
+            let st = self.model.state();
+            (self.selected_marks)
+                .retain(|(pid, aid)| st.find_annot(*aid).is_some_and(|(on, _)| on == *pid));
+            if self.selected_foreign.is_some_and(|id| !st.has_annot(id)) {
+                self.selected_foreign = None;
+            }
+        }
+        if ch.pages_removed.is_empty() {
+            return false;
+        }
+        if (self.text_sel).is_some_and(|s| ch.pages_removed.contains(&s.page)) {
+            self.text_sel = None;
+        }
+        let before = self.selection.len();
+        for p in &ch.pages_removed {
+            self.selection.remove(p);
+            self.page_chars.remove(p);
+        }
+        self.selection.len() != before
+    }
+
+    /// Forget the images of the pages `ch` added or changed that now show
+    /// another source page: whether there were any.
+    fn drop_stale_images(&mut self, ch: &ChangeSet) -> bool {
+        let st = self.model.state();
         let mut stale: HashSet<PageId> = HashSet::new();
-        for (id, def, _) in self.model.state().pages() {
+        for &id in ch.content.iter().chain(&ch.pages_added) {
+            let Some(def) = st.def(id) else {
+                continue;
+            };
             let now = (def.base.src.id(), def.base.index);
             if let Some(was) = self.shown.insert(id, now)
                 && was != now
@@ -522,7 +591,7 @@ impl Doc {
             }
         }
         if stale.is_empty() {
-            return;
+            return false;
         }
         let tiles: Vec<TileKey> = self
             .tiles
@@ -547,6 +616,7 @@ impl Doc {
             }
         }
         self.inflight.retain(|k, _| !stale.contains(&k.0));
+        true
     }
 
     /// Drop every rendered image so pages re-rasterize (after the engine's
@@ -560,7 +630,7 @@ impl Doc {
             self.retired.push(im);
         }
         self.inflight.clear();
-        self.version += 1;
+        self.layout += 1;
     }
 }
 
@@ -620,16 +690,12 @@ pub enum DocEvent {
     /// The file has opened: what it says besides its pages is read into
     /// the opened version, and edits are taken from now on.
     Opened,
-    /// The model changed: an edit, a batch, an undo or a redo. `label` is
-    /// the undo label ("Undo: …"/"Redo: …" for those two).
-    Edited {
-        label: String,
-        /// The plugin whose edits these were, if any.
-        plugin: Option<String>,
-    },
-    Saved {
-        path: PathBuf,
-    },
+    /// The document went through a change: a commit, an amend, an undo, a
+    /// redo, a jump, a save, a rollback or a revert, one event each
+    /// ([`DocView::on_change`]). Who made it is the change's actor.
+    Changed { change: Arc<ChangeSet> },
+    /// The file a save wrote (after the save's [`Changed`](Self::Changed)).
+    Saved { path: PathBuf },
     /// The set of selected pages changed.
     SelectionChanged,
     /// The selected region (Shift+drag) changed: live while dragging.
@@ -672,6 +738,10 @@ pub struct DocView {
     pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
     /// A background job in progress: Export Pages, Split (see jobs.rs).
     pub(crate) job: Option<crate::jobs::Job>,
+    /// The planners in progress, oldest first: inserts, crops, watermarks,
+    /// headers and footers, comment imports, the blank-page search (see
+    /// jobs.rs).
+    pub(crate) planners: Vec<std::rc::Rc<crate::jobs::Job>>,
     /// Blank pages found, waiting for review (see blank_review.rs).
     pub(crate) blank_review: Option<crate::blank_review::Review>,
     /// A plugin command running on this document, with its progress
@@ -711,13 +781,11 @@ pub struct DocView {
     autosave: Option<Task<()>>,
     /// When the edits since the last sidecar write began.
     autosave_since: Option<Instant>,
-    /// Bumped by every change autosave hears of: with the current version,
-    /// what a sidecar is of.
-    edits: u64,
-    /// What the last sidecar written holds (the current version, and
-    /// `edits`, as it was written), so autosave writes nothing new for the
-    /// same; None once a save changed the file it's written against.
-    sidecar_of: Option<(sheaf_doc::VersionId, u64)>,
+    /// The version the last sidecar written holds, so autosave writes
+    /// nothing new for the same: a version's state never changes (an amend
+    /// makes a new one). None once a save changed the file it's written
+    /// against.
+    sidecar_of: Option<sheaf_doc::VersionId>,
     /// A sidecar is being written: the next waits for it.
     sidecar_writing: bool,
     pub(crate) tool: Tool,
@@ -727,9 +795,6 @@ pub struct DocView {
     /// Where the pointer last was over a page: page, point (in PageSpace),
     /// and how near counts as on text.
     pub(crate) last_hover: Option<(PageId, sheaf_doc::Pt, f32)>,
-    /// Set while a plugin's edits are applied, so its own edits aren't
-    /// reported back to it.
-    pub(crate) edit_source: Option<String>,
     /// Shift+drag region (see region.rs).
     pub(crate) region: Option<crate::region::Region>,
     /// Full Screen / Read Mode (see presentation.rs).
@@ -830,6 +895,7 @@ impl DocView {
             comments: None,
             ocr: None,
             job: None,
+            planners: Vec::new(),
             blank_review: None,
             plugin_run: None,
             pending_comments_focus: false,
@@ -857,14 +923,12 @@ impl DocView {
             pending_edit: None,
             autosave: None,
             autosave_since: None,
-            edits: 0,
             sidecar_of: None,
             sidecar_writing: false,
             tool: Tool::Select,
             tick_glyph: "✓".into(),
             text_hover: false,
             last_hover: None,
-            edit_source: None,
             region: None,
             presentation: Default::default(),
             saved_view: None,
@@ -907,6 +971,7 @@ impl DocView {
     fn open(&mut self, cx: &mut Context<Self>) {
         let path = self.path.clone();
         let password = self.password.clone();
+        self.forget_planners();
         self.state = State::Loading;
         let timing = self.timing;
         let launched = self.launched;
@@ -1061,6 +1126,7 @@ impl DocView {
     fn recover(&mut self, rec: sheaf_doc::recovery::Recovery, cx: &mut Context<Self>) {
         let path = self.path.clone();
         let password = self.password.clone();
+        self.forget_planners();
         self.state = State::Loading;
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
@@ -1102,16 +1168,10 @@ impl DocView {
 
     // ----- crash-recovery autosave ------------------------------------------
 
-    /// Write the recovery sidecar a few seconds after the last edit, and at
-    /// least every half minute while edits keep coming.
-    pub(crate) fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
-        self.edits += 1;
-        self.autosave_again(cx);
-    }
-
-    /// Write the sidecar later: a few seconds from now, or at once when
-    /// the edits waiting began half a minute ago.
-    fn autosave_again(&mut self, cx: &mut Context<Self>) {
+    /// Write the recovery sidecar later: a few seconds after the last
+    /// change, and at least every half minute while changes keep coming
+    /// (at once when the ones waiting began half a minute ago).
+    fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
         let first = *self.autosave_since.get_or_insert_with(Instant::now);
         let delay = if first.elapsed() >= std::time::Duration::from_secs(30) {
             std::time::Duration::ZERO
@@ -1144,10 +1204,10 @@ impl DocView {
             return;
         }
         if doc.saving || self.sidecar_writing {
-            self.autosave_again(cx);
+            self.schedule_autosave(cx);
             return;
         }
-        let of = (doc.model.current_version(), self.edits);
+        let of = doc.model.current_version();
         if self.sidecar_of == Some(of) {
             return;
         }
@@ -1221,7 +1281,7 @@ impl DocView {
         };
         self.autosave = None;
         self.autosave_since = None;
-        let of = (doc.model.current_version(), self.edits);
+        let of = doc.model.current_version();
         let t = Instant::now();
         let input = doc.model.recovery_input();
         match sheaf_doc::recovery::write(&input, file, base, &sheaf_ops::NoProgress) {
@@ -1294,7 +1354,7 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(view) = take_facts(&mut doc.model, blob, facts) else {
+        let Some((view, opened)) = take_facts(&mut doc.model, blob, facts) else {
             return;
         };
         doc.reading = None;
@@ -1356,9 +1416,7 @@ impl DocView {
         if recovered {
             doc.notice = Some("Recovered unsaved changes — Ctrl+S to keep them".into());
         }
-        doc.touched();
-        self.refresh_history();
-        cx.emit(DocEvent::Opened);
+        self.on_change(&opened, cx);
         if let Some(p) = self.selftest_save.take() {
             self.selftest_save(p, cx);
         }
@@ -1424,48 +1482,44 @@ impl DocView {
         }
     }
 
-    /// `op` as a version of the user's called `label`: what the commit
-    /// did, or None when it failed, which the notice says. With
-    /// [`apply_batch`](Self::apply_batch), until slice 12's callers make
-    /// their own transactions.
-    pub(crate) fn apply(&mut self, op: Op, label: &str, cx: &mut Context<Self>) -> Option<Commit> {
-        self.apply_batch(vec![op], label, cx)
-    }
-
-    /// `ops` as one version of the user's, so one undo reverts them all.
-    /// Each sees what the ones before it did; if any fails, none is
-    /// applied.
-    pub(crate) fn apply_batch(
+    /// `ops` lowered in a transaction of the user's on the current version,
+    /// for [`commit`](Self::commit) to make one version of, so one undo
+    /// reverts them all: None while no document is open, or when one fails,
+    /// which the notice says. Each sees what the ones before it did.
+    pub(crate) fn lower(
         &mut self,
         ops: Vec<Op>,
         label: &str,
         cx: &mut Context<Self>,
-    ) -> Option<Commit> {
+    ) -> Option<Tx> {
         let tx = self.user_tx()?;
-        self.submit(tx, ops, label, cx)
+        self.lower_in(tx, ops, label, cx)
     }
 
-    /// `ops` lowered in `tx`, then committed as one version called
-    /// `label`: what the commit did, or None when it failed, which the
-    /// notice says.
-    pub(crate) fn submit(
+    /// `ops` lowered in `tx`, as [`lower`](Self::lower) does: `tx`, or None
+    /// when one fails, which the notice says.
+    pub(crate) fn lower_in(
         &mut self,
         mut tx: Tx,
         ops: Vec<Op>,
         label: &str,
         cx: &mut Context<Self>,
-    ) -> Option<Commit> {
-        if let Err(e) = tx.apply_batch(ops, &sheaf_ops::NoProgress) {
-            self.set_notice(failed(label, &e), cx);
-            return None;
+    ) -> Option<Tx> {
+        match tx.apply_batch(ops, &sheaf_ops::NoProgress) {
+            Ok(_) => Some(tx),
+            Err(e) => {
+                self.set_notice(failed(label, &e), cx);
+                None
+            }
         }
-        let label = Some(label.into());
-        self.commit(tx, CommitOpts { label }, cx).ok()
     }
 
-    /// `tx`'s ops as a version, as `opts` says, and the reader told what
-    /// it did or why not: what the caller gets back too. The bookmarks it
-    /// made come into view.
+    /// `tx` committed as `opts` says: the way the view changes the
+    /// document, but for OCR's flushes, which tell the reader in their
+    /// run's own words (`flush_ocr`). The reader is told what it did, or
+    /// why not, which the caller gets back too; the bookmarks it made come
+    /// into view; and everything that follows the document catches up
+    /// ([`on_change`](Self::on_change)).
     pub(crate) fn commit(
         &mut self,
         tx: Tx,
@@ -1475,91 +1529,57 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return Err(EditError::NotReady);
         };
-        let had = Had::of(&doc.model);
-        let label = opts.label.clone();
-        let result = doc.model.commit(tx, opts);
-        if let Ok(c) = &result {
-            let made: HashSet<OutlineId> = c.created.bookmarks().collect();
-            if !made.is_empty() {
-                let rows = (doc.model.state().bookmarks_preorder().into_iter())
-                    .map(|(depth, id, b)| (depth, id, !b.kids.is_empty()));
-                reveal_new_bookmarks(rows, &made, &mut doc.outline_expanded);
+        let bookmarks = doc.model.state().bookmark_count();
+        let what = opts.label.clone();
+        let commit = match doc.model.commit(tx, opts) {
+            Ok(commit) => commit,
+            Err(e) => {
+                doc.notice = Some(failed(what.as_deref().unwrap_or("Edit"), &e));
+                cx.notify();
+                return Err(e);
             }
-        }
-        let first = |c: &Commit| Some(c.lines.first()?.text.clone().into());
-        let label = (label.or_else(|| first(result.as_ref().ok()?))).unwrap_or_default();
-        self.finish_edit(&label, had, result.clone(), cx);
-        result
+        };
+        let st = doc.model.state();
+        let made = commit.created.bookmarks();
+        reveal_bookmarks(st, made, &commit.change.keys, &mut doc.outline_expanded);
+        let gone = bookmarks.saturating_sub(st.bookmark_count());
+        doc.notice = Some(commit_notice(&commit, gone));
+        self.on_change(&commit.change, cx);
+        Ok(commit)
     }
 
-    /// After a commit: notice, redraw, autosave, and tell listeners. The
-    /// document `had` what it had before. The notice says what went with
-    /// the edit: pages and bookmarks, the ops' own or the cascades', and
-    /// the form fields and replies the cascades took; then what the commit
-    /// tells besides.
-    fn finish_edit(
-        &mut self,
-        label: &str,
-        had: Had,
-        result: Result<Commit, EditError>,
-        cx: &mut Context<Self>,
-    ) {
+    /// The one refresh: everything that follows the document catches up
+    /// with `ch`, one change it went through (a commit, an amend, an undo,
+    /// a redo, a jump, a save, a rollback, a revert, or the file's facts
+    /// coming in). What's selected of what it removed goes, the panes lay
+    /// the pages out again only when they go elsewhere, what's made from
+    /// the document (the Comments panel's view, the History rows) is made
+    /// again ([`Doc::follow`]), plugin calls read it as it is now, the
+    /// recovery sidecar is written again later, and listeners hear of it
+    /// once: as [`DocEvent::Opened`] when the file opened, and as
+    /// [`DocEvent::Changed`] otherwise.
+    pub(crate) fn on_change(&mut self, ch: &ChangeSet, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        match result {
-            Ok(commit) => {
-                let st = doc.model.state();
-                let cascaded = |rule: Rule| {
-                    (commit.cascades.iter())
-                        .filter(|c| c.rule == rule)
-                        .map(|c| c.objects)
-                        .sum()
-                };
-                let parts = [
-                    counted(had.pages.saturating_sub(st.page_count()), "page", "pages"),
-                    counted(
-                        had.bookmarks.saturating_sub(st.bookmark_count()),
-                        "bookmark",
-                        "bookmarks",
-                    ),
-                    counted(cascaded(Rule::WidgetField), "form field", "form fields"),
-                    counted(cascaded(Rule::AnnotThread), "reply", "replies"),
-                ];
-                let parts: Vec<String> = parts.into_iter().flatten().collect();
-                let mut notice = match parts.split_last() {
-                    None => label.to_string(),
-                    Some((last, [])) => format!("{label}: removed {last} — Ctrl+Z to undo"),
-                    Some((last, rest)) => format!(
-                        "{label}: removed {} and {last} — Ctrl+Z to undo",
-                        rest.join(", ")
-                    ),
-                };
-                // A form's copies renamed apart, scripts turned off, text
-                // drawn as `?`.
-                if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
-                    notice = format!("{notice}. {told}");
-                }
-                doc.notice = Some(notice);
-                doc.touched();
-                self.after_model_change(label.to_string(), cx);
-            }
-            Err(e) => {
-                doc.notice = Some(failed(label, &e));
-                cx.notify();
-            }
-        }
-    }
-
-    /// Bookkeeping after any change to the model.
-    pub(crate) fn after_model_change(&mut self, label: String, cx: &mut Context<Self>) {
-        if self.prune_selection() {
+        let selection = doc.follow(ch);
+        #[cfg(feature = "plugins")]
+        doc.plugin_cell.store(Arc::new(doc.model.snapshot()));
+        let change = Arc::new(ch.clone());
+        doc.last_change = Some(change.clone());
+        if selection {
             cx.emit(DocEvent::SelectionChanged);
         }
-        self.prune_region(cx);
-        self.schedule_autosave(cx);
-        let plugin = self.edit_source.clone();
-        cx.emit(DocEvent::Edited { label, plugin });
+        self.prune_region(&ch.pages_removed, cx);
+        // A save leaves nothing unsaved to write, and opening nothing new:
+        // a sidecar found at open waits for the reader's answer.
+        if !matches!(ch.cause, Cause::Saved | Cause::Opened) {
+            self.schedule_autosave(cx);
+        }
+        cx.emit(match ch.cause {
+            Cause::Opened => DocEvent::Opened,
+            _ => DocEvent::Changed { change },
+        });
         cx.notify();
     }
 
@@ -1596,7 +1616,7 @@ impl DocView {
             .collect();
         Some(sheaf_plugin::DocContext {
             path: self.path.clone(),
-            snapshot: doc.model.snapshot(),
+            cell: doc.plugin_cell.clone(),
             selection,
             current_page: doc.page_id(doc.current_page()),
             text: crate::plugins::text_source(&doc.handles),
@@ -1636,7 +1656,9 @@ impl DocView {
         if !ids.is_empty() {
             let label = self.label("Rotate", ids.len());
             let pages = PageSel::ids(ids);
-            self.apply(Op::RotatePages { pages, by }, &label, cx);
+            if let Some(tx) = self.lower(vec![Op::RotatePages { pages, by }], &label, cx) {
+                self.commit(tx, CommitOpts::labelled(label), cx).ok();
+            }
         }
     }
 
@@ -1645,7 +1667,9 @@ impl DocView {
         if !ids.is_empty() {
             let label = self.label("Delete", ids.len());
             let pages = PageSel::ids(ids);
-            self.apply(Op::DeletePages { pages }, &label, cx);
+            if let Some(tx) = self.lower(vec![Op::DeletePages { pages }], &label, cx) {
+                self.commit(tx, CommitOpts::labelled(label), cx).ok();
+            }
         }
     }
 
@@ -1655,7 +1679,9 @@ impl DocView {
             let label = self.label("Duplicate", ids.len());
             let pages = PageSel::ids(ids);
             let locals = Vec::new();
-            self.apply(Op::DuplicatePages { pages, locals }, &label, cx);
+            if let Some(tx) = self.lower(vec![Op::DuplicatePages { pages, locals }], &label, cx) {
+                self.commit(tx, CommitOpts::labelled(label), cx).ok();
+            }
         }
     }
 
@@ -1677,28 +1703,6 @@ impl DocView {
             cx.emit(DocEvent::SelectionChanged);
             cx.notify();
         }
-    }
-
-    /// Drop pages that no longer exist (after delete/undo/redo). True if
-    /// the page selection changed.
-    fn prune_selection(&mut self) -> bool {
-        let State::Ready(doc) = &mut self.state else {
-            return false;
-        };
-        let st = doc.model.state().clone();
-        doc.selected_marks
-            .retain(|(pid, aid)| st.find_annot(*aid).is_some_and(|(on, _)| on == *pid));
-        if doc.selected_foreign.is_some_and(|id| !st.has_annot(id)) {
-            doc.selected_foreign = None;
-        }
-        let live: HashSet<PageId> = doc.model.state().order().iter().copied().collect();
-        if doc.text_sel.is_some_and(|s| !live.contains(&s.page)) {
-            doc.text_sel = None;
-        }
-        doc.page_chars.retain(|id, _| live.contains(id));
-        let before = doc.selection.len();
-        doc.selection.retain(|id| live.contains(id));
-        doc.selection.len() != before
     }
 
     /// Thumbnail click: plain selects just that page, Ctrl toggles, Shift
@@ -1758,7 +1762,9 @@ impl DocView {
         let n = ids.len();
         let label = self.label("Move", n);
         let (pages, before) = (PageSel::ids(ids), before.map(PageRef::Id));
-        self.apply(Op::MovePages { pages, before }, &label, cx);
+        if let Some(tx) = self.lower(vec![Op::MovePages { pages, before }], &label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         if let State::Ready(doc) = &mut self.state {
             doc.selection = moving;
             cx.emit(DocEvent::SelectionChanged);
@@ -1777,8 +1783,8 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let label = match doc.model.undo() {
-            Ok(Some(label)) => label.to_string(),
+        let change = match doc.model.undo() {
+            Ok(Some(change)) => change,
             Ok(None) => {
                 doc.notice = Some("Nothing to undo".into());
                 cx.notify();
@@ -1791,17 +1797,16 @@ impl DocView {
                 return;
             }
         };
-        doc.notice = Some(format!("Undid: {label}"));
-        doc.touched();
-        self.after_model_change(format!("Undo: {label}"), cx);
+        doc.notice = Some(format!("Undid: {}", change.label));
+        self.on_change(&change, cx);
     }
 
     pub(crate) fn redo(&mut self, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let label = match doc.model.redo() {
-            Ok(Some(label)) => label.to_string(),
+        let change = match doc.model.redo() {
+            Ok(Some(change)) => change,
             Ok(None) => {
                 doc.notice = Some("Nothing to redo".into());
                 cx.notify();
@@ -1814,9 +1819,8 @@ impl DocView {
                 return;
             }
         };
-        doc.notice = Some(format!("Redid: {label}"));
-        doc.touched();
-        self.after_model_change(format!("Redo: {label}"), cx);
+        doc.notice = Some(format!("Redid: {}", change.label));
+        self.on_change(&change, cx);
     }
 
     // ----- save --------------------------------------------------------------
@@ -2102,7 +2106,8 @@ impl DocView {
     /// its version is the saved one, with the file's record; a stop asks
     /// the reader again (another program changed the file just before the
     /// rename) or ends the save. Then the recovery sidecar follows the new
-    /// file. Whether it saved.
+    /// file, and what follows the document hears of the save
+    /// ([`Self::on_change`]). Whether it saved.
     ///
     /// The screen keeps what it shows: the pages, their renders and what
     /// the engines hide are the document's, which a save doesn't change.
@@ -2136,8 +2141,8 @@ impl DocView {
                 return false;
             }
         };
-        let report = match doc.take_save(written) {
-            Ok(report) => report,
+        let (report, saved) = match doc.take_save(written) {
+            Ok(taken) => taken,
             Err(e) => {
                 doc.notice = Some(format!("Save failed: {e:#}"));
                 cx.notify();
@@ -2184,8 +2189,8 @@ impl DocView {
         // sidecar of it would lose those edits.
         self.sidecar_of = None;
         self.write_recovery_now(cx);
+        self.on_change(&saved, cx);
         cx.emit(DocEvent::Saved { path });
-        cx.notify();
         true
     }
 
@@ -2196,8 +2201,10 @@ impl DocView {
             return;
         };
         if let Some(p) = doc.page_id(0) {
-            let (pages, by) = (PageSel::ids([p]), Turn::Quarter);
-            self.apply(Op::RotatePages { pages, by }, "Rotate page", cx);
+            let (pages, by, label) = (PageSel::ids([p]), Turn::Quarter, "Rotate page");
+            if let Some(tx) = self.lower(vec![Op::RotatePages { pages, by }], label, cx) {
+                self.commit(tx, CommitOpts::labelled(label), cx).ok();
+            }
         }
         self.save_to(path, cx).detach();
     }
@@ -2297,7 +2304,8 @@ impl DocView {
             local: None,
             imported: None,
         };
-        let commit = self.submit(tx, vec![op], label, cx)?;
+        let tx = self.lower_in(tx, vec![op], label, cx)?;
+        let commit = self.commit(tx, CommitOpts::labelled(label), cx).ok()?;
         let id = commit.created.annots().next()?;
         if let State::Ready(doc) = &mut self.state {
             doc.select_mark(Some((page, id)));
@@ -2487,7 +2495,10 @@ impl DocView {
             style: mark_style(&a),
             locals: Vec::new(),
         };
-        self.apply(pair, "Connector 1", cx);
+        let label = "Connector 1";
+        if let Some(tx) = self.lower(vec![pair], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         let mut tape = self.new_annot(
             AnnotKind::Tape {
                 rect: Box2 {
@@ -2894,11 +2905,10 @@ impl DocView {
             && matches!(cur.kind, AnnotKind::Insert { .. })
         {
             let annots = vec![AnnotRef::Id(ed.id)];
-            self.apply(
-                Op::DeleteAnnotations { annots },
-                "Delete text insertion",
-                cx,
-            );
+            let label = "Delete text insertion";
+            if let Some(tx) = self.lower(vec![Op::DeleteAnnotations { annots }], label, cx) {
+                self.commit(tx, CommitOpts::labelled(label), cx).ok();
+            }
             self.pending_focus = true;
             return;
         }
@@ -2918,7 +2928,9 @@ impl DocView {
                 patch,
                 imported: None,
             };
-            self.apply(op, "Edit text", cx);
+            if let Some(tx) = self.lower(vec![op], "Edit text", cx) {
+                self.commit(tx, CommitOpts::labelled("Edit text"), cx).ok();
+            }
         }
         self.pending_focus = true;
         cx.notify();
@@ -2971,133 +2983,6 @@ impl DocView {
             .unwrap_or("file")
             .to_string();
         self.insert_file(path, before, name, true, cx);
-    }
-
-    /// Insert every page of `path` before `before` (None: at the end), as
-    /// one undo step labelled "Insert `name`", with its bookmarks merged
-    /// when `bookmarks`.
-    pub(crate) fn insert_file(
-        &mut self,
-        path: PathBuf,
-        before: Option<PageId>,
-        name: String,
-        bookmarks: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self.still_opening(cx) {
-            return;
-        }
-        let State::Ready(doc) = &mut self.state else {
-            return;
-        };
-        doc.notice = Some(format!("Inserting {name}…"));
-        let store = doc.model.store().clone();
-        let primary = doc.model.primary().clone();
-        cx.notify();
-        let timing = self.timing;
-        cx.spawn(async move |this, cx| {
-            let t = Instant::now();
-            let opened = cx
-                .background_executor()
-                .spawn(async move {
-                    let (src, _) = store.read_file(&path, None)?;
-                    // What lowering reads of it, read here, off the UI
-                    // thread; what its marks hold, held until the insert's
-                    // committed.
-                    let pages: Vec<u32> = (0..src.page_count()).collect();
-                    let held = sheaf_doc::tx::ready_to_insert(&store, &primary, &src, &pages);
-                    let handle = RenderHandle::open_bytes(src.bytes().clone(), None)?;
-                    let file = sheaf_doc::store::file_name(&path);
-                    anyhow::Ok((src, file, handle, held))
-                })
-                .await;
-            let (src, file, handle, held) = match opened {
-                Ok(v) => v,
-                Err(e) => {
-                    this.update(cx, |view, cx| {
-                        if let State::Ready(doc) = &mut view.state {
-                            doc.notice = Some(format!("Insert failed: {e:#}"));
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-            };
-            this.update(cx, |view, cx| {
-                // A recovery may have reopened the view meanwhile: a document
-                // still opening takes nothing in.
-                if view.still_opening(cx) {
-                    return;
-                }
-                let State::Ready(doc) = &mut view.state else {
-                    return;
-                };
-                let page_count = src.page_count();
-                doc.handles.entry(src.id()).or_insert(handle);
-                let had = doc.model.state().bookmark_count();
-                let mut tx = doc.model.tx(Actor::Job(JobKind::Insert));
-                for blob in held {
-                    tx.pin(blob);
-                }
-                tx.pin(src.blob().clone());
-                // Pages sheaf made (blank, images) bring nothing more.
-                let bring = Bring {
-                    marks: bookmarks,
-                    form: FormBring::New,
-                    outline: match bookmarks {
-                        true => OutlineBring::MergeByTitle,
-                        false => OutlineBring::None,
-                    },
-                };
-                let insert = Op::InsertPages {
-                    from: PageSource::File {
-                        file: BlobSel::Id(src.id()),
-                        name: file.to_string(),
-                    },
-                    pages: None,
-                    before: before.map(PageRef::Id),
-                    bring,
-                    locals: Vec::new(),
-                };
-                let label = format!("Insert {name}");
-                let Some(commit) = view.submit(tx, vec![insert], &label, cx) else {
-                    return;
-                };
-                let State::Ready(doc) = &mut view.state else {
-                    return;
-                };
-                doc.take_in(&src);
-                let added = commit.created.pages().count();
-                let merged = doc.model.state().bookmark_count().saturating_sub(had);
-                let mut notice = if !bookmarks {
-                    // Pages sheaf made (blank, images): name says it all.
-                    format!("Inserted {name}")
-                } else {
-                    format!(
-                        "Inserted {added} page{} from {name}{}",
-                        if added == 1 { "" } else { "s" },
-                        match merged {
-                            0 => String::new(),
-                            1 => "; 1 bookmark merged".into(),
-                            n => format!("; {n} bookmarks merged"),
-                        }
-                    )
-                };
-                if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
-                    notice = format!("{notice}. {told}");
-                }
-                if timing {
-                    eprintln!(
-                        "[timing] inserted {name} ({page_count} pages) in {:?}",
-                        t.elapsed()
-                    );
-                }
-                view.set_notice(notice, cx);
-            })
-            .ok();
-        })
-        .detach();
     }
 
     pub fn set_selftest_insert(&mut self, path: PathBuf) {
@@ -3926,15 +3811,16 @@ pub(crate) fn opening_model(
     model
 }
 
-/// `facts`, read from the file `blob`, made `model`'s opened version, and
-/// what the view shows beside it. None when `model` no longer shows that
-/// file, or has opened already: another open of the same bytes had its
-/// facts first.
+/// `facts`, read from the file `blob`, made `model`'s opened version: what
+/// the view shows beside it, and the change, which is
+/// [`Cause::Opened`](sheaf_doc::Cause::Opened). None when `model` no
+/// longer shows that file, or has opened already: another open of the
+/// same bytes had its facts first.
 pub(crate) fn take_facts(
     model: &mut Document,
     blob: sheaf_doc::BlobId,
     facts: sheaf_doc::open::Facts,
-) -> Option<sheaf_doc::open::ViewFacts> {
+) -> Option<(sheaf_doc::open::ViewFacts, ChangeSet)> {
     if model.primary().id() != blob {
         return None;
     }
@@ -3977,19 +3863,37 @@ pub(crate) fn failed(what: &str, e: &EditError) -> String {
     }
 }
 
-/// What a document had before an edit, to say what it removed.
-pub(crate) struct Had {
-    pages: usize,
-    bookmarks: usize,
-}
-
-impl Had {
-    pub(crate) fn of(model: &Document) -> Had {
-        let st = model.state();
-        Had {
-            pages: st.page_count(),
-            bookmarks: st.bookmark_count(),
-        }
+/// What the reader is told of `commit`, which left the document
+/// `bookmarks` fewer bookmarks: its label, and what went with it (pages
+/// and bookmarks, the ops' own or the cascades', and the form fields and
+/// replies the cascades took); then what the commit tells besides.
+fn commit_notice(commit: &Commit, bookmarks: usize) -> String {
+    let cascaded = |rule: Rule| {
+        (commit.cascades.iter())
+            .filter(|c| c.rule == rule)
+            .map(|c| c.objects)
+            .sum()
+    };
+    let parts = [
+        counted(commit.change.pages_removed.len(), "page", "pages"),
+        counted(bookmarks, "bookmark", "bookmarks"),
+        counted(cascaded(Rule::WidgetField), "form field", "form fields"),
+        counted(cascaded(Rule::AnnotThread), "reply", "replies"),
+    ];
+    let parts: Vec<String> = parts.into_iter().flatten().collect();
+    let label = &commit.change.label;
+    let notice = match parts.split_last() {
+        None => label.to_string(),
+        Some((last, [])) => format!("{label}: removed {last} — Ctrl+Z to undo"),
+        Some((last, rest)) => format!(
+            "{label}: removed {} and {last} — Ctrl+Z to undo",
+            rest.join(", ")
+        ),
+    };
+    // A form's copies renamed apart, scripts turned off, text drawn as `?`.
+    match sheaf_doc::notice_text(&commit.notices) {
+        Some(told) => format!("{notice}. {told}"),
+        None => notice,
     }
 }
 
@@ -4116,7 +4020,7 @@ fn plan_pane(
 ) -> PaneFrame {
     let (view_w, view_h) = view;
     let pages = doc.model.page_count();
-    let version = doc.version;
+    let layout = doc.layout;
     let pane = &mut doc.panes[ix];
     resolve_row(pane, pages);
     let stale = pane.layout.as_ref().is_none_or(|l| {
@@ -4124,7 +4028,7 @@ fn plan_pane(
             || l.mode != pane.mode
             || l.rotation != pane.rotation
             || (!pane.mode.continuous && l.row != pane.row)
-            || l.version != version
+            || l.layout != layout
             || (l.view_w - view_w).abs() > 0.5
             || (l.view_h - view_h).abs() > 0.5
     });
@@ -4158,7 +4062,7 @@ fn plan_pane(
                 row: pane.row,
                 view_w,
                 view_h,
-                version,
+                layout,
             },
             &doc.model,
         );
@@ -5046,8 +4950,11 @@ impl Render for DocView {
                     // Esc during a Recognize Text run stops it.
                 } else if v.close_blank_review(cx) {
                     // Esc closes the blank-page review.
+                } else if v.cancel_planner(cx) {
+                    // Likewise the newest insert, crop, watermark, header
+                    // and footer, comment import or blank-page search.
                 } else if v.cancel_job(cx) {
-                    // Likewise an export or a split.
+                    // And an export or a split.
                 } else if v.cancel_plugin_run(cx) {
                     // And a plugin command that reports progress.
                 } else if v.cancel_tape_placing(cx) || v.cancel_shape(cx) || v.close_group_list(cx)
@@ -6216,26 +6123,46 @@ fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) ->
         .into_any_element()
 }
 
-/// Expand what's needed to see bookmarks a commit `made`: their parents,
-/// and new headings with children of their own. Everything else keeps its
-/// expanded or collapsed state. `rows` is the outline in pre-order: each
-/// bookmark's depth, id, and whether it has kids.
-fn reveal_new_bookmarks(
-    rows: impl IntoIterator<Item = (u16, OutlineId, bool)>,
-    made: &HashSet<OutlineId>,
+/// Expand what's needed to see the bookmarks `made` in `st`: each one's
+/// ancestors, walking up from it, and a made one with kids of its own (a
+/// new heading, perhaps over bookmarks that were there). Everything else
+/// keeps its expanded or collapsed state. A made bookmark's parent is one
+/// of the bookmarks its commit wrote, in `keys`, whose kids changed; an
+/// older ancestor is looked up in the outline, each once.
+fn reveal_bookmarks(
+    st: &DocState,
+    made: impl IntoIterator<Item = OutlineId>,
+    keys: &BTreeSet<Key>,
     expanded: &mut HashSet<OutlineId>,
 ) {
-    // The bookmarks above the one at hand.
-    let mut path: Vec<OutlineId> = Vec::new();
-    for (depth, id, kids) in rows {
-        path.truncate(depth.into());
-        if made.contains(&id) {
-            expanded.extend(path.iter().copied());
-            if kids {
-                expanded.insert(id);
-            }
+    let mut made = made.into_iter().peekable();
+    if made.peek().is_none() {
+        return;
+    }
+    let written: HashMap<OutlineId, OutlineId> = (keys.iter())
+        .filter_map(|k| match *k {
+            Key::Bookmark(id) => Some((id, st.bookmark(id)?)),
+            _ => None,
+        })
+        .flat_map(|(id, b)| b.kids.iter().map(move |&kid| (kid, id)))
+        .collect();
+    let mut walked = HashSet::new();
+    for id in made {
+        if st.bookmark(id).is_some_and(|b| !b.kids.is_empty()) {
+            expanded.insert(id);
         }
-        path.push(id);
+        let mut at = id;
+        while walked.insert(at) {
+            let up = match written.get(&at) {
+                Some(&parent) => Some(parent),
+                None => st.bookmark_place(at).and_then(|(parent, _)| parent),
+            };
+            let Some(parent) = up else {
+                break;
+            };
+            expanded.insert(parent);
+            at = parent;
+        }
     }
 }
 
@@ -6243,27 +6170,67 @@ fn reveal_new_bookmarks(
 mod tests {
     use super::*;
     use anyhow::Context as _;
+    use sheaf_edit::{BookmarkRef, Local, Sibling};
 
+    /// The bookmarks a commit made come into view, walking up from each:
+    /// their ancestors open, older ones and made ones alike, and so does a
+    /// new heading over bookmarks that were there; everything else keeps
+    /// its state.
     #[test]
     fn new_bookmarks_are_revealed() {
-        // 1 (old, collapsed) > 2 (old) > 3 (new); 4 (new heading) > 5 (new);
-        // 6 (old, collapsed, untouched) > 7 (old).
-        let rows = [
-            (0, 1, true),
-            (1, 2, true),
-            (2, 3, false),
-            (0, 4, true),
-            (1, 5, false),
-            (0, 6, true),
-            (1, 7, false),
-        ]
-        .map(|(depth, id, kids)| (depth, OutlineId(id), kids));
-        let made: HashSet<OutlineId> = [3, 4, 5].map(OutlineId).into();
+        // 1 (old, collapsed) > 2 (old) > 3 (new); 6 (old, collapsed) > 7
+        // (old), which moves under 8 (new); 4 (new heading) > 5 (new).
+        let item = |title: &str, depth: u16| sheaf_doc::FlatOutlineItem {
+            title: title.into(),
+            page: Some(0),
+            depth,
+            view: None,
+            color: None,
+            style: Default::default(),
+            open: false,
+            object: None,
+            kept: false,
+        };
+        let store = Store::new();
+        let primary = sheaf_doc::store::blank(&store, 1);
+        let items = [item("1", 0), item("2", 1), item("6", 0), item("7", 1)];
+        let policy = Box::new(sheaf_doc::FixedCount(10));
+        let mut d = Document::new(store, primary, "a.pdf".into(), None, &items, policy);
+        let st = d.state();
+        let (one, six) = (st.outline_roots()[0], st.outline_roots()[1]);
+        let two = st.bookmark(one).unwrap().kids[0];
+        let seven = st.bookmark(six).unwrap().kids[0];
+        let add = |parent: Option<BookmarkRef>, title: &str, local| Op::AddBookmark {
+            parent,
+            at: Sibling::Last,
+            title: title.into(),
+            target: None,
+            view: None,
+            color: None,
+            style: Default::default(),
+            local,
+        };
+        let ops = vec![
+            add(Some(BookmarkRef::Id(two)), "3", None),
+            add(None, "4", Some(Local(1))),
+            add(Some(BookmarkRef::New(Local(1))), "5", None),
+            add(None, "8", Some(Local(2))),
+            Op::MoveBookmarks {
+                bookmarks: vec![BookmarkRef::Id(seven)],
+                parent: Some(BookmarkRef::New(Local(2))),
+                at: Sibling::Last,
+                with_pages: false,
+            },
+        ];
+        let c = d.commit_ops(ops, "Bookmarks").unwrap();
+        let made = |n| match c.created.locals[&Local(n)] {
+            sheaf_doc::tx::Made::Bookmark(id) => id,
+            _ => panic!("a bookmark"),
+        };
         let mut expanded = HashSet::new();
-        reveal_new_bookmarks(rows, &made, &mut expanded);
-        let mut got: Vec<u64> = expanded.iter().map(|i| i.0).collect();
-        got.sort();
-        assert_eq!(got, [1, 2, 4]);
+        let bookmarks = c.created.bookmarks();
+        reveal_bookmarks(d.state(), bookmarks, &c.change.keys, &mut expanded);
+        assert_eq!(expanded, HashSet::from([one, two, made(1), made(2)]));
     }
 
     /// `path` opened as the view opens it, with no window: the model
@@ -6295,7 +6262,7 @@ mod tests {
         let name = sheaf_doc::store::file_name(path);
         let mut model = opening_model(store, primary, name, Some(came), Identity::default());
         let facts = sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
-        let view = take_facts(&mut model, blob, facts).context("not taken")?;
+        let (view, _) = take_facts(&mut model, blob, facts).context("not taken")?;
         Ok((model, view))
     }
 
@@ -6426,6 +6393,73 @@ mod tests {
         );
     }
 
+    /// A save of `doc`'s current version to `path`, as the view makes one:
+    /// sealed, planned and written, for the view to end
+    /// ([`DocView::finish_save`]), which records it.
+    #[cfg(target_os = "linux")]
+    fn written(
+        doc: &mut Doc,
+        path: &std::path::Path,
+    ) -> (Saving, Result<materialize::Written, materialize::SaveStop>) {
+        let v = doc.model.current_version();
+        let input = doc.model.save_input(v).unwrap();
+        doc.saving = true;
+        let target = doc.model.save_target(path);
+        let plan = materialize::plan(&input, &target);
+        let answers = materialize::AskAnswers::default();
+        let written = materialize::write_file(
+            &input,
+            &plan,
+            target.clone(),
+            &answers,
+            &sheaf_ops::NoProgress,
+        );
+        let saving = Saving {
+            input: Arc::new(input),
+            target,
+            plan,
+            answers,
+            started: Instant::now(),
+        };
+        (saving, written)
+    }
+
+    /// A file of `pages` blank pages, in a `sheaf-` temporary directory,
+    /// which the recent files leave out.
+    #[cfg(target_os = "linux")]
+    fn blank_file(pages: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("blank.pdf");
+        let bytes = sheaf_doc::generated::blank_pages(612.0, 792.0, pages).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path)
+    }
+
+    /// `doc`'s first pane laid out, as a frame would.
+    #[cfg(target_os = "linux")]
+    fn lay_out(doc: &mut Doc) {
+        let pane = &doc.panes[0];
+        let spec = LayoutSpec {
+            zoom: pane.zoom,
+            mode: pane.mode,
+            rotation: pane.rotation,
+            row: 0,
+            view_w: 800.0,
+            view_h: 600.0,
+            layout: doc.layout,
+        };
+        doc.panes[0].layout = Some(Layout::build(spec, &doc.model));
+    }
+
+    /// The document `view` shows.
+    #[cfg(target_os = "linux")]
+    fn shown(view: &mut DocView) -> &mut Doc {
+        match &mut view.state {
+            State::Ready(doc) => doc,
+            _ => panic!("ready"),
+        }
+    }
+
     /// A save changes nothing the document shows, so it drops nothing
     /// rendered: through the view's own end of a save (`finish_save`), the
     /// tile counter doesn't move, and no tile or preview is dropped, by it
@@ -6462,28 +6496,7 @@ mod tests {
                 };
                 doc.tiles.insert((page, job), pixel());
                 let before = doc.tiles_invalidated;
-                // A save, as the view makes one: sealed, planned, written,
-                // then ended by the view, which records it.
-                let v = doc.model.current_version();
-                let input = doc.model.save_input(v).unwrap();
-                doc.saving = true;
-                let target = doc.model.save_target(&path);
-                let plan = materialize::plan(&input, &target);
-                let answers = materialize::AskAnswers::default();
-                let written = materialize::write_file(
-                    &input,
-                    &plan,
-                    target.clone(),
-                    &answers,
-                    &sheaf_ops::NoProgress,
-                );
-                let saving = Saving {
-                    input: Arc::new(input),
-                    target,
-                    plan,
-                    answers,
-                    started: Instant::now(),
-                };
+                let (saving, written) = written(&mut doc, &path);
                 let view = cx.new(|cx| {
                     let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
                     view.state = State::Ready(Box::new(doc));
@@ -6528,28 +6541,9 @@ mod tests {
             move |cx| {
                 let mut doc =
                     Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
-                let v = doc.model.current_version();
-                let input = doc.model.save_input(v).unwrap();
-                doc.saving = true;
-                let target = doc.model.save_target(&path);
-                let plan = materialize::plan(&input, &target);
-                let answers = materialize::AskAnswers::default();
-                let written = materialize::write_file(
-                    &input,
-                    &plan,
-                    target.clone(),
-                    &answers,
-                    &sheaf_ops::NoProgress,
-                );
+                let (saving, written) = written(&mut doc, &path);
                 // While it was written.
                 doc.model.commit_ops(turn(), "Rotate").unwrap();
-                let saving = Saving {
-                    input: Arc::new(input),
-                    target,
-                    plan,
-                    answers,
-                    started: Instant::now(),
-                };
                 let view = cx.new(|cx| {
                     let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
                     view.state = State::Ready(Box::new(doc));
@@ -6565,6 +6559,602 @@ mod tests {
                 assert!(sheaf_doc::recovery::find(&path).is_some());
                 ran.store(true, Ordering::Relaxed);
                 cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A mark's edit lays nothing out (bug 26): through the view's one
+    /// door ([`DocView::commit`]), an added mark leaves the layout count
+    /// and the pane's layout as they were, while the change count moves,
+    /// so the Comments panel's view is made again, with the mark. A turned
+    /// page lays the pages out anew, and so does a page shown from a copy
+    /// of the same size (a watermark's), whose boxes didn't change: a
+    /// layout holds the source page each page shows.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_mark_edit_lays_nothing_out() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(2);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let mut doc =
+                    Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                lay_out(&mut doc);
+                let view = cx.new(|cx| {
+                    let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
+                    view.state = State::Ready(Box::new(doc));
+                    view
+                });
+                view.update(cx, |view, cx| {
+                    let first = view.comment_view(cx);
+                    let doc = shown(view);
+                    let (layout, changes) = (doc.layout, doc.changes);
+                    let page = doc.page_id(0).unwrap();
+                    let rect = Box2 {
+                        x: 72.0,
+                        y: 72.0,
+                        w: 100.0,
+                        h: 50.0,
+                    };
+                    let square = view.new_annot(AnnotKind::Square { rect }, [200, 0, 0]);
+                    assert!(view.add_annot(page, square, "Square", cx).is_some());
+                    let doc = shown(view);
+                    assert_eq!((doc.layout, doc.changes), (layout, changes + 1));
+                    let pane = doc.panes[0].layout.as_ref();
+                    assert!(pane.is_some_and(|l| l.layout == layout));
+                    let second = view.comment_view(cx);
+                    assert!(!Arc::ptr_eq(&first, &second));
+                    assert!(first.types.is_empty() && !second.types.is_empty());
+                    // A turned page goes elsewhere.
+                    let rotate = Op::RotatePages {
+                        pages: PageSel::ids([page]),
+                        by: Turn::Quarter,
+                    };
+                    let tx = view.lower(vec![rotate], "Rotate", cx).unwrap();
+                    view.commit(tx, CommitOpts::labelled("Rotate"), cx).unwrap();
+                    let doc = shown(view);
+                    assert_eq!((doc.layout, doc.changes), (layout + 1, changes + 2));
+                    assert!(doc.panes[0].layout.is_none());
+                    // The second page, shown from a blank copy of it.
+                    lay_out(doc);
+                    let page = doc.page_id(1).unwrap();
+                    let copy = sheaf_doc::store::blank(doc.model.store(), 1);
+                    let mut tx = doc.model.tx(Actor::User);
+                    let why = sheaf_doc::Derive::Watermark {
+                        behind: false,
+                        unencodable: false,
+                    };
+                    tx.set_page_base(vec![(page, copy, 0)], why).unwrap();
+                    let c = view.commit(tx, CommitOpts::labelled("Watermark"), cx);
+                    let change = c.unwrap().change;
+                    assert!(change.geometry.is_empty() && change.content.contains(&page));
+                    let doc = shown(view);
+                    assert_eq!(doc.layout, layout + 2);
+                    assert!(doc.panes[0].layout.is_none());
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// What a change removes leaves the selection (M10.5 §14.1): a mark
+    /// whose add is undone is no longer selected, nor a page deleted, its
+    /// characters or the text selected on it; a mark added on another page
+    /// leaves the marks selected as they were, and so does the delete.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn what_a_change_removes_leaves_the_selection() {
+        use crate::text_select::{CharsKey, TextSel};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(3);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let doc = Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                let view = cx.new(|cx| {
+                    let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
+                    view.state = State::Ready(Box::new(doc));
+                    view
+                });
+                view.update(cx, |view, cx| {
+                    let pages: Vec<PageId> =
+                        (0..3).map(|i| shown(view).page_id(i).unwrap()).collect();
+                    let rect = Box2 {
+                        x: 72.0,
+                        y: 72.0,
+                        w: 100.0,
+                        h: 50.0,
+                    };
+                    let square = view.new_annot(AnnotKind::Square { rect }, [200, 0, 0]);
+                    let first = view
+                        .add_annot(pages[0], square.clone(), "Square", cx)
+                        .unwrap();
+                    let second = view
+                        .add_annot(pages[0], square.clone(), "Square", cx)
+                        .unwrap();
+                    let doc = shown(view);
+                    doc.selected_marks = vec![(pages[0], first), (pages[0], second)];
+                    doc.selection = HashSet::from([pages[1], pages[2]]);
+                    let chars = Arc::new(sheaf_doc::PageChars {
+                        glyphs: Vec::new(),
+                        upright: Rotation::R0,
+                    });
+                    for (i, &p) in pages.iter().enumerate().skip(1) {
+                        let key = CharsKey::Engine(doc.model.primary().id(), i as u32);
+                        doc.page_chars.insert(p, (key, chars.clone()));
+                    }
+                    doc.text_sel = Some(TextSel {
+                        page: pages[1],
+                        anchor: 0,
+                        head: 0,
+                    });
+                    view.undo(cx);
+                    assert_eq!(shown(view).selected_marks, [(pages[0], first)]);
+                    let mut commit = |ops: Vec<Op>, label: &str| {
+                        let tx = view.lower(ops, label, cx).unwrap();
+                        view.commit(tx, CommitOpts::labelled(label), cx).unwrap();
+                    };
+                    commit(
+                        vec![sheaf_doc::tx::fixture::add(pages[2], &square)],
+                        "Square",
+                    );
+                    commit(vec![sheaf_doc::tx::fixture::delete(&[pages[1]])], "Delete");
+                    let doc = shown(view);
+                    assert_eq!(doc.selected_marks, [(pages[0], first)]);
+                    assert_eq!(doc.selection, HashSet::from([pages[2]]));
+                    let read: Vec<PageId> = doc.page_chars.keys().copied().collect();
+                    assert_eq!(read, [pages[2]]);
+                    assert!(doc.text_sel.is_none());
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// Each change the document goes through reaches what follows it once
+    /// (M10.5 §14.1): a commit, a commit and an amend in a plugin call's
+    /// group, an undo, a redo, a jump, the end of a save and an "Undo all
+    /// of …" each give one `Changed`, with its cause, and the file's facts
+    /// coming in give `Opened` alone. Each step runs in an update of its
+    /// own, after which what it emitted has been heard, and plugin calls
+    /// read the document as it is then (§14.3).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn each_transition_is_one_change() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        /// `f` on the view, and what listeners heard of it.
+        fn step(
+            cx: &mut gpui::AsyncApp,
+            view: &Entity<DocView>,
+            heard: &RefCell<Vec<String>>,
+            f: impl FnOnce(&mut DocView, &mut Context<DocView>),
+        ) -> Vec<String> {
+            cx.update(|cx| view.update(cx, f));
+            #[cfg(feature = "plugins")]
+            cx.update(|cx| {
+                view.update(cx, |v, _| {
+                    let doc = shown(v);
+                    let read = doc.plugin_cell.load().version;
+                    assert_eq!(read, doc.model.current_version());
+                })
+            });
+            heard.take()
+        }
+        let (_dir, path) = blank_file(2);
+        // The model as the view makes it, before the file's facts are in.
+        let store = Store::new();
+        let (primary, stamp) = store.read_file(&path, None).unwrap();
+        let (src, blob) = (primary.clone(), primary.id());
+        let came = Came::Read {
+            path: path.as_path().into(),
+            stamp,
+        };
+        let name = sheaf_doc::store::file_name(&path);
+        let model = opening_model(store, primary, name, Some(came), Identity::default());
+        let facts = sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let doc = Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                let view = cx.new(|cx| {
+                    let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
+                    view.state = State::Ready(Box::new(doc));
+                    view
+                });
+                let heard = Rc::new(RefCell::new(Vec::new()));
+                cx.subscribe(&view, {
+                    let heard = heard.clone();
+                    move |_, ev: &DocEvent, _| {
+                        let what = match ev {
+                            DocEvent::Opened => "Opened".to_string(),
+                            DocEvent::Changed { change } => format!("{:?}", change.cause),
+                            _ => return,
+                        };
+                        heard.borrow_mut().push(what);
+                    }
+                })
+                .detach();
+                cx.spawn(async move |cx| {
+                    let ready = |v: &mut DocView, cx: &mut Context<DocView>| {
+                        v.ready(blob, facts, Instant::now(), false, cx)
+                    };
+                    assert_eq!(step(cx, &view, &heard, ready), ["Opened"]);
+                    let version = |cx: &mut gpui::AsyncApp| {
+                        cx.update(|cx| view.update(cx, |v, _| shown(v).model.current_version()))
+                    };
+                    let opened = version(cx);
+                    let turn = || Op::RotatePages {
+                        pages: PageSel::All,
+                        by: Turn::Quarter,
+                    };
+                    let rotate = |v: &mut DocView, cx: &mut Context<DocView>| {
+                        let tx = v.lower(vec![turn()], "Rotate", cx).unwrap();
+                        v.commit(tx, CommitOpts::labelled("Rotate"), cx).unwrap();
+                    };
+                    assert_eq!(step(cx, &view, &heard, rotate), ["Commit"]);
+                    // A plugin call's batches: the first makes a version,
+                    // the next joins it.
+                    let plugin = sheaf_doc::GroupKind::PluginCall { plugin: "p".into() };
+                    let begin = |v: &mut DocView, _: &mut Context<DocView>| {
+                        shown(v).model.begin_group(plugin)
+                    };
+                    let g = cx.update(|cx| view.update(cx, begin));
+                    let batch = |v: &mut DocView, cx: &mut Context<DocView>| {
+                        let by = Actor::Plugin {
+                            id: "p".into(),
+                            version: "1".into(),
+                        };
+                        let tx = shown(v).model.tx(by);
+                        let tx = v.lower_in(tx, vec![turn()], "Plugin", cx).unwrap();
+                        let opts = CommitOpts {
+                            group: Some(g),
+                            ..CommitOpts::labelled("Plugin")
+                        };
+                        v.commit(tx, opts, cx).unwrap();
+                    };
+                    assert_eq!(step(cx, &view, &heard, batch), ["Commit"]);
+                    assert_eq!(step(cx, &view, &heard, batch), ["Amend"]);
+                    let call = version(cx);
+                    let undo = |v: &mut DocView, cx: &mut Context<DocView>| v.undo(cx);
+                    assert_eq!(step(cx, &view, &heard, undo), ["Undo"]);
+                    let redo = |v: &mut DocView, cx: &mut Context<DocView>| v.redo(cx);
+                    assert_eq!(step(cx, &view, &heard, redo), ["Redo"]);
+                    for to in [opened, call] {
+                        let jump = |v: &mut DocView, cx: &mut Context<DocView>| v.jump_to(to, cx);
+                        assert_eq!(step(cx, &view, &heard, jump), ["Jump"]);
+                    }
+                    let save = |v: &mut DocView, cx: &mut Context<DocView>| {
+                        let (saving, written) = written(shown(v), &path);
+                        assert!(v.finish_save(saving, written, cx));
+                    };
+                    assert_eq!(step(cx, &view, &heard, save), ["Saved"]);
+                    let revert = |v: &mut DocView, cx: &mut Context<DocView>| {
+                        v.undo_group(g, "Plugin".into(), cx);
+                        let notice = shown(v).notice.as_deref();
+                        assert_eq!(notice, Some("Undid all of Plugin"));
+                    };
+                    assert_eq!(step(cx, &view, &heard, revert), ["Revert"]);
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A view showing `model`, the document of the file at `path`.
+    #[cfg(target_os = "linux")]
+    fn view_of(model: Document, path: &std::path::Path, cx: &mut App) -> Entity<DocView> {
+        let doc = Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+        cx.new(|cx| {
+            let mut view = DocView::unopened(path.into(), None, false, Instant::now(), cx);
+            view.state = State::Ready(Box::new(doc));
+            view
+        })
+    }
+
+    /// An insert of every page of `file` before `before` into `doc`'s
+    /// document, planned as its planner plans it, on the version it's at.
+    #[cfg(target_os = "linux")]
+    fn insert_planned(
+        doc: &Doc,
+        file: &std::path::Path,
+        before: Option<PageId>,
+    ) -> crate::page_insert::PlannedInsert {
+        let snap = doc.model.snapshot();
+        let lower = doc.model.lower_cx(Actor::Job(sheaf_doc::JobKind::Insert));
+        let store = doc.model.store();
+        let p = &sheaf_ops::NoProgress;
+        crate::page_insert::plan_insert(&snap, store, lower, file, before, true, p).unwrap()
+    }
+
+    /// `doc`'s pages, in order.
+    #[cfg(target_os = "linux")]
+    fn order(doc: &Doc) -> Vec<PageId> {
+        doc.model.state().order().iter().copied().collect()
+    }
+
+    /// An insert planned before a page that's deleted before it lands
+    /// says why, and changes nothing (M10.5 §8.5): lowered again on the
+    /// current version, its anchor names no page, so the version and the
+    /// pages stay as they were, and the engine opened on its file isn't
+    /// kept.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_insert_whose_anchor_went_says_so_and_changes_nothing() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(3);
+        let (_from, file) = blank_file(2);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    let doc = shown(view);
+                    let anchor = doc.page_id(1).unwrap();
+                    let plan = insert_planned(doc, &file, Some(anchor));
+                    let src = plan.src().id();
+                    let delete = Op::DeletePages {
+                        pages: PageSel::ids([anchor]),
+                    };
+                    let tx = view.lower(vec![delete], "Delete page", cx).unwrap();
+                    view.commit(tx, CommitOpts::labelled("Delete page"), cx)
+                        .unwrap();
+                    let doc = shown(view);
+                    let was = (doc.model.current_version(), order(doc));
+                    assert!(view.land(plan, "Insert blank.pdf", cx).is_none());
+                    let doc = shown(view);
+                    assert_eq!((doc.model.current_version(), order(doc)), was);
+                    assert!(!doc.handles.contains_key(&src));
+                    let notice = doc.notice.as_deref().unwrap_or_default();
+                    assert!(notice.starts_with("Insert blank.pdf failed: "), "{notice}");
+                    assert!(notice.ends_with("isn't there"), "{notice}");
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// An insert planned while the user moves a page elsewhere lands too:
+    /// lowered again on the moved pages, before the page it was planned
+    /// before, and what it made keeps the ids its plan drew (M10.5 §8.5).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_insert_during_a_move_lands_both() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(3);
+        let (_from, file) = blank_file(2);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    let doc = shown(view);
+                    let [a, b, c] = std::array::from_fn(|i| doc.page_id(i).unwrap());
+                    let plan = insert_planned(doc, &file, Some(b));
+                    let (src, planned) = (plan.src().id(), plan.created());
+                    let to_end = Op::MovePages {
+                        pages: PageSel::ids([a]),
+                        before: None,
+                    };
+                    let tx = view.lower(vec![to_end], "Move page", cx).unwrap();
+                    view.commit(tx, CommitOpts::labelled("Move page"), cx)
+                        .unwrap();
+                    let commit = view.land(plan, "Insert blank.pdf", cx).unwrap();
+                    assert_eq!(commit.created, planned);
+                    let made: Vec<PageId> = commit.created.pages().collect();
+                    let doc = shown(view);
+                    assert_eq!(order(doc), [made[0], made[1], b, c, a]);
+                    assert!(doc.handles.contains_key(&src));
+                    assert_eq!(doc.model.undo_label(), Some("Insert blank.pdf"));
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// Page labels from their dialog land on the version it opened on
+    /// (M10.5 §8.5): after a page was turned meanwhile they land, the turn
+    /// kept; after the labels changed meanwhile it's a conflict, which the
+    /// notice says, and nothing changes.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn labels_land_on_the_version_their_dialog_opened_on() {
+        use sheaf_doc::labels::Style;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(3);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    let opened = view.model_snapshot().unwrap();
+                    let last = shown(view).page_id(2).unwrap();
+                    let turn = Op::RotatePages {
+                        pages: PageSel::ids([last]),
+                        by: Turn::Quarter,
+                    };
+                    let tx = view.lower(vec![turn], "Rotate", cx).unwrap();
+                    view.commit(tx, CommitOpts::labelled("Rotate"), cx).unwrap();
+                    let turned = shown(view).model.state().geom(last).cloned();
+                    let roman = (0, 1, Style::LowerRoman, String::new(), 1);
+                    view.set_page_labels(opened.clone(), Some(roman), cx);
+                    let doc = shown(view);
+                    assert_eq!(doc.model.undo_label(), Some("Page labels"));
+                    let labels = doc.model.state().page_labels().unwrap();
+                    assert_eq!(labels, ["i", "ii", "3"]);
+                    assert_eq!(doc.model.state().geom(last).cloned(), turned);
+                    let was = doc.model.current_version();
+                    let lettered = (0, 2, Style::UpperLetters, String::new(), 1);
+                    view.set_page_labels(opened, Some(lettered), cx);
+                    let doc = shown(view);
+                    assert_eq!(doc.model.current_version(), was);
+                    let notice = doc.notice.as_deref().unwrap_or_default();
+                    let conflict = "Page labels failed: “Page labels” changed the same data";
+                    assert_eq!(notice, conflict);
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// Blank review deletes the pages it shows checked on the version its
+    /// search measured (M10.5 §8.5): one moved since is deleted all the
+    /// same, the delete lowered again over the move; one shown from another
+    /// source page since, not the page the search measured, is a conflict,
+    /// which the notice says, and nothing changes.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn blank_review_deletes_what_its_search_measured() {
+        use sheaf_ops::blank::{Candidate, Reason};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(4);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    let doc = shown(view);
+                    let [a, b, c, d] = std::array::from_fn(|i| doc.page_id(i).unwrap());
+                    let planning = doc.model.snapshot();
+                    let review = |checked: &[PageId]| crate::blank_review::Review {
+                        planning: planning.clone(),
+                        candidates: (checked.iter().enumerate())
+                            .map(|(index, &id)| Candidate {
+                                index,
+                                id,
+                                ink: 0.0,
+                                reason: Reason::Blank,
+                            })
+                            .collect(),
+                        checked: checked.iter().copied().collect(),
+                        scroll: ScrollHandle::new(),
+                    };
+                    let to_end = Op::MovePages {
+                        pages: PageSel::ids([a]),
+                        before: None,
+                    };
+                    let tx = view.lower(vec![to_end], "Move page", cx).unwrap();
+                    view.commit(tx, CommitOpts::labelled("Move page"), cx)
+                        .unwrap();
+                    view.blank_review = Some(review(&[a, c]));
+                    view.delete_reviewed(cx);
+                    let doc = shown(view);
+                    assert_eq!(order(doc), [b, d]);
+                    assert_eq!(doc.model.undo_label(), Some("Delete 2 blank pages"));
+                    let copy = sheaf_doc::store::blank(doc.model.store(), 1);
+                    let mut tx = doc.model.tx(Actor::User);
+                    let why = sheaf_doc::Derive::Watermark {
+                        behind: false,
+                        unencodable: false,
+                    };
+                    tx.set_page_base(vec![(b, copy, 0)], why).unwrap();
+                    view.commit(tx, CommitOpts::labelled("Watermark"), cx)
+                        .unwrap();
+                    let was = shown(view).model.current_version();
+                    view.blank_review = Some(review(&[b]));
+                    view.delete_reviewed(cx);
+                    let doc = shown(view);
+                    assert_eq!((doc.model.current_version(), order(doc)), (was, vec![b, d]));
+                    let notice = doc.notice.as_deref().unwrap_or_default();
+                    let conflict = "Delete 1 blank page failed: “Watermark” changed the same data";
+                    assert_eq!(notice, conflict);
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// Planners run side by side, each landing as it ends (jobs.rs), and
+    /// Escape stops the newest, which then lands nothing: one whose work
+    /// stops, and one whose work doesn't look and ends as if done.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_stopped_planner_lands_nothing() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(3);
+        let (_from, file) = blank_file(2);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                let landed = Rc::new(Cell::new(false));
+                view.update(cx, |v, cx| {
+                    v.insert_file(file.clone(), None, "first".into(), false, cx);
+                    v.insert_file(file, None, "second".into(), false, cx);
+                    assert!(v.cancel_planner(cx));
+                    let lands = {
+                        let landed = landed.clone();
+                        move |_: &mut DocView, (), _: &mut Context<DocView>| {
+                            landed.set(true);
+                            None
+                        }
+                    };
+                    v.run_planner("third", |_| anyhow::Ok(()), |_| None, lands, cx);
+                    assert!(v.cancel_planner(cx));
+                    let stopped: Vec<bool> = (v.planners.iter())
+                        .map(|p| p.tracker.snapshot().cancelled)
+                        .collect();
+                    assert_eq!(stopped, [false, true, true]);
+                });
+                cx.spawn(async move |cx| {
+                    let running = |cx: &mut gpui::AsyncApp| {
+                        cx.update(|cx| !view.read(cx).planners.is_empty())
+                    };
+                    for _ in 0..1000 {
+                        if !running(cx) {
+                            break;
+                        }
+                        let tick = std::time::Duration::from_millis(10);
+                        cx.background_executor().timer(tick).await;
+                    }
+                    cx.update(|cx| {
+                        view.update(cx, |v, _| {
+                            assert!(v.planners.is_empty());
+                            let doc = shown(v);
+                            assert_eq!(doc.model.page_count(), 5);
+                            assert_eq!(doc.model.undo_label(), Some("Insert first"));
+                        })
+                    });
+                    assert!(!landed.get());
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
             }
         });
         assert!(ran.load(Ordering::Relaxed));

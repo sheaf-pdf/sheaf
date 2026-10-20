@@ -1,15 +1,16 @@
 //! The Append ≡ Rewrite property (M10.5 §7.2, slice 10): after every save
-//! in a random run of ops of every kind, transactions of several, jobs,
-//! undo, redo and jumps ([`Run`]), with saves as the plan decides, Save As,
-//! and Appends forced as "Append anyway" forces them, the file written
-//! reopens as a fresh Rewrite of the same state does. What's compared
-//! ([`Reopened`]): the pages in order, each with its boxes, its content and
-//! resources by value, and its annotations by name, with what they say and
-//! where links and widgets' actions go, where each annotation that goes
-//! somewhere goes, the records' or not, and which name another page as
-//! theirs; the outline; the page labels; the field tree and values; the
-//! form's own keys and whether it has an XFA part; the header and footer;
-//! and where the open action goes.
+//! in a random run of ops of every kind, transactions of several, groups,
+//! undo, redo, jumps and history pruned to a budget ([`Run`]), with saves
+//! as the plan decides, Save As, and Appends forced as "Append anyway"
+//! forces them, the file written reopens as a fresh Rewrite of the same
+//! state does. What's compared ([`Reopened`]): the pages in order, each
+//! with its boxes, its content and resources by value, and its
+//! annotations by name, with what they say and where links and widgets'
+//! actions go, where each annotation that goes somewhere goes, the
+//! records' or not, and which name another page as theirs; the outline;
+//! the page labels; the field tree and values; the form's own keys and
+//! whether it has an XFA part; the header and footer; and where the open
+//! action goes.
 //!
 //! Over ops since slice 11, with fixed cases beside it: labels moved with
 //! their first page, links to pages a later Append brings, a node split and
@@ -26,7 +27,9 @@
 //! brought in or duplicated after it. And for the rebase's: a screen
 //! annotation on a page written at another number, or brought in again as
 //! the copy an undone insert had, and a later instance's widget and field
-//! read as the instance's copy.
+//! read as the instance's copy. And for slice 12's: a connector group's
+//! order after a page holding some of it turned, and saves after pruning
+//! took the saved version, on the line and on an undone branch.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -35,6 +38,7 @@ use std::sync::Arc;
 use in_progress::NoProgress;
 use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use proptest::prelude::*;
+use sheaf_edit::{Anchor, Op, PageRef, Style as MarkStyle, Turn};
 
 use super::append::Refused;
 use super::plan::{Onto, Strategy, forced_append};
@@ -49,6 +53,7 @@ use crate::file::ForeignAnnot;
 use crate::forms::fixture::{Form, every_kind, every_kind_in, outline_tree};
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::geom::Geom;
+use crate::history::{AllOf, FixedCount, MemoryBudget};
 use crate::labels::{LabelRange, LabelSpec, Style};
 use crate::model::history_tests::{self, Run, with_theirs};
 use crate::model::{
@@ -56,6 +61,7 @@ use crate::model::{
 };
 use crate::stamps::HeaderFooter;
 use crate::store::Src;
+use crate::text_layer::{OcrWord, TextLayer};
 use crate::tx::Derive;
 use crate::tx::fixture as fx;
 
@@ -608,10 +614,10 @@ fn forced(doc: &mut Document, path: &Path) -> Strategy {
 }
 
 /// What a property run does beside [`Run::act`]'s actions, up to
-/// [`history_tests::TRIM`]: a save as planned to the document's file, Save
+/// [`history_tests::PRUNE`]: a save as planned to the document's file, Save
 /// As to the other, and an Append forced onto either, each three times as
 /// likely as one kind of edit.
-const SAVES: u8 = history_tests::TRIM + 1;
+const SAVES: u8 = history_tests::PRUNE + 1;
 const ACTIONS: u8 = SAVES + 9;
 
 /// A run of `actions` over [`files`], with an XFA part when `xfa`: the
@@ -1869,4 +1875,194 @@ fn append_rewrite_a_page_appended_over_a_primary_page_writes_its_screen_again() 
 #[test]
 fn append_rewrite_a_page_appended_over_a_primary_page_writes_its_screen_again_wherever_it_comes() {
     a_page_appended_over_a_primary_page(false, true, true);
+}
+
+/// A connector pair on the second page, and a copy of that page, whose
+/// copy of the pair is the same group: each connector goes to the next of
+/// the group in the order they show in. The copy turned upside down shows
+/// its pair the other way round, so the next of the first page's second
+/// connector is the copy's other one: written again, as a Rewrite writes
+/// it.
+#[test]
+fn append_rewrite_a_connector_s_next_follows_a_turned_page() {
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, false);
+    let second = doc.page(1).unwrap();
+    let at = |x| Anchor {
+        page: PageRef::Id(second),
+        rect: crate::annot::Box2 {
+            x,
+            y: 40.0,
+            w: 22.0,
+            h: 22.0,
+        },
+    };
+    let pair = Op::AddConnector {
+        a: at(40.0),
+        b: at(80.0),
+        label: "1".into(),
+        style: MarkStyle {
+            color: [255, 0, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            fill: None,
+            dashed: false,
+            cloudy: false,
+        },
+        locals: Vec::new(),
+    };
+    doc.commit_ops(vec![pair, fx::duplicate(&[second])], "pair")
+        .unwrap();
+    appends(&mut doc, &path);
+    reopens_as_rewritten(&doc, &dir, "copied");
+    let copy = doc.page(2).unwrap();
+    doc.commit_ops(vec![fx::rotate(&[copy], Turn::Half)], "turn")
+        .unwrap();
+    appends(&mut doc, &path);
+    reopens_as_rewritten(&doc, &dir, "turned");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A group of 2,000 connectors, then every page turned: each appended as
+/// a Rewrite writes it, on a stack of 1 MiB. Each connector's next is
+/// another of the group, which the closure takes once for the group: one
+/// taken again for each connector it takes recursed as deep as the group
+/// is long, and for each page turned scanned every annotation again.
+#[test]
+fn append_rewrite_a_long_connector_group_is_taken_once() {
+    let saves = std::thread::Builder::new().stack_size(1 << 20).spawn(|| {
+        let dir = scratch();
+        let (path, mut doc) = opened(&dir, false);
+        let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
+        let at = |i: usize| Anchor {
+            page: PageRef::Id(pages[i % pages.len()]),
+            rect: crate::annot::Box2 {
+                x: (i % 20) as f32 * 25.0,
+                y: (i / 20 % 30) as f32 * 25.0,
+                w: 22.0,
+                h: 22.0,
+            },
+        };
+        let pair = |i: usize| Op::AddConnector {
+            a: at(2 * i),
+            b: at(2 * i + 1),
+            label: "1".into(),
+            style: MarkStyle {
+                color: [255, 0, 0],
+                opacity: 1.0,
+                stroke: 1.0,
+                fill: None,
+                dashed: false,
+                cloudy: false,
+            },
+            locals: Vec::new(),
+        };
+        doc.commit_ops((0..1000).map(pair).collect(), "pairs")
+            .unwrap();
+        appends(&mut doc, &path);
+        reopens_as_rewritten(&doc, &dir, "connected");
+        doc.commit_ops(vec![fx::rotate(&pages, Turn::Quarter)], "turn")
+            .unwrap();
+        appends(&mut doc, &path);
+        reopens_as_rewritten(&doc, &dir, "turned");
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+    saves.unwrap().join().unwrap();
+}
+
+/// A text layer of one word, `text`, as OCR recognizes it on a page.
+fn layer(text: &str) -> Arc<TextLayer> {
+    let word = OcrWord {
+        text: text.into(),
+        rect: crate::annot::Box2 {
+            x: 72.0,
+            y: 700.0,
+            w: 60.0,
+            h: 12.0,
+        },
+        confidence: 1.0,
+    };
+    let geom = Geom::read(None, None, 0);
+    Arc::new(crate::text_layer::from_engine(vec![word], &geom, "test"))
+}
+
+/// `doc`'s history kept from now on to `budget` bytes, one snapshot kept.
+fn budget(doc: &mut Document, budget: usize) {
+    let policy = AllOf(vec![
+        Box::new(FixedCount(1)),
+        Box::new(MemoryBudget(budget)),
+    ]);
+    doc.set_policy(Box::new(policy));
+}
+
+/// A save, then edits under a budget so small that the first version
+/// kept moves past the saved one (M10.5 §8.7): what's kept of it still
+/// says what the file holds and what changed since, so the next save
+/// appends, its path keys every slot the edits since changed, and the
+/// file reopens as a fresh Rewrite does.
+#[test]
+fn append_rewrite_a_save_after_the_root_passes_the_saved_version_appends() {
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, false);
+    let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
+    doc.commit_ops(vec![fx::rotate(&pages[..1], Turn::Quarter)], "turn")
+        .unwrap();
+    appends(&mut doc, &path);
+    let saved = doc.current_version();
+    budget(&mut doc, 1);
+    let edits = [
+        vec![fx::rotate(&pages[1..2], Turn::Quarter)],
+        fx::ocr([(pages[2], layer("after"))]),
+        vec![fx::rotate(&pages[..1], Turn::Half)],
+    ];
+    let mut changed = BTreeSet::new();
+    for ops in edits {
+        let commit = doc.commit_ops(ops, "edit").unwrap();
+        changed.extend(commit.change.keys.iter().copied());
+    }
+    assert!(doc.jump(saved).is_err(), "pruned");
+    assert!(doc.is_dirty() && !doc.can_undo());
+    let v = doc.current_version();
+    let input = doc.save_input(v).unwrap();
+    doc.abandon_save(v);
+    assert_eq!(*input.path_keys, changed);
+    appends(&mut doc, &path);
+    reopens_as_rewritten(&doc, &dir, "the saved version pruned");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A save, undone, then OCR runs over every page under a small budget:
+/// the branch holding the saved version goes once the first version kept
+/// moves past where it turns off, the saved version detaching, and what
+/// history holds stays within the budget. The next save appends, turning
+/// back the page the saved version turned, and reopens as a fresh Rewrite
+/// does.
+#[test]
+fn append_rewrite_a_saved_version_on_an_undone_branch_detaches() {
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, false);
+    let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
+    doc.commit_ops(vec![fx::rotate(&pages[..1], Turn::Quarter)], "turn")
+        .unwrap();
+    appends(&mut doc, &path);
+    let saved = doc.current_version();
+    doc.undo().unwrap();
+    let ocr = |doc: &mut Document, run: usize| {
+        let layers = (pages.iter()).map(|&p| (p, layer(&format!("run {run}"))));
+        doc.commit_ops(fx::ocr(layers), "OCR").unwrap();
+    };
+    ocr(&mut doc, 0);
+    // Room for about three runs.
+    let room = 3 * doc.stats().total_bytes();
+    budget(&mut doc, room);
+    for run in 1..20 {
+        ocr(&mut doc, run);
+        let held = doc.stats().total_bytes();
+        assert!(held <= room, "run {run}: {held} bytes of history");
+    }
+    assert!(doc.jump(saved).is_err(), "pruned");
+    assert!(doc.version_count() < 10 && doc.is_dirty());
+    appends(&mut doc, &path);
+    reopens_as_rewritten(&doc, &dir, "the saved version's branch pruned");
+    let _ = std::fs::remove_dir_all(&dir);
 }

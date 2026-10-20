@@ -314,8 +314,7 @@ fn add_text(
         .collect();
     let mut tx = doc.tx(Actor::Job(JobKind::Ocr));
     tx.apply_batch(ops, &NoProgress)?;
-    let label = Some("Recognize Text".into());
-    doc.commit(tx, CommitOpts { label })?;
+    doc.commit(tx, CommitOpts::labelled("Recognize Text"))?;
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), out)
 }
 

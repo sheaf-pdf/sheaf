@@ -8,12 +8,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use futures::executor::block_on;
 use sheaf_doc::geom::Geom;
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture;
 use sheaf_doc::{
-    Actor, Box2, Commit, CommitOpts, DestView, Document, EditError, FixedCount, SourceId, Store,
+    Actor, Box2, Commit, CommitOpts, DestView, Document, EditError, FixedCount, Snapshot, SourceId,
+    Store,
 };
 use sheaf_edit::{MarkKind, Op, PageRef, PageSel, Rotation, Sibling, Turn};
 use sheaf_plugin::ui::{
@@ -185,11 +187,16 @@ fn frame(d: &Document, i: usize) -> Geom {
     base.src.geom(base.index)
 }
 
+/// What a call reads `d` from: `d` as it is now.
+fn cell(d: &Document) -> Arc<ArcSwap<Snapshot>> {
+    Arc::new(ArcSwap::from_pointee(d.snapshot()))
+}
+
 fn ctx(d: &Document) -> CallContext {
     CallContext {
         doc: Some(DocContext {
             path: "return.pdf".into(),
-            snapshot: d.snapshot(),
+            cell: cell(d),
             selection: d.page(1).into_iter().collect(),
             current_page: Some(d.page(0).unwrap()),
             text: Arc::new(FakeText),
@@ -218,9 +225,9 @@ fn commit(d: &mut Document, b: &EditBatch) -> Result<Commit, EditError> {
         id: "test".into(),
         version: "1.0.0".into(),
     };
-    let tx = b.clone().lowered(d, plugin)?;
-    let label = Some(b.label.as_str().into());
-    d.commit(tx, CommitOpts { label })
+    let mut tx = d.tx(plugin);
+    b.clone().lowered(&mut tx, d)?;
+    d.commit(tx, CommitOpts::labelled(b.label.as_str()))
 }
 
 #[test]
@@ -483,7 +490,7 @@ fn tax_form_bookmarks_example() {
     let ctx = |d: &Document| CallContext {
         doc: Some(DocContext {
             path: "binder.pdf".into(),
-            snapshot: d.snapshot(),
+            cell: cell(d),
             selection: Vec::new(),
             current_page: None,
             text: text.clone(),
@@ -613,6 +620,117 @@ fn forms_round_trip_and_waiting_is_free() {
     assert_eq!(err, PluginError::Failed("cancelled".into()));
 }
 
+/// A call's reads are the slots it decided by, in the document as it read
+/// it, its base (M10.5 §14.3): listing the pages reads their order, what
+/// each shows and its boxes, and a page's text what it shows; a page's
+/// annotations read its list of them and each mark shown; the outline its
+/// top level and each bookmark.
+#[test]
+fn a_call_s_reads_are_the_slots_it_decided_by() {
+    use sheaf_doc::prim::Key;
+    use sheaf_doc::{Annot, AnnotId, AnnotKind};
+    use std::collections::BTreeSet;
+    let p = load("reads", Limits::default());
+    let mut d = doc(2);
+    let first = d.page(0).unwrap();
+    let pages = d.state().order().clone();
+    let listed = || -> BTreeSet<Key> {
+        let each = pages.iter().flat_map(|&p| [Key::Page(p), Key::Geom(p)]);
+        std::iter::once(Key::Order).chain(each).collect()
+    };
+    let out = run(&p, "bookmark", None, ctx(&d)).unwrap();
+    assert_eq!(out.reads, listed(), "the pages, and each one's text");
+    let base = out.base.as_ref().map(|b| b.version);
+    assert_eq!(base, Some(d.current_version()));
+    commit(&mut d, &out.batches[0]).unwrap();
+
+    let out = run(&p, "reposition", Some("10,20"), ctx(&d)).unwrap();
+    let st = d.state();
+    let each = st.outline_roots().iter().map(|&b| Key::Bookmark(b));
+    let outline: BTreeSet<Key> = std::iter::once(Key::OutlineRoots).chain(each).collect();
+    assert_eq!((out.reads, outline.len()), (outline, 3));
+
+    let square = Annot {
+        id: AnnotId(0),
+        kind: AnnotKind::Square {
+            rect: Box2 {
+                x: 10.0,
+                y: 10.0,
+                w: 20.0,
+                h: 20.0,
+            },
+        },
+        color: [0, 0, 255],
+        opacity: 1.0,
+        stroke: 1.0,
+        author: "Greg".into(),
+        contents: String::new(),
+        modified: String::new(),
+        created: String::new(),
+        fill: None,
+        dashed: false,
+        cloudy: false,
+        turn: Rotation::R0,
+        name: String::new(),
+    };
+    let made = d.commit_ops(vec![fixture::add(first, &square)], "Add");
+    let mark = made.unwrap().created.annots().next().unwrap();
+    let out = run(&p, "marks", None, ctx(&d)).unwrap();
+    let mut on_first = listed();
+    on_first.extend([Key::PageAnnots(first), Key::Annot(mark)]);
+    assert_eq!(out.reads, on_first);
+}
+
+/// A user who turns a page while a plugin's form is open: the document
+/// moves on before the form is answered.
+struct TurnedMeanwhile {
+    cell: Arc<ArcSwap<Snapshot>>,
+    turned: Arc<Snapshot>,
+}
+
+impl Ui for TurnedMeanwhile {
+    fn show_form(&self, _: Form) -> Option<Vec<FieldAnswer>> {
+        self.cell.store(self.turned.clone());
+        Some(Vec::new())
+    }
+
+    fn notice(&self, _: String) {}
+
+    fn set_panel(&self, _: String, _: Vec<PanelRow>) {}
+
+    fn show_panel(&self, _: ShowPanel) {}
+}
+
+/// A call's base is the document as it is at the call's first read or
+/// submit, not when the call was queued or its form shown (M10.5 §14.3):
+/// the bookmark it submits after its form is said against the page the
+/// user turned meanwhile. A submit that keeps nothing of a mark reads
+/// nothing.
+#[test]
+fn a_call_s_base_is_the_document_at_its_first_read() {
+    let p = load("base", Limits::default());
+    let mut d = doc(3);
+    let c = ctx(&d);
+    let shown = d.current_version();
+    let page = d.page(0).unwrap();
+    d.commit_ops(vec![fixture::rotate(&[page], Turn::Quarter)], "Rotate")
+        .unwrap();
+    let ui = TurnedMeanwhile {
+        cell: c.doc.as_ref().unwrap().cell.clone(),
+        turned: Arc::new(d.snapshot()),
+    };
+    let c = CallContext {
+        ui: Some(Arc::new(ui)),
+        ..c
+    };
+    let out = run(&p, "form", None, c).unwrap();
+    assert_eq!(out.batches.len(), 1);
+    let base = out.base.as_ref().map(|b| b.version);
+    assert_ne!(base, Some(shown));
+    assert_eq!(base, Some(d.current_version()));
+    assert!(out.reads.is_empty(), "{:?}", out.reads);
+}
+
 #[test]
 fn panels_notices_and_panel_actions() {
     let p = load("panel", Limits::default());
@@ -685,7 +803,7 @@ fn amount_crossref_bundled_plugin() {
     let ctx = |d: &Document, ui: &Arc<FakeUi>| CallContext {
         doc: Some(DocContext {
             path: "binder.pdf".into(),
-            snapshot: d.snapshot(),
+            cell: cell(d),
             selection: Vec::new(),
             current_page: None,
             text: text.clone(),
@@ -937,7 +1055,7 @@ fn bookmark_from_pattern_bundled_plugin() {
     let ctx = |d: &Document, ui: &Arc<FakeUi>| CallContext {
         doc: Some(DocContext {
             path: "invoices.pdf".into(),
-            snapshot: d.snapshot(),
+            cell: cell(d),
             selection: Vec::new(),
             current_page: None,
             text: text.clone(),
@@ -1071,7 +1189,7 @@ fn subtotal_bundled_plugin() {
     let ctx = || CallContext {
         doc: Some(DocContext {
             path: "ledger.pdf".into(),
-            snapshot: d.snapshot(),
+            cell: cell(&d),
             selection: Vec::new(),
             current_page: None,
             text: text.clone(),
@@ -1183,7 +1301,7 @@ fn currency_convert_bundled_plugin() {
     let ctx = |d: &Document| CallContext {
         doc: Some(DocContext {
             path: "statement.pdf".into(),
-            snapshot: d.snapshot(),
+            cell: cell(d),
             selection: Vec::new(),
             current_page: None,
             text: text.clone(),
@@ -1366,7 +1484,7 @@ fn duplicate_pages_bundled_plugin() {
     let ctx = |d: &Document| CallContext {
         doc: Some(DocContext {
             path: "binder.pdf".into(),
-            snapshot: d.snapshot(),
+            cell: cell(d),
             selection: Vec::new(),
             current_page: None,
             text: text.clone(),

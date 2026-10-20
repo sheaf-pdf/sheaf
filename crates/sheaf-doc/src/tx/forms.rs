@@ -62,8 +62,7 @@ pub(crate) fn take_in(
         }
     }
     let mut doc = FormDoc::clone(lw.rec.form());
-    let ids: HashMap<FieldId, FieldId> =
-        (coming.iter()).map(|&n| (n, lw.cx.alloc.field())).collect();
+    let ids: HashMap<FieldId, FieldId> = (coming.iter()).map(|&n| (n, lw.field_id())).collect();
     let inst = FormInst {
         src: src.id(),
         copy: instance_copy(&doc, src.id(), lw.cx.primary.id()),
@@ -81,7 +80,7 @@ pub(crate) fn take_in(
     doc.need_appearances |= form.facts.need_appearances;
     // The node its roots go under, if any: one named apart now.
     let top = under.as_deref().map(|under| {
-        let id = lw.cx.alloc.field();
+        let id = lw.field_id();
         put_field(&mut lw.rec, id, sheaf_parent(under, inst));
         doc.roots.push_back(id);
         id
@@ -203,15 +202,14 @@ pub(crate) fn copy_forms(
         let names: Vec<String> = fields.iter().map(|&f| inst_name(&lw.rec, f)).collect();
         let under = apart(&lw.rec, &name, names.iter().map(String::as_str));
         let top = under.as_deref().map(|under| {
-            let id = lw.cx.alloc.field();
+            let id = lw.field_id();
             put_field(&mut lw.rec, id, sheaf_parent(under, inst));
             doc.roots.push_back(id);
             id
         });
         renamed.extend(under.map(|under| (under, inst)));
-        let ids: HashMap<FieldId, FieldId> = (coming.iter())
-            .map(|&id| (id, lw.cx.alloc.field()))
-            .collect();
+        let ids: HashMap<FieldId, FieldId> =
+            (coming.iter()).map(|&id| (id, lw.field_id())).collect();
         // The copies of its fields that calculate, after the rest.
         let calculates: Vec<FieldId> = (doc.calc_order.iter())
             .filter_map(|f| ids.get(f))

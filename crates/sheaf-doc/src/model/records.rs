@@ -598,6 +598,15 @@ impl GenSpec {
             GenSpec::HeaderFooter(hf) => Some(hf),
         }
     }
+
+    /// Whether it and `other` are of one kind and z, of which a document
+    /// has one generator at most (M10.5 §6.4). A header/footer has no z:
+    /// a document has one.
+    pub(crate) fn same_place(&self, other: &GenSpec) -> bool {
+        match (self, other) {
+            (GenSpec::HeaderFooter(_), GenSpec::HeaderFooter(_)) => true,
+        }
+    }
 }
 
 impl Generator {

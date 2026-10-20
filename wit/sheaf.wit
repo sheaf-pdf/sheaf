@@ -400,9 +400,12 @@ interface storage {
     preferences: func() -> string;
 }
 
-/// Changes to the document. Each `submit` becomes one undo step, applied
-/// after the command returns, in order; if any edit in a batch fails, that
-/// batch is skipped and the user is told.
+/// Changes to the document. A call's submits become one undo step, applied
+/// after the command returns, in order, to the document as the call read
+/// it; if something it read has changed since (listing the pages reads
+/// their order), none are applied; if an edit fails, the ones applied are
+/// taken back, unless the user has changed what they did since, when they
+/// stay; either way the user is told.
 interface edits {
     use types.{edit};
 

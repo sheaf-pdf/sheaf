@@ -18,7 +18,7 @@ use super::{
     save, save_appended, save_rewritten, write_file,
 };
 use crate::forms::fixture::{Form, row};
-use crate::model::{DocState, Document, PageId, VersionId};
+use crate::model::{DocState, Document, GroupKind, PageId, VersionId};
 use crate::serialize::durable::FileStamp;
 use crate::text_layer::{OcrWord, TextLayer};
 use crate::tx::fixture as fx;
@@ -149,8 +149,8 @@ impl Progress for Gate {
 }
 
 /// A save in flight seals its version (M10.5 §9.1): an edit and an OCR
-/// flush made while it's written (a job's next batch, which would amend the
-/// job's version otherwise) each make a version after it. The save records
+/// flush made while it's written (a group's next commit, which would amend
+/// the group's version otherwise) each make a version after it. The save records
 /// the version it wrote, the edits stay unsaved, and the next save writes
 /// them.
 #[test]
@@ -160,8 +160,8 @@ fn an_edit_and_an_ocr_flush_during_a_slow_save_land_after_it() {
     let mut d = opened(&path);
     let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
     turn(&mut d, 0);
-    let job = d.begin_job();
-    d.commit_ops_in_job(job, ocr(p0, "first"), "Recognize text")
+    let g = d.begin_group(GroupKind::Ocr);
+    d.commit_ops_in_group(g, ocr(p0, "first"), "Recognize text")
         .unwrap();
     let v = d.current_version();
     let input = d.save_input(v).unwrap();
@@ -178,8 +178,8 @@ fn an_edit_and_an_ocr_flush_during_a_slow_save_land_after_it() {
             write_file(&input, &plan, target, &answers, &gate)
         });
         has_started.recv().unwrap();
-        // While it's written: the job's next batch, and an edit.
-        d.commit_ops_in_job(job, ocr(p1, "second"), "Recognize text")
+        // While it's written: the group's next commit, and an edit.
+        d.commit_ops_in_group(g, ocr(p1, "second"), "Recognize text")
             .unwrap();
         flushed = Some(d.current_version());
         turn(&mut d, 1);
@@ -198,7 +198,10 @@ fn an_edit_and_an_ocr_flush_during_a_slow_save_land_after_it() {
     assert!(d.is_dirty());
     assert_eq!(pages_of(&path), [(90, true), (0, false)]);
     // The flush and the edit are the versions after it.
-    assert_eq!(d.undo().unwrap(), Some("Rotate"));
+    assert_eq!(
+        d.undo().unwrap().map(|c| c.label).as_deref(),
+        Some("Rotate")
+    );
     assert_eq!(d.current_version(), flushed);
     assert!(d.is_dirty());
     d.undo().unwrap();

@@ -14,6 +14,7 @@
 
 pub mod annot;
 pub mod attachments;
+pub mod change;
 pub mod content;
 pub mod describe;
 pub mod effects;
@@ -50,20 +51,21 @@ pub mod watermark;
 pub use sheaf_edit::{DestView, PageSize, Rotation, tape};
 
 pub use annot::{Annot, AnnotId, AnnotKind, Box2, Pt, default_author, pdf_date_now};
+pub use change::{Cause, ChangeSet};
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
     AnnotBody, AnnotRec, Bookmark, ContentStack, Derived, DerivedCopies, DocState, Document,
-    FlatOutlineItem, Foreign, FormInst, FormRef, GenId, GenSpec, Generator, Invariant, JobId,
-    Layer, Mark, OutlineId, PageBase, PageDef, PageId, Snapshot, SourceId, Static, Step, Target,
-    TextStyle, VersionId, VersionView,
+    FlatOutlineItem, Foreign, FormInst, FormRef, GenId, GenSpec, Generator, GroupId, GroupKind,
+    Invariant, Layer, Mark, OutlineId, PageBase, PageDef, PageId, Snapshot, SourceId, Static, Step,
+    Target, TextStyle, VersionId, VersionView,
 };
 pub use page_chars::{Glyph, PageChars};
 pub use source::{ObjRef, Source};
 pub use store::{Blob, BlobId, BlobRef, Src, Store};
 pub use text_layer::{OcrWord, TextHit, TextLayer};
 pub use tx::{
-    Actor, Commit, CommitOpts, Derive, EditError, Grant, Identity, JobKind, Notice, ResolvedOp, Tx,
-    notice_text,
+    Actor, Base, Commit, CommitOpts, Derive, EditError, Grant, Identity, JobKind, Notice, Preview,
+    ResolvedOp, Stale, Tx, notice_text,
 };
 
 /// What sheaf counts pages in, for progress. One spelling everywhere:

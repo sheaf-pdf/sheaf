@@ -1,8 +1,9 @@
 use super::*;
 use crate::annot::{Annot, AnnotKind, Pt};
 use crate::model::Document;
+use crate::prim::Key;
 use crate::tx::fixture::add;
-use crate::tx::{Actor, CommitOpts, JobKind};
+use crate::tx::{Actor, CommitOpts, EditError, JobKind, Stale};
 use in_progress::NoProgress;
 use lopdf::{Stream, dictionary};
 use sheaf_edit::Rotation;
@@ -232,6 +233,54 @@ fn opened(path: &std::path::Path) -> (Document, Vec<AnnotId>) {
         .flat_map(|&page| st.foreign_on(page).map(|(id, _)| id))
         .collect();
     (doc, theirs)
+}
+
+/// Two imports of the same comment planned on one version, as two
+/// started together are, with a note added to another page meanwhile: the
+/// first lands beside the note; the second, which found no comment by that
+/// name there, is a Conflict over the page the first added it to, and
+/// changes nothing, rather than adding it twice.
+#[test]
+fn imports_planned_together_conflict_over_what_they_matched_by() {
+    let dir = std::env::temp_dir().join(format!("sheaf-exchange-twice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = pdf_with_square(&dir);
+    let (mut doc, _) = opened(&path);
+    let (p0, p1) = (doc.page(0).unwrap(), doc.page(1).unwrap());
+    let mut c = Comments::new();
+    let new = dictionary! {
+        "Subtype" => "Text", "Rect" => vec![100.into(), 100.into(), 120.into(), 120.into()],
+        "NM" => Object::string_literal("new"), "Contents" => Object::string_literal("Hello"),
+    };
+    let id = c.pdf.add_object(Object::Dictionary(new));
+    c.annots.push((1, id));
+    let snap = doc.snapshot();
+    let planned = || {
+        let mut tx = Document::tx_at(&snap, doc.lower_cx(Actor::Job(JobKind::Import)));
+        let ops = import(&snap, doc.store(), &c).ops_in(&mut tx);
+        tx.apply_batch(ops, &NoProgress).unwrap();
+        tx
+    };
+    let (first, second) = (planned(), planned());
+    let ours = doc.state().marks_on(p0).next().unwrap().clone();
+    let note = Annot {
+        name: String::new(),
+        ..ours
+    };
+    doc.commit_ops(vec![add(p0, &note)], "note").unwrap();
+    let on = || CommitOpts::based(snap.version, Stale::Relower, "Import");
+    doc.commit(first, on()).unwrap();
+    assert_eq!(doc.state().annots_named(p1, "new").count(), 1);
+    assert_eq!(doc.state().marks_on(p0).count(), 2);
+    let at = doc.current_version();
+    let e = doc.commit(second, on()).unwrap_err();
+    assert!(
+        matches!(e, EditError::Conflict { key: Key::PageAnnots(p), .. } if p == p1),
+        "{e}"
+    );
+    assert_eq!(doc.current_version(), at);
+    assert_eq!(doc.state().annots_named(p1, "new").count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

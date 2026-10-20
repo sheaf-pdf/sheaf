@@ -145,7 +145,8 @@ pub(crate) struct Layout {
     pub(crate) row: usize,
     pub(crate) view_w: f32,
     pub(crate) view_h: f32,
-    pub(crate) version: u64,
+    /// The document's layout count it was built at (`Doc::layout`).
+    pub(crate) layout: u64,
     /// Logical px per PDF point.
     pub(crate) k: f32,
     /// Every page, with the pane's rotate view added to its rotation: what
@@ -167,7 +168,7 @@ pub(crate) struct LayoutSpec {
     pub row: usize,
     pub view_w: f32,
     pub view_h: f32,
-    pub version: u64,
+    pub layout: u64,
 }
 
 impl Layout {
@@ -188,7 +189,7 @@ impl Layout {
             rotation,
             view_w,
             view_h,
-            version,
+            layout,
             ..
         } = spec;
         let n = sizes.len();
@@ -263,7 +264,7 @@ impl Layout {
             row,
             view_w,
             view_h,
-            version,
+            layout,
             k,
             refs,
             rects,
@@ -447,7 +448,7 @@ mod tests {
                 row,
                 view_w: 1000.0,
                 view_h: 800.0,
-                version: 0,
+                layout: 0,
             },
             refs,
             &sizes,

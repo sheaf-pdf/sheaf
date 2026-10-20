@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use sheaf_doc::geom::{Affine, Geom};
+use sheaf_doc::prim::Key;
 use sheaf_doc::tx::mark_kind;
 use sheaf_doc::{
     Annot, AnnotId, AnnotKind, Bookmark, Box2, DestView, EditError, OutlineId, PageId, Pt,
@@ -250,11 +251,13 @@ impl Said {
 /// names by stem is held for the host to find ([`EditBatch::held`]), and
 /// the mark names it as that asset. An update names only what the API's
 /// record says, so a mark's name, dates and turn stay as they are, and so
-/// does what the API doesn't show of it.
+/// does what the API doesn't show of it, which it reads.
 pub(crate) struct Adapter<'a> {
-    /// The document the call started with; with none, nothing is mapped.
+    /// The document the call read; with none, nothing is mapped.
     snap: Option<&'a Snapshot>,
     batch: EditBatch,
+    /// The slots it read there, which the batch's ops keep parts of.
+    read: Vec<Key>,
     /// The next local a bookmark tree names its parents by.
     next_local: u16,
 }
@@ -271,12 +274,16 @@ impl<'a> Adapter<'a> {
         Adapter {
             snap,
             batch,
+            read: Vec::new(),
             next_local: 1,
         }
     }
 
-    pub(crate) fn finish(self) -> EditBatch {
-        self.batch
+    /// The batch, and the slots it read ([`CallOutput::reads`]).
+    ///
+    /// [`CallOutput::reads`]: crate::CallOutput::reads
+    pub(crate) fn finish(self) -> (EditBatch, Vec<Key>) {
+        (self.batch, self.read)
     }
 
     /// `e`, said as ops after the ones before it; one ops can't say fails
@@ -517,6 +524,9 @@ impl<'a> Adapter<'a> {
     /// its text changed (a plugin sees a tape as its text); a 0.2 line's
     /// start arrowhead.
     fn update(&mut self, page: PageId, id: AnnotId, said: Said) -> Op {
+        if self.snap.is_some() {
+            self.read.push(Key::Annot(id));
+        }
         let read = self.snap.and_then(|s| s.state.find_annot(id)).map(|(_, a)| a);
         let style = said.style();
         let (mut kind, _) = self.placed(page, said.kind);
@@ -586,9 +596,9 @@ fn patch<T>(v: Option<Option<T>>) -> Patch<T> {
     }
 }
 
-/// An event as a plugin sees it, a region in its page's frame. `snap` is
-/// the document the call started with; with none, nothing is mapped.
-pub(crate) fn event_to_wit(snap: Option<&Snapshot>, e: &DocEvent) -> w::DocEvent {
+/// An event as a plugin sees it, a region in its page's frame in the
+/// call's document (`host`'s base); with none, nothing is mapped.
+pub(crate) fn event_to_wit(host: &HostState, e: &DocEvent) -> w::DocEvent {
     match e {
         DocEvent::Opened => w::DocEvent::Opened,
         DocEvent::Edited(l) => w::DocEvent::Edited(l.clone()),
@@ -596,7 +606,7 @@ pub(crate) fn event_to_wit(snap: Option<&Snapshot>, e: &DocEvent) -> w::DocEvent
         DocEvent::SelectionChanged => w::DocEvent::SelectionChanged,
         DocEvent::Closed => w::DocEvent::Closed,
         DocEvent::Region { page, rect } => {
-            let to_view = snap.map_or(Affine::IDENTITY, |s| to_frame(s, *page));
+            let to_view = host.base().map_or(Affine::IDENTITY, |s| to_frame(s, *page));
             w::DocEvent::Region(w::Region {
                 page: page.0,
                 rect: box_to_wit(to_view.apply_box(*rect)),
@@ -706,41 +716,51 @@ impl api::document::Host for HostState {
         self.doc().map(|d| d.path.display().to_string())
     }
 
+    /// Read: the order, and each page's slot and boxes.
     fn pages(&mut self) -> Vec<api::types::PageInfo> {
-        let Some(d) = self.doc() else {
+        let Some(snap) = self.base() else {
             return Vec::new();
         };
-        d.snapshot
-            .state
-            .order()
-            .iter()
-            .map(|&p| page_info(&d.snapshot, p))
-            .collect()
+        let order = snap.state.order().clone();
+        let pages = order.iter().map(|&p| page_info(snap, p)).collect();
+        let each = order.iter().flat_map(|&p| [Key::Page(p), Key::Geom(p)]);
+        self.read(std::iter::once(Key::Order).chain(each));
+        pages
     }
 
+    /// Read: the top-level bookmarks, and each bookmark.
     fn outline(&mut self) -> Vec<api::types::OutlineItem> {
-        let Some(d) = self.doc() else {
+        let Some(snap) = self.base() else {
             return Vec::new();
         };
-        d.snapshot
-            .state
-            .bookmarks_preorder()
-            .into_iter()
-            .map(|(depth, id, b)| outline_item(&d.snapshot, depth, id, b))
-            .collect()
+        let mut read = vec![Key::OutlineRoots];
+        let items = (snap.state.bookmarks_preorder().into_iter())
+            .map(|(depth, id, b)| {
+                read.push(Key::Bookmark(id));
+                outline_item(snap, depth, id, b)
+            })
+            .collect();
+        self.read(read);
+        items
     }
 
+    /// Read: the page's annotations, and each mark it shows.
     fn annotations(&mut self, page: u64) -> Vec<api::types::Annot> {
-        let Some(d) = self.doc() else {
+        let Some(snap) = self.base() else {
             return Vec::new();
         };
         let page = PageId(page);
-        let to_view = to_frame(&d.snapshot, page);
-        d.snapshot
-            .state
-            .marks_on(page)
-            .filter_map(|a| annot_to_wit(&a.mapped(&to_view)))
-            .collect()
+        let to_view = to_frame(snap, page);
+        let mut read = vec![Key::PageAnnots(page)];
+        let shown = (snap.state.marks_on(page))
+            .filter_map(|a| {
+                let shown = annot_to_wit(&a.mapped(&to_view))?;
+                read.push(Key::Annot(a.id));
+                Some(shown)
+            })
+            .collect();
+        self.read(read);
+        shown
     }
 
     fn selection(&mut self) -> Vec<u64> {
@@ -756,8 +776,8 @@ impl api::document::Host for HostState {
 
 impl api::text::Host for HostState {
     fn page_text(&mut self, page: u64) -> Result<String, String> {
-        let (d, id, base) = self.page_base(page)?;
-        if let Some(layer) = d.snapshot.state.ocr_text(id) {
+        let (d, snap, id, base) = self.page_base(page)?;
+        if let Some(layer) = snap.state.ocr_text(id) {
             return Ok(layer.text());
         }
         d.text
@@ -775,11 +795,11 @@ impl api::text::Host for HostState {
             .size_limit(1 << 20)
             .build()
             .map_err(|e| e.to_string())?;
-        let (d, id, base) = self.page_base(page)?;
-        let found: Vec<TextMatch> = match d.snapshot.state.ocr_text(id) {
+        let (d, snap, id, base) = self.page_base(page)?;
+        let found: Vec<TextMatch> = match snap.state.ocr_text(id) {
             Some(layer) => layer_matches(
                 sheaf_doc::text_layer::pattern_search(layer, &re),
-                to_frame(&d.snapshot, id),
+                to_frame(snap, id),
             ),
             None => d
                 .text
@@ -795,11 +815,11 @@ impl api::text::Host for HostState {
         query: String,
         match_case: bool,
     ) -> Result<Vec<api::types::TextMatch>, String> {
-        let (d, id, base) = self.page_base(page)?;
-        let found: Vec<TextMatch> = match d.snapshot.state.ocr_text(id) {
+        let (d, snap, id, base) = self.page_base(page)?;
+        let found: Vec<TextMatch> = match snap.state.ocr_text(id) {
             Some(layer) => layer_matches(
                 sheaf_doc::text_layer::search(layer, &query, match_case),
-                to_frame(&d.snapshot, id),
+                to_frame(snap, id),
             ),
             None => d
                 .text
@@ -816,11 +836,11 @@ impl api::text::Host for HostState {
     ) -> Result<Vec<api::types::TextMatch>, String> {
         static WORD: std::sync::LazyLock<Arc<regex::Regex>> =
             std::sync::LazyLock::new(|| Arc::new(regex::Regex::new(r"\S+").unwrap()));
-        let (d, id, base) = self.page_base(page)?;
-        let words: Vec<TextMatch> = match d.snapshot.state.ocr_text(id) {
+        let (d, snap, id, base) = self.page_base(page)?;
+        let words: Vec<TextMatch> = match snap.state.ocr_text(id) {
             Some(layer) => layer_matches(
                 sheaf_doc::text_layer::pattern_search(layer, &WORD),
-                to_frame(&d.snapshot, id),
+                to_frame(snap, id),
             ),
             None => d
                 .text
@@ -849,12 +869,12 @@ impl api::text::Host for HostState {
         page: u64,
         rect: api::types::Box2,
     ) -> Result<Vec<api::types::Box2>, String> {
-        let (d, id, base) = self.page_base(page)?;
+        let (d, snap, id, base) = self.page_base(page)?;
         let rect = box_from_wit(rect);
-        let boxes = match d.snapshot.state.ocr_text(id) {
+        let boxes = match snap.state.ocr_text(id) {
             // `rect` is in the page's frame, the layer in PageSpace.
             Some(layer) => {
-                let to_view = to_frame(&d.snapshot, id);
+                let to_view = to_frame(snap, id);
                 layer
                     .boxes_in_rect(to_view.inverse().apply_box(rect))
                     .into_iter()
@@ -893,11 +913,11 @@ impl api::ocr::Host for HostState {
         page: u64,
         options: api::ocr::OcrOptions,
     ) -> Result<api::ocr::TextLayer, String> {
-        let (d, id, base) = self.page_base(page)?;
+        let (d, snap, id, base) = self.page_base(page)?;
         let ocr = d.ocr.clone().ok_or("OCR isn't available")?;
-        let geom = d.snapshot.geom(id);
-        let render = d.snapshot.render_delta(id);
-        let to_view = to_frame(&d.snapshot, id);
+        let geom = snap.geom(id);
+        let render = snap.render_delta(id);
+        let to_view = to_frame(snap, id);
         let started = Instant::now();
         let layer = ocr.recognize(id, base, &geom, render, options.language, options.dpi);
         // The engine's time isn't the plugin's.
@@ -907,13 +927,13 @@ impl api::ocr::Host for HostState {
             .map_err(|e| format!("{e:#}"))
     }
 
+    /// Read: what the page shows.
     fn page_text_layer(&mut self, page: u64) -> Option<api::ocr::TextLayer> {
-        let d = self.doc()?;
+        let snap = self.base()?;
         let page = PageId(page);
-        d.snapshot
-            .state
-            .ocr_text(page)
-            .map(|l| layer_to_wit(l, to_frame(&d.snapshot, page)))
+        let layer = (snap.state.ocr_text(page)).map(|l| layer_to_wit(l, to_frame(snap, page)));
+        self.read([Key::Page(page)]);
+        layer
     }
 }
 
@@ -971,11 +991,12 @@ impl api::ui::Host for HostState {
 
 impl api::edits::Host for HostState {
     fn submit(&mut self, label: String, edits: Vec<api::types::Edit>) {
-        let mut ops = Adapter::new(self.doc().map(|d| &d.snapshot), label);
+        let mut ops = Adapter::new(self.base(), label);
         for e in edits {
             ops.edit(e);
         }
-        let batch = ops.finish();
+        let (batch, read) = ops.finish();
+        self.read(read);
         self.batches.push(batch);
     }
 }
@@ -998,11 +1019,14 @@ impl api::render::Host for HostState {}
 
 impl api::render::HostPageRenderer for HostState {
     fn new(&mut self, page: u64) -> Resource<PageRenderer> {
-        // An unknown page still gets a handle; `render` reports it.
+        // An unknown page still gets a handle; `render` reports it. Read:
+        // what the page shows.
         let page = PageId(page);
-        let base = self
-            .doc()
-            .and_then(|d| Some(d.snapshot.state.def(page)?.base.clone()));
+        let base = (self.base()).map(|s| Some(s.state.def(page)?.base.clone()));
+        if base.is_some() {
+            self.read([Key::Page(page)]);
+        }
+        let base = base.flatten();
         let size = base.as_ref().map_or((0.0, 0.0), |b| {
             let s = b.src.page_size(b.index);
             (s.width, s.height)

@@ -1,7 +1,10 @@
 //! Transactions (M10.5 §6.3): ops lowered into prims. A [`Tx`] collects
 //! ops against the version it was made at, each lowered at once into the
 //! transaction's own state, so a later op reads what an earlier one did;
-//! [`Document::commit`] makes them one version.
+//! [`Document::commit`] makes them one version. One made on a version the
+//! document has since moved on from ([`Document::tx_at`]) lands on the
+//! current one as [`Stale`] says (§8.5): its changes checked by value, or
+//! its ops lowered again, each drawing the ids it drew before.
 //!
 //! [`Tx::apply`] runs in three stages, all or nothing for the op:
 //! 1. **Resolve** ([`resolve`]): references become ids, locals what
@@ -23,6 +26,7 @@
 //! reader its [`Notice`]s.
 //!
 //! [`Document::commit`]: crate::model::Document::commit
+//! [`Document::tx_at`]: crate::model::Document::tx_at
 //! [`Document::lower_cx`]: crate::model::Document::lower_cx
 //! [`describe`]: crate::describe
 //! [`StepEffects`]: crate::effects::StepEffects
@@ -36,12 +40,13 @@ use in_progress::Progress;
 use sheaf_edit::{BlobSel, Local, Op};
 
 use crate::annot::AnnotId;
+use crate::change::ChangeSet;
 use crate::effects::StepEffects;
 use crate::forms::FieldId;
 use crate::labels::LabelSpec;
 use crate::model::{
-    Bookmark, DocState, FieldNode, FormDoc, FormRef, IdAlloc, OutlineId, PageDef, PageId, Step,
-    VersionId,
+    Bookmark, DocState, FieldNode, FormDoc, FormRef, GenId, GroupId, IdAlloc, OutlineId, PageDef,
+    PageId, Step, VersionId,
 };
 use crate::prim::{Key, Rec, Val, same};
 use crate::store::{Blob, BlobRef, Src, Store};
@@ -60,6 +65,8 @@ pub mod resolve;
 
 #[cfg(test)]
 mod cascade_tests;
+#[cfg(test)]
+mod stale_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -224,22 +231,84 @@ pub struct OpResult {
     pub made: Vec<Made>,
 }
 
+/// The version a transaction's caller made it on, as its commit says
+/// (§8.5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Base {
+    /// The current one: made and committed at once, as a gesture, a menu
+    /// or a paste is. A transaction made on another is a bug.
+    #[default]
+    Current,
+    /// Version `v`, which may not be the current one by the time it
+    /// commits: a planner's snapshot, the version a dialog opened on. It
+    /// lands on the current one as [`Stale`] says.
+    At(VersionId),
+}
+
+/// How a transaction made on a version that's no longer the current one
+/// lands on the current one (§8.5). Under either, what its caller based
+/// its ops on (its decision reads) must hold the same values there, or
+/// it's a [`EditError::Conflict`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Stale {
+    /// Its prims, put on the current version, when what its ops read and
+    /// what they wrote over hold the same values there, by value, and the
+    /// cascades and the rules of uniqueness and reference find nothing
+    /// more to do on what they make: a dialog's, an OCR flush's.
+    #[default]
+    Validate,
+    /// Its ops lowered again on the current version, each drawing the ids
+    /// it drew before, so what it made keeps its ids: a planner's, a plugin
+    /// call's. A reference that no longer resolves is the op's error, and
+    /// a position once the order has moved is a Conflict.
+    Relower,
+}
+
 /// How a transaction is committed.
 #[derive(Debug, Clone, Default)]
 pub struct CommitOpts {
     /// What undo calls the version; its first line when none.
     pub label: Option<Arc<str>>,
+    pub base: Base,
+    pub stale: Stale,
+    /// The group it's of, whose version it joins when it may (§8.4).
+    pub group: Option<GroupId>,
+}
+
+impl CommitOpts {
+    /// Made on the current version, labelled `label`.
+    pub fn labelled(label: impl Into<Arc<str>>) -> CommitOpts {
+        CommitOpts {
+            label: Some(label.into()),
+            ..CommitOpts::default()
+        }
+    }
+
+    /// Made on version `v`, which the document may have moved on from by
+    /// the time it commits, landing as `stale` says, labelled `label`: a
+    /// planner's or a dialog's.
+    pub fn based(v: VersionId, stale: Stale, label: impl Into<Arc<str>>) -> CommitOpts {
+        CommitOpts {
+            base: Base::At(v),
+            stale,
+            ..CommitOpts::labelled(label)
+        }
+    }
 }
 
 /// What a commit did.
 #[derive(Debug, Clone)]
 pub struct Commit {
-    /// The version it made, or amended; None when it changed nothing.
+    /// The version it made, or amended; None when it changed nothing, or
+    /// when an amend put back all its group's version did.
     pub version: Option<VersionId>,
-    /// It joined the job's version rather than making one
-    /// ([`Document::apply_in_job`](crate::model::Document::apply_in_job)).
+    /// It joined its group's version rather than making one
+    /// ([`CommitOpts::group`]).
     pub amended: bool,
     pub created: Created,
+    /// What it changed, from the version it was made on: nothing, at that
+    /// version, when it made none.
+    pub change: ChangeSet,
     /// What its steps did, together.
     pub effects: StepEffects,
     /// Its lines, as the History panel shows them.
@@ -249,14 +318,68 @@ pub struct Commit {
     pub notices: Vec<Notice>,
 }
 
+/// What a transaction would do, committed on the version it was made on
+/// (§8.6): its lines, what its steps did together, and what its ops made.
+#[derive(Debug, Clone)]
+pub struct Preview {
+    pub lines: Vec<crate::describe::Line>,
+    pub effects: StepEffects,
+    pub created: Created,
+}
+
+/// An op as a transaction took it, kept to lower it again on another
+/// version ([`Stale::Relower`]). The op is kept as it came, not boxed: a
+/// transaction may keep thousands (OCR's 7,000 pages), and a box each is
+/// an allocation more an op.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum Entry {
+    /// An op, the ids lowering it drew, and whether resolving it read the
+    /// order (a position, a span, every page).
+    Op {
+        op: Op,
+        drawn: Drawn,
+        positional: bool,
+    },
+    /// The internal page rebase of a derived flow ([`Tx::set_page_base`]).
+    Base(Vec<(PageId, Src, u32)>, Derive),
+}
+
+/// The ids an op's lowering drew, of each kind in order: what lowering it
+/// again draws first.
+#[derive(Debug, Default)]
+pub(crate) struct Drawn {
+    pages: Vec<PageId>,
+    outlines: Vec<OutlineId>,
+    fields: Vec<FieldId>,
+    annots: Vec<AnnotId>,
+    generators: Vec<GenId>,
+}
+
+impl Drawn {
+    /// Each kind's ids last first, for drawing by `pop`.
+    fn reversed(mut self) -> Drawn {
+        self.pages.reverse();
+        self.outlines.reverse();
+        self.fields.reverse();
+        self.annots.reverse();
+        self.generators.reverse();
+        self
+    }
+}
+
 /// Ops against a version, lowered as they come (§6.3). Send and
 /// `'static`: it can be built off the UI thread.
 pub struct Tx {
+    /// The document and version it's based on.
+    instance: u64,
     base: VersionId,
     /// The state of the version it's based on, and the one its ops made.
     base_state: DocState,
     state: DocState,
     steps: Vec<Step>,
+    /// Its ops, each as it took it, to lower them again.
+    entries: Vec<Entry>,
     /// What each local names: im collections, so a checkpoint is cheap.
     locals: im::HashMap<Local, Made>,
     created: Created,
@@ -283,6 +406,7 @@ pub struct Tx {
 struct Checkpoint {
     state: DocState,
     steps: usize,
+    entries: usize,
     ops: usize,
     notices: usize,
     locals: im::HashMap<Local, Made>,
@@ -290,13 +414,16 @@ struct Checkpoint {
 }
 
 impl Tx {
-    /// A transaction on `state`, version `base`'s, lowering with `cx`.
-    pub(crate) fn new(base: VersionId, state: DocState, cx: Arc<LowerCx>) -> Tx {
+    /// A transaction on `state`, version `base`'s of document `instance`,
+    /// lowering with `cx`.
+    pub(crate) fn new(instance: u64, base: VersionId, state: DocState, cx: Arc<LowerCx>) -> Tx {
         Tx {
+            instance,
             base,
             base_state: state.clone(),
             state,
             steps: Vec::new(),
+            entries: Vec::new(),
             locals: im::HashMap::new(),
             created: Created::default(),
             notices: Vec::new(),
@@ -312,10 +439,28 @@ impl Tx {
     /// `op`, lowered: all of it, or nothing and why not. Canceled by `p`,
     /// it leaves the transaction as it was.
     pub fn apply(&mut self, op: Op, p: &dyn Progress) -> Result<OpResult, EditError> {
+        self.apply_pinned(op, Drawn::default(), p)
+    }
+
+    /// [`apply`](Self::apply), its lowering drawing the ids `pins` holds
+    /// first; the op kept, with the ids it drew.
+    fn apply_pinned(
+        &mut self,
+        op: Op,
+        pins: Drawn,
+        p: &dyn Progress,
+    ) -> Result<OpResult, EditError> {
         self.ready()?;
         let (resolved, reads) = self.resolve(&op)?;
         self.allowed(&resolved)?;
-        self.lower(resolved, reads, p)
+        let positional = reads.contains(&Key::Order);
+        let (made, drawn) = self.lower(resolved, reads, pins, p)?;
+        self.entries.push(Entry::Op {
+            op,
+            drawn,
+            positional,
+        });
+        Ok(made)
     }
 
     /// `ops`, each lowered against what the ones before it did: all of
@@ -383,6 +528,24 @@ impl Tx {
         &self.state
     }
 
+    /// Who makes it.
+    pub(crate) fn actor(&self) -> &Actor {
+        &self.cx.actor
+    }
+
+    /// What a commit of it on the version it was made on would do.
+    pub fn preview(&self) -> Preview {
+        let effects: Vec<&StepEffects> = self.steps.iter().map(|s| &s.effects).collect();
+        Preview {
+            lines: crate::describe::lines(&self.steps),
+            effects: StepEffects::union(&effects),
+            created: Created {
+                locals: self.locals.iter().map(|(&l, &m)| (l, m)).collect(),
+                ..self.created.clone()
+            },
+        }
+    }
+
     /// The internal page rebase of a derived flow (transitional, until
     /// slice 17): each page shown from page `index` of `src`, a copy the
     /// flow made and noted ([`Document::add_derived`]), as `why` says.
@@ -406,9 +569,17 @@ impl Tx {
                 ));
             }
         }
+        let entry = Entry::Base(pages.clone(), why);
         let resolved = ResolvedOp::SetPageBase { pages, why };
         self.allowed(&resolved)?;
-        self.lower(resolved, BTreeSet::new(), &in_progress::NoProgress)
+        let (made, _) = self.lower(
+            resolved,
+            BTreeSet::new(),
+            Drawn::default(),
+            &in_progress::NoProgress,
+        )?;
+        self.entries.push(entry);
+        Ok(made)
     }
 
     /// Ops wait for the document's file to open.
@@ -444,17 +615,20 @@ impl Tx {
         }
     }
 
-    /// `op`, resolved and allowed, lowered into a step.
+    /// `op`, resolved and allowed, lowered into a step, drawing the ids
+    /// `pins` holds first: what it made, and the ids it drew.
     fn lower(
         &mut self,
         op: ResolvedOp,
         reads: BTreeSet<Key>,
+        pins: Drawn,
         p: &dyn Progress,
-    ) -> Result<OpResult, EditError> {
+    ) -> Result<(OpResult, Drawn), EditError> {
         let before = self.state.clone();
         let line = crate::describe::describe(&op, &before);
         let mut lw = Lower::new(Rec::new(before.clone()), &self.cx, p, op.name());
         lw.reads = reads;
+        lw.pins = pins.reversed();
         lower_op(&mut lw, &op)?;
         let cascades = cascade::settle(&mut lw)?;
         let Lower {
@@ -462,6 +636,7 @@ impl Tx {
             made,
             notices,
             reads,
+            drawn,
             ..
         } = lw;
         let names = op.locals();
@@ -496,7 +671,7 @@ impl Tx {
             line,
             cascades: cascades.into(),
         });
-        Ok(OpResult { made })
+        Ok((OpResult { made }, drawn))
     }
 
     /// Whether `key` holds what it held when the transaction began: a slot
@@ -512,6 +687,7 @@ impl Tx {
         Checkpoint {
             state: self.state.clone(),
             steps: self.steps.len(),
+            entries: self.entries.len(),
             ops: self.created.ops.len(),
             notices: self.notices.len(),
             locals: self.locals.clone(),
@@ -522,6 +698,7 @@ impl Tx {
     fn rewind(&mut self, m: Checkpoint) {
         self.state = m.state;
         self.steps.truncate(m.steps);
+        self.entries.truncate(m.entries);
         self.created.ops.truncate(m.ops);
         self.notices.truncate(m.notices);
         self.locals = m.locals;
@@ -532,27 +709,87 @@ impl Tx {
     pub(crate) fn into_parts(self) -> TxParts {
         let locals = self.locals.into_iter().collect();
         TxParts {
+            instance: self.instance,
             base: self.base,
+            base_state: self.base_state,
             state: self.state,
             steps: self.steps,
+            entries: self.entries,
             created: Created {
                 locals,
                 ..self.created
             },
             notices: self.notices,
-            actor: self.cx.actor.clone(),
+            seen: self.seen,
+            decided: self.decided,
+            pins: self.pins,
+            grants: self.grants,
+            named: self.named,
+            cx: self.cx,
         }
     }
 }
 
 /// A transaction as a commit takes it.
 pub(crate) struct TxParts {
+    pub(crate) instance: u64,
     pub(crate) base: VersionId,
+    pub(crate) base_state: DocState,
     pub(crate) state: DocState,
     pub(crate) steps: Vec<Step>,
+    pub(crate) entries: Vec<Entry>,
     pub(crate) created: Created,
     pub(crate) notices: Vec<Notice>,
-    pub(crate) actor: Actor,
+    pub(crate) seen: im::OrdMap<Key, Option<Val>>,
+    pub(crate) decided: BTreeMap<Key, Option<Val>>,
+    pins: Vec<Blob>,
+    grants: Vec<Grant>,
+    named: HashMap<String, usize>,
+    cx: Arc<LowerCx>,
+}
+
+impl TxParts {
+    /// Who made it.
+    pub(crate) fn actor(&self) -> &Actor {
+        &self.cx.actor
+    }
+
+    /// Whether resolving one of its ops read the order: a position, a span
+    /// or every page.
+    pub(crate) fn positional(&self) -> bool {
+        (self.entries.iter()).any(|e| {
+            matches!(
+                e,
+                Entry::Op {
+                    positional: true,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Its ops lowered again on `state`, version `at`'s, as its own were,
+    /// with the same context, grants and pins, each drawing the ids it drew
+    /// before first (§8.5's [`Stale::Relower`]). The first op that can't be
+    /// lowered there says why, as it would have at once: a page it names
+    /// that's gone is [`EditError::NotFound`].
+    pub(crate) fn relowered(self, at: VersionId, state: DocState) -> Result<TxParts, EditError> {
+        let mut tx = Tx::new(self.instance, at, state, self.cx);
+        tx.pins = self.pins;
+        tx.grants = self.grants;
+        tx.named = self.named;
+        for entry in self.entries {
+            match entry {
+                Entry::Op { op, drawn, .. } => {
+                    tx.apply_pinned(op, drawn, &in_progress::NoProgress)?;
+                }
+                Entry::Base(pages, why) => {
+                    tx.set_page_base(pages, why)?;
+                }
+            }
+        }
+        Ok(tx.into_parts())
+    }
 }
 
 /// The transaction's state as a caller deciding its ops reads it: each
@@ -668,6 +905,11 @@ pub(crate) struct Lower<'a> {
     pub(crate) reads: BTreeSet<Key>,
     /// Annotation ids drawn so far: not yet in the state.
     taken: HashSet<AnnotId>,
+    /// The ids the op drew when it was first lowered, each kind's next
+    /// last: drawn first when it's lowered again on another version.
+    pins: Drawn,
+    /// The ids it has drawn.
+    drawn: Drawn,
 }
 
 impl<'a> Lower<'a> {
@@ -686,21 +928,61 @@ impl<'a> Lower<'a> {
             notices: Vec::new(),
             reads: BTreeSet::new(),
             taken: HashSet::new(),
+            pins: Drawn::default(),
+            drawn: Drawn::default(),
         }
     }
 
-    /// A mark id no annotation has, nor one drawn before in this op.
-    /// Random rather than counted, so two copies of a file never give
-    /// different marks the same `/NM`; 53 bits, so the JSON is exact in any
-    /// reader.
+    /// A new page's id: the one pinned next, else the allocator's.
+    pub(crate) fn page_id(&mut self) -> PageId {
+        let id = (self.pins.pages.pop()).unwrap_or_else(|| self.cx.alloc.page());
+        self.drawn.pages.push(id);
+        id
+    }
+
+    /// A new bookmark's id: the one pinned next, else the allocator's.
+    pub(crate) fn outline_id(&mut self) -> OutlineId {
+        let id = (self.pins.outlines.pop()).unwrap_or_else(|| self.cx.alloc.outline());
+        self.drawn.outlines.push(id);
+        id
+    }
+
+    /// A new field node's id: the one pinned next, else the allocator's.
+    pub(crate) fn field_id(&mut self) -> FieldId {
+        let id = (self.pins.fields.pop()).unwrap_or_else(|| self.cx.alloc.field());
+        self.drawn.fields.push(id);
+        id
+    }
+
+    /// A mark id no annotation has, nor one drawn before in this op: the
+    /// one pinned next when that's so. Random rather than counted, so two
+    /// copies of a file never give different marks the same `/NM`; 53
+    /// bits, so the JSON is exact in any reader.
     pub(crate) fn annot_id(&mut self) -> AnnotId {
-        loop {
-            let id = AnnotId(fastrand::u64(1..1 << 53));
-            if !self.taken.contains(&id) && !self.rec.has_annot(id) {
-                self.taken.insert(id);
-                return id;
+        let free = |lw: &Lower, id| !lw.taken.contains(&id) && !lw.rec.has_annot(id);
+        let pinned = self.pins.annots.pop().filter(|&id| free(self, id));
+        let id = pinned.unwrap_or_else(|| {
+            loop {
+                let id = AnnotId(fastrand::u64(1..1 << 53));
+                if free(self, id) {
+                    break id;
+                }
             }
-        }
+        });
+        self.taken.insert(id);
+        self.drawn.annots.push(id);
+        id
+    }
+
+    /// A generator id none has: the one pinned next when that's so.
+    pub(crate) fn gen_id(&mut self) -> GenId {
+        let generators = self.rec.generators();
+        let pinned = (self.pins.generators.pop()).filter(|id| !generators.contains_key(id));
+        let id = pinned.unwrap_or_else(|| {
+            GenId::draw(&mut fastrand::Rng::new(), |id| generators.contains_key(&id))
+        });
+        self.drawn.generators.push(id);
+        id
     }
 
     /// A lowering read of `key`.
@@ -856,6 +1138,9 @@ fn lower_op(lw: &mut Lower, op: &ResolvedOp) -> Result<(), EditError> {
             content::remove_header_footer(lw, pages);
             Ok(())
         }
+        R::Revert { .. } => Err(EditError::internal(
+            "a revert is made of its group's prims, never lowered",
+        )),
     }
 }
 

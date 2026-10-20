@@ -153,6 +153,15 @@ pub enum ResolvedOp {
         pages: Vec<(PageId, Src, u32)>,
         why: Derive,
     },
+    /// A group's versions taken back, the group called `label`: what
+    /// History's "Undo all of …" makes, and a failed call's rollback. No
+    /// `Op` says it, and it's never lowered: its step holds the group's
+    /// prims swapped ([`Document::revert_group`]).
+    ///
+    /// [`Document::revert_group`]: crate::model::Document::revert_group
+    Revert {
+        label: Arc<str>,
+    },
 }
 
 /// Where among its siblings a bookmark goes.
@@ -222,7 +231,7 @@ pub fn op_name(op: &Op) -> &'static str {
 
 impl ResolvedOp {
     /// What it's called in Op JSON; the internal page rebase as
-    /// `set-page-base`.
+    /// `set-page-base`, and a group's revert as `revert`.
     pub fn name(&self) -> &'static str {
         use ResolvedOp as R;
         match self {
@@ -248,6 +257,7 @@ impl ResolvedOp {
             R::SetHeaderFooter { .. } => "set-header-footer",
             R::RemoveHeaderFooter { .. } => "remove-header-footer",
             R::SetPageBase { .. } => "set-page-base",
+            R::Revert { .. } => "revert",
         }
     }
 

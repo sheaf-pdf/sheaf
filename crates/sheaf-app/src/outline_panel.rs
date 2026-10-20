@@ -10,7 +10,7 @@ use gpui::{
     AnchoredPositionMode, AnyElement, Context, DragMoveEvent, Entity, Focusable, MouseButton,
     Pixels, Point, Subscription, Window, anchored, deferred, div, point, prelude::*, px, rgb,
 };
-use sheaf_doc::{Commit, DestView, DocState, OutlineId, PageId};
+use sheaf_doc::{Commit, CommitOpts, DestView, DocState, OutlineId, PageId};
 use sheaf_edit::{BookmarkPatch, BookmarkRef, Op, Patch, Sibling};
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
@@ -150,7 +150,9 @@ impl DocView {
             return;
         };
         let op = new_bookmark_op(doc.model.state(), doc.outline_selected, here);
-        let made = self.apply(op, "New bookmark", cx);
+        let label = "New bookmark";
+        let made = (self.lower(vec![op], label, cx))
+            .and_then(|tx| self.commit(tx, CommitOpts::labelled(label), cx).ok());
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -182,7 +184,10 @@ impl DocView {
                         title: Some(text),
                         ..BookmarkPatch::default()
                     };
-                    this.apply(patched(id, patch), "Rename bookmark", cx);
+                    let label = "Rename bookmark";
+                    if let Some(tx) = this.lower(vec![patched(id, patch)], label, cx) {
+                        this.commit(tx, CommitOpts::labelled(label), cx).ok();
+                    }
                 }
                 _ => {}
             }
@@ -219,7 +224,10 @@ impl DocView {
         };
         doc.outline_menu = None;
         let bookmarks = vec![BookmarkRef::Id(id)];
-        self.apply(Op::DeleteBookmarks { bookmarks }, "Delete bookmark", cx);
+        let label = "Delete bookmark";
+        if let Some(tx) = self.lower(vec![Op::DeleteBookmarks { bookmarks }], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
     }
 
     fn set_selected_destination(&mut self, cx: &mut Context<Self>) {
@@ -238,7 +246,10 @@ impl DocView {
             view: view.map_or(Patch::Clear, Patch::Set),
             ..BookmarkPatch::default()
         };
-        self.apply(patched(id, patch), "Set destination", cx);
+        let label = "Set destination";
+        if let Some(tx) = self.lower(vec![patched(id, patch)], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
     }
 
     fn set_selected_color(&mut self, color: Option<[u8; 3]>, cx: &mut Context<Self>) {
@@ -253,7 +264,10 @@ impl DocView {
             color: color.map_or(Patch::Clear, Patch::Set),
             ..BookmarkPatch::default()
         };
-        self.apply(patched(id, patch), "Bookmark color", cx);
+        let label = "Bookmark color";
+        if let Some(tx) = self.lower(vec![patched(id, patch)], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
     }
 
     fn set_all_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
@@ -320,7 +334,9 @@ impl DocView {
             at: after.map_or(Sibling::First, |a| Sibling::After(a.into())),
             with_pages,
         };
-        self.apply(op, label, cx);
+        if let Some(tx) = self.lower(vec![op], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         if let State::Ready(doc) = &mut self.state {
             doc.outline_selected = Some(id);
         }

@@ -1,14 +1,17 @@
-//! Document > Find Blank Pages…: the search runs as a background job
-//! (`sheaf_ops::blank::find`), then a review sheet over the document shows
-//! each page found, with a thumbnail, why, and a checkbox. Blank and
-//! "intentionally blank" pages start checked, "nearly blank" ones don't.
-//! "Delete N pages" removes the checked ones in one undo step. Nothing is
-//! deleted without that click.
+//! Document > Find Blank Pages…: the search runs as a planner (jobs.rs)
+//! over a snapshot (`sheaf_ops::blank::find`), then a review sheet over
+//! the document shows each page found, with a thumbnail, why, and a
+//! checkbox. Blank and "intentionally blank" pages start checked, "nearly
+//! blank" ones don't. "Delete N pages" removes the checked ones in one
+//! undo step, on the version the search measured (M10.5 §8.5): a page
+//! changed since conflicts, and the delete is lowered again over what
+//! else changed. Nothing is deleted without that click.
 
 use std::collections::HashSet;
 
 use gpui::{AnyElement, Context, ObjectFit, ScrollHandle, div, img, prelude::*, px};
-use sheaf_doc::PageId;
+use sheaf_doc::prim::Key;
+use sheaf_doc::{Actor, CommitOpts, Document, PageId, Snapshot, Stale};
 use sheaf_edit::Rotation;
 use sheaf_edit::{Op, PageSel};
 use sheaf_image::raster::PixelFormat;
@@ -25,6 +28,8 @@ use crate::pane::Shown;
 const THUMB: f32 = 120.0;
 
 pub(crate) struct Review {
+    /// The document as the search measured it.
+    pub planning: Snapshot,
     pub candidates: Vec<Candidate>,
     pub checked: HashSet<PageId>,
     pub scroll: ScrollHandle,
@@ -41,9 +46,10 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let snapshot = doc.model.snapshot();
+        let planning = doc.model.snapshot();
+        let snapshot = planning.clone();
         self.blank_review = None;
-        self.run_job_then(
+        self.run_planner(
             "Find blank pages",
             move |p| sheaf_ops::blank::find(&snapshot, pages.as_deref(), params, p),
             |s| {
@@ -63,6 +69,7 @@ impl DocView {
                     .map(|c| c.id)
                     .collect();
                 v.blank_review = Some(Review {
+                    planning,
                     candidates: found,
                     checked,
                     scroll: ScrollHandle::new(),
@@ -89,7 +96,7 @@ impl DocView {
         true
     }
 
-    fn delete_reviewed(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn delete_reviewed(&mut self, cx: &mut Context<Self>) {
         let Some(review) = self.blank_review.take() else {
             return;
         };
@@ -112,8 +119,18 @@ impl DocView {
         }
         let n = ids.len();
         let label = format!("Delete {n} blank page{}", if n == 1 { "" } else { "s" });
+        // What the search measured of each is what the delete is based on.
+        let planning = review.planning;
+        let mut tx = Document::tx_at(&planning, doc.model.lower_cx(Actor::User));
+        for &id in &ids {
+            tx.read(Key::Page(id));
+        }
         let pages = PageSel::ids(ids);
-        if self.apply(Op::DeletePages { pages }, &label, cx).is_some() {
+        let Some(tx) = self.lower_in(tx, vec![Op::DeletePages { pages }], &label, cx) else {
+            return;
+        };
+        let opts = CommitOpts::based(planning.version, Stale::Relower, label.as_str());
+        if self.commit(tx, opts, cx).is_ok() {
             self.set_notice(format!("{label} — Ctrl+Z brings them back"), cx);
         }
     }

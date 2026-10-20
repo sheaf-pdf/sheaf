@@ -156,7 +156,7 @@ pub fn file(path: &Path, password: Option<&str>) -> Result<Opened> {
         Some(came),
         crate::history::default_policy(),
     );
-    let view = doc.ready(finish(&src, &NoProgress))?;
+    let (view, _) = doc.ready(finish(&src, &NoProgress))?;
     Ok(Opened { doc, view, torn })
 }
 

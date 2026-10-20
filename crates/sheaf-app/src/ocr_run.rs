@@ -1,7 +1,10 @@
 //! Running an OCR job on one document. The job (see `sheaf_ocr::job`)
-//! streams per-page layers; they are applied in batches as one undoable
-//! step, the status bar shows progress, and Escape or Document > Cancel
-//! OCR stops it, keeping what's done.
+//! streams per-page layers; they're committed in flushes as one undoable
+//! step, the run's group (M10.5 §8.4), the status bar shows progress, and
+//! Escape or Document > Cancel OCR stops it, keeping what's done. Each
+//! flush is made on the version the run began on, which its pages were
+//! rendered from, and lands by value: a page changed since keeps no text.
+//! Undoing the run stops it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,7 +12,11 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use gpui::{Context, Task};
-use sheaf_doc::{Actor, JobId, JobKind, PageId, TextLayer};
+use sheaf_doc::prim::Key;
+use sheaf_doc::{
+    Actor, Base, ChangeSet, CommitOpts, Document, EditError, GroupId, GroupKind, JobKind, PageId,
+    Snapshot, Stale, TextLayer,
+};
 use sheaf_edit::{Op, PageRef};
 use sheaf_ocr::{JobHandle, OcrConfig, OcrEvent, OcrPage, OcrRequest, PageSource, Scope};
 
@@ -26,16 +33,22 @@ pub(crate) struct OcrRun {
     save_to: Option<std::path::PathBuf>,
     handle: JobHandle,
     _task: Task<()>,
-    job: JobId,
+    /// The run's group, and the version its pages were rendered from.
+    group: GroupId,
+    base: Snapshot,
     engine: String,
     total: usize,
     done: usize,
     skipped: usize,
     /// (1-based page number, error).
     failed: Vec<(usize, String)>,
+    /// Pages changed since the run began, whose text wasn't added.
+    changed: usize,
     pending: Vec<(PageId, Arc<TextLayer>)>,
-    /// At least one batch has been applied.
+    /// At least one flush has been committed.
     flushed: bool,
+    /// The user undid the run's results: none are added again.
+    undone: bool,
     last_flush: Instant,
     started: Instant,
 }
@@ -127,7 +140,8 @@ impl DocView {
             config,
         };
         let (handle, mut rx) = sheaf_ocr::job::start(req, sources);
-        let job = doc.model.begin_job();
+        let group = doc.model.begin_group(GroupKind::Ocr);
+        let base = doc.model.snapshot();
         doc.notice = Some(format!("OCR: loading {}…", spec.engine.label()));
         let task = cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.next().await {
@@ -143,14 +157,17 @@ impl DocView {
             save_to: None,
             handle,
             _task: task,
-            job,
+            group,
+            base,
             engine: spec.engine.label().to_string(),
             total,
             done: 0,
             skipped: 0,
             failed: Vec::new(),
+            changed: 0,
             pending: Vec::new(),
             flushed: false,
+            undone: false,
             last_flush: Instant::now(),
             started: Instant::now(),
         });
@@ -255,7 +272,9 @@ impl DocView {
             }
             OcrEvent::Aborted(msg) => {
                 log::error!("ocr: {msg}");
-                self.ocr = None;
+                if let (Some(run), State::Ready(doc)) = (self.ocr.take(), &mut self.state) {
+                    doc.model.end_group(run.group);
+                }
                 self.set_notice(format!("OCR failed: {msg}"), cx);
                 return true;
             }
@@ -266,6 +285,9 @@ impl DocView {
         match finished {
             Some(cancelled) => {
                 let run = self.ocr.take().expect("run exists");
+                if let State::Ready(doc) = &mut self.state {
+                    doc.model.end_group(run.group);
+                }
                 let s = |n: usize| if n == 1 { "" } else { "s" };
                 let mut msg = format!(
                     "OCR {}: {} page{} recognized",
@@ -275,6 +297,12 @@ impl DocView {
                 );
                 if run.skipped > 0 {
                     msg.push_str(&format!(", {} skipped (had text)", run.skipped));
+                }
+                if run.changed > 0 {
+                    msg.push_str(&format!(
+                        ", {} changed during the run (their text wasn't added)",
+                        run.changed
+                    ));
                 }
                 if !run.failed.is_empty() {
                     let pages: Vec<String> = run
@@ -295,7 +323,9 @@ impl DocView {
                     run.engine,
                     run.started.elapsed()
                 ));
-                if run.flushed {
+                if run.undone {
+                    msg = "OCR stopped: its results were undone".into();
+                } else if run.flushed {
                     msg.push_str(" — Ctrl+Z undoes");
                 }
                 if self.timing {
@@ -309,6 +339,8 @@ impl DocView {
                 }
                 true
             }
+            // Stopping: the notice says why.
+            None if self.ocr.as_ref().is_some_and(|run| run.undone) => false,
             None => {
                 let run = self.ocr.as_ref().expect("run exists");
                 let text = format!(
@@ -324,51 +356,96 @@ impl DocView {
         }
     }
 
-    /// Apply the pending layers as (part of) the run's one undo step.
+    /// Commit the pending layers in the run's group: part of its one undo
+    /// step, or another fragment of it after the user's edits. When some
+    /// page changed since the run began, the layers go one by one, and the
+    /// changed pages' are left out. The view follows each commit
+    /// ([`DocView::on_change`]), made on the model rather than through
+    /// [`DocView::commit`], whose notice would replace the run's own and
+    /// tell each page left out as an error. When the user undid the run,
+    /// it stops.
     fn flush_ocr(&mut self, cx: &mut Context<Self>) {
         let Some(run) = &mut self.ocr else {
             return;
         };
-        if run.pending.is_empty() {
+        let pending = std::mem::take(&mut run.pending);
+        if pending.is_empty() || run.undone {
             return;
         }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        if run.flushed && doc.model.job_is_undone(run.job) {
-            // The user undid the run: don't put the results back.
-            run.pending.clear();
-            run.handle.cancel();
-            doc.notice = Some("OCR stopped: its results were undone".into());
-            cx.notify();
-            return;
+        let mut changes = Vec::new();
+        let mut landed = flush(&mut doc.model, run, &pending).map(|ch| changes.push(ch));
+        if let Err(EditError::Conflict { .. }) = landed {
+            landed = page_by_page(&mut doc.model, run, &pending, &mut changes);
         }
-        let ops = (std::mem::take(&mut run.pending).into_iter())
-            .map(|(page, layer)| Op::SetOcrText {
-                page: PageRef::Id(page),
-                layer,
-            })
-            .collect();
-        let mut tx = doc.model.tx(Actor::Job(JobKind::Ocr));
-        let flushed = (tx.apply_batch(ops, &sheaf_ops::NoProgress))
-            .and_then(|_| doc.model.apply_in_job(run.job, tx, "Recognize text"));
-        let applied = match flushed {
-            Ok(_) => {
-                run.flushed = true;
-                run.last_flush = Instant::now();
-                doc.touched();
-                true
+        if changes.iter().any(|ch| ch.from != ch.to) {
+            run.flushed = true;
+            run.last_flush = Instant::now();
+        }
+        match landed {
+            Ok(()) => {}
+            Err(EditError::GroupEnded) => {
+                // The user undid the run: don't put the results back.
+                run.undone = true;
+                run.handle.cancel();
+                doc.notice = Some("OCR stopped: its results were undone".into());
             }
             Err(e) => {
                 log::error!("ocr: applying results: {e:#}");
                 doc.notice = Some(crate::docview::failed("OCR: applying results", &e));
-                false
             }
-        };
-        if applied {
-            self.after_model_change("Recognize text".into(), cx);
-        } else {
-            cx.notify();
+        }
+        for ch in &changes {
+            self.on_change(ch, cx);
+        }
+        cx.notify();
+    }
+}
+
+/// `layers` committed in `run`'s group, made on the version the run began
+/// on and deciding by their pages as they were rendered, so a page changed
+/// since is a Conflict: the change.
+fn flush(
+    model: &mut Document,
+    run: &OcrRun,
+    layers: &[(PageId, Arc<TextLayer>)],
+) -> Result<ChangeSet, EditError> {
+    let mut tx = Document::tx_at(&run.base, model.lower_cx(Actor::Job(JobKind::Ocr)));
+    for &(page, _) in layers {
+        tx.read(Key::Page(page));
+    }
+    let ops = (layers.iter())
+        .map(|(page, layer)| Op::SetOcrText {
+            page: PageRef::Id(*page),
+            layer: layer.clone(),
+        })
+        .collect();
+    tx.apply_batch(ops, &sheaf_ops::NoProgress)?;
+    let opts = CommitOpts {
+        base: Base::At(run.base.version),
+        stale: Stale::Validate,
+        group: Some(run.group),
+        ..CommitOpts::labelled("Recognize text")
+    };
+    Ok(model.commit(tx, opts)?.change)
+}
+
+/// `layers` flushed one by one ([`flush`]), each change onto `changes`: a
+/// page changed since the run began keeps no text, and is counted.
+fn page_by_page(
+    model: &mut Document,
+    run: &mut OcrRun,
+    layers: &[(PageId, Arc<TextLayer>)],
+    changes: &mut Vec<ChangeSet>,
+) -> Result<(), EditError> {
+    for layer in layers {
+        match flush(model, run, std::slice::from_ref(layer)) {
+            Ok(change) => changes.push(change),
+            Err(EditError::Conflict { .. }) => run.changed += 1,
+            Err(e) => return Err(e),
         }
     }
+    Ok(())
 }

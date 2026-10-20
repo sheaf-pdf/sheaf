@@ -7,7 +7,7 @@ A sheaf plugin is a WebAssembly component plus a manifest. It can add
 commands to the menus, the command palette and the keymap; read the open
 document's pages, bookmarks, markup and text (including OCR text that hasn't
 been saved yet); change the document through the same edits sheaf itself
-uses, each batch one undo step; ask the user questions with forms; list
+uses, each call's one undo step; ask the user questions with forms; list
 things in its own dock panel; react to document events; keep a little data;
 and, if the user allows it, read or write files in named folders or use the
 network.
@@ -208,12 +208,24 @@ carry their capture groups. OCR text the user hasn't saved yet counts.
 This frame is 0.3's and stays so: sheaf keeps pages' geometry in their
 unrotated user space now, and converts at the API's edge.
 
-**`edits`**: `submit(label, edits)` queues a batch that becomes one undo step
-labelled `label`. Batches are applied in order **after your call returns**,
-so ids of things a batch creates (bookmarks, annotations) aren't known during
-the call. If any edit in a batch fails (a page that's gone, say), that whole
-batch is skipped and the user sees why. A batch is your plugin's own: what
-needs the user's approval, such as deleting another tool's comment (which
+**`edits`**: `submit(label, edits)` queues a batch of edits labelled `label`.
+Batches are applied in order **after your call returns**, all of a call's as
+one undo step, labelled as its first is, so ids of things a batch creates
+(bookmarks, annotations) aren't known during the call. Your call sees the
+document as it is at its first read or submit, and its edits are applied to
+it as it read it: what it read is checked when they land (the pages it
+listed, a page's annotations, text or render, the outline, a mark it
+updates), and when the user has changed any of it since, none of the
+edits are applied, and the user sees which change got in the way. Listing
+the pages reads their order, so a page inserted, moved or deleted anywhere
+since is such a change. Only changes to what the call didn't read are
+worked around: the edits are worked out again on the document as it is.
+If any edit fails (a page that's gone, say), the call's edits are
+taken back, and the user sees why; should the user have changed since what
+an earlier batch did, they stay instead, and the user is told so. A call
+made on a document that has since been closed changes nothing. A batch is
+your plugin's own: what needs the user's approval, such as deleting
+another tool's comment (which
 `annotations` never lists), is refused. The edits mirror sheaf's own: move,
 rotate, delete and duplicate pages; insert, move, edit and delete bookmarks;
 add, update and delete annotations; add a connector pair. Bookmarks can land
@@ -316,8 +328,10 @@ call's limit. There are no raw sockets.
   thread. Global state in your module persists between calls until sheaf
   exits or the plugin is turned off. Keep anything that must outlive that in
   `storage`.
-- **Events** arrive like any other call. A plugin isn't told about edits it
-  made itself. Region events are latest-wins: while a plugin is handling
+- **Events** arrive like any other call. `edited` comes once for each
+  change: an edit by its label, an undo as "Undo: …", a redo as "Redo: …"
+  and a History jump as "Go to: …". A plugin isn't told about edits it
+  made itself, nor about a call of its own being taken back. Region events are latest-wins: while a plugin is handling
   one, newer ones replace each other and only the newest is sent next. For
   live work, fetch a page's words once and filter them yourself, as
   `plugins/subtotal` does.

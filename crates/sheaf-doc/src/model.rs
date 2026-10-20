@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 use sheaf_edit::{DestView, PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
+use crate::change::{Cause, ChangeSet};
 use crate::describe::Line;
 use crate::effects::StepEffects;
 use crate::forms::{FieldId, FileForm};
 use crate::geom::Geom;
-use crate::history::{HistoryPolicy, HistoryStats};
+use crate::history::{HistoryPolicy, HistoryStats, MAX_VERSIONS};
 use crate::materialize::{Came, Profile, SaveInput, SaveNote, SaveRecord, SaveTarget, SavedSide};
 use crate::open::{Facts, FileAnnot, FileBody, ViewFacts};
 use crate::prim::{HeapSize, Key, Prim, Val, same};
@@ -29,6 +30,7 @@ use crate::tx::{
 };
 
 mod records;
+mod stale;
 mod state;
 
 pub use records::{
@@ -95,14 +97,48 @@ fn is_no(b: &bool) -> bool {
     !*b
 }
 
-/// Identifies a long-running job whose results arrive in batches but
-/// should undo as one step. See [`Document::apply_in_job`].
+/// A group of versions that undo as one step (M10.5 §8.4): an OCR run's
+/// flushes, a plugin call's batches. A commit in the group joins its
+/// version when that's the current one and nothing came after it, and
+/// makes another of the group's otherwise, so edits made in between leave
+/// the group in fragments, undone one at a time or all at once
+/// ([`Document::revert_group`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct JobId(u64);
+pub struct GroupId(u64);
+
+/// What a group's versions are, which says whose commits it takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupKind {
+    /// An OCR run's flushes, the OCR job's.
+    Ocr,
+    /// A call of plugin `plugin`'s, its batches.
+    PluginCall { plugin: Arc<str> },
+}
+
+impl GroupKind {
+    /// Whether `actor` makes this kind of group's versions: one job's or
+    /// one plugin's, never another's, whose edit would undo with them.
+    fn takes(&self, actor: &Actor) -> bool {
+        match (self, actor) {
+            (GroupKind::Ocr, Actor::Job(crate::tx::JobKind::Ocr)) => true,
+            (GroupKind::PluginCall { plugin }, Actor::Plugin { id, .. }) => id == plugin,
+            _ => false,
+        }
+    }
+}
+
+/// A group that takes commits ([`Document::begin_group`]).
+struct Group {
+    kind: GroupKind,
+    /// What its versions are called: its first one's label, which those
+    /// made after another edit say they continue.
+    label: Option<Arc<str>>,
+    /// Its newest version, while one is kept.
+    latest: Option<VersionId>,
+}
 
 /// A version in the history tree. It names one state, which never changes:
-/// a job's amend or a save puts a new version in its place. Ids aren't
-/// reused.
+/// a group's amend puts a new version in its place. Ids aren't reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VersionId(pub u64);
 
@@ -116,7 +152,9 @@ pub struct Step {
     pub op: Arc<ResolvedOp>,
     /// What it changed. Coalesced over its version's steps (see
     /// [`coalesce`]), so a slot's change is on the last step that made
-    /// one, and an op whose change a later one undid has none.
+    /// one, and an op whose change a later one undid has none. None once
+    /// its version is the first the history keeps, which nothing is
+    /// rebuilt into (M10.5 §8.7).
     pub(crate) prims: Arc<[Prim]>,
     /// What it did, as it was lowered: against the state its op found.
     pub effects: StepEffects,
@@ -142,9 +180,14 @@ struct Version {
     author: String,
     /// When it was made: a PDF date string.
     at: String,
-    /// The ops from the parent; empty for the root. A job's later
-    /// batches add to its version's steps.
+    /// The ops from the parent; none for the opened version. A group's
+    /// later commits add to its version's steps. The first version kept
+    /// keeps them, but not their prims.
     steps: Vec<Step>,
+    /// The slots its steps change: their prims' keys, after coalescing
+    /// ([`keys_of`]). What a save's path and the change of an undo, a redo
+    /// or a jump take from it, without walking its prims.
+    keys: Arc<BTreeSet<Key>>,
     /// The sources its steps bring pages of (inserted files, derived
     /// copies), by blob, noted once as it's made: what pruning it may free
     /// ([`Document::undone_source_bytes`]). The first version holds those
@@ -156,13 +199,17 @@ struct Version {
     /// Rebuilding it failed ([`EditError::Mismatch`]), so it can't be
     /// reached.
     damaged: bool,
+    /// It's on the line from the first version to the current one: not
+    /// undone, nor on another branch. Kept as the cursor moves.
+    on_line: bool,
     /// What its snapshot holds that no other version's does, which
     /// trimming frees, and what its steps hold, which only pruning the
     /// version does (see [`accounting`]).
     snapshot_bytes: usize,
     step_bytes: usize,
-    /// The job that produced this version, if it may still amend it.
-    job: Option<JobId>,
+    /// The group it's of ([`Document::begin_group`]), and what the group
+    /// is called, as History's "Undo all of …" says.
+    group: Option<(GroupId, Arc<str>)>,
     /// Saves of it in flight ([`Document::save_input`]): while there's
     /// one, nothing amends it, and pruning never removes it.
     sealed: u16,
@@ -202,13 +249,20 @@ pub struct VersionView {
     /// Its replay failed, so it can't be reached
     /// ([`EditError::Mismatch`]).
     pub damaged: bool,
+    /// The group it's of, and what the group is called: History offers to
+    /// undo all of it ([`Document::revert_group`]). None once pruning took
+    /// part of the group.
+    pub group: Option<(GroupId, Arc<str>)>,
 }
 
 /// Everything a save needs, detached from the document so it can run on
 /// another thread while editing continues.
 #[derive(Clone)]
 pub struct Snapshot {
-    /// The version whose state it is.
+    /// The document it's of, a number no other in the process has, and the
+    /// version whose state it is: a version id names one only within its
+    /// document.
+    pub instance: u64,
     pub version: VersionId,
     pub state: DocState,
     /// The source the document opened on: what a Rewrite writes onto.
@@ -308,7 +362,49 @@ impl IdAlloc {
     }
 }
 
+/// The saved version: the one whose record says what the document's file
+/// holds, or, restored from the file's recovery sidecar, holds once its
+/// first save writes what the record has pending.
+enum SavedVersion {
+    /// A version the history holds.
+    At(VersionId),
+    /// One pruning took (M10.5 §8.7): the first version kept moved past
+    /// it, or past where the branch holding it turned off. What a save
+    /// needs of it stays.
+    Detached(Box<Anchor>),
+}
+
+/// What a save needs of a saved version pruning took: its state and its
+/// record, which the next save writes after, and the slots any step
+/// changed on the tree path from it to the first version kept, that
+/// one's own edge included, which grow as that one moves on. A save's
+/// path keys are those and the path's from there (§7.2).
+struct Anchor {
+    state: DocState,
+    record: Arc<SaveRecord>,
+    keys_to_root: BTreeSet<Key>,
+}
+
+/// What the history holds, counted as versions come and go and snapshots
+/// are dropped and rebuilt, so an edit weighs it without walking the
+/// history.
+#[derive(Default)]
+struct Held {
+    /// Versions keeping their snapshots, and those snapshots' bytes.
+    snapshots: BTreeSet<VersionId>,
+    snapshot_bytes: usize,
+    /// Every version's steps' bytes.
+    step_bytes: usize,
+    /// [`Document::undone_source_bytes`] as last counted, until a version
+    /// that brings a source comes or goes, or the cursor moves.
+    undone: Option<usize>,
+}
+
 pub struct Document {
+    /// Which document of the process's it is: its versions' ids are
+    /// counted afresh, so a transaction made on another's lands on none of
+    /// its versions.
+    instance: u64,
     /// The blobs its sources are in, outside undo.
     store: Arc<Store>,
     /// The source it opened on, and the name it goes by (see
@@ -319,18 +415,26 @@ pub struct Document {
     /// with its snapshots.
     derived: Arc<DerivedCopies>,
     versions: HashMap<VersionId, Version>,
+    /// What they hold, as the policy weighs it.
+    held: Held,
     root: VersionId,
     cursor: VersionId,
-    /// The saved version: the one whose record says what the document's
-    /// file holds, or, restored from the file's recovery sidecar, holds
-    /// once its first save writes what the record has pending.
-    saved: Option<VersionId>,
+    /// The saved version, or what a save needs of it once it was pruned.
+    /// None when no file holds the document: one made in memory, before
+    /// its first save.
+    saved: Option<SavedVersion>,
     next_version: u64,
     /// Who the user is, as the host fills marks in (the app sets it).
     identity: Identity,
     ids: Arc<IdAlloc>,
     policy: Box<dyn HistoryPolicy>,
-    next_job: u64,
+    /// The groups that take commits ([`begin_group`](Self::begin_group)),
+    /// and the next one's id.
+    groups: HashMap<GroupId, Group>,
+    next_group: u64,
+    /// Groups pruning took a version of, or the prims of the first version
+    /// kept: undoing all of one would take back only part of it.
+    cut_groups: HashSet<GroupId>,
     /// The reader has been told some text shows as `?` in the file
     /// ([`Notice::Unencodable`]). Outside history: undo doesn't make it
     /// news again.
@@ -365,11 +469,7 @@ impl Document {
             ..Default::default()
         };
         let (state, _) = doc.opened(facts);
-        let root = doc.root;
-        doc.versions
-            .get_mut(&root)
-            .expect("the opened version")
-            .state = Some(state);
+        doc.set_state(doc.root, Some(state));
         doc.ready = true;
         doc
     }
@@ -418,24 +518,29 @@ impl Document {
                 } => SaveRecord::restored(VersionId(0), &primary, path, base, pending),
             })
         });
+        static INSTANCES: AtomicU64 = AtomicU64::new(0);
         let mut doc = Self {
+            instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
             store,
             primary,
             name,
             derived: Arc::default(),
             versions: HashMap::new(),
+            held: Held::default(),
             root: VersionId(0),
             cursor: VersionId(0),
-            saved: Some(VersionId(0)),
+            saved: Some(SavedVersion::At(VersionId(0))),
             next_version: 1,
             identity: Identity::default(),
             ids: Arc::new(ids),
             policy,
-            next_job: 1,
+            groups: HashMap::new(),
+            next_group: 1,
+            cut_groups: HashSet::new(),
             told_unencodable: false,
             ready: false,
         };
-        doc.versions.insert(
+        doc.insert_version(
             VersionId(0),
             Version {
                 parent: None,
@@ -446,12 +551,14 @@ impl Document {
                 author: String::new(),
                 at: crate::annot::pdf_date_now(),
                 steps: Vec::new(),
+                keys: Arc::default(),
                 blobs: HashSet::new(),
                 state: Some(state),
                 damaged: false,
+                on_line: true,
                 snapshot_bytes: 0,
                 step_bytes: 0,
-                job: None,
+                group: None,
                 sealed: 0,
                 record,
                 saves: Vec::new(),
@@ -465,19 +572,22 @@ impl Document {
     /// the one with the pages alone, which no longer resolves; the current
     /// and saved versions are this one, so the document isn't dirty and
     /// there's nothing to undo. Gives what the view shows beside the
-    /// document. Only once, while the file opens: there are no late facts
-    /// (M10.5 proposal 28).
-    pub fn ready(&mut self, facts: Facts) -> Result<ViewFacts> {
+    /// document, and the change, from the version with the pages alone,
+    /// in which anything may have changed ([`ChangeSet::opened`]). Only
+    /// once, while the file opens: there are no late facts (M10.5 proposal
+    /// 28).
+    pub fn ready(&mut self, facts: Facts) -> Result<(ViewFacts, ChangeSet)> {
         if self.ready {
             bail!("the file has opened already");
         }
         let (state, view) = self.opened(facts);
         let old = self.root;
-        let mut v = self.versions.remove(&old).expect("the opened version");
+        let mut v = self.take_version(old).expect("the opened version");
         v.state = Some(state);
-        self.replace(old, v);
+        let label = v.label.as_str().into();
+        let id = self.replace(old, v);
         self.ready = true;
-        Ok(view)
+        Ok((view, ChangeSet::opened(old, id, label, self.state())))
     }
 
     /// Whether the file's facts are in: until then edits are refused.
@@ -493,8 +603,12 @@ impl Document {
         let by_index: Vec<PageId> = loading.order().iter().copied().collect();
         let at = |index: usize| by_index.get(index).copied();
         let src = self.primary.clone();
-        let (roots_outline, bookmarks) =
-            outline_from_flat(&self.ids, &facts.outline, |index| at(index as usize), &src);
+        let (roots_outline, bookmarks) = outline_from_flat(
+            || self.ids.outline(),
+            &facts.outline,
+            |i| at(i as usize),
+            &src,
+        );
         let bookmarks = bookmarks
             .into_iter()
             .map(|(id, b)| (id, Arc::new(b)))
@@ -672,6 +786,7 @@ impl Document {
     /// sources shared, nothing computed.
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
+            instance: self.instance,
             version: self.cursor,
             state: self.state().clone(),
             primary: self.primary.clone(),
@@ -726,12 +841,20 @@ impl Document {
     }
 
     /// The version the document's file holds: the saved one, unless its
-    /// record has sections pending (§11.10).
+    /// record has sections pending (§11.10), or pruning took it.
     fn on_disk(&self) -> Option<VersionId> {
         let pending = self
             .saved_record()
             .is_some_and(|r| r.pending_tail.is_some());
-        self.saved.filter(|_| !pending)
+        self.saved_at().filter(|_| !pending)
+    }
+
+    /// The saved version, while the history holds it.
+    fn saved_at(&self) -> Option<VersionId> {
+        match self.saved {
+            Some(SavedVersion::At(s)) => Some(s),
+            _ => None,
+        }
     }
 
     /// What a save of version `v` writes from (M10.5 §9.1), and `v` sealed
@@ -766,7 +889,7 @@ impl Document {
     pub fn append_input(&self, v: VersionId) -> SaveInput {
         let mut input = self.input(v);
         if input.saved.is_none()
-            && let Some(s) = self.saved
+            && let Some(s) = self.saved_at()
             && let Some(state) = self.versions[&s].state.clone()
         {
             let stamp = FileStamp {
@@ -778,7 +901,7 @@ impl Document {
             let path: Arc<Path> = Path::new(&*self.name).into();
             let record = Arc::new(SaveRecord::opened(s, &self.primary, path, stamp));
             input.saved = Some(SavedSide { state, record });
-            input.path_keys = Arc::new(self.path_keys(s, v));
+            input.path_keys = self.path_keys(s, v);
         }
         input
     }
@@ -788,7 +911,7 @@ impl Document {
     /// its saved version given their record as opened.
     #[cfg(any(test, feature = "fixtures"))]
     pub fn opened_from(&mut self, path: &Path) -> Result<()> {
-        let s = self.saved.context("nothing is saved")?;
+        let s = self.saved_at().context("nothing saved is kept")?;
         std::fs::write(path, &**self.primary.bytes())?;
         let stamp = FileStamp::read(path)?;
         let record = SaveRecord::opened(s, &self.primary, path.into(), stamp);
@@ -797,21 +920,35 @@ impl Document {
         Ok(())
     }
 
-    /// Version `v`'s save input, from its state, which it keeps.
+    /// Version `v`'s save input, from its state, which it keeps, and the
+    /// saved side, the history's saved version's or what was kept of it
+    /// once pruned.
     fn input(&self, v: VersionId) -> SaveInput {
-        let saved = self.saved.and_then(|s| {
-            let at = &self.versions[&s];
-            Some((
-                s,
-                SavedSide {
-                    state: at.state.clone()?,
-                    record: at.record.clone()?,
-                },
-            ))
-        });
-        let path_keys = match &saved {
-            Some((s, _)) => self.path_keys(*s, v),
-            None => BTreeSet::new(),
+        let (saved, path_keys) = match &self.saved {
+            Some(SavedVersion::At(s)) => {
+                let at = &self.versions[s];
+                match (&at.state, &at.record) {
+                    (Some(state), Some(record)) => {
+                        let side = SavedSide {
+                            state: state.clone(),
+                            record: record.clone(),
+                        };
+                        (Some(side), self.path_keys(*s, v))
+                    }
+                    _ => (None, Arc::default()),
+                }
+            }
+            Some(SavedVersion::Detached(anchor)) => {
+                let side = SavedSide {
+                    state: anchor.state.clone(),
+                    record: anchor.record.clone(),
+                };
+                let mut keys = anchor.keys_to_root.clone();
+                let after = self.keys_along(&self.edges_between(self.root, v));
+                keys.extend(after.iter().copied());
+                (Some(side), Arc::new(keys))
+            }
+            None => (None, Arc::default()),
         };
         SaveInput {
             version: v,
@@ -819,47 +956,83 @@ impl Document {
                 .expect("a version being saved keeps its state"),
             primary: self.primary.clone(),
             derived: self.derived.clone(),
-            saved: saved.map(|(_, side)| side),
-            path_keys: Arc::new(path_keys),
+            saved,
+            path_keys,
         }
     }
 
     /// The keys any step changed on the tree path from version `saved` to
     /// version `v`, through the last version both come from (M10.5 §7.2):
-    /// the slots a save of `v` may find changed since `saved`'s file.
-    /// Pruning keeps the saved version, a version being saved, and any
-    /// branch holding either, and the root stops at the saved version or
-    /// where the path turns ([`prune`](Self::prune)), so the path is
-    /// always whole: nothing from before the root is needed (§8.7's
-    /// `keys_to_root`).
-    fn path_keys(&self, saved: VersionId, v: VersionId) -> BTreeSet<Key> {
-        let up = |mut at: VersionId| {
-            let mut line = vec![at];
-            while let Some(p) = self.versions[&at].parent {
-                line.push(p);
-                at = p;
+    /// the slots a save of `v` may find changed since `saved`'s file. The
+    /// path never takes in the first version's edge, whose prims are gone.
+    /// Once pruning took the saved version, its anchor has the keys from
+    /// it to the first version kept, and the path runs on from there
+    /// ([`input`](Self::input)).
+    fn path_keys(&self, saved: VersionId, v: VersionId) -> Arc<BTreeSet<Key>> {
+        self.keys_along(&self.edges_between(saved, v))
+    }
+
+    /// The versions whose edges make the tree path from version `a` to
+    /// version `b`: those from each up to the last version both come from,
+    /// which isn't one; none from a version to itself.
+    fn edges_between(&self, a: VersionId, b: VersionId) -> Vec<VersionId> {
+        let (from_a, from_b) = self.sides(a, b);
+        [from_a, from_b].concat()
+    }
+
+    /// The versions whose edges make the tree path from version `a` to
+    /// version `b`, `a`'s side and `b`'s: those from each up to the last
+    /// version both come from, which isn't one. It walks the path, not the
+    /// lines down from the root.
+    fn sides(&self, a: VersionId, b: VersionId) -> (Vec<VersionId>, Vec<VersionId>) {
+        let parent = |v: VersionId| self.versions[&v].parent;
+        let (mut up_a, mut up_b) = (vec![a], vec![b]);
+        let (mut seen_a, mut seen_b) = (HashSet::from([a]), HashSet::from([b]));
+        // Up from both ends a version at a time, until one reaches a
+        // version the other has passed: the first is where the path turns.
+        let turn = loop {
+            let (at_a, at_b) = (up_a[up_a.len() - 1], up_b[up_b.len() - 1]);
+            if seen_b.contains(&at_a) {
+                break at_a;
             }
-            line
+            if seen_a.contains(&at_b) {
+                break at_b;
+            }
+            let (pa, pb) = (parent(at_a), parent(at_b));
+            assert!(pa.is_some() || pb.is_some(), "{a:?} and {b:?} in two trees");
+            if let Some(p) = pa {
+                up_a.push(p);
+                seen_a.insert(p);
+            }
+            if let Some(p) = pb {
+                up_b.push(p);
+                seen_b.insert(p);
+            }
         };
-        let (ours, theirs) = (up(v), up(saved));
-        // Both lines end at the root: what they share is the way down to
-        // where the path turns.
-        let shared = (ours.iter().rev())
-            .zip(theirs.iter().rev())
-            .take_while(|(a, b)| a == b)
-            .count();
-        let edges = (ours[..ours.len() - shared].iter()).chain(&theirs[..theirs.len() - shared]);
-        edges
-            .flat_map(|id| self.versions[id].steps.iter())
-            .flat_map(|step| step.prims.iter().map(|p| p.key))
-            .collect()
+        let below = |up: Vec<VersionId>| up.into_iter().take_while(|&v| v != turn).collect();
+        (below(up_a), below(up_b))
+    }
+
+    /// The slots the steps of `edges` change: one version's own set, or
+    /// their union.
+    fn keys_along(&self, edges: &[VersionId]) -> Arc<BTreeSet<Key>> {
+        match edges {
+            [one] => self.versions[one].keys.clone(),
+            _ => Arc::new(
+                (edges.iter())
+                    .flat_map(|id| self.versions[id].keys.iter().copied())
+                    .collect(),
+            ),
+        }
     }
 
     /// A save of `rec.version` wrote `rec`'s file: that version is the
     /// saved one now, and holds the record, the previous saved version's
-    /// shrinking to the note it has. It's noted among the version's saves
-    /// and unsealed. Nothing else changes: no version, state or source.
-    pub fn record_save(&mut self, rec: SaveRecord) -> Result<()> {
+    /// shrinking to the note it has, or, once pruned, what was kept of it
+    /// going. It's noted among the version's saves and unsealed. Nothing
+    /// else changes: no version, state or source, so the change is empty
+    /// ([`Cause::Saved`]).
+    pub fn record_save(&mut self, rec: SaveRecord) -> Result<ChangeSet> {
         self.attach(rec, true)
     }
 
@@ -868,18 +1041,19 @@ impl Document {
     /// the saved file's record, is that version's now, so it's the saved
     /// one and the document is clean. As [`record_save`](Self::record_save),
     /// but no save is noted.
-    pub fn record_unchanged(&mut self, rec: SaveRecord) -> Result<()> {
+    pub fn record_unchanged(&mut self, rec: SaveRecord) -> Result<ChangeSet> {
         self.attach(rec, false)
     }
 
     /// `rec` the record of its version, the saved one now, noted among its
-    /// saves when `noted`.
-    fn attach(&mut self, rec: SaveRecord, noted: bool) -> Result<()> {
+    /// saves when `noted`: a change of nothing at the current version, the
+    /// user's.
+    fn attach(&mut self, rec: SaveRecord, noted: bool) -> Result<ChangeSet> {
         let v = rec.version;
         if !self.versions.contains_key(&v) {
             bail!("the saved version is no longer kept");
         }
-        if let Some(was) = self.saved.filter(|&s| s != v)
+        if let Some(was) = self.saved_at().filter(|&s| s != v)
             && let Some(was) = self.versions.get_mut(&was)
         {
             was.record = None;
@@ -890,8 +1064,14 @@ impl Document {
         }
         version.record = Some(Arc::new(rec));
         version.sealed = version.sealed.saturating_sub(1);
-        self.saved = Some(v);
-        Ok(())
+        self.saved = Some(SavedVersion::At(v));
+        let label = "Save".into();
+        Ok(ChangeSet::empty(
+            self.cursor,
+            Cause::Saved,
+            Actor::User,
+            label,
+        ))
     }
 
     /// A save of version `v` failed or was canceled: it's unsealed, and
@@ -912,7 +1092,10 @@ impl Document {
     /// None when nothing is saved, or the saved version was made in
     /// memory.
     pub fn saved_record(&self) -> Option<&Arc<SaveRecord>> {
-        self.versions.get(&self.saved?)?.record.as_ref()
+        match self.saved.as_ref()? {
+            SavedVersion::At(s) => self.versions.get(s)?.record.as_ref(),
+            SavedVersion::Detached(anchor) => Some(&anchor.record),
+        }
     }
 
     /// The document's file, and that file as sheaf last read or wrote it:
@@ -966,36 +1149,38 @@ impl Document {
             .or_else(|| v.children.last().copied())
     }
 
-    /// Back to the parent version: the label of the version undone, or None
-    /// with nothing to undo.
-    pub fn undo(&mut self) -> Result<Option<&str>, EditError> {
+    /// Back to the parent version: what that changed, labelled as the
+    /// version undone, or None with nothing to undo.
+    pub fn undo(&mut self) -> Result<Option<ChangeSet>, EditError> {
         let from = self.cursor;
         let Some(parent) = self.versions[&from].parent else {
             return Ok(None);
         };
         self.ensure_state(parent)?;
         self.versions.get_mut(&parent).expect("parent").redo_to = Some(from);
-        self.cursor = parent;
-        Ok(Some(self.versions[&from].label.as_str()))
+        Ok(Some(self.move_to(parent, Cause::Undo)))
     }
 
-    /// On to the version redo goes to: its label, or None with nothing to
-    /// redo.
-    pub fn redo(&mut self) -> Result<Option<&str>, EditError> {
+    /// On to the version redo goes to: what that changed, labelled as that
+    /// version, or None with nothing to redo.
+    pub fn redo(&mut self) -> Result<Option<ChangeSet>, EditError> {
         let Some(to) = self.redo_target() else {
             return Ok(None);
         };
         self.ensure_state(to)?;
-        self.cursor = to;
-        Ok(Some(self.versions[&to].label.as_str()))
+        Ok(Some(self.move_to(to, Cause::Redo)))
     }
 
     /// Make `id` the current version, as undo and redo do: not an edit,
     /// so jumping back and forth is free. Redo from any version on the way
-    /// to it then leads toward it.
-    pub fn jump(&mut self, id: VersionId) -> Result<(), EditError> {
+    /// to it then leads toward it. What that changed, labelled as `id`, or
+    /// None when it's the current version already.
+    pub fn jump(&mut self, id: VersionId) -> Result<Option<ChangeSet>, EditError> {
         if !self.versions.contains_key(&id) {
             return Err(EditError::not_found("jump", format!("version {}", id.0)));
+        }
+        if id == self.cursor {
+            return Ok(None);
         }
         self.ensure_state(id)?;
         let mut child = id;
@@ -1003,8 +1188,35 @@ impl Document {
             self.versions.get_mut(&parent).expect("parent").redo_to = Some(child);
             child = parent;
         }
-        self.cursor = id;
-        Ok(())
+        Ok(Some(self.move_to(id, Cause::Jump)))
+    }
+
+    /// The cursor moved to version `to`, which has its state, by an undo,
+    /// a redo or a jump, which the user makes: what changed, by the keys
+    /// of every version's steps on the way, labelled as the version undone
+    /// or the one gone to.
+    fn move_to(&mut self, to: VersionId, cause: Cause) -> ChangeSet {
+        let from = std::mem::replace(&mut self.cursor, to);
+        // Another line: the versions left are off it, and other versions'
+        // sources may be undone now.
+        let (left, joined) = self.sides(from, to);
+        for (versions, on_line) in [(&left, false), (&joined, true)] {
+            for v in versions {
+                self.versions.get_mut(v).expect("version").on_line = on_line;
+            }
+        }
+        self.held.undone = None;
+        let keys = self.keys_along(&[left, joined].concat());
+        let named = match cause {
+            Cause::Undo => from,
+            _ => to,
+        };
+        let label = self.versions[&named].label.as_str().into();
+        let state = |id: VersionId| {
+            (self.versions[&id].state.as_ref()).expect("both ends keep their states")
+        };
+        let (before, after) = (state(from), state(to));
+        ChangeSet::of(from, to, cause, Actor::User, label, keys, before, after)
     }
 
     pub fn current_version(&self) -> VersionId {
@@ -1037,30 +1249,70 @@ impl Document {
 
     /// A transaction of `actor`'s on the current version.
     pub fn tx(&self, actor: Actor) -> Tx {
-        Tx::new(self.cursor, self.state().clone(), self.lower_cx(actor))
+        let cx = self.lower_cx(actor);
+        Tx::new(self.instance, self.cursor, self.state().clone(), cx)
+    }
+
+    /// A transaction lowering with `cx` on `snap`'s version: one a planner
+    /// builds off the UI thread, or a dialog keeps while it's open, and
+    /// commits with [`Base::At`](crate::tx::Base::At) that version once
+    /// the document may have moved on (M10.5 §8.5).
+    pub fn tx_at(snap: &Snapshot, cx: Arc<LowerCx>) -> Tx {
+        Tx::new(snap.instance, snap.version, snap.state.clone(), cx)
     }
 
     /// `tx`'s ops as a version after the current one, which `opts` names;
     /// the versions that were after the current one stay, as a branch.
     /// None when they change nothing. Refused while the file opens
-    /// ([`EditError::NotReady`]); a transaction made on another version
-    /// can't commit until slice 12 merges stale bases.
+    /// ([`EditError::NotReady`]). A transaction made on another version
+    /// lands on the current one as `opts.stale` says
+    /// ([`Stale`](crate::tx::Stale)), or is an [`EditError::Conflict`] and
+    /// changes nothing. One in a group (`opts.group`) joins the group's
+    /// version when that's the current one, nothing came after it, and it
+    /// was never saved and isn't being saved, and makes another of the
+    /// group's otherwise; once the group's edits were undone, or it ended,
+    /// it's [`EditError::GroupEnded`] and changes nothing (M10.5 §8.4).
     pub fn commit(&mut self, tx: Tx, opts: CommitOpts) -> Result<Commit, EditError> {
-        let (parts, mut commit) = self.settle(tx)?;
+        let group = opts.group;
+        if let Some(g) = group {
+            self.joins(g, tx.actor())?;
+        }
+        let (parts, mut commit) = self.settle(tx, opts)?;
         if parts.steps.iter().all(|s| s.prims.is_empty()) {
             return Ok(commit);
         }
-        let label = match opts.label {
-            Some(label) => label.to_string(),
-            None => commit
-                .lines
-                .first()
-                .map(|l| l.text.clone())
-                .unwrap_or_default(),
+        if let Some(g) = group
+            && self.amends(g)
+        {
+            return Ok(self.amend(g, parts, commit));
+        }
+        let (from, before) = (self.cursor, self.state().clone());
+        let (label, tag) = match group {
+            Some(g) => self.of_group(g, commit.change.label.clone()),
+            None => (commit.change.label.clone(), None),
         };
-        self.push(parts.state, label, parts.steps, parts.actor, None);
+        let actor = parts.actor().clone();
+        self.push(parts.state, label.to_string(), parts.steps, actor, tag);
         commit.version = Some(self.cursor);
+        commit.change = self.made(from, &before, Cause::Commit, label);
         Ok(commit)
+    }
+
+    /// What the version just made at the cursor changed from version
+    /// `from`, whose state was `before`: all its keys, by its actor.
+    fn made(&self, from: VersionId, before: &DocState, cause: Cause, label: Arc<str>) -> ChangeSet {
+        let v = &self.versions[&self.cursor];
+        let (actor, keys) = (v.actor.clone(), v.keys.clone());
+        ChangeSet::of(
+            from,
+            self.cursor,
+            cause,
+            actor,
+            label,
+            keys,
+            before,
+            self.state(),
+        )
     }
 
     /// `val` put at `key` as a version of its own, labelled `label`: what
@@ -1089,116 +1341,314 @@ impl Document {
         self.ids.next()
     }
 
-    /// Start a job whose batches of edits should undo as one step.
-    pub fn begin_job(&mut self) -> JobId {
-        let id = JobId(self.next_job);
-        self.next_job += 1;
+    /// Start a group of `kind`, whose versions undo as one step: an OCR
+    /// run, a plugin call. It takes commits until
+    /// [`end_group`](Self::end_group).
+    pub fn begin_group(&mut self, kind: GroupKind) -> GroupId {
+        let id = GroupId(self.next_group);
+        self.next_group += 1;
+        let group = Group {
+            kind,
+            label: None,
+            latest: None,
+        };
+        self.groups.insert(id, group);
         id
     }
 
-    /// Like [`commit`](Self::commit), but when the current version was
-    /// made by `job`, has nothing after it, was never saved, isn't being
-    /// saved (sealed), and isn't the first (pruning can make it so), `tx`
-    /// joins it instead of making a new version. The first batch of a job
-    /// makes a version; later batches amend it, so the whole job is one
-    /// undo step. An amend replaces the version with a new id under the
-    /// same parent, and when the job has put back all it did, it leaves no
-    /// version at all. A save, an undo or an unrelated edit in between ends
-    /// the chain, and the rest of the job becomes another step; so does a
-    /// save in flight, whose version a later batch would change under it.
-    pub fn apply_in_job(
-        &mut self,
-        job: JobId,
-        tx: Tx,
-        label: impl Into<String>,
-    ) -> Result<Commit, EditError> {
-        let (parts, mut commit) = self.settle(tx)?;
-        if parts.steps.iter().all(|s| s.prims.is_empty()) {
-            return Ok(commit);
+    /// Group `g` takes no more commits: its run or call is over. Its
+    /// versions stay, and History can still undo all of them.
+    pub fn end_group(&mut self, g: GroupId) {
+        self.groups.remove(&g);
+    }
+
+    /// For tests: what group `g` is, while it takes commits.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn group_kind(&self, g: GroupId) -> Option<&GroupKind> {
+        Some(&self.groups.get(&g)?.kind)
+    }
+
+    /// Whether a commit by `actor` may be in group `g`: one its kind takes
+    /// (another's is a bug), while the group takes commits and its latest
+    /// version is the current one or one before it (§8.4). Otherwise the
+    /// group's edits were undone, or jumped away from, or the group has
+    /// ended, and what the commit adds is never put back:
+    /// [`EditError::GroupEnded`].
+    fn joins(&self, g: GroupId, actor: &Actor) -> Result<(), EditError> {
+        let Some(group) = self.groups.get(&g) else {
+            return Err(EditError::GroupEnded);
+        };
+        if !group.kind.takes(actor) {
+            let kind = &group.kind;
+            return Err(EditError::internal(format!(
+                "a commit of {actor:?}'s in a group of {kind:?}"
+            )));
         }
-        let current = &self.versions[&self.cursor];
-        let amend = current.job == Some(job)
-            && current.parent.is_some()
-            && current.children.is_empty()
-            && current.saves.is_empty()
-            && current.sealed == 0
-            && self.saved != Some(self.cursor);
-        if !amend {
-            self.push(
-                parts.state,
-                label.into(),
-                parts.steps,
-                parts.actor,
-                Some(job),
-            );
-            commit.version = Some(self.cursor);
-            return Ok(commit);
+        match group.latest {
+            Some(latest) if !self.reaches(latest) => Err(EditError::GroupEnded),
+            _ => Ok(()),
         }
+    }
+
+    /// Whether version `v` is the current one or one before it.
+    fn reaches(&self, v: VersionId) -> bool {
+        let mut at = Some(self.cursor);
+        while let Some(id) = at {
+            if id == v {
+                return true;
+            }
+            at = self.versions[&id].parent;
+        }
+        false
+    }
+
+    /// Whether a commit in group `g` joins the current version (§8.4's
+    /// amend rule): it's the group's, nothing came after it, it was never
+    /// saved, it isn't being saved (sealed: what the save writes must stay
+    /// as it is), and it isn't the first (pruning can make it so). It's the
+    /// group's latest, then: [`joins`](Self::joins) let the commit in.
+    fn amends(&self, g: GroupId) -> bool {
+        let v = &self.versions[&self.cursor];
+        v.group.as_ref().is_some_and(|(id, _)| *id == g)
+            && v.parent.is_some()
+            && v.children.is_empty()
+            && v.saves.is_empty()
+            && v.sealed == 0
+            && self.saved_at() != Some(self.cursor)
+    }
+
+    /// A version of group `g`'s, which a commit labelled `label` makes:
+    /// what it's called, and its tag. The group's first is called as its
+    /// commit is, and names the group; one made after another edit, or a
+    /// save, says it continues the group.
+    fn of_group(&mut self, g: GroupId, label: Arc<str>) -> (Arc<str>, Option<(GroupId, Arc<str>)>) {
+        let group = self.groups.get_mut(&g).expect("the group takes commits");
+        match (&group.label, group.latest) {
+            (Some(first), Some(_)) => {
+                let continued = format!("{first} (continued)").into();
+                (continued, Some((g, first.clone())))
+            }
+            _ => {
+                group.label = Some(label.clone());
+                (label.clone(), Some((g, label)))
+            }
+        }
+    }
+
+    /// `parts`, a commit in group `g`, joined to the current version, the
+    /// group's latest ([`amends`](Self::amends)): its steps added to the
+    /// version's and coalesced, a new version in its place, under its
+    /// label; or, when they put back all it did, none, and the cursor at
+    /// its parent, as if the commits hadn't been made. The change is the
+    /// commit's own, from the version it replaces.
+    fn amend(&mut self, g: GroupId, parts: crate::tx::TxParts, mut commit: Commit) -> Commit {
+        let actor = parts.actor().clone();
+        let keys = keys_of(&parts.steps);
         let state = parts.state;
         let old = self.cursor;
-        let mut v = self.versions.remove(&old).expect("current version");
-        let parent = v.parent.expect("a job's version has a parent");
-        v.steps.extend(parts.steps);
-        coalesce(&mut v.steps);
+        let mut v = self.take_version(old).expect("current version");
+        let before = v.state.take().expect("the current version keeps its state");
+        let parent = v.parent.expect("an amended version has a parent");
+        let label: Arc<str> = v.label.as_str().into();
+        join(&mut v, parts.steps, &keys, &state);
         commit.amended = true;
         if v.steps.iter().all(|s| s.prims.is_empty()) {
-            // The job put back all it did: back to the parent, whose state
-            // this is (trimming may have dropped its snapshot). What the
-            // version held waits for the next one, as if the job hadn't
-            // run.
+            // Back to the parent, whose state this is (trimming may have
+            // dropped its snapshot). What the version held waits for the
+            // next one; the group's latest is the one before it, if any.
             let p = self.versions.get_mut(&parent).expect("parent");
             p.children.retain(|c| *c != old);
             if p.redo_to == Some(old) {
                 p.redo_to = None;
             }
-            p.state.get_or_insert(state);
+            if p.state.is_none() {
+                self.set_state(parent, Some(state));
+            }
             self.cursor = parent;
+            let latest = self.group_line(g).first().copied();
+            self.groups
+                .get_mut(&g)
+                .expect("the group takes commits")
+                .latest = latest;
         } else {
-            (v.snapshot_bytes, v.step_bytes) = accounting(&v.steps, &state);
-            v.blobs = brought(&v.steps);
             v.state = Some(state);
-            v.label = label.into();
             commit.version = Some(self.replace(old, v));
         }
+        let (to, after) = (self.cursor, self.state());
+        commit.change = ChangeSet::of(old, to, Cause::Amend, actor, label, keys, &before, after);
         self.trim();
+        commit
+    }
+
+    /// Group `g`'s versions on the line from the opened version to the
+    /// current one, the newest first.
+    fn group_line(&self, g: GroupId) -> Vec<VersionId> {
+        let mut ours = Vec::new();
+        let mut at = Some(self.cursor);
+        while let Some(id) = at {
+            let v = &self.versions[&id];
+            if v.group.as_ref().is_some_and(|(of, _)| *of == g) {
+                ours.push(id);
+            }
+            at = v.parent;
+        }
+        ours
+    }
+
+    /// History's "Undo all of `label`" (§8.4): group `g`'s versions on the
+    /// current one's line taken back as one version after it, the user's.
+    /// What was edited between them stays. An edit since that changed what
+    /// they wrote, or a rule what they'd put back would break, is a Conflict
+    /// naming that edit; none of them on the line, or a group pruning took
+    /// part of, is [`EditError::Invalid`]; and either changes nothing. Otherwise the group ends, so what a run still adds
+    /// is never put back ([`EditError::GroupEnded`]).
+    pub fn revert_group(&mut self, g: GroupId, label: &str) -> Result<Commit, EditError> {
+        let commit = self.revert(g, label.into(), Cause::Revert, Actor::User)?;
+        self.groups.remove(&g);
         Ok(commit)
     }
 
-    /// Whether the current version is the one `job` is building, i.e. the
-    /// user hasn't undone it or edited past it. Meaningful once the job has
-    /// applied its first batch.
-    pub fn job_is_current(&self, job: JobId) -> bool {
-        self.versions[&self.cursor].job == Some(job)
-    }
-
-    /// Whether the user has undone `job`'s version: it's past the current
-    /// version, reachable by redo. An unrelated edit after the job doesn't
-    /// count.
-    pub fn job_is_undone(&self, job: JobId) -> bool {
-        let mut stack = self.versions[&self.cursor].children.clone();
-        while let Some(id) = stack.pop() {
-            let v = &self.versions[&id];
-            if v.job == Some(job) {
-                return true;
-            }
-            stack.extend(v.children.iter().copied());
+    /// Group `g`'s versions taken back after its call failed (§8.4): the
+    /// change, by the group's actor, or None when it has none here. Its only
+    /// version, when that's the current one and the group could still
+    /// amend it, goes, with nothing to redo to it; otherwise the versions
+    /// stay, a saved one among them, and a version after the current one
+    /// takes them back, as [`revert_group`](Self::revert_group) does. A
+    /// Conflict, or a group pruning took part of, keeps them all and
+    /// changes nothing; otherwise the group ends.
+    pub fn rollback_group(&mut self, g: GroupId) -> Result<Option<ChangeSet>, EditError> {
+        if self.cut_groups.contains(&g) {
+            let label = self.groups.get(&g).and_then(|group| group.label.clone());
+            return Err(cut(label.as_deref().unwrap_or("the edits")));
         }
-        false
+        let change = match self.group_line(g)[..] {
+            [] => None,
+            [only] if only == self.cursor && self.amends(g) => Some(self.truncate()?),
+            [latest, ..] => {
+                let v = &self.versions[&latest];
+                let actor = v.actor.clone();
+                let label = v.group.as_ref().expect("the group's").1.clone();
+                let commit = self.revert(g, label, Cause::Rollback, actor)?;
+                commit.version.map(|_| commit.change)
+            }
+        };
+        self.groups.remove(&g);
+        Ok(change)
     }
 
-    /// `tx`, ready to commit at the cursor: its steps coalesced, and what
-    /// the commit says of them, unencodable text told once a document.
-    fn settle(&mut self, tx: Tx) -> Result<(crate::tx::TxParts, Commit), EditError> {
+    /// The current version taken out of the tree, the cursor back at its
+    /// parent with nothing to redo to it: a rolled-back group's only
+    /// version, by its actor.
+    fn truncate(&mut self) -> Result<ChangeSet, EditError> {
+        let old = self.cursor;
+        let parent = self.versions[&old]
+            .parent
+            .expect("a group's version has a parent");
+        self.ensure_state(parent)?;
+        let v = self.take_version(old).expect("current version");
+        let p = self.versions.get_mut(&parent).expect("parent");
+        p.children.retain(|c| *c != old);
+        p.redo_to = None;
+        self.cursor = parent;
+        let before = v
+            .state
+            .as_ref()
+            .expect("the current version keeps its state");
+        let label = v.label.as_str().into();
+        Ok(ChangeSet::of(
+            old,
+            parent,
+            Cause::Rollback,
+            v.actor,
+            label,
+            v.keys,
+            before,
+            self.state(),
+        ))
+    }
+
+    /// Group `g`'s versions on the current one's line taken back as one
+    /// version after it, labelled "Undo all of `label`" and made by
+    /// `actor`, its change's `cause` saying why: each one's prims with
+    /// before and after swapped, the newest version's first, each landed
+    /// on the current version by value, as a stale transaction's are, so
+    /// any edit made since that changed what they wrote is a Conflict
+    /// naming it. Then what they put back must leave the cascades nothing
+    /// to do and keep the rules of uniqueness and reference
+    /// ([`merge`](Self::merge)), as on the state before the group. None of
+    /// it on the line is [`EditError::Invalid`], and so is a group pruning
+    /// took a version of, or the prims of the first version kept: the
+    /// versions left are only part of it. Nothing changes when it fails.
+    fn revert(
+        &mut self,
+        g: GroupId,
+        label: Arc<str>,
+        cause: Cause,
+        actor: Actor,
+    ) -> Result<Commit, EditError> {
+        if self.cut_groups.contains(&g) {
+            return Err(cut(&label));
+        }
+        let ours = self.group_line(g);
+        let Some(&first) = ours.last() else {
+            return Err(EditError::invalid(
+                "revert",
+                format!("“{label}” isn't in this version"),
+            ));
+        };
+        let made = self.versions[&first].parent.expect("not the first version");
+        let mut rec = crate::prim::Rec::new(self.state().clone());
+        for id in &ours {
+            let steps = self.versions[id].steps.iter().rev();
+            for p in steps.flat_map(|s| s.prims.iter().rev()) {
+                if !same(rec.get(&p.key).as_ref(), p.after.as_ref()) {
+                    return Err(self.conflict(p.key, made, Some(g)));
+                }
+                rec.put(p.key, p.before.clone());
+            }
+        }
+        let (_, prims) = rec.finish();
+        let undo = format!("Undo all of {label}");
+        if prims.is_empty() {
+            let change = ChangeSet::empty(self.cursor, cause, actor, undo.into());
+            return Ok(reverted(None, change, &[]));
+        }
+        // What they put back held there, so a name it held twice already
+        // isn't a clash.
+        self.ensure_state(made)?;
+        let theirs = self.versions[&made].state.clone().expect("ensured");
+        let step = Step {
+            op: Arc::new(ResolvedOp::Revert { label }),
+            prims: prims.into(),
+            effects: StepEffects::default(),
+            line: String::new(),
+            cascades: Arc::new([]),
+        };
+        let (state, steps) = self.merge(vec![step], made, Some(g), &theirs)?;
+        debug_assert_eq!(state.check_invariants(), Ok(()), "{undo}");
+        let (from, before) = (self.cursor, self.state().clone());
+        self.push(state, undo.clone(), steps, actor, None);
+        let change = self.made(from, &before, cause, undo.into());
+        let steps = &self.versions[&self.cursor].steps;
+        Ok(reverted(Some(self.cursor), change, steps))
+    }
+
+    /// `tx`, ready to commit at the cursor, where it lands as `opts`
+    /// says when it was made on another version ([`onto_cursor`]): its
+    /// steps coalesced, and what the commit says of them, unencodable text
+    /// told once a document, labelled as `opts` says, or as its first line.
+    /// Its change is none yet, as a commit that changes nothing has.
+    ///
+    /// [`onto_cursor`]: Self::onto_cursor
+    fn settle(
+        &mut self,
+        tx: Tx,
+        opts: CommitOpts,
+    ) -> Result<(crate::tx::TxParts, Commit), EditError> {
         if !self.ready {
             return Err(EditError::NotReady);
         }
-        let mut parts = tx.into_parts();
-        if parts.base != self.cursor {
-            return Err(EditError::internal(
-                "a transaction made on another version: commits are at the current one \
-                 until slice 12",
-            ));
-        }
+        let mut parts = self.onto_cursor(tx.into_parts(), opts.base, opts.stale)?;
         // One step's prims are its own already.
         if parts.steps.len() > 1 {
             coalesce(&mut parts.steps);
@@ -1208,14 +1658,19 @@ impl Document {
         let mut tell = !self.told_unencodable;
         notices.retain(|n| *n != Notice::Unencodable || std::mem::take(&mut tell));
         self.told_unencodable |= notices.contains(&Notice::Unencodable);
+        let lines = crate::describe::lines(&parts.steps);
+        let label = opts.label.unwrap_or_else(|| {
+            (lines.first()).map_or_else(Arc::default, |l| l.text.as_str().into())
+        });
         let commit = Commit {
             version: None,
             amended: false,
             created: std::mem::take(&mut parts.created),
+            change: ChangeSet::empty(self.cursor, Cause::Commit, parts.actor().clone(), label),
             effects: StepEffects::union(
                 &parts.steps.iter().map(|s| &s.effects).collect::<Vec<_>>(),
             ),
-            lines: crate::describe::lines(&parts.steps),
+            lines,
             cascades: crate::tx::cascade::merged(
                 parts.steps.iter().flat_map(|s| s.cascades.iter()),
             ),
@@ -1266,7 +1721,7 @@ impl Document {
         }
         match self.replay(id) {
             Ok(state) => {
-                self.versions.get_mut(&id).expect("version").state = Some(state);
+                self.set_state(id, Some(state));
                 Ok(())
             }
             Err(e) => {
@@ -1283,20 +1738,21 @@ impl Document {
     }
 
     /// A new version after the current one, made by `actor` with the ops
-    /// that made it. The versions that were after the current one stay, as
-    /// a branch.
+    /// that made it, its `group`'s latest if it's of one. The versions that
+    /// were after the current one stay, as a branch.
     fn push(
         &mut self,
         state: DocState,
         label: String,
         steps: Vec<Step>,
         actor: Actor,
-        job: Option<JobId>,
+        group: Option<(GroupId, Arc<str>)>,
     ) {
         let id = VersionId(self.next_version);
         self.next_version += 1;
         let parent = self.cursor;
-        let (snapshot_bytes, step_bytes) = accounting(&steps, &state);
+        let keys = keys_of(&steps);
+        let (snapshot_bytes, step_bytes) = accounting(&steps, &keys, &state);
         let blobs = brought(&steps);
         let author = match &actor {
             Actor::Plugin { id, .. } => id.to_string(),
@@ -1305,7 +1761,12 @@ impl Document {
         let p = self.versions.get_mut(&parent).expect("parent");
         p.children.push(id);
         p.redo_to = Some(id);
-        self.versions.insert(
+        if let Some((g, _)) = &group
+            && let Some(group) = self.groups.get_mut(g)
+        {
+            group.latest = Some(id);
+        }
+        self.insert_version(
             id,
             Version {
                 parent: Some(parent),
@@ -1316,12 +1777,14 @@ impl Document {
                 author,
                 at: crate::annot::pdf_date_now(),
                 steps,
+                keys,
                 blobs,
                 state: Some(state),
                 damaged: false,
+                on_line: true,
                 snapshot_bytes,
                 step_bytes,
-                job,
+                group,
                 sealed: 0,
                 record: None,
                 saves: Vec::new(),
@@ -1361,22 +1824,80 @@ impl Document {
         if self.cursor == old {
             self.cursor = id;
         }
-        if self.saved == Some(old) {
-            self.saved = Some(id);
+        if self.saved_at() == Some(old) {
+            self.saved = Some(SavedVersion::At(id));
         }
-        self.versions.insert(id, v);
+        if let Some((g, _)) = &v.group
+            && let Some(group) = self.groups.get_mut(g)
+            && group.latest == Some(old)
+        {
+            group.latest = Some(id);
+        }
+        self.insert_version(id, v);
         id
     }
 
-    /// Versions that must keep their snapshots: the opened one (every
+    /// `v` in the tree as version `id`, and what it holds counted.
+    fn insert_version(&mut self, id: VersionId, v: Version) {
+        let held = &mut self.held;
+        if v.state.is_some() {
+            held.snapshots.insert(id);
+            held.snapshot_bytes += v.snapshot_bytes;
+        }
+        held.step_bytes += v.step_bytes;
+        if !v.blobs.is_empty() {
+            held.undone = None;
+        }
+        self.versions.insert(id, v);
+    }
+
+    /// Version `id` out of the tree, if it's there, and what it holds no
+    /// longer counted.
+    fn take_version(&mut self, id: VersionId) -> Option<Version> {
+        let v = self.versions.remove(&id)?;
+        let held = &mut self.held;
+        if v.state.is_some() {
+            held.snapshots.remove(&id);
+            held.snapshot_bytes -= v.snapshot_bytes;
+        }
+        held.step_bytes -= v.step_bytes;
+        if !v.blobs.is_empty() {
+            held.undone = None;
+        }
+        Some(v)
+    }
+
+    /// Version `id`'s snapshot kept, or dropped with None, and counted so.
+    fn set_state(&mut self, id: VersionId, state: Option<DocState>) {
+        let v = self.versions.get_mut(&id).expect("version");
+        let held = &mut self.held;
+        match (v.state.is_some(), state.is_some()) {
+            (false, true) => {
+                held.snapshots.insert(id);
+                held.snapshot_bytes += v.snapshot_bytes;
+            }
+            (true, false) => {
+                held.snapshots.remove(&id);
+                held.snapshot_bytes -= v.snapshot_bytes;
+            }
+            _ => {}
+        }
+        v.state = state;
+    }
+
+    /// For tests: the policy history is kept to from now on.
+    #[cfg(test)]
+    pub(crate) fn set_policy(&mut self, policy: Box<dyn HistoryPolicy>) {
+        self.policy = policy;
+    }
+
+    /// Versions that must keep their snapshots: the first one kept (every
     /// replay starts somewhere), the current one, one being saved (its
-    /// save reads it) and the saved one (the next save's saved side). A
-    /// save changes no state, so every other version replays as any does.
-    fn keeps_snapshot(&self, id: VersionId) -> bool {
-        id == self.root
-            || id == self.cursor
-            || Some(id) == self.saved
-            || self.versions[&id].sealed > 0
+    /// save reads it) and the saved one while the history holds it (the
+    /// next save's saved side). A save changes no state, so every other
+    /// version replays as any does. `v` is version `id`.
+    fn keeps_snapshot(&self, id: VersionId, v: &Version) -> bool {
+        id == self.root || id == self.cursor || self.saved_at() == Some(id) || v.sealed > 0
     }
 
     /// The versions from the opened one to the current one.
@@ -1389,112 +1910,170 @@ impl Document {
         line
     }
 
-    /// Snapshots the policy may drop, in the order to drop them: versions
-    /// off the current `line` first (other branches, undone ones), then the
-    /// line's, oldest first.
-    fn droppable(&self, line: &HashSet<VersionId>) -> Vec<VersionId> {
-        let mut ids: Vec<VersionId> = self
+    /// Keep history to the policy and to [`MAX_VERSIONS`] (M10.5 §8.7):
+    /// versions pruned one at a time while there are too many or the
+    /// policy says ([`prune_one`](Self::prune_one)), then snapshots dropped
+    /// as it says. History is weighed only when the policy could act on
+    /// what it holds ([`Held`]), so an edit doesn't walk it.
+    fn trim(&mut self) {
+        loop {
+            let weighed = self.weighed();
+            let over = self.versions.len() > MAX_VERSIONS
+                || (weighed.as_ref()).is_some_and(|(_, stats)| self.policy.prunes(stats));
+            if over && self.prune_one() {
+                continue;
+            }
+            if let Some((droppable, stats)) = weighed {
+                let n = self.policy.trim(&stats).min(droppable.len());
+                for &id in &droppable[..n] {
+                    self.set_state(id, None);
+                }
+            }
+            return;
+        }
+    }
+
+    /// The snapshots the policy may drop, in the order to drop them, and
+    /// the stats it weighs; none when it couldn't act on what history
+    /// holds.
+    fn weighed(&mut self) -> Option<(Vec<VersionId>, HistoryStats)> {
+        let undone = self.undone_bytes();
+        let Held {
+            snapshots,
+            snapshot_bytes,
+            step_bytes,
+            ..
+        } = &self.held;
+        let bytes = snapshot_bytes + step_bytes + undone;
+        if !self.policy.could_act(snapshots.len(), bytes) {
+            return None;
+        }
+        Some(self.weigh(undone))
+    }
+
+    /// One version out of the tree, as pruning takes them: the oldest leaf
+    /// off the current line, unless it's the saved version or one being
+    /// saved; else the first version, the next on the line in its place
+    /// ([`advance_root`](Self::advance_root)). Whether one went.
+    fn prune_one(&mut self) -> bool {
+        let leaf = self
             .versions
             .iter()
-            .filter(|(id, v)| v.state.is_some() && !self.keeps_snapshot(**id))
+            .filter(|(id, v)| v.children.is_empty() && !v.on_line && !self.protected(**id))
             .map(|(id, _)| *id)
+            .min();
+        match leaf {
+            Some(leaf) => self.remove_version(leaf),
+            None => self.advance_root(),
+        }
+    }
+
+    /// The first version out of the tree, the next on the current line the
+    /// first from now on: never past the current version or one being
+    /// saved, nor while a branch off it holds one being saved. The other
+    /// branches off it go with it. The saved version may go, the first
+    /// version or on one of them: then it detaches
+    /// ([`detach`](Self::detach)), and once it has, its anchor takes the
+    /// keys of the edge into each new first version. The new first version
+    /// takes the sources of the one before, whose state was made over
+    /// them, and keeps its steps' edits and lines, but not their prims:
+    /// nothing is rebuilt into it, so they would only hold what it
+    /// replaced. A group whose latest it passes has none kept, and one it
+    /// takes a version or prims of can't be undone all at once. Whether it
+    /// moved.
+    fn advance_root(&mut self) -> bool {
+        let old = self.root;
+        let first = &self.versions[&old];
+        let next = first.children.iter().find(|c| self.versions[c].on_line);
+        let Some(&next) = next.filter(|_| first.sealed == 0) else {
+            return false;
+        };
+        let branches: Vec<VersionId> = (first.children.iter())
+            .filter(|&&c| c != next)
+            .flat_map(|&c| self.subtree(c))
             .collect();
-        ids.sort_by_key(|id| (line.contains(id), *id));
-        ids
-    }
-
-    fn trim(&mut self) {
-        let line = self.line().into_iter().collect();
-        let droppable = self.droppable(&line);
-        let stats = self.stats_for(&line, &droppable);
-        let n = self.policy.trim(&stats).min(droppable.len());
-        for id in &droppable[..n] {
-            self.versions.get_mut(id).expect("version").state = None;
+        if branches.iter().any(|b| self.versions[b].sealed > 0) {
+            return false;
         }
-        self.prune();
-    }
-
-    /// Keep the tree to [`crate::history::MAX_VERSIONS`]: drop versions on
-    /// other branches, oldest first, then the oldest versions before the
-    /// saved one. Edits back to the last save always stay (a later merge
-    /// replays them), and so does a version being saved, and the saved
-    /// one: a branch holding either stays whole. The first version's
-    /// sources go to the next, whose state was made over them.
-    fn prune(&mut self) {
-        let max = crate::history::MAX_VERSIONS;
-        while self.versions.len() > max {
-            let line: HashSet<VersionId> = self.line().into_iter().collect();
-            let leaf = self
-                .versions
-                .iter()
-                .filter(|(id, v)| {
-                    v.children.is_empty() && !line.contains(id) && !self.protected(**id)
-                })
-                .map(|(id, _)| *id)
-                .min();
-            let Some(leaf) = leaf else { break };
-            if !self.remove_version(leaf) {
-                break;
+        if self.ensure_state(next).is_err() {
+            return false;
+        }
+        match self.saved {
+            Some(SavedVersion::At(s)) if s == old || branches.contains(&s) => self.detach(s, next),
+            Some(SavedVersion::Detached(ref mut anchor)) => {
+                let keys = self.versions[&next].keys.iter().copied();
+                anchor.keys_to_root.extend(keys);
             }
+            _ => {}
         }
-        // Then move the root forward along the line, up to the saved
-        // version or one being saved (or the current one when neither is
-        // on it), and never past a branch holding one.
-        let line = self.line();
-        let stop = (line.iter().position(|&v| self.protected(v))).unwrap_or(line.len() - 1);
+        for b in branches {
+            self.remove_version(b);
+        }
+        let gone = self.take_version(old).expect("the first version");
+        // A group whose latest it was has none kept now.
+        if let Some((g, _)) = gone.group
+            && let Some(group) = self.groups.get_mut(&g)
+            && group.latest == Some(old)
+        {
+            group.latest = None;
+        }
+        let mut root = self.take_version(next).expect("the next version");
+        let cut = [&gone, &root].map(|v| v.group.as_ref().map(|(g, _)| *g));
+        self.cut_groups.extend(cut.into_iter().flatten());
+        root.parent = None;
+        root.blobs.extend(gone.blobs);
+        for step in &mut root.steps {
+            step.prims = Arc::new([]);
+        }
+        root.step_bytes = steps_bytes(&root.steps, &root.keys);
+        self.insert_version(next, root);
+        self.root = next;
+        true
+    }
+
+    /// The saved version `s`, which pruning takes, kept as an anchor: its
+    /// state and record, and the keys on the tree path from it to version
+    /// `next`, the first from now on. One made in memory has no record:
+    /// no file holds the document, and nothing is kept.
+    fn detach(&mut self, s: VersionId, next: VersionId) {
+        let keys_to_root = BTreeSet::clone(&self.keys_along(&self.edges_between(s, next)));
+        let v = &self.versions[&s];
+        self.saved = v.record.clone().map(|record| {
+            let state = v.state.clone().expect("the saved version keeps its state");
+            SavedVersion::Detached(Box::new(Anchor {
+                state,
+                record,
+                keys_to_root,
+            }))
+        });
+    }
+
+    /// Version `id` and every version after it.
+    fn subtree(&self, id: VersionId) -> Vec<VersionId> {
+        let mut out = vec![id];
         let mut i = 0;
-        while self.versions.len() > max && i < stop {
-            let next = line[i + 1];
-            let old = line[i];
-            let siblings: Vec<VersionId> = (self.versions[&old].children.iter())
-                .copied()
-                .filter(|&c| c != next)
-                .collect();
-            if siblings.iter().any(|&s| self.holds_protected(s)) {
-                break;
-            }
-            if self.ensure_state(next).is_err() {
-                break;
-            }
-            for sibling in siblings {
-                self.remove_subtree(sibling);
-            }
-            let blobs = self.versions.remove(&old).expect("old root").blobs;
-            let new_root = self.versions.get_mut(&next).expect("next");
-            new_root.parent = None;
-            new_root.blobs.extend(blobs);
-            self.root = next;
+        while let Some(&v) = out.get(i) {
+            out.extend(self.versions[&v].children.iter().copied());
             i += 1;
         }
+        out
     }
 
     /// Whether version `id` must stay in the tree: it's the saved version,
     /// or a save of it is in flight.
     fn protected(&self, id: VersionId) -> bool {
-        Some(id) == self.saved || self.versions.get(&id).is_some_and(|v| v.sealed > 0)
+        self.saved_at() == Some(id) || self.versions.get(&id).is_some_and(|v| v.sealed > 0)
     }
 
-    /// Whether version `id`, or a version after it, must stay.
-    fn holds_protected(&self, id: VersionId) -> bool {
-        let mut stack = vec![id];
-        while let Some(v) = stack.pop() {
-            if self.protected(v) {
-                return true;
-            }
-            if let Some(version) = self.versions.get(&v) {
-                stack.extend(version.children.iter().copied());
-            }
-        }
-        false
-    }
-
-    /// Take version `id` out of the tree: what only it held goes with it.
-    /// Not the saved version, or one being saved. Whether it went.
+    /// Take version `id`, off the current line, out of the tree: what only
+    /// it held goes with it. Not the saved version, or one being saved. A
+    /// group whose latest it was ends: its edits were undone. Whether it
+    /// went.
     fn remove_version(&mut self, id: VersionId) -> bool {
         if self.protected(id) {
             return false;
         }
-        let Some(v) = self.versions.remove(&id) else {
+        let Some(v) = self.take_version(id) else {
             return false;
         };
         if let Some(p) = v.parent
@@ -1505,59 +2084,79 @@ impl Document {
                 parent.redo_to = None;
             }
         }
+        if let Some((g, _)) = v.group
+            && self
+                .groups
+                .get(&g)
+                .is_some_and(|group| group.latest == Some(id))
+        {
+            self.groups.remove(&g);
+        }
         true
     }
 
-    /// Take version `id` and the versions after it out of the tree, unless
-    /// one of them must stay ([`holds_protected`](Self::holds_protected)):
-    /// then none goes.
-    fn remove_subtree(&mut self, id: VersionId) {
-        if self.holds_protected(id) {
-            return;
-        }
-        let mut stack = vec![id];
-        while let Some(v) = stack.pop() {
-            if let Some(version) = self.versions.get(&v) {
-                stack.extend(version.children.iter().copied());
+    /// Snapshots the policy may drop, in the order to drop them, and
+    /// history's stats, `undone` the bytes of the sources only versions off
+    /// the current line bring. Versions off the current line go first
+    /// (other branches, undone ones), then the line's, oldest first; then
+    /// the snapshots that must stay, the current version's last. Each
+    /// version keeping a snapshot is looked up once: the default policy
+    /// weighs them at every edit once it holds its count.
+    fn weigh(&self, undone: usize) -> (Vec<VersionId>, HistoryStats) {
+        let (mut off, mut on, mut kept) = (Vec::new(), Vec::new(), Vec::new());
+        let mut cursor = None;
+        for &id in &self.held.snapshots {
+            let v = &self.versions[&id];
+            let held = (id, v.snapshot_bytes);
+            if id == self.cursor {
+                cursor = Some(v.snapshot_bytes);
+            } else if self.keeps_snapshot(id, v) {
+                kept.push(v.snapshot_bytes);
+            } else if v.on_line {
+                on.push(held);
+            } else {
+                off.push(held);
             }
-            self.remove_version(v);
         }
-    }
-
-    fn stats_for(&self, line: &HashSet<VersionId>, droppable: &[VersionId]) -> HistoryStats {
-        let mut kept: Vec<VersionId> = self
-            .versions
-            .iter()
-            .filter(|(id, v)| v.state.is_some() && !droppable.contains(id))
-            .map(|(id, _)| *id)
+        let droppable: Vec<VersionId> = off.iter().chain(&on).map(|&(id, _)| id).collect();
+        let snapshot_bytes: Vec<usize> = (off.iter().chain(&on))
+            .map(|&(_, bytes)| bytes)
+            .chain(kept)
+            .chain(cursor)
             .collect();
-        // The current version's last.
-        kept.sort_by_key(|id| (*id == self.cursor, *id));
-        let snapshot_bytes: Vec<usize> = droppable
-            .iter()
-            .chain(&kept)
-            .map(|id| self.versions[id].snapshot_bytes)
-            .collect();
-        HistoryStats {
+        let stats = HistoryStats {
             versions: snapshot_bytes.len(),
             cursor: snapshot_bytes.len() - 1,
+            droppable: droppable.len(),
             snapshot_bytes,
-            step_bytes: self.versions.values().map(|v| v.step_bytes).sum(),
+            step_bytes: self.held.step_bytes,
             blob_bytes: self.store.bytes(),
-            undone_source_bytes: self.undone_source_bytes(line),
-        }
+            undone_source_bytes: undone,
+        };
+        (droppable, stats)
     }
 
-    /// The bytes of the sources only versions off the current `line`
-    /// bring (inserts that were undone), each blob once. A source a version
-    /// on the line brings, or the primary, isn't counted: pruning wouldn't
+    /// [`undone_source_bytes`](Self::undone_source_bytes), counted again
+    /// only when what it counts may have changed ([`Held::undone`]).
+    fn undone_bytes(&mut self) -> usize {
+        if let Some(bytes) = self.held.undone {
+            return bytes;
+        }
+        let bytes = self.undone_source_bytes();
+        self.held.undone = Some(bytes);
+        bytes
+    }
+
+    /// The bytes of the sources only versions off the current line bring
+    /// (inserts that were undone), each blob once. A source a version on
+    /// the line brings, or the primary, isn't counted: pruning wouldn't
     /// free it. Each version noted its sources as it was made, so this
     /// never walks a step.
-    fn undone_source_bytes(&self, line: &HashSet<VersionId>) -> usize {
+    fn undone_source_bytes(&self) -> usize {
         let mut kept = HashSet::from([self.primary.id()]);
         let mut undone = HashSet::new();
-        for (id, v) in &self.versions {
-            match line.contains(id) {
+        for v in self.versions.values() {
+            match v.on_line {
                 true => kept.extend(v.blobs.iter().copied()),
                 false => undone.extend(v.blobs.iter().copied()),
             }
@@ -1570,8 +2169,8 @@ impl Document {
     /// Snapshots kept and their estimated bytes (droppable ones first), the
     /// bytes every version's steps hold, and the sources' bytes.
     pub fn stats(&self) -> HistoryStats {
-        let line = self.line().into_iter().collect();
-        self.stats_for(&line, &self.droppable(&line))
+        let undone = (self.held.undone).unwrap_or_else(|| self.undone_source_bytes());
+        self.weigh(undone).1
     }
 
     /// How many versions the history holds, with or without snapshots.
@@ -1600,6 +2199,7 @@ impl Document {
                 .collect(),
             replays: v.state.is_none(),
             damaged: v.damaged,
+            group: (v.group.clone()).filter(|(g, _)| !self.cut_groups.contains(g)),
         }
     }
 
@@ -1645,6 +2245,54 @@ impl Document {
     }
 }
 
+/// `steps`, a commit's in version `v`'s group, which changed `keys` and
+/// made `state`, added to `v`'s: coalesced with them, and what they all
+/// hold, change and bring counted again. When they change none of the
+/// slots `v`'s steps do, they're added as they are and only what they hold
+/// is counted, so a version of thousands of steps (an OCR run's flushes)
+/// takes one more in the time its own take.
+fn join(v: &mut Version, steps: Vec<Step>, keys: &BTreeSet<Key>, state: &DocState) {
+    if keys.is_disjoint(&v.keys) {
+        let was = keys_bytes(&v.steps, &v.keys);
+        let mut arcs = HashSet::new();
+        let held: usize = steps.iter().map(|s| step_bytes(s, &mut arcs)).sum();
+        v.blobs.extend(brought(&steps));
+        v.steps.extend(steps);
+        Arc::make_mut(&mut v.keys).extend(keys.iter().copied());
+        v.step_bytes = v.step_bytes - was + held + keys_bytes(&v.steps, &v.keys);
+        v.snapshot_bytes = state.snapshot_bytes(v.keys.iter().copied());
+    } else {
+        v.steps.extend(steps);
+        coalesce(&mut v.steps);
+        v.keys = keys_of(&v.steps);
+        (v.snapshot_bytes, v.step_bytes) = accounting(&v.steps, &v.keys, state);
+        v.blobs = brought(&v.steps);
+    }
+}
+
+/// A revert's commit: of `steps`, which made `version`, or none.
+/// Why the edits labelled `label`, a group pruning took part of, can't be
+/// taken back all at once.
+fn cut(label: &str) -> EditError {
+    EditError::invalid(
+        "revert",
+        format!("“{label}” is older than the history kept"),
+    )
+}
+
+fn reverted(version: Option<VersionId>, change: ChangeSet, steps: &[Step]) -> Commit {
+    Commit {
+        version,
+        amended: false,
+        created: crate::tx::Created::default(),
+        change,
+        effects: StepEffects::union(&steps.iter().map(|s| &s.effects).collect::<Vec<_>>()),
+        lines: crate::describe::lines(steps),
+        cascades: Vec::new(),
+        notices: Vec::new(),
+    }
+}
+
 /// Each slot's change over `steps` as one prim, on the last step that
 /// changed it: from the first step's before to the last one's after, and
 /// none when they're the same (M10.5 §6.2). So a batch that puts a slot
@@ -1683,6 +2331,24 @@ fn coalesce(steps: &mut [Step]) {
     }
 }
 
+/// The slots `steps`, coalesced, change: their prims' keys, each on one
+/// step. One step's are the keys its effects hold, which are its prims'
+/// as it was lowered: shared, not copied.
+fn keys_of(steps: &[Step]) -> Arc<BTreeSet<Key>> {
+    match steps {
+        [one] => {
+            let prims = one.prims.iter().map(|p| p.key);
+            debug_assert!(prims.eq(one.effects.keys.iter().copied()), "{}", one.line);
+            one.effects.keys.clone()
+        }
+        _ => Arc::new(
+            (steps.iter())
+                .flat_map(|s| s.prims.iter().map(|p| p.key))
+                .collect(),
+        ),
+    }
+}
+
 /// The sources `steps` bring pages of, by blob: what a page they put
 /// shows when it showed another source before, or nothing (an insert's
 /// file, a derived copy).
@@ -1706,120 +2372,146 @@ fn set_bytes<T>(set: &BTreeSet<T>) -> usize {
 
 /// What a version holds that no other does (M10.5 §3.9), from the steps
 /// that made it and its state: its snapshot's bytes, which trimming frees,
-/// and its steps', which only pruning the version frees.
-///
-/// A step's before-values are its parent's after-values, so each value is
-/// counted once, by the version that made it, and an `Arc` once however
-/// many of the version's prims hold it: a page's definition, its boxes,
-/// its content stack (a duplicate shares its original's), an
-/// annotation's body, another tool's annotation's summary and a widget's
-/// props (their copies share them), a field node and its terminal's
-/// props (unless the node it replaces has them), a bookmark, the labels,
-/// the form, a generator. A source's bytes and a blob's aren't a
-/// value's: the store counts them. The values are the snapshot's too, so
-/// the snapshot adds only the im nodes it copied to put them
-/// ([`DocState::snapshot_bytes`]). Each step's op, the sets of what it
-/// did and its cascades count too, an `Arc` once. The order, a page's annotations, the
-/// top-level bookmarks and the form count in full, though im shares all
-/// but the changed paths of the order, the top-level bookmarks and the
-/// form's roots and names with the parent's: an over-count.
-fn accounting(steps: &[Step], state: &DocState) -> (usize, usize) {
-    let mut step_bytes = 0;
+/// and its steps' ([`steps_bytes`]), which only pruning the version frees.
+/// The values are the snapshot's too, so the snapshot adds only the im
+/// nodes it copied to put them ([`DocState::snapshot_bytes`]).
+fn accounting(steps: &[Step], keys: &Arc<BTreeSet<Key>>, state: &DocState) -> (usize, usize) {
+    (
+        state.snapshot_bytes(keys.iter().copied()),
+        steps_bytes(steps, keys),
+    )
+}
+
+/// What a version's `steps` hold ([`step_bytes`]), and its `keys`
+/// ([`keys_bytes`]).
+fn steps_bytes(steps: &[Step], keys: &Arc<BTreeSet<Key>>) -> usize {
     let mut arcs = HashSet::new();
+    let held = steps
+        .iter()
+        .map(|s| step_bytes(s, &mut arcs))
+        .sum::<usize>();
+    held + keys_bytes(steps, keys)
+}
+
+/// What a version's `keys` hold: nothing beyond its `steps` when they're
+/// its one step's.
+fn keys_bytes(steps: &[Step], keys: &Arc<BTreeSet<Key>>) -> usize {
+    match steps {
+        [one] if Arc::ptr_eq(&one.effects.keys, keys) => 0,
+        _ => 2 * size_of::<usize>() + set_bytes(keys),
+    }
+}
+
+/// What step `s` holds that no other version's steps do: its op, the sets
+/// of what it did and its cascades, an `Arc` once each, and what its prims
+/// put, the `Arc`s it counted noted in `arcs`, which it clears first.
+/// Counted a step at a time, so a commit that joins a group's version adds
+/// its own without counting the version's again.
+///
+/// A version's before-values are its parent's after-values, so each value
+/// is counted once, by the step that made it, and an `Arc` once however
+/// many of the step's prims hold it: a page's definition, its boxes, its
+/// content stack (a duplicate shares its original's), an annotation's
+/// body, another tool's annotation's summary and a widget's props (their
+/// copies share them), a field node and its terminal's props (unless the
+/// node it replaces has them), a bookmark, the labels, the form, a
+/// generator. A source's bytes and a blob's aren't a value's: the store
+/// counts them. An `Arc` two steps of a version hold counts in each, and
+/// the order, a page's annotations, the top-level bookmarks and the form
+/// count in full, though im shares all but the changed paths of the order,
+/// the top-level bookmarks and the form's roots and names with the
+/// parent's: over-counts.
+fn step_bytes(s: &Step, arcs: &mut HashSet<*const ()>) -> usize {
+    arcs.clear();
     let mut once = |arc: *const ()| arcs.insert(arc);
     // A step's own `Arc`s, which lowering made for it alone: each one's
     // counts and what it holds.
     let arc = 2 * size_of::<usize>();
-    for s in steps {
-        let StepEffects { pages, keys, .. } = &s.effects;
-        step_bytes += size_of::<Step>()
-            + s.line.heap_size()
-            + (arc + size_of::<ResolvedOp>() + s.op.heap_size())
-            + (arc + set_bytes(pages))
-            + (arc + set_bytes(keys))
-            + (arc + size_of_val(&*s.cascades));
-        for p in s.prims.iter() {
-            let after = match p.key {
-                Key::Order | Key::OutlineRoots | Key::PageAnnots(_) => p.after.heap_size(),
-                Key::Page(_) => match &p.after {
-                    Some(Val::Page(def)) if once(Arc::as_ptr(def).cast()) => {
-                        // Its stack counts once too: a duplicate shares it.
-                        let stack = once(Arc::as_ptr(&def.content).cast());
-                        size_of::<PageDef>() + if stack { def.heap_size() } else { 0 }
+    let StepEffects { pages, keys, .. } = &s.effects;
+    let mut bytes = size_of::<Step>()
+        + s.line.heap_size()
+        + (arc + size_of::<ResolvedOp>() + s.op.heap_size())
+        + (arc + set_bytes(pages))
+        + (arc + set_bytes(keys))
+        + (arc + size_of_val(&*s.cascades));
+    for p in s.prims.iter() {
+        let after = match p.key {
+            Key::Order | Key::OutlineRoots | Key::PageAnnots(_) => p.after.heap_size(),
+            Key::Page(_) => match &p.after {
+                Some(Val::Page(def)) if once(Arc::as_ptr(def).cast()) => {
+                    // Its stack counts once too: a duplicate shares it.
+                    let stack = once(Arc::as_ptr(&def.content).cast());
+                    size_of::<PageDef>() + if stack { def.heap_size() } else { 0 }
+                }
+                _ => 0,
+            },
+            Key::Geom(_) => match &p.after {
+                Some(Val::Geom(g)) if once(Arc::as_ptr(g).cast()) => size_of::<Geom>(),
+                _ => 0,
+            },
+            Key::Bookmark(_) => match &p.after {
+                Some(Val::Bookmark(b)) if once(Arc::as_ptr(b).cast()) => {
+                    size_of::<Bookmark>() + b.heap_size()
+                }
+                _ => 0,
+            },
+            Key::Annot(_) => match &p.after {
+                Some(Val::Annot(a)) => match &a.body {
+                    AnnotBody::Mark(m) if once(Arc::as_ptr(m).cast()) => {
+                        size_of::<Mark>() + m.heap_size()
                     }
-                    _ => 0,
-                },
-                Key::Geom(_) => match &p.after {
-                    Some(Val::Geom(g)) if once(Arc::as_ptr(g).cast()) => size_of::<Geom>(),
-                    _ => 0,
-                },
-                Key::Bookmark(_) => match &p.after {
-                    Some(Val::Bookmark(b)) if once(Arc::as_ptr(b).cast()) => {
-                        size_of::<Bookmark>() + b.heap_size()
+                    AnnotBody::Foreign(f) if once(Arc::as_ptr(f).cast()) => {
+                        // Its summary counts once too: a copy shares it.
+                        let summary = once(Arc::as_ptr(&f.summary).cast());
+                        size_of::<Foreign>() + if summary { f.heap_size() } else { 0 }
                     }
-                    _ => 0,
+                    AnnotBody::Widget(w) if once(Arc::as_ptr(w).cast()) => {
+                        // Its props count once too: a copy shares them.
+                        let props = once(Arc::as_ptr(&w.props).cast());
+                        size_of::<Widget>() + w.heap_size() - if props { 0 } else { w.shared() }
+                    }
+                    AnnotBody::Mark(_) | AnnotBody::Foreign(_) | AnnotBody::Widget(_) => 0,
                 },
-                Key::Annot(_) => match &p.after {
-                    Some(Val::Annot(a)) => match &a.body {
-                        AnnotBody::Mark(m) if once(Arc::as_ptr(m).cast()) => {
-                            size_of::<Mark>() + m.heap_size()
+                _ => 0,
+            },
+            Key::Field(_) => match &p.after {
+                Some(Val::Field(node)) if once(Arc::as_ptr(node).cast()) => {
+                    // Its terminal's props count once too, and not when
+                    // the node it replaces has them: a copy shares them,
+                    // and a field whose widgets went keeps them.
+                    let had = |props: &Arc<FieldProps>| match &p.before {
+                        Some(Val::Field(was)) => {
+                            (was.term.as_ref()).is_some_and(|t| Arc::ptr_eq(&t.props, props))
                         }
-                        AnnotBody::Foreign(f) if once(Arc::as_ptr(f).cast()) => {
-                            // Its summary counts once too: a copy shares it.
-                            let summary = once(Arc::as_ptr(&f.summary).cast());
-                            size_of::<Foreign>() + if summary { f.heap_size() } else { 0 }
-                        }
-                        AnnotBody::Widget(w) if once(Arc::as_ptr(w).cast()) => {
-                            // Its props count once too: a copy shares them.
-                            let props = once(Arc::as_ptr(&w.props).cast());
-                            size_of::<Widget>() + w.heap_size() - if props { 0 } else { w.shared() }
-                        }
-                        AnnotBody::Mark(_) | AnnotBody::Foreign(_) | AnnotBody::Widget(_) => 0,
-                    },
-                    _ => 0,
-                },
-                Key::Field(_) => match &p.after {
-                    Some(Val::Field(node)) if once(Arc::as_ptr(node).cast()) => {
-                        // Its terminal's props count once too, and not when
-                        // the node it replaces has them: a copy shares them,
-                        // and a field whose widgets went keeps them.
-                        let had = |props: &Arc<FieldProps>| match &p.before {
-                            Some(Val::Field(was)) => {
-                                (was.term.as_ref()).is_some_and(|t| Arc::ptr_eq(&t.props, props))
-                            }
-                            _ => false,
-                        };
-                        let props = (node.term.as_ref())
-                            .is_none_or(|t| !had(&t.props) && once(Arc::as_ptr(&t.props).cast()));
-                        size_of::<FieldNode>() + node.heap_size()
-                            - if props { 0 } else { node.shared() }
-                    }
-                    _ => 0,
-                },
-                Key::Form => match &p.after {
-                    Some(Val::Form(form)) if once(Arc::as_ptr(form).cast()) => {
-                        size_of::<FormDoc>() + form.heap_size()
-                    }
-                    _ => 0,
-                },
-                Key::Labels => match &p.after {
-                    Some(Val::Labels(labels)) if once(Arc::as_ptr(labels).cast()) => {
-                        labels.heap_size()
-                    }
-                    _ => 0,
-                },
-                Key::Generator(_) => match &p.after {
-                    Some(Val::Generator(g)) if once(Arc::as_ptr(g).cast()) => {
-                        size_of::<Generator>() + g.heap_size()
-                    }
-                    _ => 0,
-                },
-            };
-            step_bytes += size_of::<Prim>() + after;
-        }
+                        _ => false,
+                    };
+                    let props = (node.term.as_ref())
+                        .is_none_or(|t| !had(&t.props) && once(Arc::as_ptr(&t.props).cast()));
+                    size_of::<FieldNode>() + node.heap_size()
+                        - if props { 0 } else { node.shared() }
+                }
+                _ => 0,
+            },
+            Key::Form => match &p.after {
+                Some(Val::Form(form)) if once(Arc::as_ptr(form).cast()) => {
+                    size_of::<FormDoc>() + form.heap_size()
+                }
+                _ => 0,
+            },
+            Key::Labels => match &p.after {
+                Some(Val::Labels(labels)) if once(Arc::as_ptr(labels).cast()) => labels.heap_size(),
+                _ => 0,
+            },
+            Key::Generator(_) => match &p.after {
+                Some(Val::Generator(g)) if once(Arc::as_ptr(g).cast()) => {
+                    size_of::<Generator>() + g.heap_size()
+                }
+                _ => 0,
+            },
+        };
+        bytes += size_of::<Prim>() + after;
     }
-    let keys = steps.iter().flat_map(|s| s.prims.iter().map(|p| p.key));
-    (state.snapshot_bytes(keys), step_bytes)
+    bytes
 }
 
 // ----- outline helpers: bookmarks are records, their kids by id ----------
@@ -1829,16 +2521,17 @@ fn accounting(steps: &[Step], state: &DocState) -> (usize, usize) {
 pub(crate) type Nested = (Vector<OutlineId>, Vec<(OutlineId, Bookmark)>);
 
 /// Bookmarks of a file's items, as [`crate::open::outline`] read them
-/// from `src`, ids drawn from `ids`: `page` gives the page that shows each
-/// page of the file, and an item going to one none shows goes nowhere.
+/// from `src`, each with a new id from `new_id`: `page` gives the page
+/// that shows each page of the file, and an item going to one none shows
+/// goes nowhere.
 pub(crate) fn outline_from_flat(
-    ids: &IdAlloc,
+    new_id: impl FnMut() -> OutlineId,
     items: &[FlatOutlineItem],
     page: impl Fn(u32) -> Option<PageId>,
     src: &Src,
 ) -> Nested {
     nest(
-        ids,
+        new_id,
         items.iter().map(|item| {
             let target = if item.kept {
                 Some(Target::Kept)
@@ -1866,9 +2559,12 @@ pub(crate) fn outline_from_flat(
 }
 
 /// `items`, bookmarks in pre-order with their depths, under one another,
-/// each with a new id from `ids`: one deeper than the one before is its
+/// each with a new id from `new_id`: one deeper than the one before is its
 /// kid, and one as deep or less a sibling of the last one less deep.
-fn nest(ids: &IdAlloc, items: impl IntoIterator<Item = (u16, Bookmark)>) -> Nested {
+fn nest(
+    mut new_id: impl FnMut() -> OutlineId,
+    items: impl IntoIterator<Item = (u16, Bookmark)>,
+) -> Nested {
     let mut roots = Vector::new();
     let mut out: Vec<(OutlineId, Bookmark)> = Vec::new();
     // The path down to the last one: each one's depth and place in `out`.
@@ -1877,7 +2573,7 @@ fn nest(ids: &IdAlloc, items: impl IntoIterator<Item = (u16, Bookmark)>) -> Nest
         while path.last().is_some_and(|&(d, _)| d >= depth) {
             path.pop();
         }
-        let id = ids.outline();
+        let id = new_id();
         match path.last() {
             Some(&(_, parent)) => out[parent].1.kids.push_back(id),
             None => roots.push_back(id),
@@ -2044,6 +2740,10 @@ fn nodes_of(
 }
 
 #[cfg(test)]
+mod change_tests;
+#[cfg(test)]
+mod group_tests;
+#[cfg(test)]
 pub(crate) mod history_tests;
 
 #[cfg(test)]
@@ -2056,7 +2756,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::history::FixedCount;
+    use crate::history::{AllOf, FixedCount, MemoryBudget};
     use crate::materialize::{How, StrategyKind};
     use crate::open::FileAnnots;
     use crate::text_layer::TextLayer;
@@ -2100,7 +2800,7 @@ mod tests {
             .collect()
     }
 
-    fn doc() -> Document {
+    pub(super) fn doc() -> Document {
         // Pages 0..6; bookmarks: A->0 { A1->1, A2->2 }, B->3, C->5
         new_doc(
             6,
@@ -2140,7 +2840,7 @@ mod tests {
             .collect()
     }
 
-    fn id_at(d: &Document, i: usize) -> PageId {
+    pub(super) fn id_at(d: &Document, i: usize) -> PageId {
         d.page(i).unwrap()
     }
 
@@ -2197,12 +2897,14 @@ mod tests {
         let bookmark = || fx::bookmark(None, None, "One", Some(page));
         let drawn = |d: &Document| d.ids.next();
         let before = (d.current_version(), d.next_version, drawn(&d));
-        let job = d.begin_job();
+        let g = d.begin_group(GroupKind::PluginCall {
+            plugin: "bookmarks".into(),
+        });
         let refused = [
             d.commit_ops(vec![duplicate()], "Duplicate").unwrap_err(),
             d.commit_ops(vec![duplicate(), bookmark()], "Both")
                 .unwrap_err(),
-            d.commit_ops_in_job(job, vec![bookmark()], "Bookmark")
+            d.commit_ops_in_group(g, vec![bookmark()], "Bookmark")
                 .unwrap_err(),
         ];
         for e in &refused {
@@ -2213,7 +2915,7 @@ mod tests {
         d.ready(Facts::default()).unwrap();
         d.commit_ops(vec![duplicate()], "Duplicate").unwrap();
         d.commit_ops(vec![duplicate(), bookmark()], "Both").unwrap();
-        d.commit_ops_in_job(job, vec![bookmark()], "Bookmark")
+        d.commit_ops_in_group(g, vec![bookmark()], "Bookmark")
             .unwrap();
         assert_eq!((d.page_count(), d.state().outline_roots().len()), (5, 2));
         assert_eq!(d.versions.len(), 4);
@@ -2221,8 +2923,8 @@ mod tests {
 
     /// `ready` puts the complete opened version in place of the one with
     /// the pages alone: the facts are on the pages the document showed
-    /// while it opened, and there's nothing to save or undo. It's taken
-    /// once.
+    /// while it opened, and there's nothing to save or undo. Its change
+    /// says anything may have changed. It's taken once.
     #[test]
     fn ready_replaces_the_opened_version() {
         let store = Store::new();
@@ -2242,15 +2944,25 @@ mod tests {
         assert_eq!(pages.len(), 3);
         assert!(st.bookmark_count() == 0 && st.annot_count() == 0 && st.field_count() == 0);
         assert!(st.labels().is_none() && st.header_footer().is_none());
-        let view = d
+        let (view, change) = d
             .ready(crate::open::finish(&src, &in_progress::NoProgress))
             .unwrap();
         assert!(d.is_ready());
         let opened = d.current_version();
         assert_ne!(opened, loading);
+        assert_eq!((change.from, change.to), (loading, opened));
+        assert_eq!((change.cause, &change.actor), (Cause::Opened, &Actor::User));
+        let (order, outline, labels) = (change.order, change.outline, change.labels);
+        assert!(order && outline && labels && change.form && change.generators);
+        let all = BTreeSet::from_iter(pages.iter().copied());
+        for set in [&change.geometry, &change.content, &change.annots] {
+            assert_eq!(**set, all);
+        }
+        assert_eq!(change.fields.len(), d.state().field_count());
+        assert!(change.pages_added.is_empty() && !change.is_empty());
         assert!(!d.versions.contains_key(&loading));
         assert!(d.jump(loading).is_err());
-        assert_eq!((d.root, d.saved), (opened, Some(opened)));
+        assert_eq!((d.root, d.saved_at()), (opened, Some(opened)));
         let now: Vec<PageId> = d.state().order().iter().copied().collect();
         assert_eq!(now, pages);
         crate::open::tests::assert_every_fact(d.state());
@@ -2887,12 +3599,21 @@ mod tests {
         assert_eq!(rotation(&d, 0), Rotation::R90);
         assert_eq!(d.page_size(d.page(0).unwrap()).width, 792.0);
         assert!(d.is_dirty());
-        assert_eq!(d.undo(), Ok(Some("rotate")));
+        assert_eq!(
+            d.undo().map(|c| c.map(|c| c.label)),
+            Ok(Some("rotate".into()))
+        );
         assert_eq!(rotation(&d, 0), Rotation::R0);
-        assert_eq!(d.undo(), Ok(Some("move")));
+        assert_eq!(
+            d.undo().map(|c| c.map(|c| c.label)),
+            Ok(Some("move".into()))
+        );
         assert_eq!(order(&d), vec![0, 1, 2, 3, 4, 5]);
         assert!(!d.is_dirty());
-        assert_eq!(d.redo(), Ok(Some("move")));
+        assert_eq!(
+            d.redo().map(|c| c.map(|c| c.label)),
+            Ok(Some("move".into()))
+        );
         assert_eq!(order(&d), vec![5, 0, 1, 2, 3, 4]);
         // A new edit discards the redo branch.
         d.commit_ops(vec![fx::delete(&[p5])], "delete").unwrap();
@@ -3146,7 +3867,7 @@ mod tests {
         assert!(d.commit_ops(vec![into_its_own], "x").is_err());
     }
 
-    fn rotate(d: &mut Document, page: usize, label: &str) {
+    pub(super) fn rotate(d: &mut Document, page: usize, label: &str) {
         let page = id_at(d, page);
         d.commit_ops(vec![fx::rotate(&[page], Turn::Quarter)], label)
             .unwrap();
@@ -3176,7 +3897,7 @@ mod tests {
         d.jump(b).unwrap();
         assert_eq!(rotation(&d, 1), Rotation::R90);
         assert_eq!(rotation(&d, 3), Rotation::R0);
-        assert_eq!(d.redo(), Ok(Some("c")));
+        assert_eq!(d.redo().map(|c| c.map(|c| c.label)), Ok(Some("c".into())));
         // Undo to a, and redo now follows the branch last visited.
         d.undo().unwrap();
         d.undo().unwrap();
@@ -3223,7 +3944,10 @@ mod tests {
         assert_eq!(d.version_count(), 6);
         // Undo goes all the way back, replaying what was dropped.
         for i in (0..5).rev() {
-            assert_eq!(d.undo(), Ok(Some(format!("r{i}").as_str())));
+            assert_eq!(
+                d.undo().map(|c| c.map(|c| c.label)),
+                Ok(Some(format!("r{i}").into()))
+            );
             assert_eq!(rotation(&d, 0).degrees(), (i * 90) % 360);
         }
         assert!(!d.can_undo());
@@ -3313,7 +4037,7 @@ mod tests {
         let (v, current) = (ids[2], ids[3]);
         let prims = d.versions[&v].steps[0].prims.clone();
         damage_turn_before(&mut d, v);
-        if let Some(undone) = unless_debug(|| d.undo().map(|l| l.map(str::to_owned))) {
+        if let Some(undone) = unless_debug(|| d.undo().map(|c| c.map(|c| c.label))) {
             assert_eq!(undone, Err(EditError::Mismatch { version: v }));
         }
         assert_eq!(d.current_version(), current, "nothing was undone");
@@ -4630,93 +5354,114 @@ mod tests {
         assert_eq!(layer_texts(&d), vec![(1, "a".into()), (3, "a".into())]);
     }
 
+    /// An OCR group's commits join one version: one undo step, called as
+    /// its first commit is. Undone, its next commit is GroupEnded and
+    /// changes nothing; redone, the group goes on.
     #[test]
-    fn job_batches_coalesce() {
+    fn a_group_s_commits_coalesce() {
         let mut d = doc();
-        let before = d.stats().versions;
-        let job = d.begin_job();
+        let n = d.version_count();
+        let g = d.begin_group(GroupKind::Ocr);
         for (i, page) in [0usize, 1, 2].iter().enumerate() {
-            d.commit_ops_in_job(
-                job,
-                fx::ocr([(id_at(&d, *page), tl("a"))]),
-                &format!("OCR batch {i}"),
-            )
-            .unwrap();
-            assert!(d.job_is_current(job));
+            let layers = fx::ocr([(id_at(&d, *page), tl("a"))]);
+            d.commit_ops_in_group(g, layers, &format!("OCR batch {i}"))
+                .unwrap();
         }
-        assert_eq!(d.stats().versions, before + 1);
+        assert_eq!(d.version_count(), n + 1);
         assert_eq!(layer_texts(&d).len(), 3);
-        assert_eq!(d.undo_label(), Some("OCR batch 2"));
+        assert_eq!(d.undo_label(), Some("OCR batch 0"));
         d.undo().unwrap();
         assert!(layer_texts(&d).is_empty());
-        assert!(!d.job_is_current(job));
-        assert!(d.job_is_undone(job));
+        let next = |d: &Document| fx::ocr([(id_at(d, 3), tl("a"))]);
+        let (at, layers) = (d.current_version(), next(&d));
+        let e = d.commit_ops_in_group(g, layers, "OCR batch 3");
+        assert_eq!(e.unwrap_err(), EditError::GroupEnded);
+        assert_eq!(d.current_version(), at);
+        assert!(layer_texts(&d).is_empty());
         d.redo().unwrap();
-        assert_eq!(layer_texts(&d).len(), 3);
-        assert!(!d.job_is_undone(job));
+        let layers = next(&d);
+        d.commit_ops_in_group(g, layers, "OCR batch 3").unwrap();
+        assert_eq!(layer_texts(&d).len(), 4);
+        assert_eq!(d.version_count(), n + 1, "amended");
     }
 
+    /// A group's commit after its version was saved makes another version,
+    /// which says it continues the group: the saved one stays as written.
     #[test]
-    fn job_never_amends_saved_version() {
+    fn a_group_never_amends_a_saved_version() {
         let mut d = doc();
-        let job = d.begin_job();
-        d.commit_ops_in_job(job, fx::ocr([(id_at(&d, 0), tl("a"))]), "ocr")
+        let g = d.begin_group(GroupKind::Ocr);
+        d.commit_ops_in_group(g, fx::ocr([(id_at(&d, 0), tl("a"))]), "ocr")
             .unwrap();
-        let n = d.stats().versions;
+        let n = d.version_count();
         let v = d.current_version();
         d.save_input(v).unwrap();
         d.record_save(record_for(&d, v)).unwrap();
-        d.commit_ops_in_job(job, fx::ocr([(id_at(&d, 1), tl("a"))]), "ocr")
+        d.commit_ops_in_group(g, fx::ocr([(id_at(&d, 1), tl("a"))]), "ocr")
             .unwrap();
-        assert_eq!(d.stats().versions, n + 1, "pushed, not amended");
+        assert_eq!(d.version_count(), n + 1, "pushed, not amended");
+        assert_eq!(d.undo_label(), Some("ocr (continued)"));
         assert!(d.is_dirty());
         d.undo().unwrap();
         assert!(!d.is_dirty(), "the saved version is intact");
         assert_eq!(layer_texts(&d).len(), 1);
     }
 
+    /// An edit between a group's commits leaves it in fragments: the next
+    /// commit makes another of its versions, which says it continues it,
+    /// and undo takes them back one at a time. Undoing the latest ends the
+    /// group, though the one before it is still there.
     #[test]
-    fn job_breaks_after_foreign_edit() {
+    fn a_group_s_commit_after_another_edit_continues_it() {
         let mut d = doc();
-        let job = d.begin_job();
-        d.commit_ops_in_job(job, fx::ocr([(id_at(&d, 0), tl("a"))]), "ocr")
+        let g = d.begin_group(GroupKind::Ocr);
+        d.commit_ops_in_group(g, fx::ocr([(id_at(&d, 0), tl("a"))]), "ocr")
             .unwrap();
         let last = id_at(&d, 5);
         d.commit_ops(vec![fx::rotate(&[last], Turn::Quarter)], "rotate")
             .unwrap();
-        assert!(!d.job_is_current(job));
-        assert!(!d.job_is_undone(job), "a later edit is not an undo");
-        let n = d.stats().versions;
-        d.commit_ops_in_job(job, fx::ocr([(id_at(&d, 1), tl("a"))]), "ocr")
+        let n = d.version_count();
+        d.commit_ops_in_group(g, fx::ocr([(id_at(&d, 1), tl("a"))]), "ocr")
             .unwrap();
-        assert_eq!(d.stats().versions, n + 1);
-        assert!(d.job_is_current(job));
-        // Undo peels the second batch, then the rotation, then the first.
+        assert_eq!(d.version_count(), n + 1);
+        assert_eq!(d.undo_label(), Some("ocr (continued)"));
+        let view = d.timeline().pop().unwrap();
+        assert_eq!(view.group, Some((g, "ocr".into())));
+        // Undo peels the second fragment, then the rotation, then the
+        // first.
         d.undo().unwrap();
         assert_eq!(layer_texts(&d).len(), 1);
         assert_eq!(rotation(&d, 5), Rotation::R90);
+        let layers = fx::ocr([(id_at(&d, 2), tl("a"))]);
+        let e = d.commit_ops_in_group(g, layers, "ocr").unwrap_err();
+        assert_eq!(e, EditError::GroupEnded);
     }
 
+    /// A group's commit that changes nothing makes no version, and the
+    /// group's first version is called as the first commit that makes one
+    /// is, not as continuing it.
     #[test]
-    fn job_first_batch_noop_pushes_nothing() {
+    fn a_group_s_first_no_op_pushes_nothing() {
         let mut d = doc();
-        let job = d.begin_job();
-        let n = d.stats().versions;
-        d.commit_ops_in_job(job, vec![fx::clear_ocr(&[id_at(&d, 0)])], "ocr")
+        let g = d.begin_group(GroupKind::Ocr);
+        let (n, at) = (d.version_count(), d.current_version());
+        d.commit_ops_in_group(g, vec![fx::clear_ocr(&[id_at(&d, 0)])], "nothing")
             .unwrap();
-        assert_eq!(d.stats().versions, n);
-        assert!(!d.job_is_current(job));
+        assert_eq!((d.version_count(), d.current_version()), (n, at));
+        d.commit_ops_in_group(g, fx::ocr([(id_at(&d, 1), tl("a"))]), "ocr")
+            .unwrap();
+        assert_eq!(d.undo_label(), Some("ocr"));
     }
 
-    /// A version names one state, so a job's later batch makes another
+    /// A version names one state, so a group's later commit makes another
     /// version in place of the one it amends.
     #[test]
     fn an_ocr_amend_gives_the_cursor_a_new_version() {
         let mut d = doc();
         let parent = d.current_version();
-        let job = d.begin_job();
+        let g = d.begin_group(GroupKind::Ocr);
         let ocr = |d: &mut Document, page: usize| {
-            d.commit_ops_in_job(job, fx::ocr([(id_at(d, page), tl("a"))]), "ocr")
+            d.commit_ops_in_group(g, fx::ocr([(id_at(d, page), tl("a"))]), "ocr")
                 .unwrap();
         };
         ocr(&mut d, 0);
@@ -4728,12 +5473,14 @@ mod tests {
         assert!(d.edge(v1).is_none());
         let ids: Vec<VersionId> = d.timeline().iter().map(|view| view.id).collect();
         assert_eq!(ids, [parent, v2]);
-        assert!(d.job_is_current(job));
-        assert_eq!(d.undo().unwrap(), Some("ocr"));
+        assert_eq!(d.undo().unwrap().map(|c| c.label).as_deref(), Some("ocr"));
         assert_eq!(d.current_version(), parent);
-        assert_eq!(d.redo().unwrap(), Some("ocr"));
+        assert_eq!(d.redo().unwrap().map(|c| c.label).as_deref(), Some("ocr"));
         assert_eq!(d.current_version(), v2);
         assert_eq!(layer_texts(&d).len(), 2);
+        // The group goes on from the version in its version's place.
+        ocr(&mut d, 2);
+        assert_eq!(d.edge(d.current_version()).unwrap().len(), 3);
     }
 
     /// A save is an output: the version it wrote keeps its id, and is the
@@ -4767,98 +5514,238 @@ mod tests {
                 .len()
         };
         assert_eq!((saves(opened), saves(v)), (1, 1));
-        assert_eq!(d.undo().unwrap(), Some("rotate"));
+        assert_eq!(
+            d.undo().unwrap().map(|c| c.label).as_deref(),
+            Some("rotate")
+        );
         assert_eq!(d.current_version(), opened);
         assert!(*d.state() == before && d.is_dirty());
-        assert_eq!(d.redo().unwrap(), Some("rotate"));
+        assert_eq!(
+            d.redo().unwrap().map(|c| c.label).as_deref(),
+            Some("rotate")
+        );
         assert_eq!(d.current_version(), v);
         assert!(*d.state() == after && !d.is_dirty());
     }
 
-    /// A job whose batches put back all they did leaves no version: the
-    /// parent is current again, as if the job never ran, even when its
-    /// snapshot was dropped.
+    /// A group whose commits put back all they did leaves no version: the
+    /// parent is current again, as if they were never made, even when its
+    /// snapshot was dropped. The group has no version, so its next commit's
+    /// is its first.
     #[test]
-    fn a_job_that_nets_to_nothing_leaves_no_version() {
+    fn a_group_that_nets_to_nothing_leaves_no_version() {
         let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
         rotate(&mut d, 2, "rotate");
         let (parent, want) = (d.current_version(), d.state().clone());
         let n = d.version_count();
-        let job = d.begin_job();
+        let g = d.begin_group(GroupKind::Ocr);
         let p0 = id_at(&d, 0);
-        d.commit_ops_in_job(job, fx::ocr([(p0, tl("a"))]), "ocr")
+        d.commit_ops_in_group(g, fx::ocr([(p0, tl("a"))]), "ocr")
             .unwrap();
         let v = d.current_version();
         assert!(d.versions[&parent].state.is_none(), "trimmed");
-        d.commit_ops_in_job(job, vec![fx::clear_ocr(&[p0])], "ocr")
-            .unwrap();
+        let c = d.commit_ops_in_group(g, vec![fx::clear_ocr(&[p0])], "ocr");
+        assert_eq!(c.unwrap().version, None);
         assert_eq!(d.current_version(), parent);
         assert_eq!(d.version_count(), n);
         assert!(d.jump(v).is_err());
         assert!(!d.can_redo());
-        assert!(!d.job_is_current(job));
         assert_eq!(*d.state(), want);
+        d.commit_ops_in_group(g, fx::ocr([(p0, tl("b"))]), "again")
+            .unwrap();
+        assert_eq!(d.undo_label(), Some("again"));
     }
 
-    /// An amend notes the sources its batch brings pages of with the
-    /// version it joins, and a batch that changes nothing leaves that
-    /// version as it is.
+    /// An amend notes the sources its commit brings pages of with the
+    /// version it joins (a plugin's copy of an inserted page), and a
+    /// commit that changes nothing leaves that version as it is.
     #[test]
-    fn a_job_s_amend_takes_its_sources_and_its_no_op_changes_nothing() {
+    fn a_group_s_amend_takes_its_sources_and_its_no_op_changes_nothing() {
         let mut d = doc();
-        let job = d.begin_job();
-        let ocr = |d: &mut Document, page: usize, label: &str| {
-            d.commit_ops_in_job(job, fx::ocr([(id_at(d, page), tl("a"))]), label)
-                .unwrap();
-        };
-        ocr(&mut d, 0, "ocr");
         let s = crate::store::blank(d.store(), 1);
-        d.commit_ops_in_job(job, vec![insert_of(&s, "a.pdf")], "ocr")
+        d.commit_ops(vec![insert_of(&s, "a.pdf")], "insert")
             .unwrap();
+        let inserted = id_at(&d, d.page_count() - 1);
+        let g = d.begin_group(GroupKind::PluginCall {
+            plugin: "copies".into(),
+        });
+        let (p0, p1, p2) = (id_at(&d, 0), id_at(&d, 1), id_at(&d, 2));
+        d.commit_ops_in_group(g, vec![fx::rotate(&[p0], Turn::Quarter)], "copies")
+            .unwrap();
+        let copy = Op::DuplicatePages {
+            pages: ids(&[inserted]),
+            locals: Vec::new(),
+        };
+        d.commit_ops_in_group(g, vec![copy], "other").unwrap();
         let v = d.current_version();
         assert_eq!(d.edge(v).unwrap().len(), 2);
         assert_eq!(d.versions[&v].blobs, HashSet::from([s.id()]));
-        d.commit_ops_in_job(job, Vec::new(), "other").unwrap();
+        d.commit_ops_in_group(g, vec![fx::move_pages(&[p1], Some(p2))], "other")
+            .unwrap();
         assert_eq!(d.current_version(), v);
-        assert_eq!(d.undo_label(), Some("ocr"));
+        assert_eq!(d.undo_label(), Some("copies"));
         assert_eq!(d.edge(v).unwrap().len(), 2, "no step added");
     }
 
-    /// Pruning past `MAX_VERSIONS` never takes the saved version (M10.5
-    /// §9.1): its branch stays whole, and the root doesn't move past it,
-    /// so a job's version made off it keeps its parent, and the job's next
-    /// batch amends it.
+    /// `d`'s history kept to just under what pruning can bring it to
+    /// ([`HistoryStats::untrimmable_bytes`]): a version or a few go. Then
+    /// it's kept to one snapshot, and nothing more is pruned.
+    fn squeeze(d: &mut Document) {
+        let budget = d.stats().untrimmable_bytes() - 1;
+        let policy = AllOf(vec![
+            Box::new(FixedCount(1)),
+            Box::new(MemoryBudget(budget)),
+        ]);
+        d.set_policy(Box::new(policy));
+        d.trim();
+        d.set_policy(Box::new(FixedCount(1)));
+    }
+
+    /// The saved version goes last (M10.5 §8.7): versions on other
+    /// branches go first, the saved one staying, until the first version
+    /// kept moves past where its branch turns off. Then it detaches: the
+    /// document is dirty and still knows its file, and a save's saved side
+    /// is the saved version's state and record, its path keys the slots
+    /// changed from there, through where the branches meet, to the version
+    /// saved, which are judged by value.
     #[test]
-    fn pruning_keeps_the_saved_branch_whole() {
-        let max = crate::history::MAX_VERSIONS;
-        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
-        for i in 1..max {
-            rotate(&mut d, i % 3, "rotate");
-        }
+    fn pruning_takes_the_saved_branch_last() {
+        let mut d = doc();
+        rotate(&mut d, 0, "saved");
         let saved = d.current_version();
-        d.save_input(saved).unwrap();
+        let saved_state = d.state().clone();
         d.record_save(record_for(&d, saved)).unwrap();
-        let opened = d.timeline()[0].id;
-        d.jump(opened).unwrap();
-        let job = d.begin_job();
-        let ocr = |d: &mut Document, page: usize| {
-            d.commit_ops_in_job(job, fx::ocr([(id_at(d, page), tl("a"))]), "ocr")
-                .unwrap();
-        };
-        // One version too many, and none goes.
-        ocr(&mut d, 0);
+        let record = d.saved_record().unwrap().clone();
+        d.undo().unwrap();
+        rotate(&mut d, 1, "kept");
+        let kept = d.current_version();
+        rotate(&mut d, 2, "undone");
+        let undone = d.current_version();
+        d.undo().unwrap();
+        rotate(&mut d, 0, "after");
+        // The undone version goes first; the saved one stays.
+        squeeze(&mut d);
+        assert!(!d.versions.contains_key(&undone));
+        assert_eq!(d.saved_at(), Some(saved));
+        // Nothing else off the line: the first version moves on, past
+        // where the saved version's branch turns off, and it detaches.
+        assert!(d.prune_one());
+        assert_eq!(d.root, kept);
+        assert!(!d.versions.contains_key(&saved));
+        assert!(d.saved_at().is_none() && d.is_dirty());
+        assert!(Arc::ptr_eq(d.saved_record().unwrap(), &record));
+        assert_eq!(d.file().unwrap().0, &record.path);
+        assert!(d.timeline().iter().all(|v| !v.saved));
+        let (p0, p1) = (id_at(&d, 0), id_at(&d, 1));
+        let (keys, path) = path_of(&mut d);
+        assert_eq!(keys, BTreeSet::from([Key::Geom(p0), Key::Geom(p1)]));
+        assert_eq!(path.changed, BTreeSet::from([Key::Geom(p1)]));
         let v = d.current_version();
-        assert_eq!(d.version_count(), max + 1);
-        d.jump(saved).unwrap();
-        assert!(!d.is_dirty());
-        d.jump(v).unwrap();
-        assert!(d.can_undo());
-        ocr(&mut d, 1);
-        assert_ne!(d.current_version(), v);
-        assert_eq!(d.version_count(), max + 1, "amended");
-        assert_eq!(layer_texts(&d).len(), 2);
-        assert_eq!(d.undo().unwrap(), Some("ocr"));
-        assert_eq!(d.current_version(), opened);
+        assert_eq!(d.save_input(v).unwrap().saved.unwrap().state, saved_state);
+        // The save makes the version it wrote the saved one: the anchor
+        // goes.
+        d.record_save(record_for(&d, v)).unwrap();
+        assert!(!d.is_dirty() && d.saved_at() == Some(v));
+    }
+
+    /// The first version kept keeps its steps' edits, lines and keys, but
+    /// not their prims: nothing is rebuilt into it. Its step bytes are
+    /// counted again without them, the History panel still says what it
+    /// did, and the versions after it are rebuilt from it.
+    #[test]
+    fn the_root_keeps_lines_not_prims() {
+        let mut d = doc();
+        rotate(&mut d, 0, "first");
+        let first = d.current_version();
+        let step = d.versions[&first].steps[0].clone();
+        rotate(&mut d, 1, "second");
+        rotate(&mut d, 2, "third");
+        let third = d.current_version();
+        let held = d.stats().step_bytes;
+        let opened = d.root;
+        assert!(d.prune_one());
+        assert_eq!(d.root, first);
+        assert!(!d.versions.contains_key(&opened));
+        let v = &d.versions[&first];
+        assert!(v.steps.iter().all(|s| s.prims.is_empty()));
+        assert!(Arc::ptr_eq(&v.steps[0].op, &step.op));
+        assert_eq!(v.steps[0].line, step.line);
+        assert_eq!(v.keys, step.effects.keys);
+        assert_eq!(v.step_bytes, steps_bytes(&v.steps, &v.keys));
+        assert!(d.stats().step_bytes < held);
+        let timeline = d.timeline();
+        assert_eq!(timeline[0].id, first);
+        assert_eq!(timeline[0].edits[0].text, step.line);
+        // The others replay from it.
+        d.set_policy(Box::new(FixedCount(1)));
+        d.jump(first).unwrap();
+        d.trim();
+        d.jump(third).unwrap();
+        assert_eq!(rotation(&d, 2), Rotation::R90);
+        d.undo().unwrap();
+        d.undo().unwrap();
+        assert_eq!(d.current_version(), first);
+        assert_eq!(rotation(&d, 0), Rotation::R90);
+        assert!(!d.can_undo());
+    }
+
+    /// A layer of 300 words, as a page of a scan reads, which `seed` makes
+    /// differ from others'.
+    fn words(seed: usize) -> Arc<TextLayer> {
+        let words = (0..300).map(|i| crate::text_layer::OcrWord {
+            text: format!("w{}", seed * 300 + i),
+            rect: crate::annot::Box2 {
+                x: 72.0 + 46.0 * (i % 10) as f32,
+                y: 708.0 - 20.0 * (i / 10) as f32,
+                w: 42.0,
+                h: 12.0,
+            },
+            confidence: 0.9,
+        });
+        let geom = crate::geom::Geom::read(None, None, 0);
+        let layer = crate::text_layer::from_engine(words.collect(), &geom, "test");
+        Arc::new(layer)
+    }
+
+    /// 200 OCR runs over every page, each a version, kept to a budget in
+    /// proportion to the history gate's (256 MB for 1,000 pages): after
+    /// each, what history holds fits, the first version kept moving on,
+    /// and the versions left undo, each rebuilt from the one before.
+    #[test]
+    fn two_hundred_ocr_versions_keep_to_a_budget() {
+        let pages = 10;
+        let budget = (256 << 20) / 1000 * pages;
+        let policy = AllOf(vec![
+            Box::new(FixedCount(200)),
+            Box::new(MemoryBudget(budget)),
+        ]);
+        let mut d = new_doc(pages as u32, &[], Box::new(policy));
+        let ids: Vec<PageId> = d.state().order().iter().copied().collect();
+        let opened = d.root;
+        for run in 0..200 {
+            let layers = (ids.iter().enumerate()).map(|(i, &p)| (p, words(run * pages + i)));
+            d.commit_ops(fx::ocr(layers), "OCR").unwrap();
+            let total = d.stats().total_bytes();
+            assert!(total <= budget, "run {run}: {total} bytes of history");
+        }
+        assert!(!d.versions.contains_key(&opened));
+        let kept = d.version_count();
+        assert!((2..200).contains(&kept), "{kept} versions");
+        // The first page's first word, as the run that set it named it.
+        let text = |d: &Document| {
+            let def = d.state().def(ids[0]).unwrap().clone();
+            let words = def.content.ocr_text().map(|t| t.words.clone());
+            words?.into_iter().map(|w| w.text).min()
+        };
+        assert_eq!(text(&d).as_deref(), Some("w597000"));
+        d.set_policy(Box::new(FixedCount(1)));
+        d.trim();
+        for back in 1..kept {
+            d.undo().unwrap();
+            let want = format!("w{}", (199 - back) * pages * 300);
+            assert_eq!(text(&d), Some(want), "{back} back");
+        }
+        assert!(!d.can_undo());
     }
 
     /// A save keeps the text layers the document draws: the file has
@@ -5034,6 +5921,9 @@ mod tests {
         assert_eq!(stats.blob_bytes, primary + len, "one blob");
     }
 
+    /// An undone insert of a 400-page scan holds the scan's bytes until
+    /// its branch is pruned: by bytes, at the next edit, once they're over
+    /// the budget. Nothing else goes.
     #[test]
     fn pruning_an_undone_400_page_scan_frees_its_bytes() {
         use sheaf_image::io::{PageImage, Pixels};
@@ -5054,10 +5944,14 @@ mod tests {
         assert_eq!((d.page_count(), d.store().bytes()), (403, before + len));
         d.undo().unwrap();
         assert_eq!(d.stats().undone_source_bytes, len);
-        // One edit branches off; past `MAX_VERSIONS`, the branch goes.
-        for i in 0..crate::history::MAX_VERSIONS {
-            rotate(&mut d, i % 3, "rotate");
-        }
+        let policy = AllOf(vec![
+            Box::new(FixedCount(1)),
+            Box::new(MemoryBudget(len / 2)),
+        ]);
+        d.set_policy(Box::new(policy));
+        // One edit branches off, and the branch goes.
+        rotate(&mut d, 0, "rotate");
+        assert_eq!(d.version_count(), 2);
         assert_eq!(d.store().bytes(), before, "its bytes went with it");
         assert!(d.store().get(id).is_none());
         let stats = d.stats();
@@ -5067,8 +5961,6 @@ mod tests {
     #[test]
     fn the_root_advancing_keeps_its_sources() {
         let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
-        // Nothing saved: the first version can move.
-        d.saved = None;
         let one = crate::store::blank(d.store(), 1);
         let gone = insert_all(&mut d, one);
         d.undo().unwrap();
@@ -5095,7 +5987,7 @@ mod tests {
 
     /// A record of `d`'s primary for a save of version `v`, as a Rewrite
     /// that wrote it would leave.
-    fn record_for(d: &Document, v: VersionId) -> SaveRecord {
+    pub(super) fn record_for(d: &Document, v: VersionId) -> SaveRecord {
         let stamp = FileStamp {
             len: d.primary().bytes().len() as u64,
             mtime: std::time::SystemTime::UNIX_EPOCH,
@@ -5108,47 +6000,48 @@ mod tests {
         }
     }
 
-    /// An OCR batch for page `page` of `d`, in `job`.
-    fn ocr_in(d: &mut Document, job: JobId, page: usize) {
+    /// An OCR flush for page `page` of `d`, in group `g`.
+    fn ocr_in(d: &mut Document, g: GroupId, page: usize) {
         let layers = fx::ocr([(id_at(d, page), tl("a"))]);
-        d.commit_ops_in_job(job, layers, "ocr").unwrap();
+        d.commit_ops_in_group(g, layers, "ocr").unwrap();
     }
 
-    /// A save in flight seals its version (M10.5 §9.1): the job's next
-    /// batch, as an OCR flush sends it, makes a version after it rather
+    /// A save in flight seals its version (M10.5 §9.1): the group's next
+    /// commit, as an OCR flush sends it, makes a version after it rather
     /// than amending what's being written, and that one stays dirty once
     /// the save is recorded.
     #[test]
     fn an_amend_on_a_sealed_version_makes_a_child() {
         let mut d = new_doc(3, &[], Box::new(FixedCount(10)));
-        let job = d.begin_job();
-        ocr_in(&mut d, job, 0);
+        let g = d.begin_group(GroupKind::Ocr);
+        ocr_in(&mut d, g, 0);
         let v = d.current_version();
         let input = d.save_input(v).unwrap();
         assert_eq!(input.version, v);
         assert_eq!(Some(&input.target), d.versions[&v].state.as_ref());
-        ocr_in(&mut d, job, 1);
+        ocr_in(&mut d, g, 1);
         let child = d.current_version();
         assert_ne!(child, v);
         assert_eq!(d.versions[&child].parent, Some(v));
         assert_eq!(d.edge(v).unwrap().len(), 1, "v is as it was sealed");
         d.record_save(record_for(&d, v)).unwrap();
         assert!(d.is_dirty());
-        assert_eq!(d.undo().unwrap(), Some("ocr"));
+        let undone = d.undo().unwrap().map(|c| c.label);
+        assert_eq!(undone.as_deref(), Some("ocr (continued)"));
         assert_eq!(d.current_version(), v);
         assert!(!d.is_dirty());
     }
 
     /// `record_save` and `abandon_save` each end a save: the version is
-    /// unsealed, so a job's next batch amends it again (an abandoned save
+    /// unsealed, so a group's next commit amends it again (an abandoned save
     /// leaves it unsaved). A recorded save makes it the saved version and
     /// holds its record, noted among its saves, and the version saved
     /// before keeps only its note.
     #[test]
     fn record_save_and_abandon_save_unseal() {
         let mut d = new_doc(3, &[], Box::new(FixedCount(10)));
-        let job = d.begin_job();
-        ocr_in(&mut d, job, 0);
+        let g = d.begin_group(GroupKind::Ocr);
+        ocr_in(&mut d, g, 0);
         let v = d.current_version();
         d.save_input(v).unwrap();
         d.save_input(v).unwrap();
@@ -5157,7 +6050,7 @@ mod tests {
         d.abandon_save(v);
         assert_eq!(d.versions[&v].sealed, 0);
         assert!(d.saved_record().is_none());
-        ocr_in(&mut d, job, 1);
+        ocr_in(&mut d, g, 1);
         let v = d.current_version();
         assert_eq!(d.edge(v).unwrap().len(), 2, "amended");
         d.save_input(v).unwrap();
@@ -5182,29 +6075,31 @@ mod tests {
         assert_eq!(d.versions[&v].saves.len(), 1);
     }
 
-    /// Pruning never takes a version being saved: a branch holding one
-    /// stays whole past `MAX_VERSIONS`, and the root stops short of it,
-    /// until the save ends.
+    /// Pruning never takes a version being saved, nor moves the first
+    /// version kept past where a branch holding one turns off: under a
+    /// budget nothing fits, everything stays until the save ends. Then all
+    /// but the current version go, the saved one, made in memory, with
+    /// nothing to keep of it.
     #[test]
     fn pruning_keeps_a_version_being_saved() {
-        let max = crate::history::MAX_VERSIONS;
         let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
-        // Nothing saved, so nothing else holds the root back.
-        d.saved = None;
         rotate(&mut d, 0, "rotate");
         let sealed = d.current_version();
         d.save_input(sealed).unwrap();
         d.undo().unwrap();
-        for i in 1..max {
+        for i in 1..10 {
             rotate(&mut d, i % 3, "rotate");
         }
-        assert_eq!(d.version_count(), max + 1);
-        assert!(d.versions.contains_key(&sealed));
+        let policy = AllOf(vec![Box::new(FixedCount(1)), Box::new(MemoryBudget(1))]);
+        d.set_policy(Box::new(policy));
+        d.trim();
+        assert_eq!(d.version_count(), 11);
         assert!(d.versions[&sealed].state.is_some(), "its snapshot is kept");
         d.abandon_save(sealed);
         rotate(&mut d, 1, "rotate");
-        assert_eq!(d.version_count(), max);
-        assert!(!d.versions.contains_key(&sealed));
+        assert_eq!(d.version_count(), 1);
+        assert_eq!(d.root, d.current_version());
+        assert!(d.saved.is_none() && d.is_dirty());
     }
 
     /// A file of four pages under two nodes of two, with every root
@@ -5469,16 +6364,16 @@ mod tests {
     }
 
     /// A recovery sidecar's input seals nothing: an OCR batch after it
-    /// still amends the job's version.
+    /// still amends the group's version.
     #[test]
     fn a_recovery_input_seals_nothing() {
         let mut d = new_doc(3, &[], Box::new(FixedCount(10)));
-        let job = d.begin_job();
-        ocr_in(&mut d, job, 0);
+        let g = d.begin_group(GroupKind::Ocr);
+        ocr_in(&mut d, g, 0);
         let v = d.current_version();
         assert_eq!(d.recovery_input().version, v);
         assert_eq!(d.versions[&v].sealed, 0);
-        ocr_in(&mut d, job, 1);
+        ocr_in(&mut d, g, 1);
         assert_eq!(d.edge(d.current_version()).unwrap().len(), 2, "amended");
     }
 

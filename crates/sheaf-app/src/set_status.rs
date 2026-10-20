@@ -12,7 +12,7 @@ use gpui::{
 };
 use serde::{Deserialize, Serialize};
 use sheaf_doc::tx::Reader;
-use sheaf_doc::{Annot, AnnotKind, Box2, OutlineId, TextStyle};
+use sheaf_doc::{Annot, AnnotKind, Box2, CommitOpts, OutlineId, TextStyle};
 use sheaf_edit::{AnnotRef, BookmarkPatch, BookmarkRef, Op, Patch};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
@@ -324,7 +324,9 @@ impl DocView {
             a
         });
         let label = format!("Set status {} on “{title}”", spec.name);
-        self.submit(tx, ops, &label, cx);
+        if let Some(tx) = self.lower_in(tx, ops, &label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         crate::state::update(cx, |s| s.set_status = Some(spec));
         self.wanted_panel = Some("bookmarks");
     }
@@ -351,7 +353,10 @@ impl DocView {
             return;
         };
         let ops = reset_ops(&mut tx.reader(), id, stamps);
-        self.submit(tx, ops, &format!("Reset status on “{title}”"), cx);
+        let label = format!("Reset status on “{title}”");
+        if let Some(tx) = self.lower_in(tx, ops, &label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
     }
 }
 

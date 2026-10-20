@@ -70,6 +70,8 @@ smallvec = "1"
 bitflags = "2"
 unicode-segmentation = "1"
 im = "15"
+# The document a plugin call reads, swapped in as it changes (sheaf-plugin).
+arc-swap = "1.9.2"
 regex = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"

@@ -23,7 +23,8 @@ use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::mark_changes;
 use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Blob, BlobRef, Box2, DocState, Document, FormRef, PageId, Pt,
+    Annot, AnnotId, AnnotKind, Blob, BlobRef, Box2, CommitOpts, DocState, Document, FormRef,
+    PageId, Pt,
 };
 use sheaf_edit::{AnnotRef, Delta, Op, PageSize, Rotation, Vec2};
 use sheaf_ui::theme;
@@ -928,7 +929,10 @@ impl DocView {
                     patch,
                     imported: None,
                 };
-                self.apply(op, "Resize annotation", cx);
+                let label = "Resize annotation";
+                if let Some(tx) = self.lower(vec![op], label, cx) {
+                    self.commit(tx, CommitOpts::labelled(label), cx).ok();
+                }
             }
             return;
         }
@@ -970,7 +974,9 @@ impl DocView {
                 format!("Move {n} annotations")
             };
             let to_page = None;
-            self.apply(Op::MoveMarks { marks, by, to_page }, &label, cx);
+            if let Some(tx) = self.lower(vec![Op::MoveMarks { marks, by, to_page }], &label, cx) {
+                self.commit(tx, CommitOpts::labelled(label), cx).ok();
+            }
             return;
         }
         let rect = Box2::from_corners(a, b);
@@ -1100,7 +1106,9 @@ impl DocView {
             },
             more => format!("Delete {} annotations", more.len()),
         };
-        self.apply(Op::DeleteAnnotations { annots }, &label, cx);
+        if let Some(tx) = self.lower(vec![Op::DeleteAnnotations { annots }], &label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         true
     }
 
@@ -1640,8 +1648,10 @@ impl DocView {
                 })
             })
             .collect();
-        if !ops.is_empty() {
-            self.apply_batch(ops, label, cx);
+        if !ops.is_empty()
+            && let Some(tx) = self.lower(ops, label, cx)
+        {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
         }
     }
 
@@ -1754,7 +1764,8 @@ impl DocView {
                 imported: None,
             });
         }
-        if let Some(commit) = self.submit(tx, ops, &label, cx)
+        if let Some(tx) = self.lower_in(tx, ops, &label, cx)
+            && let Ok(commit) = self.commit(tx, CommitOpts::labelled(label), cx)
             && let State::Ready(doc) = &mut self.state
         {
             doc.selected_marks = commit.created.annots().map(|id| (page, id)).collect();

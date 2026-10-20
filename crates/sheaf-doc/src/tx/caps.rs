@@ -128,7 +128,8 @@ pub fn cap_of(op: &ResolvedOp, targets: &[Target]) -> Cap {
         R::InsertPages { .. }
         | R::ReplacePages { .. }
         | R::SetOcrText { .. }
-        | R::SetPageBase { .. } => Cap::User,
+        | R::SetPageBase { .. }
+        | R::Revert { .. } => Cap::User,
     }
 }
 

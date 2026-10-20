@@ -1,6 +1,7 @@
 //! Plugin host: loads WebAssembly components that target the `plugin`
-//! world in `wit/sheaf.wit`, and runs their commands against a document
-//! snapshot. No GPUI here; the app connects results to the UI.
+//! world in `wit/sheaf.wit`, and runs their commands against the document
+//! as it is when a call first reads it. No GPUI here; the app connects
+//! results to the UI.
 //!
 //! Each plugin runs on its own thread with its own wasmtime `Store`, so a
 //! slow plugin never blocks the UI and a crash (a trap) is an error the app

@@ -9,6 +9,7 @@ use gpui::{
     Subscription, Window, div, prelude::*, px,
 };
 use sheaf_doc::stamps::{Bates, HeaderFooter, TOKENS};
+use sheaf_doc::{PageId, Snapshot};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
@@ -25,8 +26,9 @@ const COLORS: [([u8; 3], &str); 4] = [
 ];
 
 pub enum HeaderFooterEvent {
-    /// The settings, and the 0-based pages they're on (none: all).
-    Apply(Box<HeaderFooter>, Option<Vec<usize>>),
+    /// The settings, and the pages they're on (none: all) of the version
+    /// the dialog opened on ([`HeaderFooterDialog::opened`]).
+    Apply(Box<HeaderFooter>, Option<Vec<PageId>>),
     Remove,
     Dismiss,
 }
@@ -34,7 +36,9 @@ pub enum HeaderFooterEvent {
 pub struct HeaderFooterContext {
     /// What's there now, to update.
     pub current: Option<HeaderFooter>,
-    pub page_count: usize,
+    /// The document as the dialog opened on it: its pages are counted and
+    /// named by id there, and the change is made on that version.
+    pub opened: Snapshot,
     pub file: String,
     /// The current scope as a page range ("" for all pages).
     pub scope: String,
@@ -68,6 +72,12 @@ pub struct HeaderFooterDialog {
 }
 
 impl EventEmitter<HeaderFooterEvent> for HeaderFooterDialog {}
+
+impl HeaderFooterContext {
+    fn page_count(&self) -> usize {
+        self.opened.state.page_count()
+    }
+}
 
 impl Focusable for HeaderFooterDialog {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -192,7 +202,12 @@ impl HeaderFooterDialog {
     }
 
     /// The header/footer the fields describe, or what's wrong.
-    fn settings(&self, cx: &App) -> Result<(HeaderFooter, Option<Vec<usize>>), String> {
+    /// The version it opened on.
+    pub fn opened(&self) -> &Snapshot {
+        &self.ctx.opened
+    }
+
+    fn settings(&self, cx: &App) -> Result<(HeaderFooter, Option<Vec<PageId>>), String> {
         let num = |i: usize, name: &str, lo: f32, hi: f32| -> Result<f32, String> {
             let t = self.text(i, cx);
             let v: f32 = t
@@ -217,10 +232,11 @@ impl HeaderFooterDialog {
         let first = num(F_FIRST, "Start numbers at", 1.0, 1e6)? as u32;
         let pages = match self.text(F_PAGES, cx) {
             t if t.is_empty() => None,
-            t => Some(
-                sheaf_ops::pages::parse(&t, self.ctx.page_count)
-                    .map_err(|e| format!("Pages: {e}"))?,
-            ),
+            t => {
+                let indexes = sheaf_ops::pages::parse(&t, self.ctx.page_count())
+                    .map_err(|e| format!("Pages: {e}"))?;
+                Some(crate::page_insert::ids_at(&self.ctx.opened, &indexes))
+            }
         };
         let bates = if self.bates {
             let digits = num(F_DIGITS, "Digits", 1.0, 12.0)? as u8;
@@ -334,7 +350,7 @@ impl Render for HeaderFooterDialog {
             Ok((hf, _)) => {
                 let f = sheaf_doc::stamps::PageFacts {
                     index: 0,
-                    count: self.ctx.page_count,
+                    count: self.ctx.page_count(),
                     bates: hf.bates.as_ref().map(|b| b.start),
                 };
                 let size = sheaf_edit::PageSize {
@@ -392,7 +408,7 @@ impl Render for HeaderFooterDialog {
                         "Pages",
                         pair(
                             self.field(F_PAGES, 160.0),
-                            &format!("of {} (empty: all)", self.ctx.page_count),
+                            &format!("of {} (empty: all)", self.ctx.page_count()),
                         ),
                     ))
                     .child(row("Bates", bates_toggle))

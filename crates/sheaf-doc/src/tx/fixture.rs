@@ -12,10 +12,10 @@ use sheaf_edit::{
     Sibling, Turn,
 };
 
-use super::{Actor, Commit, CommitOpts, Derive, EditError, Tx};
+use super::{Actor, Commit, CommitOpts, Derive, EditError, JobKind, Tx};
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::labels::LabelSpec;
-use crate::model::{Document, JobId, OutlineId, PageId};
+use crate::model::{Document, GroupId, GroupKind, OutlineId, PageId};
 use crate::store::{BlobId, Src};
 use crate::text_layer::TextLayer;
 
@@ -24,19 +24,32 @@ impl Document {
     /// or none and why.
     pub fn commit_ops(&mut self, ops: Vec<Op>, label: &str) -> Result<Commit, EditError> {
         let tx = self.lowered(ops)?;
-        let label = Some(label.into());
-        self.commit(tx, CommitOpts { label })
+        self.commit(tx, CommitOpts::labelled(label))
     }
 
-    /// `ops` as job `job`'s next batch ([`apply_in_job`](Self::apply_in_job)).
-    pub fn commit_ops_in_job(
+    /// `ops` as group `g`'s next commit, labelled `label`, by whom the
+    /// group's kind takes commits from: the OCR job, or the plugin called
+    /// (as version 1.0). One in a group that has ended is the user's.
+    pub fn commit_ops_in_group(
         &mut self,
-        job: JobId,
+        g: GroupId,
         ops: Vec<Op>,
         label: &str,
     ) -> Result<Commit, EditError> {
-        let tx = self.lowered(ops)?;
-        self.apply_in_job(job, tx, label)
+        let actor = match self.group_kind(g) {
+            Some(GroupKind::Ocr) => Actor::Job(JobKind::Ocr),
+            Some(GroupKind::PluginCall { plugin }) => Actor::Plugin {
+                id: plugin.clone(),
+                version: "1.0".into(),
+            },
+            None => Actor::User,
+        };
+        let tx = self.lowered_as(actor, ops)?;
+        let opts = CommitOpts {
+            group: Some(g),
+            ..CommitOpts::labelled(label)
+        };
+        self.commit(tx, opts)
     }
 
     /// Each of `pages` shown from page `index` of `src`, a copy a derived
@@ -50,14 +63,18 @@ impl Document {
     ) -> Result<Commit, EditError> {
         let mut tx = self.tx(Actor::User);
         tx.set_page_base(pages, why)?;
-        let label = Some(label.into());
-        self.commit(tx, CommitOpts { label })
+        self.commit(tx, CommitOpts::labelled(label))
     }
 
     /// `ops` lowered in a transaction of the user's, what the pages they
     /// insert bring held as a caller holds it ([`hold_incoming`]).
     fn lowered(&self, ops: Vec<Op>) -> Result<Tx, EditError> {
-        let mut tx = self.tx(Actor::User);
+        self.lowered_as(Actor::User, ops)
+    }
+
+    /// [`lowered`](Self::lowered), in a transaction of `actor`'s.
+    fn lowered_as(&self, actor: Actor, ops: Vec<Op>) -> Result<Tx, EditError> {
+        let mut tx = self.tx(actor);
         hold_incoming(&mut tx, &ops);
         tx.apply_batch(ops, &NoProgress)?;
         Ok(tx)

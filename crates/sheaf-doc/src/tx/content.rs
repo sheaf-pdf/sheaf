@@ -7,7 +7,7 @@ use std::sync::Arc;
 use sheaf_edit::HeaderFooterSpec;
 
 use super::{Lower, Notice};
-use crate::model::{GenId, GenSpec, Generator, PageDef, PageId};
+use crate::model::{GenSpec, Generator, PageDef, PageId};
 use crate::prim::{Key, Val};
 use crate::stamps::HeaderFooter;
 use crate::text_layer::TextLayer;
@@ -66,10 +66,7 @@ pub(crate) fn set_header_footer(
     if hf.unencodable() {
         lw.notices.push(Notice::Unencodable);
     }
-    let id = drawn.map(|(id, _)| id).unwrap_or_else(|| {
-        let generators = lw.rec.generators();
-        GenId::draw(&mut fastrand::Rng::new(), |id| generators.contains_key(&id))
-    });
+    let id = drawn.map_or_else(|| lw.gen_id(), |(id, _)| id);
     let spec = GenSpec::HeaderFooter(Arc::new(hf));
     let g = Arc::new(Generator { id, spec });
     lw.rec.put(Key::Generator(id), Some(Val::Generator(g)));

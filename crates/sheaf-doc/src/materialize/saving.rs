@@ -18,6 +18,7 @@ use super::plan::{
 };
 use super::record::{SaveInput, SaveRecord};
 use super::removal::Mode;
+use crate::change::ChangeSet;
 use crate::model::Document;
 use crate::serialize::append::append_in_place;
 use crate::serialize::durable::{self, FileStamp, WriteError};
@@ -65,8 +66,9 @@ impl Written {
 
     /// Its version the saved one of `doc`, with its record
     /// ([`Document::record_save`]), the save noted when it wrote
-    /// ([`Document::record_unchanged`] otherwise).
-    pub fn record_in(self, doc: &mut Document) -> anyhow::Result<()> {
+    /// ([`Document::record_unchanged`] otherwise): the change, of nothing
+    /// the document shows.
+    pub fn record_in(self, doc: &mut Document) -> anyhow::Result<ChangeSet> {
         match self.wrote {
             true => doc.record_save(self.record),
             false => doc.record_unchanged(self.record),
@@ -274,7 +276,7 @@ fn saved_as(
         Ok(written) => {
             let report = written.report();
             match written.record_in(doc) {
-                Ok(()) => Ok(report),
+                Ok(_) => Ok(report),
                 Err(e) => {
                     doc.abandon_save(v);
                     Err(failed(e))

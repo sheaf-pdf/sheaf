@@ -21,7 +21,7 @@ use crate::forms::FieldId;
 use crate::model::{
     AnnotBody, AnnotRec, DocState, FieldNode, FormDoc, Generator, Mark, OutlineId, PageId,
 };
-use crate::prim::{Key, Rec, Round, Val};
+use crate::prim::{Key, Rec, Round, Val, same};
 
 /// How many rounds the cascades may take to settle.
 pub const MAX_ROUNDS: usize = 8;
@@ -129,6 +129,24 @@ pub(crate) fn settle_with(lw: &mut Lower, rules: &[Rule]) -> Result<Vec<Cascade>
     Ok(cascades
         .map(|(rule, objects)| Cascade { rule, objects })
         .collect())
+}
+
+/// A slot the cascades would change about what `rec` wrote, if there's
+/// one: what a transaction's changes, put on a version other than its own
+/// (§8.5's [`Stale::Validate`]), would need beside them there, which a
+/// commit can't add. One round tells: a round that changes nothing leaves
+/// the next nothing to do.
+///
+/// [`Stale::Validate`]: super::Stale::Validate
+pub(crate) fn unsettled(rec: &mut Rec) -> Option<Key> {
+    let wrote = rec.round();
+    let gone = Gone::of(wrote, rec);
+    for rule in Rule::ALL {
+        rule.run(rec, &gone);
+    }
+    let round = rec.round();
+    (round.keys.into_iter())
+        .find(|key| !same(round.before.get(key).as_ref(), rec.get(key).as_ref()))
 }
 
 /// `round` run on what `rec` took away, again on what that took away, and

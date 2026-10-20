@@ -4,13 +4,16 @@
 //! free, and Save writes whichever version is current. Where edits were
 //! undone and then replaced by others, the replaced ones stay, as a branch
 //! you can open and go into. A version a plugin made says so, and an
-//! edit that took content away (text, marks, pages) is badged.
+//! edit that took content away (text, marks, pages) is badged. A version
+//! of an OCR run or a plugin call offers to undo all of the run or call,
+//! its versions on either side of other edits too, in one new version.
 
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{AnyElement, App, Context, FocusHandle, Window, div, prelude::*, px};
-use sheaf_doc::{Actor, EditError, VersionId, VersionView};
+use sheaf_doc::{Actor, EditError, GroupId, VersionId, VersionView};
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::theme;
 
@@ -142,25 +145,41 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        if doc.model.current_version() == id {
+        let change = match doc.model.jump(id) {
+            Ok(Some(change)) => change,
+            // It's the current version.
+            Ok(None) => return,
+            Err(e) => {
+                doc.notice = Some(format!("Can't go there: {e:#}"));
+                self.refresh_history();
+                cx.notify();
+                return;
+            }
+        };
+        doc.notice = Some(format!("Went to: {}", change.label));
+        self.on_change(&change, cx);
+    }
+
+    /// "Undo all of `label`": group `g`'s versions up to the current one
+    /// taken back in a version after it, keeping the edits made between
+    /// them; or why not, when a later edit changed what they did.
+    pub(crate) fn undo_group(&mut self, g: GroupId, label: Arc<str>, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
             return;
+        };
+        match doc.model.revert_group(g, &label) {
+            Ok(c) => {
+                doc.notice = Some(match c.version {
+                    Some(_) => format!("Undid all of {label}"),
+                    None => format!("Nothing of {label} to undo"),
+                });
+                self.on_change(&c.change, cx);
+            }
+            Err(e) => {
+                doc.notice = Some(format!("Can't undo all of {label}: {e}"));
+                cx.notify();
+            }
         }
-        if let Err(e) = doc.model.jump(id) {
-            doc.notice = Some(format!("Can't go there: {e:#}"));
-            self.refresh_history();
-            cx.notify();
-            return;
-        }
-        let label = doc
-            .model
-            .timeline()
-            .into_iter()
-            .find(|v| v.id == id)
-            .map(|v| v.label)
-            .unwrap_or_default();
-        doc.notice = Some(format!("Went to: {label}"));
-        doc.touched();
-        self.after_model_change(format!("Go to: {label}"), cx);
     }
 
     /// Up and Down: the version before or after the current one, along the
@@ -186,7 +205,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return Rc::new(Vec::new());
         };
-        let key = (doc.version, doc.model.is_dirty());
+        let key = (doc.changes, doc.model.is_dirty());
         let h = self.history.as_mut().expect("ensured");
         if let Some((k, rows)) = &h.cache
             && *k == key
@@ -296,6 +315,7 @@ impl DocView {
                         format!("{by} · {}", fmt_local(&view.at))
                     };
                     let removes = view.edits.iter().any(|e| e.removes);
+                    let undo_all = (view.group.clone()).filter(|_| !view.undone && !view.damaged);
                     let text = if view.current {
                         theme::TEXT_BRIGHT
                     } else if view.undone {
@@ -346,16 +366,40 @@ impl DocView {
                                 )
                                 .child(
                                     div()
+                                        .flex()
+                                        .gap_2()
                                         .text_xs()
-                                        .text_color(if view.damaged {
-                                            theme::ERROR
-                                        } else {
-                                            theme::TEXT_MUTED
-                                        })
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .child(meta),
+                                        .child(
+                                            div()
+                                                .min_w(px(0.0))
+                                                .text_color(if view.damaged {
+                                                    theme::ERROR
+                                                } else {
+                                                    theme::TEXT_MUTED
+                                                })
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .child(meta),
+                                        )
+                                        .when_some(undo_all, |d, (g, label)| {
+                                            d.child(
+                                                div()
+                                                    .id(("history-undo-all", i))
+                                                    .min_w(px(0.0))
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .text_color(theme::LINK)
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.underline())
+                                                    .child(format!("Undo all of {label}"))
+                                                    .on_click(cx.listener(move |v, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        v.undo_group(g, label.clone(), cx);
+                                                    })),
+                                            )
+                                        }),
                                 ),
                         )
                         .when(removes, |d| d.child(removes_badge()))

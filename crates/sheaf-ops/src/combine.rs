@@ -233,8 +233,7 @@ pub fn build(
         progress.set(n as u64 + 1);
     }
     let (mut doc, tx) = doc.expect("at least one item");
-    let label = Some("Combine".into());
-    let mut notices = doc.commit(tx, CommitOpts { label })?.notices;
+    let mut notices = doc.commit(tx, CommitOpts::labelled("Combine"))?.notices;
     // Told as one: the forms renamed, then the signatures that don't hold,
     // then the rest.
     notices.sort_by_key(|n| match n {

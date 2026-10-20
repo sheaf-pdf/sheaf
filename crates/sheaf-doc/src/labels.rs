@@ -50,15 +50,16 @@ pub fn label_ranges<P: Objects + ?Sized>(pdf: &P) -> Option<Vec<LabelRange>> {
 /// Labels for `page_count` pages. Pages before the first range (a
 /// malformed tree) get plain numbers.
 pub fn labels_for(ranges: &[LabelRange], page_count: u32) -> Vec<String> {
-    (0..page_count)
-        .map(|p| {
-            let at = ranges.partition_point(|r| r.start <= p);
-            match at.checked_sub(1).map(|i| &ranges[i]) {
-                Some(r) => format_label(r, p - r.start),
-                None => (p + 1).to_string(),
-            }
-        })
-        .collect()
+    (0..page_count).map(|p| label_at(ranges, p)).collect()
+}
+
+/// The label of the page at position `p`, as [`labels_for`] gives it.
+pub fn label_at(ranges: &[LabelRange], p: u32) -> String {
+    let at = ranges.partition_point(|r| r.start <= p);
+    match at.checked_sub(1).map(|i| &ranges[i]) {
+        Some(r) => format_label(r, p - r.start),
+        None => (p + 1).to_string(),
+    }
 }
 
 /// A label range anchored to the page it starts at, as the model keeps

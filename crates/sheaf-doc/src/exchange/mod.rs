@@ -10,7 +10,7 @@
 pub mod fdf;
 pub mod xfdf;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
@@ -22,6 +22,7 @@ use crate::attachments::Objects;
 use crate::file::thread_name;
 use crate::import::{Interned, NotAMark, Options};
 use crate::model::{DocState, FormRef, PageId, Snapshot};
+use crate::prim::Key;
 use crate::store::{Blob, BlobId, BlobKind, Src, Store};
 use crate::tx::{Grant, Tx};
 
@@ -142,6 +143,12 @@ pub struct Imported {
     /// The stamp pages and files the ops' marks hold, by the names the
     /// ops give them ([`BlobSel::With`]), for the caller to grant.
     pub grants: Vec<(String, Grant)>,
+    /// What the ops were decided by, for the caller to read in its
+    /// transaction ([`Tx::read`]): the order, which numbers the pages; the
+    /// turn and the comments of each page comments came onto, which say
+    /// how they read and what's there by their names already; and each
+    /// comment updated.
+    pub reads: BTreeSet<Key>,
     /// New comments.
     pub added: usize,
     /// Comments already here (by `/NM`) brought up to date.
@@ -186,8 +193,13 @@ impl Imported {
     }
 
     /// Its ops, with what they hold in `tx`: the blobs interned for them
-    /// pinned, and the stamp pages and files they name granted.
+    /// pinned, the stamp pages and files they name granted, and what they
+    /// were decided by read, so they land on a later version only where
+    /// that's as it was.
     pub fn ops_in(self, tx: &mut Tx) -> Vec<Op> {
+        for key in self.reads {
+            tx.read(key);
+        }
         for blob in self.held {
             tx.pin(blob);
         }
@@ -246,12 +258,15 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
             .page_at(page as usize)
             .and_then(|id| Some((id, st.geom(id)?.rotate)))
         else {
+            out.reads.insert(Key::Order);
             out.off_the_end += dicts
                 .iter()
                 .filter(|d| crate::import::subtype(d) != "Popup")
                 .count();
             continue;
         };
+        out.reads
+            .extend([Key::Order, Key::Geom(id), Key::PageAnnots(id)]);
         let files = Options {
             files: Some(&interned),
         };
@@ -299,6 +314,7 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
             let imported = Some(imported(&a));
             match brought {
                 Brought::Ours(at, mark) => {
+                    out.reads.extend([Key::PageAnnots(at), Key::Annot(mark)]);
                     out.ops.push(Op::PatchMarks {
                         marks: vec![named(st, at, mark, &a.name)],
                         patch: crate::tx::mark_patch(&a),
@@ -307,6 +323,7 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
                     out.updated += 1;
                 }
                 Brought::Theirs(t) => {
+                    out.reads.insert(Key::Annot(t));
                     let them = named(st, id, t, &a.name);
                     out.ops.push(Op::AdoptAnnotations {
                         annots: vec![them.clone()],

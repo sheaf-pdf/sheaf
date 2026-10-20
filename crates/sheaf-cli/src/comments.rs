@@ -324,8 +324,7 @@ fn import(a: ImportArgs) -> anyhow::Result<()> {
         let ops = got.ops_in(&mut tx);
         if !ops.is_empty() {
             tx.apply_batch(ops, &sheaf_ops::NoProgress)?;
-            let label = Some("Import comments".into());
-            doc.commit(tx, CommitOpts { label })?;
+            doc.commit(tx, CommitOpts::labelled("Import comments"))?;
         }
     }
     // It asks nothing: a save the file's signatures allow keeps them (an

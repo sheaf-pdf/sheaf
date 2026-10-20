@@ -126,6 +126,7 @@ pub fn describe(op: &ResolvedOp, before: &DocState) -> String {
             let ids: Vec<PageId> = list.iter().map(|&(id, ..)| id).collect();
             derived(*why, &pages(&ids))
         }
+        R::Revert { label } => format!("Undo all of {label}"),
     }
 }
 
@@ -196,6 +197,8 @@ fn run_line(run: &[Step]) -> String {
         R::SetPageLabels { .. } | R::SetHeaderFooter { .. } | R::RemoveHeaderFooter { .. } => {
             run[n - 1].line.clone()
         }
+        // A version's only step.
+        R::Revert { .. } => run[0].line.clone(),
     }
 }
 

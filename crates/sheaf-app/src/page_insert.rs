@@ -1,16 +1,41 @@
-//! Document > Insert Pages > Blank Pages… and From Images…, and Replace
-//! Pages…: pages with no file of their own become PDFs in the generated-
-//! file cache (`sheaf_doc::generated`), then go in like any inserted file.
+//! Edits planned off the UI thread (M10.5 §14.1), each a planner
+//! (jobs.rs):
+//! - **Inserts:** Document > Insert Pages (a PDF's, Blank Pages… and From
+//!   Images…) and Replace Pages…. Off the UI thread the file is read into
+//!   the document's store, what lowering reads of it is read, the engine
+//!   is opened on it, and the op is lowered on a snapshot ([`plan_insert`],
+//!   [`plan_replace`]); on the UI thread it lands ([`DocView::land`]),
+//!   lowered again on the current version if the document has moved on
+//!   (`Stale::Relower`). Pages with no file of their own become PDFs in the
+//!   generated-file cache (`sheaf_doc::generated`) first.
+//! - **Derived pages:** Crop Pages, Watermark / Background and Header &
+//!   Footer show pages from copies made of them off the UI thread, over
+//!   the version their dialog opened on, and commit on that version
+//!   (`Stale::Validate`): an edit since to what they changed is a conflict,
+//!   and nothing changes. Their dialogs show no preview of the document
+//!   until M10.5 slice 13's rendered previews.
+//! - **Page Labels**, from its dialog, commits on the version the dialog
+//!   opened on in the same way.
 
-use std::path::PathBuf;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::Context;
 use sheaf_doc::images::PageFit;
-use sheaf_doc::{Actor, Derive, JobKind, PageId, Src};
+use sheaf_doc::labels::Style;
+use sheaf_doc::tx::LowerCx;
+use sheaf_doc::{
+    Actor, Commit, CommitOpts, Derive, DocState, Document, JobKind, PageId, Snapshot, Src, Stale,
+    Store, Tx, VersionId,
+};
 use sheaf_edit::{
-    BlobSel, Bring, Op, PageLabelRange, PageRef, PageSel, PageSize, PageSource, RangeSet, ScopeSel,
+    BlobSel, Bring, FormBring, Op, OutlineBring, PageLabelRange, PageRef, PageSel, PageSize,
+    PageSource, RangeSet, ScopeSel,
 };
 use sheaf_ops::derive::DerivedSource;
+use sheaf_ops::{Progress, Tracker};
 use sheaf_render::RenderHandle;
 
 use crate::docview::{DocView, State, failed};
@@ -44,6 +69,127 @@ pub const LEGAL: PageSize = PageSize {
     height: 1008.0,
 };
 
+/// Pages to come in from a file, planned off the UI thread on a snapshot
+/// ([`plan_insert`], [`plan_replace`]), for [`DocView::land`] to commit.
+pub(crate) struct PlannedInsert {
+    /// The file, a source in the document's store.
+    src: Src,
+    /// The engine opened on it, to draw its pages.
+    handle: RenderHandle,
+    /// The op that brings them, lowered on the snapshot, holding what
+    /// their marks hold until it's committed.
+    tx: Tx,
+    /// The snapshot's version.
+    on: VersionId,
+}
+
+#[cfg(test)]
+impl PlannedInsert {
+    pub(crate) fn src(&self) -> &Src {
+        &self.src
+    }
+
+    /// What its op made, as lowered on the snapshot.
+    pub(crate) fn created(&self) -> sheaf_doc::tx::Created {
+        self.tx.preview().created
+    }
+}
+
+/// Pages `pages` (None: all) of the file at `path` ready to come into the
+/// document `snap` is of: the file read into `store`, a transaction on
+/// `snap` lowering with `cx` holding what their marks hold, what lowering
+/// reads of them read, and the engine opened on the file.
+fn bring_in(
+    snap: &Snapshot,
+    store: &Store,
+    cx: Arc<LowerCx>,
+    path: &Path,
+    pages: Option<Range<u32>>,
+) -> anyhow::Result<(Src, RenderHandle, Tx)> {
+    let (src, _) = store.read_file(path, None)?;
+    let pages: Vec<u32> = pages.unwrap_or(0..src.page_count()).collect();
+    let mut tx = Document::tx_at(snap, cx);
+    for blob in sheaf_doc::tx::ready_to_insert(store, &snap.primary, &src, &pages) {
+        tx.pin(blob);
+    }
+    tx.pin(src.blob().clone());
+    let handle = RenderHandle::open_bytes(src.bytes().clone(), None)?;
+    Ok((src, handle, tx))
+}
+
+/// Every page of the file at `path` inserted before `before` (None: at the
+/// end) of the document `snap` is of, planned off the UI thread
+/// ([`bring_in`]), as `cx` lowers it: with its bookmarks merged by title,
+/// and its marks and form brought, when `bookmarks`; pages sheaf made
+/// (blank, images) bring nothing more.
+pub(crate) fn plan_insert(
+    snap: &Snapshot,
+    store: &Store,
+    cx: Arc<LowerCx>,
+    path: &Path,
+    before: Option<PageId>,
+    bookmarks: bool,
+    p: &dyn Progress,
+) -> anyhow::Result<PlannedInsert> {
+    let (src, handle, mut tx) = bring_in(snap, store, cx, path, None)?;
+    let bring = Bring {
+        marks: bookmarks,
+        form: FormBring::New,
+        outline: match bookmarks {
+            true => OutlineBring::MergeByTitle,
+            false => OutlineBring::None,
+        },
+    };
+    let insert = Op::InsertPages {
+        from: PageSource::File {
+            file: BlobSel::Id(src.id()),
+            name: sheaf_doc::store::file_name(path).to_string(),
+        },
+        pages: None,
+        before: before.map(PageRef::Id),
+        bring,
+        locals: Vec::new(),
+    };
+    tx.apply(insert, p)?;
+    Ok(PlannedInsert {
+        src,
+        handle,
+        tx,
+        on: snap.version,
+    })
+}
+
+/// Pages `pages` replaced with pages `range` (0-based) of the file at
+/// `path`, planned off the UI thread ([`bring_in`]), as `cx` lowers it.
+fn plan_replace(
+    snap: &Snapshot,
+    store: &Store,
+    cx: Arc<LowerCx>,
+    path: &Path,
+    pages: Vec<PageId>,
+    range: Range<u32>,
+    p: &dyn Progress,
+) -> anyhow::Result<PlannedInsert> {
+    let with = RangeSet::from_runs(std::iter::once(range.start + 1..=range.end))?;
+    let (src, handle, mut tx) = bring_in(snap, store, cx, path, Some(range))?;
+    let replace = Op::ReplacePages {
+        pages: pages.into_iter().map(PageRef::Id).collect(),
+        from: PageSource::File {
+            file: BlobSel::Id(src.id()),
+            name: sheaf_doc::store::file_name(path).to_string(),
+        },
+        with: Some(with),
+        bring: Bring::default(),
+    };
+    tx.apply(replace, p)?;
+    Ok(PlannedInsert {
+        src,
+        handle,
+        tx,
+        on: snap.version,
+    })
+}
+
 impl DocView {
     /// The page inserted pages go before, for `at` (None: the end).
     pub(crate) fn before_for(&self, at: Where) -> Option<PageId> {
@@ -75,6 +221,117 @@ impl DocView {
         }
     }
 
+    /// `plan` committed as one version called `label`: on the version
+    /// it was planned on, its op lowered again on the current one if the
+    /// document has moved on since, keeping the ids it made (§8.5). The
+    /// commit, or None when it failed, which the notice says. Only then is
+    /// the engine opened on the file kept, and PDFium stops drawing the
+    /// marks sheaf now draws.
+    pub(crate) fn land(
+        &mut self,
+        plan: PlannedInsert,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Commit> {
+        let PlannedInsert {
+            src,
+            handle,
+            tx,
+            on,
+        } = plan;
+        let commit = self
+            .commit(tx, CommitOpts::based(on, Stale::Relower, label), cx)
+            .ok()?;
+        let State::Ready(doc) = &mut self.state else {
+            return None;
+        };
+        doc.handles.entry(src.id()).or_insert(handle);
+        doc.take_in(&src);
+        Some(commit)
+    }
+
+    /// Insert every page of `path` before `before` (None: at the end), as
+    /// one undo step labelled "Insert `name`", with its bookmarks merged
+    /// when `bookmarks`.
+    pub(crate) fn insert_file(
+        &mut self,
+        path: PathBuf,
+        before: Option<PageId>,
+        name: String,
+        bookmarks: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.insert_made(name, before, bookmarks, move || Ok(path), cx);
+    }
+
+    /// [`insert_file`](Self::insert_file) of the file `make` makes, off
+    /// the UI thread.
+    fn insert_made(
+        &mut self,
+        name: String,
+        before: Option<PageId>,
+        bookmarks: bool,
+        make: impl FnOnce() -> anyhow::Result<PathBuf> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.still_opening(cx) {
+            return;
+        }
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let snap = doc.model.snapshot();
+        let store = doc.model.store().clone();
+        let lower = doc.model.lower_cx(Actor::Job(JobKind::Insert));
+        let label = format!("Insert {name}");
+        let (timing, t) = (self.timing, Instant::now());
+        let work = move |p: &Tracker| {
+            let path = make()?;
+            plan_insert(&snap, &store, lower, &path, before, bookmarks, p)
+        };
+        let land = {
+            let label = label.clone();
+            move |v: &mut DocView, plan: PlannedInsert, cx: &mut Context<DocView>| {
+                let State::Ready(doc) = &v.state else {
+                    return None;
+                };
+                let had = doc.model.state().bookmark_count();
+                let page_count = plan.src.page_count();
+                let commit = v.land(plan, &label, cx)?;
+                let State::Ready(doc) = &v.state else {
+                    return None;
+                };
+                let added = commit.created.pages().count();
+                let merged = doc.model.state().bookmark_count().saturating_sub(had);
+                let mut notice = if !bookmarks {
+                    // Pages sheaf made (blank, images): name says it all.
+                    format!("Inserted {name}")
+                } else {
+                    format!(
+                        "Inserted {added} page{} from {name}{}",
+                        if added == 1 { "" } else { "s" },
+                        match merged {
+                            0 => String::new(),
+                            1 => "; 1 bookmark merged".into(),
+                            n => format!("; {n} bookmarks merged"),
+                        }
+                    )
+                };
+                if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+                    notice = format!("{notice}. {told}");
+                }
+                if timing {
+                    eprintln!(
+                        "[timing] inserted {name} ({page_count} pages) in {:?}",
+                        t.elapsed()
+                    );
+                }
+                Some(notice)
+            }
+        };
+        self.run_planner(&label, work, |_| None, land, cx);
+    }
+
     pub(crate) fn insert_blank(
         &mut self,
         count: usize,
@@ -83,20 +340,17 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let s = self.size_of(size);
-        let made = sheaf_doc::generated::blank_pages(s.width, s.height, count)
-            .and_then(|pdf| sheaf_doc::generated::store(&pdf));
-        match made {
-            Ok(path) => {
-                let before = self.before_for(at);
-                let name = if count == 1 {
-                    "blank page".to_string()
-                } else {
-                    format!("{count} blank pages")
-                };
-                self.insert_file(path, before, name, false, cx);
-            }
-            Err(e) => self.set_notice(format!("Insert failed: {e:#}"), cx),
-        }
+        let before = self.before_for(at);
+        let name = if count == 1 {
+            "blank page".to_string()
+        } else {
+            format!("{count} blank pages")
+        };
+        let make = move || {
+            let pdf = sheaf_doc::generated::blank_pages(s.width, s.height, count)?;
+            sheaf_doc::generated::store(&pdf)
+        };
+        self.insert_made(name, before, false, make, cx);
     }
 
     /// Images as pages, fitted to `size` (None: each image's own size).
@@ -107,9 +361,6 @@ impl DocView {
         at: Where,
         cx: &mut Context<Self>,
     ) {
-        if self.still_opening(cx) {
-            return;
-        }
         let fit = match size.map(|s| self.size_of(s)) {
             Some(s) => PageFit::Paper {
                 width: s.width.min(s.height),
@@ -126,22 +377,11 @@ impl DocView {
                 .unwrap_or_default(),
             many => format!("{} images", many.len()),
         };
-        self.set_notice(format!("Reading {name}…"), cx);
-        cx.spawn(async move |this, cx| {
-            let made = cx
-                .background_executor()
-                .spawn(async move {
-                    let pdf = sheaf_doc::images::files_to_pdf(&files, fit)?;
-                    sheaf_doc::generated::store(&pdf)
-                })
-                .await;
-            this.update(cx, |v, cx| match made {
-                Ok(path) => v.insert_file(path, before, name, false, cx),
-                Err(e) => v.set_notice(format!("Insert failed: {e:#}"), cx),
-            })
-            .ok();
-        })
-        .detach();
+        let make = move || {
+            let pdf = sheaf_doc::images::files_to_pdf(&files, fit)?;
+            sheaf_doc::generated::store(&pdf)
+        };
+        self.insert_made(name, before, false, make, cx);
     }
 
     /// Replace `ids` with pages `range` (0-based) of the PDF at `path`, as
@@ -151,122 +391,106 @@ impl DocView {
         &mut self,
         path: PathBuf,
         ids: Vec<PageId>,
-        range: std::ops::Range<u32>,
+        range: Range<u32>,
         cx: &mut Context<Self>,
     ) {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
         if self.still_opening(cx) {
             return;
         }
-        let Ok(with) = RangeSet::from_runs(std::iter::once(range.start + 1..=range.end)) else {
+        if range.is_empty() {
             return self.set_notice("Replace failed: no pages to replace with", cx);
-        };
+        }
         let State::Ready(doc) = &self.state else {
             return;
         };
+        let snap = doc.model.snapshot();
         let store = doc.model.store().clone();
-        let primary = doc.model.primary().clone();
-        let pages: Vec<u32> = range.clone().collect();
-        self.set_notice(format!("Replacing pages from {name}…"), cx);
-        cx.spawn(async move |this, cx| {
-            let opened = cx
-                .background_executor()
-                .spawn(async move {
-                    let (src, _) = store.read_file(&path, None)?;
-                    // What lowering reads of it, read here; what its marks
-                    // hold, held until the replace is committed.
-                    let held = sheaf_doc::tx::ready_to_insert(&store, &primary, &src, &pages);
-                    let handle = RenderHandle::open_bytes(src.bytes().clone(), None)?;
-                    anyhow::Ok((src, handle, held))
-                })
-                .await;
-            this.update(cx, |v, cx| {
-                let (src, handle, held) = match opened {
-                    Ok(h) => h,
-                    Err(e) => {
-                        v.set_notice(format!("Replace failed: {e:#}"), cx);
-                        return;
-                    }
-                };
-                // A recovery may have reopened the view meanwhile: a document
-                // still opening takes nothing in.
-                if v.still_opening(cx) {
-                    return;
-                }
-                let State::Ready(doc) = &mut v.state else {
-                    return;
-                };
-                doc.handles.entry(src.id()).or_insert(handle);
-                let mut tx = doc.model.tx(Actor::Job(JobKind::Insert));
-                for blob in held {
-                    tx.pin(blob);
-                }
-                tx.pin(src.blob().clone());
-                let n = ids.len();
-                let label = format!("Replace {n} page{}", if n == 1 { "" } else { "s" });
-                let replace = Op::ReplacePages {
-                    pages: ids.into_iter().map(PageRef::Id).collect(),
-                    from: PageSource::File {
-                        file: BlobSel::Id(src.id()),
-                        name: name.clone(),
-                    },
-                    with: Some(with),
-                    bring: Bring::default(),
-                };
-                let Some(commit) = v.submit(tx, vec![replace], &label, cx) else {
-                    return;
-                };
-                if let State::Ready(doc) = &mut v.state {
-                    doc.take_in(&src);
-                }
+        let lower = doc.model.lower_cx(Actor::Job(JobKind::Insert));
+        let (n, with) = (ids.len(), range.len());
+        let label = format!("Replace {n} page{}", if n == 1 { "" } else { "s" });
+        let name = sheaf_doc::store::file_name(&path);
+        let work = move |p: &Tracker| plan_replace(&snap, &store, lower, &path, ids, range, p);
+        let land = {
+            let label = label.clone();
+            move |v: &mut DocView, plan: PlannedInsert, cx: &mut Context<DocView>| {
+                let commit = v.land(plan, &label, cx)?;
                 let mut notice = format!(
-                    "Replaced {n} page{} with {} from {name}",
+                    "Replaced {n} page{} with {with} from {name}",
                     if n == 1 { "" } else { "s" },
-                    range.len()
                 );
                 if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
                     notice = format!("{notice}. {told}");
                 }
-                v.set_notice(notice, cx);
-            })
-            .ok();
-        })
-        .detach();
+                Some(notice)
+            }
+        };
+        self.run_planner(&label, work, |_| None, land, cx);
     }
+}
 
-    /// Each page of `copies` shown from the copy a derived flow made of it,
-    /// as `why` says, as one version called `label`, the copies noted with
-    /// the document and opened to draw: what the commit did, or None when
-    /// it failed, which the notice says. `then` follows in the same
-    /// version.
-    fn rebase(
+/// The pages at these 0-based indexes of `snap`, a dialog's version.
+pub(crate) fn ids_at(snap: &Snapshot, indexes: &[usize]) -> Vec<PageId> {
+    (indexes.iter())
+        .filter_map(|&i| snap.state.page_at(i))
+        .collect()
+}
+
+/// The copies a derived flow made, each with the engine opened on it to
+/// draw its pages.
+type Copies = Vec<(DerivedSource, RenderHandle)>;
+
+/// Each of `copies` with the engine opened on it: off the UI thread.
+fn with_engines(copies: Vec<DerivedSource>) -> anyhow::Result<Copies> {
+    (copies.into_iter())
+        .map(|c| {
+            let handle = RenderHandle::open_bytes(c.src.bytes().clone(), None)?;
+            Ok((c, handle))
+        })
+        .collect()
+}
+
+impl DocView {
+    /// `tx` with each page of `copies` shown from the copy a derived flow
+    /// made of it, as `why` says, for a version called `label`: None when
+    /// that failed, which the notice says.
+    fn show_copies(
         &mut self,
-        copies: Vec<(DerivedSource, RenderHandle)>,
+        mut tx: Tx,
+        copies: &[(DerivedSource, RenderHandle)],
         why: Derive,
-        then: Vec<Op>,
         label: &str,
         cx: &mut Context<Self>,
-    ) -> Option<sheaf_doc::Commit> {
-        let State::Ready(doc) = &mut self.state else {
-            return None;
-        };
-        let mut pages: Vec<(PageId, Src, u32)> = Vec::new();
-        for (c, handle) in copies {
-            c.note(&mut doc.model);
-            doc.handles.insert(c.src.id(), handle);
-            pages.extend(c.bases());
-        }
-        let mut tx = doc.model.tx(Actor::User);
+    ) -> Option<Tx> {
+        let pages: Vec<(PageId, Src, u32)> = copies.iter().flat_map(|(c, _)| c.bases()).collect();
         if !pages.is_empty()
             && let Err(e) = tx.set_page_base(pages, why)
         {
             self.set_notice(failed(label, &e), cx);
             return None;
         }
-        self.submit(tx, then, label, cx)
+        Some(tx)
+    }
+
+    /// The copies a committed derived flow shows pages from: noted with
+    /// the document, so a save writes their pages as the ones they were
+    /// made of, and opened to draw.
+    fn keep_copies(&mut self, copies: Copies) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        for (c, handle) in copies {
+            c.note(&mut doc.model);
+            doc.handles.insert(c.src.id(), handle);
+        }
+    }
+
+    /// A transaction of the user's on `snap`'s version: None while no
+    /// document is open.
+    fn user_tx_at(&self, snap: &Snapshot) -> Option<Tx> {
+        match &self.state {
+            State::Ready(doc) => Some(Document::tx_at(snap, doc.model.lower_cx(Actor::User))),
+            _ => None,
+        }
     }
 }
 
@@ -295,67 +519,42 @@ impl DocView {
 }
 
 impl DocView {
-    /// Document > Crop Pages: plan in the background (cropped copies are
-    /// made in memory, into the document's store), then show the pages
-    /// from them as one step.
+    /// Document > Crop Pages: pages `ids` of `opened`, the version the
+    /// dialog opened on, cropped as `spec` says. Cropped copies are made
+    /// off the UI thread, in memory, into the document's store; the pages
+    /// are then shown from them, as one step on `opened`.
     pub(crate) fn crop_pages(
         &mut self,
-        pages: Vec<usize>,
+        opened: Snapshot,
+        ids: Vec<PageId>,
         spec: sheaf_ops::crop::CropSpec,
         cx: &mut Context<Self>,
     ) {
-        let ids = self.page_ids_at(&pages);
         let State::Ready(doc) = &self.state else {
             return;
         };
         if ids.is_empty() {
             return;
         }
-        let snapshot = doc.model.snapshot();
         let store = doc.model.store().clone();
         let n = ids.len();
-        self.set_notice(
-            format!("Cropping {n} page{}…", if n == 1 { "" } else { "s" }),
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            let planned = cx
-                .background_executor()
-                .spawn(async move {
-                    let plan = sheaf_ops::crop::plan(
-                        &store,
-                        &snapshot,
-                        &ids,
-                        spec,
-                        &sheaf_ops::NoProgress,
-                    )?;
-                    let mut opened = Vec::new();
-                    for c in plan {
-                        let handle = RenderHandle::open_bytes(c.src.bytes().clone(), None)?;
-                        opened.push((c, handle));
-                    }
-                    anyhow::Ok(opened)
-                })
-                .await;
-            this.update(cx, |v, cx| {
-                let opened = match planned {
-                    Ok(o) => o,
-                    Err(e) => {
-                        v.set_notice(format!("Crop failed: {e:#}"), cx);
-                        return;
-                    }
-                };
-                let label = format!("Crop {n} page{}", if n == 1 { "" } else { "s" });
-                if v.rebase(opened, Derive::Crop, Vec::new(), &label, cx)
-                    .is_some()
-                {
-                    let cropped = format!("Cropped {n} page{}", if n == 1 { "" } else { "s" });
-                    v.set_notice(cropped, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        let label = format!("Crop {n} page{}", if n == 1 { "" } else { "s" });
+        let work = {
+            let opened = opened.clone();
+            move |p: &Tracker| with_engines(sheaf_ops::crop::plan(&store, &opened, &ids, spec, p)?)
+        };
+        let land = {
+            let label = label.clone();
+            move |v: &mut DocView, copies: Copies, cx: &mut Context<DocView>| {
+                let tx = v.user_tx_at(&opened)?;
+                let tx = v.show_copies(tx, &copies, Derive::Crop, &label, cx)?;
+                let opts = CommitOpts::based(opened.version, Stale::Validate, label.as_str());
+                v.commit(tx, opts, cx).ok()?;
+                v.keep_copies(copies);
+                Some(format!("Cropped {n} page{}", if n == 1 { "" } else { "s" }))
+            }
+        };
+        self.run_planner(&label, work, |_| None, land, cx);
     }
 }
 
@@ -369,128 +568,114 @@ impl DocView {
     }
 }
 
-impl DocView {
-    /// Document > Page Labels: number pages `from..=to` with `style`,
-    /// keeping the numbering after them; or remove every label.
-    pub(crate) fn set_page_labels(
-        &mut self,
-        change: Option<(usize, usize, sheaf_doc::labels::Style, String, u32)>,
-        cx: &mut Context<Self>,
-    ) {
-        use sheaf_doc::labels;
-        let State::Ready(doc) = &mut self.state else {
-            return;
-        };
-        let st = doc.model.state();
-        let ids: Vec<PageId> = st.order().iter().copied().collect();
-        let (specs, label) = match change {
-            None => (Vec::new(), "Remove page labels"),
-            Some((from, to, style, prefix, first)) => {
-                let current = st.label_ranges().unwrap_or_default();
-                let ranges = labels::apply(
-                    &current,
-                    ids.len() as u32,
-                    from as u32,
-                    to as u32,
-                    style,
-                    &prefix,
-                    first,
-                );
-                (labels::to_specs(&ranges, &ids), "Page labels")
-            }
-        };
-        let range = |r: labels::LabelSpec| PageLabelRange {
-            start: r.start.into(),
-            style: r.style,
-            prefix: r.prefix,
-            first: r.first,
-        };
-        let ranges = (!specs.is_empty()).then(|| specs.into_iter().map(range).collect());
-        self.apply(Op::SetPageLabels { ranges }, label, cx);
-    }
+/// The op that numbers pages `from..=to` (0-based) of `st` with `style`,
+/// `prefix` and its first number, keeping the numbering after them, or,
+/// with `change` None, removes every label; and what undo calls it. Its
+/// ranges name the pages they start at by id, as `st` has them.
+pub(crate) fn labels_op(
+    st: &DocState,
+    change: Option<(usize, usize, Style, String, u32)>,
+) -> (Op, &'static str) {
+    use sheaf_doc::labels;
+    let ids: Vec<PageId> = st.order().iter().copied().collect();
+    let (specs, label) = match change {
+        None => (Vec::new(), "Remove page labels"),
+        Some((from, to, style, prefix, first)) => {
+            let current = st.label_ranges().unwrap_or_default();
+            let ranges = labels::apply(
+                &current,
+                ids.len() as u32,
+                from as u32,
+                to as u32,
+                style,
+                &prefix,
+                first,
+            );
+            (labels::to_specs(&ranges, &ids), "Page labels")
+        }
+    };
+    let range = |r: labels::LabelSpec| PageLabelRange {
+        start: r.start.into(),
+        style: r.style,
+        prefix: r.prefix,
+        first: r.first,
+    };
+    let ranges = (!specs.is_empty()).then(|| specs.into_iter().map(range).collect());
+    (Op::SetPageLabels { ranges }, label)
 }
 
 impl DocView {
-    pub(crate) fn has_page_labels(&self) -> bool {
-        matches!(&self.state, State::Ready(doc) if doc.model.state().labels().is_some())
+    /// Document > Page Labels: number pages `from..=to` of `opened`, the
+    /// version the dialog opened on, with `style`, keeping the numbering
+    /// after them; or remove every label. One step on `opened`.
+    pub(crate) fn set_page_labels(
+        &mut self,
+        opened: Snapshot,
+        change: Option<(usize, usize, Style, String, u32)>,
+        cx: &mut Context<Self>,
+    ) {
+        let (op, label) = labels_op(&opened.state, change);
+        let Some(tx) = self.user_tx_at(&opened) else {
+            return;
+        };
+        if let Some(tx) = self.lower_in(tx, vec![op], label, cx) {
+            let opts = CommitOpts::based(opened.version, Stale::Validate, label);
+            self.commit(tx, opts, cx).ok();
+        }
     }
 }
 
 impl DocView {
     /// Document > Header & Footer: set (or with None, remove) the
-    /// header/footer. Pages whose file already has one drawn are moved onto
-    /// copies without it first, in the same undo step, so the new one
-    /// isn't drawn over the old.
+    /// header/footer, from the dialog opened on `opened`. Pages whose file
+    /// already has one drawn are moved onto copies without it first, in
+    /// the same undo step, so the new one isn't drawn over the old.
     pub(crate) fn set_header_footer(
         &mut self,
+        opened: Snapshot,
         hf: Option<sheaf_doc::stamps::HeaderFooter>,
         cx: &mut Context<Self>,
     ) {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let snapshot = doc.model.snapshot();
         let store = doc.model.store().clone();
         let label = if hf.is_some() {
             "Header & footer"
         } else {
             "Remove header & footer"
         };
-        self.set_notice(format!("{label}…"), cx);
-        cx.spawn(async move |this, cx| {
-            let planned = cx
-                .background_executor()
-                .spawn(async move {
-                    let plan =
-                        sheaf_ops::derive::strip_stamps(&store, &snapshot, &sheaf_ops::NoProgress)?;
-                    let mut opened = Vec::new();
-                    for c in plan {
-                        let handle = RenderHandle::open_bytes(c.src.bytes().clone(), None)?;
-                        opened.push((c, handle));
-                    }
-                    anyhow::Ok(opened)
-                })
-                .await;
-            this.update(cx, |v, cx| {
-                let opened = match planned {
-                    Ok(o) => o,
-                    Err(e) => {
-                        v.set_notice(format!("{label} failed: {e:#}"), cx);
-                        return;
-                    }
-                };
-                let set = match hf.filter(|hf| !hf.is_empty()) {
-                    Some(hf) => Op::SetHeaderFooter {
-                        spec: hf.spec(),
-                        scope: match hf.pages {
-                            None => ScopeSel::All,
-                            Some(pages) => ScopeSel::Pages(PageSel::ids(pages)),
-                        },
-                    },
-                    None => Op::RemoveHeaderFooter {
-                        pages: PageSel::All,
-                    },
-                };
-                let why = Derive::StripHeaderFooter;
-                if let Some(commit) = v.rebase(opened, why, vec![set], label, cx) {
-                    let mut notice = format!("{label}: shown now, written when you save");
-                    if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
-                        notice = format!("{notice}. {told}");
-                    }
-                    v.set_notice(notice, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// What the Header & Footer dialog starts from.
-    pub(crate) fn header_footer(&self) -> Option<sheaf_doc::stamps::HeaderFooter> {
-        let State::Ready(doc) = &self.state else {
-            return None;
+        let work = {
+            let opened = opened.clone();
+            move |p: &Tracker| with_engines(sheaf_ops::derive::strip_stamps(&store, &opened, p)?)
         };
-        doc.model.state().header_footer().map(|hf| (**hf).clone())
+        let land = move |v: &mut DocView, copies: Copies, cx: &mut Context<DocView>| {
+            let set = match hf.filter(|hf| !hf.is_empty()) {
+                Some(hf) => Op::SetHeaderFooter {
+                    spec: hf.spec(),
+                    scope: match hf.pages {
+                        None => ScopeSel::All,
+                        Some(pages) => ScopeSel::Pages(PageSel::ids(pages)),
+                    },
+                },
+                // Every page it opened on, by id: never the order.
+                None => Op::RemoveHeaderFooter {
+                    pages: PageSel::ids(opened.state.order().iter().copied()),
+                },
+            };
+            let tx = v.user_tx_at(&opened)?;
+            let tx = v.show_copies(tx, &copies, Derive::StripHeaderFooter, label, cx)?;
+            let tx = v.lower_in(tx, vec![set], label, cx)?;
+            let opts = CommitOpts::based(opened.version, Stale::Validate, label);
+            let commit = v.commit(tx, opts, cx).ok()?;
+            v.keep_copies(copies);
+            let mut notice = format!("{label}: shown now, written when you save");
+            if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+                notice = format!("{notice}. {told}");
+            }
+            Some(notice)
+        };
+        self.run_planner(label, work, |_| None, land, cx);
     }
 }
 
@@ -512,26 +697,25 @@ impl DocView {
 }
 
 impl DocView {
-    /// Document > Watermark / Background: draw `wm` on `pages` (0-based;
-    /// None: all), stripping the old one of its kind everywhere; with
-    /// `wm` None, remove it. Pages show generated copies, as cropped pages
-    /// do, so what's on screen is what's saved.
+    /// Document > Watermark / Background: draw `wm` on pages `pages` (None:
+    /// all) of `opened`, the version the dialog opened on, stripping the
+    /// old one of its kind everywhere; with `wm` None, remove it. Pages
+    /// show generated copies, as cropped pages do, so what's on screen is
+    /// what's saved.
     pub(crate) fn apply_watermark(
         &mut self,
+        opened: Snapshot,
         behind: bool,
         wm: Option<sheaf_doc::watermark::Watermark>,
-        pages: Option<Vec<usize>>,
+        pages: Option<Vec<PageId>>,
         cx: &mut Context<Self>,
     ) {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let snapshot = doc.model.snapshot();
         let store = doc.model.store().clone();
-        let scope: Vec<PageId> = match pages {
-            Some(ix) => self.page_ids_at(&ix),
-            None => snapshot.state.order().iter().copied().collect(),
-        };
+        let scope: Vec<PageId> =
+            pages.unwrap_or_else(|| opened.state.order().iter().copied().collect());
         let what = if behind { "Background" } else { "Watermark" };
         let label = if wm.is_some() {
             what.to_string()
@@ -539,58 +723,41 @@ impl DocView {
             format!("Remove {}", what.to_lowercase())
         };
         // Its text is drawn into the copies, out of the model's sight.
-        let (drawn, unencodable) = (wm.is_some(), wm.as_ref().is_some_and(|w| w.unencodable()));
-        self.set_notice(format!("{label}…"), cx);
-        cx.spawn(async move |this, cx| {
-            let planned = cx
-                .background_executor()
-                .spawn(async move {
-                    let plan = sheaf_ops::derive::watermark(
-                        &store,
-                        &snapshot,
-                        behind,
-                        wm.as_ref(),
-                        &scope,
-                        &sheaf_ops::NoProgress,
-                    )?;
-                    let mut opened = Vec::new();
-                    for c in plan {
-                        let handle = RenderHandle::open_bytes(c.src.bytes().clone(), None)?;
-                        opened.push((c, handle));
-                    }
-                    anyhow::Ok(opened)
-                })
-                .await;
-            this.update(cx, |v, cx| {
-                let opened = match planned {
-                    Ok(o) => o,
-                    Err(e) => {
-                        v.set_notice(format!("{label} failed: {e:#}"), cx);
-                        return;
-                    }
-                };
-                if opened.is_empty() {
-                    v.set_notice(format!("No {} to remove", what.to_lowercase()), cx);
-                    return;
+        let why = match &wm {
+            Some(wm) => Derive::Watermark {
+                behind,
+                unencodable: wm.unencodable(),
+            },
+            None => Derive::RemoveWatermark { behind },
+        };
+        let work = {
+            let opened = opened.clone();
+            move |p: &Tracker| {
+                let wm = wm.as_ref();
+                with_engines(sheaf_ops::derive::watermark(
+                    &store, &opened, behind, wm, &scope, p,
+                )?)
+            }
+        };
+        let land = {
+            let label = label.clone();
+            move |v: &mut DocView, copies: Copies, cx: &mut Context<DocView>| {
+                if copies.is_empty() {
+                    return Some(format!("No {} to remove", what.to_lowercase()));
                 }
-                let n: usize = opened.iter().map(|(c, _)| c.pages.len()).sum();
-                let why = match drawn {
-                    true => Derive::Watermark {
-                        behind,
-                        unencodable,
-                    },
-                    false => Derive::RemoveWatermark { behind },
-                };
-                if let Some(commit) = v.rebase(opened, why, Vec::new(), &label, cx) {
-                    let mut notice = format!("{label}: {n} page{}", if n == 1 { "" } else { "s" });
-                    if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
-                        notice = format!("{notice}. {told}");
-                    }
-                    v.set_notice(notice, cx);
+                let n: usize = copies.iter().map(|(c, _)| c.pages.len()).sum();
+                let tx = v.user_tx_at(&opened)?;
+                let tx = v.show_copies(tx, &copies, why, &label, cx)?;
+                let opts = CommitOpts::based(opened.version, Stale::Validate, label.as_str());
+                let commit = v.commit(tx, opts, cx).ok()?;
+                v.keep_copies(copies);
+                let mut notice = format!("{label}: {n} page{}", if n == 1 { "" } else { "s" });
+                if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+                    notice = format!("{notice}. {told}");
                 }
-            })
-            .ok();
-        })
-        .detach();
+                Some(notice)
+            }
+        };
+        self.run_planner(&label, work, |_| None, land, cx);
     }
 }

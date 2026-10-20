@@ -1,15 +1,24 @@
 //! History's proof (M10.5 slice 1): over random runs of every kind of
 //! op, in transactions of one op and of several, with locals, positions
-//! and refs by name and title path, and with jobs, undo, redo, jumps, trims
-//! and saves, each version rebuilt from its prims is the state it was made
-//! as, and every file it refers to is still in the store (slice 3). Every
-//! state on the way keeps the records' invariants (slice 8), a version
-//! being saved resolves to the state it was sealed with until its save
-//! ends (slice 9), and a save of the current version would find changed
-//! exactly what differs from the saved state (slice 10). Each kind's no-op
-//! makes no version (slice 11 runs it all over ops).
+//! and refs by name and title path, and with groups, undo, redo, jumps,
+//! trims, pruning and saves, each version rebuilt from its prims is the
+//! state it was made as, and every file it refers to is still in the store
+//! (slice 3). Every state on the way keeps the records' invariants (slice
+//! 8), a version being saved resolves to the state it was sealed with
+//! until its save ends (slice 9), and a save of the current version would
+//! find changed exactly what differs from the saved state (slice 10). Each
+//! kind's no-op makes no version (slice 11 runs it all over ops). Each
+//! version's keys are its prims', and a save's path keys, taken from them,
+//! are those of the prims on its path, after what's kept of the saved
+//! version once pruned; a transaction made on an earlier version lands on
+//! the current one, checked by value or lowered again, or changes nothing;
+//! a group's commits amend its version or continue it in fragments, or
+//! find it ended and change nothing, and its versions are taken back by a
+//! revert or a rollback, or a Conflict changes nothing; and what the
+//! document counts of what history holds, kept as it changes, is what a
+//! count finds (slice 12).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use in_progress::NoProgress;
 use lopdf::{Object, ObjectId, dictionary};
@@ -24,13 +33,16 @@ use super::tests::{flat, opened_doc, square, tl};
 use super::*;
 use crate::annot::{Box2, Pt, REVIEW};
 use crate::forms::fixture::Form;
-use crate::history::FixedCount;
+use crate::history::{AllOf, FixedCount, MemoryBudget};
 use crate::materialize::StrategyKind;
 use crate::open::FileAnnots;
 use crate::store::Blob;
 use crate::tx::bookmarks::{kids_of, subtree};
 use crate::tx::fixture as fx;
-use crate::tx::{Derive, JobKind, Made, OpResult};
+use crate::tx::{Base, Derive, JobKind, Made, OpResult, Stale};
+
+/// The plugin whose calls the run's plugin groups are.
+const PLUGIN: &str = "test-plugin";
 
 /// The ops a run makes versions of, by name: below [`KINDS`], an action
 /// is an op of the kind at its place here, the page rebase of a derived
@@ -64,15 +76,19 @@ const OPS: [&str; 22] = [
 /// these.
 const KINDS: u8 = OPS.len() as u8;
 const BATCH: u8 = KINDS;
-const JOB: u8 = KINDS + 1;
+const GROUP: u8 = KINDS + 1;
 const UNDO: u8 = KINDS + 2;
 const REDO: u8 = KINDS + 3;
 const JUMP: u8 = KINDS + 4;
 pub(crate) const TRIM: u8 = KINDS + 5;
-const SAVE: u8 = KINDS + 6;
-const SEAL: u8 = KINDS + 7;
-const UNSEAL: u8 = KINDS + 8;
-const ACTIONS: u8 = KINDS + 9;
+pub(crate) const PRUNE: u8 = KINDS + 6;
+const SAVE: u8 = KINDS + 7;
+const SEAL: u8 = KINDS + 8;
+const UNSEAL: u8 = KINDS + 9;
+const STALE: u8 = KINDS + 10;
+const REVERT: u8 = KINDS + 11;
+const ROLLBACK: u8 = KINDS + 12;
+const ACTIONS: u8 = KINDS + 13;
 
 /// The kind of op `name` is.
 fn kind(name: &str) -> u8 {
@@ -90,8 +106,9 @@ pub(crate) struct Run {
     opened: Src,
     other: Src,
     held: [Blob; 2],
-    /// The job the run's job actions join, until one starts another.
-    job: Option<JobId>,
+    /// The group the run's group actions commit in, until one begins
+    /// another, or it ends.
+    group: Option<RunGroup>,
     /// Each version a transaction made that still resolves, with its state
     /// then.
     made: Vec<(VersionId, DocState)>,
@@ -99,6 +116,25 @@ pub(crate) struct Run {
     kinds: BTreeSet<&'static str>,
     /// Versions being saved, with the state each was sealed with.
     sealed: Vec<(VersionId, DocState)>,
+    /// Every version the document has held, as it was made: pruning
+    /// takes neither these nor their prims.
+    ever: HashMap<VersionId, Was>,
+}
+
+/// A version as it was made: its parent, its group and its steps' prims.
+struct Was {
+    parent: Option<VersionId>,
+    group: Option<GroupId>,
+    prims: Vec<Arc<[Prim]>>,
+}
+
+/// A group a run commits in: its kind, and the version it began on, with
+/// that version's state, which an OCR run's flushes are made on, as its
+/// pages were rendered from it.
+pub(crate) struct RunGroup {
+    id: GroupId,
+    kind: GroupKind,
+    began: (VersionId, DocState),
 }
 
 /// What a transaction's ops made that its locals name, for the ops after
@@ -221,10 +257,11 @@ impl Run {
             held: crate::forms::fixture::mark_blobs(d.store()),
             d,
             other,
-            job: None,
+            group: None,
             made,
             kinds: BTreeSet::new(),
             sealed: Vec::new(),
+            ever: HashMap::new(),
         }
     }
 
@@ -232,6 +269,7 @@ impl Run {
     /// keeps the invariants.
     pub(crate) fn act(&mut self, (action, seed): (u8, u64)) {
         let rng = &mut fastrand::Rng::with_seed(seed);
+        self.note_versions();
         match action {
             0..KINDS => {
                 let mut tx = self.d.tx(Actor::User);
@@ -248,26 +286,7 @@ impl Run {
                 }
                 self.record(|d| d.commit(tx, label("batch")));
             }
-            JOB => {
-                let job = match self.job {
-                    Some(job) if rng.u8(..4) > 0 => job,
-                    _ => self.d.begin_job(),
-                };
-                self.job = Some(job);
-                // A few batches in a row, mostly recognized text, as OCR
-                // sends it: later ones amend the job's version, and text
-                // set and cleared again can leave none.
-                for _ in 0..rng.usize(1..=3) {
-                    let (actor, k) = match rng.u8(..4) {
-                        0 => (Actor::Job(JobKind::Ocr), kind("set-ocr-text")),
-                        1 => (Actor::Job(JobKind::Ocr), kind("clear-ocr-text")),
-                        _ => (Actor::User, rng.u8(..KINDS)),
-                    };
-                    let mut tx = self.d.tx(actor);
-                    self.lower(&mut tx, k, rng, &mut Locals::default());
-                    self.record(|d| d.apply_in_job(job, tx, "job"));
-                }
-            }
+            GROUP => self.group_commits(rng),
             UNDO => {
                 self.d.undo().unwrap();
             }
@@ -280,6 +299,15 @@ impl Run {
                 self.d.jump(ids[rng.usize(..ids.len())]).unwrap();
             }
             TRIM => self.d.trim(),
+            // History kept from now on to a budget drawn below what it
+            // holds: pruned to it now, and again as edits come, the first
+            // version kept moving on and the saved version detaching.
+            PRUNE => {
+                let budget = MemoryBudget(rng.usize(..=self.d.stats().total_bytes()));
+                let policy = AllOf(vec![Box::new(FixedCount(1)), Box::new(budget)]);
+                self.d.set_policy(Box::new(policy));
+                self.d.trim();
+            }
             // A save of the current version, start to end: an output, which
             // changes no version or state.
             SAVE => {
@@ -301,23 +329,308 @@ impl Run {
                     self.d.abandon_save(v);
                 }
             }
+            STALE => self.stale(rng),
+            REVERT => self.revert(rng),
+            ROLLBACK => self.rollback(rng),
             _ => unreachable!("action {action}"),
         }
+        // A group the document ended, by pruning or a revert, takes no
+        // more of the run's commits.
+        if let Some(group) = &self.group
+            && !self.d.groups.contains_key(&group.id)
+        {
+            self.group = None;
+        }
+        self.made.retain(|(id, _)| self.d.versions.contains_key(id));
         let st = self.d.state();
         assert_eq!(st.check_invariants(), Ok(()), "after action {action}");
         for (v, st) in &self.sealed {
             let kept = self.d.versions.get(v).and_then(|v| v.state.as_ref());
             assert_eq!(kept, Some(st), "{v:?}, sealed, after action {action}");
         }
+        self.counted(action);
         // A save of the current version finds changed exactly the slots
-        // that differ from the saved state: its path keys reach every one,
-        // and are judged by value.
+        // that differ from the saved state: its path keys, the versions'
+        // own, are their prims' along the path, after what the saved
+        // version's anchor keeps once it was pruned, reach every one, and
+        // are judged by value.
         let input = self.d.input(self.d.cursor);
         if let Some(saved) = &input.saved {
+            let walked = match self.d.saved.as_ref().expect("the saved version") {
+                SavedVersion::At(s) => walked_keys(&self.d, *s, self.d.cursor),
+                SavedVersion::Detached(anchor) => {
+                    let mut keys = anchor.keys_to_root.clone();
+                    keys.extend(walked_keys(&self.d, self.d.root, self.d.cursor));
+                    keys
+                }
+            };
+            assert_eq!(*input.path_keys, walked, "after action {action}");
             let path = crate::effects::judge(&saved.state, &input.target, &input.path_keys);
             let differ = differing(&saved.state, &input.target);
             assert_eq!(path.changed, differ, "after action {action}");
             assert_eq!(path.flags.is_empty(), differ.is_empty(), "{:?}", path.flags);
+        }
+    }
+
+    /// What the document counts as history holds is what it holds, counted
+    /// again: the versions keeping snapshots and those snapshots' bytes,
+    /// steps' bytes, and the undone sources', once counted, until something
+    /// changed them; the versions it says are on the line are the line's;
+    /// and the snapshots the policy weighs are in the order it drops them.
+    fn counted(&self, action: u8) {
+        let d = &self.d;
+        let kept = || (d.versions.iter()).filter(|(_, v)| v.state.is_some());
+        let held = &d.held;
+        let snapshots = (
+            kept().map(|(&id, _)| id).collect(),
+            kept().map(|(_, v)| v.snapshot_bytes).sum(),
+        );
+        assert_eq!(
+            (held.snapshots.clone(), held.snapshot_bytes),
+            snapshots,
+            "after action {action}"
+        );
+        let steps: usize = d.versions.values().map(|v| v.step_bytes).sum();
+        assert_eq!(held.step_bytes, steps, "after action {action}");
+        let line: BTreeSet<VersionId> = d.line().into_iter().collect();
+        let on: BTreeSet<VersionId> = (d.versions.iter())
+            .filter(|(_, v)| v.on_line)
+            .map(|(&id, _)| id)
+            .collect();
+        assert_eq!(on, line, "after action {action}");
+        if let Some(undone) = held.undone {
+            assert_eq!(undone, d.undone_source_bytes(), "after action {action}");
+        }
+        // The policy's order: the snapshots it may drop, off the line and
+        // then on it, each oldest first, then those that must stay, the
+        // current version's last.
+        let must = |id: &VersionId| {
+            [d.root, d.cursor].contains(id)
+                || d.saved_at() == Some(*id)
+                || d.versions[id].sealed > 0
+        };
+        let (stay, may): (Vec<VersionId>, Vec<VersionId>) =
+            held.snapshots.iter().copied().partition(must);
+        let (on, off): (Vec<VersionId>, Vec<VersionId>) =
+            may.into_iter().partition(|id| line.contains(id));
+        let (cursor, stay): (Vec<VersionId>, Vec<VersionId>) =
+            stay.into_iter().partition(|id| *id == d.cursor);
+        let order = [off, on].concat();
+        let bytes: Vec<usize> = (order.iter().chain(&stay).chain(&cursor))
+            .map(|id| d.versions[id].snapshot_bytes)
+            .collect();
+        let (droppable, stats) = d.weigh(0);
+        assert_eq!(droppable, order, "after action {action}");
+        assert_eq!(stats.snapshot_bytes, bytes, "after action {action}");
+        assert_eq!(
+            (stats.droppable, stats.cursor),
+            (order.len(), bytes.len() - 1),
+            "after action {action}"
+        );
+    }
+
+    /// A transaction made on a version made earlier that's still kept, as
+    /// a planner or a dialog makes one, sometimes deciding by a page as it
+    /// showed there, committed now: landed by value or lowered again. One
+    /// that can't land changes nothing.
+    fn stale(&mut self, rng: &mut fastrand::Rng) {
+        let kept: Vec<&(VersionId, DocState)> = (self.made.iter())
+            .filter(|(v, _)| self.d.versions.contains_key(v))
+            .collect();
+        let (v, st) = kept[rng.usize(..kept.len())].clone();
+        let mut tx = self.tx_on(v, st, Actor::User, rng);
+        let mut locals = Locals::default();
+        for _ in 0..rng.usize(1..=2) {
+            self.lower(&mut tx, rng.u8(..KINDS), rng, &mut locals);
+        }
+        let stale = match rng.bool() {
+            true => Stale::Validate,
+            false => Stale::Relower,
+        };
+        let opts = CommitOpts {
+            base: Base::At(v),
+            stale,
+            ..label("stale")
+        };
+        self.record(|d| d.commit(tx, opts));
+    }
+
+    /// A transaction of `actor`'s on version `v`, whose state was `st`,
+    /// sometimes deciding by a page as it showed there.
+    fn tx_on(&self, v: VersionId, st: DocState, actor: Actor, rng: &mut fastrand::Rng) -> Tx {
+        let order = st.order().clone();
+        let snap = Snapshot {
+            version: v,
+            state: st,
+            ..self.d.snapshot()
+        };
+        let mut tx = Document::tx_at(&snap, self.d.lower_cx(actor));
+        if rng.bool() {
+            tx.read(Key::Page(order[rng.usize(..order.len())]));
+        }
+        tx
+    }
+
+    /// A few commits in the run's group, or a new one's, in a row: an OCR
+    /// run's flushes of recognized text, set and cleared, made on the
+    /// version it began on and landed by value, as a run's are; a plugin
+    /// call's batches, made on the current version. Later ones amend the
+    /// group's version, or continue the group after another edit, and
+    /// text set and cleared again can leave none. Once its edits were
+    /// undone, the group has ended for the run.
+    fn group_commits(&mut self, rng: &mut fastrand::Rng) {
+        if self.group.is_none() || rng.u8(..4) == 0 {
+            if let Some(old) = self.group.take() {
+                self.d.end_group(old.id);
+            }
+            let of = match rng.bool() {
+                true => GroupKind::Ocr,
+                false => GroupKind::PluginCall {
+                    plugin: PLUGIN.into(),
+                },
+            };
+            let id = self.d.begin_group(of.clone());
+            let began = (self.d.current_version(), self.d.state().clone());
+            self.group = Some(RunGroup {
+                id,
+                kind: of,
+                began,
+            });
+        }
+        for _ in 0..rng.usize(1..=3) {
+            let group = self.group.as_ref().expect("a group");
+            let id = group.id;
+            let (tx, opts) = match &group.kind {
+                GroupKind::Ocr => {
+                    let (v, st) = group.began.clone();
+                    let mut tx = self.tx_on(v, st, Actor::Job(JobKind::Ocr), rng);
+                    let k = match rng.u8(..4) {
+                        0 => kind("clear-ocr-text"),
+                        _ => kind("set-ocr-text"),
+                    };
+                    self.lower(&mut tx, k, rng, &mut Locals::default());
+                    let opts = CommitOpts {
+                        base: Base::At(v),
+                        stale: Stale::Validate,
+                        ..label("group")
+                    };
+                    (tx, opts)
+                }
+                GroupKind::PluginCall { plugin } => {
+                    let actor = Actor::Plugin {
+                        id: plugin.clone(),
+                        version: "1.0".into(),
+                    };
+                    let mut tx = self.d.tx(actor);
+                    self.lower(&mut tx, rng.u8(..KINDS), rng, &mut Locals::default());
+                    (tx, label("group"))
+                }
+            };
+            let opts = CommitOpts {
+                group: Some(id),
+                ..opts
+            };
+            if let Some(EditError::GroupEnded) = self.record(|d| d.commit(tx, opts)) {
+                self.d.end_group(id);
+                self.group = None;
+                return;
+            }
+        }
+    }
+
+    /// A group with versions on the current line, as History offers to
+    /// undo all of one, sometimes the run's own: none when there's none.
+    fn some_group(&self, rng: &mut fastrand::Rng) -> Option<GroupId> {
+        if let Some(group) = self.group.as_ref().filter(|_| rng.bool()) {
+            return Some(group.id);
+        }
+        let mut tags: Vec<GroupId> = (self.d.line().iter())
+            .filter_map(|id| Some(self.d.versions[id].group.as_ref()?.0))
+            .collect();
+        tags.dedup();
+        (!tags.is_empty()).then(|| tags[rng.usize(..tags.len())])
+    }
+
+    /// History's "Undo all of …" of a group: a version after the current
+    /// one, which its prims rebuild and which takes all of the group back,
+    /// or a refusal that changes nothing.
+    fn revert(&mut self, rng: &mut fastrand::Rng) {
+        if let Some(g) = self.some_group(rng) {
+            let at = self.d.current_version();
+            let mut change = None;
+            self.record(|d| {
+                let commit = d.revert_group(g, "group")?;
+                change = Some(commit.change.clone());
+                Ok(commit)
+            });
+            if let Some(change) = change {
+                self.taken_back(g, at, &change);
+            }
+            self.replays();
+        }
+    }
+
+    /// A group rolled back, as after a plugin call fails: its only version
+    /// taken out, or its versions taken back by one after the current one,
+    /// which its prims rebuild; or a refusal that changes nothing.
+    fn rollback(&mut self, rng: &mut fastrand::Rng) {
+        let Some(g) = self.some_group(rng) else {
+            return;
+        };
+        let at = self.d.current_version();
+        if let Ok(change) = self.landed(|d| d.rollback_group(g)) {
+            if self.d.current_version() != at {
+                self.moved();
+            }
+            if let Some(change) = change {
+                self.taken_back(g, at, &change);
+            }
+        }
+        self.replays();
+    }
+
+    /// After `change` took group `g`'s versions on version `at`'s line
+    /// back: every slot one of them wrote, those pruning took included,
+    /// holds what it held before the first of them wrote it, and it
+    /// changed no other slot.
+    fn taken_back(&self, g: GroupId, at: VersionId, change: &ChangeSet) {
+        let mut first = BTreeMap::new();
+        let mut on = Some(at);
+        while let Some(id) = on {
+            let was = &self.ever[&id];
+            if was.group == Some(g) {
+                for p in was.prims.iter().rev().flat_map(|ps| ps.iter().rev()) {
+                    first.insert(p.key, p.before.clone());
+                }
+            }
+            on = was.parent;
+        }
+        let st = self.d.state();
+        for (key, before) in &first {
+            assert!(same(st.get(key).as_ref(), before.as_ref()), "{key:?}");
+        }
+        assert!(change.keys.iter().all(|k| first.contains_key(k)));
+    }
+
+    /// Each version the document holds that the run hasn't seen yet, kept
+    /// as it was made.
+    fn note_versions(&mut self) {
+        for (&id, v) in &self.d.versions {
+            self.ever.entry(id).or_insert_with(|| Was {
+                parent: v.parent,
+                group: v.group.as_ref().map(|(g, _)| *g),
+                prims: v.steps.iter().map(|s| s.prims.clone()).collect(),
+            });
+        }
+    }
+
+    /// The current version, rebuilt from the nearest version before it
+    /// that keeps its state by its prims, unless it's the first: the state
+    /// it has.
+    fn replays(&self) {
+        let at = self.d.current_version();
+        if self.d.versions[&at].parent.is_some() {
+            assert_eq!(self.d.replay(at).as_ref(), Ok(self.d.state()), "{at:?}");
         }
     }
 
@@ -336,19 +649,48 @@ impl Run {
             ..SaveRecord::opened(v, self.d.primary(), path, stamp)
         };
         self.d.record_save(rec).unwrap();
-        assert_eq!(self.d.saved, Some(v));
+        assert_eq!(self.d.saved_at(), Some(v));
     }
 
-    /// Runs `commit`, a transaction's. When it made a version, or put a
-    /// new one in the cursor's place, records it, and the kinds of its
-    /// steps' ops.
-    fn record(&mut self, commit: impl FnOnce(&mut Document) -> Result<Commit, EditError>) {
+    /// Runs `commit`, a transaction's, a revert's. When it made a version,
+    /// or put a new one in the cursor's place, records it, and the kinds of
+    /// its steps' ops. Why it failed, if it did.
+    fn record(
+        &mut self,
+        commit: impl FnOnce(&mut Document) -> Result<Commit, EditError>,
+    ) -> Option<EditError> {
         let at = self.d.current_version();
-        if commit(&mut self.d).is_err() || self.d.current_version() == at {
-            return;
+        let failed = self.landed(commit).err();
+        if failed.is_none() && self.d.current_version() != at {
+            self.moved();
         }
-        // An amend replaces the version it joins, and a job that put back
-        // all it did removes it: the cursor is back at its parent.
+        failed
+    }
+
+    /// Runs `change`, a transition: one that fails leaves the document as
+    /// it was, and isn't a bug.
+    fn landed<T>(
+        &mut self,
+        change: impl FnOnce(&mut Document) -> Result<T, EditError>,
+    ) -> Result<T, EditError> {
+        let was = |d: &Document| (d.cursor, d.version_count(), d.state().clone());
+        let before = was(&self.d);
+        let r = change(&mut self.d);
+        if let Err(e) = &r {
+            let bug = matches!(e, EditError::Internal { .. } | EditError::Mismatch { .. });
+            assert!(!bug, "{e}");
+            assert_eq!(was(&self.d), before, "{e}");
+        }
+        self.note_versions();
+        r
+    }
+
+    /// The cursor moved to a version a transition made, or to one before
+    /// it: records the version, unless it was, and the kinds of its steps'
+    /// ops. An amend replaces the version it joins, and a group that put
+    /// back all it did, or a rollback, removes it: those are no longer
+    /// kept.
+    fn moved(&mut self) {
         self.made.retain(|(id, _)| self.d.versions.contains_key(id));
         let id = self.d.current_version();
         if self.made.iter().all(|(v, _)| *v != id) {
@@ -922,12 +1264,43 @@ impl Run {
     /// version.
     fn check(mut self) -> BTreeSet<&'static str> {
         let d = &mut self.d;
+        // Snapshots dropped, so jumps replay, and nothing more pruned.
+        d.set_policy(Box::new(FixedCount(1)));
         d.trim();
         for (id, v) in &d.versions {
             let brought = super::brought(&v.steps);
             match *id == d.root {
                 true => assert!(v.blobs.is_superset(&brought)),
                 false => assert_eq!(v.blobs, brought),
+            }
+            let prims: Vec<&Prim> = v.steps.iter().flat_map(|s| s.prims.iter()).collect();
+            let keys: BTreeSet<Key> = prims.iter().map(|p| p.key).collect();
+            // The first version kept its edits' keys, but no prims: nothing
+            // is rebuilt into it.
+            match *id == d.root {
+                true => assert!(prims.is_empty(), "{id:?}, the first, keeps prims"),
+                false => assert_eq!(*v.keys, keys, "{id:?}'s keys"),
+            }
+            // Coalesced: each slot's change once, on one step, and none that
+            // puts back what was there.
+            assert_eq!(
+                keys.len(),
+                prims.len(),
+                "{id:?}'s steps change a slot twice"
+            );
+            let back = prims
+                .iter()
+                .find(|p| same(p.before.as_ref(), p.after.as_ref()));
+            assert!(back.is_none(), "{id:?} puts back {back:?}");
+            // What it holds is as counted again, a group's commits counted
+            // as they joined it.
+            if *id != d.root {
+                let held = super::steps_bytes(&v.steps, &v.keys);
+                assert_eq!(v.step_bytes, held, "{id:?}'s steps' bytes");
+                if let Some(st) = &v.state {
+                    let copied = st.snapshot_bytes(v.keys.iter().copied());
+                    assert_eq!(v.snapshot_bytes, copied, "{id:?}'s snapshot's bytes");
+                }
             }
         }
         for (id, st) in &self.made {
@@ -944,7 +1317,7 @@ impl Run {
         // so do versions being saved (`keeps_snapshot`): with any other
         // version, snapshots were dropped.
         let sealed = (d.versions.iter()).filter(|(_, v)| v.sealed > 0);
-        let kept: BTreeSet<VersionId> = [Some(d.root), Some(d.cursor), d.saved]
+        let kept: BTreeSet<VersionId> = [Some(d.root), Some(d.cursor), d.saved_at()]
             .into_iter()
             .flatten()
             .chain(sealed.map(|(&id, _)| id))
@@ -973,9 +1346,7 @@ impl Run {
 
 /// What a commit of a run's is labelled.
 fn label(text: &str) -> CommitOpts {
-    CommitOpts {
-        label: Some(text.into()),
-    }
+    CommitOpts::labelled(text)
 }
 
 /// The locals `op` names what it makes by, in order.
@@ -1034,6 +1405,30 @@ fn differing(a: &DocState, b: &DocState) -> BTreeSet<Key> {
     (keys_of(a).union(&keys_of(b)))
         .filter(|k| !same(a.get(k).as_ref(), b.get(k).as_ref()))
         .copied()
+        .collect()
+}
+
+/// The keys of the prims of every version on the tree path from version
+/// `a` to version `b`, the lines from the root to each walked whole: what
+/// a save's path keys were before versions kept theirs.
+fn walked_keys(d: &Document, a: VersionId, b: VersionId) -> BTreeSet<Key> {
+    let line = |mut at: VersionId| {
+        let mut line = vec![at];
+        while let Some(p) = d.versions[&at].parent {
+            line.push(p);
+            at = p;
+        }
+        line
+    };
+    let (ours, theirs) = (line(a), line(b));
+    let shared = (ours.iter().rev())
+        .zip(theirs.iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    (ours[..ours.len() - shared].iter())
+        .chain(&theirs[..theirs.len() - shared])
+        .flat_map(|id| d.versions[id].steps.iter())
+        .flat_map(|step| step.prims.iter().map(|p| p.key))
         .collect()
 }
 
@@ -1118,10 +1513,11 @@ fn prims_rebuild_every_version_past_max_versions() {
                 0 => UNDO,
                 1 => REDO,
                 2 => SAVE,
-                3 => JOB,
+                3 => GROUP,
                 4 => BATCH,
                 5 => SEAL,
                 6 => UNSEAL,
+                7 => REVERT,
                 _ => rng.u8(..KINDS),
             };
             (action, rng.u64(..))
@@ -1135,8 +1531,9 @@ fn prims_rebuild_every_version_past_max_versions() {
 
 /// Each kind of op in turn, until it makes a version (one drawn against
 /// the document as it is may change nothing, or make way for another,
-/// as a move of one bookmark makes a second), then a batch, a job and the
-/// rest: every kind makes one, so the property covers them all.
+/// as a move of one bookmark makes a second), then a batch, groups, a
+/// revert and the rest: every kind makes one, so the property covers them
+/// all.
 #[test]
 fn a_run_applies_every_kind() {
     fastrand::seed(1);
@@ -1151,18 +1548,28 @@ fn a_run_applies_every_kind() {
     }
     let rest = [
         (BATCH, 1),
-        (JOB, 2),
-        (JOB, 3),
+        (GROUP, 2),
+        (GROUP, 3),
         (UNDO, 0),
         (BATCH, 4),
-        (JUMP, 5),
+        (GROUP, 5),
+        (GROUP, 6),
+        (BATCH, 7),
+        (GROUP, 8),
+        (REVERT, 9),
+        (GROUP, 10),
+        (ROLLBACK, 11),
+        (PRUNE, 13),
+        (JUMP, 12),
         (REDO, 0),
         (TRIM, 0),
     ];
     for action in rest {
         r.act(action);
     }
-    assert_eq!(r.check(), BTreeSet::from(OPS));
+    let mut every = BTreeSet::from(OPS);
+    every.insert("revert");
+    assert_eq!(r.check(), every);
 }
 
 /// Each kind's no-op makes no version and leaves the cursor where it was.

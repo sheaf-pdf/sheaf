@@ -75,12 +75,21 @@
 //! `Tx::check` of deleting and of duplicating every page by id, which
 //! draw no id, and in the history bench one transaction of 7,000 ops of
 //! one kind, lowered and committed, with neither a baseline nor a gate.
+//! Slice 12's are a snapshot of each fixture as opened, which planners,
+//! dialogs and plugin calls read, and the crop's edit landed by value on
+//! the version its dialog opened on after the user deleted a page, and an
+//! incremental save of every page turned, each holding a connector of one
+//! group; in the history bench, an OCR run as the app makes one, 700 flushes of 10 pages
+//! in its group, each landed by value and amending its version, and an
+//! insert lowered again after the user moved a page, with neither a
+//! baseline nor a gate; and history kept to its budget.
 //! So far slice 1's history bench, slice 3's geometry walk, slice 4's
 //! ready, slice 5's ready on 20,000 of sheaf's marks, slice 8's mark adds,
 //! slice 9's Rewrite, slice 10's incremental save on the scanned 7k
-//! ([`INCREMENTAL_GATE_MS`]) and slice 11's check of a delete on every
-//! fixture ([`CHECK_GATE`]) assert, after their tables print. The 200 OCR versions take about 5 GB until
-//! slice 12 bounds history, and skip with less memory available.
+//! ([`INCREMENTAL_GATE_MS`]), slice 11's check of a delete on every
+//! fixture ([`CHECK_GATE`]), and slice 12's snapshot ([`SNAPSHOT_GATE`]),
+//! flat pushes ([`FLAT`]) and 200 OCR versions within the history budget
+//! ([`HISTORY_BUDGET`]) assert, after their tables print.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -91,15 +100,16 @@ use std::time::{Duration, Instant};
 use lopdf::Object;
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
+use sheaf_doc::prim::Key;
 use sheaf_doc::serialize::fixture::{USER, encrypt_dict, rc4_aes_128_and_aes_256};
 use sheaf_doc::stamps::{Bates, HeaderFooter};
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::tx::fixture::{add, delete, duplicate, insert, move_pages, ocr, set_header};
+use sheaf_doc::tx::fixture::{add, delete, duplicate, insert, move_pages, ocr, rotate, set_header};
 use sheaf_doc::{
-    Actor, Annot, AnnotId, AnnotKind, Box2, CommitOpts, Derive, Document, JobKind, OcrWord, PageId,
-    Store, TextLayer,
+    Actor, Annot, AnnotId, AnnotKind, Base, Box2, CommitOpts, Derive, Document, GroupKind, JobKind,
+    OcrWord, PageId, Src, Stale, Store, TextLayer,
 };
-use sheaf_edit::Rotation;
+use sheaf_edit::{Anchor, Op, PageRef, Rotation, Style, Turn};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
 use sheaf_ops::crop::{CropSpec, Margins};
@@ -122,6 +132,9 @@ const INCREMENTAL_GATE_MS: f64 = 50.0;
 /// take (slice 11).
 const CHECK_RUNS: usize = 21;
 const CHECK_GATE: Duration = Duration::from_millis(1);
+/// What a snapshot of the document may take, the median of
+/// [`CHECK_RUNS`] (slice 12): O(1), its state shared.
+const SNAPSHOT_GATE: Duration = Duration::from_micros(50);
 /// Previews rendered in a row from one engine.
 const FILL: u32 = 200;
 /// Set in the processes a fixture's gates run in (see [`run`]): the file
@@ -130,9 +143,9 @@ const OWN_PROCESS: &str = "SHEAF_GATE_FIXTURE_PROCESS";
 const PART: &str = "SHEAF_GATE_PART";
 /// The fixture a process of its own is for, by gen.py's name.
 const KIND: &str = "SHEAF_GATE_KIND";
-/// The memory 200 OCR versions at 1,000 pages need available: they grow
-/// the process by about 4.7 GB until slice 12 bounds history.
-const OCR_200_NEEDS: u64 = 6 << 30;
+/// What the default policy keeps history to: 200 OCR versions at 1,000
+/// pages hold no more (slice 12).
+const HISTORY_BUDGET: usize = 256 << 20;
 
 /// A fixture's numbers on slice 2's code, each the median of three runs
 /// of the harness: milliseconds, megabytes (MiB) and pages a second. An
@@ -534,6 +547,17 @@ fn gates(kind: Kind) {
         f64::NAN,
         "",
     ));
+    // A snapshot of the document, as a planner, a dialog or a plugin call
+    // takes one, and the app at every change for plugins (slice 12): its
+    // state's tables shared, not copied.
+    let (snapshot, _) = measure(CHECK_RUNS, || timed(|| doc.snapshot()).0);
+    rows.push(Row {
+        what: "snapshot".into(),
+        now: Some(snapshot.as_secs_f64() * 1e6),
+        unit: "µs",
+        baseline: f64::NAN,
+        gate: format!("< {} µs, asserted", SNAPSHOT_GATE.as_micros()),
+    });
 
     // `Tx::check` of deleting every page, each named by its id, as a menu
     // asks before it offers an op (§6.3): every reference resolved and the
@@ -658,6 +682,25 @@ fn gates(kind: Kind) {
         "",
     ));
 
+    // An incremental save of every page turned, each page holding a
+    // connector of one group, so each page's turn takes the group into the
+    // section (slice 12's review: once for the group, not once a page).
+    // Informational.
+    let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
+    let pairs = ids.as_chunks::<2>().0.iter().map(|&[a, b]| connector(a, b));
+    doc.commit_ops(pairs.collect(), "connectors").unwrap();
+    doc.commit_ops(vec![rotate(&ids, Turn::Quarter)], "turn")
+        .unwrap();
+    let (turned, _) = measure(RUNS, || planned_and_put_back(&mut doc, &work));
+    doc.undo().unwrap();
+    doc.undo().unwrap();
+    rows.push(Row::time(
+        "incremental save, all turned, a connector each",
+        turned,
+        f64::NAN,
+        "",
+    ));
+
     // The recovery sidecar of one mark, an Append section against the
     // file. Informational.
     doc.commit_ops(vec![add(middle_id, &square(1))], "mark")
@@ -767,6 +810,42 @@ fn gates(kind: Kind) {
         base.crop_edit_ms,
         "",
     ));
+    // The crop's edit as its dialog lands it (slice 12): made on the
+    // version the dialog opened on, and committed after the user deleted
+    // the last page, by value (`Stale::Validate`): each slot it changes
+    // checked against the version it lands on, then the post-merge check.
+    // Every page but the deleted one is cropped.
+    let opened = doc.snapshot();
+    let plan = sheaf_ops::crop::plan(doc.store(), &opened, &ids, half_inch, &NoProgress).unwrap();
+    let last = *ids.last().expect("the fixture has pages");
+    let bases: Vec<(PageId, Src, u32)> = (plan.iter())
+        .flat_map(|copy| {
+            copy.note(&mut doc);
+            copy.bases()
+        })
+        .filter(|&(page, ..)| page != last)
+        .collect();
+    let (validated, _) = measure(RUNS, || {
+        doc.commit_ops(vec![delete(&[last])], "Delete page")
+            .unwrap();
+        let pages = bases.clone();
+        let (t, ()) = timed(|| {
+            let mut tx = Document::tx_at(&opened, doc.lower_cx(Actor::User));
+            tx.set_page_base(pages, Derive::Crop).unwrap();
+            let opts = CommitOpts::based(opened.version, Stale::Validate, "Crop");
+            doc.commit(tx, opts).unwrap();
+        });
+        doc.undo().unwrap();
+        doc.undo().unwrap();
+        t
+    });
+    drop((plan, bases, opened));
+    rows.push(Row::time(
+        "crop all pages, validated after a delete",
+        validated,
+        base.crop_edit_ms,
+        "< 200 ms, slice 15",
+    ));
 
     // Bates numbers on every page, as the app applies them, and the
     // Rewrite that draws them. Each apply is a first one, on the file
@@ -829,6 +908,10 @@ fn gates(kind: Kind) {
     assert!(
         check < CHECK_GATE,
         "Tx::check of deleting every page took {check:?}, over {CHECK_GATE:?}"
+    );
+    assert!(
+        snapshot < SNAPSHOT_GATE,
+        "a snapshot took {snapshot:?}, over {SNAPSHOT_GATE:?}"
     );
     if kind == Kind::Scanned {
         assert!(
@@ -1122,8 +1205,8 @@ fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) -> Vec<RenderHandle>
     }
     let set = set_header(hf.spec(), hf.pages.as_deref());
     tx.apply(set, &NoProgress).unwrap();
-    let label = Some("Header & footer".into());
-    doc.commit(tx, CommitOpts { label }).unwrap();
+    doc.commit(tx, CommitOpts::labelled("Header & footer"))
+        .unwrap();
     engines
 }
 
@@ -1131,8 +1214,12 @@ fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) -> Vec<RenderHandle>
 /// 20,000 marks, each a transaction committed: medians under 1 ms and 2 ms
 /// (M10.5 slice 1). Beside them, with neither a baseline nor a gate, one
 /// transaction of 7,000 ops of one kind, an OCR run's layer set on every
-/// page, lowered and then committed as the job's version, which History
-/// shows as one line (slice 11).
+/// page, lowered and then committed as an OCR group's version, which
+/// History shows as one line (slice 11); an OCR run as the app makes one
+/// ([`ocr_run`]): 700 flushes, each amending the group's version, the
+/// last ones joining a version of thousands of steps; and an insert of 10
+/// pages made on a version, then lowered again on the current one after
+/// the user moved a page (slice 12).
 #[test]
 #[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
 fn history_at_7k_pages_and_20k_marks() {
@@ -1169,13 +1256,44 @@ fn history_at_7k_pages_and_20k_marks() {
         let (t, made) = timed(|| tx.apply_batch(ops, &NoProgress).unwrap());
         assert_eq!(made.len(), PAGES as usize);
         lowered.push(t);
-        let job = d.begin_job();
-        let (t, c) = timed(|| d.apply_in_job(job, tx, "OCR").unwrap());
+        let g = d.begin_group(GroupKind::Ocr);
+        let opts = CommitOpts {
+            group: Some(g),
+            ..CommitOpts::labelled("OCR")
+        };
+        let (t, c) = timed(|| d.commit(tx, opts).unwrap());
+        d.end_group(g);
         committed.push(t);
         let line = format!("Recognize text on {PAGES} pages");
         let lines: Vec<&str> = c.lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(lines, [line.as_str()]);
         assert_eq!(d.timeline().pop().unwrap().edits, c.lines);
+        d.undo().unwrap();
+    }
+    let flushes = ocr_run(&mut d, &ids, &layer);
+    let run: Duration = flushes.iter().sum();
+    let last = median(flushes[flushes.len() - 50..].to_vec());
+    let amend = median(flushes[1..].to_vec());
+    // An insert planned off the UI thread on the version it began on,
+    // landed after the user moved the first page to the end: lowered again
+    // on the current version (`Stale::Relower`), drawing the ids it drew.
+    let ten = sheaf_doc::store::blank(d.store(), 10);
+    let mut relowered = Vec::new();
+    for _ in 0..QUICK_RUNS {
+        let planned = d.snapshot();
+        let before = d.page(PAGES as usize / 2).unwrap();
+        let mut tx = Document::tx_at(&planned, d.lower_cx(Actor::Job(JobKind::Insert)));
+        tx.apply(insert(&ten, 0..10, "ten.pdf", Some(before)), &NoProgress)
+            .unwrap();
+        let drew = tx.preview().created;
+        let first = d.page(0).unwrap();
+        d.commit_ops(vec![move_pages(&[first], None)], "Move page 1")
+            .unwrap();
+        let opts = CommitOpts::based(planned.version, Stale::Relower, "Insert ten.pdf");
+        let (t, c) = timed(|| d.commit(tx, opts).unwrap());
+        assert_eq!(c.created, drew);
+        relowered.push(t);
+        d.undo().unwrap();
         d.undo().unwrap();
     }
     let (add, reorder) = (median(adds), median(reorders));
@@ -1197,8 +1315,17 @@ fn history_at_7k_pages_and_20k_marks() {
                 "",
             ),
             Row::time(
-                "  committed, one History line",
+                "  committed in a group, one History line",
                 median(committed),
+                f64::NAN,
+                "",
+            ),
+            Row::time("an OCR run, 700 flushes of 10 pages", run, f64::NAN, ""),
+            Row::time("  a flush that amends, the median", amend, f64::NAN, ""),
+            Row::time("  a flush, the last 50's median", last, f64::NAN, ""),
+            Row::time(
+                "an insert relowered after a move, the commit",
+                median(relowered),
                 f64::NAN,
                 "",
             ),
@@ -1211,15 +1338,48 @@ fn history_at_7k_pages_and_20k_marks() {
     );
 }
 
+/// An OCR run over `ids`, as the app makes one: flushes of 10 pages,
+/// each made on the version the run began on, deciding by its pages as
+/// they were rendered, and landed by value in the run's group, every one
+/// after the first amending its version. Each flush's time; the run is
+/// undone.
+fn ocr_run(d: &mut Document, ids: &[PageId], layer: &Arc<TextLayer>) -> Vec<Duration> {
+    let g = d.begin_group(GroupKind::Ocr);
+    let base = d.snapshot();
+    let mut times = Vec::new();
+    for pages in ids.chunks(10) {
+        let start = Instant::now();
+        let mut tx = Document::tx_at(&base, d.lower_cx(Actor::Job(JobKind::Ocr)));
+        for &page in pages {
+            tx.read(Key::Page(page));
+        }
+        let layers = ocr(pages.iter().map(|&page| (page, layer.clone())));
+        tx.apply_batch(layers, &NoProgress).unwrap();
+        let opts = CommitOpts {
+            base: Base::At(base.version),
+            stale: Stale::Validate,
+            group: Some(g),
+            ..CommitOpts::labelled("Recognize text")
+        };
+        let c = d.commit(tx, opts).unwrap();
+        times.push(start.elapsed());
+        assert_eq!(c.amended, times.len() > 1);
+    }
+    d.end_group(g);
+    d.undo().unwrap();
+    times
+}
+
 /// 1,000 AddMarks spread over the heavy 7k's pages, opened as the app
 /// opens it, its annotations and widgets records, and the same adds on
 /// 7,000 blank pages, which hold none: the heavy's median add under 1 ms,
 /// and its medians, over all the adds and over the last 100, within twice
 /// the blank's, so no add scans the records (M10.5 slice 8). Each add is
-/// a version, and pushing one costs more as history grows towards
-/// `MAX_VERSIONS` (it walks the versions to trim them, until slice 12),
-/// which both documents pay alike. The baseline is slice 1's AnnotAdd on
-/// blank pages.
+/// a version, and pushing one doesn't walk history (slice 12): on blank
+/// pages the last 100 adds' median, with history at the policy's count
+/// and weighed at every push, is within [`FLAT`] of the first 100's,
+/// with none to drop (slice 8's took 6×). The baseline is slice 1's
+/// AnnotAdd on blank pages.
 #[test]
 #[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
 fn mark_adds_on_the_heavy_7k() {
@@ -1253,7 +1413,8 @@ fn mark_adds_on_the_heavy_7k() {
         &heavy,
         ["< 1 ms and ≤ 2× the blank's, asserted", twice],
     ));
-    table.extend(rows("AddMark, blank (none held)", &blank, ["", ""]));
+    let flat = format!("≤ {FLAT}× the first {ENDS}'s, asserted");
+    table.extend(rows("AddMark, blank (none held)", &blank, ["", &flat]));
     print_table(
         &format!("history: {ADDS} AddMarks on the heavy 7k and on 7,000 blank pages"),
         "slice 2",
@@ -1272,12 +1433,21 @@ fn mark_adds_on_the_heavy_7k() {
         heavy.last,
         blank.last
     );
+    assert!(
+        blank.last <= blank.first.mul_f64(FLAT),
+        "on blank pages the last {ENDS} adds took {:?}, the first {:?}",
+        blank.last,
+        blank.first
+    );
 }
 
 /// The AddMarks [`mark_adds_on_the_heavy_7k`] makes on each document,
 /// and how many at either end it takes a median of.
 const ADDS: usize = 1000;
 const ENDS: usize = 100;
+/// How much more the last [`ENDS`] adds may take than the first, at most
+/// (slice 12).
+const FLAT: f64 = 1.5;
 
 /// What [`ADDS`] AddMarks took: the median of all, of the first
 /// [`ENDS`] and of the last.
@@ -1442,25 +1612,16 @@ fn sheaf_marks(mark: impl Fn(u64) -> Annot) -> Vec<u8> {
 }
 
 /// 200 OCR runs over a 1,000-page scan, each a version: what history
-/// holds, by its own estimate and by RSS. The baseline for slice 12's
-/// 256 MB budget; nothing asserted until then. Until slice 12 the process
-/// grows by about 4.7 GB, so it skips with less than [`OCR_200_NEEDS`]
-/// available.
+/// holds, by its own estimate and by RSS, beside slice 2's. The default
+/// policy keeps the estimate (snapshots, steps and undone sources) within
+/// [`HISTORY_BUDGET`], pruning versions as runs come (slice 12): asserted
+/// after every run.
 #[test]
 #[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
 fn history_of_200_ocr_versions_at_1000_pages() {
-    if let Some(available) = kb_field("/proc/meminfo", "MemAvailable")
-        && available < OCR_200_NEEDS
-    {
-        println!(
-            "skipped: 200 OCR versions need {:.0} GB available until slice 12 bounds history, and {:.1} GB is",
-            OCR_200_NEEDS as f64 / f64::from(1 << 30),
-            available as f64 / f64::from(1 << 30)
-        );
-        return;
-    }
     let mut d = blank(1000);
     let ids: Vec<PageId> = d.state().order().iter().copied().collect();
+    let mut most = 0;
     let ((), mem) = with_mem(|| {
         for run in 0..200 {
             let layers = ids
@@ -1468,6 +1629,7 @@ fn history_of_200_ocr_versions_at_1000_pages() {
                 .enumerate()
                 .map(|(i, &id)| (id, Arc::new(ocr_layer(run + i))));
             d.commit_ops(ocr(layers), "OCR").unwrap();
+            most = most.max(d.stats().total_bytes());
         }
     });
     let stats = d.stats();
@@ -1501,7 +1663,14 @@ fn history_of_200_ocr_versions_at_1000_pages() {
                 now: Some(mb(stats.step_bytes as u64)),
                 unit: "MB",
                 baseline: OCR_200.step_mb,
-                gate: "history within 256 MB, slice 12".into(),
+                gate: String::new(),
+            },
+            Row {
+                what: "history (estimate), the most after a run".into(),
+                now: Some(mb(most as u64)),
+                unit: "MB",
+                baseline: OCR_200.snapshot_mb + OCR_200.step_mb,
+                gate: "≤ 256 MB, asserted".into(),
             },
             Row {
                 what: "RSS growth".into(),
@@ -1511,6 +1680,11 @@ fn history_of_200_ocr_versions_at_1000_pages() {
                 gate: String::new(),
             },
         ],
+    );
+    assert!(
+        most <= HISTORY_BUDGET,
+        "history held {:.1} MB",
+        mb(most as u64)
     );
 }
 
@@ -1618,6 +1792,34 @@ fn blank(pages: u32) -> Document {
         &[],
         sheaf_doc::history::default_policy(),
     )
+}
+
+/// A connector pair labelled "1" from page `a` to page `b`: every pair is
+/// of one group.
+fn connector(a: PageId, b: PageId) -> Op {
+    let at = |page| Anchor {
+        page: PageRef::Id(page),
+        rect: Box2 {
+            x: 10.0,
+            y: 10.0,
+            w: 22.0,
+            h: 22.0,
+        },
+    };
+    Op::AddConnector {
+        a: at(a),
+        b: at(b),
+        label: "1".into(),
+        style: Style {
+            color: [255, 0, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            fill: None,
+            dashed: false,
+            cloudy: false,
+        },
+        locals: Vec::new(),
+    }
 }
 
 /// A small red square, `id` 0 for the document to assign one.

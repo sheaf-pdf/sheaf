@@ -32,7 +32,7 @@ use sheaf_doc::annot::tape_size;
 use sheaf_doc::geom::Affine;
 use sheaf_doc::tape::{Line, Op, Row, Tape, TapeLook, fmt_amount, parse_amount};
 use sheaf_doc::tx::mark_changes;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, PageId, Pt};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, CommitOpts, PageId, Pt};
 use sheaf_edit::AnnotRef;
 use sheaf_edit::Rotation;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
@@ -584,7 +584,10 @@ impl DocView {
                     }
                 })
                 .collect();
-            self.apply_batch(ops, &format!("Tick {n} picked"), cx);
+            let label = format!("Tick {n} picked");
+            if let Some(tx) = self.lower(ops, &label, cx) {
+                self.commit(tx, CommitOpts::labelled(label), cx).ok();
+            }
         }
         self.set_notice(
             &if n == 1 {
@@ -676,7 +679,10 @@ impl DocView {
             patch: mark_changes(&was, &a),
             imported: None,
         };
-        self.submit(tx, vec![op], "Update tape", cx);
+        let label = "Update tape";
+        if let Some(tx) = self.lower_in(tx, vec![op], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
     }
 
     /// The Calculator panel. `wide`: it sits in a bottom dock, so the keys
