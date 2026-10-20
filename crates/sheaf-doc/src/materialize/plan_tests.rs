@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use lopdf::{Document as Pdf, Object, ObjectId};
-use sheaf_core::Rotation;
+use sheaf_edit::{BookmarkPatch, Turn};
 
 use super::removal_tests::{layer, note, opened, said, scratch, text_file, warned};
 use super::rewrite_tests::says;
@@ -27,9 +27,10 @@ use crate::forms::fixture::{Form, row};
 use crate::forms::sigs::{SigImpact, Verdict};
 use crate::forms::{Finding, Value};
 use crate::materialize::ObjKey;
-use crate::model::{Document, Edit, FieldNode, Terminal};
+use crate::model::{Document, FieldNode, Terminal};
 use crate::prim::{Key, Val};
 use crate::serialize::fixture::holds;
+use crate::tx::fixture as fx;
 
 /// What `doc`'s current version saved to `path` plans, nothing sealed.
 fn planned(doc: &Document, path: &Path) -> SavePlan {
@@ -107,11 +108,8 @@ fn perms(bytes: &[u8]) -> (ObjectId, Object) {
 /// A note added to page 0 of `doc`.
 fn comment(doc: &mut Document, text: &str) {
     let page = doc.page(0).unwrap();
-    let add = Edit::AnnotAdd {
-        page,
-        annot: note(text),
-    };
-    doc.apply(add, "note").unwrap();
+    let add = fx::add(page, &note(text));
+    doc.commit_ops(vec![add], "note").unwrap();
 }
 
 /// A certification's `/P` permits after it what it says (§9.3): a
@@ -174,7 +172,8 @@ fn a_comment_deleted_from_a_signed_file_offers_append_anyway() {
     assert!(before.starts_with(&bytes) && signatures_fit(&before));
     let page = doc.page(0).unwrap();
     let id = doc.state().marks_on(page).next().unwrap().id;
-    doc.apply(Edit::AnnotDelete { page, id }, "delete").unwrap();
+    doc.commit_ops(vec![fx::delete_annots(&[id])], "delete")
+        .unwrap();
     let removed = vec![Removed {
         kind: RemovedKind::Comments,
         count: 1,
@@ -235,19 +234,8 @@ fn a_page_inserted_into_a_signed_hybrid_form_offers_append_anyway() {
     other.fill(z, "Zed");
     let kind = crate::store::BlobKind::file(Path::new("other.pdf"), None);
     let src = doc.store().open(other.bytes().into(), kind).unwrap();
-    let source = doc.add_source(crate::model::SourceInfo {
-        src,
-        name: "other.pdf".into(),
-        derived: None,
-    });
-    let insert = Edit::InsertPages {
-        source,
-        range: 0..1,
-        before: None,
-        outline: None,
-        annots: Vec::new(),
-    };
-    doc.apply(insert, "insert").unwrap();
+    let insert = fx::insert(&src, [0], "other.pdf", None);
+    doc.commit_ops(vec![insert], "insert").unwrap();
     let planned = planned(&doc, &path);
     assert_eq!(planned.strategy, Strategy::Append { onto: Onto::Saved });
     let xfa = Removed {
@@ -286,9 +274,8 @@ fn fill(doc: &mut Document, name: &str, value: &str) {
     let mut term = Terminal::clone(node.term.as_deref().unwrap());
     term.value = Some(Value::Text(value.into()));
     node.term = Some(Arc::new(term));
-    let edit = Edit::SetPageLabels { ranges: Vec::new() };
     let val = Some(Val::Field(Arc::new(node)));
-    doc.put_for_test(edit, Key::Field(id), val, "fill");
+    doc.put_for_test(Key::Field(id), val, "fill");
 }
 
 /// Reader's usage rights stay on an Append within their
@@ -394,27 +381,20 @@ fn a_bookmark_renamed_rewrites_and_its_old_title_goes() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(2));
     let target = Some(doc.page(1).unwrap());
-    let insert = Edit::OutlineInsert {
-        parent: None,
-        after: None,
-        title: "OLDTITLE".into(),
-        target,
-        view: None,
-    };
-    doc.apply(insert, "bookmark").unwrap();
+    let insert = fx::bookmark(None, None, "OLDTITLE", target);
+    doc.commit_ops(vec![insert], "bookmark").unwrap();
     let report = saved(&mut doc, &path, AskAnswers::default()).unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Append));
     assert!(says(&std::fs::read(&path).unwrap(), "OLDTITLE"));
     let id = doc.state().bookmarks_preorder()[0].1;
-    let rename = Edit::OutlineEdit {
+    let rename = fx::patch_bookmark(
         id,
-        title: Some("NEWTITLE".into()),
-        target: None,
-        color: None,
-        view: None,
-        style: None,
-    };
-    doc.apply(rename, "rename").unwrap();
+        BookmarkPatch {
+            title: Some("NEWTITLE".into()),
+            ..Default::default()
+        },
+    );
+    doc.commit_ops(vec![rename], "rename").unwrap();
     let report = saved(&mut doc, &path, AskAnswers::default()).unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     let retitled = Removed {
@@ -436,8 +416,7 @@ fn pages_deleted_saved_and_undone_come_back_by_a_rewrite() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(3));
     let gone = doc.page(1).unwrap();
-    doc.apply(Edit::DeletePages { ids: vec![gone] }, "delete")
-        .unwrap();
+    doc.commit_ops(vec![fx::delete(&[gone])], "delete").unwrap();
     let report = saved(&mut doc, &path, AskAnswers::default()).unwrap();
     let page = Removed {
         kind: RemovedKind::Pages,
@@ -469,23 +448,17 @@ fn back_at_the_saved_state_nothing_is_written() {
         let name = format!("a-{header}.pdf");
         let (path, mut doc) = opened(&dir, &name, &text_file(2));
         if header {
-            let hf = crate::stamps::HeaderFooter {
-                texts: ["Head <<1>>", "", "", "", "", ""].map(String::from),
-                ..Default::default()
-            };
-            let set = Edit::SetHeaderFooter {
-                header_footer: Some(hf),
-            };
-            doc.apply(set, "header").unwrap();
+            let set = fx::set_header(fx::header("Head <<1>>"), None);
+            doc.commit_ops(vec![set], "header").unwrap();
             let report = saved(&mut doc, &path, AskAnswers::default()).unwrap();
             assert_eq!(report.why, [Why::LegacyHeaderFooter]);
         }
         let before = std::fs::read(&path).unwrap();
         let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let ids = vec![doc.page(0).unwrap()];
-        for by in [Rotation::R90, Rotation::R270] {
-            let ids = ids.clone();
-            doc.apply(Edit::RotatePages { ids, by }, "turn").unwrap();
+        let first = doc.page(0).unwrap();
+        for by in [Turn::Quarter, Turn::Back] {
+            doc.commit_ops(vec![fx::rotate(&[first], by)], "turn")
+                .unwrap();
         }
         assert!(doc.is_dirty());
         assert_eq!(planned(&doc, &path).strategy, Strategy::Unchanged);
@@ -504,9 +477,9 @@ fn back_at_the_saved_state_nothing_is_written() {
 fn a_file_changed_on_disk_plans_a_rewrite_that_asks() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(2));
-    let ids = vec![doc.page(0).unwrap()];
-    let by = Rotation::R90;
-    doc.apply(Edit::RotatePages { ids, by }, "turn").unwrap();
+    let first = doc.page(0).unwrap();
+    doc.commit_ops(vec![fx::rotate(&[first], Turn::Quarter)], "turn")
+        .unwrap();
     let mut theirs = std::fs::read(&path).unwrap();
     theirs.extend_from_slice(b"\n");
     std::fs::write(&path, &theirs).unwrap();
@@ -548,7 +521,8 @@ fn a_misjudged_removal_is_vetoed_through_the_plan() {
     assert!(holds(&std::fs::read(&path).unwrap(), b"a secret note"));
     let page = doc.page(0).unwrap();
     let id = doc.state().marks_on(page).next().unwrap().id;
-    doc.apply(Edit::AnnotDelete { page, id }, "delete").unwrap();
+    doc.commit_ops(vec![fx::delete_annots(&[id])], "delete")
+        .unwrap();
     let before = super::removal::vetoes_here();
     let (report, warnings) = warned(|| {
         misjudged(removes_nothing, || {
@@ -587,7 +561,8 @@ fn an_append_anyway_the_signatures_asked_still_stops_on_removed_text() {
     assert_eq!(report.strategy, Some(StrategyKind::Append));
     let page = doc.page(0).unwrap();
     let id = doc.state().marks_on(page).next().unwrap().id;
-    doc.apply(Edit::AnnotDelete { page, id }, "delete").unwrap();
+    doc.commit_ops(vec![fx::delete_annots(&[id])], "delete")
+        .unwrap();
     comment(&mut doc, "another note");
     misjudged(removes_nothing, || {
         let planned = planned(&doc, &path);
@@ -670,12 +645,10 @@ fn an_append_anyway_that_listed_a_removal_still_stops_on_one_it_did_not() {
             .clone()
     };
     let (gone, mut kept) = (mark("a secret note").id, mark("another secret"));
-    doc.apply(Edit::AnnotDelete { page, id: gone }, "delete")
+    doc.commit_ops(vec![fx::delete_annots(&[gone])], "delete")
         .unwrap();
     kept.contents = "a harmless note".into();
-    let annot = kept.clone();
-    doc.apply(Edit::AnnotUpdate { page, annot }, "edit")
-        .unwrap();
+    doc.commit_ops(vec![fx::update(&kept)], "edit").unwrap();
     let before = std::fs::read(&path).unwrap();
     assert!(holds(&before, b"another secret"));
     let key = ObjKey::Annot(kept.id);
@@ -750,13 +723,11 @@ fn a_page_recognized_again_on_a_signed_file_appends_anyway_as_listed() {
     let bytes = signed(|f, sig| f.sign(sig), None);
     let (path, mut doc) = opened(&dir, "signed.pdf", &bytes);
     let page = doc.page(0).unwrap();
-    let ocr = |text: &str| Edit::SetTextLayers {
-        layers: vec![(page, layer(text))],
-    };
-    doc.apply(ocr("firstwords"), "ocr").unwrap();
+    let ocr = |text: &str| fx::ocr([(page, layer(text))]);
+    doc.commit_ops(ocr("firstwords"), "ocr").unwrap();
     let report = saved(&mut doc, &path, anyway()).unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Append));
-    doc.apply(ocr("secondwords"), "ocr").unwrap();
+    doc.commit_ops(ocr("secondwords"), "ocr").unwrap();
     let planned = planned(&doc, &path);
     let removed = vec![Removed {
         kind: RemovedKind::OcrLayers,
@@ -805,15 +776,13 @@ fn a_section_writing_the_catalog_unplanned_asks() {
     let dir = scratch();
     let bytes = signed(|f, sig| f.certify(sig, 3), None);
     let (path, mut doc) = opened(&dir, "p3.pdf", &bytes);
-    let labels = Edit::SetPageLabels {
-        ranges: vec![crate::labels::LabelSpec {
-            start: doc.page(0).unwrap(),
-            style: crate::labels::Style::LowerRoman,
-            prefix: String::new(),
-            first: 1,
-        }],
-    };
-    doc.apply(labels, "labels").unwrap();
+    let labels = fx::labels(&[crate::labels::LabelSpec {
+        start: doc.page(0).unwrap(),
+        style: crate::labels::Style::LowerRoman,
+        prefix: String::new(),
+        first: 1,
+    }]);
+    doc.commit_ops(vec![labels], "labels").unwrap();
     misjudged(comments_alone, || {
         let planned = planned(&doc, &path);
         assert_eq!(planned.strategy, Strategy::Append { onto: Onto::Saved });

@@ -128,15 +128,16 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 │                     viewport, sidebars, command palette  │
 ├────────────────────────────┬────────────────────────────┤
 │  sheaf-doc                 │  sheaf-render              │
-│  Document model + edits    │  Page → tiles, cache,      │
-│  (pages, outline, annots,  │  background render pool    │
-│  undo/redo, incremental    │                            │
-│  save)                     │  trait Renderer            │
+│  Document model; ops       │  Page → tiles, cache,      │
+│  lowered in transactions   │  background render pool    │
+│  (pages, outline, annots), │                            │
+│  undo/redo, planned saves  │  trait Renderer            │
 │                            │   └ pdfium (MVP)           │
 │  lopdf / own object layer  │   └ hayro (later, pure Rust)│
 ├────────────────────────────┴────────────────────────────┤
-│  sheaf-core         Shared types: PageId, Rect, units,   │
-│                     color, coordinate transforms         │
+│  sheaf-edit         The edit vocabulary: ops, ids, refs, │
+│                     specs; types and JSON, for plugins   │
+│  sheaf-util         Byte helpers: checksum, file reads   │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -150,7 +151,7 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 | Rendering strategy | **Tiled, async, cached** | Viewport requests tiles at the current zoom; a worker pool renders them off the UI thread; LRU cache keyed by `(page, zoom, tile)`. Low-res preview tile first, then full-res. This is the single biggest "feels fast" lever. |
 | Text / OCR | PDFium text extraction. OCR is a **core feature** behind an `OcrEngine` trait with two engines compiled in by default: **Tesseract 5** (built from source, linked statically) and **PaddleOCR PP-OCRv5** on ONNX Runtime (`oar-ocr`, with Microsoft's runtime library loaded on demand from `ocr/lib`). | Both engines are native C/C++, so OCR can't live in a WASM plugin; the trait keeps engines swappable, and plugins get OCR as a host capability. Judged on scanned tax forms, not purity. |
 | Save model | Incremental update by default; Save As is a save to another file | Preserves originals, fast saves on large files (one mark on a 500 MB scan in about 21 ms). Clean rewrite available for size reduction / "Export Clean Copy". A save is an output: it writes the version on screen and records what it wrote, and the document, its undo history and what the screen shows stay as they were. sheaf plans each save: back at what the file holds, nothing is written; otherwise an incremental update, journaled so a crash mid-write is undone at the next open, unless something was removed (a page, a mark, a reply, a bookmark, OCR text replaced), the file can't take one, or the update would leave removed text readable, when the file is rewritten whole, so what was removed isn't left in an earlier revision; the save says why. A file another program changed since sheaf opened or last saved it is never overwritten unasked: Save As…, Overwrite or Cancel, and a document recovered after a crash is checked against its file the same way. A signed or certified file keeps its signatures when what changed is within what they allow (a certification's permissions, Reader's usage rights), Save As included; otherwise sheaf asks: Append Anyway (an update that leaves the signed bytes as they were, what it removed still readable in the earlier revision), Rewrite (which breaks them) or Cancel. No save or copy carries a page it doesn't keep: links, named destinations, the open action, form fields, tags and article threads that pointed at one are dropped or pruned. |
-| Undo | A tree of versions, each with the edits that made it | Every edit is an `Edit` command. A version keeps a snapshot (cheap, structure-shared) and the commands from its parent; undo, redo and jumps move between versions, an edit after undo starts a branch instead of discarding, and a trimmed snapshot is rebuilt by replaying commands. Per-document. |
+| Undo | A tree of versions, each with the edits that made it | Every edit is an op (`sheaf_edit::Op`), lowered in a transaction into the changes it makes. A version keeps a snapshot (cheap, structure-shared) and those changes from its parent; undo, redo and jumps move between versions, an edit after undo starts a branch instead of discarding, and a trimmed snapshot is rebuilt by replaying them. An OCR run or a plugin command is one undo step, however many results it lands, and an edit planned in the background (an insert, a crop, a dialog's change) lands on whatever you did meanwhile, or tells you what it conflicts with and changes nothing. History is kept within 256 MB, the oldest versions going first. Per-document. |
 
 ### Efficiency principles
 
@@ -186,7 +187,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Recent files | ✅ File > Open Recent (last 10, shared by every window) |
 | Document Properties | ✅ File > Properties (Alt+Enter): description, security, fonts |
 | Layers (OCG) panel | ✅ View > Panels > Layers (Ctrl+Alt+7): show or hide for viewing; never saved |
-| History panel | ✅ View > Panels > History (Ctrl+Alt+8): every version since the file opened, who made it and when, and its edits in words; click (or Up/Down) to go back to any version; edits undone and then replaced stay as a branch you can go into |
+| History panel | ✅ View > Panels > History (Ctrl+Alt+8): every version kept, who made it (you, or a plugin by name) and when, and its edits in words, a run of one kind as one line ("Recognize text on 7000 pages"); an edit that removes something (pages, comments, fields, bookmarks, text) carries a Removes badge; click (or Up/Down) to go back to any version; edits undone and then replaced stay as a branch you can go into; an OCR run's or a plugin command's versions have "Undo all of …", which takes back every part of it, even when your edits in between split it ("… (continued)"), and keeps your edits |
 | Configurable toolbar: any command or plugin command, docked to any edge or floating | ✅ View > Customize Toolbar…, or right-click a menu item, palette row or toolbar button; `toolbar.json` |
 
 ### Page organization

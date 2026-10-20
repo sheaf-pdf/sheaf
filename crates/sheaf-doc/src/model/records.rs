@@ -16,15 +16,14 @@
 //! generator is today's header/footer, with its own scope, date and file,
 //! and its Bates numbers counted at each Rewrite; its scope, frozen values
 //! and the watermark come with slices 16–17. A form instance is one per
-//! registration until slice 11 makes a source its blob, and the form's own
-//! keys (`/DR`, `/CO`, `/DA`…) are read from its files until slice 9's
-//! emitter writes them from [`FormDoc`].
+//! insert of a source's pages, or duplicate of them, and the form's own
+//! keys (`/DR`, `/CO`, `/DA`…) are written from [`FormDoc`].
 
 use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
 use im::Vector;
-use sheaf_core::DestView;
+use sheaf_edit::DestView;
 
 use crate::annot::{Annot, AnnotId};
 use crate::file::ForeignAnnot;
@@ -51,9 +50,6 @@ pub struct PageDef {
 /// The source page a page shows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageBase {
-    /// The registration it came in by: render handles, OCR and the old
-    /// writers go by it until slice 11 makes a source its blob.
-    pub source: SourceId,
     pub src: Src,
     /// 0-based, in `src`.
     pub index: u32,
@@ -263,11 +259,11 @@ impl AnnotRec {
     }
 }
 
-/// One instance of a source's form in the document: its registration
-/// (the source until slice 11), and which copy of that form it is. Copy 0
-/// is the first; for the primary, its own objects. A duplicate of its
-/// pages, or another insert of its file, is another, written with objects
-/// of its own.
+/// One instance of a source's form in the document: the source, and
+/// which copy of its form it is, fixed when the instance is made (M10.5
+/// §3.7). Copy 0 of the primary's is its own objects. Every insert of a
+/// file's pages makes another, and so does a duplicate of its pages, each
+/// written with objects of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FormInst {
     pub src: SourceId,
@@ -359,9 +355,9 @@ impl Terminal {
 /// The form as a whole. Its keys of the form's dictionary a save writes
 /// from the state, never from a file (M10.5 §9.1's ownership table):
 /// `/Fields` (the roots), `/CO`, `/DA`, `/Q`, `/NeedAppearances` and
-/// `/SigFlags`, read from the opened file's. `/DR` is the instances'
-/// files' merged as a save writes them, until slice 11 decides renames at
-/// lowering.
+/// `/SigFlags`, read from the opened file's. `/DR` isn't held: a save
+/// merges the instances' files' as it writes them (deciding its renames at
+/// lowering, §6.5, is left for later; see M10.5 slice 11's notes).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FormDoc {
     /// The top of the field tree, in order.
@@ -600,6 +596,49 @@ impl GenSpec {
     pub fn header_footer(&self) -> Option<&Arc<HeaderFooter>> {
         match self {
             GenSpec::HeaderFooter(hf) => Some(hf),
+        }
+    }
+
+    /// Whether it and `other` are of one kind and z, of which a document
+    /// has one generator at most (M10.5 §6.4). A header/footer has no z:
+    /// a document has one.
+    pub(crate) fn same_place(&self, other: &GenSpec) -> bool {
+        match (self, other) {
+            (GenSpec::HeaderFooter(_), GenSpec::HeaderFooter(_)) => true,
+        }
+    }
+}
+
+impl Generator {
+    /// It once only the pages `stays` says stay are left: on those of the
+    /// pages it names, or none when that's none of them; every page when it
+    /// names none. How many of the pages it names went.
+    pub(crate) fn on_pages_left(
+        self: &Arc<Self>,
+        stays: impl Fn(PageId) -> bool,
+    ) -> (Option<Arc<Generator>>, usize) {
+        match &self.spec {
+            GenSpec::HeaderFooter(hf) => {
+                let Some(scope) = &hf.pages else {
+                    return (Some(self.clone()), 0);
+                };
+                let left: Vec<PageId> = scope.iter().copied().filter(|&p| stays(p)).collect();
+                let went = scope.len() - left.len();
+                if went == 0 {
+                    return (Some(self.clone()), 0);
+                }
+                let g = (!left.is_empty()).then(|| {
+                    let hf = HeaderFooter {
+                        pages: Some(left),
+                        ..HeaderFooter::clone(hf)
+                    };
+                    Arc::new(Generator {
+                        id: self.id,
+                        spec: GenSpec::HeaderFooter(Arc::new(hf)),
+                    })
+                });
+                (g, went)
+            }
         }
     }
 }

@@ -15,18 +15,18 @@ use std::path::Path;
 use std::sync::Arc;
 
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId, XrefFacts};
-use sheaf_core::Checksum;
+use sheaf_util::Checksum;
 
 use super::emit::PdfVersion;
 use super::key::ObjKey;
 use super::plan::{SaveTransform, StrategyKind};
 use crate::attachments::Objects;
 use crate::effects::SigClass;
-use crate::model::{DocState, GenId, PageId, Snapshot, SourceId, SourceInfo, VersionId};
+use crate::model::{DerivedCopies, DocState, GenId, PageId, Snapshot, VersionId};
 use crate::prim::Key;
 use crate::serialize::crypt::Crypt;
 use crate::serialize::durable::FileStamp;
-use crate::store::BlobId;
+use crate::store::{BlobId, Src};
 
 /// What sheaf knows about a file it wrote, or opened.
 #[derive(Clone)]
@@ -109,32 +109,35 @@ pub struct TailFlags {
     pub fields: BTreeSet<String>,
 }
 
-/// What a document knows of its file as it opens (§9.1): the file as it
-/// was read; or, restored from the file's recovery sidecar (§11.10), the
-/// file as the sidecar was written against it, `base`, and what the
-/// sidecar holds that the file hasn't got.
+/// What a document knows of its file as it opens (§9.1): the file at
+/// `path` as it was read; or, restored from the file's recovery sidecar
+/// (§11.10), the file as the sidecar was written against it, `base`, and
+/// what the sidecar holds that the file hasn't got.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Came {
-    Read(FileStamp),
+    Read {
+        path: Arc<Path>,
+        stamp: FileStamp,
+    },
     Restored {
+        path: Arc<Path>,
         base: FileStamp,
         pending: PendingTail,
     },
 }
 
 impl SaveRecord {
-    /// The record of `info`, the file a document opened at `version`, as
-    /// `stamp` found it: what the file says of itself, since sheaf wrote
-    /// none of it. Its objects are at their own numbers (the map's
-    /// identity), every number in use is present, and the root objects'
-    /// keys and page tree are the file's.
-    pub fn opened(version: VersionId, info: &SourceInfo, stamp: FileStamp) -> SaveRecord {
-        let src = &info.src;
+    /// The record of `src`, the file at `path` a document opened on at
+    /// `version`, as `stamp` found it: what the file says of itself, since
+    /// sheaf wrote none of it. Its objects are at their own numbers (the
+    /// map's identity), every number in use is present, and the root
+    /// objects' keys and page tree are the file's.
+    pub fn opened(version: VersionId, src: &Src, path: Arc<Path>, stamp: FileStamp) -> SaveRecord {
         let pdf = src.pdf();
         let tree = TreeShape::of(pdf);
         SaveRecord {
             version,
-            path: info.name.as_path().into(),
+            path,
             at: crate::annot::pdf_date_now(),
             strategy: StrategyKind::Opened,
             stamp,
@@ -162,21 +165,22 @@ impl SaveRecord {
     }
 
     /// The record of a document restored from its file's recovery sidecar
-    /// (§11.10) at `version`: `info` is what the sidecar recovers, the
+    /// (§11.10) at `version`: `src` is what the sidecar recovers, the
     /// file's bytes and its sections after them read as one (or its whole
-    /// document), named as the file is; `base` is the file as the sidecar
+    /// document), for the file at `path`; `base` is the file as the sidecar
     /// was written against it; and `pending`, what the file hasn't got. The
-    /// record of `info` as opened, but the file's stamp, so its first save
+    /// record of `src` as opened, but the file's stamp, so its first save
     /// writes `pending` after the file's bytes, while they're still those.
     pub fn restored(
         version: VersionId,
-        info: &SourceInfo,
+        src: &Src,
+        path: Arc<Path>,
         base: FileStamp,
         pending: PendingTail,
     ) -> SaveRecord {
         SaveRecord {
             pending_tail: Some(pending),
-            ..SaveRecord::opened(version, info, base)
+            ..SaveRecord::opened(version, src, path, base)
         }
     }
 
@@ -509,17 +513,17 @@ impl TreeShape {
 }
 
 /// What a save writes from: the state of the version it writes, the
-/// registrations its pages and forms come from, and the saved side it
-/// writes after, when there's one, with the keys changed on the way.
+/// source it opened on and the derived copies its pages may show, and the
+/// saved side it writes after, when there's one, with the keys changed on
+/// the way.
 #[derive(Clone)]
 pub struct SaveInput {
     pub version: VersionId,
     pub target: DocState,
-    /// The primary's registration: the file a Rewrite writes onto.
-    pub primary: SourceId,
-    /// The registrations, until slice 11 makes a source its blob: a
-    /// derived copy's says which pages it was made from.
-    pub sources: HashMap<SourceId, Arc<SourceInfo>>,
+    /// The primary: the file a Rewrite writes onto.
+    pub primary: Src,
+    /// Which pages each derived copy was made from (until slice 17).
+    pub derived: Arc<DerivedCopies>,
     pub saved: Option<SavedSide>,
     /// The keys any step changed on the history tree's path from the saved
     /// version to this one (M10.5 §7.2), which the planner judges by value
@@ -542,8 +546,8 @@ impl SaveInput {
         SaveInput {
             version: snap.version,
             target: snap.state.clone(),
-            primary: snap.primary,
-            sources: snap.sources.clone(),
+            primary: snap.primary.clone(),
+            derived: snap.derived.clone(),
             saved: None,
             path_keys: Arc::default(),
         }

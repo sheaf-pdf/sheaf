@@ -16,7 +16,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_core::{PageSize, Rotation};
+use sheaf_edit::{PageSize, Rotation};
 
 use crate::attachments::Objects;
 use crate::content::{self, PageContent};
@@ -26,6 +26,16 @@ use crate::source::Limits;
 /// Marks a stamp page's dynamic text template (`<<initials>> <<date>>`),
 /// drawn over the page when it's placed.
 pub const TEXT_KEY: &str = "SheafStampText";
+
+/// A dynamic stamp's tokens filled in: `<<name>>`, `<<initials>>`,
+/// `<<date>>` and `<<time>>`, as of now.
+pub fn fill(template: &str, name: &str, initials: &str, date: &str, time: &str) -> String {
+    template
+        .replace("<<name>>", name)
+        .replace("<<initials>>", initials)
+        .replace("<<date>>", date)
+        .replace("<<time>>", time)
+}
 
 /// One stamp in a collection.
 #[derive(Debug, Clone, PartialEq)]

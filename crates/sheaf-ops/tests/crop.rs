@@ -6,15 +6,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lopdf::{Dictionary, Document as Pdf, Stream, dictionary};
-use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::geom::Geom;
 use sheaf_doc::materialize::How;
+use sheaf_doc::tx::fixture::{add, ocr, rotate};
 use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Box2, DestView, Document, Edit, OcrWord, PageChars, PageId, Pt,
-    TextLayer,
+    Annot, AnnotId, AnnotKind, Box2, Derive, DestView, Document, OcrWord, PageChars, PageId, Pt,
 };
+use sheaf_edit::{Op, PageRef, Rotation, Sibling, Turn};
 use sheaf_image::raster::{PixelFormat, content_bounds};
 use sheaf_ops::crop::{CropSpec, Margins};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
@@ -87,14 +88,9 @@ fn crop(doc: &mut Document, page: PageId, m: Margins) {
         &sheaf_ops::NoProgress,
     )
     .unwrap();
-    let sid = doc.add_source(plan[0].info.clone());
-    doc.apply(
-        Edit::RebasePages {
-            pages: plan[0].rebases(sid),
-        },
-        "Crop",
-    )
-    .unwrap();
+    plan[0].note(doc);
+    let pages = plan[0].bases().collect();
+    doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
 }
 
 /// Margins off every side, none alike.
@@ -187,7 +183,7 @@ fn margins_crop_and_marks_follow() {
         h: 50.0,
     };
     let annot = mark(AnnotKind::Square { rect: over });
-    doc.apply(Edit::AnnotAdd { page, annot }, "mark").unwrap();
+    doc.commit_ops(vec![add(page, &annot)], "mark").unwrap();
     let m = Margins {
         top: 72.0,
         left: 72.0,
@@ -252,14 +248,10 @@ fn highlight_covers_its_glyphs(how: How) {
             rects: rects.clone(),
         })
     };
-    doc.apply(Edit::AnnotAdd { page: p, annot }, "highlight")
-        .unwrap();
+    doc.commit_ops(vec![add(p, &annot)], "highlight").unwrap();
     crop(&mut doc, p, UNEVEN);
-    let turn = Edit::RotatePages {
-        ids: vec![p],
-        by: Rotation::R90,
-    };
-    doc.apply(turn, "rotate").unwrap();
+    let turn = rotate(&[p], Turn::Quarter);
+    doc.commit_ops(vec![turn], "rotate").unwrap();
     let now = doc.geom(doc.state().order()[0]);
     let shown = (now.visible(), now.rotate);
     assert_eq!(shown.1, Rotation::R90);
@@ -309,7 +301,7 @@ fn trim_white_finds_the_content() {
         &sheaf_ops::NoProgress,
     )
     .unwrap();
-    let size = plan[0].info.src.page_size(0);
+    let size = plan[0].src.page_size(0);
     assert!((size.width - 100.0).abs() <= 2.0, "{size:?}");
     assert!((size.height - 100.0).abs() <= 2.0, "{size:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -330,14 +322,17 @@ fn a_bookmark_on_a_cropped_page_lands_on_the_same_content() {
         top: Some(400.0),
         zoom: None,
     };
-    let insert = Edit::OutlineInsert {
+    let insert = Op::AddBookmark {
         parent: None,
-        after: None,
+        at: Sibling::First,
         title: "Square".into(),
-        target: Some(page),
+        target: Some(PageRef::Id(page)),
         view: Some(view.clone()),
+        color: None,
+        style: Default::default(),
+        local: None,
     };
-    doc.apply(insert, "bookmark").unwrap();
+    doc.commit_ops(vec![insert], "bookmark").unwrap();
     crop(&mut doc, page, UNEVEN);
     let out = dir.join("out.pdf");
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
@@ -390,11 +385,12 @@ fn a_crop_leaves_ocr_text_on_its_words() {
         },
         confidence: 1.0,
     };
-    let layer = Arc::new(TextLayer::from_engine(vec![word], &doc.geom(p), "test"));
-    let set = Edit::SetTextLayers {
-        layers: vec![(p, layer.clone())],
-    };
-    doc.apply(set, "ocr").unwrap();
+    let layer = Arc::new(sheaf_doc::text_layer::from_engine(
+        vec![word],
+        &doc.geom(p),
+        "test",
+    ));
+    doc.commit_ops(ocr([(p, layer.clone())]), "ocr").unwrap();
     crop(&mut doc, p, UNEVEN);
     assert!(Arc::ptr_eq(doc.state().ocr_text(p).unwrap(), &layer));
     let out = dir.join("out.pdf");
@@ -424,5 +420,64 @@ fn a_crop_leaves_ocr_text_on_its_words() {
             && near(got.bottom(), want.bottom()),
         "found at {got:?}, recognized at {want:?}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two pages alike, cropped alike in two edits, make two copies, one of
+/// each page: a save writes each as the page it was made from, so a
+/// link to either still leads to it.
+#[test]
+fn pages_alike_cropped_apart_stay_apart() {
+    let dir = scratch("alike");
+    let mut pdf = Pdf::with_version("1.5");
+    let pages_id = pdf.new_object_id();
+    let content = pdf.add_object(Stream::new(
+        dictionary! {},
+        b"0 g 300 300 100 100 re f".to_vec(),
+    ));
+    let page = |annots: Vec<lopdf::Object>| {
+        dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content, "Annots" => annots,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        }
+    };
+    let alike = [page(Vec::new()), page(Vec::new())].map(|p| pdf.add_object(p));
+    let links = alike.map(|to| {
+        let rect: Vec<lopdf::Object> = vec![10.into(), 10.into(), 30.into(), 30.into()];
+        let dest: Vec<lopdf::Object> = vec![to.into(), "Fit".into()];
+        let link =
+            dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => rect, "Dest" => dest };
+        pdf.add_object(link).into()
+    });
+    let linking = pdf.add_object(page(links.to_vec()));
+    let kids: Vec<lopdf::Object> = [alike[0], alike[1], linking].map(Into::into).to_vec();
+    pdf.objects.insert(
+        pages_id,
+        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 3 }.into(),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    pdf.trailer.set("Root", catalog);
+    let path = dir.join("alike.pdf");
+    pdf.save(&path).unwrap();
+    let mut doc = open(&path);
+    for i in 0..2 {
+        let page = doc.state().order()[i];
+        crop(&mut doc, page, UNEVEN);
+    }
+    let from: Vec<Vec<u32>> = (doc.derived().values()).map(|d| d.pages.clone()).collect();
+    assert_eq!(from.len(), 2, "{from:?}");
+    for how in [How::Rewritten, How::Appended] {
+        let saved = Pdf::load_mem(&how.write(&doc)).unwrap();
+        let pages: Vec<lopdf::ObjectId> = saved.get_pages().into_values().collect();
+        let annots = saved.get_page_annotations(pages[2]).unwrap();
+        let to: Vec<lopdf::ObjectId> = (annots.iter())
+            .map(|link| {
+                link.get(b"Dest").unwrap().as_array().unwrap()[0]
+                    .as_reference()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(to, pages[..2], "{how:?}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

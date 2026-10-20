@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 use super::*;
 use crate::annot::{Annot, AnnotId};
@@ -16,8 +16,9 @@ use crate::forms::fixture::{Form, every_fact, note, outline_tree};
 use crate::labels::Style;
 use crate::materialize::rewrite_tests::annots_read;
 use crate::materialize::{Came, How, ObjKey};
-use crate::model::{DocState, Edit, Invariant, Mark, NotReady, PageId};
+use crate::model::{DocState, Invariant, Mark, PageId};
 use crate::store::{BlobKind, Src};
+use crate::tx::fixture as fx;
 
 /// `pdf` written and read as a source, in a store of its own: what a
 /// reader reads as a file opens, beside the loaded document. A fixture
@@ -100,24 +101,18 @@ pub(crate) fn assert_every_fact(st: &DocState) {
 fn no_fact_comes_after_the_first_edit() {
     let store = Store::new();
     let kind = BlobKind::file(Path::new("facts.pdf"), None);
-    let primary = SourceInfo {
-        src: store.open(every_fact().bytes().into(), kind).unwrap(),
-        name: "facts.pdf".into(),
-        derived: None,
-    };
-    let src = primary.src.clone();
-    let mut doc = start(store, primary, None, crate::history::default_policy());
+    let primary = store.open(every_fact().bytes().into(), kind).unwrap();
+    let src = primary.clone();
+    let policy = crate::history::default_policy();
+    let mut doc = start(store, primary, "facts.pdf".into(), None, policy);
     let page = doc.page(0).unwrap();
-    let rotate = || Edit::RotatePages {
-        ids: vec![page],
-        by: Rotation::R90,
-    };
-    let refused = doc.apply(rotate(), "Rotate").unwrap_err();
-    assert!(refused.is::<NotReady>(), "{refused:#}");
+    let rotate = || vec![fx::rotate(&[page], sheaf_edit::Turn::Quarter)];
+    let refused = doc.commit_ops(rotate(), "Rotate").unwrap_err();
+    assert_eq!(refused, crate::tx::EditError::NotReady);
     assert!(!doc.can_undo());
     doc.ready(finish(&src, &NoProgress)).unwrap();
     let opened = doc.current_version();
-    doc.apply(rotate(), "Rotate").unwrap();
+    doc.commit_ops(rotate(), "Rotate").unwrap();
     doc.undo().unwrap();
     assert_eq!(doc.current_version(), opened);
     assert!(!doc.can_undo());
@@ -249,14 +244,11 @@ fn assert_marks(read: &[Annot], want: &[Annot], tolerance: f64, case: &str) {
 fn opened(bytes: Vec<u8>) -> Opened {
     let store = Store::new();
     let kind = BlobKind::file(Path::new("marks.pdf"), None);
-    let primary = SourceInfo {
-        src: store.open(bytes.into(), kind).unwrap(),
-        name: "marks.pdf".into(),
-        derived: None,
-    };
-    let src = primary.src.clone();
-    let mut doc = start(store, primary, None, crate::history::default_policy());
-    let view = doc.ready(finish(&src, &NoProgress)).unwrap();
+    let primary = store.open(bytes.into(), kind).unwrap();
+    let src = primary.clone();
+    let policy = crate::history::default_policy();
+    let mut doc = start(store, primary, "marks.pdf".into(), None, policy);
+    let (view, _) = doc.ready(finish(&src, &NoProgress)).unwrap();
     Opened {
         doc,
         view,
@@ -421,8 +413,7 @@ fn stale_mark_is_theirs(how: How) {
         );
         let mut note = doc.state().marks_on(page).next().unwrap().clone();
         note.contents = "Edited in sheaf".into();
-        doc.apply(Edit::AnnotUpdate { page, annot: note }, "Edit")
-            .unwrap();
+        doc.commit_ops(vec![fx::update(&note)], "Edit").unwrap();
         let saved = how.write(&doc);
         let case = format!("{case}, {how:?}");
         let pdf = Pdf::load_mem(&saved).unwrap();
@@ -488,8 +479,7 @@ fn a_mark_holding_nothing(how: How) {
     ];
     assert_eq!(names(theirs_in(doc.state()).iter().collect()), want);
     note.contents = "Edited in sheaf".into();
-    doc.apply(Edit::AnnotUpdate { page, annot: note }, "Edit")
-        .unwrap();
+    doc.commit_ops(vec![fx::update(&note)], "Edit").unwrap();
     let found = annots_read(&how.write(&doc));
     assert_eq!(found.sheaf()[&0].len(), 1);
     let foreign = found.foreign().into_iter().map(|(_, f)| f).collect();
@@ -716,14 +706,10 @@ fn a_copied_page_gets_fresh_ids(how: How) {
     assert_eq!(marks, new);
 
     // The copied note deleted, the other tool's reply to it goes too.
-    doc.apply(
-        Edit::AnnotDelete {
-            page: copy,
-            id: new[0],
-        },
-        "Delete",
-    )
-    .unwrap();
+    let delete = sheaf_edit::Op::DeleteAnnotations {
+        annots: vec![sheaf_edit::AnnotRef::Id(new[0])],
+    };
+    doc.commit_ops(vec![delete], "Delete").unwrap();
     let reopened = opened(how.write(&doc));
     let foreign = theirs_in(reopened.doc.state());
     assert!(foreign.is_empty(), "{foreign:?}");
@@ -978,21 +964,26 @@ const EXPLAINED: &[(&str, Explained)] = &[
 /// invariants checked.
 fn compare(corpus: &Corpus, entry: &Entry) -> Outcome {
     let store = Store::new();
-    let Ok((info, stamp)) = crate::SourceInfo::read(&store, &corpus.path(entry), None) else {
+    let path = corpus.path(entry);
+    let Ok((src, stamp)) = store.read_file(&path, None) else {
         return Outcome {
             unopened: true,
             ..Default::default()
         };
     };
-    let src = &info.src.clone();
-    let facts = finish(src, &NoProgress);
+    let facts = finish(&src, &NoProgress);
+    let came = Came::Read {
+        path: path.as_path().into(),
+        stamp,
+    };
     let mut doc = start(
         store,
-        info,
-        Some(Came::Read(stamp)),
+        src.clone(),
+        crate::store::file_name(&path),
+        Some(came),
         crate::history::default_policy(),
     );
-    doc.ready(finish(src, &NoProgress)).unwrap();
+    doc.ready(finish(&src, &NoProgress)).unwrap();
     // The opened file's record (slice 9): the opened version's, its
     // catalog and page tree's root among the numbers in use.
     let rec = doc.saved_record().expect("an opened file's record");

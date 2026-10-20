@@ -91,23 +91,23 @@ impl FileStamp {
     ) -> io::Result<FileStamp> {
         let tail = &end[end.len().saturating_sub(TAIL as usize)..];
         let window = match startxref(tail) {
-            None => sheaf_core::checksum(&[]),
+            None => sheaf_util::checksum(&[]),
             Some((at, _)) => {
                 let at = at.min(len)..at.saturating_add(WINDOW).min(len);
                 match at.start.checked_sub(from) {
                     Some(start) => {
                         let start = start as usize;
                         let end = &end[start.min(end.len())..];
-                        sheaf_core::checksum(&end[..end.len().min((at.end - at.start) as usize)])
+                        sheaf_util::checksum(&end[..end.len().min((at.end - at.start) as usize)])
                     }
-                    None => sheaf_core::checksum(&read(at)?),
+                    None => sheaf_util::checksum(&read(at)?),
                 }
             }
         };
         Ok(FileStamp {
             len,
             mtime,
-            tail: sheaf_core::checksum(tail),
+            tail: sheaf_util::checksum(tail),
             window,
         })
     }
@@ -267,7 +267,7 @@ pub fn copy_appended(
     sum: Option<u128>,
     to: &Path,
     section: &[u8],
-) -> Result<(FileStamp, sheaf_core::Checksum), WriteError> {
+) -> Result<(FileStamp, sheaf_util::Checksum), WriteError> {
     let changed = || WriteError::Changed {
         path: from.to_path_buf(),
     };
@@ -328,9 +328,9 @@ fn copy_into(
     sum: Option<u128>,
     section: &[u8],
     target: &Path,
-) -> io::Result<Option<(File, (FileStamp, sheaf_core::Checksum))>> {
+) -> io::Result<Option<(File, (FileStamp, sheaf_util::Checksum))>> {
     let mut source = File::open(from)?;
-    let mut hash = sheaf_core::Checksum::new();
+    let mut hash = sheaf_util::Checksum::new();
     let mut buf = vec![0; 1 << 20];
     // The last bytes copied, for the stamp.
     let mut end: Vec<u8> = Vec::new();
@@ -525,11 +525,11 @@ pub(crate) mod tests {
         let path = dir.join("a.pdf");
         let (at, original) = far_section();
         fs::write(&path, &original).unwrap();
-        let (bytes, meta) = sheaf_core::read_file_and_metadata(&path).unwrap();
+        let (bytes, meta) = sheaf_util::read_file_and_metadata(&path).unwrap();
         let stamp = FileStamp::of(&meta, &bytes).unwrap();
         assert_eq!(FileStamp::read(&path).unwrap(), stamp);
         let window = &original[at as usize..at as usize + WINDOW as usize];
-        assert_eq!(stamp.window, sheaf_core::checksum(window));
+        assert_eq!(stamp.window, sheaf_util::checksum(window));
         // A byte of the section, then one past its window.
         for (offset, changes) in [(at + 5, true), (at + WINDOW + 5, false)] {
             let mut file = File::options().write(true).open(&path).unwrap();
@@ -553,7 +553,7 @@ pub(crate) mod tests {
         }
         // A target past the end hashes nothing of it; no `startxref`, the
         // same.
-        let empty = sheaf_core::checksum(&[]);
+        let empty = sheaf_util::checksum(&[]);
         for bytes in [&b"startxref\n99999\n%%EOF"[..], b"%PDF-1.7\n"] {
             fs::write(&path, bytes).unwrap();
             assert_eq!(FileStamp::read(&path).unwrap().window, empty);
@@ -571,13 +571,13 @@ pub(crate) mod tests {
         let (_, original) = far_section();
         fs::write(&from, &original).unwrap();
         let stamp = FileStamp::read(&from).unwrap();
-        let sum = sheaf_core::checksum(&original);
+        let sum = sheaf_util::checksum(&original);
         let section = b"\n%% a section\nstartxref\n9\n%%EOF\n";
         let (now, hash) = copy_appended(&from, &stamp, Some(sum), &to, section).unwrap();
         let written = fs::read(&to).unwrap();
         assert_eq!(written, [&original[..], section].concat());
         assert_eq!(now, FileStamp::read(&to).unwrap());
-        assert_eq!(hash.finish(), sheaf_core::checksum(&written));
+        assert_eq!(hash.finish(), sheaf_util::checksum(&written));
         assert_eq!(fs::read(&from).unwrap(), original);
         // Summed otherwise, or changed since it was stamped: refused.
         fs::remove_file(&to).unwrap();
@@ -601,7 +601,7 @@ pub(crate) mod tests {
         for how in ["appended", "a new tail", "touched"] {
             fs::write(&path, &original).unwrap();
             // As an open stamps it: from the bytes it read.
-            let (bytes, meta) = sheaf_core::read_file_and_metadata(&path).unwrap();
+            let (bytes, meta) = sheaf_util::read_file_and_metadata(&path).unwrap();
             let stamp = FileStamp::of(&meta, &bytes).unwrap();
             assert_eq!(FileStamp::read(&path).unwrap(), stamp, "{how}");
             let mut file = File::options().write(true).open(&path).unwrap();

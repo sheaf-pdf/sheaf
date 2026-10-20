@@ -22,15 +22,16 @@ use lopdf::{
     Stream, XrefKind, dictionary,
 };
 
-use sheaf_core::Rotation;
+use sheaf_edit::Turn;
 
 use super::crypt::Crypt;
 use super::{full, object};
 use crate::forms::fixture::{Form, note, outline_tree, row};
 use crate::materialize::ObjKey;
 use crate::materialize::emit::PdfVersion;
-use crate::model::{Document, Edit};
+use crate::model::Document;
 use crate::store::BlobId;
+use crate::tx::fixture as fx;
 
 pub const OWNER: &str = "owner";
 pub const USER: &str = "user";
@@ -371,18 +372,9 @@ pub fn holds(bytes: &[u8], text: &[u8]) -> bool {
 pub fn edited(path: &Path, password: Option<&str>) -> Document {
     let mut doc = crate::open::file(path, password).unwrap().doc;
     let page = doc.page(0).unwrap();
-    let turn = Edit::RotatePages {
-        ids: vec![page],
-        by: Rotation::R90,
-    };
-    doc.apply(turn, "turn").unwrap();
-    doc.apply(
-        Edit::AnnotAdd {
-            page,
-            annot: note(),
-        },
-        "note",
-    )
-    .unwrap();
+    doc.commit_ops(vec![fx::rotate(&[page], Turn::Quarter)], "turn")
+        .unwrap();
+    doc.commit_ops(vec![fx::add(page, &note())], "note")
+        .unwrap();
     doc
 }

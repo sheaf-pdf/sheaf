@@ -12,10 +12,12 @@
 //! placed before rows existed is read back from that text
 //! ([`Tape::from_text`]).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// What an entry does to its section's running total.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "TapeOp")]
 pub enum Op {
     Add,
     Sub,
@@ -44,7 +46,7 @@ impl Op {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum Row {
     /// A section's title (`1-0`).
     Title(String),
@@ -87,7 +89,7 @@ impl Row {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Line {
     pub row: Row,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -103,7 +105,7 @@ impl Line {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Tape {
     pub lines: Vec<Line>,
 }
@@ -331,7 +333,7 @@ pub fn number_in(word: &str) -> Option<f64> {
 }
 
 /// How a placed tape looks (PDFlyer's options).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct TapeLook {
     /// The `1-1` column.

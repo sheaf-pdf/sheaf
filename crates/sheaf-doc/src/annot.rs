@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use anyhow::Context as _;
 use lopdf::{Dictionary, Object, Stream, StringFormat, dictionary};
 use serde::{Deserialize, Serialize};
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::attachments::{Objects, resolve};
@@ -47,67 +47,7 @@ use crate::geom::{Affine, Geom, Rect};
 use crate::model::{FormRef, Mark};
 use crate::store::{BlobId, BlobRef};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct AnnotId(pub u64);
-
-impl AnnotId {
-    /// What a mark with this id and no name of its own is called in the
-    /// file (`/NM`), and the StrikeOut of a replacement: the names PDFium
-    /// is told to hide.
-    pub fn sheaf_names(self) -> [String; 2] {
-        [
-            format!("sheaf:{}", self.0),
-            format!("sheaf:{}:strike", self.0),
-        ]
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Pt {
-    pub x: f32,
-    pub y: f32,
-}
-
-/// A box, `w` and `h` not negative, with `(x, y)` its low corner: its
-/// bottom-left in PageSpace, its top-left in a frame that's y down. So
-/// [`bottom`](Self::bottom) is its top in PageSpace.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Box2 {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl Box2 {
-    pub fn right(&self) -> f32 {
-        self.x + self.w
-    }
-    pub fn bottom(&self) -> f32 {
-        self.y + self.h
-    }
-    pub fn contains(&self, p: Pt) -> bool {
-        p.x >= self.x && p.x <= self.right() && p.y >= self.y && p.y <= self.bottom()
-    }
-    pub fn union(self, o: Box2) -> Box2 {
-        let x = self.x.min(o.x);
-        let y = self.y.min(o.y);
-        Box2 {
-            x,
-            y,
-            w: self.right().max(o.right()) - x,
-            h: self.bottom().max(o.bottom()) - y,
-        }
-    }
-    pub fn from_corners(a: Pt, b: Pt) -> Box2 {
-        Box2 {
-            x: a.x.min(b.x),
-            y: a.y.min(b.y),
-            w: (a.x - b.x).abs(),
-            h: (a.y - b.y).abs(),
-        }
-    }
-}
+pub use sheaf_edit::{AnnotId, Box2, Pt};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AnnotKind {
@@ -1597,6 +1537,15 @@ pub fn default_author() -> String {
         .unwrap_or_else(|_| "sheaf".into())
 }
 
+/// The first letter of each word of `name`, as dynamic stamps write
+/// initials: "Pat Q. Smith" → "PQS".
+pub fn initials_of(name: &str) -> String {
+    name.split_whitespace()
+        .filter_map(|w| w.chars().find(|c| c.is_alphanumeric()))
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
 /// A mark's upright frame (see [`Annot::upright`]) to PageSpace, which
 /// is the page's user space: where the writer draws what it lays out.
 fn to_user(turn: Rotation) -> Affine {
@@ -3013,7 +2962,7 @@ pub fn staleness<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, threaded: bool
         // Each key's value ends with a byte no text or number has.
         out.push(0xFF);
     }
-    sheaf_core::checksum_hex(&out)
+    sheaf_util::checksum_hex(&out)
 }
 
 #[cfg(test)]

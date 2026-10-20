@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use serde::{Deserialize, Serialize};
-use sheaf_core::PageSize;
+use sheaf_edit::{HeaderFooterSpec, Margins, PageSize};
 
 use crate::annot::Pt;
 use crate::attachments::Objects;
@@ -31,24 +31,7 @@ use crate::source::{Limits, Source};
 
 /// Bates numbering: `<prefix><number, zero-padded to digits><suffix>`,
 /// counting pages in scope in document order from `start`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Bates {
-    pub prefix: String,
-    pub suffix: String,
-    pub digits: u8,
-    pub start: u64,
-}
-
-impl Default for Bates {
-    fn default() -> Self {
-        Self {
-            prefix: String::new(),
-            suffix: String::new(),
-            digits: 6,
-            start: 1,
-        }
-    }
-}
+pub use sheaf_edit::BatesSpec as Bates;
 
 /// The header/footer of a document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,6 +111,24 @@ pub struct Placed {
 impl HeaderFooter {
     pub fn is_empty(&self) -> bool {
         self.texts.iter().all(|t| t.trim().is_empty())
+    }
+
+    /// What sets it again as it is (`Op::SetHeaderFooter`), but for its
+    /// date and file, which the host fixes when it's set, and its pages.
+    pub fn spec(&self) -> HeaderFooterSpec {
+        HeaderFooterSpec {
+            texts: self.texts.clone(),
+            size: self.font_size,
+            color: self.color,
+            margins: Margins {
+                top: self.top,
+                bottom: self.bottom,
+                left: self.left,
+                right: self.right,
+            },
+            first_number: self.first_page_number,
+            bates: self.bates.clone(),
+        }
     }
 
     /// Whether it's on page `id`.

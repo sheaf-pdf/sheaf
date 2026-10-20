@@ -104,7 +104,7 @@ pub fn text_bag(
                 Some(text) => run.push_str(&text),
                 None => {
                     bag.add(&std::mem::take(run));
-                    bag.add_hash(sheaf_core::checksum(s));
+                    bag.add_hash(sheaf_util::checksum(s));
                 }
             };
             match operand.and_then(|o| lex::object(o, depth)) {

@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use sheaf_core::PageIndex;
+use sheaf_render::PageIndex;
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 

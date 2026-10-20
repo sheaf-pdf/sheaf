@@ -1,20 +1,18 @@
 //! Crop pages (Document > Crop Pages…). A cropped page becomes a page of
 //! a PDF sheaf makes in memory, whose `/CropBox` is the new shown area:
 //! the layout sizes it, and PDFium renders and maps text for it, like any
-//! page. `Edit::RebasePages` moves the document's page onto it, keeping
-//! its id, rotation, bookmarks, marks and OCR text. A crop is a box edit:
-//! all of those are in PageSpace, which the copy keeps, so they stay on
-//! the same content.
-
-use std::collections::BTreeMap;
+//! page. A transaction's [`set_page_base`](sheaf_doc::Tx::set_page_base)
+//! moves the document's page onto it, keeping its id, rotation,
+//! bookmarks, marks and OCR text. A crop is a box edit: all of those are
+//! in PageSpace, which the copy keeps, so they stay on the same content.
 
 use anyhow::{Context, Result, bail};
 use in_progress::Progress;
 use serde::{Deserialize, Serialize};
-use sheaf_core::{PageIndex, PageSize, Rotation};
-use sheaf_doc::geom::Geom;
-use sheaf_doc::{Box2, PAGES, PageId, Snapshot, SourceId, Store};
+use sheaf_doc::{Box2, PAGES, PageId, Snapshot, Store};
+use sheaf_edit::{PageSize, Rotation};
 use sheaf_image::raster::{PixelFormat, content_bounds};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
@@ -55,22 +53,18 @@ pub fn plan(
     progress.set_total(Some(ids.len() as u64), PAGES);
     // Pages grouped by the source they show now, each with its geometry as
     // it shows and the turn PDFium adds to its source page's.
-    let mut by_source: BTreeMap<SourceId, Vec<(PageId, u32, Geom, Rotation)>> = BTreeMap::new();
+    let mut pages = Vec::with_capacity(ids.len());
     for &id in ids {
         let base = &snap.state.def(id).context("page not found")?.base;
-        by_source.entry(base.source).or_default().push((
-            id,
-            base.index,
-            snap.geom(id),
-            snap.render_delta(id),
-        ));
+        let page = (id, base.index, snap.geom(id), snap.render_delta(id));
+        pages.push((base.src.clone(), page));
     }
+    let by_source = crate::by_source(pages);
     let mut out = Vec::new();
     let mut done = 0;
-    for (sid, pages) in by_source {
-        let info = snap.source(sid).context("unknown source")?;
+    for (src, pages) in by_source {
         let engine = match spec {
-            CropSpec::TrimWhite { .. } => Some(crate::engine_for(info)?),
+            CropSpec::TrimWhite { .. } => Some(crate::engine_for(&src)?),
             CropSpec::Margins(_) => None,
         };
         let mut boxes = Vec::new();
@@ -101,12 +95,9 @@ pub fn plan(
             done += 1;
             progress.set(done);
         }
-        let bytes = sheaf_doc::save::cropped_copy(info, &boxes)?;
+        let bytes = sheaf_doc::save::cropped_copy(&src, &boxes)?;
         let pages = boxes.iter().map(|&(i, _)| i).collect();
-        out.push(CroppedSource {
-            info: crate::derive::copy_of(store, bytes, info, sid, pages)?,
-            pages: planned,
-        });
+        out.push(crate::derive::copy_of(store, bytes, &src, pages, planned)?);
     }
     Ok(out)
 }
@@ -148,9 +139,11 @@ fn content_margins(
 mod tests {
     use std::path::Path;
 
-    use sheaf_doc::geom::Rect;
+    use sheaf_doc::geom::{Geom, Rect};
     use sheaf_doc::store::BlobKind;
-    use sheaf_doc::{Document, Edit, FixedCount, SourceInfo};
+    use sheaf_doc::tx::fixture::rotate;
+    use sheaf_doc::{Document, FixedCount};
+    use sheaf_edit::Turn;
 
     use super::*;
 
@@ -177,20 +170,14 @@ mod tests {
             (Rotation::R90, Rect::new(120.0, 60.0, 672.0, 812.0)),
         ] {
             let store = Store::new();
-            let primary = SourceInfo {
-                src: store
-                    .open(
-                        bytes.clone().into(),
-                        BlobKind::file(Path::new("t.pdf"), None),
-                    )
-                    .unwrap(),
-                name: "t.pdf".into(),
-                derived: None,
-            };
-            let mut doc = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
+            let kind = BlobKind::file(Path::new("t.pdf"), None);
+            let primary = store.open(bytes.clone().into(), kind).unwrap();
+            let policy = Box::new(FixedCount(10));
+            let mut doc = Document::new(store, primary, "t.pdf".into(), None, &[], policy);
             let id = doc.state().order()[0];
-            let rotate = Edit::RotatePages { ids: vec![id], by };
-            doc.apply(rotate, "rotate").unwrap();
+            if let Some(by) = Turn::by(by) {
+                doc.commit_ops(vec![rotate(&[id], by)], "rotate").unwrap();
+            }
             let shown = doc.page_size(doc.state().order()[0]);
             let plan = plan(
                 doc.store(),
@@ -200,7 +187,7 @@ mod tests {
                 &crate::NoProgress,
             )
             .unwrap();
-            let cropped = plan[0].info.src.geom(0);
+            let cropped = plan[0].src.geom(0);
             assert_eq!(cropped.crop, want, "{by:?}");
             let left = doc.geom(doc.state().order()[0]);
             let size = Geom { crop: want, ..left }.shown();

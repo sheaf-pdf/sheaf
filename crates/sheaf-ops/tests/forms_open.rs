@@ -9,11 +9,12 @@
 use std::path::{Path, PathBuf};
 
 use lopdf::{Object, dictionary};
-use sheaf_core::Rotation;
 use sheaf_doc::forms::FormClass;
 use sheaf_doc::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
 use sheaf_doc::materialize::{How, StrategyKind};
-use sheaf_doc::{Document, Edit, SourceInfo, Store};
+use sheaf_doc::tx::fixture::rotate;
+use sheaf_doc::{Document, Store};
+use sheaf_edit::Turn;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{FormType, Renderer};
 
@@ -37,8 +38,8 @@ fn open(path: &Path) -> Document {
 
 /// What `path` says about itself when it opens, read from its source.
 fn facts_of(path: &Path) -> sheaf_doc::open::Facts {
-    let (info, _) = SourceInfo::read(&Store::new(), path, None).unwrap();
-    sheaf_doc::open::finish(&info.src, &sheaf_ops::NoProgress)
+    let (info, _) = Store::new().read_file(path, None).unwrap();
+    sheaf_doc::open::finish(&info, &sheaf_ops::NoProgress)
 }
 
 /// A field tree that loops: `a`'s kid is `b`, whose kid is `a`.
@@ -172,11 +173,8 @@ fn hybrid_saves_whole(how: How) {
     let rotated = |path: &Path| -> Document {
         let mut doc = open(path);
         let page = doc.state().order()[0];
-        let rotate = Edit::RotatePages {
-            ids: vec![page],
-            by: Rotation::R90,
-        };
-        doc.apply(rotate, "rotate").unwrap();
+        let turn = rotate(&[page], Turn::Quarter);
+        doc.commit_ops(vec![turn], "rotate").unwrap();
         doc
     };
     // Saved as another file by a Rewrite.

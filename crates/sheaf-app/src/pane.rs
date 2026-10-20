@@ -7,9 +7,9 @@ use std::ops::Range;
 use std::time::Instant;
 
 use gpui::ScrollHandle;
-use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::geom::Geom;
 use sheaf_doc::{DocState, Document, PageDef, PageId, SourceId};
+use sheaf_edit::{PageSize, Rotation};
 
 use crate::docview::ScrollTo;
 
@@ -145,7 +145,8 @@ pub(crate) struct Layout {
     pub(crate) row: usize,
     pub(crate) view_w: f32,
     pub(crate) view_h: f32,
-    pub(crate) version: u64,
+    /// The document's layout count it was built at (`Doc::layout`).
+    pub(crate) layout: u64,
     /// Logical px per PDF point.
     pub(crate) k: f32,
     /// Every page, with the pane's rotate view added to its rotation: what
@@ -167,7 +168,7 @@ pub(crate) struct LayoutSpec {
     pub row: usize,
     pub view_w: f32,
     pub view_h: f32,
-    pub version: u64,
+    pub layout: u64,
 }
 
 impl Layout {
@@ -188,7 +189,7 @@ impl Layout {
             rotation,
             view_w,
             view_h,
-            version,
+            layout,
             ..
         } = spec;
         let n = sizes.len();
@@ -263,7 +264,7 @@ impl Layout {
             row,
             view_w,
             view_h,
-            version,
+            layout,
             k,
             refs,
             rects,
@@ -390,7 +391,7 @@ impl Pane {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Shown {
     pub(crate) id: PageId,
-    /// The registration and page its render handle draws.
+    /// The source and page its render handle draws.
     pub(crate) source: SourceId,
     pub(crate) index: u32,
     /// Its `to_view` takes PageSpace to the page as drawn, and `shown` is
@@ -413,7 +414,7 @@ impl Shown {
         let rotate = geom.rotate.plus(view);
         Shown {
             id,
-            source: base.source,
+            source: base.src.id(),
             index: base.index,
             geom: Geom { rotate, ..*geom },
             render: rotate.minus(base.src.geom(base.index).rotate),
@@ -429,7 +430,7 @@ mod tests {
         let refs = (0..sizes.len())
             .map(|i| Shown {
                 id: PageId(i as u64),
-                source: SourceId(0),
+                source: SourceId { hash: 0, len: 0 },
                 index: i as u32,
                 geom: Geom::read(None, None, 0),
                 render: Rotation::R0,
@@ -447,7 +448,7 @@ mod tests {
                 row,
                 view_w: 1000.0,
                 view_h: 800.0,
-                version: 0,
+                layout: 0,
             },
             refs,
             &sizes,

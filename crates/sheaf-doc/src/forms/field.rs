@@ -11,9 +11,7 @@ use std::sync::Arc;
 
 use lopdf::ObjectId;
 
-/// A field's id in a document. Never reused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FieldId(pub u64);
+pub use sheaf_edit::FieldId;
 
 /// What a field is, from `/FT` and `/Ff`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

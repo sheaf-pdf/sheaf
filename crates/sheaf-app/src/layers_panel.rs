@@ -54,11 +54,8 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let sid = doc.model.primary();
-        let Some(src) = doc.model.source(sid) else {
-            return;
-        };
-        let src = src.src.clone();
+        let src = doc.model.primary().clone();
+        let sid = src.id();
         let hidden = doc.layers_hidden.clone();
         let generation = {
             doc.layers_generation += 1;
@@ -82,7 +79,7 @@ impl DocView {
                     return;
                 };
                 // A newer change superseded this one.
-                if doc.layers_generation != generation || doc.model.primary() != sid {
+                if doc.layers_generation != generation || doc.model.primary().id() != sid {
                     return;
                 }
                 match opened {

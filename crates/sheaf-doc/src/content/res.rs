@@ -20,7 +20,7 @@ impl ResId {
         for object in objects {
             feed(&mut bytes, object);
         }
-        ResId(sheaf_core::checksum(&bytes))
+        ResId(sheaf_util::checksum(&bytes))
     }
 }
 

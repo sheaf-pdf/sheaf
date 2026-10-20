@@ -11,16 +11,7 @@ use crate::attachments::{Objects, once, resolve};
 use crate::model::PageId;
 
 /// How a range numbers its pages (`/S`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Style {
-    Decimal,
-    UpperRoman,
-    LowerRoman,
-    UpperLetters,
-    LowerLetters,
-    /// No number, only the prefix.
-    None,
-}
+pub use sheaf_edit::LabelStyle as Style;
 
 /// One entry of the number tree: pages from `start` on, until the next.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,15 +50,16 @@ pub fn label_ranges<P: Objects + ?Sized>(pdf: &P) -> Option<Vec<LabelRange>> {
 /// Labels for `page_count` pages. Pages before the first range (a
 /// malformed tree) get plain numbers.
 pub fn labels_for(ranges: &[LabelRange], page_count: u32) -> Vec<String> {
-    (0..page_count)
-        .map(|p| {
-            let at = ranges.partition_point(|r| r.start <= p);
-            match at.checked_sub(1).map(|i| &ranges[i]) {
-                Some(r) => format_label(r, p - r.start),
-                None => (p + 1).to_string(),
-            }
-        })
-        .collect()
+    (0..page_count).map(|p| label_at(ranges, p)).collect()
+}
+
+/// The label of the page at position `p`, as [`labels_for`] gives it.
+pub fn label_at(ranges: &[LabelRange], p: u32) -> String {
+    let at = ranges.partition_point(|r| r.start <= p);
+    match at.checked_sub(1).map(|i| &ranges[i]) {
+        Some(r) => format_label(r, p - r.start),
+        None => (p + 1).to_string(),
+    }
 }
 
 /// A label range anchored to the page it starts at, as the model keeps
@@ -110,6 +102,42 @@ pub fn resolve_specs(specs: &[LabelSpec], pages: &[PageId]) -> Vec<LabelRange> {
         );
     }
     ranges
+}
+
+/// `specs` once only the pages `stays` says stay, of `order`, the pages in
+/// document order, whose positions `pos` gives (M10.5 proposal 25): a
+/// range whose first page goes starts at the next page of its range that
+/// stays, numbered as it was, and goes when none does. None when every
+/// range's first page stays; else the ranges, and how many moved or went.
+pub fn anchored(
+    specs: &[LabelSpec],
+    order: &im::Vector<PageId>,
+    pos: impl Fn(PageId) -> Option<usize>,
+    stays: impl Fn(PageId) -> bool,
+) -> Option<(Vec<LabelSpec>, usize)> {
+    if specs.iter().all(|s| stays(s.start)) {
+        return None;
+    }
+    let mut starts: Vec<usize> = specs.iter().filter_map(|s| pos(s.start)).collect();
+    starts.sort_unstable();
+    let mut out = Vec::with_capacity(specs.len());
+    let mut moved = 0;
+    for s in specs {
+        if stays(s.start) {
+            out.push(s.clone());
+            continue;
+        }
+        moved += 1;
+        // Its range: up to the next range's first page.
+        let Some(first) = pos(s.start) else {
+            continue;
+        };
+        let end = starts.get(starts.partition_point(|&p| p <= first));
+        let len = end.map_or(order.len(), |&end| end) - first - 1;
+        let next = (order.iter().skip(first + 1).take(len)).find(|&&p| stays(p));
+        out.extend(next.map(|&start| LabelSpec { start, ..s.clone() }));
+    }
+    Some((out, moved))
 }
 
 /// Back to specs, by the page at each start.

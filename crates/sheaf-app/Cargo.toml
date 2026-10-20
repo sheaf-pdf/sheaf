@@ -3,6 +3,7 @@ name = "sheaf-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "sheaf"
@@ -15,10 +16,11 @@ default = ["ocr-tesseract", "ocr-oar", "plugins"]
 ocr-tesseract = ["sheaf-ocr/tesseract"]
 ocr-oar = ["sheaf-ocr/oar"]
 # WebAssembly plugins (wasmtime). Off for a quicker dev build.
-plugins = ["dep:sheaf-plugin", "dep:semver", "dep:zip"]
+plugins = ["dep:sheaf-plugin", "dep:semver", "dep:zip", "dep:arc-swap"]
 
 [dependencies]
-sheaf-core.workspace = true
+sheaf-util.workspace = true
+sheaf-edit.workspace = true
 sheaf-render.workspace = true
 sheaf-doc.workspace = true
 sheaf-ui.workspace = true
@@ -29,6 +31,8 @@ sheaf-image.workspace = true
 sheaf-cli.workspace = true
 sheaf-instance.workspace = true
 sheaf-plugin = { workspace = true, optional = true }
+# The document a plugin call reads ([`sheaf_plugin::DocContext`]).
+arc-swap = { workspace = true, optional = true }
 semver = { version = "1", features = ["serde"], optional = true }
 # Reading .sheafplugin archives.
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"], optional = true }

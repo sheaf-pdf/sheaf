@@ -7,11 +7,13 @@
 use std::path::{Path, PathBuf};
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
-use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::save::text_string;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, Pt};
+use sheaf_doc::tx::fixture::add;
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
+use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_ops::comments::{self, Column, CommentFilter, Layout};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
@@ -118,14 +120,8 @@ fn opened(dir: &Path) -> sheaf_doc::Document {
         [255, 0, 0],
         "First note (with parens)",
     );
-    doc.apply(
-        Edit::AnnotAdd {
-            page: pages[0],
-            annot: placed(&doc, 0, note),
-        },
-        "note",
-    )
-    .unwrap();
+    let note = placed(&doc, 0, note);
+    doc.commit_ops(vec![add(pages[0], &note)], "note").unwrap();
     let tick = mark(
         AnnotKind::Stamp {
             rect: Box2 {
@@ -139,14 +135,8 @@ fn opened(dir: &Path) -> sheaf_doc::Document {
         [0, 160, 0],
         "",
     );
-    doc.apply(
-        Edit::AnnotAdd {
-            page: pages[2],
-            annot: placed(&doc, 2, tick),
-        },
-        "tick",
-    )
-    .unwrap();
+    let tick = placed(&doc, 2, tick);
+    doc.commit_ops(vec![add(pages[2], &tick)], "tick").unwrap();
     doc
 }
 
@@ -354,8 +344,7 @@ fn a_measurement_shows_its_value_and_lists_it() {
         [0, 0, 255],
         "",
     );
-    doc.apply(Edit::AnnotAdd { page: p0, annot: m }, "measure")
-        .unwrap();
+    doc.commit_ops(vec![add(p0, &m)], "measure").unwrap();
     // Two inches at 1 in = 10 ft: drawn on the page with its value.
     let printed = sheaf_doc::save::print_pdf(&doc.snapshot(), &[p0], true).unwrap();
     let text = engine(printed).page_text(PageIndex(0)).unwrap();
@@ -440,7 +429,7 @@ fn the_comments_panel_lists_what_the_file_holds() {
                 }
             }
         }
-        let src = &doc.source(doc.primary()).unwrap().src;
+        let src = &doc.primary();
         let pages = (src.pages().iter()).map(|page| (page.id, page.geom.rotate));
         let read = sheaf_doc::file::annots_in(src.pdf(), pages);
         let mut held: BTreeMap<usize, Page> = BTreeMap::new();

@@ -11,6 +11,7 @@ use gpui::{
     MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, SharedString,
     Subscription, Task, Window, WindowHandle, anchored, deferred, div, prelude::*, px,
 };
+use sheaf_doc::Snapshot;
 use sheaf_ui::frame;
 use sheaf_ui::menu_bar::MenuBar;
 use sheaf_ui::palette::{Palette, PaletteEvent};
@@ -376,9 +377,8 @@ pub struct Workspace {
     /// Plugins > Manage Plugins…, while open.
     #[cfg(feature = "plugins")]
     plugin_manager: Option<(Entity<crate::plugin_manager::PluginManager>, Subscription)>,
-    /// The document's events, forwarded to plugins. A closed document's
-    /// entry stays until its `Closed` event is delivered.
-    #[cfg(feature = "plugins")]
+    /// The document's events, followed ([`Workspace::watch`]). A closed
+    /// document's entry stays until its `Closed` event is delivered.
     doc_subs: Vec<(gpui::EntityId, Subscription)>,
     /// File/Edit/View… in the title bar; None where the OS draws menus.
     menu_bar: Option<Entity<MenuBar>>,
@@ -489,7 +489,6 @@ impl Workspace {
             plugin_form: None,
             #[cfg(feature = "plugins")]
             plugin_manager: None,
-            #[cfg(feature = "plugins")]
             doc_subs: Vec::new(),
             menu_bar: frame::draws_menu_bar().then(|| {
                 cx.new(|cx| {
@@ -805,12 +804,29 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Forward a document's events to the plugins that want them.
-    #[cfg(feature = "plugins")]
+    /// Follow a document's events: each change it goes through reaches
+    /// the Page Labels dialog, while open, whose preview follows the
+    /// document; a document opened in place of another (a recovery's)
+    /// closes the dialogs opened on that one; and every event reaches the
+    /// plugins that want it.
     fn watch(&mut self, doc: &Entity<DocView>, window: &mut Window, cx: &mut Context<Self>) {
         let id = doc.entity_id();
         let sub = cx.subscribe_in(doc, window, move |ws, doc, ev: &DocEvent, window, cx| {
+            if let DocEvent::Changed { .. } = ev
+                && let Some((labels, _)) = &ws.labels
+                && let Some((now, lower)) = doc.read(cx).lowering_now()
+            {
+                labels.update(cx, |d, cx| d.follow(now, lower, cx));
+            }
+            if *ev == DocEvent::Opened
+                && let Some((now, _)) = doc.read(cx).lowering_now()
+            {
+                ws.close_dialogs_of_another(&now, cx);
+            }
+            #[cfg(feature = "plugins")]
             crate::plugins::dispatch_event(doc, ev, window, cx);
+            #[cfg(not(feature = "plugins"))]
+            let _ = window;
             if *ev == DocEvent::Closed {
                 ws.doc_subs.retain(|(d, _)| *d != id);
             }
@@ -818,8 +834,25 @@ impl Workspace {
         self.doc_subs.push((id, sub));
     }
 
-    #[cfg(not(feature = "plugins"))]
-    fn watch(&mut self, _: &Entity<DocView>, _: &mut Window, _: &mut Context<Self>) {}
+    /// The dialogs that apply to the version they opened on closed, when
+    /// that's of another document than `now`'s: one this view showed
+    /// before a recovery replaced it, whose versions are counted apart.
+    fn close_dialogs_of_another(&mut self, now: &Snapshot, cx: &mut Context<Self>) {
+        let another = |opened: &Snapshot| opened.instance != now.instance;
+        if (self.crop.as_ref()).is_some_and(|(d, _)| another(d.read(cx).opened())) {
+            self.crop = None;
+        }
+        if (self.labels.as_ref()).is_some_and(|(d, _)| another(d.read(cx).opened())) {
+            self.labels = None;
+        }
+        if (self.header_footer.as_ref()).is_some_and(|(d, _)| another(d.read(cx).opened())) {
+            self.header_footer = None;
+        }
+        if (self.watermark.as_ref()).is_some_and(|(d, _)| another(d.read(cx).opened())) {
+            self.watermark = None;
+        }
+        cx.notify();
+    }
 
     /// Acrobat's "Save changes?" prompt for one document. Resolves to true
     /// once the document may be closed: either it was saved, or the user
@@ -1296,8 +1329,7 @@ impl Workspace {
             let counted = cx
                 .background_executor()
                 .spawn(async move {
-                    sheaf_doc::SourceInfo::read(&sheaf_doc::Store::new(), &p, None)
-                        .map(|(info, _)| info.src.page_count())
+                    (sheaf_doc::Store::new().read_file(&p, None)).map(|(src, _)| src.page_count())
                 })
                 .await;
             ws.update_in(cx, |ws, window, cx| {
@@ -1462,7 +1494,7 @@ impl Workspace {
         let Some(snapshot) = doc.read(cx).model_snapshot() else {
             return;
         };
-        let page_count = snapshot.state.page_count();
+        let opened = snapshot.clone();
         cx.spawn_in(window, async move |ws, cx| {
             let current = cx
                 .background_executor()
@@ -1472,15 +1504,16 @@ impl Workspace {
                 let ctx = crate::watermark_dialog::WatermarkContext {
                     behind,
                     current,
-                    page_count,
+                    opened,
                 };
                 let dialog =
                     cx.new(|cx| crate::watermark_dialog::WatermarkDialog::new(ctx, window, cx));
                 let sub = cx.subscribe_in(
                     &dialog,
                     window,
-                    move |ws, _, ev: &crate::watermark_dialog::WatermarkEvent, window, cx| {
+                    move |ws, dialog, ev: &crate::watermark_dialog::WatermarkEvent, window, cx| {
                         use crate::watermark_dialog::WatermarkEvent;
+                        let opened = dialog.read(cx).opened().clone();
                         ws.watermark = None;
                         ws.focus_active(window, cx);
                         if let Some(doc) = ws.doc().cloned() {
@@ -1488,12 +1521,12 @@ impl Workspace {
                                 WatermarkEvent::Apply(wm, pages) => {
                                     let (wm, pages) = ((**wm).clone(), pages.clone());
                                     doc.update(cx, |d, cx| {
-                                        d.apply_watermark(behind, Some(wm), pages, cx)
+                                        d.apply_watermark(opened, behind, Some(wm), pages, cx)
                                     });
                                 }
                                 WatermarkEvent::Remove => {
                                     doc.update(cx, |d, cx| {
-                                        d.apply_watermark(behind, None, None, cx)
+                                        d.apply_watermark(opened, behind, None, None, cx)
                                     });
                                 }
                                 WatermarkEvent::Dismiss => {}
@@ -1519,16 +1552,16 @@ impl Workspace {
             return;
         };
         let ctx = doc.read_with(cx, |d, _| {
-            let current = d.header_footer();
-            let (page_count, _) = d.target_indexes();
+            let opened = d.model_snapshot()?;
+            let current = (opened.state.header_footer()).map(|hf| (**hf).clone());
             let scope = current
                 .as_ref()
                 .and_then(|h| h.pages.as_ref())
                 .map(|ids| crate::insert_dialog::ranges_text(&d.indexes_of(ids)))
                 .unwrap_or_default();
-            crate::header_footer_dialog::HeaderFooterContext {
+            Some(crate::header_footer_dialog::HeaderFooterContext {
                 current,
-                page_count,
+                opened,
                 file: d
                     .path
                     .file_name()
@@ -1536,28 +1569,32 @@ impl Workspace {
                     .unwrap_or_default(),
                 scope,
                 bates,
-            }
+            })
         });
+        let Some(ctx) = ctx else {
+            return;
+        };
         let dialog =
             cx.new(|cx| crate::header_footer_dialog::HeaderFooterDialog::new(ctx, window, cx));
         let sub = cx.subscribe_in(
             &dialog,
             window,
-            |ws, _, ev: &crate::header_footer_dialog::HeaderFooterEvent, window, cx| {
+            |ws, dialog, ev: &crate::header_footer_dialog::HeaderFooterEvent, window, cx| {
                 use crate::header_footer_dialog::HeaderFooterEvent;
+                let opened = dialog.read(cx).opened().clone();
                 ws.header_footer = None;
                 ws.focus_active(window, cx);
                 if let Some(doc) = ws.doc().cloned() {
                     match ev {
                         HeaderFooterEvent::Apply(hf, pages) => {
-                            let (mut hf, pages) = ((**hf).clone(), pages.clone());
-                            doc.update(cx, |d, cx| {
-                                hf.pages = pages.map(|ix| d.page_ids_at(&ix));
-                                d.set_header_footer(Some(hf), cx)
-                            });
+                            let hf = sheaf_doc::stamps::HeaderFooter {
+                                pages: pages.clone(),
+                                ..(**hf).clone()
+                            };
+                            doc.update(cx, |d, cx| d.set_header_footer(opened, Some(hf), cx));
                         }
                         HeaderFooterEvent::Remove => {
-                            doc.update(cx, |d, cx| d.set_header_footer(None, cx));
+                            doc.update(cx, |d, cx| d.set_header_footer(opened, None, cx));
                         }
                         HeaderFooterEvent::Dismiss => {}
                     }
@@ -1581,20 +1618,23 @@ impl Workspace {
         let Some(doc) = self.doc().cloned() else {
             return;
         };
-        let (count, targets, has) = doc.read_with(cx, |d, _| {
-            let (count, targets) = d.target_indexes();
-            (count, targets, d.has_page_labels())
-        });
-        if count == 0 {
+        let Some((opened, lower, targets)) = doc.read_with(cx, |d, _| {
+            let (opened, lower) = d.lowering_now()?;
+            Some((opened, lower, d.target_indexes().1))
+        }) else {
+            return;
+        };
+        if opened.state.page_count() == 0 {
             return;
         }
-        let dialog =
-            cx.new(|cx| crate::labels_dialog::LabelsDialog::new(count, &targets, has, window, cx));
+        let dialog = cx
+            .new(|cx| crate::labels_dialog::LabelsDialog::new(opened, lower, &targets, window, cx));
         let sub = cx.subscribe_in(
             &dialog,
             window,
-            |ws, _, ev: &crate::labels_dialog::LabelsEvent, window, cx| {
+            |ws, dialog, ev: &crate::labels_dialog::LabelsEvent, window, cx| {
                 use crate::labels_dialog::LabelsEvent;
+                let opened = dialog.read(cx).opened().clone();
                 ws.labels = None;
                 ws.focus_active(window, cx);
                 if let Some(doc) = ws.doc().cloned() {
@@ -1607,10 +1647,10 @@ impl Workspace {
                             first,
                         } => {
                             let change = (*from, *to, *style, prefix.clone(), *first);
-                            doc.update(cx, |d, cx| d.set_page_labels(Some(change), cx));
+                            doc.update(cx, |d, cx| d.set_page_labels(opened, Some(change), cx));
                         }
                         LabelsEvent::RemoveAll => {
-                            doc.update(cx, |d, cx| d.set_page_labels(None, cx));
+                            doc.update(cx, |d, cx| d.set_page_labels(opened, None, cx));
                         }
                         LabelsEvent::Dismiss => {}
                     }
@@ -1635,9 +1675,9 @@ impl Workspace {
             return;
         };
         let ctx = doc.read_with(cx, |d, _| {
-            let (page_count, targets) = d.target_indexes();
-            crate::crop_dialog::CropContext {
-                page_count,
+            let (_, targets) = d.target_indexes();
+            Some(crate::crop_dialog::CropContext {
+                opened: d.model_snapshot()?,
                 current: d.current_index(),
                 selected: if targets.len() > 1 {
                     targets
@@ -1645,23 +1685,24 @@ impl Workspace {
                     Vec::new()
                 },
                 size: d.current_size(),
-            }
+            })
         });
-        if ctx.page_count == 0 {
+        let Some(ctx) = ctx.filter(|c| c.opened.state.page_count() > 0) else {
             return;
-        }
+        };
         let dialog = cx.new(|cx| crate::crop_dialog::CropDialog::new(ctx, window, cx));
         let sub = cx.subscribe_in(
             &dialog,
             window,
-            |ws, _, ev: &crate::crop_dialog::CropEvent, window, cx| {
+            |ws, dialog, ev: &crate::crop_dialog::CropEvent, window, cx| {
+                let opened = dialog.read(cx).opened().clone();
                 ws.crop = None;
                 ws.focus_active(window, cx);
                 if let crate::crop_dialog::CropEvent::Crop { pages, spec } = ev
                     && let Some(doc) = ws.doc().cloned()
                 {
                     let (pages, spec) = (pages.clone(), *spec);
-                    doc.update(cx, |d, cx| d.crop_pages(pages, spec, cx));
+                    doc.update(cx, |d, cx| d.crop_pages(opened, pages, spec, cx));
                 }
                 cx.notify();
             },

@@ -17,12 +17,12 @@ use std::sync::LazyLock;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
 use crate::model::{FormRef, Mark, PageId};
 use crate::stamps::HeaderFooter;
-use crate::store::{Blob, BlobId, BlobKind, Src, Store};
+use crate::store::{Blob, BlobKind, Src, Store, blob_id};
 
 /// A rectangle in page space: left, bottom, right, top.
 pub type Rect = [f32; 4];
@@ -820,6 +820,38 @@ pub fn outline_tree(f: &mut Form, items: Vec<(u16, Dictionary)>) -> Vec<ObjectId
     ids
 }
 
+/// A file of `pages` pages with no form, its outline `items`: each
+/// (title, the page it goes to, depth), in pre-order.
+pub fn outlined(pages: usize, items: &[(&str, usize, u16)]) -> Vec<u8> {
+    let mut f = Form::new(pages);
+    let ids = f.pages.clone();
+    let items = (items.iter())
+        .map(|&(title, page, depth)| {
+            let item = dictionary! {
+                "Title" => Object::string_literal(title),
+                "Dest" => vec![ids[page].into(), "Fit".into()],
+            };
+            (depth, item)
+        })
+        .collect();
+    outline_tree(&mut f, items);
+    f.bytes()
+}
+
+/// A file of `pages` pages with no form, sheaf's `marks` written on them
+/// as a save writes them: each (page index, its marks), holding what
+/// [`holding`] gives them.
+pub fn with_marks(pages: usize, marks: &[(usize, Vec<Annot>)]) -> Vec<u8> {
+    let mut f = Form::new(pages);
+    for (index, on) in marks {
+        let page = f.pages[*index];
+        let mut dict = f.dict(page).clone();
+        write_marks(&mut f.pdf, &mut dict, &holding(on));
+        *f.dict(page) = dict;
+    }
+    f.bytes()
+}
+
 /// The note [`every_fact`] puts on its second page, as sheaf reads it.
 pub fn note() -> Annot {
     Annot {
@@ -844,11 +876,11 @@ pub fn note() -> Annot {
 
 /// The stem [`every_mark_kind`]'s page stamp names its page by, its
 /// blob's: [`mark_stamp_pdf`]'s.
-pub static MARK_STAMP: LazyLock<String> = LazyLock::new(|| BlobId::of(&mark_stamp_pdf()).stem());
+pub static MARK_STAMP: LazyLock<String> = LazyLock::new(|| blob_id(&mark_stamp_pdf()).stem());
 
 /// The stem [`every_mark_kind`]'s attachment names its file by,
 /// [`MARK_FILE_BYTES`]'s.
-pub static MARK_FILE: LazyLock<String> = LazyLock::new(|| BlobId::of(MARK_FILE_BYTES).stem());
+pub static MARK_FILE: LazyLock<String> = LazyLock::new(|| blob_id(MARK_FILE_BYTES).stem());
 
 /// The bytes of [`every_mark_kind`]'s attachment.
 pub const MARK_FILE_BYTES: &[u8] = b"fixture notes\n";

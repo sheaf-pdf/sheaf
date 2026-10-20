@@ -62,7 +62,7 @@ fn shown(bytes: &[u8], password: Option<&str>) -> Shown {
     Shown {
         pages: engine.page_count(),
         size: (page.width, page.height),
-        pixels: sheaf_core::checksum(&page.data),
+        pixels: sheaf_util::checksum(&page.data),
         text,
         annots,
         fields,

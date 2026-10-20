@@ -5,6 +5,7 @@
 //! has, are given new ids; other tools' annotations are given ids no mark
 //! has. Both are drawn from an rng seeded with the file's hash, so the
 //! same bytes give the same ids, however often and wherever they're read.
+//! A connector keeps its partner only when the two name each other.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -93,8 +94,8 @@ impl FileAnnots {
         })
     }
 
-    /// sheaf's marks, by page index: what `Edit::InsertPages` and
-    /// `ReplacePages` carry in.
+    /// sheaf's marks, by page index: what pages inserted from the file
+    /// bring of it.
     pub fn marks(&self) -> HashMap<u32, Vec<Annot>> {
         (self.pages.keys())
             .map(|&index| (index, self.marks_on(index).cloned().collect::<Vec<_>>()))
@@ -161,6 +162,7 @@ pub(crate) fn read(src: &Source, p: &dyn Progress) -> FileAnnots {
     let mut pages = found.pages;
     let (renamed, fresh) = fresh_ids(&mut pages, &mut rng);
     follow_renamed(&mut pages, &renamed);
+    pair_connectors(&mut pages);
     // Other tools' ids, drawn after the marks' new ones, none a mark's.
     let mut taken: HashSet<AnnotId> = marks(&pages).map(|a| a.id).collect();
     let mut order: Vec<u32> = pages.keys().copied().collect();
@@ -277,6 +279,29 @@ fn fresh_ids(
         }
     }
     (renamed, fresh)
+}
+
+/// Each connector's partner kept only when it's a connector of the file's
+/// whose partner is that one: a pair's ends name each other (M10.5 §6.4).
+/// One whose other end another tool deleted, or a copy of an end another
+/// program made (which names the end it was copied from), has none.
+fn pair_connectors(pages: &mut HashMap<u32, Vec<InFile>>) {
+    let partners: HashMap<AnnotId, Option<AnnotId>> = (marks(pages))
+        .filter_map(|a| match a.kind {
+            AnnotKind::Connector { partner, .. } => Some((a.id, partner)),
+            _ => None,
+        })
+        .collect();
+    for entry in pages.values_mut().flatten() {
+        if let Found::Mark { annot, .. } = &mut entry.found {
+            let id = annot.id;
+            if let AnnotKind::Connector { partner, .. } = &mut annot.kind
+                && partner.is_some_and(|p| partners.get(&p) != Some(&Some(id)))
+            {
+                *partner = None;
+            }
+        }
+    }
 }
 
 /// Other tools' comments in the thread of a mark `fresh_ids` renamed, as

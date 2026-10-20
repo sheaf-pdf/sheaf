@@ -1,7 +1,7 @@
 // What API 0.2 and 0.3 have in common: the conversions between their
-// types and sheaf's, and the host side of their interfaces. Included in
-// each version's module (`mod.rs`), where `api` is that version's
-// bindings; a change here changes both.
+// types and sheaf's, their edits said as ops (`Adapter`), and the host
+// side of their interfaces. Included in each version's module (`mod.rs`),
+// where `api` is that version's bindings; a change here changes both.
 //
 // Their page coordinates are a page's frame (`page_frame`): sheaf's
 // PageSpace converts to it on the way out and from it on the way in.
@@ -9,18 +9,23 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::geom::{Affine, Geom};
+use sheaf_doc::prim::Key;
+use sheaf_doc::tx::mark_kind;
 use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Bookmark, Box2, DestView, Edit, NewOutlineItem, OutlineId, PageId,
-    Pt, Snapshot, TextHit,
+    Annot, AnnotId, AnnotKind, Bookmark, Box2, DestView, EditError, OutlineId, PageId, Pt,
+    Snapshot, TextHit,
+};
+use sheaf_edit::{
+    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Local, MarkPatch, NewMark, Op, PageSel,
+    PageSize, Patch, Rotation, Sibling, Style, Turn,
 };
 use in_progress::{Level, Progress, Tracker, Unit};
 use wasmtime::component::Resource;
 
 use crate::progress::Task;
 use crate::render::{MAX_DPI, MAX_LIVE_IMAGES, PIXEL_BUDGET, PageRenderer, RenderedImage};
-use crate::runtime::{DocEvent, EditBatch, HostState, TextMatch};
+use crate::runtime::{DocEvent, EditBatch, Held, HostState, TextMatch};
 use crate::ui::{self, BuiltinPanel, ShowPanel};
 use api::types as w;
 use api::ui as wu;
@@ -98,7 +103,7 @@ fn page_frame(snap: &Snapshot, page: PageId) -> Option<Geom> {
 }
 
 /// PageSpace into `page`'s frame, for geometry going out.
-fn to_frame(snap: &Snapshot, page: PageId) -> Affine {
+pub(crate) fn to_frame(snap: &Snapshot, page: PageId) -> Affine {
     page_frame(snap, page).map_or(Affine::IDENTITY, |g| g.to_view())
 }
 
@@ -203,112 +208,397 @@ pub(crate) fn outline_item(
     }
 }
 
-/// A plugin's edit, its geometry from its pages' frames into PageSpace.
-/// `snap` is the document the call started with; with none, nothing is
-/// mapped.
-pub(crate) fn edit_from_wit(snap: Option<&Snapshot>, e: w::Edit) -> Edit {
-    let pages = |ids: Vec<u64>| ids.into_iter().map(PageId).collect::<Vec<_>>();
-    let frame = |page: PageId| snap.and_then(|s| page_frame(s, page));
-    let from_view = |page: Option<PageId>| {
-        page.and_then(frame)
-            .map_or(Affine::IDENTITY, |g| g.from_view())
-    };
-    // A mark reads upright in the frame it was given in.
-    let page_annot = |pa: w::PageAnnot| {
-        let page = PageId(pa.page);
-        let annot = annot_from_wit(pa.annot);
-        let annot = match frame(page) {
-            Some(g) => annot.to_page(&g),
-            None => annot,
-        };
-        (page, annot)
-    };
-    match e {
-        w::Edit::MovePages(m) => Edit::MovePages {
-            ids: pages(m.ids),
-            before: m.before.map(PageId),
-        },
-        w::Edit::RotatePages(r) => Edit::RotatePages {
-            ids: pages(r.ids),
-            by: rotation_from_wit(r.by),
-        },
-        w::Edit::DeletePages(ids) => Edit::DeletePages { ids: pages(ids) },
-        w::Edit::DuplicatePages(ids) => Edit::DuplicatePages { ids: pages(ids) },
-        w::Edit::OutlineInsert(o) => {
-            let target = o.target.map(PageId);
-            Edit::OutlineInsert {
-                parent: o.parent.map(OutlineId),
-                after: o.after.map(OutlineId),
-                title: o.title,
-                target,
-                view: o.view.map(|v| dest_from_wit(v, from_view(target))),
-            }
+/// A mark as a plugin's API says it: its kind in its page's frame, and
+/// the look and text the API shows. A page stamp's page and an
+/// attachment's file are named by stem, as the API shows them; who made
+/// it and when, its name and its turn aren't the plugin's to say.
+pub(crate) struct Said {
+    pub(crate) kind: AnnotKind,
+    pub(crate) color: [u8; 3],
+    pub(crate) opacity: f32,
+    pub(crate) stroke: f32,
+    pub(crate) contents: String,
+    /// What API 0.3 says and 0.2 can't: None from a 0.2 plugin, whose
+    /// lines have no start arrowhead either.
+    pub(crate) more: Option<More>,
+}
+
+/// A mark's fill, dashes and cloud.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct More {
+    pub(crate) fill: Option<[u8; 3]>,
+    pub(crate) dashed: bool,
+    pub(crate) cloudy: bool,
+}
+
+impl Said {
+    pub(crate) fn style(&self) -> Style {
+        let more = self.more.unwrap_or_default();
+        Style {
+            color: self.color,
+            opacity: self.opacity,
+            stroke: self.stroke,
+            fill: more.fill,
+            dashed: more.dashed,
+            cloudy: more.cloudy,
         }
-        w::Edit::OutlineInsertTree(t) => Edit::OutlineInsertTree {
-            parent: t.parent.map(OutlineId),
-            after: t.after.map(OutlineId),
-            items: t
-                .items
-                .into_iter()
-                .map(|i| {
-                    let target = i.target.map(PageId);
-                    NewOutlineItem {
-                        title: i.title,
-                        target,
-                        view: i.view.map(|v| dest_from_wit(v, from_view(target))),
-                        depth: i.depth,
-                    }
-                })
-                .collect(),
-        },
-        w::Edit::OutlineMove(o) => Edit::OutlineMove {
-            id: OutlineId(o.id),
-            parent: o.parent.map(OutlineId),
-            after: o.after.map(OutlineId),
-            with_pages: o.with_pages,
-        },
-        w::Edit::OutlineEdit(o) => {
-            let id = OutlineId(o.id);
-            let target = o.target.map(|t| t.map(PageId));
-            // A position is on the bookmark's new page, or else its own.
-            let page = || match target {
-                Some(t) => t,
-                None => snap.and_then(|s| s.state.bookmark(id)?.page()),
-            };
-            Edit::OutlineEdit {
-                id,
-                title: o.title,
-                target,
-                color: o.color.map(|c| c.map(rgb_from_wit)),
-                view: o
-                    .view
-                    .map(|v| v.map(|v| dest_from_wit(v, from_view(page())))),
-                style: None,
-            }
-        }
-        w::Edit::OutlineDelete(id) => Edit::OutlineDelete { id: OutlineId(id) },
-        w::Edit::AnnotAdd(pa) => {
-            let (page, annot) = page_annot(pa);
-            Edit::AnnotAdd { page, annot }
-        }
-        w::Edit::AnnotUpdate(pa) => {
-            let (page, annot) = page_annot(pa);
-            Edit::AnnotUpdate { page, annot }
-        }
-        w::Edit::AnnotDelete(r) => Edit::AnnotDelete {
-            page: PageId(r.page),
-            id: AnnotId(r.id),
-        },
-        w::Edit::ConnectorAdd(c) => Edit::ConnectorAdd {
-            a: page_annot(c.a),
-            b: page_annot(c.b),
-        },
     }
 }
 
-/// An event as a plugin sees it, a region in its page's frame. `snap` is
-/// the document the call started with; with none, nothing is mapped.
-pub(crate) fn event_to_wit(snap: Option<&Snapshot>, e: &DocEvent) -> w::DocEvent {
+/// A plugin's edits said as ops: the transitional WIT 0.2/0.3 → Op
+/// adapter, until WIT 0.4 takes Op JSON (slice 20). Geometry goes from the
+/// plugin's pages' frames into PageSpace. The page stamp or file a mark
+/// names by stem is held for the host to find ([`EditBatch::held`]), and
+/// the mark names it as that asset. An update names only what the API's
+/// record says, so a mark's name, dates and turn stay as they are, and so
+/// does what the API doesn't show of it, which it reads.
+pub(crate) struct Adapter<'a> {
+    /// The document the call read; with none, nothing is mapped.
+    snap: Option<&'a Snapshot>,
+    batch: EditBatch,
+    /// The slots it read there, which the batch's ops keep parts of.
+    read: Vec<Key>,
+    /// The next local a bookmark tree names its parents by.
+    next_local: u16,
+}
+
+impl<'a> Adapter<'a> {
+    /// The batch `edits.submit` called `label`, on `snap`.
+    pub(crate) fn new(snap: Option<&'a Snapshot>, label: String) -> Adapter<'a> {
+        let batch = EditBatch {
+            label,
+            ops: Vec::new(),
+            held: Vec::new(),
+            invalid: None,
+        };
+        Adapter {
+            snap,
+            batch,
+            read: Vec::new(),
+            next_local: 1,
+        }
+    }
+
+    /// The batch, and the slots it read ([`CallOutput::reads`]).
+    ///
+    /// [`CallOutput::reads`]: crate::CallOutput::reads
+    pub(crate) fn finish(self) -> (EditBatch, Vec<Key>) {
+        (self.batch, self.read)
+    }
+
+    /// `e`, said as ops after the ones before it; one ops can't say fails
+    /// the batch.
+    pub(crate) fn edit(&mut self, e: w::Edit) {
+        match self.ops(e) {
+            Ok(ops) => self.batch.ops.extend(ops),
+            Err(e) => {
+                self.batch.invalid.get_or_insert(e);
+            }
+        }
+    }
+
+    fn frame(&self, page: PageId) -> Option<Geom> {
+        self.snap.and_then(|s| page_frame(s, page))
+    }
+
+    /// `page`'s frame into PageSpace.
+    fn to_page_space(&self, page: Option<PageId>) -> Affine {
+        (page.and_then(|p| self.frame(p))).map_or(Affine::IDENTITY, |g| g.from_view())
+    }
+
+    fn ops(&mut self, e: w::Edit) -> Result<Vec<Op>, EditError> {
+        let pages = |ids: Vec<u64>| PageSel::ids(ids.into_iter().map(PageId));
+        Ok(match e {
+            w::Edit::MovePages(m) => vec![Op::MovePages {
+                pages: pages(m.ids),
+                before: m.before.map(|p| PageId(p).into()),
+            }],
+            w::Edit::RotatePages(r) => match Turn::by(rotation_from_wit(r.by)) {
+                Some(by) => vec![Op::RotatePages {
+                    pages: pages(r.ids),
+                    by,
+                }],
+                None => Vec::new(),
+            },
+            w::Edit::DeletePages(ids) => vec![Op::DeletePages { pages: pages(ids) }],
+            w::Edit::DuplicatePages(ids) => vec![Op::DuplicatePages {
+                pages: pages(ids),
+                locals: Vec::new(),
+            }],
+            w::Edit::OutlineInsert(o) => {
+                let target = o.target.map(PageId);
+                vec![Op::AddBookmark {
+                    parent: o.parent.map(|p| OutlineId(p).into()),
+                    at: sibling(o.after),
+                    title: o.title,
+                    target: target.map(Into::into),
+                    view: o.view.map(|v| dest_from_wit(v, self.to_page_space(target))),
+                    color: None,
+                    style: Default::default(),
+                    local: None,
+                }]
+            }
+            w::Edit::OutlineInsertTree(t) => self.tree(t)?,
+            w::Edit::OutlineMove(o) => vec![Op::MoveBookmarks {
+                bookmarks: vec![OutlineId(o.id).into()],
+                parent: o.parent.map(|p| OutlineId(p).into()),
+                at: sibling(o.after),
+                with_pages: o.with_pages,
+            }],
+            w::Edit::OutlineEdit(o) => {
+                let id = OutlineId(o.id);
+                let target = o.target.map(|t| t.map(PageId));
+                // A position is on the bookmark's new page, or else its own.
+                let page = match target {
+                    Some(t) => t,
+                    None => self.snap.and_then(|s| s.state.bookmark(id)?.page()),
+                };
+                let from_view = self.to_page_space(page);
+                vec![Op::PatchBookmarks {
+                    bookmarks: vec![id.into()],
+                    patch: BookmarkPatch {
+                        title: o.title,
+                        target: patch(target.map(|t| t.map(Into::into))),
+                        view: patch(o.view.map(|v| v.map(|v| dest_from_wit(v, from_view)))),
+                        color: patch(o.color.map(|c| c.map(rgb_from_wit))),
+                        style: None,
+                    },
+                }]
+            }
+            w::Edit::OutlineDelete(id) => vec![Op::DeleteBookmarks {
+                bookmarks: vec![OutlineId(id).into()],
+            }],
+            w::Edit::AnnotAdd(pa) => vec![self.add(PageId(pa.page), said(pa.annot))],
+            w::Edit::AnnotUpdate(pa) => {
+                let id = AnnotId(pa.annot.id);
+                vec![self.update(PageId(pa.page), id, said(pa.annot))]
+            }
+            w::Edit::AnnotDelete(r) => vec![Op::DeleteAnnotations {
+                annots: vec![AnnotId(r.id).into()],
+            }],
+            w::Edit::ConnectorAdd(c) => {
+                let (a, b) = (PageId(c.a.page), PageId(c.b.page));
+                let (said_a, said_b) = (said(c.a.annot), said(c.b.annot));
+                let style = said_a.style();
+                let (kind_a, kind_b) = (self.placed(a, said_a.kind).0, self.placed(b, said_b.kind).0);
+                let (
+                    AnnotKind::Connector { rect, label, .. },
+                    AnnotKind::Connector { rect: rect_b, .. },
+                ) = (kind_a, kind_b)
+                else {
+                    return Err(EditError::Invalid {
+                        op: "add-connector",
+                        why: "a connector pair is two connectors".into(),
+                    });
+                };
+                vec![Op::AddConnector {
+                    a: Anchor { page: a.into(), rect },
+                    b: Anchor {
+                        page: b.into(),
+                        rect: rect_b,
+                    },
+                    label,
+                    style,
+                    locals: Vec::new(),
+                }]
+            }
+        })
+    }
+
+    /// A tree of bookmarks, in pre-order by depth: each under the last one
+    /// a level up, by the local it was named; the top ones after each
+    /// other, from `t.after`. Each top one's subtree goes at `t.after`,
+    /// the last first, so no bookmark is named to place the next, and
+    /// only one with others under it has a local: a flat list of any
+    /// length names none.
+    fn tree(&mut self, t: w::OutlineInsertTree) -> Result<Vec<Op>, EditError> {
+        let invalid = |why: &str| EditError::Invalid {
+            op: "add-bookmark",
+            why: why.into(),
+        };
+        let parent = t.parent.map(OutlineId);
+        let depths: Vec<usize> = t.items.iter().map(|i| i.depth as usize).collect();
+        let mut subtrees: Vec<Vec<Op>> = Vec::new();
+        let mut path: Vec<Option<Local>> = Vec::new();
+        for (i, item) in t.items.into_iter().enumerate() {
+            let depth = depths[i];
+            if depth > path.len() {
+                return Err(invalid(
+                    "a bookmark's depth goes down one level at a time, from 0",
+                ));
+            }
+            path.truncate(depth);
+            let local = match depths.get(i + 1).is_some_and(|&next| next > depth) {
+                true => {
+                    let local = Local(self.next_local);
+                    self.next_local = (self.next_local.checked_add(1)).ok_or_else(|| {
+                        invalid("a batch's trees have at most 65,534 bookmarks with others under them")
+                    })?;
+                    Some(local)
+                }
+                false => None,
+            };
+            let (under, at) = match path.last() {
+                Some(up) => {
+                    let up = up.expect("a bookmark with others under it has a local");
+                    (Some(BookmarkRef::New(up)), Sibling::Last)
+                }
+                None => {
+                    subtrees.push(Vec::new());
+                    (parent.map(Into::into), sibling(t.after))
+                }
+            };
+            path.push(local);
+            let target = item.target.map(PageId);
+            let op = Op::AddBookmark {
+                parent: under,
+                at,
+                title: item.title,
+                target: target.map(Into::into),
+                view: item.view.map(|v| dest_from_wit(v, self.to_page_space(target))),
+                color: None,
+                style: Default::default(),
+                local,
+            };
+            subtrees.last_mut().expect("a top one first").push(op);
+        }
+        Ok(subtrees.into_iter().rev().flatten().collect())
+    }
+
+    /// `kind`, in `page`'s frame, in PageSpace, and the turn it reads
+    /// upright in there: the frame's.
+    fn placed(&self, page: PageId, kind: AnnotKind) -> (AnnotKind, Rotation) {
+        match self.frame(page) {
+            Some(g) => (kind.mapped(&g.from_view()), g.rotate),
+            None => (kind, Rotation::R0),
+        }
+    }
+
+    /// What a mark of `kind` holds, held for the host to find, as the
+    /// asset the mark names it by.
+    fn hold(&mut self, kind: &AnnotKind) -> Option<BlobSel> {
+        let held = match kind {
+            AnnotKind::PageStamp { stamp, .. } => Held::Stamp(stamp.clone()),
+            AnnotKind::FileAttachment { file, size, .. } => Held::File {
+                stem: file.clone(),
+                size: *size,
+            },
+            _ => return None,
+        };
+        self.batch.held.push(held);
+        Some(BlobSel::Asset(self.batch.held.len() as u32 - 1))
+    }
+
+    /// A mark `said` on `page`: a reply or status in the thread of the
+    /// comment there of the name it gives.
+    fn add(&mut self, page: PageId, said: Said) -> Op {
+        let reply_to = match &said.kind {
+            AnnotKind::Reply { parent } | AnnotKind::Status { parent, .. } => Some(AnnotRef::Nm {
+                nm: parent.clone(),
+                page: Some(page.into()),
+            }),
+            _ => None,
+        };
+        let asset = self.hold(&said.kind);
+        let style = said.style();
+        let (kind, turn) = self.placed(page, said.kind);
+        Op::AddMark {
+            page: page.into(),
+            mark: NewMark {
+                kind: mark_kind(&kind),
+                style,
+                contents: said.contents,
+                author: None,
+                turn,
+                asset,
+            },
+            reply_to,
+            local: None,
+            imported: None,
+        }
+    }
+
+    /// Mark `id` on `page` made what `said` says, and no more. The patch
+    /// replaces the kind whole, so what the API doesn't show of it is the
+    /// mark's as the plugin read it: a tape's look, and its rows unless
+    /// its text changed (a plugin sees a tape as its text); a 0.2 line's
+    /// start arrowhead.
+    fn update(&mut self, page: PageId, id: AnnotId, said: Said) -> Op {
+        if self.snap.is_some() {
+            self.read.push(Key::Annot(id));
+        }
+        let read = self.snap.and_then(|s| s.state.find_annot(id)).map(|(_, a)| a);
+        let style = said.style();
+        let (mut kind, _) = self.placed(page, said.kind);
+        match (&mut kind, read.map(|a| (&a.kind, &a.contents))) {
+            (
+                AnnotKind::Tape { tape, look, .. },
+                Some((
+                    AnnotKind::Tape {
+                        tape: rows,
+                        look: was,
+                        ..
+                    },
+                    text,
+                )),
+            ) => {
+                look.clone_from(was);
+                if *text == said.contents {
+                    tape.clone_from(rows);
+                }
+            }
+            (
+                AnnotKind::Line { arrow_start, .. },
+                Some((
+                    AnnotKind::Line {
+                        arrow_start: was, ..
+                    },
+                    _,
+                )),
+            ) if said.more.is_none() => *arrow_start = *was,
+            _ => {}
+        }
+        let more = said.more;
+        Op::PatchMarks {
+            marks: vec![id.into()],
+            patch: MarkPatch {
+                kind: Some(mark_kind(&kind)),
+                color: Some(style.color),
+                opacity: Some(style.opacity),
+                stroke: Some(style.stroke),
+                fill: match more {
+                    Some(m) => m.fill.map_or(Patch::Clear, Patch::Set),
+                    None => Patch::Keep,
+                },
+                dashed: more.map(|m| m.dashed),
+                cloudy: more.map(|m| m.cloudy),
+                contents: Some(said.contents),
+            },
+            imported: None,
+        }
+    }
+}
+
+/// After `after` among its siblings, or first.
+fn sibling(after: Option<u64>) -> Sibling {
+    match after {
+        Some(a) => Sibling::After(OutlineId(a).into()),
+        None => Sibling::First,
+    }
+}
+
+/// A WIT edit's double option: absent keeps, none clears.
+fn patch<T>(v: Option<Option<T>>) -> Patch<T> {
+    match v {
+        None => Patch::Keep,
+        Some(None) => Patch::Clear,
+        Some(Some(v)) => Patch::Set(v),
+    }
+}
+
+/// An event as a plugin sees it, a region in its page's frame in the
+/// call's document (`host`'s base); with none, nothing is mapped.
+pub(crate) fn event_to_wit(host: &HostState, e: &DocEvent) -> w::DocEvent {
     match e {
         DocEvent::Opened => w::DocEvent::Opened,
         DocEvent::Edited(l) => w::DocEvent::Edited(l.clone()),
@@ -316,7 +606,7 @@ pub(crate) fn event_to_wit(snap: Option<&Snapshot>, e: &DocEvent) -> w::DocEvent
         DocEvent::SelectionChanged => w::DocEvent::SelectionChanged,
         DocEvent::Closed => w::DocEvent::Closed,
         DocEvent::Region { page, rect } => {
-            let to_view = snap.map_or(Affine::IDENTITY, |s| to_frame(s, *page));
+            let to_view = host.base().map_or(Affine::IDENTITY, |s| to_frame(s, *page));
             w::DocEvent::Region(w::Region {
                 page: page.0,
                 rect: box_to_wit(to_view.apply_box(*rect)),
@@ -426,41 +716,51 @@ impl api::document::Host for HostState {
         self.doc().map(|d| d.path.display().to_string())
     }
 
+    /// Read: the order, and each page's slot and boxes.
     fn pages(&mut self) -> Vec<api::types::PageInfo> {
-        let Some(d) = self.doc() else {
+        let Some(snap) = self.base() else {
             return Vec::new();
         };
-        d.snapshot
-            .state
-            .order()
-            .iter()
-            .map(|&p| page_info(&d.snapshot, p))
-            .collect()
+        let order = snap.state.order().clone();
+        let pages = order.iter().map(|&p| page_info(snap, p)).collect();
+        let each = order.iter().flat_map(|&p| [Key::Page(p), Key::Geom(p)]);
+        self.read(std::iter::once(Key::Order).chain(each));
+        pages
     }
 
+    /// Read: the top-level bookmarks, and each bookmark.
     fn outline(&mut self) -> Vec<api::types::OutlineItem> {
-        let Some(d) = self.doc() else {
+        let Some(snap) = self.base() else {
             return Vec::new();
         };
-        d.snapshot
-            .state
-            .bookmarks_preorder()
-            .into_iter()
-            .map(|(depth, id, b)| outline_item(&d.snapshot, depth, id, b))
-            .collect()
+        let mut read = vec![Key::OutlineRoots];
+        let items = (snap.state.bookmarks_preorder().into_iter())
+            .map(|(depth, id, b)| {
+                read.push(Key::Bookmark(id));
+                outline_item(snap, depth, id, b)
+            })
+            .collect();
+        self.read(read);
+        items
     }
 
+    /// Read: the page's annotations, and each mark it shows.
     fn annotations(&mut self, page: u64) -> Vec<api::types::Annot> {
-        let Some(d) = self.doc() else {
+        let Some(snap) = self.base() else {
             return Vec::new();
         };
         let page = PageId(page);
-        let to_view = to_frame(&d.snapshot, page);
-        d.snapshot
-            .state
-            .marks_on(page)
-            .filter_map(|a| annot_to_wit(&a.mapped(&to_view)))
-            .collect()
+        let to_view = to_frame(snap, page);
+        let mut read = vec![Key::PageAnnots(page)];
+        let shown = (snap.state.marks_on(page))
+            .filter_map(|a| {
+                let shown = annot_to_wit(&a.mapped(&to_view))?;
+                read.push(Key::Annot(a.id));
+                Some(shown)
+            })
+            .collect();
+        self.read(read);
+        shown
     }
 
     fn selection(&mut self) -> Vec<u64> {
@@ -476,12 +776,12 @@ impl api::document::Host for HostState {
 
 impl api::text::Host for HostState {
     fn page_text(&mut self, page: u64) -> Result<String, String> {
-        let (d, id, base) = self.page_base(page)?;
-        if let Some(layer) = d.snapshot.state.ocr_text(id) {
+        let (d, snap, id, base) = self.page_base(page)?;
+        if let Some(layer) = snap.state.ocr_text(id) {
             return Ok(layer.text());
         }
         d.text
-            .page_text(base.source, base.index)
+            .page_text(base.src.id(), base.index)
             .map_err(|e| format!("{e:#}"))
     }
 
@@ -495,15 +795,15 @@ impl api::text::Host for HostState {
             .size_limit(1 << 20)
             .build()
             .map_err(|e| e.to_string())?;
-        let (d, id, base) = self.page_base(page)?;
-        let found: Vec<TextMatch> = match d.snapshot.state.ocr_text(id) {
+        let (d, snap, id, base) = self.page_base(page)?;
+        let found: Vec<TextMatch> = match snap.state.ocr_text(id) {
             Some(layer) => layer_matches(
                 sheaf_doc::text_layer::pattern_search(layer, &re),
-                to_frame(&d.snapshot, id),
+                to_frame(snap, id),
             ),
             None => d
                 .text
-                .pattern_search(base.source, base.index, &Arc::new(re))
+                .pattern_search(base.src.id(), base.index, &Arc::new(re))
                 .map_err(|e| format!("{e:#}"))?,
         };
         Ok(found.into_iter().map(text_match_to_wit).collect())
@@ -515,15 +815,15 @@ impl api::text::Host for HostState {
         query: String,
         match_case: bool,
     ) -> Result<Vec<api::types::TextMatch>, String> {
-        let (d, id, base) = self.page_base(page)?;
-        let found: Vec<TextMatch> = match d.snapshot.state.ocr_text(id) {
+        let (d, snap, id, base) = self.page_base(page)?;
+        let found: Vec<TextMatch> = match snap.state.ocr_text(id) {
             Some(layer) => layer_matches(
                 sheaf_doc::text_layer::search(layer, &query, match_case),
-                to_frame(&d.snapshot, id),
+                to_frame(snap, id),
             ),
             None => d
                 .text
-                .search(base.source, base.index, &query, match_case)
+                .search(base.src.id(), base.index, &query, match_case)
                 .map_err(|e| format!("{e:#}"))?,
         };
         Ok(found.into_iter().map(text_match_to_wit).collect())
@@ -536,15 +836,15 @@ impl api::text::Host for HostState {
     ) -> Result<Vec<api::types::TextMatch>, String> {
         static WORD: std::sync::LazyLock<Arc<regex::Regex>> =
             std::sync::LazyLock::new(|| Arc::new(regex::Regex::new(r"\S+").unwrap()));
-        let (d, id, base) = self.page_base(page)?;
-        let words: Vec<TextMatch> = match d.snapshot.state.ocr_text(id) {
+        let (d, snap, id, base) = self.page_base(page)?;
+        let words: Vec<TextMatch> = match snap.state.ocr_text(id) {
             Some(layer) => layer_matches(
                 sheaf_doc::text_layer::pattern_search(layer, &WORD),
-                to_frame(&d.snapshot, id),
+                to_frame(snap, id),
             ),
             None => d
                 .text
-                .pattern_search(base.source, base.index, &WORD)
+                .pattern_search(base.src.id(), base.index, &WORD)
                 .map_err(|e| format!("{e:#}"))?,
         };
         let within = |m: &TextMatch| match rect {
@@ -569,12 +869,12 @@ impl api::text::Host for HostState {
         page: u64,
         rect: api::types::Box2,
     ) -> Result<Vec<api::types::Box2>, String> {
-        let (d, id, base) = self.page_base(page)?;
+        let (d, snap, id, base) = self.page_base(page)?;
         let rect = box_from_wit(rect);
-        let boxes = match d.snapshot.state.ocr_text(id) {
+        let boxes = match snap.state.ocr_text(id) {
             // `rect` is in the page's frame, the layer in PageSpace.
             Some(layer) => {
-                let to_view = to_frame(&d.snapshot, id);
+                let to_view = to_frame(snap, id);
                 layer
                     .boxes_in_rect(to_view.inverse().apply_box(rect))
                     .into_iter()
@@ -583,7 +883,7 @@ impl api::text::Host for HostState {
             }
             None => d
                 .text
-                .text_boxes(base.source, base.index, rect)
+                .text_boxes(base.src.id(), base.index, rect)
                 .map_err(|e| format!("{e:#}"))?,
         };
         Ok(boxes.into_iter().map(box_to_wit).collect())
@@ -613,11 +913,11 @@ impl api::ocr::Host for HostState {
         page: u64,
         options: api::ocr::OcrOptions,
     ) -> Result<api::ocr::TextLayer, String> {
-        let (d, id, base) = self.page_base(page)?;
+        let (d, snap, id, base) = self.page_base(page)?;
         let ocr = d.ocr.clone().ok_or("OCR isn't available")?;
-        let geom = d.snapshot.geom(id);
-        let render = d.snapshot.render_delta(id);
-        let to_view = to_frame(&d.snapshot, id);
+        let geom = snap.geom(id);
+        let render = snap.render_delta(id);
+        let to_view = to_frame(snap, id);
         let started = Instant::now();
         let layer = ocr.recognize(id, base, &geom, render, options.language, options.dpi);
         // The engine's time isn't the plugin's.
@@ -627,13 +927,13 @@ impl api::ocr::Host for HostState {
             .map_err(|e| format!("{e:#}"))
     }
 
+    /// Read: what the page shows.
     fn page_text_layer(&mut self, page: u64) -> Option<api::ocr::TextLayer> {
-        let d = self.doc()?;
+        let snap = self.base()?;
         let page = PageId(page);
-        d.snapshot
-            .state
-            .ocr_text(page)
-            .map(|l| layer_to_wit(l, to_frame(&d.snapshot, page)))
+        let layer = (snap.state.ocr_text(page)).map(|l| layer_to_wit(l, to_frame(snap, page)));
+        self.read([Key::Page(page)]);
+        layer
     }
 }
 
@@ -691,9 +991,13 @@ impl api::ui::Host for HostState {
 
 impl api::edits::Host for HostState {
     fn submit(&mut self, label: String, edits: Vec<api::types::Edit>) {
-        let snap = self.doc().map(|d| &d.snapshot);
-        let edits = edits.into_iter().map(|e| edit_from_wit(snap, e)).collect();
-        self.batches.push(EditBatch { label, edits });
+        let mut ops = Adapter::new(self.base(), label);
+        for e in edits {
+            ops.edit(e);
+        }
+        let (batch, read) = ops.finish();
+        self.read(read);
+        self.batches.push(batch);
     }
 }
 
@@ -715,11 +1019,14 @@ impl api::render::Host for HostState {}
 
 impl api::render::HostPageRenderer for HostState {
     fn new(&mut self, page: u64) -> Resource<PageRenderer> {
-        // An unknown page still gets a handle; `render` reports it.
+        // An unknown page still gets a handle; `render` reports it. Read:
+        // what the page shows.
         let page = PageId(page);
-        let base = self
-            .doc()
-            .and_then(|d| Some(d.snapshot.state.def(page)?.base.clone()));
+        let base = (self.base()).map(|s| Some(s.state.def(page)?.base.clone()));
+        if base.is_some() {
+            self.read([Key::Page(page)]);
+        }
+        let base = base.flatten();
         let size = base.as_ref().map_or((0.0, 0.0), |b| {
             let s = b.src.page_size(b.index);
             (s.width, s.height)
@@ -743,7 +1050,7 @@ impl api::render::HostPageRenderer for HostState {
     ) -> Result<Resource<RenderedImage>, String> {
         let (page, shows, (pw, ph)) = {
             let r = self.table.get(&this).map_err(|e| e.to_string())?;
-            let shows = r.base.as_ref().map(|b| (b.source, b.index));
+            let shows = r.base.as_ref().map(|b| (b.src.id(), b.index));
             (r.page, shows, r.size)
         };
         let Some((shown, index)) = shows.filter(|_| pw > 0.0) else {

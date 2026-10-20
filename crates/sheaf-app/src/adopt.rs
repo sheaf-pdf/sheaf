@@ -1,12 +1,13 @@
 //! Another tool's comment becomes one of our marks when it's edited (M9
 //! decision 5): dragged on the page, its text edited (double-click, or F2
 //! in the Comments panel), or Make Editable from the panel's menu. Its
-//! mark was made when the file was read (`ForeignAnnot::mark`); it keeps
-//! the comment's name, so replies stay with it, and a save puts it where
-//! the comment was.
+//! mark was made when the file was read (`ForeignAnnot::mark`); adopting
+//! it keeps the comment's id and name, so replies stay with it, and a
+//! save puts it where the comment was.
 
 use gpui::{Context, Window};
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, CommitOpts, PageId, Pt};
+use sheaf_edit::{AnnotRef, Op};
 
 use crate::docview::{DocView, State};
 
@@ -56,40 +57,33 @@ impl DocView {
         Some((a.page, (**a.foreign()?.summary.mark.as_ref()?).clone()))
     }
 
-    /// Make another tool's comment `id` one of our marks (`changed` says
-    /// how, if it's being changed too), as one undo step called `label`,
-    /// and select it. Its page and id, or None when sheaf can't hold it.
+    /// Make another tool's comment `id` one of our marks, and then what
+    /// `then` does to it, as one undo step called `label`, and select it:
+    /// the mark keeps the comment's id. Its page, or None when sheaf can't
+    /// hold it or the edit failed.
     pub(crate) fn adopt_foreign(
         &mut self,
         id: AnnotId,
-        changed: impl FnOnce(&mut Annot),
+        then: Option<Op>,
         label: &str,
         cx: &mut Context<Self>,
-    ) -> Option<(PageId, AnnotId)> {
-        let Some((page, mut mark)) = self.foreign_mark(id) else {
+    ) -> Option<PageId> {
+        let Some((page, _)) = self.foreign_mark(id) else {
             self.set_notice("sheaf can't edit that kind of comment", cx);
             return None;
         };
-        changed(&mut mark);
-        // It takes this comment's place, of any named alike.
-        mark.id = id;
-        let name = mark.name.clone();
-        self.apply(Edit::AnnotAdd { page, annot: mark }, label, cx);
+        let adopt = Op::AdoptAnnotations {
+            annots: vec![AnnotRef::Id(id)],
+        };
+        let tx = self.lower([adopt].into_iter().chain(then).collect(), label, cx)?;
+        self.commit(tx, CommitOpts::labelled(label), cx).ok()?;
         let State::Ready(doc) = &mut self.state else {
             return None;
         };
-        // The newest of the marks named so: it comes after the others.
-        let id = doc
-            .model
-            .state()
-            .marks_on(page)
-            .filter(|a| a.name == name)
-            .last()?
-            .id;
         doc.selected_foreign = None;
         doc.select_mark(Some((page, id)));
         cx.notify();
-        Some((page, id))
+        Some(page)
     }
 
     /// F2 or a double-click on another tool's comment: make it ours, then
@@ -100,7 +94,7 @@ impl DocView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((page, id)) = self.adopt_foreign(id, |_| {}, "Make comment editable", cx) else {
+        let Some(page) = self.adopt_foreign(id, None, "Make comment editable", cx) else {
             return;
         };
         let kind = match &self.state {

@@ -9,14 +9,14 @@
 use std::path::{Path, PathBuf};
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
-use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::annot::caret_box;
 use sheaf_doc::materialize::Came;
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Blob, Box2, Document, Edit, FixedCount, Pt, SourceInfo, Store,
-};
+use sheaf_doc::tx::fixture::add;
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Blob, Box2, Document, FixedCount, Pt, Store};
+use sheaf_edit::{PageSize, Rotation};
 use sheaf_image::raster::PixelFormat;
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::{PdfiumEngine, appearance_text};
 use sheaf_render::{Job, Renderer};
 
@@ -135,11 +135,16 @@ fn check(rotate: i64) {
     }
     .rotated(Rotation::from_degrees(rotate as i32));
     let store = Store::new();
-    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let (primary, stamp) = store.read_file(&src, None).unwrap();
+    let came = Came::Read {
+        path: src.as_path().into(),
+        stamp,
+    };
     let mut model = Document::new(
         store,
         primary,
-        Some(Came::Read(stamp)),
+        sheaf_doc::store::file_name(&src),
+        Some(came),
         &[],
         Box::new(FixedCount(10)),
     );
@@ -203,7 +208,7 @@ fn check(rotate: i64) {
         ),
     ] {
         let annot = placed(&model, a);
-        model.apply(Edit::AnnotAdd { page, annot }, "mark").unwrap();
+        model.commit_ops(vec![add(page, &annot)], "mark").unwrap();
     }
     let out = dir.join("marked.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
@@ -386,11 +391,16 @@ fn tapes_draw_turned_and_from_old_text() {
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
     let store = Store::new();
-    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let (primary, stamp) = store.read_file(&src, None).unwrap();
+    let came = Came::Read {
+        path: src.as_path().into(),
+        stamp,
+    };
     let mut model = Document::new(
         store,
         primary,
-        Some(Came::Read(stamp)),
+        sheaf_doc::store::file_name(&src),
+        Some(came),
         &[],
         Box::new(FixedCount(10)),
     );
@@ -434,7 +444,7 @@ fn tapes_draw_turned_and_from_old_text() {
     );
     a.contents = tape.text(2);
     let annot = placed(&model, a);
-    model.apply(Edit::AnnotAdd { page, annot }, "tape").unwrap();
+    model.commit_ops(vec![add(page, &annot)], "tape").unwrap();
     // From before rows were kept: text only, read back from it.
     let mut old = mark(
         AnnotKind::Tape {
@@ -452,7 +462,7 @@ fn tapes_draw_turned_and_from_old_text() {
     );
     old.contents = "1,234.50 +\n250.00 +\n1,484.50 T".into();
     let annot = placed(&model, old);
-    model.apply(Edit::AnnotAdd { page, annot }, "tape").unwrap();
+    model.commit_ops(vec![add(page, &annot)], "tape").unwrap();
     let out = dir.join("tapes.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
 
@@ -500,11 +510,16 @@ fn clouds_and_callouts_draw() {
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
     let store = Store::new();
-    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let (primary, stamp) = store.read_file(&src, None).unwrap();
+    let came = Came::Read {
+        path: src.as_path().into(),
+        stamp,
+    };
     let mut model = Document::new(
         store,
         primary,
-        Some(Came::Read(stamp)),
+        sheaf_doc::store::file_name(&src),
+        Some(came),
         &[],
         Box::new(FixedCount(10)),
     );
@@ -538,7 +553,7 @@ fn clouds_and_callouts_draw() {
     );
     for a in [cloud, callout] {
         let annot = placed(&model, a);
-        model.apply(Edit::AnnotAdd { page, annot }, "mark").unwrap();
+        model.commit_ops(vec![add(page, &annot)], "mark").unwrap();
     }
     let out = dir.join("shapes.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
@@ -588,11 +603,16 @@ fn free_text_reads_back_from_its_appearance() {
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
     let store = Store::new();
-    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let (primary, stamp) = store.read_file(&src, None).unwrap();
+    let came = Came::Read {
+        path: src.as_path().into(),
+        stamp,
+    };
     let mut model = Document::new(
         store,
         primary,
-        Some(Came::Read(stamp)),
+        sheaf_doc::store::file_name(&src),
+        Some(came),
         &[],
         Box::new(FixedCount(10)),
     );
@@ -612,8 +632,8 @@ fn free_text_reads_back_from_its_appearance() {
     );
     note.contents = text.into();
     let annot = placed(&model, note);
-    let out = model.apply(Edit::AnnotAdd { page, annot }, "note").unwrap();
-    assert!(!out.unencodable, "WinAnsi has every one");
+    let out = model.commit_ops(vec![add(page, &annot)], "note").unwrap();
+    assert!(out.notices.is_empty(), "WinAnsi has every one");
     let bytes = sheaf_doc::save::rewrite(&model.snapshot()).unwrap();
     let read = appearance_text(&bytes, None, PageIndex(0)).unwrap();
     assert!(read.contains(text), "{read:?}");

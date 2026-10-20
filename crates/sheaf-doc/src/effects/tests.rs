@@ -10,8 +10,8 @@ use crate::forms::FieldKind;
 use crate::forms::field::Mk;
 use crate::labels::Style;
 use crate::model::{
-    FieldProps, FormDoc, FormInst, GenId, GenSpec, Mark, OutlineId, PageBase, SourceId, SourceInfo,
-    Target, TextStyle, WidgetProps,
+    FieldProps, FormDoc, FormInst, GenId, GenSpec, Mark, OutlineId, PageBase, SourceId, Target,
+    TextStyle, WidgetProps,
 };
 use crate::stamps::HeaderFooter;
 use crate::store::{Src, Store};
@@ -25,7 +25,6 @@ fn state_of(src: &Src, n: u32) -> DocState {
     let pages = (0..n).map(|index| {
         let def = PageDef {
             base: PageBase {
-                source: SourceId(0),
                 src: src.clone(),
                 index,
             },
@@ -42,7 +41,7 @@ fn state_of(src: &Src, n: u32) -> DocState {
 }
 
 fn blank(n: u32) -> DocState {
-    state_of(&SourceInfo::blank(&Store::new(), n).src, n)
+    state_of(&crate::store::blank(&Store::new(), n), n)
 }
 
 fn sq(x: f32) -> Box2 {
@@ -108,7 +107,7 @@ fn widget(field: u64, state: Option<&str>) -> Widget {
         field: FieldId(field),
         src: None,
         inst: FormInst {
-            src: SourceId(0),
+            src: SourceId { hash: 0, len: 0 },
             copy: 0,
         },
         merged: true,
@@ -155,7 +154,7 @@ fn node(partial: &str, parent: Option<u64>, term: Option<Terminal>) -> FieldNode
         partial: partial.into(),
         src: None,
         inst: FormInst {
-            src: SourceId(0),
+            src: SourceId { hash: 0, len: 0 },
             copy: 0,
         },
         kids: Vector::new(),
@@ -215,7 +214,7 @@ fn layer(words: &str) -> Arc<TextLayer> {
         rect: sq(10.0),
         confidence: 1.0,
     };
-    Arc::new(TextLayer::from_engine(
+    Arc::new(crate::text_layer::from_engine(
         vec![word],
         &crate::geom::Geom::read(None, None, 0),
         "test",
@@ -524,8 +523,8 @@ fn geometry_and_order() {
 fn pages_added_removed_and_rebased() {
     let store = Store::new();
     let (one, other) = (
-        SourceInfo::blank(&store, 3).src,
-        SourceInfo::blank(&store, 4).src,
+        crate::store::blank(&store, 3),
+        crate::store::blank(&store, 4),
     );
     let st = state_of(&one, 3);
     let page = |i: u64| Key::Page(PageId(i));

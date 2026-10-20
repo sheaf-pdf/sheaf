@@ -1,6 +1,6 @@
 use super::*;
 use lopdf::{Document as Pdf, Stream, dictionary};
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 fn mark(kind: AnnotKind) -> Annot {
     Annot {

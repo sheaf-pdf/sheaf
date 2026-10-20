@@ -10,7 +10,8 @@ use gpui::{
     AnchoredPositionMode, AnyElement, Context, DragMoveEvent, Entity, Focusable, MouseButton,
     Pixels, Point, Subscription, Window, anchored, deferred, div, point, prelude::*, px, rgb,
 };
-use sheaf_doc::{DestView, Edit, OutlineId, PageId};
+use sheaf_doc::{Commit, CommitOpts, DestView, DocState, OutlineId, PageId};
+use sheaf_edit::{BookmarkPatch, BookmarkRef, Op, Patch, Sibling};
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
@@ -148,47 +149,16 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let (target, view) = match here {
-            Some((p, v)) => (Some(p), v),
-            None => (None, None),
-        };
-        // Acrobat places the new bookmark as a sibling after the selected one.
-        let st = doc.model.state();
-        let (parent, after) = match doc.outline_selected.and_then(|sel| st.bookmark_place(sel)) {
-            Some((parent, _)) => (parent, doc.outline_selected),
-            None => (None, st.outline_roots().last().copied()),
-        };
-        self.apply(
-            Edit::OutlineInsert {
-                parent,
-                after,
-                title: "Untitled".into(),
-                target,
-                view,
-            },
-            "New bookmark",
-            cx,
-        );
-        // The new node is the sibling after `after` (or the first); find it
-        // and rename.
+        let op = new_bookmark_op(doc.model.state(), doc.outline_selected, here);
+        let label = "New bookmark";
+        let made = (self.lower(vec![op], label, cx))
+            .and_then(|tx| self.commit(tx, CommitOpts::labelled(label), cx).ok());
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let st = doc.model.state();
-        let siblings = match parent {
-            Some(p) => st.bookmark(p).map(|b| b.kids.clone()).unwrap_or_default(),
-            None => st.outline_roots().clone(),
-        };
-        let new_id = match after {
-            Some(a) => siblings.index_of(&a).and_then(|i| siblings.get(i + 1)),
-            None => siblings.front(),
-        }
-        .copied();
-        if let Some(id) = new_id {
+        // Its parent opened as it was made (`DocView::commit`).
+        if let Some(id) = made_bookmark(made.as_ref()) {
             doc.outline_selected = Some(id);
-            if let Some(parent) = parent {
-                doc.outline_expanded.insert(parent);
-            }
             self.start_rename(id, window, cx);
         }
     }
@@ -210,18 +180,14 @@ impl DocView {
             let text = input.read(cx).text().trim().to_string();
             match ev {
                 TextInputEvent::Confirm if !text.is_empty() => {
-                    this.apply(
-                        Edit::OutlineEdit {
-                            id,
-                            title: Some(text),
-                            target: None,
-                            color: None,
-                            view: None,
-                            style: None,
-                        },
-                        "Rename bookmark",
-                        cx,
-                    );
+                    let patch = BookmarkPatch {
+                        title: Some(text),
+                        ..BookmarkPatch::default()
+                    };
+                    let label = "Rename bookmark";
+                    if let Some(tx) = this.lower(vec![patched(id, patch)], label, cx) {
+                        this.commit(tx, CommitOpts::labelled(label), cx).ok();
+                    }
                 }
                 _ => {}
             }
@@ -257,7 +223,11 @@ impl DocView {
             return;
         };
         doc.outline_menu = None;
-        self.apply(Edit::OutlineDelete { id }, "Delete bookmark", cx);
+        let bookmarks = vec![BookmarkRef::Id(id)];
+        let label = "Delete bookmark";
+        if let Some(tx) = self.lower(vec![Op::DeleteBookmarks { bookmarks }], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
     }
 
     fn set_selected_destination(&mut self, cx: &mut Context<Self>) {
@@ -271,18 +241,15 @@ impl DocView {
         let Some((page, view)) = self.current_view() else {
             return;
         };
-        self.apply(
-            Edit::OutlineEdit {
-                id,
-                title: None,
-                target: Some(Some(page)),
-                color: None,
-                view: Some(view),
-                style: None,
-            },
-            "Set destination",
-            cx,
-        );
+        let patch = BookmarkPatch {
+            target: Patch::Set(page.into()),
+            view: view.map_or(Patch::Clear, Patch::Set),
+            ..BookmarkPatch::default()
+        };
+        let label = "Set destination";
+        if let Some(tx) = self.lower(vec![patched(id, patch)], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
     }
 
     fn set_selected_color(&mut self, color: Option<[u8; 3]>, cx: &mut Context<Self>) {
@@ -293,18 +260,14 @@ impl DocView {
             return;
         };
         doc.outline_menu = None;
-        self.apply(
-            Edit::OutlineEdit {
-                id,
-                title: None,
-                target: None,
-                color: Some(color),
-                view: None,
-                style: None,
-            },
-            "Bookmark color",
-            cx,
-        );
+        let patch = BookmarkPatch {
+            color: color.map_or(Patch::Clear, Patch::Set),
+            ..BookmarkPatch::default()
+        };
+        let label = "Bookmark color";
+        if let Some(tx) = self.lower(vec![patched(id, patch)], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
     }
 
     fn set_all_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
@@ -365,16 +328,15 @@ impl DocView {
         } else {
             "Move bookmark"
         };
-        self.apply(
-            Edit::OutlineMove {
-                id,
-                parent,
-                after,
-                with_pages,
-            },
-            label,
-            cx,
-        );
+        let op = Op::MoveBookmarks {
+            bookmarks: vec![BookmarkRef::Id(id)],
+            parent: parent.map(BookmarkRef::Id),
+            at: after.map_or(Sibling::First, |a| Sibling::After(a.into())),
+            with_pages,
+        };
+        if let Some(tx) = self.lower(vec![op], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         if let State::Ready(doc) = &mut self.state {
             doc.outline_selected = Some(id);
         }
@@ -763,4 +725,99 @@ fn self_menu(pos: Point<Pixels>, cx: &mut Context<DocView>) -> AnyElement {
 #[allow(dead_code)]
 fn _unused(_: Point<Pixels>) -> Point<Pixels> {
     point(px(0.0), px(0.0))
+}
+
+/// Bookmark `id` changed as `patch` says.
+fn patched(id: OutlineId, patch: BookmarkPatch) -> Op {
+    Op::PatchBookmarks {
+        bookmarks: vec![BookmarkRef::Id(id)],
+        patch,
+    }
+}
+
+/// New Bookmark on `st`: an "Untitled" one going to `here` (the page in
+/// view, and where on it). As Acrobat places it, it's the `selected`
+/// bookmark's next sibling, or else the last at the top.
+fn new_bookmark_op(
+    st: &DocState,
+    selected: Option<OutlineId>,
+    here: Option<(PageId, Option<DestView>)>,
+) -> Op {
+    let (target, view) = here.map_or((None, None), |(page, view)| (Some(page), view));
+    let placed = selected.and_then(|sel| Some((sel, st.bookmark_place(sel)?)));
+    let (parent, at) = match placed {
+        Some((sel, (parent, _))) => (parent, Sibling::After(sel.into())),
+        None => (None, Sibling::Last),
+    };
+    Op::AddBookmark {
+        parent: parent.map(BookmarkRef::Id),
+        at,
+        title: "Untitled".into(),
+        target: target.map(Into::into),
+        view,
+        color: None,
+        style: Default::default(),
+        local: None,
+    }
+}
+
+/// The bookmark New Bookmark `made`, which it selects to rename: the one
+/// its commit says it made, never a guess at where it went (bug 25). None
+/// when it made none.
+fn made_bookmark(made: Option<&Commit>) -> Option<OutlineId> {
+    made?.created.bookmarks().next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sheaf_doc::{Document, FixedCount, FlatOutlineItem, Store};
+
+    /// Two blank pages, and bookmarks A (with A1 and A2 under it) and B.
+    fn outlined() -> Document {
+        let item = |title: &str, page: u32, depth: u16| FlatOutlineItem {
+            title: title.into(),
+            page: Some(page),
+            depth,
+            view: None,
+            color: None,
+            style: Default::default(),
+            open: true,
+            object: None,
+            kept: false,
+        };
+        let store = Store::new();
+        let primary = sheaf_doc::store::blank(&store, 2);
+        let items = [
+            item("A", 0, 0),
+            item("A1", 0, 1),
+            item("A2", 1, 1),
+            item("B", 1, 0),
+        ];
+        let policy = Box::new(FixedCount(10));
+        Document::new(store, primary, "a.pdf".into(), None, &items, policy)
+    }
+
+    /// New Bookmark with a bookmark that has children selected selects
+    /// the one it made: the selected one's next sibling. One refused
+    /// selects none. Before, the selection was a guess (bug 25, which
+    /// says pre-order; it was the selected one's next sibling by index,
+    /// which picked B, an old bookmark, to rename when the edit failed).
+    #[test]
+    fn a_new_bookmark_is_the_one_selected() {
+        let mut d = outlined();
+        let a = d.state().outline_roots()[0];
+        let page = d.page(1).unwrap();
+        let op = new_bookmark_op(d.state(), Some(a), Some((page, None)));
+        let c = d.commit_ops(vec![op], "New bookmark").unwrap();
+        let st = d.state();
+        let made = made_bookmark(Some(&c)).expect("one was made");
+        assert_eq!(st.outline_roots().iter().position(|&r| r == made), Some(1));
+        let b = st.bookmark(made).unwrap();
+        assert_eq!((&*b.title, b.page()), ("Untitled", Some(page)));
+        // Its page is gone: refused, so none is selected.
+        let op = new_bookmark_op(d.state(), Some(a), Some((PageId(999), None)));
+        let refused = d.commit_ops(vec![op], "New bookmark").ok();
+        assert_eq!(made_bookmark(refused.as_ref()), None);
+    }
 }

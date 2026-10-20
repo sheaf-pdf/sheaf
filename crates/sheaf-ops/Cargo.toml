@@ -4,9 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "sheaf's document operations without a GUI: what both the app and the command line run"
+publish = false
 
 [dependencies]
-sheaf-core.workspace = true
+sheaf-edit.workspace = true
 sheaf-doc.workspace = true
 sheaf-render.workspace = true
 in-progress.workspace = true
@@ -25,5 +26,6 @@ toml = "0.9"
 image = { workspace = true, features = ["jpeg"] }
 
 [dev-dependencies]
+sheaf-util.workspace = true
 fastrand = "2"
 sheaf-doc = { workspace = true, features = ["fixtures"] }

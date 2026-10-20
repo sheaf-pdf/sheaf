@@ -109,13 +109,14 @@ impl DocView {
         true
     }
 
-    /// After the document changed: a region on a page that's gone goes too.
-    pub(crate) fn prune_region(&mut self, cx: &mut Context<Self>) {
-        let gone = match (&self.region, &self.state) {
-            (Some(r), State::Ready(doc)) => doc.model.index_of(r.page).is_none(),
-            _ => false,
-        };
-        if gone {
+    /// After the document changed: a region on a page it `removed` goes
+    /// too.
+    pub(crate) fn prune_region(&mut self, removed: &[PageId], cx: &mut Context<Self>) {
+        if self
+            .region
+            .as_ref()
+            .is_some_and(|r| removed.contains(&r.page))
+        {
             self.clear_region(cx);
         }
     }

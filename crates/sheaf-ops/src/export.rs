@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use in_progress::Progress;
-use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::{PAGES, PageId, Snapshot};
+use sheaf_edit::Rotation;
 use sheaf_image::encode::{TiffPage, TiffWriter};
 use sheaf_image::raster::{PixelFormat, Raster};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
@@ -288,13 +289,11 @@ mod tests {
             stem: "x".into(),
         };
         let store = sheaf_doc::Store::new();
-        let primary = sheaf_doc::SourceInfo {
-            name: "none.pdf".into(),
-            ..sheaf_doc::SourceInfo::blank(&store, 1)
-        };
+        let primary = sheaf_doc::store::blank(&store, 1);
         let snapshot = sheaf_doc::Document::new(
             store,
             primary,
+            "none.pdf".into(),
             None,
             &[],
             sheaf_doc::history::default_policy(),

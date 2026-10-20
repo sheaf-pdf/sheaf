@@ -10,6 +10,7 @@ use gpui::{
     Subscription, Window, div, prelude::*, px,
 };
 use sheaf_doc::watermark::{Anchor, Mark, Watermark};
+use sheaf_doc::{PageId, Snapshot};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
@@ -29,8 +30,9 @@ const ROTATIONS: [f32; 4] = [0.0, 45.0, 90.0, -45.0];
 const OPACITIES: [f32; 5] = [0.1, 0.25, 0.5, 0.75, 1.0];
 
 pub enum WatermarkEvent {
-    /// Settings, and the 0-based pages (none: all).
-    Apply(Box<Watermark>, Option<Vec<usize>>),
+    /// Settings, and the pages (none: all) of the version the dialog
+    /// opened on ([`WatermarkDialog::opened`]).
+    Apply(Box<Watermark>, Option<Vec<PageId>>),
     Remove,
     Dismiss,
 }
@@ -38,7 +40,15 @@ pub enum WatermarkEvent {
 pub struct WatermarkContext {
     pub behind: bool,
     pub current: Option<Watermark>,
-    pub page_count: usize,
+    /// The document as the dialog opened on it: its pages are counted and
+    /// named by id there, and the change is made on that version.
+    pub opened: Snapshot,
+}
+
+impl WatermarkContext {
+    fn page_count(&self) -> usize {
+        self.opened.state.page_count()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -197,7 +207,12 @@ impl WatermarkDialog {
         .detach();
     }
 
-    fn settings(&self, cx: &App) -> Result<(Watermark, Option<Vec<usize>>), String> {
+    /// The version it opened on.
+    pub fn opened(&self) -> &Snapshot {
+        &self.ctx.opened
+    }
+
+    fn settings(&self, cx: &App) -> Result<(Watermark, Option<Vec<PageId>>), String> {
         let text = |i: usize| self.fields[i].read(cx).text().trim().to_string();
         let mark = match self.kind {
             Kind::Text => {
@@ -231,10 +246,11 @@ impl WatermarkDialog {
         };
         let pages = match text(F_PAGES) {
             t if t.is_empty() => None,
-            t => Some(
-                sheaf_ops::pages::parse(&t, self.ctx.page_count)
-                    .map_err(|e| format!("Pages: {e}"))?,
-            ),
+            t => {
+                let indexes = sheaf_ops::pages::parse(&t, self.ctx.page_count())
+                    .map_err(|e| format!("Pages: {e}"))?;
+                Some(crate::page_insert::ids_at(&self.ctx.opened, &indexes))
+            }
         };
         Ok((
             Watermark {
@@ -438,7 +454,7 @@ impl Render for WatermarkDialog {
                         "Pages",
                         pair(
                             self.field(F_PAGES, 160.0),
-                            format!("of {} (empty: all)", self.ctx.page_count),
+                            format!("of {} (empty: all)", self.ctx.page_count()),
                         ),
                     ))
                     .when_some(self.error.clone(), |d, e| d.child(dialog::message(e, true)))

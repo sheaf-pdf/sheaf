@@ -33,7 +33,7 @@ use crate::model::{FlatOutlineItem, PageId};
 use crate::portfolio::Collection;
 use crate::serialize::append::Torn;
 use crate::stamps::HeaderFooter;
-use crate::{Document, PAGES, Source, SourceInfo, Store};
+use crate::{Document, PAGES, Source, Src, Store};
 
 pub(crate) mod annots;
 mod outline;
@@ -107,22 +107,25 @@ pub struct Opened {
     pub torn: Option<Torn>,
 }
 
-/// `primary` as a document while it opens: its pages, as the page table
-/// [`SourceInfo::read`] built has them, and nothing else, so the first
-/// page can paint at once. It reads nothing of its own. How it `came` is
+/// `primary` as a document while it opens, under `name` (the name it goes
+/// by where the reader sees it: its form's, [`Document::name`]): its
+/// pages, as the page table [`Store::read_file`] built has them, and
+/// nothing else, so the first page can paint at once. It reads nothing of
+/// its own. How it `came` is
 /// what's known of its file, which the opened version's record starts
 /// from: the file as `read` read it, or a recovery sidecar's base with
 /// what the sidecar holds that the file hasn't got; None for a primary
 /// made in memory. Edits are refused with
-/// [`NotReady`](crate::model::NotReady) until [`Document::ready`] takes
-/// [`finish`]'s facts.
+/// [`EditError::NotReady`](crate::tx::EditError::NotReady) until
+/// [`Document::ready`] takes [`finish`]'s facts.
 pub fn start(
     store: Arc<Store>,
-    primary: SourceInfo,
+    primary: Src,
+    name: Arc<str>,
     came: Option<Came>,
     policy: Box<dyn HistoryPolicy>,
 ) -> Document {
-    Document::loading(store, primary, came, policy)
+    Document::loading(store, primary, name, came, policy)
 }
 
 /// `path` opened as the app opens it, with no window: an append a crash
@@ -140,15 +143,20 @@ pub fn file(path: &Path, password: Option<&str>) -> Result<Opened> {
         log::warn!("{}: {torn}", path.display());
     }
     let store = Store::new();
-    let (primary, stamp) = SourceInfo::read(&store, path, password)?;
-    let src = primary.src.clone();
+    let (primary, stamp) = store.read_file(path, password)?;
+    let src = primary.clone();
+    let came = Came::Read {
+        path: path.into(),
+        stamp,
+    };
     let mut doc = start(
         store,
         primary,
-        Some(Came::Read(stamp)),
+        crate::store::file_name(path),
+        Some(came),
         crate::history::default_policy(),
     );
-    let view = doc.ready(finish(&src, &NoProgress))?;
+    let (view, _) = doc.ready(finish(&src, &NoProgress))?;
     Ok(Opened { doc, view, torn })
 }
 

@@ -152,10 +152,12 @@ interface types {
         /// 0 to 1.
         opacity: f32,
         stroke: f32,
-        /// Empty means the user's name.
+        /// Who made it. Set by the host, ignored in edits: a plugin's
+        /// marks are by the plugin.
         author: string,
-        /// Its text. `<<name>>`, `<<initials>>`, `<<date>>` and `<<time>>`
-        /// are filled in by the host, as dynamic stamps are.
+        /// Its text. `<<date>>` and `<<time>>` are filled in by the host,
+        /// as dynamic stamps are; `<<name>>` and `<<initials>>` stay as a
+        /// plugin writes them.
         contents: string,
         /// The inside's color, for kinds with one.
         fill: option<rgb>,
@@ -398,9 +400,12 @@ interface storage {
     preferences: func() -> string;
 }
 
-/// Changes to the document. Each `submit` becomes one undo step, applied
-/// after the command returns, in order; if any edit in a batch fails, that
-/// batch is skipped and the user is told.
+/// Changes to the document. A call's submits become one undo step, applied
+/// after the command returns, in order, to the document as the call read
+/// it; if something it read has changed since (listing the pages reads
+/// their order), none are applied; if an edit fails, the ones applied are
+/// taken back, unless the user has changed what they did since, when they
+/// stay; either way the user is told.
 interface edits {
     use types.{edit};
 

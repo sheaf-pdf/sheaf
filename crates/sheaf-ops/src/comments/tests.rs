@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use super::*;
-use sheaf_core::Rotation;
 use sheaf_doc::annot::REVIEW;
 use sheaf_doc::open::{FileAnnot, FileAnnots, FileBody};
-use sheaf_doc::{FixedCount, Pt, SourceInfo, Store};
+use sheaf_doc::{FixedCount, Pt, Store};
+use sheaf_edit::Rotation;
 
 #[test]
 fn dates_format() {
@@ -186,11 +186,14 @@ fn the_filter_hides_by_each_facet() {
 /// numbered from 10,000.
 fn doc(pages: u32, marks: HashMap<u32, Vec<Annot>>, theirs: Vec<(u32, ForeignAnnot)>) -> Document {
     let store = Store::new();
-    let primary = SourceInfo {
-        name: "big.pdf".into(),
-        ..SourceInfo::blank(&store, pages)
-    };
-    let mut d = sheaf_doc::open::start(store, primary, None, Box::new(FixedCount(10)));
+    let primary = sheaf_doc::store::blank(&store, pages);
+    let mut d = sheaf_doc::open::start(
+        store,
+        primary,
+        "big.pdf".into(),
+        None,
+        Box::new(FixedCount(10)),
+    );
     let mut annots = FileAnnots::default();
     for (index, list) in marks {
         let marks = list.into_iter().map(|a| FileAnnot {

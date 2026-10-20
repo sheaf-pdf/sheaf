@@ -9,8 +9,13 @@ use in_progress::{NoProgress, Progress, Unit};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::materialize::Came;
 use sheaf_doc::open::Facts;
+use sheaf_doc::tx::Made;
 use sheaf_doc::{
-    Document, Edit, FlatOutlineItem, NewOutlineItem, PageId, SourceId, SourceInfo, Store,
+    Actor, CommitOpts, Document, FlatOutlineItem, JobKind, Notice, OutlineId, PageId, Store, Tx,
+};
+use sheaf_edit::{
+    BlobSel, BookmarkRef, Bring, DestView, Op, OutlineBring, PageRef, PageSel, PageSource,
+    RangeSet, Sibling,
 };
 
 use crate::images::Paper;
@@ -103,7 +108,10 @@ pub fn page_source(path: &Path, image_page: Paper) -> Result<PathBuf> {
     sheaf_doc::generated::store(&pdf)
 }
 
-/// Build the combined document (not yet written).
+/// Build the combined document (not yet written): the first file opened
+/// as the document, and the rest put in by one transaction (M10.5 §14.2):
+/// the first file's pages left out deleted, each further file's pages
+/// inserted, with its marks and form, and a bookmark per file.
 pub fn build(
     items: &[CombineItem],
     params: &CombineParams,
@@ -114,9 +122,9 @@ pub fn build(
     }
     progress.set_total(Some(items.len() as u64), Unit::ITEMS);
     let store = Store::new();
-    let mut doc: Option<Document> = None;
+    // The first file's document, and the transaction the rest go into.
+    let mut doc: Option<(Document, Tx)> = None;
     let mut report = CombineReport::default();
-    let (mut renamed, mut signed) = (Vec::new(), Vec::new());
     for (n, item) in items.iter().enumerate() {
         progress.check()?;
         let name = item
@@ -126,9 +134,9 @@ pub fn build(
             .unwrap_or_default();
         let file = page_source(&item.path, params.image_page)
             .with_context(|| format!("reading {}", item.path.display()))?;
-        let (info, stamp) = SourceInfo::read(&store, &file, item.password.as_deref())
+        let (src, stamp) = (store.read_file(&file, item.password.as_deref()))
             .with_context(|| format!("opening {name}"))?;
-        let count = info.src.page_count() as usize;
+        let count = src.page_count() as usize;
         let wanted: Vec<u32> = match &item.pages {
             Some(r) if !r.trim().is_empty() => crate::pages::parse(r, count)
                 .map_err(anyhow::Error::msg)
@@ -136,37 +144,37 @@ pub fn build(
                 .into_iter()
                 .map(|i| i as u32)
                 .collect(),
-            _ => (0..info.src.page_count()).collect(),
+            _ => (0..src.page_count()).collect(),
         };
-        // Its marks and what they hold, its form (M10 slice 4) and its
-        // bookmarks; an image's page has none.
-        let Facts {
-            annots,
-            form,
-            outline,
-            ..
-        } = if is_pdf(&item.path) {
-            sheaf_doc::open::finish(&info.src, &NoProgress)
-        } else {
-            Facts::default()
-        };
+        let outline = src.outline().clone();
         // Page ids of this file's pages, by index in the file.
         let ids: Vec<(u32, PageId)> = match doc.as_mut() {
             None => {
                 // The first file opens as the document, with its marks and
-                // form. Its bookmarks go under its own below, like every
-                // file's, and its labels and header/footer aren't taken.
+                // form; an image's page has none. Its bookmarks go under its
+                // own below, like every file's, and its labels and
+                // header/footer aren't taken.
+                let came = Came::Read {
+                    path: file.as_path().into(),
+                    stamp,
+                };
+                let facts = match is_pdf(&item.path) {
+                    true => Facts {
+                        annots: src.annots().clone(),
+                        form: src.form().clone(),
+                        ..Default::default()
+                    },
+                    false => Facts::default(),
+                };
                 let mut d = sheaf_doc::open::start(
                     store.clone(),
-                    info,
-                    Some(Came::Read(stamp)),
+                    src,
+                    sheaf_doc::store::file_name(&file),
+                    Some(came),
                     sheaf_doc::history::default_policy(),
                 );
-                d.ready(Facts {
-                    annots,
-                    form,
-                    ..Default::default()
-                })?;
+                d.ready(facts)?;
+                let mut tx = d.tx(Actor::Job(JobKind::Insert));
                 let all: Vec<PageId> = d.state().order().iter().copied().collect();
                 let drop: Vec<PageId> = all
                     .iter()
@@ -175,91 +183,66 @@ pub fn build(
                     .map(|(_, id)| *id)
                     .collect();
                 if !drop.is_empty() {
-                    d.apply(Edit::DeletePages { ids: drop }, "Combine")?;
+                    let delete = Op::DeletePages {
+                        pages: PageSel::ids(drop),
+                    };
+                    tx.apply(delete, &NoProgress)?;
                 }
                 let ids = wanted.iter().map(|&i| (i, all[i as usize])).collect();
-                doc = Some(d);
+                doc = Some((d, tx));
                 ids
             }
-            Some(d) => {
-                let sid = d.add_source(info);
-                let ids = insert_runs(d, sid, &wanted, &mut renamed, &mut signed)?;
-                for &(index, id) in &ids {
-                    for annot in annots.marks_on(index) {
-                        d.apply(
-                            Edit::AnnotAdd {
-                                page: id,
-                                annot: annot.clone(),
-                            },
-                            "Combine",
-                        )?;
-                    }
+            Some((d, tx)) => {
+                // Its pages as one insert, its form as one instance of
+                // its own (M10.5 §3.7), its marks with them, holding what
+                // they hold.
+                for blob in sheaf_doc::tx::ready_to_insert(d.store(), d.primary(), &src, &wanted) {
+                    tx.pin(blob);
                 }
-                ids
+                tx.pin(src.blob().clone());
+                let insert = Op::InsertPages {
+                    from: PageSource::File {
+                        file: BlobSel::Id(src.id()),
+                        name: sheaf_doc::store::file_name(&file).to_string(),
+                    },
+                    pages: Some(RangeSet::from_runs(wanted.iter().map(|&i| i + 1..=i + 1))?),
+                    before: None,
+                    bring: Bring {
+                        outline: OutlineBring::None,
+                        ..Bring::default()
+                    },
+                    locals: Vec::new(),
+                };
+                let made = tx.apply(insert, &NoProgress)?.made;
+                let pages = made.into_iter().filter_map(|m| match m {
+                    Made::Page(id) => Some(id),
+                    _ => None,
+                });
+                wanted.iter().copied().zip(pages).collect()
             }
         };
-        let d = doc.as_mut().expect("made above");
+        let (_, tx) = doc.as_mut().expect("made above");
         let title = item
             .path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or(name);
-        report.bookmarks += add_bookmarks(d, &title, &ids, &outline, params.bookmark_each_file)?;
+        report.bookmarks += add_bookmarks(tx, &title, &ids, &outline, params.bookmark_each_file)?;
         report.pages += ids.len();
         report.files += 1;
         progress.set(n as u64 + 1);
     }
-    let doc = doc.expect("at least one item");
-    signed.dedup();
-    let forms = sheaf_doc::EditOutcome {
-        forms_renamed: renamed,
-        signatures_in: signed,
-        ..Default::default()
-    };
-    report.notice = doc.form_notice(&forms, false, false);
+    let (mut doc, tx) = doc.expect("at least one item");
+    let mut notices = doc.commit(tx, CommitOpts::labelled("Combine"))?.notices;
+    // Told as one: the forms renamed, then the signatures that don't hold,
+    // then the rest.
+    notices.sort_by_key(|n| match n {
+        Notice::FormRenamed { .. } | Notice::CopiesRenamed { .. } => 0,
+        Notice::SignatureNotValidHere { .. } => 1,
+        Notice::ScriptsOff | Notice::Unencodable => 2,
+    });
+    report.notice = sheaf_doc::notice_text(&notices);
     Ok((doc, report))
-}
-
-/// Insert `wanted` pages of `sid` at the end, a contiguous run at a time,
-/// and return each one's id by its index in the file. The forms renamed
-/// go in `renamed`, and files whose signed fields came in in `signed`.
-fn insert_runs(
-    d: &mut Document,
-    sid: SourceId,
-    wanted: &[u32],
-    renamed: &mut Vec<(String, SourceId)>,
-    signed: &mut Vec<SourceId>,
-) -> Result<Vec<(u32, PageId)>> {
-    let mut out = Vec::with_capacity(wanted.len());
-    let mut i = 0;
-    while i < wanted.len() {
-        let mut j = i + 1;
-        while j < wanted.len() && wanted[j] == wanted[j - 1] + 1 {
-            j += 1;
-        }
-        let before = d.page_count();
-        let done = d.apply(
-            Edit::InsertPages {
-                source: sid,
-                range: wanted[i]..wanted[j - 1] + 1,
-                before: None,
-                outline: None,
-                // `combine` adds each file's marks itself, afterwards.
-                annots: Vec::new(),
-            },
-            "Combine",
-        )?;
-        renamed.extend(done.forms_renamed);
-        signed.extend(done.signatures_in);
-        let order = d.state().order();
-        out.extend(
-            (before..order.len())
-                .zip(wanted[i]..)
-                .map(|(at, index)| (index, order[at])),
-        );
-        i = j;
-    }
-    Ok(out)
 }
 
 /// This file's bookmarks at the end of the outline: under one titled with
@@ -267,7 +250,7 @@ fn insert_runs(
 /// pages left out are dropped unless something under them stays, which
 /// makes them headings. Returns how many were added.
 fn add_bookmarks(
-    d: &mut Document,
+    tx: &mut Tx,
     title: &str,
     ids: &[(u32, PageId)],
     outline: &[FlatOutlineItem],
@@ -283,48 +266,58 @@ fn add_bookmarks(
             .any(|j| keep[j]);
         keep[i] = child_kept || target(outline[i].page).is_some();
     }
-    let base = u16::from(per_file);
-    let mut items: Vec<NewOutlineItem> = Vec::new();
-    if per_file {
-        items.push(NewOutlineItem {
-            title: title.to_string(),
-            target: ids.first().map(|(_, id)| *id),
-            view: None,
-            depth: 0,
-        });
-    }
-    // Depths renumbered so a dropped parent's children move up a level.
-    let mut stack: Vec<u16> = Vec::new();
+    let mut added = 0;
+    let top = match per_file {
+        true => {
+            added += 1;
+            let first = ids.first().map(|(_, id)| *id);
+            Some(add_bookmark(tx, None, title.to_string(), first, None)?)
+        }
+        false => None,
+    };
+    // The kept bookmarks above this one, by their depth in the file: a
+    // dropped parent's children move up a level.
+    let mut stack: Vec<(u16, OutlineId)> = Vec::new();
     for (i, o) in outline.iter().enumerate() {
-        while stack.last().is_some_and(|&d| d >= o.depth) {
+        while stack.last().is_some_and(|&(d, _)| d >= o.depth) {
             stack.pop();
         }
         if !keep[i] {
             continue;
         }
+        let parent = stack.last().map(|&(_, id)| id).or(top);
         let t = target(o.page);
-        items.push(NewOutlineItem {
-            title: o.title.clone(),
-            target: t,
-            view: t.and(o.view.clone()),
-            depth: base + stack.len() as u16,
-        });
-        stack.push(o.depth);
+        added += 1;
+        let id = add_bookmark(tx, parent, o.title.clone(), t, t.and(o.view.clone()))?;
+        stack.push((o.depth, id));
     }
-    if items.is_empty() {
-        return Ok(0);
+    Ok(added)
+}
+
+/// A bookmark titled `title`, last under `parent` (at the top level when
+/// none), going to `view` on `target`: the one `tx` made.
+fn add_bookmark(
+    tx: &mut Tx,
+    parent: Option<OutlineId>,
+    title: String,
+    target: Option<PageId>,
+    view: Option<DestView>,
+) -> Result<OutlineId> {
+    let op = Op::AddBookmark {
+        parent: parent.map(BookmarkRef::Id),
+        at: Sibling::Last,
+        title,
+        target: target.map(PageRef::Id),
+        view,
+        color: None,
+        style: Default::default(),
+        local: None,
+    };
+    let made = tx.apply(op, &NoProgress)?.made;
+    match made[..] {
+        [Made::Bookmark(id)] => Ok(id),
+        _ => bail!("adding a bookmark made {made:?}"),
     }
-    let n = items.len();
-    let after = d.state().outline_roots().last().copied();
-    d.apply(
-        Edit::OutlineInsertTree {
-            parent: None,
-            after,
-            items,
-        },
-        "Combine",
-    )?;
-    Ok(n)
 }
 
 /// Combine `items` into a new PDF at `out`.
@@ -351,7 +344,8 @@ mod tests {
     fn marks_bring_what_they_hold() {
         use sheaf_doc::annot::{WriteCx, to_pdf_in};
         use sheaf_doc::forms::fixture::{self, Form};
-        use sheaf_doc::{AnnotKind, BlobId, FormRef, Mark};
+        use sheaf_doc::store::blob_id;
+        use sheaf_doc::{AnnotKind, FormRef, Mark};
         let dir = std::env::temp_dir().join(format!(
             "sheaf-combine-{}-{:x}",
             std::process::id(),
@@ -371,7 +365,7 @@ mod tests {
                 file: stem, size, ..
             } = &mut marks[1].annot.kind
             {
-                (*stem, *size) = (BlobId::of(&file).stem(), file.len() as u64);
+                (*stem, *size) = (blob_id(&file).stem(), file.len() as u64);
             }
             let store = sheaf_doc::Store::new();
             let blob = store.intern(file.into(), sheaf_doc::store::BlobKind::Attachment);

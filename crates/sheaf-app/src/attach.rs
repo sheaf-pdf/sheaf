@@ -42,7 +42,7 @@ impl DocView {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        let bytes = sheaf_core::read_file(&path)?;
+                        let bytes = sheaf_util::read_file(&path)?;
                         anyhow::Ok(store.intern(bytes, BlobKind::Attachment)?)
                     }
                 })
@@ -68,7 +68,7 @@ impl DocView {
                             crate::markup_tools::Tool::AttachFile,
                             cx,
                         );
-                        let a = v.new_annot(kind, color, cx);
+                        let a = v.new_annot(kind, color);
                         v.add_annot(page, a, &format!("Attach {name}"), cx);
                         drop(held);
                     }

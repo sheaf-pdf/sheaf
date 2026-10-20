@@ -20,8 +20,14 @@
 //! - `{"checkpoint": "name"}`: print `SCRIPT checkpoint name` and wait (up to
 //!   two minutes) until `<script>.go` contains that name, so a harness can
 //!   take a screenshot first.
-//! - `{"dump": "outline" | "notice" | "selection" | "annots" | "pages" | "panels" |
-//!   "plugins" | "region" | "view" | "layout" | "toolbar" | "focus" | "form"}`: print state as `SCRIPT <what>: …` lines.
+//! - `{"dump": "outline" | "notice" | "selection" | "annots" | "marks" | "pages" |
+//!   "panels" | "plugins" | "region" | "view" | "layout" | "toolbar" | "focus" |
+//!   "form" | "version" | "changes"}`: print state as `SCRIPT <what>: …` lines.
+//!   `"marks"` is the selected marks. `"version"` is the current version,
+//!   how many changes the document went through, how many times its pages
+//!   were laid out anew, and whether it's saved; `"changes"` is how many
+//!   changes, and what the last changed, so a script can check that each
+//!   step made one change, and a mark's edit no layout.
 //! - `{"quit": true}`
 //!
 //! File pickers can't be driven; set `SHEAF_SCRIPT_PICK=<path>` and every
@@ -440,13 +446,14 @@ impl Workspace {
                     Some(facts) => eprintln!("SCRIPT form: {facts}"),
                     None => eprintln!("SCRIPT form: not read yet"),
                 }
-                // The inserted files', as their sources read them.
-                let mut inserted: Vec<_> = (d.model.sources())
-                    .filter(|&(id, _)| id != d.model.primary())
-                    .collect();
-                inserted.sort_by_key(|&(id, _)| id);
-                for (source, info) in inserted {
-                    eprintln!("SCRIPT form: source {} {}", source.0, info.src.form().facts);
+                // The other files', as their sources read them.
+                let primary = d.model.primary();
+                for src in d.model.store().sources().iter().filter(|s| *s != primary) {
+                    eprintln!(
+                        "SCRIPT form: source {} {}",
+                        src.id().stem(),
+                        src.form().facts
+                    );
                 }
             }
             "selection" => eprintln!(
@@ -454,6 +461,27 @@ impl Workspace {
                 view.selected_text().map(|(_, text, _)| text)
             ),
             "pages" => eprintln!("SCRIPT pages: {}", st.page_count()),
+            "version" => eprintln!(
+                "SCRIPT version: {} changes {} layout {} dirty {}",
+                d.model.current_version().0,
+                d.changes,
+                d.layout,
+                d.model.is_dirty()
+            ),
+            "changes" => match &d.last_change {
+                Some(ch) => eprintln!(
+                    "SCRIPT changes: {}; last {:?} {} -> {} by {:?} {:?}: {} keys{}",
+                    d.changes,
+                    ch.cause,
+                    ch.from.0,
+                    ch.to.0,
+                    ch.actor,
+                    ch.label,
+                    ch.keys.len(),
+                    changed(ch)
+                ),
+                None => eprintln!("SCRIPT changes: {}", d.changes),
+            },
             "view" => eprintln!(
                 "SCRIPT view: page {} {:?} selected {:?}",
                 view.current_page() + 1,
@@ -513,6 +541,19 @@ impl Workspace {
                     }
                 }
             }
+            "marks" => {
+                for &(page, id) in &d.selected_marks {
+                    let at = st.pos_of(page).map_or(0, |i| i + 1);
+                    let kind = (st.find_annot(id)).map_or(String::new(), |(_, a)| {
+                        let kind = format!("{:?}", a.kind);
+                        kind.split([' ', '{', '(']).next().unwrap_or("").to_string()
+                    });
+                    eprintln!("SCRIPT marks: selected page {at} {kind} {}", id.0);
+                }
+                if d.selected_marks.is_empty() {
+                    eprintln!("SCRIPT marks: none selected");
+                }
+            }
             "panels" =>
             {
                 #[cfg(feature = "plugins")]
@@ -530,4 +571,31 @@ impl Workspace {
             other => eprintln!("SCRIPT {other}: unknown dump"),
         }
     }
+}
+
+/// What `ch` changed, as the `"changes"` dump lists it: ", order, removed
+/// 2, geometry 1", and so on; nothing when it changed nothing.
+fn changed(ch: &sheaf_doc::ChangeSet) -> String {
+    let counts = [
+        ("added", ch.pages_added.len()),
+        ("removed", ch.pages_removed.len()),
+        ("geometry", ch.geometry.len()),
+        ("content", ch.content.len()),
+        ("annots", ch.annots.len()),
+        ("fields", ch.fields.len()),
+    ];
+    let flags = [
+        ("order", ch.order),
+        ("outline", ch.outline),
+        ("labels", ch.labels),
+        ("form", ch.form),
+        ("generators", ch.generators),
+    ];
+    let counts = (counts.into_iter())
+        .filter(|&(_, n)| n > 0)
+        .map(|(what, n)| format!(", {what} {n}"));
+    let flags = (flags.into_iter())
+        .filter(|&(_, set)| set)
+        .map(|(what, _)| format!(", {what}"));
+    counts.chain(flags).collect()
 }

@@ -1,6 +1,7 @@
 //! Plugin host: loads WebAssembly components that target the `plugin`
-//! world in `wit/sheaf.wit`, and runs their commands against a document
-//! snapshot. No GPUI here; the app connects results to the UI.
+//! world in `wit/sheaf.wit`, and runs their commands against the document
+//! as it is when a call first reads it. No GPUI here; the app connects
+//! results to the UI.
 //!
 //! Each plugin runs on its own thread with its own wasmtime `Store`, so a
 //! slow plugin never blocks the UI and a crash (a trap) is an error the app
@@ -23,8 +24,8 @@ use std::path::{Path, PathBuf};
 
 pub use manifest::{EventKind, Grants, Manifest, Permissions};
 pub use runtime::{
-    Call, CallContext, CallOutput, DocContext, DocEvent, EditBatch, Limits, LoadOptions, OcrSource,
-    Plugin, PluginError, Preset, Runtime, Status, TextMatch, TextSource,
+    Call, CallContext, CallOutput, DocContext, DocEvent, EditBatch, Held, Limits, LoadOptions,
+    OcrSource, Plugin, PluginError, Preset, Runtime, Status, TextMatch, TextSource,
 };
 
 /// The version of `sheaf:plugin` this host provides.

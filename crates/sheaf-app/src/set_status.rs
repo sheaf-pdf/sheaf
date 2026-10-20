@@ -11,8 +11,9 @@ use gpui::{
     Subscription, Window, div, prelude::*, px,
 };
 use serde::{Deserialize, Serialize};
-use sheaf_doc::geom::Geom;
-use sheaf_doc::{Annot, AnnotKind, Box2, Edit, OutlineId, PageId, TextStyle};
+use sheaf_doc::tx::Reader;
+use sheaf_doc::{Annot, AnnotKind, Box2, CommitOpts, OutlineId, TextStyle};
+use sheaf_edit::{AnnotRef, BookmarkPatch, BookmarkRef, Op, Patch};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
@@ -302,34 +303,30 @@ impl DocView {
         let Some((id, title, _)) = self.status_bookmark() else {
             return self.set_notice("Select a bookmark first", cx);
         };
+        // The stamp is laid out as the host fills its tokens in as it's
+        // made: the user's initials, and now.
         let prefs = crate::prefs::get(cx);
         let now = chrono::Local::now();
-        let stamp_text = sheaf_ops::stamps::fill(
+        let shown = sheaf_doc::stamp_lib::fill(
             &spec.stamp_text(),
             &prefs.identity.name(),
             &prefs.identity.initials(),
             &now.format(prefs.stamps.date_format()).to_string(),
             &now.format(prefs.stamps.time_format()).to_string(),
         );
-        let height = prefs.stamps.size();
-        let State::Ready(doc) = &self.state else {
+        let stamp = sheaf_doc::annot::text_stamp_size(&shown, prefs.stamps.size());
+        let Some(mut tx) = self.user_tx() else {
             return;
         };
-        let app: &App = cx;
-        let edits = status_edits(
-            doc.model.state(),
-            &|page| doc.model.geom(page),
-            id,
-            &spec,
-            &stamp_text,
-            height,
-            &|kind| {
-                let mut a = self.new_annot(kind, spec.color, app);
-                a.stroke = spec.width;
-                a
-            },
-        );
-        self.apply_batch(edits, &format!("Set status {} on “{title}”", spec.name), cx);
+        let ops = status_ops(&mut tx.reader(), id, &spec, stamp, &|kind| {
+            let mut a = self.new_annot(kind, spec.color);
+            a.stroke = spec.width;
+            a
+        });
+        let label = format!("Set status {} on “{title}”", spec.name);
+        if let Some(tx) = self.lower_in(tx, ops, &label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         crate::state::update(cx, |s| s.set_status = Some(spec));
         self.wanted_panel = Some("bookmarks");
     }
@@ -352,121 +349,135 @@ impl DocView {
         let Some((id, title, _)) = self.status_bookmark() else {
             return self.set_notice("Select a bookmark first", cx);
         };
-        let State::Ready(doc) = &self.state else {
+        let Some(mut tx) = self.user_tx() else {
             return;
         };
-        let edits = reset_edits(doc.model.state(), id, stamps);
-        self.apply_batch(edits, &format!("Reset status on “{title}”"), cx);
+        let ops = reset_ops(&mut tx.reader(), id, stamps);
+        let label = format!("Reset status on “{title}”");
+        if let Some(tx) = self.lower_in(tx, ops, &label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
     }
 }
 
-/// What Set Status does to bookmark `id` and its pages: the bookmark's
-/// edit, the old borders' deletions, then each page's border and stamp,
-/// laid out on the page as it shows (`geom` gives its boxes and turn) and
-/// signed by `sign`.
-fn status_edits(
-    st: &sheaf_doc::DocState,
-    geom: &dyn Fn(PageId) -> Geom,
+/// What Set Status does to bookmark `id` and its pages, as `r` reads
+/// them: the bookmark's color and style, the old borders' deletions, then
+/// each page's border and stamp (`stamp` big, its template's tokens the
+/// host's to fill in), laid out on the page as it shows and drawn as
+/// `sign` says.
+fn status_ops(
+    r: &mut Reader,
     id: OutlineId,
     spec: &StatusSpec,
-    stamp_text: &str,
-    height: f32,
+    stamp: (f32, f32),
     sign: &dyn Fn(AnnotKind) -> Annot,
-) -> Vec<Edit> {
-    let mut edits = vec![Edit::OutlineEdit {
-        id,
-        title: None,
-        target: None,
-        color: Some(Some(spec.color)),
-        view: None,
-        style: Some(TextStyle {
-            bold: spec.bold,
-            italic: spec.italic,
-        }),
+) -> Vec<Op> {
+    let mut ops = vec![Op::PatchBookmarks {
+        bookmarks: vec![BookmarkRef::Id(id)],
+        patch: BookmarkPatch {
+            color: Patch::Set(spec.color),
+            style: Some(TextStyle {
+                bold: spec.bold,
+                italic: spec.italic,
+            }),
+            ..BookmarkPatch::default()
+        },
     }];
+    let mut borders = Vec::new();
     let mut marks = Vec::new();
-    for page in st.bookmark_pages(id).unwrap_or_default() {
-        if st.def(page).is_none() {
+    for page in r.bookmark_pages(id).unwrap_or_default() {
+        let Some(edit) = r.geom(page).map(|g| **g) else {
             continue;
-        }
-        let edit = geom(page);
+        };
         let size = edit.shown();
         // A page's border is replaced, not doubled.
-        for a in st.marks_on(page) {
-            if matches!(a.kind, AnnotKind::PageBorder { .. }) {
-                edits.push(Edit::AnnotDelete { page, id: a.id });
-            }
-        }
+        borders.extend(
+            (r.marks_on(page))
+                .filter(|a| matches!(a.kind, AnnotKind::PageBorder { .. }))
+                .map(|a| AnnotRef::Id(a.id)),
+        );
         if spec.border {
-            marks.push((
-                page,
-                edit,
-                AnnotKind::PageBorder {
-                    rect: Box2 {
-                        x: INSET,
-                        y: INSET,
-                        w: size.width - 2.0 * INSET,
-                        h: size.height - 2.0 * INSET,
-                    },
-                    status: spec.name.clone(),
+            let kind = AnnotKind::PageBorder {
+                rect: Box2 {
+                    x: INSET,
+                    y: INSET,
+                    w: size.width - 2.0 * INSET,
+                    h: size.height - 2.0 * INSET,
                 },
-            ));
+                status: spec.name.clone(),
+            };
+            marks.push((page, sign(kind).to_page(&edit)));
         }
         if spec.stamp {
-            let (w, h) = sheaf_doc::annot::text_stamp_size(stamp_text, height);
-            marks.push((
-                page,
-                edit,
-                AnnotKind::TextStamp {
-                    rect: Box2 {
-                        x: STAMP_AT,
-                        y: STAMP_AT,
-                        w,
-                        h,
-                    },
-                    text: stamp_text.to_string(),
-                    status: true,
+            let (w, h) = stamp;
+            let kind = AnnotKind::TextStamp {
+                rect: Box2 {
+                    x: STAMP_AT,
+                    y: STAMP_AT,
+                    w,
+                    h,
                 },
-            ));
+                text: spec.stamp_text(),
+                status: true,
+            };
+            marks.push((page, sign(kind).to_page(&edit)));
         }
     }
-    edits.extend(marks.into_iter().map(|(page, edit, kind)| Edit::AnnotAdd {
-        page,
-        annot: sign(kind).to_page(&edit),
+    if !borders.is_empty() {
+        ops.push(Op::DeleteAnnotations { annots: borders });
+    }
+    ops.extend(marks.into_iter().map(|(page, a)| Op::AddMark {
+        page: page.into(),
+        mark: crate::docview::new_mark(&a, None),
+        reply_to: None,
+        local: None,
+        imported: None,
     }));
-    edits
+    ops
 }
 
-/// What Reset Status does to bookmark `id`: no color or style, no borders
-/// on its pages, and no status stamps when `stamps`.
-fn reset_edits(st: &sheaf_doc::DocState, id: OutlineId, stamps: bool) -> Vec<Edit> {
-    let mut edits = vec![Edit::OutlineEdit {
-        id,
-        title: None,
-        target: None,
-        color: Some(None),
-        view: None,
-        style: Some(TextStyle::default()),
+/// What Reset Status does to bookmark `id`, as `r` reads it: no color or
+/// style, no borders on its pages, and no status stamps when `stamps`.
+fn reset_ops(r: &mut Reader, id: OutlineId, stamps: bool) -> Vec<Op> {
+    let mut ops = vec![Op::PatchBookmarks {
+        bookmarks: vec![BookmarkRef::Id(id)],
+        patch: BookmarkPatch {
+            color: Patch::Clear,
+            style: Some(TextStyle::default()),
+            ..BookmarkPatch::default()
+        },
     }];
-    for page in st.bookmark_pages(id).unwrap_or_default() {
-        for a in st.marks_on(page) {
-            let goes = match &a.kind {
-                AnnotKind::PageBorder { .. } => true,
-                AnnotKind::TextStamp { status, .. } => *status && stamps,
-                _ => false,
-            };
-            if goes {
-                edits.push(Edit::AnnotDelete { page, id: a.id });
-            }
-        }
+    let mut gone = Vec::new();
+    for page in r.bookmark_pages(id).unwrap_or_default() {
+        gone.extend(
+            (r.marks_on(page))
+                .filter(|a| match &a.kind {
+                    AnnotKind::PageBorder { .. } => true,
+                    AnnotKind::TextStamp { status, .. } => *status && stamps,
+                    _ => false,
+                })
+                .map(|a| AnnotRef::Id(a.id)),
+        );
     }
-    edits
+    if !gone.is_empty() {
+        ops.push(Op::DeleteAnnotations { annots: gone });
+    }
+    ops
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_doc::{AnnotId, Document, FixedCount, FlatOutlineItem, SourceInfo, Store};
+    use sheaf_doc::tx::fixture;
+    use sheaf_doc::{Actor, AnnotId, CommitOpts, Document, FixedCount, FlatOutlineItem, Store};
+
+    /// The ops `make` reads off `d`, committed as the user's.
+    fn commit(d: &mut Document, make: impl FnOnce(&mut Reader) -> Vec<Op>) {
+        let mut tx = d.tx(Actor::User);
+        let ops = make(&mut tx.reader());
+        tx.apply_batch(ops, &sheaf_ops::NoProgress).unwrap();
+        d.commit(tx, CommitOpts::default()).unwrap();
+    }
 
     fn signed(kind: AnnotKind) -> Annot {
         Annot {
@@ -482,7 +493,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
-            turn: sheaf_core::Rotation::R0,
+            turn: sheaf_edit::Rotation::R0,
             name: String::new(),
         }
     }
@@ -490,13 +501,11 @@ mod tests {
     /// Five blank pages; "Cash" owns the first three.
     fn binder() -> (Document, OutlineId) {
         let store = Store::new();
-        let primary = SourceInfo {
-            name: "binder.pdf".into(),
-            ..SourceInfo::blank(&store, 5)
-        };
+        let primary = sheaf_doc::store::blank(&store, 5);
         let d = Document::new(
             store,
             primary,
+            "binder.pdf".into(),
             None,
             &[
                 FlatOutlineItem {
@@ -533,16 +542,7 @@ mod tests {
         let (mut d, cash) = binder();
         let spec = StatusSpec::default();
         let set = |d: &mut Document| {
-            let edits = status_edits(
-                d.state(),
-                &|p| d.geom(p),
-                cash,
-                &spec,
-                "REVIEWED\nPS 10/14/2026",
-                40.0,
-                &signed,
-            );
-            d.apply_batch(edits, "status").unwrap();
+            commit(d, |r| status_ops(r, cash, &spec, (90.0, 40.0), &signed));
         };
         set(&mut d);
         // Cash owns pages 1-3: each has a border and a stamp; 4 and 5 none.
@@ -558,12 +558,10 @@ mod tests {
         set(&mut d);
         assert_eq!(count(&d, 0), 3);
         // Reset keeps the stamps unless asked.
-        d.apply_batch(reset_edits(d.state(), cash, false), "reset")
-            .unwrap();
+        commit(&mut d, |r| reset_ops(r, cash, false));
         assert_eq!(count(&d, 0), 2);
         assert_eq!(d.state().bookmark(cash).unwrap().color, None);
-        d.apply_batch(reset_edits(d.state(), cash, true), "reset")
-            .unwrap();
+        commit(&mut d, |r| reset_ops(r, cash, true));
         assert_eq!(count(&d, 0), 0);
     }
 
@@ -573,24 +571,12 @@ mod tests {
     fn a_status_is_laid_out_on_the_page_as_it_shows() {
         let (mut d, cash) = binder();
         let first = d.page(0).unwrap();
-        d.apply(
-            Edit::RotatePages {
-                ids: vec![first],
-                by: sheaf_core::Rotation::R90,
-            },
-            "turn",
-        )
-        .unwrap();
-        let edits = status_edits(
-            d.state(),
-            &|p| d.geom(p),
-            cash,
-            &StatusSpec::default(),
-            "REVIEWED",
-            40.0,
-            &signed,
-        );
-        d.apply_batch(edits, "status").unwrap();
+        let turn = fixture::rotate(&[first], sheaf_edit::Turn::Quarter);
+        d.commit_ops(vec![turn], "turn").unwrap();
+        let spec = StatusSpec::default();
+        commit(&mut d, |r| {
+            status_ops(r, cash, &spec, (90.0, 40.0), &signed)
+        });
         let geom = d.geom(d.page(0).unwrap());
         let size = geom.shown();
         let marks: Vec<Annot> = d.state().marks_on(first).cloned().collect();
@@ -611,6 +597,6 @@ mod tests {
         assert!(near(s.x, STAMP_AT) && near(s.y, STAMP_AT), "{s:?}");
         assert!(s.w > s.h, "{s:?}");
         assert_eq!((border.turn, stamp.turn), (geom.rotate, geom.rotate));
-        assert_eq!(geom.rotate, sheaf_core::Rotation::R90);
+        assert_eq!(geom.rotate, sheaf_edit::Rotation::R90);
     }
 }

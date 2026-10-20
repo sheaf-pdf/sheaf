@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use lopdf::content::Content;
 use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use serde::{Deserialize, Serialize};
-use sheaf_core::PageSize;
+use sheaf_edit::PageSize;
 
 use crate::annot::Pt;
 use crate::content::{Font, Std14, write_string};

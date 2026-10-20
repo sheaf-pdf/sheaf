@@ -28,11 +28,13 @@
 use gpui::{
     AnyElement, Context, Entity, Focusable, KeyDownEvent, Subscription, Window, div, prelude::*, px,
 };
-use sheaf_core::Rotation;
 use sheaf_doc::annot::tape_size;
 use sheaf_doc::geom::Affine;
 use sheaf_doc::tape::{Line, Op, Row, Tape, TapeLook, fmt_amount, parse_amount};
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt};
+use sheaf_doc::tx::mark_changes;
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, CommitOpts, PageId, Pt};
+use sheaf_edit::AnnotRef;
+use sheaf_edit::Rotation;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
@@ -462,7 +464,6 @@ impl DocView {
                 look,
             },
             [20, 20, 20],
-            cx,
         );
         a.contents = contents;
         self.add_annot(page, a, "Place tape", cx);
@@ -552,7 +553,7 @@ impl DocView {
             // Laid out where the text reads upright, and turned to read
             // with it.
             let up = Affine::upright(upright);
-            let edits: Vec<Edit> = numbers
+            let ops: Vec<sheaf_edit::Op> = numbers
                 .iter()
                 .map(|(_, r)| {
                     let r = up.apply_box(*r);
@@ -569,18 +570,24 @@ impl DocView {
                             glyph: glyph.clone(),
                         },
                         crate::markup_tools::color_of(crate::markup_tools::Tool::Tick, cx),
-                        cx,
                     );
-                    Edit::AnnotAdd {
-                        page,
-                        annot: Annot {
-                            turn: upright,
-                            ..a.mapped(&up.inverse())
-                        },
+                    let a = Annot {
+                        turn: upright,
+                        ..a.mapped(&up.inverse())
+                    };
+                    sheaf_edit::Op::AddMark {
+                        page: page.into(),
+                        mark: crate::docview::new_mark(&a, None),
+                        reply_to: None,
+                        local: None,
+                        imported: None,
                     }
                 })
                 .collect();
-            self.apply_batch(edits, &format!("Tick {n} picked"), cx);
+            let label = format!("Tick {n} picked");
+            if let Some(tx) = self.lower(ops, &label, cx) {
+                self.commit(tx, CommitOpts::labelled(label), cx).ok();
+            }
         }
         self.set_notice(
             &if n == 1 {
@@ -631,18 +638,16 @@ impl DocView {
         let Some(calc) = &mut self.calc else { return };
         let (tape, decimals, contents) = (calc.tape.clone(), calc.decimals, calc.contents());
         calc.editing = None;
-        let annot = match &self.state {
-            State::Ready(doc) => doc
-                .model
-                .state()
-                .find_annot(id)
-                .filter(|(on, _)| *on == page)
-                .map(|(_, a)| a.clone()),
-            _ => None,
+        let Some(mut tx) = self.user_tx() else {
+            return;
         };
-        let Some(mut a) = annot else {
+        let annot = (tx.reader().annot(id))
+            .filter(|rec| rec.page == page)
+            .and_then(|rec| rec.mark().cloned());
+        let Some(was) = annot else {
             return self.set_notice("That tape is gone", cx);
         };
+        let mut a = was.clone();
         // Sized as it reads, in the frame it reads upright in.
         let upright = a.upright();
         let AnnotKind::Tape {
@@ -669,8 +674,15 @@ impl DocView {
         }
         .mapped(&Affine::upright(a.turn).inverse());
         a.contents = contents;
-        a.modified = sheaf_doc::pdf_date_now();
-        self.apply(Edit::AnnotUpdate { page, annot: a }, "Update tape", cx);
+        let op = sheaf_edit::Op::PatchMarks {
+            marks: vec![AnnotRef::Id(id)],
+            patch: mark_changes(&was, &a),
+            imported: None,
+        };
+        let label = "Update tape";
+        if let Some(tx) = self.lower_in(tx, vec![op], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
     }
 
     /// The Calculator panel. `wide`: it sits in a bottom dock, so the keys

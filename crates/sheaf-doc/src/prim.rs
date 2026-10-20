@@ -23,7 +23,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use im::Vector;
-use sheaf_core::DestView;
+use sheaf_edit::{BlobSel, DestView, Imported, MarkKind, NewMark};
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt};
 use crate::file::ForeignAnnot;
@@ -33,14 +33,14 @@ use crate::geom::Geom;
 use crate::labels::LabelSpec;
 use crate::measure::Scale;
 use crate::model::{
-    AnnotBody, AnnotRec, Bookmark, ContentStack, DocState, Edit, FieldNode, FieldProps,
-    FlatOutlineItem, Foreign, FormDoc, FormInst, GenId, GenSpec, Generator, Layer, Mark,
-    NewOutlineItem, OutlineId, PageDef, PageId, Rebase, ScriptState, Static, Target, Terminal,
-    Widget, WidgetProps,
+    AnnotBody, AnnotRec, Bookmark, ContentStack, DocState, FieldNode, FieldProps, Foreign, FormDoc,
+    FormInst, GenId, GenSpec, Generator, Layer, Mark, OutlineId, PageDef, PageId, ScriptState,
+    Static, Target, Terminal, Widget, WidgetProps,
 };
 use crate::stamps::{Bates, HeaderFooter};
 use crate::tape::{Row, Tape};
 use crate::text_layer::TextLayer;
+use crate::tx::ResolvedOp;
 
 /// A slot of the document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -128,30 +128,56 @@ impl DocState {
     }
 }
 
-/// The state an edit is computing, and what it started from. The edit
+/// The state an op is lowering into, and what it started from. Lowering
 /// reads its own writes through `Deref`, and writes only with
 /// [`put`](Self::put), so [`finish`](Self::finish) knows each slot it
-/// changed.
+/// changed. The cascades read what it wrote in rounds
+/// ([`round`](Self::round)).
 pub(crate) struct Rec {
     base: DocState,
     st: DocState,
     touched: BTreeSet<Key>,
+    /// The slots put since the round began, as they were put, and the
+    /// state it began with.
+    round: Vec<Key>,
+    round_base: DocState,
+}
+
+/// What one round of lowering wrote: each slot, and the state the round
+/// began with.
+pub(crate) struct Round {
+    /// In key order, each once.
+    pub(crate) keys: Vec<Key>,
+    pub(crate) before: DocState,
 }
 
 impl Rec {
     pub(crate) fn new(base: DocState) -> Self {
         Self {
             st: base.clone(),
+            round_base: base.clone(),
             base,
             touched: BTreeSet::new(),
+            round: Vec::new(),
         }
     }
 
     pub(crate) fn put(&mut self, key: Key, val: Option<Val>) {
         self.st
             .set(&key, val)
-            .expect("an edit puts values its keys can hold");
+            .expect("lowering puts values its keys can hold");
         self.touched.insert(key);
+        self.round.push(key);
+    }
+
+    /// The slots put since the last round, with the state that round began
+    /// with; the next round begins now.
+    pub(crate) fn round(&mut self) -> Round {
+        let before = std::mem::replace(&mut self.round_base, self.st.clone());
+        let mut keys = std::mem::take(&mut self.round);
+        keys.sort_unstable();
+        keys.dedup();
+        Round { keys, before }
     }
 
     /// The state the edit made, and its prims from the state it started
@@ -202,7 +228,7 @@ macro_rules! no_heap {
 }
 
 no_heap!(
-    u32, PageId, OutlineId, AnnotId, FieldId, FormInst, Pt, Box2, Trigger, Rebase
+    u32, PageId, OutlineId, AnnotId, FieldId, FormInst, Pt, Box2, Trigger
 );
 
 impl HeapSize for String {
@@ -278,18 +304,6 @@ impl HeapSize for Target {
 impl HeapSize for Bookmark {
     fn heap_size(&self) -> usize {
         self.title.heap_size() + self.target.heap_size() + self.kids.heap_size()
-    }
-}
-
-impl HeapSize for FlatOutlineItem {
-    fn heap_size(&self) -> usize {
-        self.title.heap_size() + self.view.heap_size()
-    }
-}
-
-impl HeapSize for NewOutlineItem {
-    fn heap_size(&self) -> usize {
-        self.title.heap_size() + self.view.heap_size()
     }
 }
 
@@ -617,31 +631,112 @@ impl HeapSize for Val {
     }
 }
 
-/// What an edit holds beyond its own size. Ids are plain data.
-impl HeapSize for Edit {
+impl HeapSize for MarkKind {
     fn heap_size(&self) -> usize {
+        use MarkKind as K;
         match self {
-            Edit::MovePages { ids, .. }
-            | Edit::RotatePages { ids, .. }
-            | Edit::DeletePages { ids }
-            | Edit::DuplicatePages { ids }
-            | Edit::ClearTextLayers { ids } => ids.heap_size(),
-            Edit::InsertPages {
-                outline, annots, ..
-            } => outline.heap_size() + annots.heap_size(),
-            Edit::ReplacePages { ids, annots, .. } => ids.heap_size() + annots.heap_size(),
-            Edit::OutlineInsert { title, view, .. } => title.heap_size() + view.heap_size(),
-            Edit::OutlineInsertTree { items, .. } => items.heap_size(),
-            Edit::OutlineMove { .. } | Edit::OutlineDelete { .. } | Edit::AnnotDelete { .. } => 0,
-            Edit::OutlineEdit { title, view, .. } => title.heap_size() + view.heap_size(),
-            Edit::AnnotAdd { annot, .. } | Edit::AnnotUpdate { annot, .. } => annot.heap_size(),
-            Edit::CommentsDelete { names, .. } => names.heap_size(),
-            Edit::ConnectorAdd { a, b } => a.heap_size() + b.heap_size(),
-            // The layers are the ones its prims put, and counted there.
-            Edit::SetTextLayers { layers } => buf(layers),
-            Edit::RebasePages { pages } => pages.heap_size(),
-            Edit::SetPageLabels { ranges } => ranges.heap_size(),
-            Edit::SetHeaderFooter { header_footer } => header_footer.heap_size(),
+            K::Highlight { rects }
+            | K::Underline { rects }
+            | K::StrikeOut { rects }
+            | K::Squiggly { rects } => rects.heap_size(),
+            K::Replace { rects, struck, .. } => rects.heap_size() + struck.heap_size(),
+            K::Ink { paths } => paths.heap_size(),
+            K::Polygon { points } | K::Polyline { points } => points.heap_size(),
+            K::Measure { points, scale, .. } => points.heap_size() + scale.heap_size(),
+            K::Tape { tape, .. } => tape.heap_size(),
+            K::Stamp { glyph: s, .. }
+            | K::Connector { label: s, .. }
+            | K::TextStamp { text: s, .. }
+            | K::PageBorder { status: s, .. } => s.heap_size(),
+            K::Status { model, state } => model.heap_size() + state.heap_size(),
+            K::PageStamp { name, text, .. } => name.heap_size() + text.heap_size(),
+            K::FileAttachment { icon, name, .. } => icon.heap_size() + name.heap_size(),
+            K::Note { .. }
+            | K::FreeText { .. }
+            | K::Square { .. }
+            | K::Ellipse { .. }
+            | K::Line { .. }
+            | K::Insert { .. }
+            | K::Reply {}
+            | K::Callout { .. } => 0,
+        }
+    }
+}
+
+impl HeapSize for NewMark {
+    fn heap_size(&self) -> usize {
+        let asset = match &self.asset {
+            Some(BlobSel::With(name)) => name.heap_size(),
+            _ => 0,
+        };
+        self.kind.heap_size() + self.contents.heap_size() + self.author.heap_size() + asset
+    }
+}
+
+impl HeapSize for Imported {
+    fn heap_size(&self) -> usize {
+        self.nm.heap_size()
+            + self.created.heap_size()
+            + self.modified.heap_size()
+            + self.author.heap_size()
+    }
+}
+
+/// What an op holds beyond its own size. Ids are plain data; a source,
+/// a blob and an OCR layer are counted where the store and the prims hold
+/// them.
+impl HeapSize for ResolvedOp {
+    fn heap_size(&self) -> usize {
+        use ResolvedOp as R;
+        match self {
+            R::MovePages { pages, .. }
+            | R::RotatePages { pages, .. }
+            | R::DeletePages { pages }
+            | R::ClearOcrText { pages }
+            | R::RemoveHeaderFooter { pages } => pages.heap_size(),
+            R::DuplicatePages { pages, locals } => pages.heap_size() + buf(locals),
+            R::InsertPages {
+                name,
+                pages,
+                locals,
+                ..
+            } => name.heap_size() + pages.heap_size() + buf(locals),
+            R::ReplacePages {
+                pages, name, with, ..
+            } => pages.heap_size() + name.heap_size() + with.heap_size(),
+            R::SetPageLabels { ranges } => ranges.heap_size(),
+            R::AddBookmark { title, view, .. } => title.heap_size() + view.heap_size(),
+            R::PatchBookmarks { bookmarks, patch } => {
+                let view = match &patch.view {
+                    sheaf_edit::Patch::Set(v) => v.heap_size(),
+                    _ => 0,
+                };
+                bookmarks.heap_size() + patch.title.heap_size() + view
+            }
+            R::MoveBookmarks { bookmarks, .. } | R::DeleteBookmarks { bookmarks } => {
+                bookmarks.heap_size()
+            }
+            R::AddMark { mark, imported, .. } => mark.heap_size() + imported.heap_size(),
+            R::AddConnector { label, locals, .. } => label.heap_size() + buf(locals),
+            R::PatchMarks {
+                marks,
+                patch,
+                imported,
+            } => {
+                marks.heap_size()
+                    + patch.kind.heap_size()
+                    + patch.contents.heap_size()
+                    + imported.heap_size()
+            }
+            R::MoveMarks { marks, .. }
+            | R::DeleteAnnotations { annots: marks }
+            | R::AdoptAnnotations { annots: marks } => marks.heap_size(),
+            R::SetOcrText { .. } => 0,
+            R::SetHeaderFooter { spec, scope } => {
+                spec.texts.iter().map(String::heap_size).sum::<usize>() + scope.heap_size()
+            }
+            R::SetPageBase { pages, .. } => buf(pages),
+            R::Revert { label } => label.heap_size(),
         }
     }
 }
@@ -650,16 +745,15 @@ impl HeapSize for Edit {
 mod tests {
     use super::*;
     use crate::labels::Style;
-    use crate::model::{PageBase, SourceId, SourceInfo};
+    use crate::model::PageBase;
     use crate::store::Store;
 
     /// Three blank pages, in their file's order.
     fn state() -> DocState {
-        let src = SourceInfo::blank(&Store::new(), 3).src;
+        let src = crate::store::blank(&Store::new(), 3);
         let pages = (0..3).map(|index| {
             let def = PageDef {
                 base: PageBase {
-                    source: SourceId(0),
                     src: src.clone(),
                     index,
                 },

@@ -145,10 +145,9 @@ pub(crate) fn annot_to_wit(a: &Annot) -> Option<w::Annot> {
     })
 }
 
-/// A plugin's mark as sheaf stores it. The author defaults to the user;
-/// the dates are now, and the name is the host's (an update keeps the
-/// mark's own: the app's `keep_unseen`).
-pub(crate) fn annot_from_wit(a: w::Annot) -> Annot {
+/// What a plugin says of a mark: all API 0.3 shows but who made it and
+/// when, and its name, which are the host's.
+pub(crate) fn said(a: w::Annot) -> Said {
     let boxes = |r: Vec<w::Box2>| r.into_iter().map(box_from_wit).collect::<Vec<_>>();
     let points = |p: Vec<w::Pt>| p.into_iter().map(pt_from_wit).collect::<Vec<_>>();
     let kind = match a.kind {
@@ -257,23 +256,17 @@ pub(crate) fn annot_from_wit(a: w::Annot) -> Annot {
             }),
         },
     };
-    let now = sheaf_doc::pdf_date_now();
-    Annot {
-        id: AnnotId(a.id),
-        fill: a.fill.map(rgb_from_wit).filter(|_| kind.fillable()),
-        cloudy: a.cloudy && kind.cloudable(),
+    Said {
         kind,
         color: rgb_from_wit(a.color),
-        opacity: a.opacity.clamp(0.0, 1.0),
-        stroke: a.stroke.max(0.0),
-        // Empty means the user, whom the app names (`settings.toml`).
-        author: a.author.trim().to_string(),
+        opacity: a.opacity,
+        stroke: a.stroke,
         contents: a.contents,
-        modified: now.clone(),
-        created: now,
-        dashed: a.dashed,
-        turn: Rotation::R0,
-        name: String::new(),
+        more: Some(More {
+            fill: a.fill.map(rgb_from_wit),
+            dashed: a.dashed,
+            cloudy: a.cloudy,
+        }),
     }
 }
 

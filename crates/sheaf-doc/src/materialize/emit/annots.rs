@@ -271,7 +271,10 @@ impl Page<'_> {
                     obj: *r,
                     copy: shown.copy,
                 };
-                // An Append's saved file may have it already.
+                // An Append's saved file may have it already, its `/P` the
+                // number of the page it was written with: written again when
+                // its source's pages are named otherwise now (the page
+                // renumbered, or another page that copy of its page).
                 if cx.closure.claim(key) && cx.writes(&key) {
                     let out = built(cx);
                     cx.push(key, Object::Dictionary(out));
@@ -717,7 +720,7 @@ impl Cx<'_> {
         }
         let stream = self.primary.pdf().get_object(at).ok()?;
         let data = crate::attachments::file_bytes(stream.as_stream().ok()?).ok()?;
-        if crate::store::BlobId::of(&data) != file {
+        if crate::store::blob_id(&data) != file {
             return None;
         }
         let scope = Scope {

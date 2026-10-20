@@ -8,8 +8,8 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use sheaf_core::PageIndex;
 use sheaf_image::raster::PixelFormat;
+use sheaf_render::PageIndex;
 use sheaf_render::{Renderer, pdfium::PdfiumEngine};
 
 fn main() -> Result<()> {
@@ -109,7 +109,7 @@ fn main() -> Result<()> {
         y: 1024,
         w: 1024,
         h: 1024,
-        rotation: sheaf_core::Rotation::R0,
+        rotation: sheaf_edit::Rotation::R0,
     };
     let t = Instant::now();
     let tile = r.render(PageIndex(0), job, PixelFormat::Rgba)?;

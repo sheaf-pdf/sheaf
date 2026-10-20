@@ -34,14 +34,15 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use lopdf::{Document as Pdf, Object, ObjectId};
-use sheaf_core::Rotation;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::sigs::Verdict;
 use sheaf_doc::materialize::{
     Ask, AskAnswers, How, Onto, SaveStop, Strategy, StrategyKind, Why, forced_append, materialize,
     plan, removal, save, save_rewritten, write_file,
 };
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, Edit, PageId, Pt};
+use sheaf_doc::tx::fixture::{add, bookmark, delete, delete_annots, delete_bookmark, update};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, PageId, Pt};
+use sheaf_edit::Rotation;
 
 /// A directory of its own for `test`'s copies, empty.
 fn scratch(test: &str) -> PathBuf {
@@ -129,11 +130,7 @@ fn marked(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<Marked, S
         let mut doc = opened(&path)?;
         let before = std::fs::read(&path).unwrap();
         let page = doc.page(0)?;
-        let add = Edit::AnnotAdd {
-            page,
-            annot: note(MARK),
-        };
-        if let Err(e) = doc.apply(add, "mark") {
+        if let Err(e) = doc.commit_ops(vec![add(page, &note(MARK))], "mark") {
             return Some(Err(format!("no mark: {e}")));
         }
         Some(saved_with_a_mark(&mut doc, &path, &before))
@@ -502,16 +499,15 @@ fn saved_then_deleted(
         Feature::Page => page_probe(&std::fs::read(path).unwrap(), last),
         _ => None,
     };
-    let add = |doc: &mut Document, annot: Annot| {
-        let add = Edit::AnnotAdd { page: on, annot };
-        doc.apply(add, "add")
+    let put = |doc: &mut Document, annot: Annot| {
+        doc.commit_ops(vec![add(on, &annot)], "add")
             .map(drop)
             .map_err(|e| format!("adding: {e}"))
     };
     match feature {
-        Feature::Page | Feature::Mark | Feature::MarkText => add(doc, note(&ours))?,
+        Feature::Page | Feature::Mark | Feature::MarkText => put(doc, note(&ours))?,
         Feature::Reply => {
-            add(doc, note("SHEAF-Reply-PARENT"))?;
+            put(doc, note("SHEAF-Reply-PARENT"))?;
             let parent = (doc.state().marks_on(on))
                 .find(|a| a.contents == "SHEAF-Reply-PARENT")
                 .ok_or("the note isn't on its page")?
@@ -520,18 +516,12 @@ fn saved_then_deleted(
                 kind: AnnotKind::Reply { parent },
                 ..note(&ours)
             };
-            add(doc, reply)?;
+            put(doc, reply)?;
         }
-        Feature::Theirs => add(doc, note("SHEAF-Theirs-OURS"))?,
+        Feature::Theirs => put(doc, note("SHEAF-Theirs-OURS"))?,
         Feature::Bookmark => {
-            let insert = Edit::OutlineInsert {
-                parent: None,
-                after: None,
-                title: ours.clone(),
-                target: Some(on),
-                view: None,
-            };
-            doc.apply(insert, "add")
+            let insert = bookmark(None, None, &ours, Some(on));
+            doc.commit_ops(vec![insert], "add")
                 .map_err(|e| format!("adding: {e}"))?;
         }
     }
@@ -559,35 +549,32 @@ fn saved_then_deleted(
             .cloned()
             .ok_or("the note isn't on its page")
     };
-    let delete = match feature {
-        Feature::Page => Edit::DeletePages { ids: vec![on] },
-        Feature::Mark | Feature::Reply => Edit::AnnotDelete {
-            page: on,
-            id: mark(doc)?.id,
-        },
-        Feature::MarkText => Edit::AnnotUpdate {
-            page: on,
-            annot: Annot {
-                contents: "SHEAF-MarkText-NEW".into(),
-                ..mark(doc)?
-            },
-        },
+    let gone = match feature {
+        Feature::Page => delete(&[on]),
+        Feature::Mark | Feature::Reply => delete_annots(&[mark(doc)?.id]),
+        Feature::MarkText => update(&Annot {
+            contents: "SHEAF-MarkText-NEW".into(),
+            ..mark(doc)?
+        }),
         Feature::Theirs => {
+            // Every comment of that name on its page, as Delete Comment
+            // deletes them: a file may name two alike.
             let (page, name, _) = theirs.ok_or("no comment of theirs")?;
-            Edit::CommentsDelete {
-                page,
-                names: vec![name],
-            }
+            let named: Vec<AnnotId> = (doc.state().foreign_on(page))
+                .filter(|(_, f)| f.summary.name == name)
+                .map(|(id, _)| id)
+                .collect();
+            delete_annots(&named)
         }
         Feature::Bookmark => {
             let id = (doc.state().bookmarks_preorder().into_iter())
                 .find(|(_, _, b)| *b.title == *text)
                 .ok_or("the bookmark isn't there")?
                 .1;
-            Edit::OutlineDelete { id }
+            delete_bookmark(id)
         }
     };
-    doc.apply(delete, "delete")
+    doc.commit_ops(vec![gone], "delete")
         .map_err(|e| format!("deleting: {e}"))?;
     let answers = AskAnswers {
         break_signatures: true,
@@ -723,8 +710,7 @@ fn oracle(entry: &Entry, corpus: &Corpus) -> Option<Result<bool, String>> {
         return None;
     }
     let first = doc.page(0).unwrap();
-    doc.apply(Edit::DeletePages { ids: vec![first] }, "delete")
-        .ok()?;
+    doc.commit_ops(vec![delete(&[first])], "delete").ok()?;
     let v = doc.current_version();
     let input = doc.save_input(v).ok()?;
     let target = doc.save_target(&path);
@@ -855,7 +841,7 @@ fn a_comment_on_a_signed_file_appends_or_asks_by_what_its_signatures_allow() {
         };
         let copy = copy_of(&entry, &corpus, &dir, "").unwrap();
         let mut doc = opened(&copy).unwrap_or_else(|| panic!("{path} opens"));
-        let sigs = (doc.source(doc.primary()).unwrap().src.signatures()).clone();
+        let sigs = (doc.primary().signatures()).clone();
         let p = sigs.signed.iter().filter_map(|s| s.p).min();
         let class = match p {
             Some(p) => Allows::P(p),
@@ -866,11 +852,8 @@ fn a_comment_on_a_signed_file_appends_or_asks_by_what_its_signatures_allow() {
         let before = std::fs::read(&copy).unwrap();
         let ranges = byte_ranges(&before);
         let page = doc.page(0).unwrap();
-        let add = Edit::AnnotAdd {
-            page,
-            annot: note("a comment"),
-        };
-        doc.apply(add, "comment").unwrap();
+        doc.commit_ops(vec![add(page, &note("a comment"))], "comment")
+            .unwrap();
 
         let v = doc.current_version();
         let input = doc.save_input(v).unwrap();
@@ -920,7 +903,7 @@ fn a_comment_on_a_signed_file_appends_or_asks_by_what_its_signatures_allow() {
             assert!(a + b <= *c && c + d <= before.len(), "{path}: {ranges:?}");
         }
         let again = opened(&copy).unwrap();
-        let reread = again.source(again.primary()).unwrap().src.signatures();
+        let reread = again.primary().signatures();
         assert_eq!(reread.signed.len(), sigs.signed.len(), "{path}");
         println!(
             "{path} ({allows:?}): {}appended, {} signatures' bytes intact",

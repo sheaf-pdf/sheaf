@@ -11,15 +11,16 @@ use std::path::Path;
 use in_progress::NoProgress;
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
-use sheaf_core::{DestView, Rotation};
+use sheaf_edit::{AnnotRef, BookmarkPatch, DestView, Op, PageRef, Patch, Rotation, Sibling, Turn};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::FixedCount;
 use crate::materialize::{self, AskAnswers, Came, How, StrategyKind, Why};
-use crate::model::{Document, Edit, FlatOutlineItem, Mark, PageId, SourceInfo};
+use crate::model::{Document, FlatOutlineItem, Mark, PageId};
 use crate::save::{HeaderKept, derived_copy, rewrite, rewrite_to_path, text_string};
 use crate::serialize::crypt::Crypt;
-use crate::store::{BlobKind, Store};
+use crate::store::{BlobKind, Src, Store};
+use crate::tx::fixture as fx;
 
 /// A PDF whose page i has content "MARK <tag> <i>" and /Rotate from `rot`.
 pub(crate) fn make_pdf(
@@ -104,8 +105,8 @@ pub(crate) fn make_pdf(
 }
 
 /// The file at `path`, read into `store`.
-pub(crate) fn info(store: &Store, path: &Path) -> SourceInfo {
-    SourceInfo::read(store, path, None).unwrap().0
+pub(crate) fn info(store: &Store, path: &Path) -> Src {
+    store.read_file(path, None).unwrap().0
 }
 
 /// The annotations of the file `bytes`, read through its source as the
@@ -124,8 +125,13 @@ pub(crate) fn open(
     policy: Box<dyn crate::history::HistoryPolicy>,
 ) -> Document {
     let store = Store::new();
-    let (primary, stamp) = SourceInfo::read(&store, path, None).unwrap();
-    Document::new(store, primary, Some(Came::Read(stamp)), outline, policy)
+    let (primary, stamp) = store.read_file(path, None).unwrap();
+    let name = crate::store::file_name(path);
+    let came = Came::Read {
+        path: path.into(),
+        stamp,
+    };
+    Document::new(store, primary, name, Some(came), outline, policy)
 }
 
 /// (marker text, /Rotate) per page of a written PDF, in order.
@@ -316,31 +322,28 @@ fn bookmark_positions(how: How) {
     // in PageSpace, which a turn leaves alone.
     let p0 = model.page(0).unwrap();
     model
-        .apply(
-            Edit::RotatePages {
-                ids: vec![p0],
-                by: Rotation::R90,
-            },
-            "rotate",
-        )
+        .commit_ops(vec![fx::rotate(&[p0], Turn::Quarter)], "rotate")
         .unwrap();
     let want = ["/XYZ 36 692 null", "/FitH 500", "/XYZ null null null"];
     assert_eq!(read_dests(&how.write(&model)), want);
     // A save writes the outline when it changed.
     let p1 = model.page(1).unwrap();
     model
-        .apply(
-            Edit::OutlineInsert {
+        .commit_ops(
+            vec![Op::AddBookmark {
                 parent: None,
-                after: None,
+                at: Sibling::First,
                 title: "New".into(),
-                target: Some(p1),
+                target: Some(PageRef::Id(p1)),
                 view: Some(DestView::Xyz {
                     left: None,
                     top: Some(792.0),
                     zoom: Some(1.5),
                 }),
-            },
+                color: None,
+                style: Default::default(),
+                local: None,
+            }],
             "add",
         )
         .unwrap();
@@ -426,43 +429,22 @@ fn edits_materialize() {
         ],
         Box::new(FixedCount(10)),
     );
-    let sb = model.add_source(info(model.store(), &b));
+    let sb = info(model.store(), &b);
     let ids: Vec<PageId> = model.state().order().iter().copied().collect();
     model
-        .apply(Edit::DeletePages { ids: vec![ids[1]] }, "del")
+        .commit_ops(vec![fx::delete(&[ids[1]])], "del")
         .unwrap(); // A0 A2 A3
     model
-        .apply(
-            Edit::RotatePages {
-                ids: vec![ids[2]],
-                by: Rotation::R90,
-            },
-            "rot",
-        )
+        .commit_ops(vec![fx::rotate(&[ids[2]], Turn::Quarter)], "rot")
         .unwrap();
     model
-        .apply(
-            Edit::MovePages {
-                ids: vec![ids[3]],
-                before: Some(ids[0]),
-            },
-            "mv",
-        )
+        .commit_ops(vec![fx::move_pages(&[ids[3]], Some(ids[0]))], "mv")
         .unwrap(); // A3 A0 A2
     model
-        .apply(
-            Edit::InsertPages {
-                source: sb,
-                range: 0..2,
-                before: Some(ids[2]),
-                outline: None,
-                annots: Vec::new(),
-            },
-            "ins",
-        )
+        .commit_ops(vec![fx::insert(&sb, 0..2, "a.pdf", Some(ids[2]))], "ins")
         .unwrap(); // A3 A0 B0 B1 A2
     model
-        .apply(Edit::DuplicatePages { ids: vec![ids[0]] }, "dup")
+        .commit_ops(vec![fx::duplicate(&[ids[0]])], "dup")
         .unwrap(); // A3 A0 A0 B0 B1 A2
 
     let bytes = rewrite(&model.snapshot()).unwrap();
@@ -510,19 +492,13 @@ fn appends_onto(modern: bool) {
     }
     let original = std::fs::read(&a).unwrap();
     // Its bookmark as the open reads it: the file's object.
-    let items = crate::open::outline(&info(&Store::new(), &a).src);
+    let items = crate::open::outline(&info(&Store::new(), &a));
     let mut model = open(&a, &items, Box::new(FixedCount(10)));
     let ids: Vec<PageId> = model.state().order().iter().copied().collect();
 
     // Rotation only: tree untouched, one page object rewritten.
     model
-        .apply(
-            Edit::RotatePages {
-                ids: vec![ids[1]],
-                by: Rotation::R180,
-            },
-            "rot",
-        )
+        .commit_ops(vec![fx::rotate(&[ids[1]], Turn::Half)], "rot")
         .unwrap();
     let bytes = How::Appended.write(&model);
     assert!(bytes.starts_with(&original), "original bytes preserved");
@@ -538,33 +514,24 @@ fn appends_onto(modern: bool) {
     assert_eq!(read_outline(&bytes), vec![(0, "One".into(), Some(3))]);
 
     // Structural: delete, insert from another file, bookmark rename.
-    let sb = model.add_source(info(model.store(), &b));
+    let sb = info(model.store(), &b);
     model
-        .apply(Edit::DeletePages { ids: vec![ids[0]] }, "del")
+        .commit_ops(vec![fx::delete(&[ids[0]])], "del")
         .unwrap();
     model
-        .apply(
-            Edit::InsertPages {
-                source: sb,
-                range: 0..1,
-                before: None,
-                outline: None,
-                annots: Vec::new(),
-            },
-            "ins",
-        )
+        .commit_ops(vec![fx::insert(&sb, [0], "a.pdf", None)], "ins")
         .unwrap();
     let one = model.state().bookmarks_preorder()[0].1;
     model
-        .apply(
-            Edit::OutlineEdit {
-                id: one,
-                title: Some("Uno".into()),
-                target: Some(Some(ids[2])),
-                color: None,
-                view: None,
-                style: None,
-            },
+        .commit_ops(
+            vec![fx::patch_bookmark(
+                one,
+                BookmarkPatch {
+                    title: Some("Uno".into()),
+                    target: Patch::Set(PageRef::Id(ids[2])),
+                    ..Default::default()
+                },
+            )],
             "bm",
         )
         .unwrap();
@@ -653,11 +620,8 @@ fn with_trailer_keys(bytes: &[u8], keys: &str) -> Vec<u8> {
 fn rotated(path: &Path) -> Document {
     let mut model = opened(path);
     let page = model.state().order()[0];
-    let rotate = Edit::RotatePages {
-        ids: vec![page],
-        by: Rotation::R90,
-    };
-    model.apply(rotate, "rot").unwrap();
+    let rotate = fx::rotate(&[page], Turn::Quarter);
+    model.commit_ops(vec![rotate], "rot").unwrap();
     model
 }
 
@@ -780,15 +744,7 @@ fn unknown_mark_survives(how: How) {
         turn: Rotation::R0,
         name: String::new(),
     };
-    model
-        .apply(
-            Edit::AnnotAdd {
-                page: p0,
-                annot: ours,
-            },
-            "add",
-        )
-        .unwrap();
+    model.commit_ops(vec![fx::add(p0, &ours)], "add").unwrap();
     let bytes = how.write(&model);
     let out = dir.join(format!("out-{how:?}.pdf"));
     std::fs::write(&out, &bytes).unwrap();
@@ -849,7 +805,7 @@ fn bookmark_colors_and_styles(how: How) {
         pdf.get_dictionary_mut(third).unwrap().set("F", 3);
         pdf.save(&path).unwrap();
     }
-    let items = crate::open::outline(&info(&Store::new(), &path).src);
+    let items = crate::open::outline(&info(&Store::new(), &path));
     assert_eq!(items.len(), 3);
     assert_eq!(items[0].color, Some([255, 0, 0]));
     assert!(items[1].color.is_none() && items[1].style.is_plain());
@@ -858,15 +814,14 @@ fn bookmark_colors_and_styles(how: How) {
     // A bookmark edit, so an Append writes the outline.
     let plain = model.state().outline_roots()[1];
     model
-        .apply(
-            Edit::OutlineEdit {
-                id: plain,
-                title: Some("Renamed".into()),
-                target: None,
-                color: None,
-                view: None,
-                style: None,
-            },
+        .commit_ops(
+            vec![fx::patch_bookmark(
+                plain,
+                BookmarkPatch {
+                    title: Some("Renamed".into()),
+                    ..Default::default()
+                },
+            )],
             "rename",
         )
         .unwrap();
@@ -907,7 +862,7 @@ fn closed_bookmark_stays_closed(how: How) {
     );
     let path = dir.join("closed.pdf");
     std::fs::write(&path, f.bytes()).unwrap();
-    let items = crate::open::outline(&info(&Store::new(), &path).src);
+    let items = crate::open::outline(&info(&Store::new(), &path));
     let open_flags = |items: &[FlatOutlineItem]| items.iter().map(|i| i.open).collect::<Vec<_>>();
     assert_eq!(open_flags(&items), [false, true, true, true, true]);
     /// (title, `/Count`) of each item below `first`, in pre-order.
@@ -930,15 +885,14 @@ fn closed_bookmark_stays_closed(how: How) {
     let st = model.state();
     let leaf = st.bookmark(st.outline_roots()[1]).unwrap().kids[0];
     model
-        .apply(
-            Edit::OutlineEdit {
-                id: leaf,
-                title: Some("Renamed".into()),
-                target: None,
-                color: None,
-                view: None,
-                style: None,
-            },
+        .commit_ops(
+            vec![fx::patch_bookmark(
+                leaf,
+                BookmarkPatch {
+                    title: Some("Renamed".into()),
+                    ..Default::default()
+                },
+            )],
             "rename",
         )
         .unwrap();
@@ -998,13 +952,7 @@ fn undo_past_a_save(first: How) {
         let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().order().iter().copied().collect();
         model
-            .apply(
-                Edit::MovePages {
-                    ids: vec![ids[2]],
-                    before: Some(ids[0]),
-                },
-                "move",
-            )
+            .commit_ops(vec![fx::move_pages(&[ids[2]], Some(ids[0]))], "move")
             .unwrap();
         let saved = first.save(&mut model, &a);
         assert_eq!(saved.strategy, Some(first.strategy()), "{what}");
@@ -1090,15 +1038,7 @@ fn replies_and_statuses_thread(how: How) {
         },
         "Tie to the K-1",
     );
-    model
-        .apply(
-            Edit::AnnotAdd {
-                page: p0,
-                annot: note,
-            },
-            "note",
-        )
-        .unwrap();
+    model.commit_ops(vec![fx::add(p0, &note)], "note").unwrap();
     let parent = model.state().marks_on(p0).next().unwrap().name();
     for (kind, text) in [
         (
@@ -1117,13 +1057,7 @@ fn replies_and_statuses_thread(how: How) {
         ),
     ] {
         model
-            .apply(
-                Edit::AnnotAdd {
-                    page: p0,
-                    annot: thread_mark(kind, text),
-                },
-                "thread",
-            )
+            .commit_ops(vec![fx::add(p0, &thread_mark(kind, text))], "thread")
             .unwrap();
     }
     let want: Vec<Annot> = model.state().marks_on(p0).cloned().collect();
@@ -1149,7 +1083,7 @@ fn replies_and_statuses_thread(how: How) {
     // Deleting the note takes its thread.
     let id = want[0].id;
     model
-        .apply(Edit::AnnotDelete { page: p0, id }, "rm")
+        .commit_ops(vec![fx::delete_annots(&[id])], "rm")
         .unwrap();
     assert!(model.state().marks_on(p0).next().is_none());
 }
@@ -1167,15 +1101,7 @@ fn file_with_their_comments(dir: &Path) -> (std::path::PathBuf, Vec<Annot>) {
         },
         "ours",
     );
-    model
-        .apply(
-            Edit::AnnotAdd {
-                page: p0,
-                annot: note,
-            },
-            "note",
-        )
-        .unwrap();
+    model.commit_ops(vec![fx::add(p0, &note)], "note").unwrap();
     let ours: Vec<Annot> = model.state().marks_on(p0).cloned().collect();
     let bytes = rewrite(&model.snapshot()).unwrap();
     let mut pdf = Pdf::load_mem(&bytes).unwrap();
@@ -1230,15 +1156,7 @@ fn replies_follow_our_marks(how: How) {
     let p0 = model.page(0).unwrap();
     let mut note = model.state().marks_on(p0).next().unwrap().clone();
     note.contents = "ours, edited".into();
-    model
-        .apply(
-            Edit::AnnotUpdate {
-                page: p0,
-                annot: note,
-            },
-            "edit",
-        )
-        .unwrap();
+    model.commit_ops(vec![fx::update(&note)], "edit").unwrap();
     let out = how.write(&model);
     let list = page_annots(&out);
     let note_obj = list
@@ -1361,11 +1279,25 @@ fn made_ours_takes_its_place(how: How) {
             })
     };
     let was = object(&model, "sq");
-    for annot in [square.clone(), replace.clone()] {
-        model
-            .apply(Edit::AnnotAdd { page: p0, annot }, "adopt")
-            .unwrap();
-    }
+    // Each made ours, and the square moved.
+    let named = |nm: &str| AnnotRef::Nm {
+        nm: nm.into(),
+        page: Some(PageRef::Id(p0)),
+    };
+    let ops = vec![
+        Op::AdoptAnnotations {
+            annots: vec![named("sq"), named("c1")],
+        },
+        Op::PatchMarks {
+            marks: vec![named("sq")],
+            patch: sheaf_edit::MarkPatch {
+                kind: Some(crate::tx::mark_kind(&square.kind)),
+                ..Default::default()
+            },
+            imported: None,
+        },
+    ];
+    model.commit_ops(ops, "adopt").unwrap();
     // Theirs are ours now, the objects they were, and their parts
     // are gone with them; Pat's reply stays.
     let theirs: Vec<String> = (model.state().foreign_on(p0))
@@ -1420,15 +1352,16 @@ fn made_ours_takes_its_place(how: How) {
 /// would stay readable in the earlier revision. So a Rewrite is right,
 /// whatever the planner says. What it says now is a stopgap (slice 10's
 /// notes, "After the commit", a comment made ours, left for Greg): the
-/// path has the comments' records go (the square, the caret and the
-/// strikeout grouped under it: an `AnnotAdd` draws the mark's id afresh),
-/// so it plans a Rewrite for three comments removed, where the reader
-/// made two theirs and removed none. Slice 8 counted an adopted comment
-/// as kept; counted so again, the plan appends and the removal check's
-/// veto makes the save a Rewrite (`Why::RemovalCheck`): either reason
-/// passes here. Appended anyway, as the both-ways tests append, the
-/// reader is told the text stays readable. Either way, the mark deleted
-/// then is something gone.
+/// adoption keeps each comment's id (slice 11's `AdoptAnnotations`), so
+/// the square and the caret are kept, but the strikeout grouped under the
+/// caret goes as a comment, the replacement writing one of its own: it
+/// plans a Rewrite for one comment removed, where the reader made two
+/// theirs and removed none. Slice 8 counted an adopted comment as kept;
+/// counted so again, the plan appends and the removal check's veto makes
+/// the save a Rewrite (`Why::RemovalCheck`): either reason passes here.
+/// Appended anyway, as the both-ways tests append, the reader is told the
+/// text stays readable. Either way, the mark deleted then is something
+/// gone.
 #[test]
 fn a_comment_made_ours_is_saved_in_place() {
     use std::sync::Arc;
@@ -1452,14 +1385,10 @@ fn a_comment_made_ours_is_saved_in_place() {
         let mut model = opened(&path);
         let p0 = model.page(0).unwrap();
         for name in ["sq", "c1"] {
-            let (id, f) = (model.state().foreign_on(p0))
+            let (id, _) = (model.state().foreign_on(p0))
                 .find(|(_, f)| f.summary.name == name)
                 .unwrap();
-            let mut annot = (**f.summary.mark.as_ref().unwrap()).clone();
-            annot.id = id;
-            model
-                .apply(Edit::AnnotAdd { page: p0, annot }, "adopt")
-                .unwrap();
+            model.commit_ops(vec![fx::adopt(&[id])], "adopt").unwrap();
         }
         let theirs: Vec<String> = (model.state().foreign_on(p0))
             .map(|(_, f)| f.summary.name.clone())
@@ -1491,8 +1420,8 @@ fn a_comment_made_ours_is_saved_in_place() {
                     materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress)
                         .unwrap();
                 assert_eq!(saved.strategy, Some(StrategyKind::Rewrite));
-                // KNOWN MISCOUNT, not the spec: `Removes([Comments: 3])`
-                // today, for two comments made ours (see the doc comment).
+                // KNOWN MISCOUNT, not the spec: `Removes([Comments: 1])`
+                // today, the caret's strikeout (see the doc comment).
                 assert!(
                     matches!(
                         saved.why.as_slice(),
@@ -1518,7 +1447,7 @@ fn a_comment_made_ours_is_saved_in_place() {
             .unwrap()
             .id;
         model
-            .apply(Edit::AnnotDelete { page: p0, id: sq }, "delete")
+            .commit_ops(vec![fx::delete_annots(&[sq])], "delete")
             .unwrap();
         // The mark and its thread's reply.
         let saved = materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress);
@@ -1559,11 +1488,7 @@ fn of_two_comments_named_alike_the_one_made_ours_goes() {
                 .find(|(_, f)| f.summary.contents == pick)
                 .unwrap();
             let was = f.src.clone();
-            let mut annot = (**f.summary.mark.as_ref().unwrap()).clone();
-            annot.id = id;
-            model
-                .apply(Edit::AnnotAdd { page: p0, annot }, "adopt")
-                .unwrap();
+            model.commit_ops(vec![fx::adopt(&[id])], "adopt").unwrap();
             let st = model.state();
             let left: Vec<&str> = (st.foreign_on(p0))
                 .map(|(_, f)| f.summary.contents.as_str())
@@ -1601,9 +1526,7 @@ fn a_link_a_save_left_out_is_gone_from_its_file() {
     let mut model = opened(&path);
     let [p0, p1] = [0, 1].map(|i| model.page(i).unwrap());
     assert_eq!(model.state().foreign_on(p0).count(), 2);
-    model
-        .apply(Edit::DeletePages { ids: vec![p1] }, "delete")
-        .unwrap();
+    model.commit_ops(vec![fx::delete(&[p1])], "delete").unwrap();
     let subtypes = |path: &Path| -> Vec<String> {
         let saved = Pdf::load(path).unwrap();
         let page = saved.page_iter().next().unwrap();
@@ -1656,23 +1579,14 @@ fn deleted_comments_stay_out(how: How) {
     let p0 = model.page(0).unwrap();
     // Theirs, by name.
     model
-        .apply(
-            Edit::CommentsDelete {
-                page: p0,
-                names: vec![unnamed.name.clone()],
-            },
+        .commit_ops(
+            vec![fx::delete_named(p0, &[&unnamed.name])],
             "delete theirs",
         )
         .unwrap();
     // Ours: Acrobat's reply to it goes too.
     model
-        .apply(
-            Edit::AnnotDelete {
-                page: p0,
-                id: ours[0].id,
-            },
-            "delete ours",
-        )
+        .commit_ops(vec![fx::delete_annots(&[ours[0].id])], "delete ours")
         .unwrap();
     let save = |m: &Document| how.write(m);
     let written = save(&model);
@@ -1733,15 +1647,7 @@ fn saves_marks_and_comments(in_place: bool) {
         },
         "another",
     );
-    model
-        .apply(
-            Edit::AnnotAdd {
-                page: p0,
-                annot: note,
-            },
-            "note",
-        )
-        .unwrap();
+    model.commit_ops(vec![fx::add(p0, &note)], "note").unwrap();
     let before = model.state().clone();
     let (report, out) = match in_place {
         true => (materialize::save_appended(&mut model, &copy), copy.clone()),
@@ -1769,13 +1675,7 @@ fn saves_marks_and_comments(in_place: bool) {
         .map(|(_, f)| f.summary.name.clone())
         .unwrap();
     model
-        .apply(
-            Edit::CommentsDelete {
-                page: p0,
-                names: vec![name],
-            },
-            "delete theirs",
-        )
+        .commit_ops(vec![fx::delete_named(p0, &[&name])], "delete theirs")
         .unwrap();
     let report = materialize::save(&mut model, &out, &AskAnswers::default(), &NoProgress);
     assert_eq!(report.unwrap().strategy, Some(StrategyKind::Rewrite));
@@ -1805,16 +1705,10 @@ fn dup_without_theirs(how: How) {
         .map(|(_, f)| f.summary.name.clone())
         .unwrap();
     model
-        .apply(
-            Edit::CommentsDelete {
-                page: p0,
-                names: vec![unnamed],
-            },
-            "delete theirs",
-        )
+        .commit_ops(vec![fx::delete_named(p0, &[&unnamed])], "delete theirs")
         .unwrap();
     model
-        .apply(Edit::DuplicatePages { ids: vec![p0] }, "duplicate")
+        .commit_ops(vec![fx::duplicate(&[p0])], "duplicate")
         .unwrap();
     let st = model.state();
     let p1 = st.page_at(1).unwrap();
@@ -1880,16 +1774,16 @@ fn a_reply_names_a_comment(how: How) {
     let mut model = opened(&path);
     let p0 = model.page(0).unwrap();
     model
-        .apply(
-            Edit::AnnotAdd {
-                page: p0,
-                annot: thread_mark(
+        .commit_ops(
+            vec![fx::add(
+                p0,
+                &thread_mark(
                     AnnotKind::Reply {
                         parent: unnamed.name.clone(),
                     },
                     "Answered",
                 ),
-            },
+            )],
             "reply",
         )
         .unwrap();
@@ -2040,7 +1934,7 @@ fn a_page_stamp_is_written_once(how: How) {
     for page in [p0, p1] {
         let annot = thread_mark(page_stamp(&stem), "");
         model
-            .apply(Edit::AnnotAdd { page, annot }, "stamp")
+            .commit_ops(vec![fx::add(page, &annot)], "stamp")
             .unwrap();
     }
     let bytes = how.write(&model);
@@ -2073,7 +1967,7 @@ fn two_attachments_of_one_file_embed_it_once() {
     for _ in 0..2 {
         let annot = thread_mark(attachment(&stem, bytes.len()), "");
         model
-            .apply(Edit::AnnotAdd { page: p0, annot }, "attach")
+            .commit_ops(vec![fx::add(p0, &annot)], "attach")
             .unwrap();
     }
     let out = rewrite(&model.snapshot()).unwrap();
@@ -2129,9 +2023,7 @@ fn survive_an_empty_cache(how: How) {
     let p0 = model.page(0).unwrap();
     for kind in [page_stamp(&stamp), attachment(&file, bytes.len())] {
         let annot = thread_mark(kind, "");
-        model
-            .apply(Edit::AnnotAdd { page: p0, annot }, "add")
-            .unwrap();
+        model.commit_ops(vec![fx::add(p0, &annot)], "add").unwrap();
     }
     drop(held);
     let saved = dir.join("saved.pdf");
@@ -2166,8 +2058,7 @@ fn survive_an_empty_cache(how: How) {
         for m in marks {
             let mut a = m.annot.clone();
             a.contents = format!("{} again", a.contents);
-            doc.apply(Edit::AnnotUpdate { page: p0, annot: a }, "edit")
-                .unwrap();
+            doc.commit_ops(vec![fx::update(&a)], "edit").unwrap();
         }
         (doc, [form, file_id])
     };
@@ -2193,7 +2084,7 @@ fn a_file_whose_pages_come_in_cant_replace_a_stamp() {
         format!("theirs-{:x}", fastrand::u64(..)),
     );
     let ours_pdf = stamp_page(&ours);
-    let stem = crate::store::BlobId::of(&ours_pdf).stem();
+    let stem = crate::store::blob_id(&ours_pdf).stem();
     let dir = tempdir();
     // A file whose mark names the document's stamp, drawing another.
     let other = Store::new();
@@ -2214,21 +2105,13 @@ fn a_file_whose_pages_come_in_cant_replace_a_stamp() {
     let page = model.page(0).unwrap();
     let annot = thread_mark(page_stamp(&stem), "");
     model
-        .apply(Edit::AnnotAdd { page, annot }, "stamp")
+        .commit_ops(vec![fx::add(page, &annot)], "stamp")
         .unwrap();
     drop(held);
     let incoming = info(model.store(), &b_saved);
-    assert!(incoming.src.annots().stamp(&stem).is_some());
-    let annots = incoming.src.annots().marks().into_iter().collect();
-    let sb = model.add_source(incoming);
-    let insert = Edit::InsertPages {
-        source: sb,
-        range: 0..1,
-        before: None,
-        outline: None,
-        annots,
-    };
-    model.apply(insert, "ins").unwrap();
+    assert!(incoming.annots().stamp(&stem).is_some());
+    let insert = fx::insert(&incoming, [0], "a.pdf", None);
+    model.commit_ops(vec![insert], "ins").unwrap();
 
     let out = rewrite(&model.snapshot()).unwrap();
     let pdf = Pdf::load_mem(&out).unwrap();
@@ -2292,9 +2175,7 @@ fn caret_and_strikeout(how: How) {
         "",
     );
     for (a, label) in [(replace, "replace"), (underline, "underline")] {
-        model
-            .apply(Edit::AnnotAdd { page: p0, annot: a }, label)
-            .unwrap();
+        model.commit_ops(vec![fx::add(p0, &a)], label).unwrap();
     }
     let want: Vec<Annot> = model.state().marks_on(p0).cloned().collect();
 
@@ -2374,13 +2255,7 @@ fn caret_and_strikeout(how: How) {
     let mut changed = model2.state().marks_on(p).next().unwrap().clone();
     changed.contents = "newer words".into();
     model2
-        .apply(
-            Edit::AnnotUpdate {
-                page: p,
-                annot: changed,
-            },
-            "edit",
-        )
+        .commit_ops(vec![fx::update(&changed)], "edit")
         .unwrap();
     let bytes2 = how.write(&model2);
     let (list2, _) = annots_of(&bytes2);
@@ -2420,10 +2295,10 @@ fn annots_read_back(how: How) {
         name: String::new(),
     };
     model
-        .apply(
-            Edit::AnnotAdd {
-                page: p0,
-                annot: mk(AnnotKind::Highlight {
+        .commit_ops(
+            vec![fx::add(
+                p0,
+                &mk(AnnotKind::Highlight {
                     rects: vec![Box2 {
                         x: 72.0,
                         y: 80.0,
@@ -2431,26 +2306,26 @@ fn annots_read_back(how: How) {
                         h: 14.0,
                     }],
                 }),
-            },
+            )],
             "hl",
         )
         .unwrap();
     model
-        .apply(
-            Edit::AnnotAdd {
-                page: p0,
-                annot: mk(AnnotKind::Note {
+        .commit_ops(
+            vec![fx::add(
+                p0,
+                &mk(AnnotKind::Note {
                     pos: Pt { x: 300.0, y: 80.0 },
                 }),
-            },
+            )],
             "note",
         )
         .unwrap();
     model
-        .apply(
-            Edit::AnnotAdd {
-                page: p0,
-                annot: mk(AnnotKind::Stamp {
+        .commit_ops(
+            vec![fx::add(
+                p0,
+                &mk(AnnotKind::Stamp {
                     rect: Box2 {
                         x: 400.0,
                         y: 80.0,
@@ -2459,7 +2334,7 @@ fn annots_read_back(how: How) {
                     },
                     glyph: "✓".into(),
                 }),
-            },
+            )],
             "tick",
         )
         .unwrap();
@@ -2490,13 +2365,7 @@ fn annots_read_back(how: How) {
     let p0b = model2.page(0).unwrap();
     let first = model2.state().marks_on(p0b).next().unwrap().clone();
     model2
-        .apply(
-            Edit::AnnotDelete {
-                page: p0b,
-                id: first.id,
-            },
-            "rm",
-        )
+        .commit_ops(vec![fx::delete_annots(&[first.id])], "rm")
         .unwrap();
     let bytes2 = how.write(&model2);
     let pdf = Pdf::load_mem(&bytes2).unwrap();
@@ -2560,13 +2429,7 @@ fn connectors_link_in_a_cycle(how: How) {
     };
     for pg in [p0, p1, p2] {
         model
-            .apply(
-                Edit::AnnotAdd {
-                    page: pg,
-                    annot: connector(100.0),
-                },
-                "c",
-            )
+            .commit_ops(vec![fx::add(pg, &connector(100.0))], "c")
             .unwrap();
     }
     // Each page's links, top to bottom, as the page number each goes to.
@@ -2610,13 +2473,7 @@ fn connectors_link_in_a_cycle(how: How) {
     let mut model = opened(&out);
     let p0 = model.page(0).unwrap();
     model
-        .apply(
-            Edit::AnnotAdd {
-                page: p0,
-                annot: connector(400.0),
-            },
-            "c",
-        )
+        .commit_ops(vec![fx::add(p0, &connector(400.0))], "c")
         .unwrap();
     let bytes = how.write(&model);
     assert_eq!(dests(&bytes), [vec![1, 2], vec![3], vec![1]]);
@@ -2661,13 +2518,7 @@ fn connectors_link_to_partner(how: How) {
         name: String::new(),
     };
     model
-        .apply(
-            Edit::ConnectorAdd {
-                a: (p0, mk()),
-                b: (p2, mk()),
-            },
-            "c",
-        )
+        .commit_ops(vec![fx::connect((p0, &mk()), (p2, &mk()))], "c")
         .unwrap();
 
     let check = |bytes: &[u8]| {
@@ -2743,11 +2594,16 @@ fn encrypted_source_saves(how: How) {
     );
 
     let store = Store::new();
-    let (primary, stamp) = SourceInfo::read(&store, &enc, Some("secret")).unwrap();
+    let (primary, stamp) = store.read_file(&enc, Some("secret")).unwrap();
+    let came = Came::Read {
+        path: enc.as_path().into(),
+        stamp,
+    };
     let mut model = Document::new(
         store,
         primary,
-        Some(Came::Read(stamp)),
+        crate::store::file_name(&enc),
+        Some(came),
         &[FlatOutlineItem {
             title: "Top".into(),
             page: Some(0),
@@ -2763,16 +2619,10 @@ fn encrypted_source_saves(how: How) {
     );
     let p1 = model.page(1).unwrap();
     model
-        .apply(
-            Edit::RotatePages {
-                ids: vec![p1],
-                by: Rotation::R90,
-            },
-            "rot",
-        )
+        .commit_ops(vec![fx::rotate(&[p1], Turn::Quarter)], "rot")
         .unwrap();
     let lazy = |path: &Path, password| {
-        let bytes = sheaf_core::read_file(path).unwrap();
+        let bytes = sheaf_util::read_file(path).unwrap();
         lopdf::LazyPdf::open(bytes, password, &crate::source::Limits::DEFAULT.reader)
     };
     let crypt = |path: &Path| {
@@ -2843,28 +2693,14 @@ fn encrypted_source_saves(how: How) {
 #[test]
 fn header_footer_is_drawn_stored_and_strippable() {
     use crate::content::{PagOrigin, PaginationKind};
-    use crate::stamps::{HEADER_FOOTER, HeaderFooter};
+    use crate::stamps::HEADER_FOOTER;
     let dir = tempdir();
     let a = make_pdf(&dir, "hf.pdf", "H", 2, &[]);
     let mut model = open(&a, &[], crate::history::default_policy());
-    let hf = HeaderFooter {
-        texts: [
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            "Page <<1>> of <<N>>".into(),
-            String::new(),
-        ],
-        ..Default::default()
-    };
+    let mut footer = fx::header("");
+    footer.texts[4] = "Page <<1>> of <<N>>".into();
     model
-        .apply(
-            Edit::SetHeaderFooter {
-                header_footer: Some(hf.clone()),
-            },
-            "hf",
-        )
+        .commit_ops(vec![fx::set_header(footer.clone(), None)], "hf")
         .unwrap();
     let out = dir.join("hf-out.pdf");
     rewrite_to_path(&model.snapshot(), &out).unwrap();
@@ -2905,7 +2741,7 @@ fn header_footer_is_drawn_stored_and_strippable() {
         assert!(String::from_utf8_lossy(&all).contains(&want), "page {i}");
     }
     let (stored, scope) = crate::stamps::from_catalog(&pdf).unwrap();
-    assert_eq!(stored.texts, hf.texts);
+    assert_eq!(stored.texts, footer.texts);
     assert_eq!(scope, None);
     // Read from a source, as it opens: the same.
     assert_eq!(
@@ -2952,13 +2788,11 @@ fn page_labels_follow_pages(how: How) {
         first,
     };
     model
-        .apply(
-            Edit::SetPageLabels {
-                ranges: vec![
-                    spec(ids[0], Style::LowerRoman, 1),
-                    spec(ids[2], Style::Decimal, 1),
-                ],
-            },
+        .commit_ops(
+            vec![fx::labels(&[
+                spec(ids[0], Style::LowerRoman, 1),
+                spec(ids[2], Style::Decimal, 1),
+            ])],
             "labels",
         )
         .unwrap();
@@ -2971,20 +2805,14 @@ fn page_labels_follow_pages(how: How) {
     assert_eq!(read(&a).unwrap(), vec!["i", "ii", "1", "2"]);
     // Move the decimal range's first page to the front; rewrite.
     model
-        .apply(
-            Edit::MovePages {
-                ids: vec![ids[2]],
-                before: Some(ids[0]),
-            },
-            "move",
-        )
+        .commit_ops(vec![fx::move_pages(&[ids[2]], Some(ids[0]))], "move")
         .unwrap();
     let out = dir.join("moved.pdf");
     rewrite_to_path(&model.snapshot(), &out).unwrap();
     assert_eq!(read(&out).unwrap(), vec!["1", "i", "ii", "iii"]);
     // Removed.
     model
-        .apply(Edit::SetPageLabels { ranges: vec![] }, "none")
+        .commit_ops(vec![Op::SetPageLabels { ranges: None }], "none")
         .unwrap();
     let out = dir.join("none.pdf");
     rewrite_to_path(&model.snapshot(), &out).unwrap();
@@ -2995,8 +2823,8 @@ fn page_labels_follow_pages(how: How) {
 
 pub(crate) fn ocr_layer(text: &str) -> std::sync::Arc<crate::text_layer::TextLayer> {
     use crate::annot::Box2;
-    use crate::text_layer::{OcrWord, TextLayer};
-    std::sync::Arc::new(TextLayer::from_engine(
+    use crate::text_layer::OcrWord;
+    std::sync::Arc::new(crate::text_layer::from_engine(
         vec![OcrWord {
             text: text.into(),
             rect: Box2 {
@@ -3014,12 +2842,7 @@ pub(crate) fn ocr_layer(text: &str) -> std::sync::Arc<crate::text_layer::TextLay
 
 pub(crate) fn set_layer(model: &mut Document, page: PageId, text: &str) {
     model
-        .apply(
-            Edit::SetTextLayers {
-                layers: vec![(page, ocr_layer(text))],
-            },
-            "ocr",
-        )
+        .commit_ops(fx::ocr(vec![(page, ocr_layer(text))]), "ocr")
         .unwrap();
 }
 
@@ -3161,7 +2984,7 @@ fn an_append_writes_a_layer_in_a_changed_tree() {
     let ids: Vec<PageId> = model.state().order().iter().copied().collect();
     set_layer(&mut model, ids[2], "Hello");
     model
-        .apply(Edit::DeletePages { ids: vec![ids[0]] }, "del")
+        .commit_ops(vec![fx::delete(&[ids[0]])], "del")
         .unwrap();
     let bytes = How::Appended.write(&model);
     assert!(bytes.starts_with(&original));
@@ -3185,14 +3008,12 @@ fn one_font_set_per_file() {
     let mut model = open(&a, &[], Box::new(FixedCount(10)));
     let ids: Vec<PageId> = model.state().order().iter().copied().collect();
     model
-        .apply(
-            Edit::SetTextLayers {
-                layers: vec![
-                    (ids[0], ocr_layer("one")),
-                    (ids[1], ocr_layer("two")),
-                    (ids[2], ocr_layer("three")),
-                ],
-            },
+        .commit_ops(
+            fx::ocr(vec![
+                (ids[0], ocr_layer("one")),
+                (ids[1], ocr_layer("two")),
+                (ids[2], ocr_layer("three")),
+            ]),
             "ocr",
         )
         .unwrap();
@@ -3217,17 +3038,11 @@ fn duplicate_shares_layer_and_is_not_double_rotated() {
     let mut model = open(&a, &[], Box::new(FixedCount(10)));
     let ids: Vec<PageId> = model.state().order().iter().copied().collect();
     model
-        .apply(
-            Edit::RotatePages {
-                ids: vec![ids[0]],
-                by: Rotation::R90,
-            },
-            "rot",
-        )
+        .commit_ops(vec![fx::rotate(&[ids[0]], Turn::Quarter)], "rot")
         .unwrap();
     set_layer(&mut model, ids[0], "Hello");
     model
-        .apply(Edit::DuplicatePages { ids: vec![ids[0]] }, "dup")
+        .commit_ops(vec![fx::duplicate(&[ids[0]])], "dup")
         .unwrap();
     let bytes = rewrite(&model.snapshot()).unwrap();
     assert_eq!(
@@ -3281,19 +3096,12 @@ fn empty_layer_writes_nothing() {
     let a = make_pdf(&dir, "a.pdf", "A", 1, &[]);
     let mut model = open(&a, &[], Box::new(FixedCount(10)));
     let p0 = model.page(0).unwrap();
-    let empty = std::sync::Arc::new(crate::text_layer::TextLayer::from_engine(
+    let empty = std::sync::Arc::new(crate::text_layer::from_engine(
         vec![],
         &crate::geom::Geom::read(None, None, 0),
         "test",
     ));
-    model
-        .apply(
-            Edit::SetTextLayers {
-                layers: vec![(p0, empty)],
-            },
-            "ocr",
-        )
-        .unwrap();
+    model.commit_ops(fx::ocr(vec![(p0, empty)]), "ocr").unwrap();
     let bytes = rewrite(&model.snapshot()).unwrap();
     let pdf = Pdf::load_mem(&bytes).unwrap();
     let page = pdf.get_pages()[&1];

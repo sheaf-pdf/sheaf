@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
-use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::materialize::Came;
-use sheaf_doc::{
-    Box2, Document, Edit, FixedCount, OcrWord, PageChars, Pt, SourceInfo, Store, TextLayer,
-};
+use sheaf_doc::tx::fixture::{self, ocr};
+use sheaf_doc::{Box2, Document, FixedCount, OcrWord, PageChars, Pt, Store};
+use sheaf_edit::{Rotation, Turn};
+use sheaf_render::PageIndex;
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
@@ -97,24 +97,23 @@ fn check(rotate: i64, by: Rotation) {
     let src = dir.join("src.pdf");
     blank_pdf(&src, rotate);
     let store = Store::new();
-    let (primary, stamp) = SourceInfo::read(&store, &src, None).unwrap();
+    let (primary, stamp) = store.read_file(&src, None).unwrap();
+    let came = Came::Read {
+        path: src.as_path().into(),
+        stamp,
+    };
     let mut model = Document::new(
         store,
         primary,
-        Some(Came::Read(stamp)),
+        sheaf_doc::store::file_name(&src),
+        Some(came),
         &[],
         Box::new(FixedCount(10)),
     );
     let page = model.page(0).unwrap();
-    if by != Rotation::R0 {
+    if let Some(by) = Turn::by(by) {
         model
-            .apply(
-                Edit::RotatePages {
-                    ids: vec![page],
-                    by,
-                },
-                "rotate",
-            )
+            .commit_ops(vec![fixture::rotate(&[page], by)], "rotate")
             .unwrap();
     }
     // Two words on a line, as the engine would report them in the frame
@@ -132,7 +131,7 @@ fn check(rotate: i64, by: Rotation) {
         w: 60.0,
         h: 12.0,
     };
-    let layer = TextLayer::from_engine(
+    let layer = sheaf_doc::text_layer::from_engine(
         vec![word("Hello", hello), word("World", world)],
         &shown,
         "test",
@@ -142,14 +141,8 @@ fn check(rotate: i64, by: Rotation) {
         let hits = sheaf_doc::text_layer::search(&layer, query, true);
         hits[0].rects.iter().copied().reduce(Box2::union).unwrap()
     };
-    model
-        .apply(
-            Edit::SetTextLayers {
-                layers: vec![(page, Arc::new(layer.clone()))],
-            },
-            "ocr",
-        )
-        .unwrap();
+    let layers = [(page, Arc::new(layer.clone()))];
+    model.commit_ops(ocr(layers), "ocr").unwrap();
     let out = dir.join("ocr.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
 

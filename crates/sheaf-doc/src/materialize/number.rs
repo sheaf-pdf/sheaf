@@ -14,8 +14,9 @@
 //!   a stream byte-identical to one before it written once.
 //! - **Appended,** for an Append's section ([`appended`]): a key the saved
 //!   file's map has keeps its number, so a changed object is written over
-//!   itself; a key that's a primary object sits at its own number; every
-//!   other is numbered past every number the file uses, its `/Size`, its
+//!   itself, unless that's the number of a primary object another key is;
+//!   a key that's a primary object sits at its own number; every other is
+//!   numbered past every number the file uses, its `/Size`, its
 //!   cross-reference streams' and its map's (slice 2's 5801985: an object
 //!   numbered at the base's cross-reference stream's number was read as
 //!   it), and past every primary number the section names, as the stable
@@ -194,18 +195,19 @@ pub struct Appended {
 
 /// The numbers an Append of `e` onto the file `record` says writes its
 /// objects at: each key the file's map has at its number there, each the
-/// emission says is a primary object ([`Emission::owned`]) at its own, and
-/// the rest from past every number the file uses and every primary number
-/// the section names, the pages in order, then the rest by key, and the
-/// section's cross-reference stream after them. What it names is what its
-/// placeholders name and `raw`, what the primary's objects it writes as
-/// the file has them refer to: a reference to a number that nothing is
-/// (the input's damage, which the section keeps) stays one, as a
-/// Rewrite's does ([`stable`]). An error when no numbers are left for
-/// them; refused ([`Refused::Unsound`]) when only the numbers it names
-/// leave too few, so the save is a Rewrite, which numbers it for itself
-/// and stops too when its own numbering runs out as well (a reference to
-/// a number next to the last a file may use: nothing can be saved).
+/// emission says is a primary object ([`Emission::owned`]) at its own,
+/// which a key the file has there gives up, and the rest from past every
+/// number the file uses and every primary number the section names, the
+/// pages in order, then the rest by key, and the section's cross-reference
+/// stream after them. What it names is what its placeholders name and
+/// `raw`, what the primary's objects it writes as the file has them refer
+/// to: a reference to a number that nothing is (the input's damage, which
+/// the section keeps) stays one, as a Rewrite's does ([`stable`]). An error
+/// when no numbers are left for them; refused ([`Refused::Unsound`]) when
+/// only the numbers it names leave too few, so the save is a Rewrite, which
+/// numbers it for itself and stops too when its own numbering runs out as
+/// well (a reference to a number next to the last a file may use: nothing
+/// can be saved).
 pub fn appended(
     e: &Emission,
     record: &SaveRecord,
@@ -221,8 +223,20 @@ pub fn appended(
     let (widgets, others): (Vec<&ObjKey>, Vec<&ObjKey>) = (e.objects.iter())
         .map(|(key, _)| key)
         .partition(|key| matches!(key, ObjKey::Annot(_)));
+    let number = |key: &ObjKey| record.map.get(key).or_else(|| e.owned.get(key).copied());
+    // A key written at the number of the primary object it is sits there
+    // whatever comes first: one the file has there that's another now (a
+    // page replaced, appended over the object it was, and that page
+    // brought back) takes a number of its own.
+    let owners: HashMap<u32, &ObjKey> = (others.iter().chain(&widgets))
+        .filter_map(|&key| {
+            let own = e.owned.get(key)?;
+            (number(key) == Some(*own)).then_some((own.0, key))
+        })
+        .collect();
     for key in others.into_iter().chain(widgets) {
-        match record.map.get(key).or_else(|| e.owned.get(key).copied()) {
+        let at = number(key).filter(|at| owners.get(&at.0).is_none_or(|&k| k == key));
+        match at {
             Some(at) if taken.insert(at.0) => {
                 by_key.insert(*key, at);
             }
@@ -311,7 +325,7 @@ pub fn dense(
             && !apart(id)
             && let Some(bytes) = written(obj)
         {
-            let like = streams.entry(sheaf_core::checksum(&bytes)).or_default();
+            let like = streams.entry(sheaf_util::checksum(&bytes)).or_default();
             let same = (like.iter())
                 .find(|&&first| written(&objects[&first]).as_deref() == Some(bytes.as_slice()));
             if let Some(first) = same {

@@ -210,9 +210,7 @@ pub fn of_rewrite(
 ) -> anyhow::Result<Option<Found>> {
     use anyhow::Context as _;
     let saved = (input.saved.as_ref()).context("nothing says what the saved file holds")?;
-    let primary = &(input.sources.get(&input.primary))
-        .context("the primary isn't registered")?
-        .src;
+    let primary = &input.primary;
     let password = saved.record.crypt.as_ref().and(primary.password());
     let lim = primary.limits();
     let old = LazyPdf::open(on_disk, password, &lim.reader).context("reading the saved file")?;
@@ -568,7 +566,7 @@ fn stream_text(
     );
     let mut bag = TextBag::default();
     if subtype == Some(b"Image") || kind == Some(b"EmbeddedFile") {
-        bag.add_hash(sheaf_core::checksum(&stream.content));
+        bag.add_hash(sheaf_util::checksum(&stream.content));
         return Some(bag);
     }
     let pattern = dict.get(b"PatternType").and_then(Object::as_i64).ok() == Some(1);
@@ -695,8 +693,9 @@ impl ReadObjects for Joined<'_> {
 
 /// What annotation `rec` says, as words: a sheaf mark's contents, author
 /// and name, its kind's own text, and the file or stamp it holds, by hash;
-/// another tool's comment's contents, author and name. Nothing for a
-/// widget, or none.
+/// another tool's comment's contents, author and name, and the name of the
+/// comment it replies to, as a sheaf reply's says it. Nothing for a widget,
+/// or none.
 fn says(rec: Option<&AnnotRec>) -> TextBag {
     let mut bag = TextBag::default();
     match rec.map(|r| &r.body) {
@@ -706,6 +705,7 @@ fn says(rec: Option<&AnnotRec>) -> TextBag {
             for text in [&s.contents, &s.author, &s.name] {
                 bag.add(text);
             }
+            bag.add(s.parent.as_deref().unwrap_or_default());
         }
         Some(AnnotBody::Widget(_)) | None => {}
     }
@@ -767,7 +767,7 @@ fn mark_says(m: &Mark, bag: &mut TextBag) {
             let mut bytes = blob_hash(r.src.id()).to_be_bytes().to_vec();
             bytes.extend(r.id.0.to_be_bytes());
             bytes.extend(r.id.1.to_be_bytes());
-            bag.add_hash(sheaf_core::checksum(&bytes));
+            bag.add_hash(sheaf_util::checksum(&bytes));
         }
         None => {}
     }
@@ -777,7 +777,7 @@ fn mark_says(m: &Mark, bag: &mut TextBag) {
 fn blob_hash(id: BlobId) -> u128 {
     let mut bytes = id.hash.to_be_bytes().to_vec();
     bytes.extend(id.len.to_be_bytes());
-    sheaf_core::checksum(&bytes)
+    sheaf_util::checksum(&bytes)
 }
 
 /// What sheaf draws over the pages of a state, as words ([`Drawn::on`]):

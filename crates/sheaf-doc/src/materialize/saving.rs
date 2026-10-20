@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use in_progress::Progress;
-use sheaf_core::Checksum;
+use sheaf_util::Checksum;
 
 use super::plan::{
     Ask, AskAnswers, Note, Onto, SavePlan, SaveStop, SaveTarget, Strategy, StrategyKind, Why,
@@ -18,6 +18,7 @@ use super::plan::{
 };
 use super::record::{SaveInput, SaveRecord};
 use super::removal::Mode;
+use crate::change::ChangeSet;
 use crate::model::Document;
 use crate::serialize::append::append_in_place;
 use crate::serialize::durable::{self, FileStamp, WriteError};
@@ -65,8 +66,9 @@ impl Written {
 
     /// Its version the saved one of `doc`, with its record
     /// ([`Document::record_save`]), the save noted when it wrote
-    /// ([`Document::record_unchanged`] otherwise).
-    pub fn record_in(self, doc: &mut Document) -> anyhow::Result<()> {
+    /// ([`Document::record_unchanged`] otherwise): the change, of nothing
+    /// the document shows.
+    pub fn record_in(self, doc: &mut Document) -> anyhow::Result<ChangeSet> {
         match self.wrote {
             true => doc.record_save(self.record),
             false => doc.record_unchanged(self.record),
@@ -167,7 +169,7 @@ pub fn appended(doc: &Document) -> Result<Vec<u8>, SaveStop> {
             .with_context(|| format!("reading {}", record.path.display()))
             .map_err(failed)?
             .into(),
-        None => input.sources[&input.primary].src.bytes().clone(),
+        None => input.primary.bytes().clone(),
     };
     if base.len() as u64 != saved.record.stamp.len {
         return Err(SaveStop::Ask(Ask::FileChanged {
@@ -274,7 +276,7 @@ fn saved_as(
         Ok(written) => {
             let report = written.report();
             match written.record_in(doc) {
-                Ok(()) => Ok(report),
+                Ok(_) => Ok(report),
                 Err(e) => {
                     doc.abandon_save(v);
                     Err(failed(e))

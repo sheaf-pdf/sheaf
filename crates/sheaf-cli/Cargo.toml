@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "sheaf on the command line: the same operations as the app, with no GUI"
+publish = false
 
 [[bin]]
 name = "sheaf-cli"

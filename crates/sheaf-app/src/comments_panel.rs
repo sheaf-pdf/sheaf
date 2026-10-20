@@ -17,7 +17,9 @@ use gpui::{
 };
 use sheaf_doc::annot::{MARKED, REVIEW, REVIEW_STATES};
 use sheaf_doc::geom::Affine;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, DocState, PageId, file::ForeignAnnot};
+use sheaf_doc::tx::{Actor, CommitOpts, JobKind, Stale};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, DocState, Document, PageId, file::ForeignAnnot};
+use sheaf_edit::{AnnotRef, MarkPatch, Op};
 use sheaf_ops::comments::{
     self, Column, Comment, DataFormat, Layout, Sort, Summary, foreign_text, ours_text, parse_pages,
     status_words, subtype_label, thread_status, threads,
@@ -129,7 +131,7 @@ pub struct CommentView {
     pub hidden_foreign: HashSet<AnnotId>,
 }
 
-/// When the view must be made again: the document's version, the
+/// When the view must be made again: the document's change count, the
 /// filter, the search text and the reply box.
 pub(crate) type ViewKey = (u64, CommentFilter, String, Option<(Item, Option<AnnotId>)>);
 
@@ -322,26 +324,28 @@ impl DocView {
         }
         match rb.editing {
             Some(id) => {
-                if let Some(mut a) = self.ours(rb.page, id)
-                    && a.contents != text
-                {
-                    a.contents = text;
-                    a.modified = sheaf_doc::pdf_date_now();
-                    self.apply(
-                        sheaf_doc::Edit::AnnotUpdate {
-                            page: rb.page,
-                            annot: a,
-                        },
-                        "Edit reply",
-                        cx,
-                    );
+                if self.ours(rb.page, id).is_some_and(|a| a.contents != text) {
+                    let patch = MarkPatch {
+                        contents: Some(text),
+                        ..MarkPatch::default()
+                    };
+                    let marks = vec![AnnotRef::Id(id)];
+                    let op = Op::PatchMarks {
+                        marks,
+                        patch,
+                        imported: None,
+                    };
+                    if let Some(tx) = self.lower(vec![op], "Edit reply", cx) {
+                        self.commit(tx, CommitOpts::labelled("Edit reply"), cx).ok();
+                    }
                 }
             }
             None => {
                 let color = crate::markup_tools::color_of(crate::markup_tools::Tool::Note, cx);
-                let mut a = self.new_annot(AnnotKind::Reply { parent: rb.parent }, color, cx);
+                let mut a = self.new_annot(AnnotKind::Reply { parent: rb.parent }, color);
                 a.contents = text;
-                self.add_page_annot(rb.page, a, "Reply", cx);
+                let (Item::Ours(_, to) | Item::Foreign(to)) = rb.to;
+                self.add_reply(rb.page, a, to, "Reply", cx);
             }
         }
     }
@@ -364,11 +368,12 @@ impl DocView {
                 state: state.to_string(),
             },
             crate::markup_tools::color_of(crate::markup_tools::Tool::Note, cx),
-            cx,
         );
-        // What Acrobat writes, for viewers that list statuses as text.
-        a.contents = format!("{state} set by {}", a.author);
-        self.add_page_annot(page, a, "Status", cx);
+        // What Acrobat writes, for viewers that list statuses as text: the
+        // host fills in who.
+        a.contents = format!("{state} set by <<name>>");
+        let (Item::Ours(_, to) | Item::Foreign(to)) = item;
+        self.add_reply(page, a, to, "Status", cx);
         if let Some(cm) = &mut self.comments {
             cm.menu = None;
         }
@@ -498,7 +503,7 @@ impl DocView {
             return Arc::default();
         };
         let key: ViewKey = (
-            doc.version,
+            doc.changes,
             doc.comment_filter.clone(),
             needle.clone(),
             reply,
@@ -542,14 +547,10 @@ impl DocView {
         let mut want: HashSet<(sheaf_doc::SourceId, u32, usize)> = HashSet::new();
         for (page, def, _) in st.pages() {
             let base = &def.base;
-            let Some(info) = doc
-                .model
-                .source(base.source)
-                .filter(|s| s.derived.is_none())
-            else {
+            if doc.model.derived().contains_key(&base.src.id()) {
                 continue;
-            };
-            let in_file = info.src.annots().foreign_on(base.index);
+            }
+            let in_file = base.src.annots().foreign_on(base.index);
             let mut in_file = in_file
                 .filter(|(_, _, f)| !f.hidden && !f.is_link())
                 .peekable();
@@ -563,7 +564,7 @@ impl DocView {
             want.extend(
                 in_file
                     .filter(|(_, _, f)| !shown.contains(f.name.as_str()))
-                    .map(|(_, _, f)| (base.source, base.index, f.slot)),
+                    .map(|(_, _, f)| (base.src.id(), base.index, f.slot)),
             );
         }
         let hide: Vec<_> = want.difference(&doc.foreign_hidden).copied().collect();
@@ -649,17 +650,20 @@ impl DocView {
         let Some((page, name)) = self.item_page_and_name(Item::Foreign(id)) else {
             return false;
         };
-        if let State::Ready(doc) = &mut self.state {
-            doc.selected_foreign = None;
+        let State::Ready(doc) = &mut self.state else {
+            return false;
+        };
+        doc.selected_foreign = None;
+        // Every one of another tool's comments on the page by that name: a
+        // file may name two alike.
+        let annots = (doc.model.state().foreign_on(page))
+            .filter(|(_, f)| f.summary.name == name)
+            .map(|(id, _)| AnnotRef::Id(id))
+            .collect();
+        let label = "Delete comment";
+        if let Some(tx) = self.lower(vec![Op::DeleteAnnotations { annots }], label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
         }
-        self.apply(
-            sheaf_doc::Edit::CommentsDelete {
-                page,
-                names: vec![name],
-            },
-            "Delete comment",
-            cx,
-        );
         true
     }
 
@@ -1546,53 +1550,53 @@ impl DocView {
 
     /// Bring in the comments in the FDF, XFDF or PDF file at `path`, as
     /// one undo step: one here already by name is updated, the rest added.
+    /// A planner (jobs.rs): the file is read, matched against the comments
+    /// here and lowered off the UI thread, on a snapshot, and lowered again
+    /// on the current version if the document has moved on (M10.5 §8.5).
     pub fn import_comments_from(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         // What's brought in is matched against the comments already here.
         if self.still_opening(cx) {
             return;
         }
-        let State::Ready(doc) = &mut self.state else {
+        let State::Ready(doc) = &self.state else {
             return;
         };
-        doc.notice = Some(format!("Reading comments from {}…", path.display()));
-        let (snapshot, store) = (doc.model.snapshot(), doc.model.store().clone());
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move {
-                        let bytes = std::fs::read(&path)?;
-                        comments::import_data(&snapshot, &store, &bytes, None)
-                    }
-                })
-                .await;
-            this.update(cx, |view, cx| {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                match result {
-                    Ok(got) => {
-                        let summary = got.summary();
-                        // What the marks hold is held until they're added.
-                        if !got.edits.is_empty() {
-                            view.apply_batch(
-                                got.edits,
-                                &format!("Import comments from {name}"),
-                                cx,
-                            );
-                        }
-                        drop(got.held);
-                        view.set_notice(format!("Imported from {name}: {summary}"), cx);
-                    }
-                    Err(e) => view.set_notice(format!("Import failed: {e:#}"), cx),
+        let snapshot = doc.model.snapshot();
+        let store = doc.model.store().clone();
+        let lower = doc.model.lower_cx(Actor::Job(JobKind::Import));
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let label = format!("Import comments from {name}");
+        let work = move |p: &sheaf_ops::Tracker| {
+            let bytes = std::fs::read(&path)?;
+            let got = comments::import_data(&snapshot, &store, &bytes, None)?;
+            let summary = got.summary();
+            // What the marks hold is held in the transaction until they're
+            // added.
+            let mut tx = Document::tx_at(&snapshot, lower);
+            let ops = got.ops_in(&mut tx);
+            let tx = match ops.is_empty() {
+                true => None,
+                false => {
+                    tx.apply_batch(ops, p)?;
+                    Some(tx)
                 }
-            })
-            .ok();
-        })
-        .detach();
+            };
+            anyhow::Ok((tx, summary, snapshot.version))
+        };
+        let land = {
+            let label = label.clone();
+            move |v: &mut DocView, (tx, summary, on), cx: &mut Context<DocView>| {
+                if let Some(tx) = tx {
+                    let opts = CommitOpts::based(on, Stale::Relower, label);
+                    v.commit(tx, opts, cx).ok()?;
+                }
+                Some(format!("Imported from {name}: {summary}"))
+            }
+        };
+        self.run_planner(&label, work, |_| None, land, cx);
     }
 
     /// The right-click menu on a comment: reply, status, checkmark.
@@ -1628,7 +1632,7 @@ impl DocView {
                         if let Some(cm) = &mut v.comments {
                             cm.menu = None;
                         }
-                        v.adopt_foreign(id, |_| {}, "Make comment editable", cx);
+                        v.adopt_foreign(id, None, "Make comment editable", cx);
                     }))
                     .into_any_element(),
             );
@@ -1892,18 +1896,22 @@ pub(crate) fn foreign_outline(f: &ForeignAnnot, to_pane: &Affine, k: f32) -> Any
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_doc::{AnnotBody, Box2, Document, FixedCount, Foreign, SourceInfo, Store};
+    use sheaf_doc::{AnnotBody, Box2, Document, FixedCount, Foreign, Store};
 
     /// The rows for a page with a thread (a; r in reply to it; rr in reply
     /// to r) and a comment b, other tools' comments 0 to 3, as short
     /// strings.
     fn rows(reply: Option<(Item, Option<AnnotId>)>) -> Vec<String> {
         let store = Store::new();
-        let primary = SourceInfo {
-            name: "x.pdf".into(),
-            ..SourceInfo::blank(&store, 1)
-        };
-        let d = Document::new(store, primary, None, &[], Box::new(FixedCount(10)));
+        let primary = sheaf_doc::store::blank(&store, 1);
+        let d = Document::new(
+            store,
+            primary,
+            "x.pdf".into(),
+            None,
+            &[],
+            Box::new(FixedCount(10)),
+        );
         let theirs = |name: &str, parent: Option<&str>, date: &str| {
             let summary = ForeignAnnot {
                 subtype: "Text".into(),

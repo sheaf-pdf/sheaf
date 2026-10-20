@@ -16,12 +16,12 @@ pub(crate) struct GoTo {
 
 impl Doc {
     /// Every page's label when the document has page labels, worked out
-    /// once per version.
+    /// once per change.
     pub(crate) fn labels(&self) -> Option<std::sync::Arc<Vec<String>>> {
         let mut cache = self.labels.borrow_mut();
-        if cache.0 != self.version {
+        if cache.0 != self.changes {
             *cache = (
-                self.version,
+                self.changes,
                 self.model.state().page_labels().map(std::sync::Arc::new),
             );
         }

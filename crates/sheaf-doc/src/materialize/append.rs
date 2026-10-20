@@ -7,7 +7,10 @@
 //!   is written over itself, under its number; a primary object at its own;
 //!   anything new past every number the file uses and every primary
 //!   number the section names, so a reference to one that nothing is (the
-//!   input's damage) stays one.
+//!   input's damage) stays one. A page the file has at the number of a
+//!   primary page that another page is copy 0 of now leaves it to that
+//!   page, and is written as a new one, with what names it by number
+//!   ([`deps::Closure::renumbered`](super::deps::Closure::renumbered)).
 //! - **References** to what the section doesn't write are the file's: a
 //!   key its map numbers, a primary object still in it (`present`), a
 //!   primary page, annotation, field or bookmark at its own number. One the
@@ -16,24 +19,24 @@
 //!   by a Rewrite.
 //! - **Refused** ([`Refused`]) as well onto a file whose cross-reference
 //!   sections were rebuilt, or whose page tree can't be spliced, when a
-//!   form instance's objects in the file are another instance's now, when
-//!   a primary object's number in it is another record's of that object,
-//!   which stays there, or the record it is sits elsewhere in it, and when
-//!   what it has names a page that a copy's reference names another page
-//!   by now, which the section doesn't write again: the save is a Rewrite
-//!   instead, or a signed document asks first. A section that writes the
-//!   catalog or the form's dictionary of a file whose signatures hold,
-//!   which none of them allows, is refused too unless the reader chose to
-//!   append anyway: the plan judged the save within what they allow, and
-//!   the save asks as it would have.
+//!   primary object's number in it is another record's of that object,
+//!   which stays there (unless it's a page the closure renumbered), or the
+//!   record it is sits elsewhere in it, and when what it has names a page
+//!   that a copy's reference names another page by now, which the section
+//!   doesn't write again: the save is a Rewrite instead, or a signed
+//!   document asks first. A section that writes the catalog or the form's
+//!   dictionary of a file whose signatures hold, which none of them
+//!   allows, is refused too unless the reader chose to append anyway: the
+//!   plan judged the save within what they allow, and the save asks as it
+//!   would have.
 //! - **Checked** ([`verify::section`]): copy-on-write and every reference;
 //!   then the removal check ([`removal`]), against the file as its record
 //!   has it, which refuses an Append that would leave removed text
 //!   readable, or reports it where the reader agreed it stays readable,
 //!   but for a derived object whose removal the save's path didn't say
 //!   (a misclassification), unless they agreed to what the check finds;
-//!   the form, with the file, when the section writes any of it; in debug
-//!   builds every object read back.
+//!   the form, with the file, when the section writes any of it or writes
+//!   a page at another number; in debug builds every object read back.
 //! - **Save policy** (§11.8): what the file had of it applies to what the
 //!   section writes, beside what the plan adds, but an XFA copy dropped
 //!   that policy keeps now, which comes back.
@@ -67,6 +70,7 @@ use super::removal::{self, Mode};
 use super::{Output, deps, number, verify};
 use crate::effects::judge;
 use crate::forms::rules;
+use crate::model::PageId;
 use crate::prim::Key;
 use crate::serialize::append::{self, Base};
 use crate::source::Source;
@@ -91,10 +95,6 @@ pub enum Refused {
     Unsound(String),
     #[error(transparent)]
     Missing(#[from] NotInFile),
-    /// A form instance's objects in the file are another instance's now:
-    /// `FormCopies` indexes the instances the state holds (until slice 11).
-    #[error("a form's objects in the saved file are another copy of it now")]
-    FormShift,
     /// A key that is a primary object would be written, or is in the file,
     /// somewhere other than its own number, or its number in the file still
     /// holds another record of that object (a page brought in again before
@@ -129,7 +129,7 @@ impl Refused {
     pub fn why(&self) -> Option<Why> {
         match self {
             Refused::Unsound(_) => Some(Why::BaseUnsound),
-            Refused::Missing(_) | Refused::FormShift | Refused::Held(_) | Refused::Stale(_) => {
+            Refused::Missing(_) | Refused::Held(_) | Refused::Stale(_) => {
                 Some(Why::BaseObjectsMissing)
             }
             Refused::Removes(found) => Some(Why::RemovalCheck { key: found.key }),
@@ -186,15 +186,13 @@ pub fn append(
         }),
         None => on_disk.clone(),
     };
-    let primary = &(input.sources.get(&input.primary))
-        .context("the primary isn't registered")?
-        .src;
+    let primary = &input.primary;
     // What save policy did to the file applies to what the section writes
     // too (an XFA copy dropped gave its tooltips to the fields' `/TU`, and
     // Reader's rights stay gone), beside what the plan adds (§11.8); but an
     // XFA copy policy keeps now, the fields as the file had them again,
     // comes back.
-    let keeps_xfa = !rules::drops_xfa(primary, &input.target, input.primary);
+    let keeps_xfa = !rules::drops_xfa(primary, &input.target);
     let mut transforms: Vec<SaveTransform> = (record.transforms.iter())
         .filter(|t| !(keeps_xfa && matches!(t, SaveTransform::DropXfa { .. })))
         .copied()
@@ -206,9 +204,6 @@ pub fn append(
     }
     let deps =
         deps::closure(input, saved, &transforms).map_err(|e| Refused::Unsound(format!("{e:#}")))?;
-    if deps.form_shift {
-        return Err(Refused::FormShift.into());
-    }
     if let Some(key) = deps.stale {
         return Err(Refused::Stale(key).into());
     }
@@ -236,7 +231,7 @@ pub fn append(
     }
     let numbers = number::appended(&e, record, named)?;
     let file = Saved::new(record, primary, &e.owned);
-    held(&e, &numbers, &file)?;
+    held(&e, &numbers, &file, &deps.renumbered)?;
     let number = |key: &ObjKey| match numbers.by_key.get(key) {
         Some(&at) => Ok(at),
         None => file.number(key),
@@ -393,20 +388,19 @@ pub fn append(
     let update = append::section(&at, &objects, numbers.xref, record.crypt.as_deref())?;
     let bytes: &[u8] = update.as_ref().map_or(&[], |u| &u.bytes);
 
-    // The form as the file has it has nothing new to find.
+    // The form as the file has it has nothing new to find, unless a page
+    // is written at another number than the file has it at, which its
+    // widgets' `/P` name.
     let form: HashSet<&ObjKey> = e.form_keys.iter().collect();
-    let touched = (objects.values()).any(|(key, _)| form.contains(key));
+    let moved = |at: &ObjectId, key: &ObjKey| {
+        matches!(key, ObjKey::Page(_)) && record.map.keys.get(key).is_some_and(|was| was != at)
+    };
+    let touched = (objects.iter()).any(|(at, (key, _))| form.contains(key) || moved(at, key));
     if touched && !bytes.is_empty() {
         let mut whole = base.read_at(0..len)?.into_owned();
         whole.extend_from_slice(bytes);
-        let mut inputs = vec![&**primary];
-        for inst in input.target.form().names.keys() {
-            if let Some(info) = input.sources.get(&inst.src)
-                && inputs.iter().all(|s| s.id() != info.src.id())
-            {
-                inputs.push(&info.src);
-            }
-        }
+        let inputs = super::emit::form::inputs(&input.target, primary);
+        let inputs: Vec<&Source> = inputs.iter().map(|s| &**s).collect();
         // What the section unlinks stays in the file, for the revisions
         // before it: only what the new one reaches is its form.
         let report = crate::forms::check_latest(&whole, password)?;
@@ -570,14 +564,21 @@ impl<'a> Saved<'a> {
 /// Refuses a section `e` numbered as `numbers` onto the saved `file` that
 /// leaves a key that's a primary object ([`Emission::owned`]) anywhere but
 /// at its number, or there over another key the file holds there still,
-/// neither written elsewhere nor its own merged widget: the object would
-/// be the other's to what refers to it by number. A key the section
-/// doesn't write is where the file's map has it (else at its own number,
-/// as [`Saved::number`] finds it): a page that's another page's copy 0
-/// now (a crop's copies trading which is copy 0 as they're moved), which
-/// the file has at a number of its own, isn't at the page's object, where
-/// a Rewrite writes it and what refers to the page by number goes.
-fn held(e: &Emission, numbers: &number::Appended, file: &Saved) -> Result<(), Refused> {
+/// neither its own merged widget nor, when the section writes the key, a
+/// page of `renumbered` it writes elsewhere (the closure wrote what names
+/// that page by number again): the object would be the other's to what
+/// refers to it by number. A key the section doesn't write is where the
+/// file's map has it (else at its own number, as [`Saved::number`] finds
+/// it): a page that's another page's copy 0 now (a crop's copies trading
+/// which is copy 0 as they're moved), which the file has at a number of
+/// its own, isn't at the page's object, where a Rewrite writes it and what
+/// refers to the page by number goes.
+fn held(
+    e: &Emission,
+    numbers: &number::Appended,
+    file: &Saved,
+    renumbered: &BTreeSet<PageId>,
+) -> Result<(), Refused> {
     let mut there: Option<HashMap<u32, Vec<ObjKey>>> = None;
     for (key, &own) in &e.owned {
         let at = (numbers.by_key.get(key).copied())
@@ -597,8 +598,14 @@ fn held(e: &Emission, numbers: &number::Appended, file: &Saved) -> Result<(), Re
             at
         });
         let merged = |k: &ObjKey| matches!((key, k), (ObjKey::Field(_), ObjKey::Annot(_)));
-        let stays = (there.get(&own.0).into_iter().flatten())
-            .any(|k| k != key && !merged(k) && !numbers.by_key.contains_key(k));
+        let written = numbers.by_key.contains_key(key);
+        let moved = |k: &ObjKey| {
+            written
+                && matches!(k, ObjKey::Page(p) if renumbered.contains(p))
+                && numbers.by_key.get(k).is_some_and(|&at| at != own)
+        };
+        let stays =
+            (there.get(&own.0).into_iter().flatten()).any(|k| k != key && !merged(k) && !moved(k));
         if stays {
             return Err(Refused::Held(*key));
         }

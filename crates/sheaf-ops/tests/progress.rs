@@ -17,10 +17,11 @@ fn scratch(name: &str) -> PathBuf {
 
 fn blank(pages: u32) -> Document {
     let store = sheaf_doc::Store::new();
-    let primary = sheaf_doc::SourceInfo::blank(&store, pages);
+    let primary = sheaf_doc::store::blank(&store, pages);
     Document::new(
         store,
         primary,
+        "a.pdf".into(),
         None,
         &[],
         sheaf_doc::history::default_policy(),

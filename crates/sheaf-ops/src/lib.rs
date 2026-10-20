@@ -19,8 +19,10 @@ pub mod scan;
 pub mod split;
 pub mod stamps;
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
-use sheaf_doc::SourceInfo;
+use sheaf_doc::{SourceId, Src};
 use sheaf_render::pdfium::PdfiumEngine;
 
 pub use in_progress::{Cancelled, NoProgress, Progress, Snapshot as ProgressSnapshot, Tracker};
@@ -37,7 +39,18 @@ pub fn was_cancelled(e: &anyhow::Error) -> bool {
     })
 }
 
+/// `items` grouped by the source each is of: the sources by id, each
+/// one's items in the order they came.
+pub(crate) fn by_source<T>(items: impl IntoIterator<Item = (Src, T)>) -> Vec<(Src, Vec<T>)> {
+    let mut groups: BTreeMap<SourceId, (Src, Vec<T>)> = BTreeMap::new();
+    for (src, item) in items {
+        let group = groups.entry(src.id()).or_insert_with(|| (src, Vec::new()));
+        group.1.push(item);
+    }
+    groups.into_values().collect()
+}
+
 /// A renderer for a source, on its blob's bytes.
-pub fn engine_for(info: &SourceInfo) -> Result<PdfiumEngine> {
-    PdfiumEngine::open_bytes(info.src.bytes().clone(), info.src.password())
+pub fn engine_for(src: &Src) -> Result<PdfiumEngine> {
+    PdfiumEngine::open_bytes(src.bytes().clone(), src.password())
 }

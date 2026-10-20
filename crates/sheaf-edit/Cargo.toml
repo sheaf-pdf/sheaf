@@ -1,0 +1,23 @@
+[package]
+name = "sheaf-edit"
+description = "sheaf's edit vocabulary: ops, the references they name things by, and the payloads they carry, as types and as JSON"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Op JSON to test with (`fixture`): every op and every kind of mark, for
+# this crate's tests and other crates'.
+fixtures = []
+
+# Types only: nothing of sheaf's, no files, no platform code, so it builds
+# for wasm32-wasip2 (CI checks both).
+[dependencies]
+serde.workspace = true
+schemars.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# Its own fixtures, for its tests.
+sheaf-edit = { path = ".", features = ["fixtures"] }

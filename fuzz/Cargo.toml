@@ -3,6 +3,7 @@
 # `.github/workflows/fuzz.yml` runs each nightly; locally:
 #
 #   cargo +nightly fuzz run lazy_reader -- -dict=fuzz/pdf.dict
+#   cargo +nightly fuzz run op_json -- -dict=fuzz/op.dict
 #
 # Each target calls a body in `sheaf_doc::source::fuzz`, which a stable
 # test (`fuzz_bodies_survive_mutated_fixtures`) runs too.
@@ -18,7 +19,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-sheaf-doc = { path = "../crates/sheaf-doc" }
+# `op_json`'s document is built from sheaf-doc's form and mark fixtures.
+sheaf-doc = { path = "../crates/sheaf-doc", features = ["fixtures"] }
 
 # sheaf-doc's lopdf is the workspace's patched one (vendor/lopdf/SHEAF.md);
 # a workspace's patches don't reach a crate outside it.
@@ -56,6 +58,13 @@ bench = false
 [[bin]]
 name = "splice"
 path = "fuzz_targets/splice.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "op_json"
+path = "fuzz_targets/op_json.rs"
 test = false
 doc = false
 bench = false

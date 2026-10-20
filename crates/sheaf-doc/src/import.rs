@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use lopdf::{Dictionary, Object};
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt, REVIEW};
 use crate::attachments::Objects;

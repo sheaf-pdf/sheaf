@@ -12,17 +12,18 @@
 //! [`sheaf_image::blank`], which the scan pipeline also uses on cleaned
 //! photos.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
-use in_progress::Progress;
+use in_progress::{NoProgress, Progress};
 use serde::{Deserialize, Serialize};
-use sheaf_core::{PageIndex, Rotation};
-use sheaf_doc::{Document, Edit, NewOutlineItem, PAGES, PageId, Snapshot, SourceId};
+use sheaf_doc::{Actor, CommitOpts, Document, PAGES, PageId, Snapshot};
+use sheaf_edit::{BookmarkRef, Op, PageRef, PageSel, Rotation, Sibling};
 use sheaf_image::blank::{Sensitivity, Verdict, is_blank};
 use sheaf_image::raster::PixelFormat;
+use sheaf_render::PageIndex;
 use sheaf_render::{Job, Renderer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,19 +120,14 @@ pub fn find(
     };
     progress.set_total(Some(wanted.len() as u64), PAGES);
     let pages: Vec<_> = st.pages().collect();
-    let mut by_source: BTreeMap<SourceId, Vec<(usize, PageId, u32)>> = BTreeMap::new();
-    for &i in &wanted {
+    let by_source = crate::by_source(wanted.iter().map(|&i| {
         let (id, def, _) = pages[i];
-        by_source
-            .entry(def.base.source)
-            .or_default()
-            .push((i, id, def.base.index));
-    }
+        (def.base.src.clone(), (i, id, def.base.index))
+    }));
     let mut out = Vec::new();
     let mut done = 0;
-    for (sid, list) in by_source {
-        let info = snap.source(sid).context("unknown source")?;
-        let engine = crate::engine_for(info)?;
+    for (src, list) in by_source {
+        let engine = crate::engine_for(&src)?;
         for (i, id, index) in list {
             progress.check()?;
             done += 1;
@@ -140,10 +136,7 @@ pub fn find(
             if st.annots_on(id).next().is_some() {
                 continue;
             }
-            let has_annots = info
-                .src
-                .page(index)
-                .is_some_and(|page| !page.annots.is_empty());
+            let has_annots = (src.page(index)).is_some_and(|page| !page.annots.is_empty());
             if has_annots {
                 continue;
             }
@@ -168,7 +161,7 @@ pub fn find(
                 Says::Content => continue,
                 Says::Nothing => {}
             }
-            let size = info.src.page_size(index);
+            let size = src.page_size(index);
             let raster = engine.render(
                 PageIndex(index),
                 Job::Page {
@@ -197,8 +190,8 @@ pub fn find(
 
 /// Write `doc` without the `drop` pages to `kept`, and, with `rejects`,
 /// the dropped pages to a file of their own, each bookmarked with where it
-/// was and why ("p. 4 — blank"), so nothing is lost for good. Returns how
-/// many pages `kept` has.
+/// was and why ("p. 4 — blank"), so nothing is lost for good: those made
+/// in `doc`, the command line's. Returns how many pages `kept` has.
 pub fn write(
     doc: &mut Document,
     drop: &[Candidate],
@@ -222,24 +215,28 @@ pub fn write(
         return Ok(keep.len());
     };
     // The rejects' own bookmarks replace the document's.
-    let mut edits: Vec<Edit> = (snap.state.outline_roots().iter())
-        .map(|&id| Edit::OutlineDelete { id })
-        .collect();
-    edits.push(Edit::DeletePages { ids: keep.clone() });
-    edits.push(Edit::OutlineInsertTree {
+    let roots = snap.state.outline_roots().iter().copied();
+    let mut ops = vec![
+        Op::DeleteBookmarks {
+            bookmarks: roots.map(BookmarkRef::Id).collect(),
+        },
+        Op::DeletePages {
+            pages: PageSel::ids(keep.iter().copied()),
+        },
+    ];
+    ops.extend(drop.iter().map(|c| Op::AddBookmark {
         parent: None,
-        after: None,
-        items: drop
-            .iter()
-            .map(|c| NewOutlineItem {
-                title: format!("p. {} — {}", c.index + 1, c.reason.label()),
-                target: Some(c.id),
-                view: None,
-                depth: 0,
-            })
-            .collect(),
-    });
-    doc.apply_batch(edits, "Rejected pages")?;
+        at: Sibling::Last,
+        title: format!("p. {} — {}", c.index + 1, c.reason.label()),
+        target: Some(PageRef::Id(c.id)),
+        view: None,
+        color: None,
+        style: Default::default(),
+        local: None,
+    }));
+    let mut tx = doc.tx(Actor::Cli);
+    tx.apply_batch(ops, &NoProgress)?;
+    doc.commit(tx, CommitOpts::labelled("Rejected pages"))?;
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), rejects)?;
     Ok(keep.len())
 }

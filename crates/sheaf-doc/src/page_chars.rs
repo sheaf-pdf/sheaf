@@ -10,11 +10,11 @@
 //! character, `len()` after the last. A selection is the characters
 //! between two boundaries.
 
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 use crate::annot::{Box2, Pt, caret_box};
 use crate::geom::{Affine, Geom};
-use crate::text_layer::{TextLayer, overlaps_line};
+use crate::text_layer::{TextLayer, overlaps_line, unrotate_from_upright, upright_box};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Glyph {
@@ -125,7 +125,7 @@ impl PageChars {
                 }
                 let w = &layer.words[wi];
                 let n = w.text.chars().count().max(1) as f32;
-                let up = layer.upright_box(w);
+                let up = upright_box(layer, w);
                 for (ci, ch) in w.text.chars().enumerate() {
                     let slice = Box2 {
                         x: up.x + up.w * ci as f32 / n,
@@ -135,7 +135,7 @@ impl PageChars {
                     };
                     glyphs.push(Glyph {
                         ch,
-                        rect: Some(layer.unrotate_from_upright(slice)),
+                        rect: Some(unrotate_from_upright(layer, slice)),
                         line,
                     });
                 }
@@ -540,7 +540,7 @@ mod tests {
                 confidence: 0.9,
             },
         ];
-        let layer = TextLayer::from_engine(words, &letter(Rotation::R0), "test");
+        let layer = crate::text_layer::from_engine(words, &letter(Rotation::R0), "test");
         let c = PageChars::from_layer(&layer);
         assert_eq!(c.text(0, c.len()), "Total 42");
         // "o" is the second tenth-point-wide slice of "Total".

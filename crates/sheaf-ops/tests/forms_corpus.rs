@@ -9,10 +9,10 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use sheaf_core::PageIndex;
+use sheaf_doc::Store;
 use sheaf_doc::forms::corpus::{Corpus, Entry};
 use sheaf_doc::forms::{FieldKind, FormFacts, Report, check};
-use sheaf_doc::{SourceInfo, Store};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 use sheaf_render::{FormType, Renderer};
 
@@ -67,8 +67,8 @@ fn every_form_opens_and_is_checked() {
                         .map_err(anyhow::Error::from)
                         .and_then(|bytes| {
                             let report = check(&bytes, None)?;
-                            let (info, _) = SourceInfo::read(&Store::new(), &path, None)?;
-                            Ok((report, sheaf_doc::forms::read(&info.src).facts))
+                            let (info, _) = Store::new().read_file(&path, None)?;
+                            Ok((report, sheaf_doc::forms::read(&info).facts))
                         })
                         .map_err(|e| format!("{e:#}"));
                     checked.lock().unwrap().insert(i, result);
@@ -254,7 +254,7 @@ fn every_form_reads_as_its_manifest_row() {
                     let Some(entry) = queue.lock().unwrap().next() else {
                         break;
                     };
-                    let info = SourceInfo::read(&Store::new(), &corpus.path(entry), None);
+                    let info = Store::new().read_file(&corpus.path(entry), None);
                     let info = match info {
                         Ok((info, _)) => info,
                         Err(e) => {
@@ -265,7 +265,7 @@ fn every_form_reads_as_its_manifest_row() {
                             continue;
                         }
                     };
-                    let facts = sheaf_doc::forms::read(&info.src).facts;
+                    let facts = sheaf_doc::forms::read(&info).facts;
                     *classes
                         .lock()
                         .unwrap()

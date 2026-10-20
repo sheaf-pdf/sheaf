@@ -4,11 +4,11 @@
 //! widget hit test of its own yet (M10 slice 10 adds one), so PDFium's
 //! mapping is the one to match. Skips without the corpus.
 
-use sheaf_core::Rotation;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::Geom;
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::{Pt, Src, Store};
+use sheaf_edit::Rotation;
 
 use super::*;
 

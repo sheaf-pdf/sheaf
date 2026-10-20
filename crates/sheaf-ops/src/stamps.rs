@@ -335,16 +335,6 @@ pub fn set_favorites_in(dir: &Path, favs: &[StampRef]) -> Result<()> {
         .with_context(|| format!("writing {}", path.display()))
 }
 
-/// Fill in a dynamic stamp's tokens: `<<name>>`, `<<initials>>`,
-/// `<<date>>` and `<<time>>`, as of `now`.
-pub fn fill(template: &str, name: &str, initials: &str, date: &str, time: &str) -> String {
-    template
-        .replace("<<name>>", name)
-        .replace("<<initials>>", initials)
-        .replace("<<date>>", date)
-        .replace("<<time>>", time)
-}
-
 /// The dynamic text stamps sheaf comes with: (label, template).
 pub const PRESETS: [(&str, &str); 8] = [
     ("Approved", "APPROVED\n<<initials>> <<date>>"),
@@ -439,9 +429,8 @@ mod tests {
         }];
         set_favorites_in(&lib, &favs).unwrap();
         assert_eq!(favorites_in(&lib), favs);
-        assert_eq!(
-            fill(PRESETS[0].1, "Pat Smith", "PS", "10/14/2026", "3:15 PM"),
-            "APPROVED\nPS 10/14/2026"
-        );
+        let filled =
+            sheaf_doc::stamp_lib::fill(PRESETS[0].1, "Pat Smith", "PS", "10/14/2026", "3:15 PM");
+        assert_eq!(filled, "APPROVED\nPS 10/14/2026");
     }
 }

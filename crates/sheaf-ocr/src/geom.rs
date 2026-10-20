@@ -1,8 +1,8 @@
 //! Pixel-to-point mapping and word grouping shared by the engines.
 
-use sheaf_core::PageSize;
 use sheaf_doc::geom::Geom;
 use sheaf_doc::{Box2, TextLayer};
+use sheaf_edit::PageSize;
 
 use crate::engine::OcrWord;
 
@@ -134,7 +134,7 @@ pub fn layer_from_words(
             confidence: w.confidence,
         })
         .collect();
-    TextLayer::from_engine(words, geom, engine)
+    sheaf_doc::text_layer::from_engine(words, geom, engine)
 }
 
 #[cfg(test)]
@@ -213,7 +213,7 @@ mod tests {
             612,
             "test",
         );
-        assert_eq!(layer.upright, sheaf_core::Rotation::R90);
+        assert_eq!(layer.upright, sheaf_edit::Rotation::R90);
         assert_eq!(layer.words.len(), 1);
         let r = layer.words[0].rect;
         let want = Box2 {

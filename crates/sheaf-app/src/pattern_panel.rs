@@ -12,6 +12,8 @@ use gpui::{
     AnchoredPositionMode, AnyElement, Context, Entity, Focusable, MouseButton, Pixels, Point,
     Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
+use sheaf_doc::{CommitOpts, PageId};
+use sheaf_edit::{BookmarkRef, Local, Op, Sibling};
 use sheaf_render::SearchEvent;
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
@@ -672,18 +674,31 @@ impl DocView {
     /// undo step. Each points a little above its match's top as the page
     /// shows.
     pub(crate) fn bookmark_pattern_hits(&mut self, cx: &mut Context<Self>) {
-        let (Some(ps), State::Ready(doc)) = (&self.pattern, &self.state) else {
+        let Some(mut tx) = self.user_tx() else {
             return;
         };
-        let mut items = vec![sheaf_doc::NewOutlineItem {
-            title: format!("Pattern: {}", ps.source.trim()),
-            target: ps.hits.first().map(|h| h.page),
-            view: None,
-            depth: 0,
-        }];
-        items.extend(ps.hits.iter().map(|h| {
-            let geom = doc.model.index_of(h.page).and_then(|i| doc.edit_geom(i));
-            let at = geom.and_then(|g| {
+        let Some(ps) = &self.pattern else {
+            return;
+        };
+        let mut r = tx.reader();
+        let bookmark = |parent, title, target: PageId, view, local| Op::AddBookmark {
+            parent,
+            at: Sibling::Last,
+            title,
+            target: Some(target.into()),
+            view,
+            color: None,
+            style: Default::default(),
+            local,
+        };
+        let heading = Local(1);
+        let mut ops = Vec::with_capacity(ps.hits.len() + 1);
+        if let Some(first) = ps.hits.first() {
+            let title = format!("Pattern: {}", ps.source.trim());
+            ops.push(bookmark(None, title, first.page, None, Some(heading)));
+        }
+        for h in &ps.hits {
+            let at = r.geom(h.page).and_then(|g| {
                 let to_view = g.to_view();
                 let top = h
                     .rects
@@ -693,28 +708,25 @@ impl DocView {
                 (top < f32::MAX)
                     .then(|| g.from_view().apply_axes(None, Some((top - 12.0).max(0.0))))
             });
-            sheaf_doc::NewOutlineItem {
-                title: h.text.trim().to_string(),
-                target: Some(h.page),
-                view: at.map(|(left, top)| sheaf_core::DestView::Xyz {
-                    left,
-                    top,
-                    zoom: None,
-                }),
-                depth: 1,
-            }
-        }));
-        let n = items.len() - 1;
-        let after = doc.model.state().outline_roots().last().copied();
-        self.apply_batch(
-            vec![sheaf_doc::Edit::OutlineInsertTree {
-                parent: None,
-                after,
-                items,
-            }],
-            &format!("Bookmark {n} match{}", if n == 1 { "" } else { "es" }),
-            cx,
-        );
+            let view = at.map(|(left, top)| sheaf_edit::DestView::Xyz {
+                left,
+                top,
+                zoom: None,
+            });
+            let under = Some(BookmarkRef::New(heading));
+            ops.push(bookmark(
+                under,
+                h.text.trim().to_string(),
+                h.page,
+                view,
+                None,
+            ));
+        }
+        let n = ps.hits.len();
+        let label = format!("Bookmark {n} match{}", if n == 1 { "" } else { "es" });
+        if let Some(tx) = self.lower_in(tx, ops, &label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         self.wanted_panel = Some("bookmarks");
     }
 }

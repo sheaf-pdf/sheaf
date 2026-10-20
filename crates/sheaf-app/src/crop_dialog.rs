@@ -6,7 +6,8 @@ use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
     Subscription, Window, div, prelude::*, px,
 };
-use sheaf_core::PageSize;
+use sheaf_doc::{PageId, Snapshot};
+use sheaf_edit::PageSize;
 use sheaf_ops::crop::{CropSpec, Margins};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
@@ -56,7 +57,9 @@ enum Pages {
 }
 
 pub struct CropContext {
-    pub page_count: usize,
+    /// The document as the dialog opened on it: its pages are counted and
+    /// named by id there, and the crop is made on that version.
+    pub opened: Snapshot,
     pub current: usize,
     /// 0-based, in order.
     pub selected: Vec<usize>,
@@ -64,8 +67,18 @@ pub struct CropContext {
     pub size: PageSize,
 }
 
+impl CropContext {
+    fn page_count(&self) -> usize {
+        self.opened.state.page_count()
+    }
+}
+
 pub enum CropEvent {
-    Crop { pages: Vec<usize>, spec: CropSpec },
+    /// Pages of the version the dialog opened on ([`CropDialog::opened`]).
+    Crop {
+        pages: Vec<PageId>,
+        spec: CropSpec,
+    },
     Dismiss,
 }
 
@@ -229,6 +242,11 @@ impl CropDialog {
         }
     }
 
+    /// The version it opened on.
+    pub fn opened(&self) -> &Snapshot {
+        &self.ctx.opened
+    }
+
     fn margins(&self, cx: &App) -> Result<Margins, String> {
         let names = ["Top", "Bottom", "Left", "Right"];
         let mut v = [0f32; 4];
@@ -254,7 +272,7 @@ impl CropDialog {
     }
 
     fn page_list(&self, cx: &App) -> Result<Vec<usize>, String> {
-        let n = self.ctx.page_count;
+        let n = self.ctx.page_count();
         match self.pages {
             Pages::Current => Ok(vec![self.ctx.current.min(n.saturating_sub(1))]),
             Pages::Selected => Ok(self.ctx.selected.clone()),
@@ -275,7 +293,10 @@ impl CropDialog {
             }),
         };
         match (spec, self.page_list(cx)) {
-            (Ok(spec), Ok(pages)) if !pages.is_empty() => cx.emit(CropEvent::Crop { pages, spec }),
+            (Ok(spec), Ok(pages)) if !pages.is_empty() => cx.emit(CropEvent::Crop {
+                pages: crate::page_insert::ids_at(&self.ctx.opened, &pages),
+                spec,
+            }),
             (Err(e), _) | (_, Err(e)) => {
                 self.error = Some(e);
                 cx.notify();
@@ -362,7 +383,7 @@ impl Render for CropDialog {
                 .child(dialog::subtitle(self.unit.label()))
                 .into_any_element()
         };
-        let n = self.ctx.page_count;
+        let n = self.ctx.page_count();
         let pages = self.chips(
             "crop-pages",
             ROW_PAGES,

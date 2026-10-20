@@ -8,8 +8,9 @@
 //! |---|---|
 //! | `Order` | the page tree's nodes it changed, and the pages put under another node ([`tree::spliced`]); the page labels, and the catalog when there are none now or were none; every connector (its `/Dest` is the next in order); each page the header and footer draws on (its numbers count the pages), and the catalog when it's on some pages (their places); a link to a source page another page, or none, is written as now, and its page |
 //! | `Page(p)` | `p`'s dictionary; when its base page or copy changed, its annotations (they're copied as its), each bookmark to it (it may be written at another number) and each link to a source page another page, or none, is written as now |
-//! | `Geom(p)`, `PageAnnots(p)` | `p`'s dictionary |
-//! | `Annot(a)` | `a`'s objects; for a widget, its field's (a merged pair is one object); its replies (a mark's reply takes its `/Rect`, and each its `/IRT`); every connector of its group, for one |
+//! | `Geom(p)` | `p`'s dictionary; every connector of each group with one on `p` (a group's order is how its connectors show on their pages) |
+//! | `PageAnnots(p)` | `p`'s dictionary |
+//! | `Annot(a)` | `a`'s objects; for a widget, its field's (a merged pair is one object); its replies (a mark's reply takes its `/Rect`, and each its `/IRT`); every connector of its group, for one; its page, when it's a replacement now and wasn't or the other way round (a replacement's StrikeOut is beside it in `/Annots`) |
 //! | `Field(f)` | `f`'s dictionary, its widgets, every node above it (a node left with no widgets isn't written, nor the parents it empties); the form's dictionary when `f` came, went, moved or shows other widgets (its `/Fields` and `/CO` list what's written); the pages its widgets are on when one was its object and isn't, or the other way round |
 //! | `Form` | the form's dictionary; when the files the forms come from changed, every field and widget of the other files (their fonts' renames in `/DR`), their document scripts and the catalog; when `/DA` or `/Q` changed, the other files' roots (theirs are pushed down) |
 //! | `Bookmark(b)`, `OutlineRoots` | each bookmark whose item or place in the tree (`/Parent`, `/Prev`, `/Next`, `/First`, `/Last`, `/Count`) changed, and the outline's root when its own did |
@@ -20,27 +21,27 @@
 //! hasn't had (every field, for `DropXfa`'s tooltips), and the catalog for
 //! `DropUr3`'s `/Perms`; the same for an XFA copy the file dropped that
 //! policy keeps now; a page put under another node, or new to the saved
-//! tree, when any page is written. A bookmark that goes to a page
-//! that came or went changed itself, its target retargeted with the page.
-//! What the file has of a source one of whose pages is written as another
-//! page, or none, now is copied again where the section reaches it (a
-//! link's indirect action names the page as it was copied). What else of
-//! the file names such a page, as a copy's reference resolves it now, and
-//! isn't written again ([`Closure::stale`]: a widget's action, a field's,
-//! a link written straight into `/Annots`, an annotation the records don't
-//! hold, a page's own keys, or anything of the primary's copy 0, whose
-//! references are the numbers the file has) refuses the Append, as does
-//! what the primary's catalog holds that names a page of it that's no
-//! page's copy 0 now (an `/OpenAction`, a named destination, the
-//! structure tree), which a Rewrite prunes.
+//! tree, when any page is written. A page the file has at the number of a
+//! primary page that another page is copy 0 of now leaves it to that page
+//! (a page replaced, appended over the object it was, and that page brought
+//! back): it's written at a number of its own, with what depends on it as
+//! for a page that shows another ([`Closure::renumbered`]). A bookmark that
+//! goes to a page that came or went changed itself, its target retargeted
+//! with the page. What the file has of a source one of whose pages is
+//! written as another page, or none, or at another number, now is copied
+//! again where the section reaches it (a link's indirect action names the
+//! page as it was copied), an annotation the records don't hold in a page's
+//! `/Annots` among it (its `/P` names the page it was written with). What else of the file names such a page, as a
+//! copy's reference resolves it now, and isn't written again
+//! ([`Closure::stale`]: a widget's action, a field's, a link written
+//! straight into `/Annots`, an annotation the records don't hold, a page's
+//! own keys, or anything of the primary's copy 0, whose references are the
+//! numbers the file has) refuses the Append, as does what the primary's
+//! catalog holds that names a page of it that's no page's copy 0 now (an
+//! `/OpenAction`, a named destination, the structure tree), which a Rewrite
+//! prunes.
 //! The emitter adds the catalog when the section needs a later version
 //! than the file, or the form or the outline came or went.
-//!
-//! An instance of a form whose objects are another copy of its file's now
-//! ([`FormCopies`] moved its index, as instances came and went) is
-//! [`Closure::form_shift`]: the saved file's objects of it are another
-//! instance's, so the Append is refused (until slice 11 makes an instance
-//! its blob's).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -50,7 +51,7 @@ use lopdf::{Object, ObjectId};
 use super::append::refs;
 use super::copy;
 use super::emit::{self, annots, tree};
-use super::key::{FormCopies, NameTree, ObjKey, Part};
+use super::key::{NameTree, ObjKey, Part};
 use super::plan::SaveTransform;
 use super::record::{CATALOG_OWNED, SaveInput, SavedSide};
 use crate::annot::{AnnotId, AnnotKind};
@@ -68,9 +69,6 @@ pub struct Closure {
     /// The saved file's page tree with the target's pages placed in it,
     /// when the order changed or a page has no place in it.
     pub tree: Option<tree::Spliced>,
-    /// Whether a form instance both states hold is another copy of its
-    /// file's now.
-    pub form_shift: bool,
     /// The sources a page of which is written as another page, or none,
     /// than in the saved state: what the saved file's copies of their
     /// objects name of their pages is stale, so they're copied again.
@@ -83,6 +81,11 @@ pub struct Closure {
     /// page of the primary that's no page's copy 0 now. Only a Rewrite
     /// names it anew, or prunes it.
     pub stale: Option<ObjKey>,
+    /// The pages the file has at the number of a primary page another
+    /// page is copy 0 of now: written at a number of their own, with what
+    /// names them by number. The only keys `append::held` lets leave their
+    /// number to the primary object that's another key now.
+    pub renumbered: BTreeSet<PageId>,
 }
 
 /// The scope of an Append of `input` onto the file of `saved`, with save
@@ -103,6 +106,8 @@ pub fn closure(
         fields: HashSet::new(),
         relinked: BTreeSet::new(),
         relinking: None,
+        connected: HashSet::new(),
+        every_connector: false,
     };
     let changed =
         (input.path_keys.iter()).filter(|key| !same(was.get(key).as_ref(), now.get(key).as_ref()));
@@ -123,7 +128,11 @@ pub fn closure(
                     rebased.insert(p);
                 }
             }
-            Key::Geom(p) | Key::PageAnnots(p) => {
+            Key::Geom(p) => {
+                cx.keys.insert(ObjKey::Page(p));
+                cx.connectors_on(p);
+            }
+            Key::PageAnnots(p) => {
                 cx.keys.insert(ObjKey::Page(p));
             }
             Key::Annot(a) => cx.annot(a),
@@ -133,6 +142,32 @@ pub fn closure(
             Key::Labels => labels = true,
             Key::Generator(_) => header = true,
         }
+    }
+    // A page the file has at the number of a primary page that another
+    // page is copy 0 of now (a page replaced, appended over the object it
+    // was, and that page brought back) leaves the number to that page and
+    // is written at one of its own: what names it by number is written
+    // again, as for a page that shows another page.
+    let primary = input.primary.id();
+    let shown = emit::shown(now, &input.derived);
+    let owned: HashMap<PageId, ObjectId> = emit::owned_pages(now, &shown, primary)
+        .into_iter()
+        .collect();
+    let owners: HashMap<ObjectId, PageId> = owned.iter().map(|(&p, &at)| (at, p)).collect();
+    let renumbered: BTreeSet<PageId> = (now.pages())
+        .filter(|&(p, _, _)| {
+            (record.map.keys.get(&ObjKey::Page(p)))
+                .and_then(|at| owners.get(at))
+                .is_some_and(|&q| q != p)
+        })
+        .map(|(p, _, _)| p)
+        .collect();
+    for &p in &renumbered {
+        cx.keys.insert(ObjKey::Page(p));
+        for (a, _) in now.annots_on(p) {
+            cx.annot(a);
+        }
+        rebased.insert(p);
     }
     if order {
         cx.connectors(None);
@@ -149,7 +184,7 @@ pub fn closure(
         }
     }
     if order || !rebased.is_empty() {
-        cx.links(input);
+        cx.links(input, &renumbered);
     }
     cx.retargeted(&rebased);
     // The catalog holds the header and footer's settings, its pages by
@@ -170,10 +205,8 @@ pub fn closure(
     if form {
         cx.form(input);
     }
-    if let Some(info) = input.sources.get(&input.primary)
-        && record.map.identity == Some(info.src.id())
-    {
-        cx.fresh(&info.src, &record.map);
+    if record.map.identity == Some(input.primary.id()) {
+        cx.fresh(&input.primary, &record.map);
     }
     if outline {
         cx.outline();
@@ -206,7 +239,6 @@ pub fn closure(
     // did, and each has its place there; else in it spliced. A page that
     // shows another may be written at another page's number (two primary
     // pages trading their objects), which only the splice puts in order.
-    let primary = input.sources.get(&input.primary).map(|info| info.src.id());
     let written = |keys: &BTreeSet<ObjKey>| -> BTreeSet<PageId> {
         (keys.iter())
             .filter_map(|k| match k {
@@ -218,13 +250,14 @@ pub fn closure(
     let mut parents = BTreeMap::new();
     let mut tree = None;
     let pages = written(&cx.keys);
-    if let Some(primary) = primary.filter(|_| order || !pages.is_empty()) {
-        let shown = emit::shown(now, &input.sources);
-        let owned: HashMap<PageId, ObjectId> = emit::owned_pages(now, &shown, primary)
-            .into_iter()
-            .collect();
-        let number = |p: PageId| {
-            (record.map.keys.get(&ObjKey::Page(p)).copied()).or_else(|| owned.get(&p).copied())
+    if order || !pages.is_empty() {
+        // A page renumbered has no place in the saved tree: its number
+        // there is the page's that's copy 0 of its object now.
+        let number = |p: PageId| match renumbered.contains(&p) {
+            true => None,
+            false => {
+                (record.map.keys.get(&ObjKey::Page(p)).copied()).or_else(|| owned.get(&p).copied())
+            }
         };
         let kept = (!order && rebased.is_empty())
             .then(|| tree::parents(&record.tree, &record.map, &number, &pages))
@@ -246,19 +279,14 @@ pub fn closure(
             }
         }
     }
-    let form_shift = (was.field_count() > 0 || now.field_count() > 0) && {
-        let copies = |st: &DocState| FormCopies::of(st, input.primary, &input.sources);
-        let (then, at) = (copies(was), copies(now));
-        (then.instances()).any(|inst| at.get(inst).is_some_and(|i| then.get(inst) != Some(i)))
-    };
     let stale = cx.stale(input);
     Ok(Closure {
         keys: cx.keys,
         parents,
         tree,
-        form_shift,
         relinked: cx.relinked,
         stale,
+        renumbered,
     })
 }
 
@@ -272,6 +300,10 @@ struct Deps<'a> {
     fields: HashSet<crate::forms::FieldId>,
     relinked: BTreeSet<BlobId>,
     relinking: Option<Relinking>,
+    /// The connector groups taken whole, by label, or whether every
+    /// connector was ([`connectors`](Self::connectors)).
+    connected: HashSet<String>,
+    every_connector: bool,
 }
 
 /// The pages written as each copy of each source page ([`emit::written_pages`]),
@@ -285,8 +317,12 @@ struct Relinking {
     primary: BlobId,
     then: Written,
     now: Written,
-    /// The source pages written otherwise, as any copy.
+    /// The source pages written otherwise, as any copy, or as a page
+    /// renumbered.
     gone: HashSet<(BlobId, ObjectId)>,
+    /// The pages written at another number than the file has them at
+    /// ([`Closure::renumbered`]).
+    renumbered: BTreeSet<PageId>,
     /// What each page of the target is written as.
     shown: HashMap<PageId, emit::Shown>,
 }
@@ -310,7 +346,8 @@ impl Relinking {
     /// or none. From the primary's copy 0 it's the page's number, which
     /// holds the page that's its copy 0 now (`append::held` refuses
     /// otherwise): one that named no page names the page that came; any
-    /// other was written as the page it named then, or null.
+    /// other was written as the page it named then, or null, which may be
+    /// at another number now.
     fn moved(&self, blob: BlobId, page: ObjectId, copy: u32) -> bool {
         if !self.gone.contains(&(blob, page)) {
             return false;
@@ -319,7 +356,7 @@ impl Relinking {
         let now = self.names(&self.now, blob, page, copy);
         match blob == self.primary && copy == 0 {
             true => then.is_some() && then != now,
-            false => then != now,
+            false => then != now || then.is_some_and(|p| self.renumbered.contains(&p)),
         }
     }
 
@@ -475,10 +512,20 @@ impl<'a> Deps<'a> {
             ]
             .map(|part| ObjKey::AnnotPart(a, part)),
         );
+        // A replacement is listed with its StrikeOut: one that came or
+        // went changes its page's `/Annots`.
+        let replaces = |st: &DocState| {
+            (st.annot(a).and_then(AnnotRec::mark))
+                .is_some_and(|m| matches!(m.kind, AnnotKind::Replace { .. }))
+        };
+        let listed = replaces(self.was) != replaces(self.now);
         let mut names = HashSet::new();
         let mut pages = HashSet::new();
         let mut groups = Vec::new();
         for rec in self.states().into_iter().filter_map(|st| st.annot(a)) {
+            if listed {
+                self.keys.insert(ObjKey::Page(rec.page));
+            }
             if let Some(w) = rec.widget() {
                 self.keys.insert(ObjKey::Field(w.field));
             }
@@ -523,8 +570,16 @@ impl<'a> Deps<'a> {
     }
 
     /// Every connector, or those labelled `label`, now: each one's `/Dest`
-    /// is the next of its group in order.
+    /// is the next of its group in order. Once for each group: a page
+    /// turned, or a connector, of a group already taken adds nothing.
     fn connectors(&mut self, label: Option<&str>) {
+        let done = match label {
+            None => std::mem::replace(&mut self.every_connector, true),
+            Some(l) => self.every_connector || !self.connected.insert(l.to_owned()),
+        };
+        if done {
+            return;
+        }
         let of_label = |rec: &AnnotRec| match rec.mark().map(|m| &m.kind) {
             Some(AnnotKind::Connector { label: l, .. }) => label.is_none_or(|label| l == label),
             _ => false,
@@ -537,6 +592,22 @@ impl<'a> Deps<'a> {
             if !self.keys.contains(&ObjKey::Annot(a)) {
                 self.annot(a);
             }
+        }
+    }
+
+    /// The connectors of each group with one on page `p` now, whose turn
+    /// or boxes changed: a group goes in the order its connectors show in
+    /// on their pages, so each one's next may be another
+    /// ([`connectors`](Self::connectors)).
+    fn connectors_on(&mut self, p: PageId) {
+        let labels: BTreeSet<String> = (self.now.annots_on(p))
+            .filter_map(|(_, rec)| match rec.mark().map(|m| &m.kind) {
+                Some(AnnotKind::Connector { label, .. }) => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        for label in labels {
+            self.connectors(Some(&label));
         }
     }
 
@@ -594,14 +665,11 @@ impl<'a> Deps<'a> {
     /// The form's dictionary, and what depends on what it holds.
     fn form(&mut self, input: &SaveInput) {
         self.keys.insert(ObjKey::AcroForm);
-        let primary = input.primary;
-        let others = |st: &DocState| -> Vec<BlobId> {
-            let copies = FormCopies::of(st, primary, &input.sources);
-            let mut seen = HashSet::new();
-            (copies.instances())
-                .filter(|inst| inst.src != primary)
-                .filter_map(|inst| Some(input.sources.get(&inst.src)?.src.id()))
-                .filter(|blob| seen.insert(*blob))
+        let primary = input.primary.id();
+        let others = |st: &DocState| -> BTreeSet<BlobId> {
+            let held = (st.form().names.keys()).chain(st.fields().map(|(_, node)| &node.inst));
+            held.map(|inst| inst.src)
+                .filter(|&src| src != primary)
                 .collect()
         };
         let (was, now) = (self.was, self.now);
@@ -681,19 +749,19 @@ impl<'a> Deps<'a> {
     }
 
     /// Each link to a source page that another page, or none, is written
-    /// as now ([`emit::written_pages`]), and the page it's on: its
-    /// destination is that page as written, or null. And the sources of
-    /// such pages, whose objects the file has (a link's action, a
-    /// destination of its own) may name one too: they're copied again.
-    fn links(&mut self, input: &SaveInput) {
-        let Some(primary) = input.sources.get(&input.primary).map(|info| info.src.id()) else {
-            return;
-        };
-        let shown = emit::shown(self.now, &input.sources);
-        let then = emit::written_pages(self.was, &emit::shown(self.was, &input.sources));
+    /// as now ([`emit::written_pages`]), or that's written as a page of
+    /// `renumbered`, and the page it's on: its destination is that page as
+    /// written, or null. And the sources of such pages, whose objects the
+    /// file has (a link's action, a destination of its own) may name one
+    /// too: they're copied again.
+    fn links(&mut self, input: &SaveInput, renumbered: &BTreeSet<PageId>) {
+        let shown = emit::shown(self.now, &input.derived);
+        let then = emit::written_pages(self.was, &emit::shown(self.was, &input.derived));
         let now = emit::written_pages(self.now, &shown);
         let gone: HashSet<(BlobId, ObjectId)> = (then.iter().chain(&now))
-            .filter(|&(at, page)| then.get(at) != Some(page) || now.get(at) != Some(page))
+            .filter(|&(at, page)| {
+                then.get(at) != Some(page) || now.get(at) != Some(page) || renumbered.contains(page)
+            })
             .map(|(&(blob, obj, _), _)| (blob, obj))
             .collect();
         if gone.is_empty() {
@@ -718,10 +786,11 @@ impl<'a> Deps<'a> {
             self.keys.insert(ObjKey::Page(page));
         }
         self.relinking = Some(Relinking {
-            primary,
+            primary: input.primary.id(),
             then,
             now,
             gone,
+            renumbered: renumbered.clone(),
             shown,
         });
     }
@@ -744,7 +813,6 @@ impl<'a> Deps<'a> {
     fn stale(&self, input: &SaveInput) -> Option<ObjKey> {
         let rl = self.relinking.as_ref()?;
         let now = self.now;
-        let copies = FormCopies::of(now, input.primary, &input.sources);
         let mut walk = Walk {
             rl,
             moves: HashMap::new(),
@@ -811,18 +879,16 @@ impl<'a> Deps<'a> {
                 let popup = (src.pdf().dereference(entry).ok())
                     .and_then(|(_, d)| d.as_dict().ok())
                     .is_some_and(|d| annots::is(d, b"Subtype", b"Popup"));
-                // One written straight into `/Annots` is written again with
-                // its page; one of its own, which the file has, never is.
-                let (key, again) = match entry {
-                    Object::Reference(r) => {
-                        let key = ObjKey::Base {
-                            blob: src.id(),
-                            obj: *r,
-                            copy: shown.copy,
-                        };
-                        (key, false)
-                    }
-                    _ => (page, again),
+                // Written again with its page: one written straight into
+                // `/Annots`, and one of its own the file has, as what the
+                // file has of its source is copied again.
+                let key = match entry {
+                    Object::Reference(r) => ObjKey::Base {
+                        blob: src.id(),
+                        obj: *r,
+                        copy: shown.copy,
+                    },
+                    _ => page,
                 };
                 if !popup
                     && !anew(again, src.id(), shown.copy)
@@ -874,9 +940,10 @@ impl<'a> Deps<'a> {
                     }
                 }
                 AnnotBody::Widget(w) => {
-                    let (Some(r), Some(copy)) = (w.src.as_ref(), copies.get(w.inst)) else {
+                    let Some(r) = &w.src else {
                         continue;
                     };
+                    let copy = w.inst.copy;
                     // One its field's object is, written with it.
                     let merged = merged_widget(now, w.field) == Some(a);
                     let again = written(key) || (merged && written(ObjKey::Field(w.field)));
@@ -902,9 +969,10 @@ impl<'a> Deps<'a> {
         }
         for (f, node) in now.fields() {
             let key = ObjKey::Field(f);
-            let (Some(r), Some(copy)) = (node.src.as_ref(), copies.get(node.inst)) else {
+            let Some(r) = &node.src else {
                 continue;
             };
+            let copy = node.inst.copy;
             if !anew(written(key), r.src.id(), copy)
                 && walk.reaches(&r.src, copy, &Object::Reference(r.id), FIELD_OWN)
             {
@@ -920,8 +988,8 @@ impl<'a> Deps<'a> {
         // that names a page that's no page's copy 0 now names a page
         // outside the tree (a page deleted whose duplicate stays, which
         // removes nothing, so the plan appends).
-        let primary = input.sources.get(&input.primary).map(|info| &info.src);
-        if let Some(src) = primary.filter(|src| walk.moves(src.id(), 0))
+        let src = &input.primary;
+        if walk.moves(src.id(), 0)
             && let Ok(catalog) = src.pdf().catalog()
         {
             let catalog = catalog.clone();

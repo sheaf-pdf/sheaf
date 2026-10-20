@@ -30,7 +30,9 @@ use sheaf_doc::serialize::fixture::{
     PREFIX, USER, attachment_only, edited, encrypted, form, object_streams_encrypted,
     rc4_aes_128_and_aes_256, written,
 };
-use sheaf_doc::{Edit, PageId, Snapshot};
+use sheaf_doc::tx::fixture::{delete, delete_named, move_pages, patch_bookmark, rotate};
+use sheaf_doc::{PageId, Snapshot};
+use sheaf_edit::{BookmarkPatch, Turn};
 
 mod common;
 use common::scratch;
@@ -334,9 +336,9 @@ fn three_appends_pass_qpdf_check() {
         let mut doc = edited(&path, password);
         for i in 0..3 {
             if i > 0 {
-                let ids = vec![doc.page(0).unwrap()];
-                let by = sheaf_core::Rotation::R90;
-                doc.apply(Edit::RotatePages { ids, by }, "turn").unwrap();
+                let first = doc.page(0).unwrap();
+                let turn = rotate(&[first], Turn::Quarter);
+                doc.commit_ops(vec![turn], "turn").unwrap();
             }
             sheaf_doc::materialize::save_appended(&mut doc, &path).unwrap();
             if let Err(e) = run(qpdf_with(&qpdf, password).arg("--check").arg(&path)) {
@@ -380,8 +382,7 @@ fn pages_deleted_saved_and_undone_pass_qpdf_check() {
         std::fs::write(&path, &bytes).unwrap();
         let mut doc = sheaf_doc::open::file(&path, password).unwrap().doc;
         let gone = doc.page(1).unwrap();
-        doc.apply(Edit::DeletePages { ids: vec![gone] }, "delete")
-            .unwrap();
+        doc.commit_ops(vec![delete(&[gone])], "delete").unwrap();
         save(&mut doc, &path, &answers, &sheaf_ops::NoProgress).unwrap();
         doc.undo().unwrap();
         let report = save(&mut doc, &path, &answers, &sheaf_ops::NoProgress).unwrap();
@@ -500,28 +501,19 @@ fn records_come_through(how: How) {
         .unwrap();
     // The third page first, and its bookmark renamed, so an Append writes
     // the outline anew.
-    let edits = vec![
-        Edit::MovePages {
-            ids: vec![pages[2]],
-            before: Some(pages[0]),
-        },
-        Edit::OutlineEdit {
-            id: third,
-            title: Some("3".into()),
-            target: None,
-            color: None,
-            view: None,
-            style: None,
-        },
+    let renamed = BookmarkPatch {
+        title: Some("3".into()),
+        ..Default::default()
+    };
+    let ops = vec![
+        move_pages(&[pages[2]], Some(pages[0])),
+        patch_bookmark(third, renamed),
     ];
-    doc.apply_batch(edits, "Reorder").unwrap();
+    doc.commit_ops(ops, "Reorder").unwrap();
     // A deleted comment makes the next save a Rewrite.
     if how == How::Rewritten {
-        let delete = Edit::CommentsDelete {
-            page: pages[0],
-            names: vec!["theirs".into()],
-        };
-        doc.apply(delete, "Delete").unwrap();
+        let delete = delete_named(pages[0], &["theirs"]);
+        doc.commit_ops(vec![delete], "Delete").unwrap();
     }
     let strategy = format!("{how:?}");
     let path = dir.join(format!("records-{strategy}.pdf"));

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "OCR for sheaf: an engine trait with Tesseract and PaddleOCR (oar-ocr) implementations, and the batch job that drives them"
+publish = false
 
 [features]
 default = []
@@ -18,7 +19,7 @@ oar = ["dep:oar-ocr", "dep:ort"]
 
 [dependencies]
 sheaf-image.workspace = true
-sheaf-core.workspace = true
+sheaf-edit.workspace = true
 sheaf-doc.workspace = true
 sheaf-render.workspace = true
 anyhow.workspace = true

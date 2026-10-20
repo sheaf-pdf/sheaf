@@ -170,7 +170,7 @@ fn codes_no_font_reads_are_their_bytes_hash() {
     let hashed = |bytes: &[&[u8]]| {
         let mut bag = TextBag::default();
         for b in bytes {
-            bag.add_hash(sheaf_core::checksum(b));
+            bag.add_hash(sheaf_util::checksum(b));
         }
         bag
     };
@@ -192,7 +192,7 @@ fn codes_no_font_reads_are_their_bytes_hash() {
     );
     // Standard has no code 0x80: the string is a hash between two words.
     let mut want = words("one two");
-    want.add_hash(sheaf_core::checksum(b"x\x80"));
+    want.add_hash(sheaf_util::checksum(b"x\x80"));
     assert_eq!(
         bag(
             &pdf,

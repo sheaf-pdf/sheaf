@@ -23,17 +23,18 @@ use anyhow::{Context, Result, bail};
 use im::Vector;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 
-use crate::annot::AnnotId;
+use crate::annot::{AnnotId, AnnotKind};
 use crate::forms::FieldId;
 use crate::geom::{Geom, Rect};
 use crate::materialize::copy::{self, copy_page_dict, remap};
 use crate::materialize::graph::{self, Loaded};
 use crate::materialize::{self, Encryption, Numbering, PostPass, Profile, SaveInput, SaveTarget};
 use crate::model::{
-    AnnotBody, Bookmark, DocState, FieldNode, FormDoc, OutlineId, PageId, Snapshot, SourceInfo,
-    Target, Terminal,
+    AnnotBody, Bookmark, DocState, FieldNode, FormDoc, Mark, OutlineId, PageId, Snapshot, Target,
+    Terminal,
 };
 use crate::serialize::durable;
+use crate::store::Src;
 
 /// Serialize a snapshot as a complete new PDF: what a save writes, the
 /// primary's encryption and object numbers kept.
@@ -157,10 +158,14 @@ pub fn extract_bytes(model: &Snapshot, ids: &[PageId]) -> Result<Vec<u8>> {
 
 /// `ids` of `st` (in document order) with their markup and text layers,
 /// and their bookmarks and page labels when `outline`. None when no page
-/// is kept. What's left holds the state's invariants: the form's nodes
+/// is kept. What's left holds the state's invariants, as the cascades of
+/// deleting the other pages would leave it (M10.5 §6.5): the form's nodes
 /// keep only the widgets on kept pages, and a node that showed only on
 /// pages left out goes, as `keep_only` takes such fields out of a file
-/// (bug 14), with the parents left with no kids.
+/// (bug 14), with the parents left with no kids; a connector whose other
+/// end is left out has no partner; a label range starts at the first page
+/// of its range kept; and the header/footer is on the pages kept of its
+/// own.
 fn subset(st: &DocState, ids: &[PageId], outline: bool) -> Option<DocState> {
     let keep: HashSet<PageId> = ids.iter().copied().collect();
     let pages: Vec<_> = (st.pages())
@@ -170,10 +175,14 @@ fn subset(st: &DocState, ids: &[PageId], outline: bool) -> Option<DocState> {
     if pages.is_empty() {
         return None;
     }
-    let annots: Vec<_> = (pages.iter())
+    let shown: HashSet<AnnotId> = (pages.iter())
+        .flat_map(|(id, _, _)| st.annots_on(*id).map(|(a, _)| a))
+        .collect();
+    let annots: Vec<(PageId, Vec<_>)> = (pages.iter())
         .map(|(id, _, _)| {
             let list = st.annots_on(*id);
-            (*id, list.map(|(a, rec)| (a, rec.body.clone())).collect())
+            let list = list.map(|(a, rec)| (a, paired(&rec.body, &shown)));
+            (*id, list.collect())
         })
         .collect();
     let (roots, bookmarks) = if outline {
@@ -181,20 +190,41 @@ fn subset(st: &DocState, ids: &[PageId], outline: bool) -> Option<DocState> {
     } else {
         Default::default()
     };
-    let shown: HashSet<AnnotId> = (annots.iter())
-        .flat_map(|(_, list): &(PageId, Vec<(AnnotId, AnnotBody)>)| list.iter().map(|(a, _)| *a))
-        .collect();
     let (fields, form) = form_on(st, &shown);
+    let labels = st.labels().filter(|_| outline).and_then(|specs| {
+        let pos = |p| st.pos_of(p);
+        match crate::labels::anchored(specs, st.order(), pos, |p| keep.contains(&p)) {
+            None => Some(specs.clone()),
+            Some((specs, _)) => (!specs.is_empty()).then(|| specs.into()),
+        }
+    });
+    let generators =
+        (st.generators().values()).filter_map(|g| g.on_pages_left(|p| keep.contains(&p)).0);
     let state = DocState::builder()
         .pages(pages)
         .outline(roots, bookmarks)
         .annots(annots)
-        .labels(if outline { st.labels().cloned() } else { None })
-        .generators(st.generators().values().cloned())
+        .labels(labels)
+        .generators(generators)
         .form(fields, form)
         .build();
     debug_assert_eq!(state.check_invariants(), Ok(()));
     Some(state)
+}
+
+/// `body`, an annotation kept, with no partner when it's a connector whose
+/// other end isn't among those `kept`.
+fn paired(body: &AnnotBody, kept: &HashSet<AnnotId>) -> AnnotBody {
+    match body {
+        AnnotBody::Mark(m) if m.annot.partner().is_some_and(|p| !kept.contains(&p)) => {
+            let mut mark = Mark::clone(m);
+            if let AnnotKind::Connector { partner, .. } = &mut mark.annot.kind {
+                *partner = None;
+            }
+            AnnotBody::Mark(Arc::new(mark))
+        }
+        body => body.clone(),
+    }
 }
 
 /// What stays of `st`'s form when only the annotations `shown` are kept:
@@ -552,7 +582,7 @@ fn normal_appearance(pdf: &Pdf, annot: &Dictionary) -> Option<ObjectId> {
 /// Pages of `src`, each given a new `/CropBox` (`[x0, y0, x1, y1]` in its
 /// user space), as a new PDF: what a cropped page becomes, since sources
 /// are files. See [`derived_copy`].
-pub fn cropped_copy(src: &SourceInfo, pages: &[(u32, [f32; 4])]) -> Result<Vec<u8>> {
+pub fn cropped_copy(src: &Src, pages: &[(u32, [f32; 4])]) -> Result<Vec<u8>> {
     let pages: Vec<(u32, Option<[f32; 4]>)> = pages.iter().map(|&(i, c)| (i, Some(c))).collect();
     derived_copy(src, &pages, HeaderKept::Yes, &mut |_, _, _, _| Ok(()))
 }
@@ -572,16 +602,19 @@ pub enum HeaderKept {
 /// them; other annotations, links and fields come along, and the form the
 /// fields are in, so the page shows them (see [`copy_form`]). A save
 /// writes the page it was made from instead, with the copy's content
-/// (`SourceInfo::derived`). With `header` [`HeaderKept::Yes`], the copy's
-/// catalog says which of its pages draw the header and footer `src`'s
-/// says it drew (`stamps::base_draws`), so a save doesn't draw it again.
+/// ([`Document::add_derived`]), which knows the copy by its blob: its
+/// catalog's `/SheafCopyOf` names `src`'s blob and the pages, so copies of
+/// different pages are different blobs. With `header`
+/// [`HeaderKept::Yes`], the copy's catalog says which of its pages draw
+/// the header and footer `src`'s says it drew (`stamps::base_draws`), so
+/// a save doesn't draw it again.
 pub fn derived_copy(
-    src: &SourceInfo,
+    src: &Src,
     pages: &[(u32, Option<[f32; 4]>)],
     header: HeaderKept,
     fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, &Geom, usize) -> Result<()>,
 ) -> Result<Vec<u8>> {
-    let from = graph::load(src)?;
+    let from = graph::eager(src).context("loading the source")?;
     let loaded = Loaded::from_pdf(&from)?;
     let mut pdf = Pdf::with_version("1.7");
     let pages_id = pdf.new_object_id();
@@ -599,7 +632,7 @@ pub fn derived_copy(
         let page = *loaded
             .pages
             .get(index as usize)
-            .with_context(|| format!("no page {index} in {}", src.name.display()))?;
+            .with_context(|| format!("no page {index} in the source"))?;
         let mut dict = copy_page_dict(&from, page, &mut pdf, &mut map)?;
         let id = if filled.insert(page) {
             map[&page]
@@ -654,12 +687,22 @@ pub fn derived_copy(
         pages_id,
         Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count }),
     );
-    let mut catalog = dictionary! { "Type" => "Catalog", "Pages" => pages_id };
+    // What it's a copy of: the document knows a copy by its blob, so
+    // copies of different pages differ however alike the pages are.
+    let indexes: Vec<Object> = pages.iter().map(|&(i, _)| i64::from(i).into()).collect();
+    let mut catalog = dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+        "SheafCopyOf" => dictionary! {
+            "Blob" => Object::string_literal(src.id().stem()),
+            "Pages" => indexes,
+        },
+    };
     if let Some(form) = copy_form(&from, &mut pdf, &mut map)? {
         catalog.set("AcroForm", pdf.add_object(form));
     }
     if header == HeaderKept::Yes
-        && let Some((hf, scope)) = src.src.header_footer()
+        && let Some((hf, scope)) = src.header_footer()
     {
         let on = |index: u32| scope.as_ref().is_none_or(|s| s.contains(&(index as usize)));
         let positions: Vec<usize> = (pages.iter().enumerate())
@@ -762,12 +805,10 @@ pub fn text_string(s: &str) -> Object {
 /// exists in its source.
 pub fn validate(model: &Snapshot) -> Result<()> {
     for (id, def, _) in model.state.pages() {
-        let info = model.source(def.base.source).context("unknown source")?;
-        if def.base.index >= info.src.page_count() {
+        if def.base.index >= def.base.src.page_count() {
             bail!(
-                "page {id:?} shows page {} of {}, which hasn't got it",
+                "page {id:?} shows page {} of its source, which hasn't got it",
                 def.base.index,
-                info.name.display()
             );
         }
     }
@@ -816,8 +857,9 @@ mod tests {
         HELLO_HEX, annots_read, fonts_of, make_pdf, open, read_outline, read_pages, set_layer,
         tempdir,
     };
-    use crate::model::{Edit, FlatOutlineItem};
-    use sheaf_core::Rotation;
+    use crate::model::FlatOutlineItem;
+    use crate::tx::fixture as fx;
+    use sheaf_edit::{Rotation, Turn};
 
     #[test]
     fn rewrite_to_path_is_atomic() {
@@ -913,10 +955,10 @@ mod tests {
         );
         let p0 = model.page(0).unwrap();
         model
-            .apply(
-                Edit::AnnotAdd {
-                    page: p0,
-                    annot: Annot {
+            .commit_ops(
+                vec![fx::add(
+                    p0,
+                    &Annot {
                         id: crate::annot::AnnotId(0),
                         kind: AnnotKind::Stamp {
                             rect: Box2 {
@@ -940,7 +982,7 @@ mod tests {
                         turn: Rotation::R0,
                         name: String::new(),
                     },
-                },
+                )],
                 "tick",
             )
             .unwrap();
@@ -972,23 +1014,11 @@ mod tests {
             name: String::new(),
         };
         model
-            .apply(
-                Edit::ConnectorAdd {
-                    a: (p0, conn()),
-                    b: (p1, conn()),
-                },
-                "conn",
-            )
+            .commit_ops(vec![fx::connect((p0, &conn()), (p1, &conn()))], "conn")
             .unwrap();
         // Also rotate page 2 so the copy reflects edits, not just the file.
         model
-            .apply(
-                Edit::RotatePages {
-                    ids: vec![p1],
-                    by: Rotation::R90,
-                },
-                "rot",
-            )
+            .commit_ops(vec![fx::rotate(&[p1], Turn::Quarter)], "rot")
             .unwrap();
 
         let out = dir.join("clean.pdf");
@@ -1144,10 +1174,10 @@ mod tests {
             ),
         ] {
             model
-                .apply(
-                    Edit::AnnotAdd {
-                        page: ids[i],
-                        annot: Annot {
+                .commit_ops(
+                    vec![fx::add(
+                        ids[i],
+                        &Annot {
                             id: crate::annot::AnnotId(0),
                             kind,
                             color: [0, 0, 0],
@@ -1163,7 +1193,7 @@ mod tests {
                             turn: Rotation::R0,
                             name: String::new(),
                         },
-                    },
+                    )],
                     "a",
                 )
                 .unwrap();
@@ -1219,10 +1249,10 @@ mod tests {
         );
         let ids: Vec<PageId> = (0..3).map(|i| model.page(i).unwrap()).collect();
         model
-            .apply(
-                Edit::AnnotAdd {
-                    page: ids[1],
-                    annot: Annot {
+            .commit_ops(
+                vec![fx::add(
+                    ids[1],
+                    &Annot {
                         id: crate::annot::AnnotId(0),
                         kind: AnnotKind::Square {
                             rect: Box2 {
@@ -1245,7 +1275,7 @@ mod tests {
                         turn: Rotation::R0,
                         name: String::new(),
                     },
-                },
+                )],
                 "a",
             )
             .unwrap();
@@ -1295,10 +1325,10 @@ mod tests {
         let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap();
         model
-            .apply(
-                Edit::AnnotAdd {
-                    page: p0,
-                    annot: Annot {
+            .commit_ops(
+                vec![fx::add(
+                    p0,
+                    &Annot {
                         id: crate::annot::AnnotId(0),
                         kind: AnnotKind::Square {
                             rect: Box2 {
@@ -1321,7 +1351,7 @@ mod tests {
                         turn: Rotation::R0,
                         name: String::new(),
                     },
-                },
+                )],
                 "sq",
             )
             .unwrap();
@@ -1373,10 +1403,10 @@ mod tests {
         let ids: Vec<PageId> = model.state().order().iter().copied().collect();
         set_layer(&mut model, ids[1], "Hello");
         model
-            .apply(
-                Edit::AnnotAdd {
-                    page: ids[1],
-                    annot: Annot {
+            .commit_ops(
+                vec![fx::add(
+                    ids[1],
+                    &Annot {
                         id: crate::annot::AnnotId(0),
                         kind: AnnotKind::Square {
                             rect: Box2 {
@@ -1399,7 +1429,7 @@ mod tests {
                         turn: Rotation::R0,
                         name: String::new(),
                     },
-                },
+                )],
                 "sq",
             )
             .unwrap();

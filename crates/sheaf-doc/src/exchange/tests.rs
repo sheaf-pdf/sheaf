@@ -1,8 +1,12 @@
 use super::*;
 use crate::annot::{Annot, AnnotKind, Pt};
 use crate::model::Document;
+use crate::prim::Key;
+use crate::tx::fixture::add;
+use crate::tx::{Actor, CommitOpts, EditError, JobKind, Stale};
+use in_progress::NoProgress;
 use lopdf::{Stream, dictionary};
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 /// Comments of most kinds, as another tool writes them.
 fn sample() -> Comments {
@@ -192,6 +196,14 @@ fn pdf_with_square(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
+/// What `got` brings, applied to `doc` as the import job applies it.
+fn applied(doc: &mut Document, got: Imported) {
+    let mut tx = doc.tx(Actor::Job(JobKind::Import));
+    let ops = got.ops_in(&mut tx);
+    tx.apply_batch(ops, &NoProgress).unwrap();
+    doc.commit(tx, CommitOpts::default()).unwrap();
+}
+
 /// `path` opened, with a note of ours on its first page, and the other
 /// tools' comments in it.
 fn opened(path: &std::path::Path) -> (Document, Vec<AnnotId>) {
@@ -215,14 +227,7 @@ fn opened(path: &std::path::Path) -> (Document, Vec<AnnotId>) {
         name: String::new(),
     };
     let p0 = doc.page(0).unwrap();
-    doc.apply(
-        Edit::AnnotAdd {
-            page: p0,
-            annot: note,
-        },
-        "note",
-    )
-    .unwrap();
+    doc.commit_ops(vec![add(p0, &note)], "note").unwrap();
     let st = doc.state();
     let theirs = (st.order().iter())
         .flat_map(|&page| st.foreign_on(page).map(|(id, _)| id))
@@ -230,12 +235,60 @@ fn opened(path: &std::path::Path) -> (Document, Vec<AnnotId>) {
     (doc, theirs)
 }
 
+/// Two imports of the same comment planned on one version, as two
+/// started together are, with a note added to another page meanwhile: the
+/// first lands beside the note; the second, which found no comment by that
+/// name there, is a Conflict over the page the first added it to, and
+/// changes nothing, rather than adding it twice.
+#[test]
+fn imports_planned_together_conflict_over_what_they_matched_by() {
+    let dir = std::env::temp_dir().join(format!("sheaf-exchange-twice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = pdf_with_square(&dir);
+    let (mut doc, _) = opened(&path);
+    let (p0, p1) = (doc.page(0).unwrap(), doc.page(1).unwrap());
+    let mut c = Comments::new();
+    let new = dictionary! {
+        "Subtype" => "Text", "Rect" => vec![100.into(), 100.into(), 120.into(), 120.into()],
+        "NM" => Object::string_literal("new"), "Contents" => Object::string_literal("Hello"),
+    };
+    let id = c.pdf.add_object(Object::Dictionary(new));
+    c.annots.push((1, id));
+    let snap = doc.snapshot();
+    let planned = || {
+        let mut tx = Document::tx_at(&snap, doc.lower_cx(Actor::Job(JobKind::Import)));
+        let ops = import(&snap, doc.store(), &c).ops_in(&mut tx);
+        tx.apply_batch(ops, &NoProgress).unwrap();
+        tx
+    };
+    let (first, second) = (planned(), planned());
+    let ours = doc.state().marks_on(p0).next().unwrap().clone();
+    let note = Annot {
+        name: String::new(),
+        ..ours
+    };
+    doc.commit_ops(vec![add(p0, &note)], "note").unwrap();
+    let on = || CommitOpts::based(snap.version, Stale::Relower, "Import");
+    doc.commit(first, on()).unwrap();
+    assert_eq!(doc.state().annots_named(p1, "new").count(), 1);
+    assert_eq!(doc.state().marks_on(p0).count(), 2);
+    let at = doc.current_version();
+    let e = doc.commit(second, on()).unwrap_err();
+    assert!(
+        matches!(e, EditError::Conflict { key: Key::PageAnnots(p), .. } if p == p1),
+        "{e}"
+    );
+    assert_eq!(doc.current_version(), at);
+    assert_eq!(doc.state().annots_named(p1, "new").count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn imports_match_by_name_and_report_the_rest() {
     let dir = std::env::temp_dir().join(format!("sheaf-exchange-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = pdf_with_square(&dir);
-    let (doc, foreign) = opened(&path);
+    let (mut doc, foreign) = opened(&path);
     let snap = doc.snapshot();
     let p0 = doc.page(0).unwrap();
     let ours = doc.state().marks_on(p0).next().unwrap().clone();
@@ -270,14 +323,33 @@ fn imports_match_by_name_and_report_the_rest() {
         got.summary(),
         "1 added, 2 updated; skipped 1 Sound (sheaf can't hold them); 1 on pages this document doesn't have"
     );
-    match &got.edits[0] {
-        Edit::AnnotUpdate { page, annot } => {
-            assert_eq!((*page, annot.id), (p0, ours.id));
-            assert_eq!(annot.contents, "ours, edited");
+    // Ours, by name; theirs made ours, by name, then updated.
+    let named = |nm: &str| AnnotRef::Nm {
+        nm: nm.into(),
+        page: Some(PageRef::Id(p0)),
+    };
+    match &got.ops[..] {
+        [
+            Op::PatchMarks {
+                marks,
+                patch,
+                imported: Some(mine),
+            },
+            Op::AdoptAnnotations { annots },
+            Op::PatchMarks { marks: square, .. },
+            Op::AddMark {
+                imported: Some(new),
+                ..
+            },
+        ] => {
+            assert_eq!(*marks, [named(&ours.name())]);
+            assert_eq!(patch.contents.as_deref(), Some("ours, edited"));
+            assert_eq!(mine.nm, ours.name());
+            assert_eq!((annots, square), (&vec![named("sq")], &vec![named("sq")]));
+            assert_eq!(new.nm, "new");
         }
         other => panic!("{other:?}"),
     }
-    assert!(matches!(&got.edits[1], Edit::AnnotAdd { annot, .. } if annot.name == "sq"));
 
     // All of it, ours and theirs, out and back.
     let out = gather(&snap, &[ours.id], &foreign).unwrap();
@@ -290,6 +362,19 @@ fn imports_match_by_name_and_report_the_rest() {
     // Ours come back exactly, from /SheafAnnot.
     let again = import(&snap, doc.store(), &back);
     assert_eq!((again.added, again.updated), (0, 2));
+
+    // Applied: ours and theirs changed in place, under their names, and
+    // the new one added on the second page.
+    applied(&mut doc, got);
+    let st = doc.state();
+    let mark = |page: PageId, nm: &str| {
+        let id = st.annots_named(page, nm).next().unwrap();
+        st.annot(id).unwrap().mark().unwrap().clone()
+    };
+    assert_eq!(mark(p0, &ours.name()).contents, "ours, edited");
+    assert_eq!(st.annots_named(p0, "sq").count(), 1);
+    assert_eq!(mark(p0, "sq").contents, "Box, edited");
+    assert_eq!(mark(doc.page(1).unwrap(), "new").contents, "Hello");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -311,9 +396,8 @@ fn our_marks_bring_their_stamps_and_files() {
     let held = crate::forms::fixture::mark_blobs(doc.store());
     let p0 = doc.page(0).unwrap();
     let every = every_mark_kind();
-    for annot in [every[17].clone(), every[23].clone()] {
-        doc.apply(Edit::AnnotAdd { page: p0, annot }, "mark")
-            .unwrap();
+    for annot in [&every[17], &every[23]] {
+        doc.commit_ops(vec![add(p0, annot)], "mark").unwrap();
     }
     drop(held);
     // After the note.
@@ -329,14 +413,13 @@ fn our_marks_bring_their_stamps_and_files() {
     );
     let got = import(&other.snapshot(), other.store(), &back);
     assert_eq!(got.added, 2);
-    other.apply_batch(got.edits, "Import").unwrap();
-    drop(got.held);
+    applied(&mut other, got);
     let marks: Vec<&crate::model::Mark> = other.state().mark_records_on(p0).skip(1).collect();
     let AnnotKind::PageStamp { stamp, .. } = &marks[0].annot.kind else {
         panic!("a page stamp")
     };
     let page = marks[0].stamp.as_ref().unwrap().to_pdf().unwrap();
-    assert_eq!(*stamp, crate::store::BlobId::of(&page).stem());
+    assert_eq!(*stamp, crate::store::blob_id(&page).stem());
     assert_eq!(
         lopdf::Document::load_mem(&page).unwrap().get_pages().len(),
         1
@@ -345,5 +428,70 @@ fn our_marks_bring_their_stamps_and_files() {
         matches!(&marks[1].annot.kind, AnnotKind::FileAttachment { file, .. } if *file == *MARK_FILE)
     );
     assert_eq!(&**marks[1].file.as_ref().unwrap().bytes(), MARK_FILE_BYTES);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A reply comes in after the comment it replies to, wherever the data
+/// file lists it; one to a comment that's neither here nor brought in is
+/// in no thread, and is left out and said.
+#[test]
+fn replies_come_in_after_their_comments() {
+    let dir = std::env::temp_dir().join(format!(
+        "sheaf-exchange-replies-{}-{:x}",
+        std::process::id(),
+        fastrand::u64(..)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = pdf_with_square(&dir);
+    let (mut doc, _) = opened(&path);
+    let p0 = doc.page(0).unwrap();
+    let mut c = Comments::new();
+    let r = || vec![100.into(), 100.into(), 120.into(), 120.into()];
+    let mut add = |d: Dictionary| {
+        let id = c.pdf.add_object(Object::Dictionary(d));
+        c.annots.push((0, id));
+    };
+    // By name, as XFDF says what a reply is to: the reply first, then its
+    // comment; a reply to the square here; one to nothing.
+    add(dictionary! {
+        "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("re"),
+        "IRT" => Object::string_literal("why"), "Contents" => Object::string_literal("Because"),
+    });
+    add(dictionary! {
+        "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("why"),
+        "Contents" => Object::string_literal("Why?"),
+    });
+    add(dictionary! {
+        "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("ok"),
+        "IRT" => Object::string_literal("sq"), "Contents" => Object::string_literal("OK"),
+    });
+    add(dictionary! {
+        "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("lost"),
+        "IRT" => Object::string_literal("gone"), "Contents" => Object::string_literal("?"),
+    });
+    let got = import(&doc.snapshot(), doc.store(), &c);
+    assert_eq!((got.added, got.updated, got.orphans), (3, 0, 1));
+    assert_eq!(
+        got.summary(),
+        "3 added, 0 updated; 1 replies left out (what they reply to isn't on their page)"
+    );
+    let order: Vec<&str> = (got.ops.iter())
+        .map(|op| match op {
+            Op::AddMark {
+                imported: Some(i), ..
+            } => i.nm.as_str(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(order, ["why", "ok", "re"]);
+    applied(&mut doc, got);
+    let st = doc.state();
+    let parent = |nm: &str| {
+        let id = st.annots_named(p0, nm).next().unwrap();
+        st.annot(id).unwrap().parent().map(str::to_string)
+    };
+    assert_eq!(parent("re").as_deref(), Some("why"));
+    assert_eq!(parent("ok").as_deref(), Some("sq"));
+    assert_eq!(st.annots_named(p0, "lost").count(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }

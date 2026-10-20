@@ -10,11 +10,12 @@
 use std::sync::Arc;
 
 use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::content::{DrawnForms, PagOrigin, PageBlocks, PaginationKind, contents};
 use sheaf_doc::source::Limits;
 use sheaf_doc::stamps;
+use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
+use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 

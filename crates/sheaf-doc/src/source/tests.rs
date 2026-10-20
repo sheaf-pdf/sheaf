@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use lopdf::{Object, ObjectId};
-use sheaf_core::{PageSize, Rotation};
+use sheaf_edit::{PageSize, Rotation};
 
 use super::lazy_tests::{QUICK, catalog, plaintext, stream, with_table};
 use super::{Conformance, Limits, OpenError, PageTreeError, PageTreeLimits, PdfA};

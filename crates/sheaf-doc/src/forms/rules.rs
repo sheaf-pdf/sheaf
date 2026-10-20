@@ -33,7 +33,7 @@ pub const RIGHTS_REMOVED: &str =
     "Removed Reader's usage rights: their signature covers the file as it was";
 
 /// What save policy does to the form of a save of `target` by `strategy`
-/// over `src`, the file of registration `primary` as read, after the save
+/// over `src`, the primary file as read, after the save
 /// `rec` recorded, when there's one. `class` and `ops` are what an Append
 /// changes: its classes of change (§9.3), but for its transforms', and
 /// what it does to annotations.
@@ -53,7 +53,6 @@ pub const RIGHTS_REMOVED: &str =
 pub fn plan(
     src: &Source,
     target: &DocState,
-    primary: SourceId,
     rec: Option<&SaveRecord>,
     strategy: &Strategy,
     class: SigClass,
@@ -63,7 +62,7 @@ pub fn plan(
     let append = matches!(strategy, Strategy::Append { .. });
     let done = |t: &SaveTransform| append && rec.is_some_and(|rec| rec.transforms.contains(t));
     let mut out = Vec::new();
-    if drops_xfa(src, target, primary) {
+    if drops_xfa(src, target) {
         out.push(SaveTransform::DropXfa {
             tooltips_to_tu: true,
         });
@@ -87,17 +86,17 @@ pub fn plan(
     out
 }
 
-/// Whether save policy drops the XFA copy of `src`, the file of
-/// registration `primary` as read, from a save of `target` ([`plan`]'s
-/// `DropXfa`): it has one, and the fields differ from its.
-pub(crate) fn drops_xfa(src: &Source, target: &DocState, primary: SourceId) -> bool {
+/// Whether save policy drops the XFA copy of `src`, the primary file as
+/// read, from a save of `target` ([`plan`]'s `DropXfa`): it has one, and
+/// the fields differ from its.
+pub(crate) fn drops_xfa(src: &Source, target: &DocState) -> bool {
     let base = src.form();
-    base.facts.xfa && form_differs(base, target, primary)
+    base.facts.xfa && form_differs(base, target, src.id())
 }
 
-/// Whether `target`'s fields differ from `base`'s, registration
-/// `primary`'s form as read: a node of another instance, a node gone, or a
-/// node with another name, value or number of widgets.
+/// Whether `target`'s fields differ from `base`'s, the form of `primary`
+/// as read: a node of another instance, a node gone, or a node with
+/// another name, value or number of widgets.
 fn form_differs(base: &FileForm, target: &DocState, primary: SourceId) -> bool {
     let own = FormInst {
         src: primary,

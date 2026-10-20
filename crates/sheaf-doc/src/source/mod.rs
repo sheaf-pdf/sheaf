@@ -25,12 +25,13 @@ use std::sync::{Arc, OnceLock};
 
 use in_progress::{NoProgress, Progress};
 use lopdf::{LazyPdf, Object, ObjectId, XrefFacts};
-use sheaf_core::PageSize;
+use sheaf_edit::PageSize;
 
 use crate::content::{ContentError, DrawnForms, PageBlocks};
 use crate::forms::FileForm;
 use crate::forms::sigs::Signatures;
 use crate::geom::Geom;
+use crate::model::FlatOutlineItem;
 use crate::open::FileAnnots;
 use crate::serialize::crypt::Crypt;
 use crate::stamps::HeaderFooter;
@@ -54,6 +55,7 @@ pub struct Source {
     forms: DrawnForms,
     conformance: OnceLock<Conformance>,
     annots: OnceLock<Arc<FileAnnots>>,
+    outline: OnceLock<Arc<[FlatOutlineItem]>>,
     form: OnceLock<Arc<FileForm>>,
     signatures: OnceLock<Arc<Signatures>>,
     header_footer: OnceLock<Option<StoredHeaderFooter>>,
@@ -135,6 +137,7 @@ impl Source {
             pages,
             conformance: OnceLock::new(),
             annots: OnceLock::new(),
+            outline: OnceLock::new(),
             form: OnceLock::new(),
             signatures: OnceLock::new(),
             header_footer: OnceLock::new(),
@@ -281,6 +284,12 @@ impl Source {
         }
         let annots = crate::open::annots::read(self, p);
         self.annots.get_or_init(|| Arc::new(annots))
+    }
+
+    /// Its bookmarks in pre-order, read once (see [`crate::open::outline`]):
+    /// what pages inserted from it bring.
+    pub fn outline(&self) -> &Arc<[FlatOutlineItem]> {
+        (self.outline).get_or_init(|| crate::open::outline(self).into())
     }
 
     /// Its form: the field tree, the widgets on its pages and what sheaf

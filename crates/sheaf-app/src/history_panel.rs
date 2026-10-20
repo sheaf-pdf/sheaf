@@ -3,13 +3,17 @@
 //! that moves through history as undo does, so going back and forth is
 //! free, and Save writes whichever version is current. Where edits were
 //! undone and then replaced by others, the replaced ones stay, as a branch
-//! you can open and go into.
+//! you can open and go into. A version a plugin made says so, and an
+//! edit that took content away (text, marks, pages) is badged. A version
+//! of an OCR run or a plugin call offers to undo all of the run or call,
+//! its versions on either side of other edits too, in one new version.
 
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use gpui::{AnyElement, Context, FocusHandle, Window, div, prelude::*, px};
-use sheaf_doc::{Damaged, VersionId, VersionView};
+use gpui::{AnyElement, App, Context, FocusHandle, Window, div, prelude::*, px};
+use sheaf_doc::{Actor, EditError, GroupId, VersionId, VersionView};
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::theme;
 
@@ -45,6 +49,8 @@ enum Row {
     },
     Edit {
         text: String,
+        /// It took content away (M10.5 §7.3).
+        removes: bool,
         depth: u8,
     },
     Branch {
@@ -62,6 +68,31 @@ impl Row {
             Row::Branch { .. } => BRANCH_H,
         }
     }
+}
+
+/// The badge on an edit that took content away, and on its version.
+fn removes_badge() -> impl IntoElement {
+    div().text_xs().text_color(theme::WARNING).child("Removes")
+}
+
+/// Who made `view`, as its row says: a plugin by its name.
+fn made_by(view: &VersionView, cx: &App) -> String {
+    match &view.actor {
+        Actor::Plugin { id, .. } => format!("Plugin {}", plugin_name(id, cx)),
+        _ => view.author.clone(),
+    }
+}
+
+/// Plugin `id`'s name, as its manifest says.
+#[cfg(feature = "plugins")]
+fn plugin_name(id: &str, cx: &App) -> String {
+    crate::plugins::name_of(id, cx).unwrap_or_else(|| id.to_string())
+}
+
+/// Plugin `id`'s name: its id, with plugins left out of the build.
+#[cfg(not(feature = "plugins"))]
+fn plugin_name(id: &str, _: &App) -> String {
+    id.to_string()
 }
 
 /// `D:20261014153000Z` (UTC, as sheaf writes it) as local time: just the
@@ -114,25 +145,41 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        if doc.model.current_version() == id {
+        let change = match doc.model.jump(id) {
+            Ok(Some(change)) => change,
+            // It's the current version.
+            Ok(None) => return,
+            Err(e) => {
+                doc.notice = Some(format!("Can't go there: {e:#}"));
+                self.refresh_history();
+                cx.notify();
+                return;
+            }
+        };
+        doc.notice = Some(format!("Went to: {}", change.label));
+        self.on_change(&change, cx);
+    }
+
+    /// "Undo all of `label`": group `g`'s versions up to the current one
+    /// taken back in a version after it, keeping the edits made between
+    /// them; or why not, when a later edit changed what they did.
+    pub(crate) fn undo_group(&mut self, g: GroupId, label: Arc<str>, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
             return;
+        };
+        match doc.model.revert_group(g, &label) {
+            Ok(c) => {
+                doc.notice = Some(match c.version {
+                    Some(_) => format!("Undid all of {label}"),
+                    None => format!("Nothing of {label} to undo"),
+                });
+                self.on_change(&c.change, cx);
+            }
+            Err(e) => {
+                doc.notice = Some(format!("Can't undo all of {label}: {e}"));
+                cx.notify();
+            }
         }
-        if let Err(e) = doc.model.jump(id) {
-            doc.notice = Some(format!("Can't go there: {e:#}"));
-            self.refresh_history();
-            cx.notify();
-            return;
-        }
-        let label = doc
-            .model
-            .timeline()
-            .into_iter()
-            .find(|v| v.id == id)
-            .map(|v| v.label)
-            .unwrap_or_default();
-        doc.notice = Some(format!("Went to: {label}"));
-        doc.touched();
-        self.after_model_change(format!("Go to: {label}"), Default::default(), cx);
     }
 
     /// Up and Down: the version before or after the current one, along the
@@ -158,7 +205,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return Rc::new(Vec::new());
         };
-        let key = (doc.version, doc.model.is_dirty());
+        let key = (doc.changes, doc.model.is_dirty());
         let h = self.history.as_mut().expect("ensured");
         if let Some((k, rows)) = &h.cache
             && *k == key
@@ -169,10 +216,14 @@ impl DocView {
         let push_version = |rows: &mut Vec<Row>, view: VersionView, depth: u8| {
             let open = h.expanded.contains(&view.id);
             let edits = view.edits.clone();
-            let single_same = edits.len() == 1 && edits[0] == view.label;
+            let single_same = edits.len() == 1 && edits[0].text == view.label;
             rows.push(Row::Version { view, depth });
             if open && !single_same {
-                rows.extend(edits.into_iter().map(|text| Row::Edit { text, depth }));
+                rows.extend((edits.into_iter()).map(|line| Row::Edit {
+                    text: line.text,
+                    removes: line.removes,
+                    depth,
+                }));
             }
         };
         for view in doc.model.timeline() {
@@ -251,17 +302,20 @@ impl DocView {
                 Row::Version { view, depth } => {
                     let id = view.id;
                     let expandable = view.edits.len() > 1
-                        || view.edits.first().is_some_and(|e| *e != view.label);
+                        || view.edits.first().is_some_and(|e| e.text != view.label);
                     let open = h.expanded.contains(&id);
+                    let by = made_by(view, cx);
                     let meta = if view.damaged {
-                        Damaged { version: id }.to_string()
+                        EditError::Mismatch { version: id }.to_string()
                     } else if view.edits.is_empty() {
                         format!("Opened · {}", fmt_local(&view.at))
-                    } else if view.author.is_empty() {
+                    } else if by.is_empty() {
                         fmt_local(&view.at)
                     } else {
-                        format!("{} · {}", view.author, fmt_local(&view.at))
+                        format!("{by} · {}", fmt_local(&view.at))
                     };
+                    let removes = view.edits.iter().any(|e| e.removes);
+                    let undo_all = (view.group.clone()).filter(|_| !view.undone && !view.damaged);
                     let text = if view.current {
                         theme::TEXT_BRIGHT
                     } else if view.undone {
@@ -312,34 +366,70 @@ impl DocView {
                                 )
                                 .child(
                                     div()
+                                        .flex()
+                                        .gap_2()
                                         .text_xs()
-                                        .text_color(if view.damaged {
-                                            theme::ERROR
-                                        } else {
-                                            theme::TEXT_MUTED
-                                        })
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .child(meta),
+                                        .child(
+                                            div()
+                                                .min_w(px(0.0))
+                                                .text_color(if view.damaged {
+                                                    theme::ERROR
+                                                } else {
+                                                    theme::TEXT_MUTED
+                                                })
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .child(meta),
+                                        )
+                                        .when_some(undo_all, |d, (g, label)| {
+                                            d.child(
+                                                div()
+                                                    .id(("history-undo-all", i))
+                                                    .min_w(px(0.0))
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .text_color(theme::LINK)
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.underline())
+                                                    .child(format!("Undo all of {label}"))
+                                                    .on_click(cx.listener(move |v, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        v.undo_group(g, label.clone(), cx);
+                                                    })),
+                                            )
+                                        }),
                                 ),
                         )
+                        .when(removes, |d| d.child(removes_badge()))
                         .when(view.saved, |d| {
                             d.child(div().text_xs().text_color(theme::SUCCESS).child("Saved"))
                         })
                         .into_any_element()
                 }
-                Row::Edit { text, depth } => place
+                Row::Edit {
+                    text,
+                    removes,
+                    depth,
+                } => place
                     .flex()
                     .items_center()
+                    .gap_1()
                     .pl(px(24.0 + *depth as f32 * INDENT))
                     .pr_2()
                     .text_xs()
                     .text_color(theme::TEXT_DETAIL)
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(text.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(text.clone()),
+                    )
+                    .when(*removes, |d| d.child(removes_badge()))
                     .into_any_element(),
                 Row::Branch { start, len, open } => {
                     let start = *start;

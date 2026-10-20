@@ -6,7 +6,10 @@ use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
     Subscription, Window, div, prelude::*, px,
 };
-use sheaf_doc::{Edit, NewOutlineItem, PageId};
+use std::collections::BTreeMap;
+
+use sheaf_doc::{CommitOpts, OutlineId, PageId};
+use sheaf_edit::{BookmarkPatch, BookmarkRef, Local, Op, Patch, Sibling};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
@@ -282,7 +285,8 @@ impl Render for BookmarkToolsDialog {
 
 impl DocView {
     /// A bookmark per page in `pages` (0-based), titled from `template`,
-    /// at the end of the outline or under a new `parent`.
+    /// at the end of the outline or under a new `parent`: one batch, the
+    /// new parent named by a local.
     pub(crate) fn bookmarks_from_pages(
         &mut self,
         pages: Vec<usize>,
@@ -290,43 +294,47 @@ impl DocView {
         parent: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let Some(mut tx) = self.user_tx() else {
+            return;
+        };
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let st = doc.model.state();
-        let ids: Vec<PageId> = pages.iter().filter_map(|&i| st.page_at(i)).collect();
-        let depth = u16::from(parent.is_some());
-        let mut items: Vec<NewOutlineItem> = Vec::new();
-        if let Some(title) = parent {
-            items.push(NewOutlineItem {
-                title,
-                target: ids.first().copied(),
-                view: None,
-                depth: 0,
-            });
+        let mut r = tx.reader();
+        let ids: Vec<(usize, PageId)> = (pages.iter())
+            .filter_map(|&i| Some((i, r.page_at(i)?)))
+            .collect();
+        if template.contains("<<label>>") {
+            r.labels();
         }
-        for (&i, &id) in pages.iter().zip(&ids) {
+        let bookmark =
+            |parent: Option<BookmarkRef>, title, target: Option<PageId>, local| Op::AddBookmark {
+                parent,
+                at: Sibling::Last,
+                title,
+                target: target.map(Into::into),
+                view: None,
+                color: None,
+                style: Default::default(),
+                local,
+            };
+        let mut ops = Vec::with_capacity(ids.len() + 1);
+        let under = parent.map(|title| {
+            let first = ids.first().map(|&(_, id)| id);
+            ops.push(bookmark(None, title, first, Some(Local(1))));
+            BookmarkRef::New(Local(1))
+        });
+        for &(i, id) in &ids {
             let title = template
                 .replace("<<label>>", &doc.page_label(i))
                 .replace("<<1>>", &(i + 1).to_string());
-            items.push(NewOutlineItem {
-                title,
-                target: Some(id),
-                view: None,
-                depth,
-            });
+            ops.push(bookmark(under.clone(), title, Some(id), None));
         }
-        let after = st.outline_roots().last().copied();
         let n = ids.len();
-        self.apply_batch(
-            vec![Edit::OutlineInsertTree {
-                parent: None,
-                after,
-                items,
-            }],
-            &format!("Bookmark {n} page{}", if n == 1 { "" } else { "s" }),
-            cx,
-        );
+        let label = format!("Bookmark {n} page{}", if n == 1 { "" } else { "s" });
+        if let Some(tx) = self.lower_in(tx, ops, &label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         self.wanted_panel = Some("bookmarks");
     }
 
@@ -336,31 +344,41 @@ impl DocView {
         colors: [Option<[u8; 3]>; LEVELS],
         cx: &mut Context<Self>,
     ) {
-        let State::Ready(doc) = &self.state else {
+        let Some(mut tx) = self.user_tx() else {
             return;
         };
-        let edits: Vec<Edit> = doc
-            .model
-            .state()
-            .bookmarks_preorder()
-            .into_iter()
-            .filter_map(|(depth, id, b)| {
-                let want = colors[(depth as usize).min(LEVELS - 1)];
-                (b.color != want).then_some(Edit::OutlineEdit {
-                    id,
-                    title: None,
-                    target: None,
-                    color: Some(want),
-                    view: None,
-                    style: None,
-                })
-            })
-            .collect();
-        if edits.is_empty() {
+        // Each bookmark whose color isn't its level's, by the color it takes.
+        let mut recolor: BTreeMap<Option<[u8; 3]>, Vec<BookmarkRef>> = BTreeMap::new();
+        let mut r = tx.reader();
+        let mut todo: Vec<(usize, OutlineId)> =
+            r.outline_roots().iter().rev().map(|&id| (0, id)).collect();
+        while let Some((depth, id)) = todo.pop() {
+            let Some(b) = r.bookmark(id).cloned() else {
+                continue;
+            };
+            let want = colors[depth.min(LEVELS - 1)];
+            if b.color != want {
+                recolor.entry(want).or_default().push(id.into());
+            }
+            todo.extend(b.kids.iter().rev().map(|&kid| (depth + 1, kid)));
+        }
+        if recolor.is_empty() {
             self.set_notice("The bookmarks already have those colors", cx);
             return;
         }
-        self.apply_batch(edits, "Color bookmarks by level", cx);
+        let ops = (recolor.into_iter())
+            .map(|(want, bookmarks)| Op::PatchBookmarks {
+                bookmarks,
+                patch: BookmarkPatch {
+                    color: want.map_or(Patch::Clear, Patch::Set),
+                    ..BookmarkPatch::default()
+                },
+            })
+            .collect();
+        let label = "Color bookmarks by level";
+        if let Some(tx) = self.lower_in(tx, ops, label, cx) {
+            self.commit(tx, CommitOpts::labelled(label), cx).ok();
+        }
         self.wanted_panel = Some("bookmarks");
     }
 }

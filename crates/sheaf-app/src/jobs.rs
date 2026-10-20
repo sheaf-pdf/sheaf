@@ -1,7 +1,15 @@
-//! Background jobs on a document (Export Pages, Split Document): an op
-//! from `sheaf_ops` run on a background thread over a snapshot, with its
-//! progress in the status bar and Escape to stop it. One at a time.
+//! Background work on a document, its progress in the status bar and
+//! Escape to stop it (M10.5 §14.1), in two kinds:
+//! - **Jobs** write files (Export Pages, Split Document), one at a time
+//!   ([`DocView::run_job`]).
+//! - **Planners** plan an edit off the UI thread, over a snapshot (an
+//!   insert, a crop, a watermark, a header and footer, a comment import,
+//!   the blank-page search), and land it on the UI thread, committed with
+//!   the snapshot's version as its base ([`DocView::run_planner`]). Any
+//!   number run at once, beside a job and OCR's own run; Escape stops the
+//!   newest.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::Context;
@@ -9,7 +17,7 @@ use sheaf_ops::{ProgressSnapshot as Snapshot, Tracker, was_cancelled};
 
 use crate::docview::{DocView, State};
 
-/// A running job: its name ("Export") and tracker.
+/// A running job or planner: its name ("Export") and tracker.
 pub(crate) struct Job {
     pub name: String,
     pub tracker: Tracker,
@@ -27,20 +35,6 @@ impl DocView {
         done: impl FnOnce(T) -> String + 'static,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.run_job_then(name, work, status, |_, out, _| Some(done(out)), cx)
-    }
-
-    /// [`Self::run_job`], with `done` given the view to act on the result
-    /// too; it returns the status line, if any.
-    pub(crate) fn run_job_then<T: Send + 'static>(
-        &mut self,
-        name: &str,
-        work: impl FnOnce(&Tracker) -> anyhow::Result<T> + Send + 'static,
-        status: impl Fn(&Snapshot) -> Option<String> + 'static,
-        done: impl FnOnce(&mut DocView, T, &mut Context<DocView>) -> Option<String> + 'static,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        use futures::FutureExt;
         if let Some(job) = &self.job {
             let msg = format!("{} is still running — Esc stops it", job.name);
             self.set_notice(msg, cx);
@@ -52,11 +46,71 @@ impl DocView {
             tracker: tracker.clone(),
         });
         self.set_notice(format!("{name}…"), cx);
+        let name = name.to_string();
+        let end = move |v: &mut DocView, result: anyhow::Result<T>, _: &mut Context<DocView>| {
+            v.job = None;
+            Some(match result {
+                Ok(out) => done(out),
+                Err(e) => ended(&name, &e),
+            })
+        };
+        self.drive(tracker, work, status, end, cx);
+        true
+    }
+
+    /// Plan an edit: `work` on a background thread, over what it took of
+    /// the document, then `land` given the view to commit what it planned,
+    /// returning the final status line, if any. `status` turns progress
+    /// into the status line meanwhile. A planner stopped before it lands
+    /// lands nothing, and so does one whose document the view no longer
+    /// shows ([`Self::forget_planners`]).
+    pub(crate) fn run_planner<T: Send + 'static>(
+        &mut self,
+        name: &str,
+        work: impl FnOnce(&Tracker) -> anyhow::Result<T> + Send + 'static,
+        status: impl Fn(&Snapshot) -> Option<String> + 'static,
+        land: impl FnOnce(&mut DocView, T, &mut Context<DocView>) -> Option<String> + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let tracker = Tracker::new();
+        let planner = Rc::new(Job {
+            name: name.to_string(),
+            tracker: tracker.clone(),
+        });
+        self.planners.push(planner.clone());
+        self.set_notice(format!("{name}…"), cx);
+        let end = move |v: &mut DocView, result: anyhow::Result<T>, cx: &mut Context<DocView>| {
+            let at = v.planners.iter().position(|p| Rc::ptr_eq(p, &planner))?;
+            v.planners.remove(at);
+            match result {
+                // Stopped once its work was done, before it landed.
+                Ok(_) if planner.tracker.snapshot().cancelled => {
+                    Some(format!("{} stopped", planner.name))
+                }
+                Ok(out) => land(v, out, cx),
+                Err(e) => Some(ended(&planner.name, &e)),
+            }
+        };
+        self.drive(tracker, work, status, end, cx);
+    }
+
+    /// `work` run on a background thread with `tracker`, `status` turning
+    /// its progress into the status line meanwhile; then `end` given the
+    /// view and the result, returning the final status line, if any.
+    fn drive<T: Send + 'static>(
+        &mut self,
+        tracker: Tracker,
+        work: impl FnOnce(&Tracker) -> anyhow::Result<T> + Send + 'static,
+        status: impl Fn(&Snapshot) -> Option<String> + 'static,
+        end: impl FnOnce(&mut DocView, anyhow::Result<T>, &mut Context<DocView>) -> Option<String>
+        + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        use futures::FutureExt;
         let progress = tracker.clone();
         let work = cx
             .background_executor()
             .spawn(async move { work(&progress) });
-        let name = name.to_string();
         cx.spawn(async move |this, cx| {
             let mut work = Box::pin(work.fuse());
             let result = loop {
@@ -84,12 +138,7 @@ impl DocView {
                 }
             };
             this.update(cx, |v, cx| {
-                v.job = None;
-                let line = match result {
-                    Ok(out) => done(v, out, cx),
-                    Err(e) if was_cancelled(&e) => Some(format!("{name} stopped")),
-                    Err(e) => Some(format!("{name} failed: {e:#}")),
-                };
+                let line = end(v, result, cx);
                 if let (Some(line), State::Ready(doc)) = (line, &mut v.state) {
                     doc.notice = Some(line);
                 }
@@ -98,13 +147,40 @@ impl DocView {
             .ok();
         })
         .detach();
+    }
+
+    /// Fraction done of the running job, else of the newest planner, while
+    /// one runs.
+    pub(crate) fn job_progress(&self) -> Option<f32> {
+        let tracker = match (&self.job, self.planners.last()) {
+            (Some(job), _) => &job.tracker,
+            (None, Some(planner)) => &planner.tracker,
+            (None, None) => return None,
+        };
+        Some(tracker.snapshot().fraction.unwrap_or(0.0))
+    }
+
+    /// Stop the newest planner not stopped yet. Returns whether there was
+    /// one.
+    pub(crate) fn cancel_planner(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(planner) = (self.planners.iter().rev()).find(|p| !p.tracker.snapshot().cancelled)
+        else {
+            return false;
+        };
+        planner.tracker.cancel();
+        let msg = format!("{}: stopping…", planner.name);
+        self.set_notice(msg, cx);
         true
     }
 
-    /// Fraction of the running job done, while one runs.
-    pub(crate) fn job_progress(&self) -> Option<f32> {
-        let job = self.job.as_ref()?;
-        Some(job.tracker.snapshot().fraction.unwrap_or(0.0))
+    /// The planners stopped and forgotten, and the blank pages a search
+    /// found for review, as the view goes to show another document (a
+    /// recovery's): what they planned was of this one.
+    pub(crate) fn forget_planners(&mut self) {
+        for planner in self.planners.drain(..) {
+            planner.tracker.cancel();
+        }
+        self.blank_review = None;
     }
 
     /// Stop the running job. Returns whether there was one.
@@ -232,11 +308,34 @@ impl DocView {
     }
 }
 
+/// The final status line of a job or planner `name` that ended with `e`:
+/// stopped, or failed and why.
+fn ended(name: &str, e: &anyhow::Error) -> String {
+    match was_cancelled(e) {
+        true => format!("{name} stopped"),
+        false => format!("{name} failed: {e:#}"),
+    }
+}
+
 impl DocView {
     /// The document as it is now, for dialogs that plan over it.
     pub(crate) fn model_snapshot(&self) -> Option<sheaf_doc::Snapshot> {
         match &self.state {
             State::Ready(doc) => Some(doc.model.snapshot()),
+            _ => None,
+        }
+    }
+
+    /// [`Self::model_snapshot`], with a lowering context of the user's on
+    /// it: what a dialog's preview lowers on.
+    pub(crate) fn lowering_now(
+        &self,
+    ) -> Option<(sheaf_doc::Snapshot, std::sync::Arc<sheaf_doc::tx::LowerCx>)> {
+        match &self.state {
+            State::Ready(doc) => {
+                let lower = doc.model.lower_cx(sheaf_doc::Actor::User);
+                Some((doc.model.snapshot(), lower))
+            }
             _ => None,
         }
     }

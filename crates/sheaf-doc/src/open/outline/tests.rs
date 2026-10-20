@@ -5,13 +5,13 @@
 use std::path::Path;
 
 use lopdf::{Dictionary, Object, ObjectId, StringFormat, dictionary};
-use sheaf_core::DestView;
+use sheaf_edit::DestView;
 
 use super::*;
 use crate::forms::fixture::Form;
 use crate::forms::fixture::outline_tree;
 use crate::history::FixedCount;
-use crate::model::{Document, SourceInfo};
+use crate::model::Document;
 use crate::store::{BlobKind, Store};
 
 fn text(s: &str) -> Object {
@@ -79,12 +79,14 @@ fn rewritten(f: &mut Form, items: &[FlatOutlineItem]) -> Vec<u8> {
     let src = store
         .open(f.bytes().into(), BlobKind::file(Path::new("a.pdf"), None))
         .unwrap();
-    let primary = SourceInfo {
+    let doc = Document::new(
+        store,
         src,
-        name: "a.pdf".into(),
-        derived: None,
-    };
-    let doc = Document::new(store, primary, None, items, Box::new(FixedCount(5)));
+        "a.pdf".into(),
+        None,
+        items,
+        Box::new(FixedCount(5)),
+    );
     crate::save::rewrite(&doc.snapshot()).unwrap()
 }
 

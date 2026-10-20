@@ -37,7 +37,7 @@ use std::cell::OnceCell;
 use std::collections::HashMap;
 
 use lopdf::{Dictionary, Object, ObjectId};
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotKind, Box2, PART, Pt, from_json};
 use crate::attachments::Objects;
@@ -479,7 +479,7 @@ pub fn anon_name(dict: &lopdf::Dictionary) -> String {
             None => eat(b""),
         }
     }
-    format!("sheaf-anon:{}", sheaf_core::checksum_hex(&fields))
+    format!("sheaf-anon:{}", sheaf_util::checksum_hex(&fields))
 }
 
 /// What an annotation is called in threads: its `/NM`, else [`anon_name`].
@@ -832,7 +832,7 @@ pub fn annots_in<P: Objects + ?Sized>(
 mod tests {
     use super::*;
     use lopdf::{Object, Stream, dictionary};
-    use sheaf_core::Rotation;
+    use sheaf_edit::Rotation;
 
     /// `pdf`'s pages, none of them turned, as [`annots_in`] takes them.
     fn upright(pdf: &lopdf::Document) -> impl Iterator<Item = (lopdf::ObjectId, Rotation)> + '_ {

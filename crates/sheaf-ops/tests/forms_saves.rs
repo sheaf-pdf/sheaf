@@ -18,7 +18,11 @@ use sheaf_doc::forms::fixture::{Form, note, outline_tree};
 use sheaf_doc::forms::sigs::Verdict;
 use sheaf_doc::forms::{Finding, Value, check};
 use sheaf_doc::materialize::{Ask, AskAnswers, Note, SaveReport, SaveStop, Why};
-use sheaf_doc::{AnnotBody, AnnotId, Document, Edit, ObjRef, SourceInfo};
+use sheaf_doc::tx::fixture::{
+    add, bookmark, delete, duplicate, insert, move_pages, patch_bookmark, rotate,
+};
+use sheaf_doc::{AnnotBody, AnnotId, Document, ObjRef};
+use sheaf_edit::{BookmarkPatch, Turn};
 
 mod common;
 use common::*;
@@ -80,8 +84,7 @@ fn changed_hybrid_loses_xfa(how: How) {
     let path = write(&dir, "form.pdf", &mut hybrid());
     let mut doc = open(&path);
     let second = doc.state().order()[1];
-    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[second])], "Delete").unwrap();
     assert!(drops_xfa(&doc, &path));
     let written = (how.strategy(), written(&doc, how));
     for (strategy, bytes) in [written, saved(&mut doc, &path, how)] {
@@ -144,14 +147,8 @@ fn unchanged_hybrid_keeps_xfa(how: How) {
     let path = write(&dir, "form.pdf", &mut hybrid());
     let mut doc = open(&path);
     let first = doc.state().order()[0];
-    doc.apply(
-        Edit::RotatePages {
-            ids: vec![first],
-            by: sheaf_core::Rotation::R90,
-        },
-        "Rotate",
-    )
-    .unwrap();
+    doc.commit_ops(vec![rotate(&[first], Turn::Quarter)], "Rotate")
+        .unwrap();
     assert!(!drops_xfa(&doc, &path));
     let written = (how.strategy(), written(&doc, how));
     for (strategy, bytes) in [written, saved(&mut doc, &path, how)] {
@@ -177,19 +174,9 @@ fn a_form_brought_into_a_hybrid_one_is_saved_in_full() {
         blue(&mut f, "z", 0, 0, "Zed");
         std::fs::write(&other, f.bytes()).unwrap();
     }
-    let (info, _) = SourceInfo::read(doc.store(), &other, None).unwrap();
-    let sid = doc.add_source(info);
-    doc.apply(
-        Edit::InsertPages {
-            source: sid,
-            range: 0..1,
-            before: None,
-            outline: None,
-            annots: Vec::new(),
-        },
-        "Insert",
-    )
-    .unwrap();
+    let (src, _) = doc.store().read_file(&other, None).unwrap();
+    doc.commit_ops(vec![insert(&src, [0], "other.pdf", None)], "Insert")
+        .unwrap();
     let drop_xfa = AskAnswers {
         drop_xfa_values: true,
         ..Default::default()
@@ -223,14 +210,8 @@ fn usage_rights_go(how: How) {
     assert_eq!(parts(&std::fs::read(&path).unwrap()), (true, true, true));
     let mut doc = open(&path);
     let first = doc.state().order()[0];
-    doc.apply(
-        Edit::RotatePages {
-            ids: vec![first],
-            by: sheaf_core::Rotation::R90,
-        },
-        "Rotate",
-    )
-    .unwrap();
+    doc.commit_ops(vec![rotate(&[first], Turn::Quarter)], "Rotate")
+        .unwrap();
     // A turn is neither a fill nor a comment, which are all usage rights
     // allow (M10.5 §9.3): a save by either strategy takes them out. No
     // signature needs `/SigFlags` now; the form is as it was.
@@ -313,8 +294,7 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
     assert!(signature_fits(&original));
     let mut doc = open(&path);
     let second = doc.state().order()[1];
-    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[second])], "Delete").unwrap();
     // Asked: nothing's written.
     let stop = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
     assert!(asks_for_removal(&stop), "{stop:?}");
@@ -338,24 +318,12 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
     // again: the document's signatures stopped holding with the Rewrite,
     // whatever file it writes (`SaveRecord::signatures_hold`).
     let first = doc.state().order()[0];
-    doc.apply(
-        Edit::RotatePages {
-            ids: vec![first],
-            by: sheaf_core::Rotation::R90,
-        },
-        "Rotate",
-    )
-    .unwrap();
+    doc.commit_ops(vec![rotate(&[first], Turn::Quarter)], "Rotate")
+        .unwrap();
     save(&mut doc, &copy, AskAnswers::default()).unwrap();
     assert!(!doc.is_dirty());
-    doc.apply(
-        Edit::RotatePages {
-            ids: vec![first],
-            by: sheaf_core::Rotation::R90,
-        },
-        "Rotate",
-    )
-    .unwrap();
+    doc.commit_ops(vec![rotate(&[first], Turn::Quarter)], "Rotate")
+        .unwrap();
     let report = save(&mut doc, &path, AskAnswers::default()).unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     assert_eq!(report.why, [Why::OtherTarget]);
@@ -364,8 +332,7 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
     let plain = write(&dir, "plain.pdf", &mut hybrid());
     let mut doc = open(&plain);
     let second = doc.state().order()[1];
-    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[second])], "Delete").unwrap();
     let drop_xfa = AskAnswers {
         drop_xfa_values: true,
         ..Default::default()
@@ -384,8 +351,7 @@ fn a_signed_file_appended_keeps_its_signature() {
     let original = std::fs::read(&path).unwrap();
     let mut doc = open(&path);
     let second = doc.state().order()[1];
-    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[second])], "Delete").unwrap();
     let report = sheaf_doc::materialize::save_appended(&mut doc, &path).unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Append));
     let appended = std::fs::read(&path).unwrap();
@@ -409,14 +375,7 @@ fn a_signed_file_saved_as_another_copies_and_appends() {
     let copy = dir.join("copy.pdf");
     let mut doc = open(&path);
     let first = doc.state().order()[0];
-    doc.apply(
-        Edit::AnnotAdd {
-            page: first,
-            annot: note(),
-        },
-        "Note",
-    )
-    .unwrap();
+    doc.commit_ops(vec![add(first, &note())], "Note").unwrap();
     let report = sheaf_doc::materialize::save_appended(&mut doc, &copy).unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Append));
     let copied = std::fs::read(&copy).unwrap();
@@ -431,14 +390,7 @@ fn a_signed_file_saved_as_another_copies_and_appends() {
 
     // Its file changed since: refused, nothing written.
     let mut doc = open(&path);
-    doc.apply(
-        Edit::AnnotAdd {
-            page: first,
-            annot: note(),
-        },
-        "Note",
-    )
-    .unwrap();
+    doc.commit_ops(vec![add(first, &note())], "Note").unwrap();
     let mut theirs = original.clone();
     theirs.extend_from_slice(b"\n");
     std::fs::write(&path, &theirs).unwrap();
@@ -477,19 +429,9 @@ fn an_encrypted_signed_file_appends_and_keeps_its_signature() {
     let mut doc = open(&path);
     let [first, second] = [0, 1].map(|i| doc.state().order()[i]);
     let title = "APPENDEDTITLE123";
-    doc.apply(
-        Edit::OutlineInsert {
-            parent: None,
-            after: None,
-            title: title.into(),
-            target: Some(first),
-            view: None,
-        },
-        "Bookmark",
-    )
-    .unwrap();
-    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
+    doc.commit_ops(vec![bookmark(None, None, title, Some(first))], "Bookmark")
         .unwrap();
+    doc.commit_ops(vec![delete(&[second])], "Delete").unwrap();
     let stop = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
     assert!(asks_for_removal(&stop), "{stop:?}");
     assert_eq!(std::fs::read(&path).unwrap(), original);
@@ -512,9 +454,9 @@ fn an_encrypted_signed_file_appends_and_keeps_its_signature() {
     let section = &appended[original.len()..];
     assert!(!section.windows(title.len()).any(|w| w == title.as_bytes()));
     assert!(holds(&appended, title.as_bytes()));
-    let (saved, _) = SourceInfo::read(doc.store(), &path, None).unwrap();
-    assert!(saved.src.pdf().is_encrypted());
-    assert_eq!(saved.src.page_count(), 1);
+    let (saved, _) = doc.store().read_file(&path, None).unwrap();
+    assert!(saved.pdf().is_encrypted());
+    assert_eq!(saved.page_count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -527,8 +469,7 @@ fn a_certified_file_asks_too() {
     let path = write(&dir, "certified.pdf", &mut f);
     let mut doc = open(&path);
     let second = doc.state().order()[1];
-    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[second])], "Delete").unwrap();
     let original = std::fs::read(&path).unwrap();
     let err = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
     assert!(asks_for_removal(&err), "{err:?}");
@@ -542,22 +483,12 @@ fn signed_fields_brought_in_are_kept_and_said_so() {
     let a = write(&dir, "a.pdf", &mut Form::new(1));
     let s = write(&dir, "signed.pdf", &mut signed());
     let mut doc = open(&a);
-    let (info, _) = SourceInfo::read(doc.store(), &s, None).unwrap();
-    let sid = doc.add_source(info);
+    let (src, _) = doc.store().read_file(&s, None).unwrap();
     let out = doc
-        .apply(
-            Edit::InsertPages {
-                source: sid,
-                range: 0..1,
-                before: None,
-                outline: None,
-                annots: Vec::new(),
-            },
-            "Insert",
-        )
+        .commit_ops(vec![insert(&src, [0], "signed.pdf", None)], "Insert")
         .unwrap();
     assert_eq!(
-        doc.form_notice(&out, false, false).as_deref(),
+        sheaf_doc::notice_text(&out.notices).as_deref(),
         Some("The signature from signed.pdf is no longer valid here")
     );
     let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
@@ -577,8 +508,7 @@ fn corpus_path(path: &str) -> Option<std::path::PathBuf> {
 fn without_page(path: &Path, index: usize) -> (Document, Vec<u8>) {
     let mut doc = open(path);
     let id = doc.state().order()[index];
-    doc.apply(Edit::DeletePages { ids: vec![id] }, "Delete")
-        .unwrap();
+    doc.commit_ops(vec![delete(&[id])], "Delete").unwrap();
     let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
     (doc, bytes)
 }
@@ -720,7 +650,7 @@ fn held(doc: &Document) -> Held {
 /// bookmark.
 fn all_in_the_primary(doc: &Document, what: &str) {
     let st = doc.state();
-    let primary = doc.source(doc.primary()).unwrap().src.id();
+    let primary = doc.primary().id();
     let ours = |src: Option<&ObjRef>| src.is_some_and(|s| s.src.id() == primary);
     for (id, a) in st.annots() {
         let src = match &a.body {
@@ -785,26 +715,17 @@ fn saved_again(incremental: bool) {
     // form's first page duplicated.
     let [p1, p2] = [0, 1].map(|i| doc.state().order()[i]);
     let first = doc.state().bookmarks_preorder()[1].1;
-    let edits = vec![
-        Edit::MovePages {
-            ids: vec![p2],
-            before: Some(p1),
-        },
-        Edit::AnnotAdd {
-            page: p2,
-            annot: note(),
-        },
-        Edit::OutlineEdit {
-            id: first,
-            title: Some("Renamed".into()),
-            target: None,
-            color: None,
-            view: None,
-            style: None,
-        },
-        Edit::DuplicatePages { ids: vec![p1] },
+    let renamed = BookmarkPatch {
+        title: Some("Renamed".into()),
+        ..Default::default()
+    };
+    let ops = vec![
+        move_pages(&[p2], Some(p1)),
+        add(p2, &note()),
+        patch_bookmark(first, renamed),
+        duplicate(&[p1]),
     ];
-    doc.apply_batch(edits, "Edit").unwrap();
+    doc.commit_ops(ops, "Edit").unwrap();
     let edited = held(&doc);
     assert_eq!(edited.marks.len(), 3, "{what}");
     assert_eq!(edited.fields.len(), 3, "{what}: {:?}", edited.fields);
@@ -858,7 +779,7 @@ fn named_alike(incremental: bool) {
         assert_eq!(&value_at(*object), value, "{what}");
     }
     let page = st.order()[0];
-    doc.apply(Edit::DuplicatePages { ids: vec![page] }, "Duplicate")
+    doc.commit_ops(vec![duplicate(&[page])], "Duplicate")
         .unwrap();
     save_by(&mut doc, &path, incremental);
     let mut values: Vec<Option<Value>> = (held(&open(&path)).fields.into_iter())

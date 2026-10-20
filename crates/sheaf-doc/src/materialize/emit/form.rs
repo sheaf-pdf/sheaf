@@ -2,7 +2,7 @@
 //! records (the old writers' forms/merge.rs, generalized).
 //!
 //! - **Field dictionaries** are their source's, copied as their instance
-//!   ([`FormCopies`]): an instance past the first of its file's bytes
+//!   ([`FormInst::copy`]): an instance past the first of its file's bytes
 //!   (a duplicate's, the same file inserted again) gets objects of its
 //!   own. `/Parent` and `/Kids` are the tree's; a parent sheaf made for an
 //!   instance whose names clashed is written from its record. Copy 0 of
@@ -44,7 +44,7 @@
 //!
 //! [`FormDoc`]: crate::model::FormDoc
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat};
@@ -53,10 +53,10 @@ use super::Cx;
 use crate::annot::AnnotId;
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::materialize::copy::Scope;
-use crate::materialize::key::{FormCopies, NameTree, ObjKey};
+use crate::materialize::key::{NameTree, ObjKey};
 use crate::materialize::plan::SaveTransform;
 use crate::materialize::record::ACROFORM_OWNED;
-use crate::model::{FieldNode, PageId, Widget};
+use crate::model::{DocState, FieldNode, FormInst, PageId, Widget};
 use crate::source::{Limits, ObjRef};
 use crate::store::{BlobId, Src};
 
@@ -98,7 +98,6 @@ const MAX_SCRIPTS: usize = Limits::DEFAULT.forms.scripts;
 /// What the form's emission decides before the pages are written.
 #[derive(Default)]
 pub(crate) struct Plan {
-    pub(crate) copies: FormCopies,
     /// Widgets that are their field's one object, by id: their field.
     merged: HashMap<AnnotId, FieldId>,
     /// Fields read merged with a widget the state shows more than once:
@@ -108,7 +107,7 @@ pub(crate) struct Plan {
     dr: Option<Dictionary>,
     /// Each other file's fonts renamed in `/DR`, by old name.
     renamed: HashMap<BlobId, HashMap<Vec<u8>, Vec<u8>>>,
-    /// The other files the forms come from, in their instances' order.
+    /// The other files the forms come from, by their blobs.
     others: Vec<Src>,
     /// Whether the state models the primary's form: its records were read
     /// (a document made by `Document::new` reads none) and its tree isn't
@@ -139,7 +138,6 @@ impl Plan {
 pub(crate) fn prepare(cx: &mut Cx) -> Plan {
     let input = cx.input;
     let st = &input.target;
-    let copies = FormCopies::of(st, input.primary, &input.sources);
     let mut merged = HashMap::new();
     let mut split = HashSet::new();
     for (fid, node, term) in st.terminals() {
@@ -161,32 +159,25 @@ pub(crate) fn prepare(cx: &mut Cx) -> Plan {
         }
     }
     let primary = cx.primary.id();
+    let own = FormInst {
+        src: primary,
+        copy: 0,
+    };
     for (fid, node) in st.fields() {
         if let Some(r) = &node.src
             && r.src.id() == primary
-            && copies.get(node.inst) == Some(0)
+            && node.inst == own
         {
             cx.own(ObjKey::Field(fid), r.id);
         }
     }
-    let mut others = Vec::new();
-    let mut seen = BTreeSet::from([primary]);
-    for inst in copies.instances() {
-        if let Some(info) = input.sources.get(&inst.src)
-            && seen.insert(info.src.id())
-        {
-            others.push(info.src.clone());
-        }
-    }
+    let others = (sources(st).into_values())
+        .filter(|src| src.id() != primary)
+        .collect();
     let file = cx.primary.form();
-    let own = crate::model::FormInst {
-        src: input.primary,
-        copy: 0,
-    };
     let modeled = file.facts.damaged.is_none()
         && (file.fields.is_empty() || st.form().names.contains_key(&own));
     let mut plan = Plan {
-        copies,
         merged,
         split,
         dr: None,
@@ -200,6 +191,22 @@ pub(crate) fn prepare(cx: &mut Cx) -> Plan {
         merge_dr(cx, &mut plan);
     }
     plan
+}
+
+/// The sources `st`'s form instances are of, by their blobs: what their
+/// fields were read from.
+fn sources(st: &DocState) -> BTreeMap<BlobId, Src> {
+    (st.fields())
+        .filter_map(|(_, node)| node.src.as_ref())
+        .map(|r| (r.src.id(), r.src.clone()))
+        .collect()
+}
+
+/// The files the form `st` holds is made of, as a written form's check
+/// compares it with them: `primary`, then the others its instances are of.
+pub(crate) fn inputs(st: &DocState, primary: &Src) -> Vec<Src> {
+    let others = sources(st).into_values().filter(|src| src != primary);
+    std::iter::once(primary.clone()).chain(others).collect()
 }
 
 /// The form dictionary `src`'s catalog names, its number when it's an
@@ -363,8 +370,10 @@ pub(crate) fn widget(
     let st = &input.target;
     let r = w.src.as_ref()?;
     let dict = r.src.pdf().get_dictionary(r.id).ok()?;
-    let copy = cx.form.copies.get(w.inst)?;
-    let scope = Scope { src: &r.src, copy };
+    let scope = Scope {
+        src: &r.src,
+        copy: w.inst.copy,
+    };
     let split = cx.form.split.contains(&w.field);
     let key = ObjKey::Annot(aid);
     // Nothing of it changes: the file's object as it is, unbuilt.
@@ -457,7 +466,7 @@ pub(crate) fn acroform(cx: &mut Cx) -> Option<Object> {
     // of one of its fields that's none of these, and on no page, is on a
     // page template.
     for (_, node) in st.fields() {
-        if cx.form.copies.get(node.inst) == Some(0)
+        if node.inst.copy == 0
             && let Some(r) = node.src.as_ref().filter(|r| r.src.id() == primary.id())
         {
             fields.accounted.insert(r.id);
@@ -465,7 +474,7 @@ pub(crate) fn acroform(cx: &mut Cx) -> Option<Object> {
     }
     for (_, rec) in st.annots() {
         if let Some(w) = rec.widget()
-            && cx.form.copies.get(w.inst) == Some(0)
+            && w.inst.copy == 0
             && let Some(r) = w.src.as_ref().filter(|r| r.src.id() == primary.id())
         {
             fields.accounted.insert(r.id);
@@ -608,8 +617,10 @@ impl Fields {
     /// the state hasn't got, or one met again, isn't). A node left with no
     /// widgets isn't: one that showed as its file was read ([`showed`]) and
     /// shows nowhere now, with no node under it written, as `keep_only`
-    /// takes such a field out of a file (bug 14). The state keeps it until
-    /// slice 11's cascade.
+    /// takes such a field out of a file (bug 14). An edit that takes a
+    /// node's last widget takes the node too (the `widget.field` cascade,
+    /// M10.5 §6.5); the rule here keeps what's written to what the file
+    /// showed, whatever the state holds.
     ///
     /// [`showed`]: Self::showed
     fn field(&mut self, cx: &mut Cx, fid: FieldId) -> bool {
@@ -697,9 +708,7 @@ impl Fields {
         let Ok(read) = r.src.pdf().get_dictionary(r.id) else {
             return;
         };
-        let Some(copy) = cx.form.copies.get(node.inst) else {
-            return;
-        };
+        let copy = node.inst.copy;
         let scope = Scope { src: &r.src, copy };
         let term = node.term.as_ref();
         let split = cx.form.split.contains(&fid);
@@ -836,18 +845,15 @@ impl Fields {
     fn push_down(&self, cx: &mut Cx, node: &FieldNode, out: &mut Dictionary) {
         let input = cx.input;
         let st = &input.target;
-        if node.parent.is_some() {
+        if node.parent.is_some() || node.inst.src == cx.primary.id() {
             return;
         }
-        let Some(info) = input.sources.get(&node.inst.src) else {
+        let Some(src) = (cx.form.others.iter()).find(|src| src.id() == node.inst.src) else {
             return;
         };
-        if info.src.id() == cx.primary.id() {
-            return;
-        }
-        let facts = &info.src.form().facts;
+        let facts = &src.form().facts;
         let doc = st.form();
-        let renamed = cx.form.renamed.get(&info.src.id());
+        let renamed = cx.form.renamed.get(&src.id());
         let da = (facts.da.as_deref()).map(|da| match renamed {
             Some(renamed) => rename_in_da(da.as_bytes(), renamed),
             None => da.as_bytes().to_vec(),
@@ -1017,7 +1023,7 @@ mod tests {
     /// widget's, never both.
     #[test]
     fn field_and_widget_keys_are_apart() {
-        let widget: BTreeSet<&[u8]> = WIDGET_KEYS.iter().copied().collect();
+        let widget: std::collections::BTreeSet<&[u8]> = WIDGET_KEYS.iter().copied().collect();
         assert!(FIELD_KEYS.iter().all(|k| !widget.contains(k)));
     }
 }

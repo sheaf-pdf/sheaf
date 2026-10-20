@@ -12,10 +12,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use sheaf_core::PageIndex;
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{self, Form};
 use sheaf_image::raster::PixelFormat;
+use sheaf_render::PageIndex;
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 

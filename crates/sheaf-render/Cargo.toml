@@ -3,10 +3,13 @@ name = "sheaf-render"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 sheaf-image.workspace = true
-sheaf-core.workspace = true
+sheaf-util.workspace = true
+# Rotation, PageSize and DestView.
+sheaf-edit.workspace = true
 pdfium-render.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

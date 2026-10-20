@@ -3,6 +3,7 @@ name = "sheaf-doc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [features]
 # Forms and encrypted files built in code and the lookup for Greg's corpus
@@ -14,7 +15,10 @@ fixtures = []
 # Random mark ids, so copies of a file never hand out the same one, and
 # save temp names no other save uses.
 fastrand = "2"
-sheaf-core.workspace = true
+sheaf-util.workspace = true
+# The edit vocabulary, and the types its records share with it (M10.5
+# §6.1).
+sheaf-edit.workspace = true
 # How far an open has read (M10.5 §14.2).
 in-progress.workspace = true
 lopdf.workspace = true
@@ -42,8 +46,13 @@ sha2 = "0.11"
 unicode-normalization = "0.1"
 # What a change means for saving and signatures, as sets (M10.5 §7.1).
 bitflags.workspace = true
+# The date and time a mark's identity tokens are filled in with, as the
+# user's settings write them (M10.5 §6.8).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
+# Every op as Op JSON, which seeds the fuzzing of transactions.
+sheaf-edit = { workspace = true, features = ["fixtures"] }
 image.workspace = true
 env_logger.workspace = true
 # Random field trees for the form reader (M10 slice 2).

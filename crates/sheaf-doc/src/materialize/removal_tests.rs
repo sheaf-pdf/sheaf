@@ -11,25 +11,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use in_progress::NoProgress;
 use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
-use sheaf_core::Rotation;
+use sheaf_edit::{Rotation, Turn};
 
-use super::append::{self, Refused};
+use super::append;
 use super::key::ObjKey;
 use super::plan::{
     AppendAnyway, Ask, AskAnswers, Note, Onto, SaveStop, Strategy, Why, forced_append,
 };
-use super::removal::{self, Found, Mode, Section, Vetoes};
+use super::removal::{self, Found, Section, Vetoes};
 use super::{save, save_appended, write_file};
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2};
 use crate::content::ResId;
 use crate::effects::{Removed, RemovedKind};
 use crate::forms::fixture::{Form, row};
 use crate::forms::sigs::{SigImpact, Verdict};
-use crate::model::{Document, Edit, PageId, SourceId, SourceInfo};
+use crate::model::{Document, PageId};
 use crate::serialize::fixture::holds;
 use crate::source::Limits;
-use crate::store::BlobKind;
+use crate::store::{BlobKind, Src};
 use crate::text_layer::{OcrWord, TextLayer};
+use crate::tx::fixture as fx;
 
 /// An empty directory of a test's own, removed when it's dropped, so a
 /// test that fails (a property's shrinking runs, among them) leaves
@@ -158,9 +159,23 @@ pub(super) fn rewrite_answers() -> AskAnswers {
 /// with `answers`: how it was written, and the notes, the save recorded;
 /// or why it stopped, the version unsealed.
 fn forced(doc: &mut Document, answers: &AskAnswers) -> Result<(Strategy, Vec<Note>), SaveStop> {
+    forced_lacking(doc, answers, None)
+}
+
+/// As [`forced`], the saved file's record saying it lacks `lacks`' object,
+/// as one a save pruned would.
+fn forced_lacking(
+    doc: &mut Document,
+    answers: &AskAnswers,
+    lacks: Option<ObjKey>,
+) -> Result<(Strategy, Vec<Note>), SaveStop> {
     let path = doc.file().unwrap().0.to_path_buf();
     let v = doc.current_version();
-    let input = doc.save_input(v).unwrap();
+    let mut input = doc.save_input(v).unwrap();
+    if let (Some(key), Some(saved)) = (lacks, input.saved.as_mut()) {
+        let record = Arc::make_mut(&mut saved.record);
+        Arc::make_mut(&mut record.map).keys.remove(&key);
+    }
     let plan = forced_append(&input, Onto::Saved);
     match write_file(&input, &plan, doc.save_target(&path), answers, &NoProgress) {
         Ok(written) => {
@@ -229,8 +244,7 @@ fn change_mark(doc: &mut Document, change: impl FnOnce(&mut Annot)) -> AnnotId {
     let mut annot = doc.state().marks_on(page).next().unwrap().clone();
     change(&mut annot);
     let id = annot.id;
-    doc.apply(Edit::AnnotUpdate { page, annot }, "change")
-        .unwrap();
+    doc.commit_ops(vec![fx::update(&annot)], "change").unwrap();
     id
 }
 
@@ -247,7 +261,7 @@ pub(super) fn layer(text: &str) -> Arc<TextLayer> {
         confidence: 0.9,
     };
     let geom = crate::geom::Geom::read(None, None, 0);
-    Arc::new(TextLayer::from_engine(vec![word], &geom, "test"))
+    Arc::new(crate::text_layer::from_engine(vec![word], &geom, "test"))
 }
 
 /// Pages deleted, the file rewritten (pruning their objects), and the
@@ -258,8 +272,7 @@ fn pages_a_rewrite_pruned_come_back_by_a_rewrite() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(3));
     let gone = doc.page(1).unwrap();
-    doc.apply(Edit::DeletePages { ids: vec![gone] }, "delete")
-        .unwrap();
+    doc.commit_ops(vec![fx::delete(&[gone])], "delete").unwrap();
     save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
     assert_eq!(said(&path), ["page 0", "page 2"]);
     doc.undo().unwrap();
@@ -277,27 +290,17 @@ fn pages_a_rewrite_pruned_come_back_by_a_rewrite() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `bytes`, a form, registered in `doc` as `name`.
-fn register(doc: &mut Document, bytes: &[u8], name: &str) -> SourceId {
-    let kind = BlobKind::file(Path::new(name), None);
-    let src = doc.store().open(bytes.into(), kind).unwrap();
-    doc.add_source(SourceInfo {
-        src,
-        name: name.into(),
-        derived: None,
-    })
+/// `bytes`, a form, read into `doc`'s store.
+fn form_source(doc: &Document, bytes: &[u8]) -> Src {
+    let kind = BlobKind::file(Path::new("form.pdf"), None);
+    doc.store().open(bytes.into(), kind).unwrap()
 }
 
-/// The one page of `source` inserted at the end of `doc`: the page.
-fn insert(doc: &mut Document, source: SourceId) -> PageId {
-    let insert = Edit::InsertPages {
-        source,
-        range: 0..1,
-        before: None,
-        outline: None,
-        annots: Vec::new(),
-    };
-    doc.apply(insert, "insert").unwrap();
+/// The one page of `source` inserted at the end of `doc` under `name`:
+/// the page.
+fn insert(doc: &mut Document, source: &Src, name: &str) -> PageId {
+    let insert = fx::insert(source, [0], name, None);
+    doc.commit_ops(vec![insert], "insert").unwrap();
     *doc.state().order().last().unwrap()
 }
 
@@ -309,45 +312,46 @@ fn small_form() -> Vec<u8> {
     f.bytes()
 }
 
-/// A form registered twice, the second registration's page inserted and
-/// saved, then the first's: an instance's objects are copy 0 of its file's
-/// only while no instance before it is held, so the file's are the first's
-/// now, and the Append is refused; the save is a Rewrite.
+/// A form inserted twice, the first instance's page deleted and saved,
+/// and the delete undone and saved again: each instance's objects are the
+/// copy of its file's form it was made as, whatever comes or goes before
+/// it (M10.5 §3.7), so the file's objects of the second stay its own and
+/// both saves append, with nothing missing.
 #[test]
-fn a_form_whose_copies_shift_refuses_the_append() {
+fn a_form_instance_keeps_its_objects_across_saves() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(1));
-    let form = small_form();
-    let [a, b] = [
-        register(&mut doc, &form, "a.pdf"),
-        register(&mut doc, &form, "b.pdf"),
-    ];
-    insert(&mut doc, b);
-    save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
-    insert(&mut doc, a);
-    let input = doc.recovery_input();
-    let base: Arc<[u8]> = std::fs::read(&path).unwrap().into();
-    let plan = forced_append(&input, Onto::Saved);
-    let e = append::append(&input, &plan, Arc::new(base), Mode::Veto, &NoProgress)
-        .err()
+    let form = form_source(&doc, &small_form());
+    let first = insert(&mut doc, &form, "a.pdf");
+    insert(&mut doc, &form, "b.pdf");
+    let copies = |doc: &Document| -> Vec<u32> {
+        let st = doc.state();
+        (st.pages().skip(1))
+            .flat_map(|(page, _, _)| st.widgets_on(page).map(|(_, w)| w.inst.copy))
+            .collect()
+    };
+    assert_eq!(copies(&doc), [0, 1]);
+    doc.commit_ops(vec![fx::delete(&[first])], "delete")
         .unwrap();
-    assert_eq!(
-        e.downcast_ref::<Refused>(),
-        Some(&Refused::FormShift),
-        "{e:#}"
-    );
+    let appended = Strategy::Append { onto: Onto::Saved };
     let (strategy, _) = forced(&mut doc, &AskAnswers::default()).unwrap();
-    let why = vec![Why::BaseObjectsMissing];
-    assert_eq!(strategy, Strategy::Rewrite { why });
+    assert_eq!(strategy, appended);
+    assert_eq!(copies(&doc), [1]);
+    doc.undo().unwrap();
+    assert_eq!(copies(&doc), [0, 1]);
+    let (strategy, _) = forced(&mut doc, &AskAnswers::default()).unwrap();
+    assert_eq!(strategy, appended);
     let back = crate::open::file(&path, None).unwrap().doc;
     assert_eq!(back.page_count(), 3);
     assert_eq!(back.state().terminals().count(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The same on a signed file, appended to so its signature holds: the
-/// save asks before it rewrites, never offering an Append, and writes
-/// nothing until it's answered.
+/// A signed file appended to, so its signature holds, whose saved file
+/// lacks an object the next section refers to and doesn't write (the
+/// record says so, as it would of one a save pruned): a mark a turned
+/// page lists. The save asks before it rewrites, never offering an
+/// Append, and writes nothing until it's answered.
 #[test]
 fn missing_objects_on_a_signed_file_ask_and_write_nothing() {
     let dir = scratch();
@@ -355,17 +359,19 @@ fn missing_objects_on_a_signed_file_ask_and_write_nothing() {
     let sig = f.signature("sig", 0, row(1));
     f.sign(sig);
     let (path, mut doc) = opened(&dir, "signed.pdf", &f.bytes());
-    let form = small_form();
-    let [a, b] = [
-        register(&mut doc, &form, "a.pdf"),
-        register(&mut doc, &form, "b.pdf"),
-    ];
-    insert(&mut doc, b);
+    let page = doc.page(0).unwrap();
+    let annot = note("signed off");
+    doc.commit_ops(vec![fx::add(page, &annot)], "note").unwrap();
+    let mark = doc.state().marks_on(page).next().unwrap().id;
     save_appended(&mut doc, &path).unwrap();
     assert!(doc.saved_record().unwrap().signatures_hold);
-    insert(&mut doc, a);
+    // The page turned: its dictionary, written again, lists the mark,
+    // which the section doesn't write.
+    let turn = fx::rotate(&[page], Turn::Quarter);
+    doc.commit_ops(vec![turn], "turn").unwrap();
+    let lacks = Some(ObjKey::Annot(mark));
     let before = std::fs::read(&path).unwrap();
-    let stop = forced(&mut doc, &AskAnswers::default()).err();
+    let stop = forced_lacking(&mut doc, &AskAnswers::default(), lacks).err();
     let asks = Ask::Signatures {
         impact: broken("sig"),
         append_anyway: None,
@@ -380,10 +386,10 @@ fn missing_objects_on_a_signed_file_ask_and_write_nothing() {
         ..Default::default()
     };
     assert!(matches!(
-        forced(&mut doc, &anyway),
+        forced_lacking(&mut doc, &anyway, lacks),
         Err(SaveStop::Ask(Ask::Signatures { .. }))
     ));
-    let (strategy, _) = forced(&mut doc, &rewrite_answers()).unwrap();
+    let (strategy, _) = forced_lacking(&mut doc, &rewrite_answers(), lacks).unwrap();
     let why = vec![Why::BaseObjectsMissing];
     assert_eq!(strategy, Strategy::Rewrite { why });
     let _ = std::fs::remove_dir_all(&dir);
@@ -397,14 +403,10 @@ fn missing_objects_on_a_signed_file_ask_and_write_nothing() {
 fn a_field_whose_widget_comes_back_is_written_with_the_form() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(1));
-    let form = small_form();
-    let [a, b] = [
-        register(&mut doc, &form, "a.pdf"),
-        register(&mut doc, &form, "b.pdf"),
-    ];
-    let first = insert(&mut doc, a);
-    insert(&mut doc, b);
-    doc.apply(Edit::DeletePages { ids: vec![first] }, "delete")
+    let form = form_source(&doc, &small_form());
+    let first = insert(&mut doc, &form, "a.pdf");
+    insert(&mut doc, &form, "b.pdf");
+    doc.commit_ops(vec![fx::delete(&[first])], "delete")
         .unwrap();
     save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
     doc.undo().unwrap();
@@ -432,15 +434,13 @@ fn a_forced_misclassification_is_vetoed_and_counted() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(2));
     let page = doc.page(0).unwrap();
-    let add = Edit::AnnotAdd {
-        page,
-        annot: note("a secret note"),
-    };
-    doc.apply(add, "add").unwrap();
+    let add = fx::add(page, &note("a secret note"));
+    doc.commit_ops(vec![add], "add").unwrap();
     save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
     assert!(holds(&std::fs::read(&path).unwrap(), b"a secret note"));
     let id = doc.state().marks_on(page).next().unwrap().id;
-    doc.apply(Edit::AnnotDelete { page, id }, "delete").unwrap();
+    doc.commit_ops(vec![fx::delete_annots(&[id])], "delete")
+        .unwrap();
     let before = removal::vetoes_here();
     let (forced, warnings) = warned(|| forced(&mut doc, &AskAnswers::default()));
     let (strategy, _) = forced.unwrap();
@@ -468,14 +468,12 @@ fn the_veto_on_a_certified_file_asks_and_never_rewrites() {
     f.certify(sig, 2);
     let (path, mut doc) = opened(&dir, "certified.pdf", &f.bytes());
     let page = doc.page(0).unwrap();
-    let add = Edit::AnnotAdd {
-        page,
-        annot: note("a secret note"),
-    };
-    doc.apply(add, "add").unwrap();
+    let add = fx::add(page, &note("a secret note"));
+    doc.commit_ops(vec![add], "add").unwrap();
     save_appended(&mut doc, &path).unwrap();
     let id = doc.state().marks_on(page).next().unwrap().id;
-    doc.apply(Edit::AnnotDelete { page, id }, "delete").unwrap();
+    doc.commit_ops(vec![fx::delete_annots(&[id])], "delete")
+        .unwrap();
     let before = std::fs::read(&path).unwrap();
     let stop = forced(&mut doc, &AskAnswers::default()).err();
     let asks = Ask::Signatures {
@@ -548,14 +546,12 @@ fn a_re_ocr_over_a_saved_layer_is_a_rewrite() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(1));
     let page = doc.page(0).unwrap();
-    let ocr = |text: &str| Edit::SetTextLayers {
-        layers: vec![(page, layer(text))],
-    };
-    doc.apply(ocr("first"), "ocr").unwrap();
+    let ocr = |text: &str| fx::ocr([(page, layer(text))]);
+    doc.commit_ops(ocr("first"), "ocr").unwrap();
     save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
     assert_eq!(marked_in(&path), 2);
     // This session: the page's block.
-    doc.apply(ocr("second"), "ocr").unwrap();
+    doc.commit_ops(ocr("second"), "ocr").unwrap();
     let (strategy, _) = forced(&mut doc, &AskAnswers::default()).unwrap();
     let key = vetoed(&strategy);
     assert!(matches!(key, Some(ObjKey::Block(_))), "{strategy:?}");
@@ -564,10 +560,8 @@ fn a_re_ocr_over_a_saved_layer_is_a_rewrite() {
     // An earlier session: the file's own streams.
     let mut doc = crate::open::file(&path, None).unwrap().doc;
     let page = doc.page(0).unwrap();
-    let edit = Edit::SetTextLayers {
-        layers: vec![(page, layer("third"))],
-    };
-    doc.apply(edit, "ocr").unwrap();
+    let ocr = fx::ocr([(page, layer("third"))]);
+    doc.commit_ops(ocr, "ocr").unwrap();
     let before = removal::vetoes_here();
     let (strategy, _) = forced(&mut doc, &AskAnswers::default()).unwrap();
     let key = vetoed(&strategy);
@@ -591,11 +585,8 @@ fn an_overwritten_appearance_is_judged_on_its_inputs() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(1));
     let page = doc.page(0).unwrap();
-    let add = Edit::AnnotAdd {
-        page,
-        annot: note("a note"),
-    };
-    doc.apply(add, "add").unwrap();
+    let add = fx::add(page, &note("a note"));
+    doc.commit_ops(vec![add], "add").unwrap();
     save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
     change_mark(&mut doc, |a| a.color = [10, 200, 10]);
     let (strategy, _) = forced(&mut doc, &AskAnswers::default()).unwrap();
@@ -708,7 +699,7 @@ fn checked(
     let input = doc.recovery_input();
     let saved = input.saved.as_ref().unwrap();
     let catalog = saved.record.map.keys[&ObjKey::Catalog];
-    let primary = input.sources[&input.primary].src.id();
+    let primary = input.primary.id();
     removal::check(&Section {
         old: &old,
         objects: &objects,
@@ -736,8 +727,7 @@ fn helvetica() -> Dictionary {
 fn an_unlinked_form_s_text_is_read() {
     let dir = scratch();
     let (path, doc, page, form) = form_file(&dir, helvetica(), None, "(hidden words)");
-    let primary = doc.recovery_input();
-    let primary = primary.sources[&primary.primary].src.id();
+    let primary = doc.primary().id();
     let gone = Found {
         key: ObjKey::Base {
             blob: primary,

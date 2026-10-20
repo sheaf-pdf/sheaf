@@ -10,11 +10,11 @@ use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::sync::{Arc, OnceLock};
 
 use im::Vector;
-use sheaf_core::Rotation;
+use sheaf_edit::Rotation;
 
 use super::{
-    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, GenId, Generator, Mark, OutlineId,
-    PageDef, PageId, Terminal, Widget, bookmark_span,
+    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, GenId, GenSpec, Generator, Mark,
+    OutlineId, PageDef, PageId, Terminal, Widget,
 };
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::forms::{FieldId, full_name_of};
@@ -638,13 +638,15 @@ impl DocState {
     /// The node whose full name is `name`, found without a scan: of two
     /// named alike, as a file may have them, the first by id.
     pub fn field_named(&self, name: &str) -> Option<FieldId> {
+        self.fields_named(name).next()
+    }
+
+    /// Every node whose full name is `name`, by id, found without a scan.
+    pub(crate) fn fields_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = FieldId> + 'a {
         let hash = name_hash(name);
-        let ids = self
-            .idx
-            .names
-            .range((hash, FieldId(0))..=(hash, FieldId(u64::MAX)));
+        let ids = (self.idx.names).range((hash, FieldId(0))..=(hash, FieldId(u64::MAX)));
         ids.map(|&(_, id)| id)
-            .find(|&id| self.full_name(id).as_deref() == Some(name))
+            .filter(move |&id| self.full_name(id).as_deref() == Some(name))
     }
 
     /// Mark `id`, and its page.
@@ -723,7 +725,7 @@ impl DocState {
     /// The pages bookmark `id` owns (as moving it with its pages takes
     /// them), in document order.
     pub fn bookmark_pages(&self, id: OutlineId) -> Option<Vec<PageId>> {
-        bookmark_span(self, id)
+        crate::tx::bookmarks::bookmark_span(self, id)
     }
 }
 
@@ -739,6 +741,8 @@ pub enum Invariant {
     Form(String),
     #[error("bookmarks: {0}")]
     Outline(String),
+    #[error("page labels: {0}")]
+    Labels(String),
     #[error("generators: {0}")]
     Generators(String),
     #[error("indexes: {0}")]
@@ -755,18 +759,22 @@ impl DocState {
     /// (M10.5 §6.4), as tests and debug builds check after each. The
     /// order, the pages and their boxes name the same pages, each once,
     /// and no two pages are one copy of one source page. Each annotation
-    /// is listed once, on its page. Each widget and its terminal field name
-    /// each other, in one instance of a form with a name. The bookmarks and
-    /// the field nodes are trees from their roots, each node in once, a
-    /// field under the parent it names, and a bookmark going to a page
-    /// there is. There's one header/footer at most, and each generator is
+    /// is listed once, on its page. The two ends of a connector name each
+    /// other. A reply or status that's one of sheaf's marks is to a comment
+    /// on its page, or names no mark at all. Each widget and its terminal
+    /// field name each other, in one instance of a form with a name. The
+    /// bookmarks and the field nodes are trees from their roots, each node
+    /// in once, a field under the parent it names, and a bookmark going to
+    /// a page there is. Each label range starts at a page there is. There's
+    /// one header/footer at most, on pages there are, and each generator is
     /// under its id. Every index is what its table makes again.
     ///
-    /// Not yet: the pages label ranges start at, the header/footer's
-    /// pages, and the comments replies and connectors name, which edits
-    /// don't keep or check until slice 11 (M10.5 bugs 11 and 12); nor that
-    /// the `/NM`s on a page or the form's full names are unique, which
-    /// files break (the indexes hold each one).
+    /// Not: that another tool's reply is to a comment on its page, as files
+    /// have them to ones that are gone or elsewhere, nor a mark's that names
+    /// another tool's comment, which a file may have deleted and have a
+    /// copy of on another page; nor that the `/NM`s on a page or the form's
+    /// full names are unique, which files break (the indexes hold each
+    /// one).
     pub fn check_invariants(&self) -> Result<(), Invariant> {
         let DocState {
             order,
@@ -776,8 +784,7 @@ impl DocState {
             outline_roots,
             page_annots,
             annots,
-            // Anchored to pages no edit checks yet.
-            labels: _,
+            labels,
             generators,
             fields,
             form,
@@ -839,6 +846,33 @@ impl DocState {
             let unlisted = annots.len() - listed.len();
             Invariant::Annots(format!("{unlisted} aren't listed on their pages"))
         })?;
+        // Connectors and threads.
+        let mut marked: Option<HashSet<String>> = None;
+        for (&id, a) in annots {
+            let Some(m) = a.mark() else {
+                continue;
+            };
+            if let Some(other) = m.partner() {
+                let back = (annots.get(&other).and_then(AnnotRec::mark)).and_then(Annot::partner);
+                hold(back == Some(id), || {
+                    Invariant::Annots(format!("{id:?}'s partner {other:?} isn't paired with it"))
+                })?;
+            }
+            if let Some(parent) = m.thread_parent()
+                && self.annot_by_nm(a.page, parent).is_none()
+            {
+                let marked = marked.get_or_insert_with(|| {
+                    (annots.values().filter_map(AnnotRec::mark))
+                        .map(Annot::name)
+                        .collect()
+                });
+                hold(!marked.contains(parent), || {
+                    Invariant::Annots(format!(
+                        "{id:?} is a reply to “{parent}”, a mark on another page"
+                    ))
+                })?;
+            }
+        }
 
         // The widgets and their fields.
         let mut widgets = 0;
@@ -916,6 +950,16 @@ impl DocState {
             Invariant::Outline(format!("{out} bookmarks aren't in the outline"))
         })?;
 
+        // The labels.
+        for spec in labels.iter().flat_map(|l| l.iter()) {
+            hold(pages.contains_key(&spec.start), || {
+                Invariant::Labels(format!(
+                    "a range starts at {:?}, which isn't a page",
+                    spec.start
+                ))
+            })?;
+        }
+
         // The generators.
         for (&id, g) in generators {
             hold(g.id == id, || {
@@ -928,6 +972,16 @@ impl DocState {
         hold(headers <= 1, || {
             Invariant::Generators(format!("{headers} draw a header/footer"))
         })?;
+        for g in generators.values() {
+            let scope = match &g.spec {
+                GenSpec::HeaderFooter(hf) => hf.pages.iter().flatten(),
+            };
+            for &page in scope {
+                hold(pages.contains_key(&page), || {
+                    Invariant::Generators(format!("{:?} is on {page:?}, which isn't a page", g.id))
+                })?;
+            }
+        }
 
         // The indexes.
         if let Some(pos) = idx.pos.get() {
@@ -964,6 +1018,143 @@ impl DocState {
                 fields.len()
             ))
         })
+    }
+
+    /// The first slot at which this state, a transaction's changes put on
+    /// a version other than its own (M10.5 §8.5's `Stale::Validate`), at
+    /// `keys`, breaks a rule of uniqueness that neither state it came from
+    /// (`was`: that version's and the transaction's) broke: the generator
+    /// of a written one's kind and z ([`GenSpec::same_place`]), the
+    /// annotation a written one's `/NM` names on its page too, the node a
+    /// written one's full name, or one under it, names too, the page that
+    /// shows the copy of its source page a written one now does. Files
+    /// break the second and third, so a name either state held twice
+    /// already isn't one.
+    pub(crate) fn unique_after<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a Key>,
+        was: [&DocState; 2],
+    ) -> Result<(), Key> {
+        let copy_of = |def: &PageDef| (def.base.src.id(), def.base.index, def.copy);
+        // The copies the written pages show that the version's didn't.
+        let mut copies = HashMap::new();
+        let mut nodes = Vec::new();
+        for &key in keys {
+            match key {
+                Key::Page(p) => {
+                    let Some(def) = self.pages.get(&p) else {
+                        continue;
+                    };
+                    if was[0].def(p).is_none_or(|d| copy_of(d) != copy_of(def)) {
+                        copies.insert(copy_of(def), p);
+                    }
+                }
+                Key::Annot(a) => {
+                    let Some(rec) = self.annots.get(&a) else {
+                        continue;
+                    };
+                    let name = rec.name();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let twice = |st: &DocState| st.annots_named(rec.page, &name).nth(1).is_some();
+                    let other = self.annots_named(rec.page, &name).find(|&id| id != a);
+                    if let Some(other) = other
+                        && !was.into_iter().any(twice)
+                    {
+                        return Err(Key::Annot(other));
+                    }
+                }
+                Key::Field(f) => nodes.push(f),
+                Key::Generator(g) => {
+                    let Some(made) = self.generators.get(&g) else {
+                        continue;
+                    };
+                    let other = (self.generators.values())
+                        .find(|other| other.id != g && other.spec.same_place(&made.spec));
+                    if let Some(other) = other {
+                        return Err(Key::Generator(other.id));
+                    }
+                }
+                Key::Order
+                | Key::Geom(_)
+                | Key::PageAnnots(_)
+                | Key::Form
+                | Key::Bookmark(_)
+                | Key::OutlineRoots
+                | Key::Labels => {}
+            }
+        }
+        let mut named = HashSet::new();
+        while let Some(id) = nodes.pop() {
+            let Some(node) = self.fields.get(&id).filter(|_| named.insert(id)) else {
+                continue;
+            };
+            nodes.extend(node.kids.iter().copied());
+            let Some(name) = self.full_name(id) else {
+                continue;
+            };
+            let twice = |st: &DocState| st.fields_named(&name).nth(1).is_some();
+            let other = self.fields_named(&name).find(|&other| other != id);
+            if let Some(other) = other
+                && !was.into_iter().any(twice)
+            {
+                return Err(Key::Field(other));
+            }
+        }
+        if copies.is_empty() {
+            return Ok(());
+        }
+        for (id, def, _) in self.pages() {
+            if let Some(&page) = copies.get(&copy_of(def))
+                && page != id
+            {
+                return Err(Key::Page(id));
+            }
+        }
+        Ok(())
+    }
+
+    /// The first page that `keys`, slots a transaction's changes put on a
+    /// version other than its own wrote (M10.5 §8.5's `Stale::Validate`),
+    /// name in this state, which isn't one of its pages: a page the version
+    /// took away, which the transaction didn't see go, as the page of
+    /// annotations, an annotation's, a bookmark's target, a label range's
+    /// start, or among a generator's pages.
+    pub(crate) fn resolves_after<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a Key>,
+    ) -> Result<(), Key> {
+        for &key in keys {
+            let mut named = Vec::new();
+            match key {
+                Key::PageAnnots(p) if self.page_annots.contains_key(&p) => named.push(p),
+                Key::Annot(a) => named.extend(self.annots.get(&a).map(|rec| rec.page)),
+                Key::Bookmark(b) => named.extend(self.bookmarks.get(&b).and_then(|b| b.page())),
+                Key::Labels => {
+                    named.extend(self.labels.iter().flat_map(|l| l.iter().map(|s| s.start)))
+                }
+                Key::Generator(g) => {
+                    if let Some(g) = self.generators.get(&g) {
+                        let scope = match &g.spec {
+                            GenSpec::HeaderFooter(hf) => hf.pages.iter().flatten(),
+                        };
+                        named.extend(scope);
+                    }
+                }
+                Key::Order
+                | Key::Page(_)
+                | Key::Geom(_)
+                | Key::PageAnnots(_)
+                | Key::Field(_)
+                | Key::Form
+                | Key::OutlineRoots => {}
+            }
+            if let Some(&gone) = named.iter().find(|p| !self.pages.contains_key(p)) {
+                return Err(Key::Page(gone));
+            }
+        }
+        Ok(())
     }
 
     /// What its snapshot copied from its parent's to put `keys` (M10.5
@@ -1049,7 +1240,6 @@ fn path_copies<E>(touched: usize, len: usize, fanout: usize) -> usize {
 mod tests {
     use super::*;
     use crate::history::FixedCount;
-    use crate::model::Edit;
     use crate::model::tests::{opened_doc, square};
     use crate::open::Facts;
 
@@ -1064,11 +1254,8 @@ mod tests {
         };
         let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
         let p0 = d.state().order()[0];
-        let add = Edit::AnnotAdd {
-            page: p0,
-            annot: square(0),
-        };
-        d.apply(add, "add").unwrap();
+        let add = crate::tx::fixture::add(p0, &square(0));
+        d.commit_ops(vec![add], "add").unwrap();
         let st = d.state().clone();
         assert_eq!(st.pos_of(p0), Some(0));
         assert_eq!(st.check_invariants(), Ok(()));

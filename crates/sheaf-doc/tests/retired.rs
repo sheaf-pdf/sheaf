@@ -446,17 +446,163 @@ const RETIRED: &[(&str, u8)] = &[
     ("model::Document::mark_unsaved", 10),
     // An update frees nothing: an object it unlinks stays in use.
     ("serialize::xref::Entry::deleted", 10),
+    // Ids and OCR text are sheaf-edit's types (M10.5 §6.1), which can't
+    // hold what needs the model: a blob's id is the store's `blob_id`, and
+    // a layer from an engine's words `text_layer::from_engine`.
+    ("store::BlobId::of", 11),
+    ("text_layer::TextLayer::from_engine", 11),
+    // A source is its blob (M10.5 §3.1): nothing registers a file, and an
+    // edit names its source by `BlobId`, the name it goes by beside it.
+    // Each insert is a form instance of its own (§3.7), whose copy is
+    // fixed when it's made, so an instance's objects never shift.
+    ("model::SourceInfo", 11),
+    ("model::Document::add_source", 11),
+    ("model::Document::register_source", 11),
+    ("model::Document::unregister", 11),
+    ("model::Document::sources", 11),
+    ("model::Document::source", 11),
+    ("model::Document::next_source", 11),
+    ("model::Document::unlogged_sources", 11),
+    ("model::Document::debug_assert_ours", 11),
+    ("model::Version::sources", 11),
+    ("model::Snapshot::sources", 11),
+    ("model::Snapshot::source", 11),
+    ("model::PageBase::source", 11),
+    ("model::Edit::InsertPages::range", 11),
+    ("model::Edit::ReplacePages::range", 11),
+    ("model::registered", 11),
+    ("model::signed_from", 11),
+    ("materialize::record::SaveInput::sources", 11),
+    ("materialize::graph::load", 11),
+    ("materialize::deps::Closure::form_shift", 11),
+    ("materialize::append::Refused::FormShift", 11),
+    ("materialize::key::FormCopies", 11),
+    ("derive::DerivedSource::info", 11),
+    ("combine::insert_runs", 11),
+    ("model::Document::compute", 11),
+    ("model::EditOutcome", 11),
+    ("model::Document::form_notice", 11),
+    ("model::Document::unencodable_notice", 11),
+    ("model::Damaged", 11),
+    ("model::NotReady", 11),
+    ("model::Document::bring_annots", 11),
+    ("model::Document::take_in_fields", 11),
+    ("model::Document::copy_fields", 11),
+    ("model::Document::script_sources", 11),
+    ("model::Document::scripts_mixed", 11),
+    ("model::Document::scripts_apart", 11),
+    ("model::Document::set_author", 11),
+    ("model::merge_outline", 11),
+    ("model::cascade_delete", 11),
+    ("model::name_apart", 11),
+    ("model::next_copy", 11),
+    ("model::Step::edit", 11),
+    ("exchange::Imported::edits", 11),
+    ("plugins::sign_marks", 11),
+    ("plugins::keep_unseen", 11),
+    ("plugins::Signer", 11),
+    ("api::shared::edit_from_wit", 11),
+    ("api::v02::annot_from_wit", 11),
+    ("api::v03::annot_from_wit", 11),
+    ("runtime::EditBatch::edits", 11),
+    ("docview::Incoming", 11),
+    ("docview::Incoming::edit_marks", 11),
+    ("docview::DocView::start_annot_editor", 11),
+    ("docview::DocView::pending_edit_last", 11),
+    // Every change is an op lowered in a transaction (M10.5 §6), which
+    // a caller commits: the old edits, and what only they used, are gone.
+    ("model::Edit", 11),
+    ("model::double_option", 11),
+    ("model::Rebase", 11),
+    ("model::NewOutlineItem", 11),
+    ("model::Document::apply", 11),
+    ("model::Document::apply_batch", 11),
+    ("model::holds_same", 11),
+    ("derive::DerivedSource::rebases", 11),
+    // What compute's arms and the app's edit builders used: the ready
+    // check is the transaction's (`EditError::NotReady`), and the
+    // outline and mark helpers are lowering's, under their own names.
+    ("model::Document::check_ready", 11),
+    ("model::Document::tree_from_items", 11),
+    ("model::Document::scripted", 11),
+    ("model::outline_insert", 11),
+    ("model::outline_unlink", 11),
+    ("model::fresh_annot_id", 11),
+    ("set_status::status_edits", 11),
+    ("set_status::reset_edits", 11),
+    ("docview::DocEvent::Edited::outcome", 11),
+    // The job API: a group's commits amend its version, or continue it
+    // after other edits (§8.4).
+    ("model::JobId", 12),
+    ("model::Version::job", 12),
+    ("model::Document::next_job", 12),
+    ("model::Document::begin_job", 12),
+    ("model::Document::apply_in_job", 12),
+    ("model::Document::job_is_current", 12),
+    ("model::Document::job_is_undone", 12),
+    ("tx::fixture::Document::commit_ops_in_job", 12),
+    ("ocr_run::OcrRun::job", 12),
+    // Pruning that kept the saved version and the branch holding it, the
+    // root stopping there: the saved version detaches instead (§8.7).
+    ("model::Document::prune", 12),
+    ("model::Document::holds_protected", 12),
+    ("model::Document::remove_subtree", 12),
+    // History weighed in one pass, each version that keeps a snapshot
+    // looked up once (`Document::weigh`).
+    ("model::Document::droppable", 12),
+    ("model::Document::stats_for", 12),
+    // The app's funnels and refreshes: a view lowers apart from its one
+    // commit (`DocView::commit`), and every change reaches `on_change`,
+    // which lays the pages out again only when they go elsewhere (§14.1).
+    ("docview::DocView::apply", 12),
+    ("docview::DocView::apply_batch", 12),
+    ("docview::DocView::submit", 12),
+    ("docview::DocView::finish_edit", 12),
+    ("docview::DocView::after_model_change", 12),
+    ("docview::DocView::prune_selection", 12),
+    ("docview::Doc::touched", 12),
+    ("docview::Doc::version", 12),
+    ("docview::Had", 12),
+    ("docview::reveal_new_bookmarks", 12),
+    ("page_insert::DocView::rebase", 12),
+    // A plugin's own edits are told by the change's actor; a sidecar is
+    // of a version, which never changes.
+    ("docview::DocView::edit_source", 12),
+    ("docview::DocView::edits", 12),
+    ("docview::DocView::autosave_again", 12),
+    // Planners and dialogs plan on a snapshot and commit on its version
+    // (§14.1): the one-job-at-a-time runner was the planners' too, and
+    // dialogs read the document as it was when they opened, not now.
+    ("jobs::DocView::run_job_then", 12),
+    ("page_insert::DocView::header_footer", 12),
+    ("page_insert::DocView::has_page_labels", 12),
+    // A plugin call reads the document from its cell at its first read,
+    // and its batches land as one undo step (§14.3), not one transaction
+    // each on the document as it is when the call returns.
+    ("runtime::DocContext::snapshot", 12),
+    ("plugins::plugin_tx", 12),
 ];
 
 /// Last segments only a path matches: names the new design uses again
 /// (§17), and words common enough to name other things.
 const QUALIFIED_ONLY: &[&str] = &[
+    // A print, export or render request's job, and the app's file-writing
+    // job: not the version's.
+    "job",
+    // The command palette's entries pruned (commands.rs): not history's.
+    "prune",
+    // How many snapshots the policy may drop (`HistoryStats`), and the
+    // locals that hold them.
+    "droppable",
+    // The header and footer a document's state draws: not the view's.
+    "header_footer",
     "Mode",
     "deleted",
     "Step",
     "PageRef",
     "LabelSpec",
     "Widget",
+    "Ids",
     "ids",
     "rng",
     "next_page",
@@ -554,6 +700,43 @@ const QUALIFIED_ONLY: &[&str] = &[
     "encrypt",
     // `Source::signatures` reads them; `Ask::Signatures`' count is gone.
     "signatures",
+    // `PageChars::from_engine`, and the free function in its place.
+    "from_engine",
+    // The OCR job's and the store's sources, and fields of that name.
+    "sources",
+    // Other things of these names: ranges of every kind, an engine's
+    // `info`, a file's `load`, a command's being `registered`.
+    "range",
+    "info",
+    "load",
+    "registered",
+    // Another tool's edit box (stamps_panel.rs's `edit`), a form field
+    // tree's damage (`Finding::Damaged`), and the error a refused edit
+    // became (`EditError::NotReady`).
+    "edit",
+    "Damaged",
+    "NotReady",
+    // A version's lines (`VersionView::edits`), and the app's count of
+    // them.
+    "edits",
+    // The plugin API's edits until WIT 0.4 (slice 20), and what a
+    // transaction and the app's document view apply.
+    "Edit",
+    "NewOutlineItem",
+    "apply",
+    "apply_batch",
+    // A plugin form's own submit and a print job's, Rec's touched keys and
+    // a form's, the tests' page rebases, and anything's version.
+    "submit",
+    "touched",
+    "rebase",
+    "version",
+    // Every other snapshot: the document's, a dialog's, a tracker's.
+    "snapshot",
+    // The file dialog's scripted answer (`file_dialog::scripted`), and
+    // what anything else comes out as.
+    "scripted",
+    "outcome",
 ];
 
 #[test]

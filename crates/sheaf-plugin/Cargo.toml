@@ -3,9 +3,10 @@ name = "sheaf-plugin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
-sheaf-core.workspace = true
+sheaf-edit.workspace = true
 sheaf-doc.workspace = true
 in-progress.workspace = true
 anyhow.workspace = true
@@ -13,6 +14,7 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
+arc-swap.workspace = true
 toml = "0.9"
 semver = { version = "1", features = ["serde"] }
 regex.workspace = true
