@@ -83,7 +83,8 @@ pub(crate) struct PlannedInsert {
     on: VersionId,
 }
 
-#[cfg(test)]
+// For docview's headless tests, which run on Linux only.
+#[cfg(all(test, target_os = "linux"))]
 impl PlannedInsert {
     pub(crate) fn src(&self) -> &Src {
         &self.src
