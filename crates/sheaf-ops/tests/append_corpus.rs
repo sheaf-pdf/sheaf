@@ -5,6 +5,11 @@
 //!   the plan rewrites or asks, why is counted; the removal check never
 //!   finds a derived object's text gone (a `RemovalMisclassified`), and
 //!   its vetoes on the files' own objects are counted, for tuning;
+//! - a crop is the page's boxes alone (M10.5 slice 15; ignored, as a
+//!   corpus tier): every file's first page cropped and saved as planned
+//!   reopens cropped, an Append writing that page's dictionary and
+//!   nothing else, and the form check finds nothing in the file it didn't
+//!   find before; where the plan rewrites or asks, why is counted;
 //! - deleted means deleted, both ways, on every file (ignored, as it
 //!   takes about seven minutes; each slice's Verify and commit run it): a
 //!   page, a mark, a reply, a mark's text, another tool's comment or a
@@ -40,9 +45,11 @@ use sheaf_doc::materialize::{
     Ask, AskAnswers, How, Onto, SaveStop, Strategy, StrategyKind, Why, forced_append, materialize,
     plan, removal, save, save_rewritten, write_file,
 };
-use sheaf_doc::tx::fixture::{add, bookmark, delete, delete_annots, delete_bookmark, update};
+use sheaf_doc::tx::fixture::{add, bookmark, crop, delete, delete_annots, delete_bookmark, update};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, PageId, Pt};
-use sheaf_edit::Rotation;
+use sheaf_edit::{Margins, Rotation};
+
+mod common;
 
 /// A directory of its own for `test`'s copies, empty.
 fn scratch(test: &str) -> PathBuf {
@@ -252,6 +259,162 @@ fn every_file_appends_a_mark_as_planned_and_reopens_with_it() {
             MARKED.appended
         );
     }
+}
+
+// ----- A crop appends page dicts alone --------------------------------------
+
+/// What a crop of a copy's first page, saved as planned, came to.
+enum Cropped {
+    /// Appended, the section the page's dictionary alone.
+    Appended,
+    /// Rewritten, for these reasons.
+    Rewritten(String),
+    /// The plan asked about the file's signatures first.
+    Asked,
+    /// The page shows too little to crop by [`CROP_BY`] a side.
+    TooSmall,
+}
+
+/// Points off each side of the first page as it shows.
+const CROP_BY: f32 = 18.0;
+
+/// Corpus paths, comma-separated, to run [`crop_appends_only_page_dicts`]
+/// on alone (`SHEAF_CROP_ONLY=forms/irs/f1040.pdf,…`): for looking at a few
+/// files by hand. Unset, it crops every file.
+const CROP_ONLY: &str = "SHEAF_CROP_ONLY";
+
+/// A copy of `entry`'s file with its first page cropped by [`CROP_BY`] a
+/// side, saved to itself as planned, asking nothing, then reopened: None
+/// when it doesn't open.
+fn cropped(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<Cropped, String>> {
+    let path = copy_of(entry, corpus, dir, "crop-")?;
+    let outcome = (|| {
+        let mut doc = opened(&path)?;
+        let before = std::fs::read(&path).unwrap();
+        let page = doc.page(0)?;
+        let shown = doc.geom(page).shown();
+        let least = 2.0 * CROP_BY + sheaf_doc::geom::MIN_SIDE;
+        if shown.width < least || shown.height < least {
+            return Some(Ok(Cropped::TooSmall));
+        }
+        let by = Margins {
+            top: CROP_BY,
+            bottom: CROP_BY,
+            left: CROP_BY,
+            right: CROP_BY,
+        };
+        if let Err(e) = doc.commit_ops(vec![crop(&[page], by)], "crop") {
+            return Some(Err(format!("no crop: {e}")));
+        }
+        Some(saved_cropped(&mut doc, page, &path, &before))
+    })();
+    remove(&path);
+    outcome
+}
+
+/// [`cropped`]'s save of `doc`, its page `page` cropped, to `path`, whose
+/// bytes were `before`, and its reopen.
+fn saved_cropped(
+    doc: &mut Document,
+    page: PageId,
+    path: &Path,
+    before: &[u8],
+) -> Result<Cropped, String> {
+    let report = match save(doc, path, &AskAnswers::default(), &NoProgress) {
+        Ok(report) => report,
+        Err(SaveStop::Ask(Ask::Signatures { .. })) => return Ok(Cropped::Asked),
+        Err(stop) => return Err(format!("stopped: {stop}")),
+    };
+    let after = std::fs::read(path).unwrap();
+    let cropped = match report.strategy {
+        Some(StrategyKind::Append) if !after.starts_with(before) => {
+            return Err("an Append that doesn't keep the file's bytes first".into());
+        }
+        Some(StrategyKind::Append) => {
+            let wrote = common::appended_objects(before.len(), &after);
+            let others: Vec<&ObjectId> = (wrote.iter())
+                .filter(|(_, page)| !**page)
+                .map(|(id, _)| id)
+                .collect();
+            if !others.is_empty() || wrote.is_empty() {
+                return Err(format!(
+                    "the Append wrote {} objects, {others:?} not pages",
+                    wrote.len()
+                ));
+            }
+            Cropped::Appended
+        }
+        Some(StrategyKind::Rewrite) => Cropped::Rewritten(reasons(&report.why)),
+        other => return Err(format!("saved as {other:?}")),
+    };
+    // What the form check finds after that it didn't before.
+    if let Ok(was) = sheaf_doc::forms::check(before, None) {
+        let now = sheaf_doc::forms::check(&after, None).map_err(|e| format!("check: {e:#}"))?;
+        let added: Vec<_> = (now.findings.iter())
+            .filter(|f| !was.findings.contains(f))
+            .collect();
+        if !added.is_empty() {
+            return Err(format!("the form check finds {added:?}"));
+        }
+    }
+    let again = opened(path).ok_or("the saved file doesn't open")?;
+    let first = again.page(0).ok_or("no first page")?;
+    let (shows, showed) = (again.geom(first).visible(), doc.geom(page).visible());
+    if shows != showed {
+        return Err(format!(
+            "reopened, it shows {shows:?}, cropped to {showed:?}"
+        ));
+    }
+    Ok(cropped)
+}
+
+/// Every file's first page cropped, saved as planned (slice 15): an Append
+/// writes the page's dictionary alone, never another object, and no save
+/// gives the form check a finding the file didn't have.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn crop_appends_only_page_dicts() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let dir = scratch("cropped");
+    let entries = common::narrowed(CROP_ONLY, corpus.manifest().unwrap(), |e| &e.path);
+    let outcomes = each_entry(&entries, |entry| cropped(entry, &corpus, &dir));
+    let (mut files, mut appended, mut asked, mut small) = (0, 0, 0, 0);
+    let mut rewritten: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    let mut failed = BTreeMap::new();
+    for (entry, outcome) in entries.iter().zip(outcomes) {
+        let Some(outcome) = outcome else {
+            continue;
+        };
+        files += 1;
+        match outcome {
+            Ok(Cropped::Appended) => appended += 1,
+            Ok(Cropped::Rewritten(why)) => rewritten.entry(why).or_default().push(&entry.path),
+            Ok(Cropped::Asked) => asked += 1,
+            Ok(Cropped::TooSmall) => small += 1,
+            Err(e) => {
+                failed.insert(entry.path.clone(), e);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    println!(
+        "{files} of {} files cropped: {appended} appended with page dictionaries alone, {} \
+         rewritten, {asked} asked about their signatures first, {small} too small to crop; {} \
+         failed",
+        entries.len(),
+        rewritten.values().map(Vec::len).sum::<usize>(),
+        failed.len(),
+    );
+    for (why, paths) in &rewritten {
+        let some = paths[..paths.len().min(4)].join(", ");
+        println!("  rewritten for {why}: {} ({some})", paths.len());
+    }
+    for (path, why) in &failed {
+        println!("{path}: {why}");
+    }
+    assert!(failed.is_empty());
 }
 
 // ----- Deleted means deleted, both ways --------------------------------------

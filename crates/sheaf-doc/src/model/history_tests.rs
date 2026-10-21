@@ -24,9 +24,9 @@ use in_progress::NoProgress;
 use lopdf::{Object, ObjectId, dictionary};
 use proptest::prelude::*;
 use sheaf_edit::{
-    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Bring, Delta, Imported, LabelStyle,
-    Local, MarkKind, MarkPatch, NewMark, Op, OutlineBring, PageRef, PageSel, Patch, RangeSet,
-    ScopeSel, Sibling, Style, Turn, Vec2,
+    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Delta, Imported,
+    LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, Op, OutlineBring, PageRef, PageSel,
+    Patch, RangeSet, ScopeSel, Sibling, Style, Turn, Vec2,
 };
 
 use super::tests::{flat, opened_doc, square, tl};
@@ -47,13 +47,14 @@ const PLUGIN: &str = "test-plugin";
 /// The ops a run makes versions of, by name: below [`KINDS`], an action
 /// is an op of the kind at its place here, the page rebase of a derived
 /// flow last (`Tx::set_page_base`).
-const OPS: [&str; 22] = [
+const OPS: [&str; 23] = [
     "move-pages",
     "rotate-pages",
     "delete-pages",
     "duplicate-pages",
     "insert-pages",
     "replace-pages",
+    "set-page-boxes",
     "set-page-labels",
     "add-bookmark",
     "patch-bookmarks",
@@ -706,7 +707,7 @@ impl Run {
     fn lower(&self, tx: &mut Tx, kind: u8, rng: &mut fastrand::Rng, locals: &mut Locals) {
         match self.op(tx.state(), kind, rng, locals) {
             Gen::Base(pages) => {
-                let _ = tx.set_page_base(pages, Derive::Crop);
+                let _ = tx.set_page_base(pages, Derive::StripHeaderFooter);
             }
             Gen::Op(op) => {
                 let names = declared(&op);
@@ -958,6 +959,41 @@ impl Run {
                     from,
                     with: Some(within(rng, src.page_count())),
                     bring: bring(rng),
+                }
+            }
+            "set-page-boxes" => {
+                // A box by margins off what the page shows, or in PageSpace,
+                // or cleared; now and then one off the page, or leaving
+                // too little of it, which fails. The crop mostly, the
+                // others now and then.
+                let page_box = |rng: &mut fastrand::Rng| match rng.u8(..6) {
+                    0 => Patch::Clear,
+                    1..=3 => Patch::Set(BoxSpec::Margins(Margins {
+                        top: rng.f32() * 120.0,
+                        bottom: rng.f32() * 120.0,
+                        left: rng.f32() * 120.0,
+                        right: rng.f32() * 120.0,
+                    })),
+                    _ => Patch::Set(BoxSpec::Rect(Box2 {
+                        x: rng.f32() * 120.0 - 10.0,
+                        y: rng.f32() * 120.0 - 10.0,
+                        w: rng.f32() * 480.0,
+                        h: rng.f32() * 640.0,
+                    })),
+                };
+                let other = |rng: &mut fastrand::Rng| match rng.u8(..4) {
+                    0 => page_box(rng),
+                    _ => Patch::Keep,
+                };
+                Op::SetPageBoxes {
+                    pages: match rng.u8(..8) {
+                        0 => PageSel::All,
+                        _ => some_pages(rng),
+                    },
+                    crop: page_box(rng),
+                    trim: other(rng),
+                    bleed: other(rng),
+                    art: other(rng),
                 }
             }
             "set-page-labels" => Op::SetPageLabels {
@@ -1619,6 +1655,16 @@ fn each_kind_s_no_op_pushes_nothing() {
             pages: none(),
             locals: Vec::new(),
         },
+        // Nothing off each side.
+        fx::crop(
+            &[p1],
+            Margins {
+                top: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+                right: 0.0,
+            },
+        ),
         roman(),
         fx::patch_bookmark(a, BookmarkPatch::default()),
         // B and its pages, after A and its.
@@ -1660,7 +1706,8 @@ fn each_kind_s_no_op_pushes_nothing() {
         assert_eq!((d.version_count(), d.current_version()), (n, at), "{name}");
     }
     let mut tx = d.tx(Actor::User);
-    tx.set_page_base(Vec::new(), Derive::Crop).unwrap();
+    tx.set_page_base(Vec::new(), Derive::StripHeaderFooter)
+        .unwrap();
     d.commit(tx, label("no-op")).unwrap();
     assert_eq!((d.version_count(), d.current_version()), (n, at));
 }

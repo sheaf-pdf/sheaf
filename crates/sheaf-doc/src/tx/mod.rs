@@ -65,6 +65,8 @@ pub(crate) mod pages;
 pub mod resolve;
 
 #[cfg(test)]
+mod boxes_tests;
+#[cfg(test)]
 mod cascade_tests;
 #[cfg(test)]
 mod stale_tests;
@@ -1050,6 +1052,13 @@ fn lower_op(lw: &mut Lower, op: &ResolvedOp) -> Result<(), EditError> {
             with,
             bring,
         } => pages::replace(lw, pages, from, name, with, bring),
+        R::SetPageBoxes {
+            pages,
+            crop,
+            trim,
+            bleed,
+            art,
+        } => pages::set_boxes(lw, pages, crop, trim, bleed, art),
         R::SetPageLabels { ranges } => {
             pages::set_labels(lw, ranges.clone());
             Ok(())

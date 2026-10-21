@@ -692,6 +692,7 @@ impl HeapSize for ResolvedOp {
             R::MovePages { pages, .. }
             | R::RotatePages { pages, .. }
             | R::DeletePages { pages }
+            | R::SetPageBoxes { pages, .. }
             | R::ClearOcrText { pages }
             | R::RemoveHeaderFooter { pages } => pages.heap_size(),
             R::DuplicatePages { pages, locals } => pages.heap_size() + buf(locals),

@@ -38,6 +38,8 @@
 //! (`scripts/fetch-pdfium.sh`). To look at a few files by hand, name them
 //! in [`ONLY`]; the tiers' own runs leave it unset.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{BufRead, BufReader, Read as _};
 use std::path::Path;
@@ -349,7 +351,7 @@ fn check(path: &Path, tier: Tier) -> Outcome {
 /// told, as the pool's openers tell it, and the page is viewed again, now
 /// in its group; but a section refused over a base PDFium reads fails, so
 /// a section sheaf wrote wrong isn't drawn standalone unseen.
-fn engine_for(
+fn engine_of(
     realizer: &Realizer,
     st: &DocState,
     page: PageId,
@@ -366,7 +368,7 @@ fn engine_for(
                 return Err(e.context("PDFium refuses the section over a base it reads"));
             }
             src.refuse_base();
-            engine_for(realizer, st, page, inputs)
+            engine_of(realizer, st, page, inputs)
         }
         engine => Ok((view, engine?)),
     }
@@ -418,7 +420,7 @@ fn edit_and_check(d: &mut Document, tier: Tier, out: &mut Outcome) -> anyhow::Re
     let realizer = Realizer::new();
     let left = order.iter().copied().find(|p| !edited.contains(p));
     for page in edited.iter().copied().chain(left) {
-        let (view, engine) = engine_for(&realizer, &st, page, &inputs)?;
+        let (view, engine) = engine_of(&realizer, &st, page, &inputs)?;
         let ours = engine.render_appearances(PageIndex(view.index), WIDTH)?;
         let at = st.pos_of(page).expect("a page") as u32;
         let theirs = render_appearances(&saved, password.as_deref(), PageIndex(at), WIDTH)?;
@@ -463,35 +465,12 @@ fn realizations_render_as_saved() {
     run(Tier::Pixels);
 }
 
-/// `picks`, or those of them [`ONLY`] names when it's set: every one it
-/// names, or a failure, as it is when it's set and names none (a leftover
-/// export mustn't make a whole run check nothing). A narrowed run says so.
-fn only(picks: Vec<Pick>) -> Vec<Pick> {
-    let Ok(only) = std::env::var(ONLY) else {
-        return picks;
-    };
-    let named: BTreeSet<&str> = (only.split(',').map(str::trim))
-        .filter(|p| !p.is_empty())
-        .collect();
-    assert!(!named.is_empty(), "{ONLY} is set but names no file");
-    let picks: Vec<Pick> = (picks.into_iter())
-        .filter(|pick| named.contains(pick.path.as_str()))
-        .collect();
-    assert_eq!(
-        picks.len(),
-        named.len(),
-        "{ONLY} names a file the tier doesn't pick: {only}"
-    );
-    eprintln!("narrowed by {ONLY} to {} files", picks.len());
-    picks
-}
-
 /// `tier` over every file, its counts printed by class.
 fn run(tier: Tier) {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let picks = only(files(&corpus));
+    let picks = common::narrowed(ONLY, files(&corpus), |pick| &pick.path);
     let entries: Vec<Entry> = (picks.iter())
         .map(|pick| Entry {
             path: pick.path.clone(),

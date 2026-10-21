@@ -453,9 +453,10 @@ fn copies_hold_only_the_pages_copied() {
     let bytes = crate::save::extract_bytes(&model.snapshot(), &[p0, p1]).unwrap();
     assert!(!says(&bytes, "MARK A 2") && says(&bytes, "MARK A 1"));
     assert_eq!(page_annots(&bytes, 0), 1);
-    // A crop is a copy of the page alone.
+    // A derived copy is a copy of the page alone.
     let src = model.snapshot().primary;
-    let bytes = crate::save::cropped_copy(&src, &[(0, [0.0, 0.0, 300.0, 300.0])]).unwrap();
+    let kept = crate::save::HeaderKept::Yes;
+    let bytes = crate::save::derived_copy(&src, &[0], kept, &mut |_, _, _, _| Ok(())).unwrap();
     assert!(!says(&bytes, "MARK A 1") && !says(&bytes, "MARK A 2"));
     assert_eq!(page_annots(&bytes, 0), 0);
     // So is a stamp made from a page, and the forms the summary draws.

@@ -750,9 +750,9 @@ pub struct DocView {
     pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
     /// A background job in progress: Export Pages, Split (see jobs.rs).
     pub(crate) job: Option<crate::jobs::Job>,
-    /// The planners in progress, oldest first: inserts, crops, watermarks,
-    /// headers and footers, comment imports, the blank-page search (see
-    /// jobs.rs).
+    /// The planners in progress, oldest first: inserts, Trim Whites,
+    /// watermarks, headers and footers, comment imports, the blank-page
+    /// search (see jobs.rs).
     pub(crate) planners: Vec<std::rc::Rc<crate::jobs::Job>>,
     /// Blank pages found, waiting for review (see blank_review.rs).
     pub(crate) blank_review: Option<crate::blank_review::Review>,
@@ -6171,6 +6171,7 @@ mod tests {
     use super::*;
     use anyhow::Context as _;
     use sheaf_edit::{BookmarkRef, Local, Sibling};
+    use sheaf_ops::crop;
 
     /// The bookmarks a commit made come into view, walking up from each:
     /// their ancestors open, older ones and made ones alike, and so does a
@@ -7668,20 +7669,24 @@ mod tests {
     }
 
     /// The process keeps as many threads as it had once its first pages
-    /// rendered, across 20 inserts and 20 crops (M10.5 §10.3): in a
-    /// process of its own, each file inserted (another each time) and each
-    /// crop of the first page lands through its planner, its pages render
-    /// from engines the one render worker opens, and no thread starts. The
-    /// count is taken after a first insert and crop: the first crop's copy,
-    /// read by lopdf until slice 15, starts rayon's pool, once.
+    /// rendered, across 20 inserts and 20 crops of each kind (M10.5
+    /// §10.3): in a process of its own, each file inserted (another each
+    /// time) lands through its planner, each crop of the first page is one
+    /// op committed on the UI thread, each Trim White of the last page
+    /// measures it through the pool on its planner, its pages render from
+    /// engines the one render worker opens, and no thread starts. A crop
+    /// makes no copy, so none is read by lopdf, whose first read started
+    /// rayon's pool until slice 15.
     #[test]
     #[cfg(target_os = "linux")]
     fn the_thread_count_is_constant_across_20_inserts_and_crops() {
-        use sheaf_ops::crop::{CropSpec, Margins};
+        use sheaf_edit::Margins;
         use std::sync::atomic::{AtomicBool, Ordering};
         let Some(path) = std::env::var_os(ALONE).map(PathBuf::from) else {
             let name = "docview::tests::the_thread_count_is_constant_across_20_inserts_and_crops";
-            let (_dir, path) = blank_file(2);
+            let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+            let path = dir.path().join("said.pdf");
+            std::fs::write(&path, said(2)).unwrap();
             alone(name, &path, &[]);
             return;
         };
@@ -7712,7 +7717,7 @@ mod tests {
                         })
                     };
                     drawn(cx);
-                    let mut threads = Vec::new();
+                    let mut threads = vec![tasks()];
                     for (k, file) in files.into_iter().enumerate() {
                         cx.update(|cx| {
                             view.update(cx, |v, cx| {
@@ -7727,13 +7732,16 @@ mod tests {
                                 let opened = v.model_snapshot().unwrap();
                                 let first = opened.state.page_at(0).unwrap();
                                 let margin = 4.0 + k as f32;
-                                let spec = CropSpec::Margins(Margins {
+                                let margins = Margins {
                                     top: margin,
-                                    right: margin,
                                     bottom: margin,
                                     left: margin,
-                                });
-                                v.crop_pages(opened, vec![first], spec, cx);
+                                    right: margin,
+                                };
+                                v.crop_pages(opened, vec![first], margins, cx);
+                                let opened = v.model_snapshot().unwrap();
+                                let last = opened.state.page_at(opened.state.page_count() - 1);
+                                v.trim_white(opened, vec![last.unwrap()], cx);
                             })
                         });
                         planned(&view, cx).await;
@@ -7745,9 +7753,79 @@ mod tests {
                             let doc = shown(v);
                             assert_eq!(doc.model.page_count(), 23);
                             assert_eq!(doc.model.undo_label(), Some("Crop 1 page"));
+                            let last = doc.model.geom(doc.model.page(22).unwrap());
+                            assert_ne!(last.crop, last.media, "Trim White cropped the last");
                         })
                     });
                     assert!(threads.iter().all(|&n| n == threads[0]), "{threads:?}");
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// Two Trim Whites on overlapping pages, started on one version, both
+    /// land (M10.5 §8.5): whichever lands second conflicts on a page the
+    /// first cropped, is measured again on the version the first made, and
+    /// lands, cropping only the page the first didn't. Every page then
+    /// holds the crop Trim White finds for it on the version both started
+    /// on, the document has the two versions alone, and the notice is the
+    /// second's, no conflict left in it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn two_overlapping_trims_both_land() {
+        use sheaf_doc::geom::Rect;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("said.pdf");
+        std::fs::write(&path, said(4)).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ids: Vec<PageId> = (0..4).map(|i| model.page(i).unwrap()).collect();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                let (opened, views, lower) = view.update(cx, |v, cx| {
+                    let opened = v.model_snapshot().unwrap();
+                    v.trim_white(opened.clone(), ids[..3].to_vec(), cx);
+                    v.trim_white(opened.clone(), ids[1..].to_vec(), cx);
+                    let doc = shown(v);
+                    let lower = doc.model.lower_cx(Actor::Job(sheaf_doc::JobKind::Trim));
+                    (opened, Views::new(doc.views.pool().clone()), lower)
+                });
+                cx.spawn(async move |cx| {
+                    planned(&view, cx).await;
+                    let want = cx.background_executor().spawn({
+                        let ids = ids.clone();
+                        async move {
+                            let (pad, urgency) = (crop::PAD, crop::Urgency::Background);
+                            let p = &sheaf_ops::NoProgress;
+                            crop::trim_white(&views, &opened, lower, &ids, pad, urgency, p)
+                        }
+                    });
+                    let want = want.await.unwrap();
+                    assert_eq!(want.crops.len(), 4, "{want:?}");
+                    cx.update(|cx| {
+                        view.update(cx, |v, _| {
+                            let doc = shown(v);
+                            assert_eq!(doc.notice.as_deref(), Some("Trimmed 1 page"));
+                            for &(id, to) in &want.crops {
+                                let g = doc.model.geom(id);
+                                let crop = Rect::new(to.x, to.y, to.right(), to.bottom());
+                                assert_eq!(g.crop, crop.intersect(g.media), "{id:?}");
+                            }
+                            let model = &mut doc.model;
+                            for label in ["Crop 1 page", "Crop 3 pages"] {
+                                assert_eq!(model.undo_label(), Some(label));
+                                model.undo().unwrap();
+                            }
+                            assert!(!model.can_undo());
+                        })
+                    });
                     ran.store(true, Ordering::Relaxed);
                     cx.update(|cx| cx.quit());
                 })
@@ -8031,19 +8109,14 @@ mod tests {
         let mut ops = fx::ocr([(p[5], Arc::new(layer))]);
         ops.push(fx::set_header(fx::header("Draft"), Some(&[p[0], p[5]])));
         model.commit_ops(ops, "OCR").unwrap();
-        let margins = sheaf_ops::crop::Margins {
+        let margins = sheaf_edit::Margins {
             top: 40.0,
-            right: 30.0,
             bottom: 50.0,
             left: 20.0,
+            right: 30.0,
         };
-        let spec = sheaf_ops::crop::CropSpec::Margins(margins);
-        let snap = model.snapshot();
-        let progress = &sheaf_ops::NoProgress;
-        let plan = sheaf_ops::crop::plan(model.store(), &snap, &[p[1]], spec, progress).unwrap();
-        plan[0].note(&mut model);
-        let pages = plan[0].bases().collect();
-        (model.commit_page_base(pages, sheaf_doc::Derive::Crop, "Crop")).unwrap();
+        let crop = fx::crop(&[p[1]], margins);
+        model.commit_ops(vec![crop], "Crop").unwrap();
         let st = model.state();
         let [inserted, copy] = [2, 6].map(|i| st.page_at(i).unwrap());
         assert_eq!(st.def(inserted).unwrap().base.src.id(), eight.id());

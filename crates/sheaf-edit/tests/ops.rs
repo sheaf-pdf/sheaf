@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 use sheaf_edit::fixture::{blob, every_op, layer};
 use sheaf_edit::{
-    AnnotId, AnnotRef, BlobId, BlobSel, BookmarkPatch, BookmarkRef, Envelope, Local, Op, OutlineId,
-    PageId, PageRef, Patch, RangeSet, Rotation, Turn,
+    AnnotId, AnnotRef, BlobId, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Envelope, Local,
+    Margins, Op, OutlineId, PageId, PageRef, PageSel, Patch, RangeSet, Rotation, Turn,
 };
 
 fn pos(s: &str) -> RangeSet {
@@ -85,6 +85,10 @@ fn the_fixture_has_every_op_and_every_kind_of_mark() {
         r#""fill":[1,2,3]"#,
         r#""scope":"all""#,
         r#""scope":{"pages":{"ids":[{"pos":2}]}}"#,
+        r#""crop":{"margins":{"top":36.0,"bottom":36.0,"left":18.0,"right":18.0}}"#,
+        r#""trim":{"rect":{"x":18.0,"y":18.0,"w":576.0,"h":756.0}}"#,
+        r#""bleed":null"#,
+        r#""crop":null"#,
     ] {
         assert!(text.contains(form), "{form}");
     }
@@ -171,6 +175,33 @@ fn patches_keep_clear_and_set() {
     assert_eq!(slot, None);
 }
 
+/// A page's boxes are patches too: one left out is kept, `null` clears
+/// it, and a box is set by margins or as a rectangle.
+#[test]
+fn page_boxes_are_kept_cleared_or_set() {
+    let op = read::<Op>(json!({
+        "op": "set-page-boxes", "pages": "all", "art": null,
+        "crop": {"margins": {"top": 1, "bottom": 2, "left": 3, "right": 4}},
+    }));
+    let margins = Margins {
+        top: 1.0,
+        bottom: 2.0,
+        left: 3.0,
+        right: 4.0,
+    };
+    let want = Op::SetPageBoxes {
+        pages: PageSel::All,
+        crop: Patch::Set(BoxSpec::Margins(margins)),
+        trim: Patch::Keep,
+        bleed: Patch::Keep,
+        art: Patch::Clear,
+    };
+    assert_eq!(op, Ok(want));
+    let e = read::<Op>(json!({"op": "set-page-boxes", "pages": "all", "trim": {"margin": {}}}))
+        .unwrap_err();
+    assert!(e.contains("unknown variant `margin`"), "{e}");
+}
+
 #[test]
 fn a_misspelled_field_is_refused() {
     let delete = json!({"op": "delete-pages", "pages": "all"});
@@ -239,6 +270,16 @@ fn a_misspelled_field_is_refused() {
             json!({"op": "patch-marks", "marks": [1], "patch": {"modified": "D:2026"}}),
             "modified",
         ),
+        (
+            json!({"op": "set-page-boxes", "pages": "all", "media": null}),
+            "media",
+        ),
+        (
+            json!({"op": "set-page-boxes", "pages": "all", "crop": {"margins": {
+                "top": 1, "bottom": 1, "left": 1, "right": 1, "inner": 1,
+            }}}),
+            "inner",
+        ),
     ] {
         let e = read::<Op>(bad.clone()).unwrap_err();
         assert!(
@@ -270,7 +311,7 @@ fn envelopes_refuse_versions_they_cant_read() {
         assert!(e.contains(why), "{v}: {e}");
     }
     // A newer version's op is refused for its version, written first.
-    let newer = r#"{"v": "1.1", "ops": [{"op": "set-page-boxes", "pages": "all"}]}"#;
+    let newer = r#"{"v": "1.1", "ops": [{"op": "set-watermark", "pages": "all"}]}"#;
     let e = serde_json::from_str::<Envelope>(newer)
         .unwrap_err()
         .to_string();

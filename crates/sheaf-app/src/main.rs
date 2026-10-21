@@ -20,6 +20,7 @@ mod commands;
 mod comments_panel;
 mod contrib;
 mod crop_dialog;
+mod dialog_preview;
 mod docview;
 mod export;
 mod export_dialog;

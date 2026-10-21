@@ -327,8 +327,8 @@ impl fmt::Display for PdfVersion {
 
 /// What a page is written as: the page of a file whose dictionary, keys
 /// and annotations it is, and as which copy of it; for a derived copy's
-/// page (a crop, a header stripped, a watermark), the page it was made
-/// from (M10 bug 1), with the copy's page what it draws.
+/// page (a header stripped, a watermark), the page it was made from (M10
+/// bug 1), with the copy's page what it draws.
 #[derive(Clone)]
 pub(crate) struct Shown {
     pub(crate) src: Src,

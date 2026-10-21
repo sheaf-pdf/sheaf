@@ -1,16 +1,15 @@
-//! Pages that show a generated copy of their source page: cropped, or
-//! with the header/footer the file had drawn stripped out. The copies are
-//! made in memory and interned into the document's store, and noted with
-//! the document as copies of their originals' pages
-//! ([`Document::add_derived`]); a transaction's
+//! Pages that show a generated copy of their source page: with a
+//! watermark drawn on, or with the header/footer the file had drawn
+//! stripped out. The copies are made in memory and interned into the
+//! document's store, and noted with the document as copies of their
+//! originals' pages ([`Document::add_derived`]); a transaction's
 //! [`set_page_base`](sheaf_doc::Tx::set_page_base) then moves the
-//! document's pages onto them, keeping ids, rotation, bookmarks, marks and
-//! OCR text.
+//! document's pages onto them, keeping ids, boxes, rotation, bookmarks,
+//! marks and OCR text.
 
 use anyhow::Result;
 use in_progress::Progress;
 use sheaf_doc::content::{ContentError, PaginationKind};
-use sheaf_doc::geom::Geom;
 use sheaf_doc::save::HeaderKept;
 use sheaf_doc::store::{BlobKind, MemoryKind, Origin};
 use sheaf_doc::{Derived, Document, PAGES, PageId, Snapshot, Src, Store};
@@ -120,26 +119,25 @@ pub fn strip_stamps_of(
         if keep.is_empty() {
             continue;
         }
-        let list: Vec<(u32, Option<[f32; 4]>)> = keep.iter().map(|k| (k.1, None)).collect();
+        let list: Vec<u32> = keep.iter().map(|k| k.1).collect();
         let stripped = HeaderKept::No;
         let bytes = sheaf_doc::save::derived_copy(&src, &list, stripped, &mut |pdf, d, _, at| {
             sheaf_doc::stamps::strip(pdf, d, keep[at].2, kinds)?;
             Ok(())
         })?;
-        let pages = keep.iter().map(|k| k.1).collect();
         let shown = (keep.iter().enumerate())
             .map(|(k, &(id, ..))| (id, k as u32))
             .collect();
-        out.push(copy_of(store, bytes, &src, pages, shown)?);
+        out.push(copy_of(store, bytes, &src, list, shown)?);
     }
     Ok(out)
 }
 
 /// Pages with `wm` drawn on (sheaf's and Acrobat's of its kind stripped
 /// first), and pages outside `scope` that have one of those stripped;
-/// `None` strips only. Each
-/// page's rotation is passed on, so the mark sits upright as the page is
-/// shown. The copies are sources in `store`.
+/// `None` strips only. Each page's boxes and rotation are passed on, so
+/// the mark sits on its crop, upright as the page is shown. The copies
+/// are sources in `store`.
 pub fn watermark(
     store: &Store,
     snap: &Snapshot,
@@ -154,10 +152,10 @@ pub fn watermark(
         sheaf_doc::stamps::WATERMARK
     };
     progress.set_total(Some(snap.state.page_count() as u64), PAGES);
-    // (page, index in source, place in the document, draw?, its rotation)
+    // (page, index in source, place in the document, draw?, its boxes)
     let pages = snap.state.pages().enumerate().map(|(n, (id, def, geom))| {
         let draw = wm.is_some() && scope.contains(&id);
-        let page = (id, def.base.index, n as u32, draw, geom.rotate);
+        let page = (id, def.base.index, n as u32, draw, **geom);
         (def.base.src.clone(), page)
     });
     let by_source = crate::by_source(pages);
@@ -176,21 +174,20 @@ pub fn watermark(
         if keep.is_empty() {
             continue;
         }
-        let list: Vec<(u32, Option<[f32; 4]>)> = keep.iter().map(|k| (k.1, None)).collect();
+        let list: Vec<u32> = keep.iter().map(|k| k.1).collect();
         let kept = HeaderKept::Yes;
-        let bytes = sheaf_doc::save::derived_copy(&src, &list, kept, &mut |pdf, d, geom, at| {
-            let (_, _, n, draw, rotate) = keep[at];
+        let bytes = sheaf_doc::save::derived_copy(&src, &list, kept, &mut |pdf, d, _, at| {
+            let (_, _, n, draw, geom) = keep[at];
             sheaf_doc::stamps::strip(pdf, d, n, kinds)?;
             if draw && let Some(wm) = wm {
-                sheaf_doc::watermark::install(pdf, d, wm, &Geom { rotate, ..*geom })?;
+                sheaf_doc::watermark::install(pdf, d, wm, &geom)?;
             }
             Ok(())
         })?;
-        let pages = keep.iter().map(|k| k.1).collect();
         let shown = (keep.iter().enumerate())
             .map(|(k, &(id, ..))| (id, k as u32))
             .collect();
-        out.push(copy_of(store, bytes, &src, pages, shown)?);
+        out.push(copy_of(store, bytes, &src, list, shown)?);
     }
     Ok(out)
 }

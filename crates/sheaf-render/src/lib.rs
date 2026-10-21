@@ -10,9 +10,9 @@
 //!
 //! PDFium is process-global and not thread-safe, so every use of it holds one
 //! lock (`pdfium::lock`): the pool's worker and the threads that open an
-//! engine of their own (a print, an export, Trim White's scan) take turns,
-//! a call into an engine at a time. A scan for blank pages, like OCR,
-//! reads pages through the pool.
+//! engine of their own (a print, an export) take turns, a call into an
+//! engine at a time. A scan for blank pages and Trim White's, like OCR,
+//! read pages through the pool.
 
 pub mod pool;
 

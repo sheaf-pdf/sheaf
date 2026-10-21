@@ -13,6 +13,7 @@ use sheaf_edit::{Op, Turn};
 use super::tests::{doc, id_at, record_for, tl};
 use super::*;
 use crate::history::{FixedCount, MAX_VERSIONS};
+use crate::realize::ViewInputs;
 use crate::tx::fixture::{self as fx, ids};
 use crate::tx::{Base, Derive, JobKind, Stale};
 
@@ -32,11 +33,12 @@ fn start(d: &mut Document) -> Ocr {
 
 /// One of `run`'s flushes, as the app makes it: `layers`' text set on
 /// their pages, made on the version the run began on, deciding by each
-/// page as it was rendered, and landed by value in the run's group.
+/// page's content as it was rendered, and landed by value in the run's
+/// group.
 fn flush(d: &mut Document, run: &Ocr, layers: &[(PageId, &str)]) -> Result<Commit, EditError> {
     let mut tx = Document::tx_at(&run.base, d.lower_cx(Actor::Job(JobKind::Ocr)));
     for &(page, _) in layers {
-        tx.read(Key::Page(page));
+        tx.read_render(page, &ViewInputs::content_only());
     }
     let ops = fx::ocr(layers.iter().map(|&(page, text)| (page, tl(text))));
     tx.apply_batch(ops, &NoProgress)?;
@@ -142,6 +144,29 @@ fn ocr_around_a_user_edit_is_fragments_undone_all_at_once() {
     assert_eq!(recognized(&d), [p0, p1]);
 }
 
+/// A crop of a page during an OCR run writes the page's boxes alone, and
+/// the run's flush decides by the page's content: its text lands on the
+/// cropped page, and the crop holds.
+#[test]
+fn an_ocr_flush_lands_after_a_crop_of_its_page() {
+    let mut d = doc();
+    let p0 = id_at(&d, 0);
+    let run = start(&mut d);
+    let margins = sheaf_edit::Margins {
+        top: 36.0,
+        bottom: 36.0,
+        left: 36.0,
+        right: 36.0,
+    };
+    d.commit_ops(vec![fx::crop(&[p0], margins)], "Crop page 1")
+        .unwrap();
+    let cropped = d.geom(p0);
+    assert_ne!(cropped.crop, cropped.media);
+    flush(&mut d, &run, &[(p0, "a")]).unwrap();
+    assert_eq!(recognized(&d), [p0]);
+    assert_eq!(d.geom(p0), cropped, "the crop holds");
+}
+
 /// A plugin call's versions around the user's edit, rolled back after the
 /// call failed: one version, the plugin's, takes back its edits alone,
 /// and its versions stay in the history.
@@ -233,11 +258,12 @@ fn a_revert_over_a_later_edit_names_it() {
     let copy = crate::store::blank(d.store(), 1);
     let run = start(&mut d);
     flush(&mut d, &run, &[(p0, "a")]).unwrap();
-    d.commit_page_base(vec![(p0, copy, 0)], Derive::Crop, "Crop page 1")
+    let strip = Derive::StripHeaderFooter;
+    d.commit_page_base(vec![(p0, copy, 0)], strip, "Strip page 1")
         .unwrap();
     let at = where_at(&d);
     let e = d.revert_group(run.group, "Recognize text").unwrap_err();
-    let by = Some("Crop page 1".into());
+    let by = Some("Strip page 1".into());
     assert_eq!(
         e,
         EditError::Conflict {

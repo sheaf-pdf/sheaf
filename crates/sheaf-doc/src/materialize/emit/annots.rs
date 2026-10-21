@@ -745,8 +745,8 @@ pub(crate) fn dead_link(
     LinkTo::of(st, own, base, f) == LinkTo::Nowhere
 }
 
-/// Whether `src` is a derived copy of another source's pages (a crop, a
-/// header stripped, a watermark), until slice 17.
+/// Whether `src` is a derived copy of another source's pages (a header
+/// stripped, a watermark), until slice 17.
 pub(crate) fn derived(src: &Src) -> bool {
     matches!(
         src.blob().kind(),

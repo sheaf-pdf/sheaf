@@ -20,16 +20,16 @@
 //!   with no unpinned engine left to close, the heaviest base engine
 //!   heavier than [`ENGINE_BYTES`] closes, pinned or not, and opens again
 //!   at its next request, whoever's request took it past.
-//! - **Background** requests (OCR, blank detection, plugins' text and page
-//!   scans) use any open engine, leaving the screen's order alone, and
-//!   otherwise open one of their own, at most [`BACKGROUND_ENGINES`], so
-//!   they never close one of the screen's to make room. Their group and
-//!   patch engines weigh at most [`BACKGROUND_BYTES`]; their base engines
-//!   grow into what the screen's engines leave of [`SCREEN_BYTES`], and
-//!   past it the heaviest heavier than [`ENGINE_BYTES`] closes, so a walk
-//!   over a 7k document opens its base engine again about as often as the
-//!   screen's does (not every 400 pages). A screen request for one of
-//!   theirs makes it the screen's.
+//! - **Background** requests (OCR, blank detection, Trim White, plugins'
+//!   text and page scans) use any open engine, leaving the screen's order
+//!   alone, and otherwise open one of their own, at most
+//!   [`BACKGROUND_ENGINES`], so they never close one of the screen's to
+//!   make room. Their group and patch engines weigh at most
+//!   [`BACKGROUND_BYTES`]; their base engines grow into what the screen's
+//!   engines leave of [`SCREEN_BYTES`], and past it the heaviest heavier
+//!   than [`ENGINE_BYTES`] closes, so a walk over a 7k document opens its
+//!   base engine again about as often as the screen's does (not every 400
+//!   pages). A screen request for one of theirs makes it the screen's.
 //! - **Walks** hold the engine they read their last page on: neither
 //!   budget's count or bytes close it, as if pinned, until the walk reads
 //!   on another or ends, so a walk past pinned engines filling
@@ -255,8 +255,8 @@ pub enum Budget {
     /// The page view's and the thumbnail strip's, dialogs' previews, and
     /// Find's and selection's text.
     Screen,
-    /// Walks over a document's pages: OCR, blank detection, plugins' text
-    /// and scans.
+    /// Walks over a document's pages: OCR, blank detection, Trim White,
+    /// plugins' text and scans.
     Background,
 }
 

@@ -50,11 +50,12 @@ fn theirs() -> Form {
     f
 }
 
-/// `d`'s page `page`, its primary's page `index`, cropped as a crop
-/// writes its derived copy.
-fn crop(d: &mut crate::Document, index: u32, page: PageId) {
-    let crop = [36.0, 36.0, 400.0, 500.0];
-    let copy = crate::save::cropped_copy(d.primary(), &[(index, crop)]).unwrap();
+/// `d`'s page `page`, its primary's page `index`, shown from a derived
+/// copy of it, its boxes as they were, as the derived flows make one.
+fn copied(d: &mut crate::Document, index: u32, page: PageId) {
+    let kept = crate::save::HeaderKept::Yes;
+    let copy =
+        crate::save::derived_copy(d.primary(), &[index], kept, &mut |_, _, _, _| Ok(())).unwrap();
     derive(d, &copy, index, page);
 }
 
@@ -64,9 +65,9 @@ fn crop(d: &mut crate::Document, index: u32, page: PageId) {
 /// resources, whose overlay writes them out under another parent; sheaf's
 /// marks in the file, which the screen draws itself; a comment hidden or
 /// deleted; a field's value, which no save writes yet; a header; recognized
-/// text; a duplicate; a turned page, which the job turns; a crop; fields
-/// whose `/Parent` isn't the parent whose `/Kids` lists them; a link to a
-/// page deleted.
+/// text; a duplicate; a turned page, which the job turns; a derived
+/// copy's page; a crop; fields whose `/Parent` isn't the parent whose
+/// `/Kids` lists them; a link to a page deleted.
 #[test]
 fn the_predicate_agrees_with_the_emission_in_every_case() {
     let all = |n: usize| vec![true; n];
@@ -127,15 +128,33 @@ fn the_predicate_agrees_with_the_emission_in_every_case() {
     assert_eq!(agree(d.state(), "edited"), [false, false, true, false]);
     let ocr = verdicts(d.state(), &ViewInputs::content_only(), "edited");
     assert_eq!(ocr, [true, true, true, false]);
-    // A crop: the page is its derived copy's, its bytes its own, but for
+    // A derived copy: the page is the copy's, its bytes its own, but for
     // the widgets its records draw from the page it was made from.
     let mut d = open(&bytes(&file("A", 2, false)), None);
     let p1 = d.page(1).unwrap();
-    crop(&mut d, 1, p1);
-    assert_eq!(agree(d.state(), "crop"), all(2));
+    copied(&mut d, 1, p1);
+    assert_eq!(agree(d.state(), "copy"), all(2));
     let mut d = opened(theirs().bytes(), "form.pdf");
     let p1 = d.page(1).unwrap();
-    crop(&mut d, 1, p1);
+    copied(&mut d, 1, p1);
+    assert_eq!(agree(d.state(), "copy of widgets"), [true, false, true]);
+    // A crop: the page's box isn't its base page's, which no job draws
+    // (spike C failed), under every consumer's inputs.
+    let to = crate::Box2 {
+        x: 36.0,
+        y: 36.0,
+        w: 364.0,
+        h: 464.0,
+    };
+    let mut d = open(&bytes(&file("A", 2, false)), None);
+    let p1 = d.page(1).unwrap();
+    d.commit_ops(vec![fx::crop_to(p1, to)], "Crop").unwrap();
+    assert_eq!(agree(d.state(), "crop"), [true, false]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "crop");
+    assert_eq!(ocr, [true, false]);
+    let mut d = opened(theirs().bytes(), "form.pdf");
+    let p1 = d.page(1).unwrap();
+    d.commit_ops(vec![fx::crop_to(p1, to)], "Crop").unwrap();
     assert_eq!(agree(d.state(), "crop of widgets"), [true, false, true]);
     // A form inserted from a file whose defaults aren't the document's,
     // which its overlay pushes down onto its roots.

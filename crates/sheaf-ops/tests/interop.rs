@@ -22,6 +22,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use lopdf::{Dictionary, Object, dictionary};
 use sheaf_doc::forms::fixture::{Form, outline_tree};
@@ -30,9 +31,9 @@ use sheaf_doc::serialize::fixture::{
     PREFIX, USER, attachment_only, edited, encrypted, form, object_streams_encrypted,
     rc4_aes_128_and_aes_256, written,
 };
-use sheaf_doc::tx::fixture::{delete, delete_named, move_pages, patch_bookmark, rotate};
-use sheaf_doc::{PageId, Snapshot};
-use sheaf_edit::{BookmarkPatch, Turn};
+use sheaf_doc::tx::fixture::{add, delete, delete_named, move_pages, ocr, patch_bookmark, rotate};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DestView, OcrWord, PageId, Snapshot};
+use sheaf_edit::{BookmarkPatch, Margins, Op, PageRef, Rotation, Sibling, Turn};
 
 mod common;
 use common::scratch;
@@ -545,4 +546,253 @@ fn records_come_through(how: How) {
         println!("qpdf --check: {} outputs, 0 fail", outputs.len());
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What pdf.js reads of a cropped page's records: the page's view (the
+/// box it shows), each annotation's subtype and rect, each bookmark's
+/// `/XYZ` left and top, and each text item's string, transform, width and
+/// height.
+const PDFJS_CROPPED: &str = r#"
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const [lib, file] = process.argv.slice(2);
+const pdfjs = await import(pathToFileURL(lib).href);
+const data = new Uint8Array(readFileSync(file));
+const doc = await pdfjs.getDocument({ data, verbosity: 0 }).promise;
+const page = await doc.getPage(1);
+console.log(`view ${page.view.join(" ")}`);
+for (const a of await page.getAnnotations()) {
+  console.log(`annot ${a.subtype} ${a.rect.join(" ")}`);
+}
+for (const item of (await doc.getOutline()) ?? []) {
+  const [, kind, left, top] = Array.isArray(item.dest) ? item.dest : [];
+  console.log(`bookmark ${kind?.name} ${left} ${top}`);
+}
+for (const item of (await page.getTextContent()).items) {
+  if (item.str.trim()) {
+    const at = [...item.transform, item.width, item.height].join(" ");
+    console.log(`text ${JSON.stringify(item.str)} ${at}`);
+  }
+}
+"#;
+
+sheaf_doc::both_ways!(
+    #[ignore = "needs qpdf, or node and pdf.js"]
+    a_cropped_page_s_records_land_in_pdfjs,
+    a_cropped_page_s_records_land_in_pdfjs_appended: cropped_records_land
+);
+
+/// A page with a mark of sheaf's, a widget with a value, recognized text
+/// and a bookmark to a point on it, saved and opened again, then cropped
+/// by margins none alike and written `how`: the file passes `qpdf
+/// --check`, and pdf.js shows the crop, and reads each record where it's
+/// stored in PageSpace, which the crop didn't move: the annotations'
+/// rects as the file had them before, the widget's where the form put it
+/// and the mark's around its box; the bookmark's `/XYZ`; and each
+/// recognized word's text within its word's box, to a point.
+fn cropped_records_land(how: How) {
+    let (qpdf, pdfjs) = (qpdf(), pdfjs());
+    if qpdf.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch(&format!("interop-cropped-{how:?}"));
+    let script = dir.join("cropped.mjs");
+    std::fs::write(&script, PDFJS_CROPPED).unwrap();
+    let mut f = Form::new(1);
+    common::blue(&mut f, "a", 0, 0, "Alpha");
+    let base = common::write(&dir, "cropped.pdf", &mut f);
+    let mut doc = sheaf_doc::open::file(&base, None).unwrap().doc;
+    let page = doc.page(0).unwrap();
+    let square = Box2 {
+        x: 325.0,
+        y: 325.0,
+        w: 50.0,
+        h: 50.0,
+    };
+    let mark = Annot {
+        id: AnnotId(0),
+        kind: AnnotKind::Square { rect: square },
+        color: [255, 0, 0],
+        opacity: 1.0,
+        stroke: 1.0,
+        author: String::new(),
+        contents: String::new(),
+        modified: String::new(),
+        created: String::new(),
+        fill: None,
+        dashed: false,
+        cloudy: false,
+        turn: Rotation::R0,
+        name: String::new(),
+    };
+    // Two words, as recognized: boxes in the page's view.
+    let words = [
+        ("sheaf", 300.0, 392.0, 100.0),
+        ("interop", 150.0, 560.0, 140.0),
+    ];
+    let words = words.map(|(text, x, y, w)| OcrWord {
+        text: text.into(),
+        rect: Box2 { x, y, w, h: 24.0 },
+        confidence: 1.0,
+    });
+    let layer = sheaf_doc::text_layer::from_engine(words.to_vec(), &doc.geom(page), "test");
+    let view = DestView::Xyz {
+        left: Some(300.0),
+        top: Some(400.0),
+        zoom: None,
+    };
+    let bookmark = Op::AddBookmark {
+        parent: None,
+        at: Sibling::First,
+        title: "Square".into(),
+        target: Some(PageRef::Id(page)),
+        view: Some(view.clone()),
+        color: None,
+        style: Default::default(),
+        local: None,
+    };
+    let words = layer.words.clone();
+    let mut ops = vec![add(page, &mark), bookmark];
+    ops.extend(ocr([(page, Arc::new(layer))]));
+    doc.commit_ops(ops, "records").unwrap();
+    How::Rewritten.save(&mut doc, &base);
+    let annots = rects_in(&std::fs::read(&base).unwrap());
+    let mut doc = sheaf_doc::open::file(&base, None).unwrap().doc;
+    let page = doc.page(0).unwrap();
+    let uneven = Margins {
+        top: 50.0,
+        bottom: 20.0,
+        left: 72.0,
+        right: 30.0,
+    };
+    common::crop(&mut doc, &[page], uneven);
+    let path = dir.join(format!("cropped-{how:?}.pdf"));
+    let bytes = how.write(&doc);
+    std::fs::write(&path, &bytes).unwrap();
+    // As stored: the annotations' rects the crop didn't move.
+    assert_eq!(rects_in(&bytes), annots, "{how:?}");
+    if let Some(qpdf) = &qpdf {
+        run(Command::new(qpdf).arg("--check").arg(&path))
+            .unwrap_or_else(|e| panic!("qpdf --check, {how:?}: {e}"));
+        println!("qpdf --check, {how:?}: passes");
+    }
+    if let Some(pdfjs) = &pdfjs {
+        let said = run(Command::new("node").arg(&script).arg(pdfjs).arg(&path)).unwrap();
+        println!("pdf.js, {how:?}:\n{said}");
+        let stored = Stored {
+            crop: doc.geom(page).crop,
+            annots,
+            square,
+            view,
+            words,
+        };
+        read_as_stored(&said, &stored, how);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What [`cropped_records_land`]'s cropped page stores, in PageSpace.
+struct Stored {
+    crop: sheaf_doc::geom::Rect,
+    /// The annotations' rects, each by subtype, as the file had them
+    /// before the crop.
+    annots: Vec<(String, [f32; 4])>,
+    /// The mark's box.
+    square: Box2,
+    /// The bookmark's view.
+    view: DestView,
+    /// The recognized words.
+    words: Vec<OcrWord>,
+}
+
+/// The first page's annotations' `/Rect`s in `bytes`, each by subtype.
+fn rects_in(bytes: &[u8]) -> Vec<(String, [f32; 4])> {
+    let pdf = lopdf::Document::load_mem(bytes).unwrap();
+    let first = pdf.get_pages()[&1];
+    let mut out: Vec<(String, [f32; 4])> = (pdf.get_page_annotations(first).unwrap().iter())
+        .map(|a| {
+            let subtype = a.get(b"Subtype").unwrap().as_name().unwrap();
+            let rect = a.get(b"Rect").unwrap().as_array().unwrap();
+            let n = |i: usize| rect[i].as_float().unwrap() as f32;
+            let r = [n(0), n(1), n(2), n(3)];
+            // As pdf.js normalizes it.
+            let r = [
+                r[0].min(r[2]),
+                r[1].min(r[3]),
+                r[0].max(r[2]),
+                r[1].max(r[3]),
+            ];
+            (String::from_utf8_lossy(subtype).into_owned(), r)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// [`PDFJS_CROPPED`]'s lines `said`, checked against what's `stored`: the
+/// view is the crop; the annotations' rects are as they were, the widget's
+/// where the form put it and the mark's around its box; the bookmark's
+/// `/XYZ` is its view's; and each recognized word is read within its box.
+fn read_as_stored(said: &str, stored: &Stored, how: How) {
+    let numbers = |rest: &str| -> Vec<f32> {
+        rest.split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect()
+    };
+    let crop = stored.crop;
+    let shown = numbers(said.lines().find_map(|l| l.strip_prefix("view ")).unwrap());
+    assert_eq!(
+        shown,
+        [crop.x0, crop.y0, crop.x1, crop.y1],
+        "{how:?}: the view"
+    );
+    let mut annots: Vec<(String, [f32; 4])> = (said.lines())
+        .filter_map(|l| l.strip_prefix("annot "))
+        .map(|l| {
+            let (subtype, rest) = l.split_once(' ').unwrap();
+            let r = numbers(rest);
+            (subtype.to_string(), [r[0], r[1], r[2], r[3]])
+        })
+        .collect();
+    annots.sort_by(|a, b| a.0.cmp(&b.0));
+    let near = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(a, b)| (a - b).abs() <= 1e-3);
+    let before = &stored.annots;
+    let alike = annots.len() == before.len()
+        && (annots.iter().zip(before)).all(|(a, b)| a.0 == b.0 && near(&a.1, &b.1));
+    assert!(alike, "{how:?}: {annots:?}, stored {before:?}");
+    let rect = |subtype: &str| annots.iter().find(|a| a.0 == subtype).unwrap().1;
+    assert!(
+        near(&rect("Widget"), &common::row(0)),
+        "{how:?}: the widget"
+    );
+    let [x0, y0, x1, y1] = rect("Square");
+    let square = stored.square;
+    let around = x0 <= square.x && y0 <= square.y && x1 >= square.right() && y1 >= square.bottom();
+    assert!(
+        around,
+        "{how:?}: the mark at {:?}, its box {square:?}",
+        rect("Square")
+    );
+    let DestView::Xyz { left, top, .. } = stored.view else {
+        unreachable!("an /XYZ")
+    };
+    let mark = format!("bookmark XYZ {} {}", left.unwrap(), top.unwrap());
+    assert!(said.lines().any(|l| l == mark), "{how:?}: no {mark:?}");
+    for word in &stored.words {
+        let quoted = format!("text {:?} ", word.text);
+        let line = said.lines().find(|l| l.starts_with(&quoted));
+        let at = numbers(&line.unwrap_or_else(|| panic!("{how:?}: no {quoted:?}"))[quoted.len()..]);
+        let (x, y, w, h) = (at[4], at[5], at[6], at[7]);
+        let b = word.rect;
+        let within = x >= b.x - 1.0
+            && x + w <= b.right() + 1.0
+            && y >= b.y - 1.0
+            && y + h <= b.bottom() + 1.0;
+        assert!(
+            within,
+            "{how:?}: {:?} read at {at:?}, stored {b:?}",
+            word.text
+        );
+    }
 }

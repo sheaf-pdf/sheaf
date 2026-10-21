@@ -25,14 +25,15 @@
 //! elsewhere; each measurement gives its peak and what it added to the
 //! RSS it started from.
 //!
-//! The rows that run the writer (Rewrite, Bates' Rewrite, flatten and
-//! crop's copy) have run up to 1.46× faster in another build of this file,
-//! with nothing they run changed, and hold steady within a build. That is
-//! code placement: a Rewrite of the heavy 7k is mostly sheaf-doc's own
-//! loops around lopdf's load and the writer. The baselines are this file's.
+//! The rows that run the writer (Rewrite, Bates' Rewrite, flatten, and
+//! crop's copy until slice 15) have run up to 1.46× faster in another
+//! build of this file, with nothing they run changed, and hold steady
+//! within a build. That is code placement: a Rewrite of the heavy 7k is
+//! mostly sheaf-doc's own loops around lopdf's load and the writer. The
+//! baselines are this file's.
 //! From slice 7 the Rewrite, Bates' Rewrite, the flatten and the
 //! incremental save write through sheaf-doc's `serialize/` rather than
-//! lopdf's writer (crop's copy still goes through lopdf's until slice 15),
+//! lopdf's writer (crop's copy went through lopdf's until slice 15),
 //! and the incremental save and the flatten replace their file durably,
 //! fsynced with its directory. From slice 9 the Rewrite, Bates' Rewrite
 //! and the flatten are the new writer's (`materialize`), the flatten a
@@ -97,30 +98,41 @@
 //! past its bound), with neither a baseline nor a gate, one run each; and
 //! alone in `text_walks_on_the_synthetic_and_heavy_7k`, Find Blank Pages
 //! over every page and Find with a header on every page past six pinned
-//! group engines, with the engines each opened. From
-//! slice 13 the crop and Bates' apply open no engine on
-//! the copies they make, as the app's don't (its render worker opens one
-//! when a page of a copy is first drawn), where their rows counted one
-//! each before. So far slice 1's history bench, slice 3's geometry walk,
-//! slice 4's ready, slice 5's ready on 20,000 of sheaf's marks, slice 8's
-//! mark adds, slice 9's Rewrite, slice 10's incremental save on the
-//! scanned 7k ([`INCREMENTAL_GATE_MS`]), slice 11's check of a delete on
-//! every fixture ([`CHECK_GATE`]), slice 12's snapshot ([`SNAPSHOT_GATE`]),
-//! flat pushes ([`FLAT`]) and 200 OCR versions within the history budget
+//! group engines, with the engines each opened. From slice 15 a crop is one
+//! op over the pages' boxes, with no copy, as the Crop Pages dialog commits
+//! it: "crop all pages" and "validated after a delete" time the transaction
+//! made on the version the dialog opened on, the op and the commit by
+//! value, beside slice 2's crop, copy and all; the row that timed the edit
+//! apart from the copy is gone. Alone in `trim_white_on_the_7k`, each
+//! fixture in a process of its own, with neither a baseline nor a gate, one
+//! run of Trim White over every page cropped, as the app's planner trims:
+//! measured through a pool of its own in the background's budget, its crops
+//! committed by value, with the engines it opened, and the group engines a
+//! second walk opened. From slice 13 Bates' apply opens no engine on the
+//! copies it makes, as the app's doesn't (its render worker opens one when
+//! a page of a copy is first drawn), where its row counted one before. So
+//! far slice 1's history bench, slice 3's geometry walk, slice 4's ready,
+//! slice 5's ready on 20,000 of sheaf's marks, slice 8's mark adds, slice
+//! 9's Rewrite, slice 10's incremental save on the scanned 7k
+//! ([`INCREMENTAL_GATE_MS`]), slice 11's check of a delete on every fixture
+//! ([`CHECK_GATE`]), slice 12's snapshot ([`SNAPSHOT_GATE`]), flat pushes
+//! ([`FLAT`]) and 200 OCR versions within the history budget
 //! ([`HISTORY_BUDGET`]), and slice 13's realize + open + render on the
 //! synthetic and heavy ([`REALIZE_GATE_SYNTHETIC`],
 //! [`REALIZE_GATE_HEAVY`]), engines after 200 groups and the thumbnail
-//! strip's memory ([`SCREEN_BYTES`]) and its rate ([`STRIP_GATE`]) assert,
-//! after their tables print.
+//! strip's memory ([`SCREEN_BYTES`]) and its rate ([`STRIP_GATE`]), and
+//! slice 15's crop of every page, as made and validated after a delete, on
+//! every fixture ([`CROP_GATE`]) assert, after their tables print.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::executor::block_on;
+use in_progress::{Level, Progress, Unit};
 use lopdf::Object;
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
@@ -129,17 +141,17 @@ use sheaf_doc::serialize::fixture::{USER, encrypt_dict, rc4_aes_128_and_aes_256}
 use sheaf_doc::stamps::{Bates, HeaderFooter};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::{
-    add, delete, duplicate, header, insert, move_pages, ocr, rotate, set_header,
+    add, crop, delete, duplicate, header, insert, move_pages, ocr, rotate, set_header,
 };
 use sheaf_doc::{
     Actor, Annot, AnnotId, AnnotKind, Base, Box2, CommitOpts, Derive, Document, GroupKind, JobKind,
-    OcrWord, PageId, Query, Src, Stale, Store, TextLayer, ViewInputs,
+    OcrWord, PageId, Query, Snapshot, Stale, Store, TextLayer, ViewInputs,
 };
-use sheaf_edit::{Anchor, Op, PageRef, Rotation, Style, Turn};
+use sheaf_edit::{Anchor, Margins, Op, PageRef, Rotation, Style, Turn};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
 use sheaf_ops::blank::{self, BlankParams};
-use sheaf_ops::crop::{CropSpec, Margins};
+use sheaf_ops::crop::{self, Urgency, trim_white};
 use sheaf_ops::text::{Found, Text};
 use sheaf_ops::views::Views;
 use sheaf_render::pdfium::PdfiumEngine;
@@ -181,6 +193,16 @@ const VISITS: usize = 4;
 /// What the thumbnail strip fills at least, in pages a second (slice 2's
 /// rate), on the synthetic and heavy fixtures.
 const STRIP_GATE: f64 = 310.0;
+/// A crop of every page, made and committed as the Crop Pages dialog
+/// commits it, at most (slice 15), on every fixture.
+const CROP_GATE: Duration = Duration::from_millis(200);
+/// The crop the crop rows make of every page: half an inch a side.
+const HALF_INCH: Margins = Margins {
+    top: 36.0,
+    bottom: 36.0,
+    left: 36.0,
+    right: 36.0,
+};
 /// Set in the processes a fixture's gates run in (see [`run`]): the file
 /// each writes once its rows are done, and which rows those are.
 const OWN_PROCESS: &str = "SHEAF_GATE_FIXTURE_PROCESS";
@@ -211,7 +233,6 @@ struct Baseline {
     rewrite_added_mb: f64,
     rewrite_out_mb: f64,
     crop_ms: f64,
-    crop_edit_ms: f64,
     bates_apply_ms: f64,
     bates_rewrite_ms: f64,
     flatten_ms: f64,
@@ -235,7 +256,6 @@ const SYNTHETIC: Baseline = Baseline {
     rewrite_added_mb: 50.5,
     rewrite_out_mb: 3.27,
     crop_ms: 445.0,
-    crop_edit_ms: 1.65,
     bates_apply_ms: 114.0,
     bates_rewrite_ms: 750.0,
     flatten_ms: 336.0,
@@ -259,7 +279,6 @@ const HEAVY: Baseline = Baseline {
     rewrite_added_mb: 248.0,
     rewrite_out_mb: 17.7,
     crop_ms: 2326.0,
-    crop_edit_ms: 1.70,
     bates_apply_ms: 270.0,
     bates_rewrite_ms: 3979.0,
     flatten_ms: 3489.0,
@@ -283,7 +302,6 @@ const SCANNED: Baseline = Baseline {
     rewrite_added_mb: 1021.0,
     rewrite_out_mb: 473.0,
     crop_ms: 2256.0,
-    crop_edit_ms: 1.71,
     bates_apply_ms: 428.0,
     bates_rewrite_ms: 1708.0,
     flatten_ms: 1495.0,
@@ -491,6 +509,7 @@ fn run_parts(test: &str, kind: Kind, parts: &[&str]) {
         match std::env::var(PART).as_deref() {
             Ok("flatten") => flatten(kind),
             Ok("rewrite") => rewrite_part(kind),
+            Ok("trim") => trim_part(kind),
             _ => gates(kind),
         }
         std::fs::write(done, "").unwrap();
@@ -959,104 +978,54 @@ fn gates(kind: Kind) {
         gate: String::new(),
     });
 
-    // Crop every page by half an inch a side, as the app does: the cropped
-    // copy made in memory and interned, then the edit onto it. From slice
-    // 13 no engine opens on the copy then: the app's render worker opens
-    // one when a page of it is first drawn.
+    // Crop every page by half an inch a side, as the Crop Pages dialog
+    // does from slice 15: one op over every page's boxes, in a transaction
+    // made on the version the dialog opened on, committed by value
+    // (`Stale::Validate`). No copy is made, and no engine opens.
     let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
-    let half_inch = CropSpec::Margins(Margins {
-        top: 36.0,
-        right: 36.0,
-        bottom: 36.0,
-        left: 36.0,
-    });
-    let mut edits = Vec::new();
-    let (crop, _) = measure(RUNS, || {
-        let snap = doc.snapshot();
-        let (t, edit) = timed(|| {
-            let plan =
-                sheaf_ops::crop::plan(doc.store(), &snap, &ids, half_inch, &NoProgress).unwrap();
-            timed(|| {
-                let pages = (plan.iter())
-                    .flat_map(|copy| {
-                        copy.note(&mut doc);
-                        copy.bases()
-                    })
-                    .collect();
-                doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
-            })
-            .0
-        });
-        edits.push(edit);
+    let half_inch = HALF_INCH;
+    let (all, _) = measure(RUNS, || {
+        let opened = doc.snapshot();
+        let (t, ()) = timed(|| cropped(&mut doc, &opened, &ids, half_inch));
         doc.undo().unwrap();
         t
     });
-    rows.push(Row::time(
-        "crop all pages",
-        crop,
-        base.crop_ms,
-        "< 200 ms, slice 15",
-    ));
-    rows.push(Row::time(
-        "crop all pages, the edit",
-        median(edits),
-        base.crop_edit_ms,
-        "",
-    ));
-    // The crop's edit as its dialog lands it (slice 12): made on the
-    // version the dialog opened on, and committed after the user deleted
-    // the last page, by value (`Stale::Validate`): each slot it changes
-    // checked against the version it lands on, then the post-merge check.
-    // Every page but the deleted one is cropped.
+    let crop_gate = format!("< {} ms, asserted", CROP_GATE.as_millis());
+    rows.push(Row::time("crop all pages", all, base.crop_ms, &crop_gate));
+    // The crop as its dialog lands it (slice 12): made on the version the
+    // dialog opened on, and committed after the user deleted the last
+    // page, by value: each slot it changes checked against the version it
+    // lands on, then the post-merge check. Every page but the deleted one
+    // is cropped.
     let opened = doc.snapshot();
-    let plan = sheaf_ops::crop::plan(doc.store(), &opened, &ids, half_inch, &NoProgress).unwrap();
     let last = *ids.last().expect("the fixture has pages");
-    let bases: Vec<(PageId, Src, u32)> = (plan.iter())
-        .flat_map(|copy| {
-            copy.note(&mut doc);
-            copy.bases()
-        })
-        .filter(|&(page, ..)| page != last)
-        .collect();
+    let kept = &ids[..ids.len() - 1];
     let (validated, _) = measure(RUNS, || {
         doc.commit_ops(vec![delete(&[last])], "Delete page")
             .unwrap();
-        let pages = bases.clone();
-        let (t, ()) = timed(|| {
-            let mut tx = Document::tx_at(&opened, doc.lower_cx(Actor::User));
-            tx.set_page_base(pages, Derive::Crop).unwrap();
-            let opts = CommitOpts::based(opened.version, Stale::Validate, "Crop");
-            doc.commit(tx, opts).unwrap();
-        });
+        let (t, ()) = timed(|| cropped(&mut doc, &opened, kept, half_inch));
         doc.undo().unwrap();
         doc.undo().unwrap();
         t
     });
-    drop((plan, bases, opened));
+    drop(opened);
     rows.push(Row::time(
         "crop all pages, validated after a delete",
         validated,
-        base.crop_edit_ms,
-        "< 200 ms, slice 15",
+        base.crop_ms,
+        crop_gate,
     ));
 
-    // The thumbnail strip (slice 13's gate): every page cropped, the crop
-    // landed, and the legacy header on all of them, then every page's
-    // preview in order as the strip draws them, through a pool of its own
-    // whose two panes pin their groups (12 and 13, 26 and 27, as slice 2
-    // measured it). Each group's overlay is realized when its first page
-    // is drawn, by a realizer that has seen nothing, so its assembly is in
-    // the time. The screen's engines are weighed after each group.
+    // The thumbnail strip (slice 13's gate): every page cropped, and the
+    // legacy header on all of them, then every page's preview in order as
+    // the strip draws them, through a pool of its own whose two panes pin
+    // their groups (12 and 13, 26 and 27, as slice 2 measured it). Each
+    // group's overlay is realized when its first page is drawn, by a
+    // realizer that has seen nothing, so its assembly is in the time. The
+    // screen's engines are weighed after each group.
     let snap = doc.snapshot();
-    let plan = sheaf_ops::crop::plan(doc.store(), &snap, &ids, half_inch, &NoProgress).unwrap();
-    let pages = (plan.iter())
-        .flat_map(|copy| {
-            copy.note(&mut doc);
-            copy.bases()
-        })
-        .collect();
-    doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
-    drop((plan, snap));
+    cropped(&mut doc, &snap, &ids, half_inch);
+    drop(snap);
     let mut texts: [String; 6] = Default::default();
     texts[1] = "Draft".into();
     texts[4] = "Page <<1>> of <<N>>".into();
@@ -1195,6 +1164,14 @@ fn gates(kind: Kind) {
             "realize + open + render took {realized:?}, over {gate:?}"
         );
     }
+    assert!(
+        all < CROP_GATE,
+        "a crop of every page took {all:?}, over {CROP_GATE:?}"
+    );
+    assert!(
+        validated < CROP_GATE,
+        "a crop of every page validated after a delete took {validated:?}, over {CROP_GATE:?}"
+    );
     assert!(
         visits_heaviest <= SCREEN_BYTES,
         "the screen's engines weighed {:.1} MB visiting {visited} groups",
@@ -1560,6 +1537,92 @@ fn rewrites_on_the_synthetic_and_heavy_7k() {
     }
 }
 
+/// Trim White over every page of each fixture, each in a process of its
+/// own (see [`run`]), with neither a baseline nor a gate (slice 15).
+#[test]
+#[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
+fn trim_white_on_the_7k() {
+    for kind in [Kind::Synthetic, Kind::Heavy, Kind::Scanned] {
+        run_parts("trim_white_on_the_7k", kind, &["trim"]);
+    }
+}
+
+/// Trim White over every page of the `kind` fixture, as Document > Crop
+/// Pages… trims them, every page cropped first: each page measured in a
+/// state that crops it as its file does, drawn under `content_only` at 72
+/// dpi through a pool of its own in the background's budget, as the app's
+/// planner measures them; then its crops lowered and committed by value
+/// on the version it measured. A page whose only change is its crop draws
+/// from its source's base engine there, so a first walk, untimed, counts
+/// the group engines it opens: a look at the pool's open engines a page,
+/// a round trip to its worker each. It reads each page's facts cold, as
+/// the app has by the time it trims, so the second walk, timed, is the
+/// planner's alone. One run, the walk taking seconds.
+fn trim_part(kind: Kind) {
+    let path = fixture(kind);
+    let cache = path.parent().unwrap().join("cache");
+    // SAFETY: every test here sets the same value before anything reads it.
+    unsafe { std::env::set_var("SHEAF_CACHE_DIR", &cache) };
+    let mut doc = sheaf_doc::open::file(&path, None).unwrap().doc;
+    let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
+    let snap = doc.snapshot();
+    cropped(&mut doc, &snap, &ids, HALF_INCH);
+    let snap = doc.snapshot();
+    let lower = doc.lower_cx(Actor::Job(JobKind::Trim));
+    let walk = |pool: &EnginePool<EngineKey>, progress: &dyn Progress| {
+        let views = Views::new(pool.clone());
+        let (pad, urgency) = (crop::PAD, Urgency::Background);
+        let found = trim_white(&views, &snap, lower.clone(), &ids, pad, urgency, progress);
+        found.unwrap()
+    };
+    let pool = EnginePool::new().unwrap();
+    let groups = GroupsOpened::new(pool.clone());
+    let first = walk(&pool, &groups);
+    groups.look();
+    drop(pool);
+    let pool = EnginePool::new().unwrap();
+    let (measured, found) = timed(|| walk(&pool, &NoProgress));
+    assert_eq!(found, first, "the second walk finds what the first did");
+    let opened = pool.opened();
+    drop(pool);
+    let (committed, commit) = timed(|| {
+        let mut tx = Document::tx_at(&snap, lower);
+        found.lower(&mut tx).unwrap();
+        let opts = CommitOpts::based(snap.version, Stale::Validate, "Crop");
+        doc.commit(tx, opts).unwrap()
+    });
+    assert!(commit.version.is_some(), "Trim White cropped nothing");
+    let count = |what: &str, n: usize| Row {
+        what: what.into(),
+        now: Some(n as f64),
+        unit: "",
+        baseline: f64::NAN,
+        gate: String::new(),
+    };
+    print_table(
+        &format!("Trim White on the {} 7k (slice 15)", kind.name()),
+        "baseline",
+        &[
+            Row::time("Trim White, all pages, measured", measured, f64::NAN, ""),
+            Row::time("Trim White, its crops committed", committed, f64::NAN, ""),
+            count("Trim White, pages cropped", found.crops.len()),
+            count("Trim White, pages left as they were", found.left.len()),
+            count("Trim White, engines opened", opened),
+            count("Trim White, group engines opened", groups.count()),
+        ],
+    );
+}
+
+/// `pages` of `doc` cropped by `m`, as Document > Crop Pages crops them:
+/// one op, in a transaction made on `opened`, the version the dialog
+/// opened on, committed by value.
+fn cropped(doc: &mut Document, opened: &Snapshot, pages: &[PageId], m: Margins) {
+    let mut tx = Document::tx_at(opened, doc.lower_cx(Actor::User));
+    tx.apply(crop(pages, m), &NoProgress).unwrap();
+    let opts = CommitOpts::based(opened.version, Stale::Validate, "Crop");
+    doc.commit(tx, opts).unwrap();
+}
+
 /// Header & Footer as the app applies it: every source loaded to find the
 /// pages whose file already draws one, those moved onto stripped copies,
 /// then `hf` set, in one transaction. No engine opens on the copies (from
@@ -1598,6 +1661,52 @@ fn drawn(views: &Views, doc: &Document, id: PageId, width: u32) -> EngineKey {
     let rx = (views.draw(st, id, &view, &screen, job, format, 1, budget)).unwrap();
     block_on(rx).expect("the render thread is gone").unwrap();
     view.engine
+}
+
+/// A walk's progress that notes, at each step, the group engines open in
+/// its pool: each one a walk that reads one page at a time opened, since
+/// the engine a page was drawn from is still open when the next begins.
+struct GroupsOpened {
+    pool: EnginePool<EngineKey>,
+    seen: Mutex<HashSet<EngineKey>>,
+}
+
+impl GroupsOpened {
+    fn new(pool: EnginePool<EngineKey>) -> Self {
+        GroupsOpened {
+            pool,
+            seen: Mutex::default(),
+        }
+    }
+
+    /// Notes the group engines open now.
+    fn look(&self) {
+        let open = self.pool.open_engines().into_iter();
+        let groups = open.filter(|e| matches!(e, EngineKey::Group(..)));
+        self.seen.lock().unwrap().extend(groups);
+    }
+
+    /// The group engines seen open.
+    fn count(&self) -> usize {
+        self.seen.lock().unwrap().len()
+    }
+}
+
+impl Progress for GroupsOpened {
+    fn set_total(&self, _: Option<u64>, _: Unit) {}
+    fn set(&self, _: u64) {
+        self.look();
+    }
+    fn inc(&self, _: u64) {
+        self.look();
+    }
+    fn message(&self, _: Level, _: &str) {}
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn child(&self, _: &str, _: f64) -> Box<dyn Progress> {
+        Box::new(NoProgress)
+    }
 }
 
 /// Slice 14's walks over every page of the synthetic and heavy 7k, with

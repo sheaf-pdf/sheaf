@@ -22,7 +22,7 @@
 //! labels after a delete, a primary object's place taken by another record
 //! of it, a comment made editable on a copy, and a page appended over a
 //! primary page's object that page takes back. And for the gaps slice
-//! 10's review found: a crop's copy made the page's copy 0 by a move, and
+//! 10's review found: a derived copy made the page's copy 0 by a move, and
 //! a copy's action, inline link or screen annotation going to a page
 //! brought in or duplicated after it. And for the rebase's: a screen
 //! annotation on a page written at another number, or brought in again as
@@ -837,7 +837,8 @@ fn other(doc: &Document, dir: &Path) -> Src {
 fn rebase(doc: &mut Document, i: usize, source: &Src, index: u32) {
     let id = doc.page(i).unwrap();
     let pages = vec![(id, source.clone(), index)];
-    doc.commit_page_base(pages, Derive::Crop, "rebase").unwrap();
+    doc.commit_page_base(pages, Derive::StripHeaderFooter, "rebase")
+        .unwrap();
 }
 
 /// The fourth page, which bookmark B and the second page's link go to,
@@ -1198,7 +1199,8 @@ fn append_rewrite_a_page_replaced_by_its_own_page_is_a_form_of_its_own() {
     let [first, fifth] = [0, 4].map(|i| doc.page(i).unwrap());
     let primary = doc.primary().clone();
     let pages = vec![(fifth, primary.clone(), 0), (first, other, 0)];
-    doc.commit_page_base(pages, Derive::Crop, "rebase").unwrap();
+    doc.commit_page_base(pages, Derive::StripHeaderFooter, "rebase")
+        .unwrap();
     let copy = dir.join("b.pdf");
     planned(&mut doc, &copy);
     let replace = fx::replace(&[first], &primary, [0], "a.pdf");
@@ -1323,15 +1325,15 @@ fn append_rewrite_a_copy_s_link_action_follows_its_page() {
 
 /// A file of two pages, the first named by what `holder` puts in it,
 /// given the file and its first page's object. The first page duplicated,
-/// and both cropped by one crop, whose two pages are both made from the
-/// first page: the first in order is its copy 0, the page its object is,
-/// and the duplicate copy 1. Saved; then the duplicate moved first, which
+/// and both shown from one derived copy (cropped in it), whose two pages
+/// are both made from the first page: the first in order is its copy 0,
+/// the page its object is, and the duplicate copy 1. Saved; then the duplicate moved first, which
 /// makes it copy 0 and the first copy 1, though neither is written (one
 /// node holds both). The file's number for the first page's object still
 /// holds the first, where what names it by number goes, while a Rewrite
 /// writes the duplicate there: the Append is refused (finding 6 of slice
 /// 10's review), and the save is a Rewrite.
-fn a_crop_s_copy_made_copy_0_by_a_move(
+fn a_derived_copy_made_copy_0_by_a_move(
     holder: impl FnOnce(&mut Form, ObjectId),
     want: impl FnOnce(&Document, PageId) -> Refused,
 ) {
@@ -1349,22 +1351,28 @@ fn a_crop_s_copy_made_copy_0_by_a_move(
     let copy = doc.page(1).unwrap();
     assert_eq!(doc.state().def(copy).unwrap().copy, 1);
     let primary = doc.primary().clone();
-    let crop = [0.0, 0.0, 400.0, 500.0];
-    let bytes = crate::save::cropped_copy(&primary, &[(0, crop), (0, crop)]).unwrap();
+    let stripped = crate::save::HeaderKept::No;
+    let bytes = crate::save::derived_copy(&primary, &[0, 0], stripped, &mut |_, page, _, _| {
+        let crop = [0.0f32, 0.0, 400.0, 500.0].map(Object::from);
+        page.set("CropBox", crop.to_vec());
+        Ok(())
+    })
+    .unwrap();
     let kind = BlobKind::Pdf {
         password: None,
         origin: Origin::Memory(MemoryKind::Derived),
     };
-    let cropped = doc.store().open(Arc::from(bytes), kind).unwrap();
+    let copied = doc.store().open(Arc::from(bytes), kind).unwrap();
     let derived = crate::Derived {
         from: primary,
         pages: vec![0, 0],
     };
-    doc.add_derived(&cropped, derived);
-    let pages = vec![(first, cropped.clone(), 0), (copy, cropped, 1)];
-    doc.commit_page_base(pages, Derive::Crop, "crop").unwrap();
+    doc.add_derived(&copied, derived);
+    let pages = vec![(first, copied.clone(), 0), (copy, copied, 1)];
+    let strip = Derive::StripHeaderFooter;
+    doc.commit_page_base(pages, strip, "strip").unwrap();
     planned(&mut doc, &path);
-    reopens_as_rewritten(&doc, &dir, "cropped");
+    reopens_as_rewritten(&doc, &dir, "copied");
     doc.commit_ops(vec![fx::move_pages(&[copy], Some(first))], "move")
         .unwrap();
     // `Refused::why` is `BaseObjectsMissing` for several refusals: which
@@ -1399,8 +1407,8 @@ fn refusal(doc: &Document) -> Option<Refused> {
 /// numbers, so `Closure::stale` refuses it before `held` would: the
 /// open action's case below is `held`'s.
 #[test]
-fn append_rewrite_a_crop_s_copy_made_copy_0_by_a_move_rewrites() {
-    a_crop_s_copy_made_copy_0_by_a_move(
+fn append_rewrite_a_derived_copy_made_copy_0_by_a_move_rewrites() {
+    a_derived_copy_made_copy_0_by_a_move(
         |f, to| {
             let link = f.pdf.add_object(dictionary! {
                 "Type" => "Annot", "Subtype" => "Link",
@@ -1422,8 +1430,8 @@ fn append_rewrite_a_crop_s_copy_made_copy_0_by_a_move_rewrites() {
 /// catalog's keys sheaf doesn't own keep as the file has them: `held`
 /// refuses it, the duplicate's page not at the first page's object.
 #[test]
-fn append_rewrite_an_open_action_to_a_crop_s_copy_made_copy_0_rewrites() {
-    a_crop_s_copy_made_copy_0_by_a_move(
+fn append_rewrite_an_open_action_to_a_derived_copy_made_copy_0_rewrites() {
+    a_derived_copy_made_copy_0_by_a_move(
         |f, to| {
             let catalog = f.catalog;
             f.dict(catalog)

@@ -579,14 +579,6 @@ fn normal_appearance(pdf: &Pdf, annot: &Dictionary) -> Option<ObjectId> {
     states.get(&state).ok()?.as_reference().ok()
 }
 
-/// Pages of `src`, each given a new `/CropBox` (`[x0, y0, x1, y1]` in its
-/// user space), as a new PDF: what a cropped page becomes, since sources
-/// are files. See [`derived_copy`].
-pub fn cropped_copy(src: &Src, pages: &[(u32, [f32; 4])]) -> Result<Vec<u8>> {
-    let pages: Vec<(u32, Option<[f32; 4]>)> = pages.iter().map(|&(i, c)| (i, Some(c))).collect();
-    derived_copy(src, &pages, HeaderKept::Yes, &mut |_, _, _, _| Ok(()))
-}
-
 /// Whether a derived copy's pages still draw the header and footer their
 /// file drew: they do unless the copy strips it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -595,13 +587,13 @@ pub enum HeaderKept {
     No,
 }
 
-/// Pages of `src` as a new PDF, each with a new `/CropBox` when given,
-/// then passed to `fix` (with the new PDF, the page's dictionary, its
-/// geometry with its own `/Rotate`, and its position in `pages`) to change
-/// its content. sheaf's own marks are left out, since the model keeps
-/// them; other annotations, links and fields come along, and the form the
-/// fields are in, so the page shows them (see [`copy_form`]). A save
-/// writes the page it was made from instead, with the copy's content
+/// Pages `pages` of `src` (by index) as a new PDF, each passed to `fix`
+/// (with the new PDF, the page's dictionary, its geometry with its own
+/// `/Rotate`, and its position in `pages`) to change its content. sheaf's
+/// own marks are left out, since the model keeps them; other annotations,
+/// links and fields come along, and the form the fields are in, so the
+/// page shows them (see [`copy_form`]). A save writes the page it was
+/// made from instead, with the copy's content
 /// ([`Document::add_derived`]), which knows the copy by its blob: its
 /// catalog's `/SheafCopyOf` names `src`'s blob and the pages, so copies of
 /// different pages are different blobs. With `header`
@@ -610,7 +602,7 @@ pub enum HeaderKept {
 /// a save doesn't draw it again.
 pub fn derived_copy(
     src: &Src,
-    pages: &[(u32, Option<[f32; 4]>)],
+    pages: &[u32],
     header: HeaderKept,
     fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, &Geom, usize) -> Result<()>,
 ) -> Result<Vec<u8>> {
@@ -623,12 +615,12 @@ pub fn derived_copy(
     copy::reserve(
         pages
             .iter()
-            .filter_map(|&(index, _)| loaded.pages.get(index as usize).copied()),
+            .filter_map(|&index| loaded.pages.get(index as usize).copied()),
         &mut pdf,
         &mut map,
     );
     let mut filled = HashSet::new();
-    for (position, &(index, crop)) in pages.iter().enumerate() {
+    for (position, &index) in pages.iter().enumerate() {
         let page = *loaded
             .pages
             .get(index as usize)
@@ -657,12 +649,6 @@ pub fn derived_copy(
             }
             None => {}
         }
-        if let Some(crop) = crop {
-            dict.set(
-                "CropBox",
-                crop.iter().map(|&v| Object::from(v)).collect::<Vec<_>>(),
-            );
-        }
         let rotate = dict
             .get(b"Rotate")
             .ok()
@@ -689,7 +675,7 @@ pub fn derived_copy(
     );
     // What it's a copy of: the document knows a copy by its blob, so
     // copies of different pages differ however alike the pages are.
-    let indexes: Vec<Object> = pages.iter().map(|&(i, _)| i64::from(i).into()).collect();
+    let indexes: Vec<Object> = pages.iter().map(|&i| i64::from(i).into()).collect();
     let mut catalog = dictionary! {
         "Type" => "Catalog",
         "Pages" => pages_id,
@@ -706,7 +692,7 @@ pub fn derived_copy(
     {
         let on = |index: u32| scope.as_ref().is_none_or(|s| s.contains(&(index as usize)));
         let positions: Vec<usize> = (pages.iter().enumerate())
-            .filter(|(_, (index, _))| on(*index))
+            .filter(|(_, index)| on(**index))
             .map(|(at, _)| at)
             .collect();
         if !positions.is_empty() {

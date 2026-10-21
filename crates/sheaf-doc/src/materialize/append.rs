@@ -98,7 +98,7 @@ pub enum Refused {
     /// A key that is a primary object would be written, or is in the file,
     /// somewhere other than its own number, or its number in the file still
     /// holds another record of that object (a page brought in again before
-    /// the first, a crop's copy made the page's copy 0 by a move): only a
+    /// the first, a derived copy made the page's copy 0 by a move): only a
     /// Rewrite renumbers them.
     #[error("{0:?}'s object in the saved file is another's there")]
     Held(ObjKey),
@@ -571,10 +571,10 @@ impl<'a> Saved<'a> {
 /// that page by number again): the object would be the other's to what
 /// refers to it by number. A key the section doesn't write is where the
 /// file's map has it (else at its own number, as [`Saved::number`] finds
-/// it): a page that's another page's copy 0 now (a crop's copies trading
-/// which is copy 0 as they're moved), which the file has at a number of
-/// its own, isn't at the page's object, where a Rewrite writes it and what
-/// refers to the page by number goes.
+/// it): a page that's another page's copy 0 now (a derived copy's pages
+/// trading which is copy 0 as they're moved), which the file has at a
+/// number of its own, isn't at the page's object, where a Rewrite writes
+/// it and what refers to the page by number goes.
 fn held(
     e: &Emission,
     numbers: &number::Appended,

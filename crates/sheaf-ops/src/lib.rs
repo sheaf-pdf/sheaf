@@ -23,9 +23,7 @@ pub mod views;
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
 use sheaf_doc::{SourceId, Src};
-use sheaf_render::pdfium::PdfiumEngine;
 
 pub use in_progress::{Cancelled, NoProgress, Progress, Snapshot as ProgressSnapshot, Tracker};
 
@@ -50,10 +48,4 @@ pub(crate) fn by_source<T>(items: impl IntoIterator<Item = (Src, T)>) -> Vec<(Sr
         group.1.push(item);
     }
     groups.into_values().collect()
-}
-
-/// A renderer for a source, on its blob's bytes: Trim White's, until it
-/// reads pages through the views too (slice 15).
-pub fn engine_for(src: &Src) -> Result<PdfiumEngine> {
-    PdfiumEngine::open_bytes(src.bytes().clone(), src.password())
 }

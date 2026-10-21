@@ -18,8 +18,8 @@ use sheaf_doc::forms::fixture::Form;
 use sheaf_doc::materialize::StrategyKind;
 use sheaf_doc::model::ScriptState;
 use sheaf_doc::tx::fixture::{duplicate, replace, rotate};
-use sheaf_doc::{Commit, Derive, Document, Notice, PageId};
-use sheaf_edit::Turn;
+use sheaf_doc::{Commit, Document, Notice, PageId};
+use sheaf_edit::{Margins, Turn};
 use sheaf_ops::combine::{CombineItem, CombineParams};
 use sheaf_render::PageIndex;
 use sheaf_render::pdfium::render_appearances;
@@ -416,22 +416,13 @@ fn duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own_by(how: How) {
     doc.commit_ops(vec![duplicate(&[b_first])], "Duplicate")
         .unwrap();
     let first = doc.state().order()[0];
-    let plan = sheaf_ops::crop::plan(
-        doc.store(),
-        &doc.snapshot(),
-        &[first],
-        sheaf_ops::crop::CropSpec::Margins(sheaf_ops::crop::Margins {
-            top: 0.0,
-            left: 0.0,
-            right: 0.0,
-            bottom: 100.0,
-        }),
-        &sheaf_ops::NoProgress,
-    )
-    .unwrap();
-    plan[0].note(&mut doc);
-    let pages = plan[0].bases().collect();
-    doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
+    let bottom = Margins {
+        top: 0.0,
+        bottom: 100.0,
+        left: 0.0,
+        right: 0.0,
+    };
+    crop(&mut doc, &[first], bottom);
     doc.commit_ops(vec![duplicate(&[first])], "Duplicate")
         .unwrap();
     assert_eq!(
