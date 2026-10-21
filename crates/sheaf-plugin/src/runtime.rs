@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, anyhow};
 use arc_swap::ArcSwap;
 use futures::channel::oneshot;
 use sheaf_doc::prim::Key;
-use sheaf_doc::{Document, EditError, Grant, PageId, Snapshot, Src, Tx, ViewInputs};
+use sheaf_doc::{Document, EditError, Grant, PageId, Snapshot, TextService, Tx, ViewInputs};
 use sheaf_edit::Op;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline};
@@ -41,37 +41,6 @@ impl Default for Limits {
             memory_bytes: 256 << 20,
         }
     }
-}
-
-/// Reads a page's text from the engine, for pages without an unsaved OCR
-/// layer: source page `index` of `src`. The app implements it over its
-/// sources' base engines, until M10.5 slice 14's text service.
-pub trait TextSource: Send + Sync {
-    fn page_text(&self, src: &Src, index: u32) -> Result<String>;
-    /// Every match of `re` on the page, with boxes in the page's displayed
-    /// space: its source page as the file displays it, which is the API's
-    /// page coordinates.
-    fn pattern_search(
-        &self,
-        src: &Src,
-        index: u32,
-        re: &Arc<regex::Regex>,
-    ) -> Result<Vec<TextMatch>>;
-    /// Every occurrence of `query`, like Find.
-    fn search(
-        &self,
-        src: &Src,
-        index: u32,
-        query: &str,
-        match_case: bool,
-    ) -> Result<Vec<TextMatch>>;
-    /// Boxes of the text under `rect`, merged per line.
-    fn text_boxes(
-        &self,
-        src: &Src,
-        index: u32,
-        rect: sheaf_doc::Box2,
-    ) -> Result<Vec<sheaf_doc::Box2>>;
 }
 
 /// Runs OCR for plugins. The app implements it over `sheaf_ocr`.
@@ -126,14 +95,6 @@ pub struct LoadOptions {
     pub data_dir: Option<PathBuf>,
     /// The permissions the user granted (a subset of the manifest's).
     pub grants: Grants,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TextMatch {
-    pub text: String,
-    pub rects: Vec<sheaf_doc::Box2>,
-    /// A pattern's capture groups 1…n; empty for a literal search.
-    pub groups: Vec<Option<String>>,
 }
 
 /// A pattern-search preset, for `patterns.presets`.
@@ -200,7 +161,8 @@ pub struct DocContext {
     /// In document order.
     pub selection: Vec<PageId>,
     pub current_page: Option<PageId>,
-    pub text: Arc<dyn TextSource>,
+    /// Pages' text, each read from what it draws (M10.5 §10.5).
+    pub text: Arc<dyn TextService>,
     /// None: `ocr.recognize` reports that OCR isn't available.
     pub ocr: Option<Arc<dyn OcrSource>>,
     /// None: `render` reports that rendering isn't available.
@@ -273,7 +235,8 @@ pub struct CallOutput {
     /// What it read there, as the slots it decided by (M10.5 §14.3): its
     /// pages' order, what they show and their boxes; a page's annotations
     /// and each mark it was shown; the outline and each bookmark; what a
-    /// page shows, for its text, OCR, search or render; a mark its update
+    /// page draws as the file will, for a render, and what of it is text,
+    /// for its text or search; what it shows, for OCR; a mark its update
     /// keeps parts of. Its first batch commits only while each holds what
     /// it held in `base`. Recorded for the 0.2 and 0.3 reads until API 0.4
     /// records them in the call's transaction (slice 20).
@@ -814,22 +777,24 @@ impl wasmtime_wasi_http::WasiHttpView for HostState {
 }
 
 impl HostState {
-    /// The call's document and base, the page, and the source page it
-    /// shows, for text calls, which read the page's own content: what it
-    /// shows ([`ViewInputs::content_only`]).
+    /// The call's document and base, and page `page`, which the call reads
+    /// as it draws under `inputs`: text as the file will draw it
+    /// ([`ViewInputs::plugin_text`]), OCR its content alone
+    /// ([`ViewInputs::content_only`]). Read: what it draws so.
     pub(crate) fn page_base(
         &mut self,
         page: u64,
-    ) -> Result<(&DocContext, &Snapshot, PageId, &sheaf_doc::PageBase), String> {
+        inputs: &ViewInputs,
+    ) -> Result<(&DocContext, &Snapshot, PageId), String> {
         let id = PageId(page);
-        let reads = (self.base())
-            .map(|s| sheaf_doc::render_reads(&s.state, id, &ViewInputs::content_only()));
+        let reads = (self.base()).map(|s| sheaf_doc::render_reads(&s.state, id, inputs));
         self.read(reads.into_iter().flatten());
         let (Some(d), Some(snap)) = (self.doc(), self.base()) else {
             return Err("no document is open".into());
         };
-        let def = snap.state.def(id);
-        let def = def.ok_or_else(|| format!("no page {page}"))?;
-        Ok((d, snap, id, &def.base))
+        snap.state
+            .def(id)
+            .ok_or_else(|| format!("no page {page}"))?;
+        Ok((d, snap, id))
     }
 }

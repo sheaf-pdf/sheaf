@@ -1,20 +1,27 @@
 //! Helpers the forms tests share: fixtures, saving both ways, and what a
 //! saved file holds. A test that saves both ways is a case taking its
 //! [`How`], run twice by `sheaf_doc::both_ways!`: by a Rewrite, and by an
-//! Append.
+//! Append. And what the realization, text and blank-page tests share: a
+//! file of pages saying "page i", opened as the app opens it, views over a
+//! pool of their own, and an OCR engine that reads nothing.
 
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use lopdf::xref::XrefType;
 use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_doc::Document;
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{Form, Rect, source};
 use sheaf_doc::forms::{FileForm, Finding, Report, Value, check};
 pub use sheaf_doc::materialize::{How, StrategyKind};
+use sheaf_doc::store::BlobKind;
+use sheaf_doc::{Document, FixedCount, Src, Store};
 use sheaf_image::raster::Raster;
+use sheaf_ocr::{EngineInfo, EngineKind, InputKind, OcrEngine, OcrImage, OcrWord};
+use sheaf_ops::views::Views;
 
 /// Half of a row's inside, in pixels.
 pub const HALF_A_ROW: usize = 196 * 26 / 2;
@@ -261,4 +268,84 @@ pub fn filled(bytes: &[u8], name: &str, value: &str) -> Vec<u8> {
 /// What the form check finds in `bytes`.
 pub fn findings(bytes: &[u8]) -> Vec<Finding> {
     check(bytes, None).unwrap().findings
+}
+
+/// `bytes` opened as the app opens the file `name`, with `password`.
+pub fn opened(bytes: Vec<u8>, name: &str, password: Option<&str>) -> Document {
+    let store = Store::new();
+    let kind = BlobKind::file(Path::new(name), password);
+    let primary = store.open(bytes.into(), kind).unwrap();
+    ready(store, primary, name).unwrap()
+}
+
+/// `primary`, a file of `store`'s, opened as the app opens it.
+pub fn ready(store: Arc<Store>, primary: Src, name: &str) -> anyhow::Result<Document> {
+    let policy = Box::new(FixedCount(10));
+    let mut d = sheaf_doc::open::start(store, primary.clone(), name.into(), None, policy);
+    let facts = sheaf_doc::open::finish(&primary, &sheaf_ops::NoProgress);
+    d.ready(facts)?;
+    Ok(d)
+}
+
+/// A file of `n` Letter pages as lopdf writes it in `kind`, each drawing
+/// a few shapes and "page i" in Helvetica, which their parent node gives
+/// them.
+pub fn file(n: usize, kind: XrefType) -> Vec<u8> {
+    let mut pdf = Pdf::with_version("1.7");
+    let root = pdf.new_object_id();
+    let font = pdf.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+    });
+    let kids: Vec<Object> = (0..n)
+        .map(|i| {
+            let content = format!(
+                "0 0 1 rg 60 600 200 120 re f 1 0 0 rg {} 200 80 80 re f \
+                 BT /F1 28 Tf 72 400 Td (page {i}) Tj ET",
+                100 + 40 * i
+            );
+            let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
+            let page = dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+            pdf.add_object(page).into()
+        })
+        .collect();
+    pdf.objects.insert(
+        root,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => kids, "Count" => n as i64,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+        }),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+    pdf.trailer.set("Root", catalog);
+    pdf.reference_table.cross_reference_type = kind;
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+/// A document's views, drawn by a pool of the test's own.
+pub fn views() -> Views {
+    Views::start().unwrap()
+}
+
+/// Reads no words, as fast as it's given pages.
+pub struct Blind;
+
+impl OcrEngine for Blind {
+    fn input(&self) -> InputKind {
+        InputKind::Gray
+    }
+
+    fn recognize(&mut self, _: OcrImage, _: u32) -> anyhow::Result<Vec<OcrWord>> {
+        Ok(Vec::new())
+    }
+
+    fn describe(&self) -> EngineInfo {
+        EngineInfo {
+            kind: EngineKind::Tesseract,
+            name: "blind".into(),
+            languages: Vec::new(),
+        }
+    }
 }

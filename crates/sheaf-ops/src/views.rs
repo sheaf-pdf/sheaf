@@ -1,26 +1,28 @@
 //! A document's pages drawn (M10.5 §10): each page's view from the
-//! document's realizer, rendered by the process's engine pool.
+//! document's realizer, rendered by the process's engine pool, or on the
+//! command line by one of their own ([`Views::start`]).
 //!
 //! [`Views::render`] finds where a page renders from under the caller's
 //! inputs, turns the job by the page's turn from its engine's page, draws
 //! what the inputs draw, and hands the pool a way to open the engine: a
 //! source's bytes, or the realizer's overlay of the state the page was
 //! viewed in; [`Views::draw`] draws a view the caller holds, by a job as
-//! its engine draws the page. Text is read from a source's base engine by
-//! page index ([`Views::base`]) until slice 14's text service.
+//! its engine draws the page. A page's text is read from the same engine
+//! and page ([`Views::locate`]; [`crate::text`]), so the screen, the file
+//! and the text agree.
 //!
 //! A source whose bytes PDFium refuses has no base engine: the pool tells
 //! the source when an engine over its bytes fails to open so (its base
 //! engine, its view patch, or a group's section over them;
 //! [`Source::refuse_base`](sheaf_doc::source::Source::refuse_base)), and
 //! from then on the realizer draws every page of it from its groups, files
-//! of their own. A render already asked of such an engine renders from the
-//! page's view found again, its group's (the request's fallback), so no
-//! consumer's render fails for it (Greg, 2026-10-20). Its text, read by
-//! index from the base engine, waits for slice 14.
+//! of their own. A render or a text read already asked of such an engine
+//! reads the page from its view found again, its group's (the request's
+//! fallback), so no consumer's render or text fails for it (Greg,
+//! 2026-10-20).
 //!
-//! [`ViewPages`] is a snapshot's pages as OCR reads them: each drawn with
-//! its content alone, in the background's budget.
+//! [`ViewPages`] is a snapshot's pages as OCR reads them: each drawn, and
+//! its text read, with its content alone, in the background's budget.
 
 use std::sync::Arc;
 
@@ -36,6 +38,8 @@ use sheaf_render::{
     Budget, Draw, EnginePool, Fallback, Job, OpenError, Opener, PageIndex, Rendered, Req, Target,
 };
 
+use crate::text::Text;
+
 /// One document's views, drawn by the process's pool.
 #[derive(Clone)]
 pub struct Views {
@@ -50,6 +54,12 @@ impl Views {
             realizer: Arc::new(Realizer::new()),
             pool,
         }
+    }
+
+    /// A document's views, drawn by a pool of their own: the command
+    /// line's, which has no process's pool to share, or a test's.
+    pub fn start() -> Result<Views> {
+        Ok(Views::new(EnginePool::new()?))
     }
 
     pub fn pool(&self) -> &EnginePool<EngineKey> {
@@ -84,11 +94,7 @@ impl Views {
             let job = job.turned(view.job.rotation);
             self.draw(st, page, &view, inputs, job, format, priority, budget)
         });
-        drawn.unwrap_or_else(|e| {
-            let (tx, rx) = oneshot::channel();
-            let _ = tx.send(Err(e));
-            rx
-        })
+        drawn.unwrap_or_else(|e| answered(Err(e)))
     }
 
     /// Page `page` of `st`, viewed under `inputs` as `view`, drawn by `job`
@@ -108,10 +114,10 @@ impl Views {
         priority: u8,
         budget: Budget,
     ) -> Result<oneshot::Receiver<Result<Rendered>>> {
-        let target = self.target(st, page, view, inputs, budget)?;
+        let (target, index, fallback) = self.locate(st, page, view, inputs, budget)?;
         Ok(self.pool.render(Req {
             target,
-            page: PageIndex(view.index),
+            page: index,
             job,
             draw: Draw {
                 annots: view.annots,
@@ -119,15 +125,35 @@ impl Views {
             },
             format,
             priority,
-            fallback: self.fallback(st, page, view, inputs, budget),
+            fallback,
         }))
     }
 
+    /// Where page `page` of `st`, viewed under `inputs` as `view`, is read
+    /// from in `budget`, by renders and text alike: its engine (its
+    /// source's base engine, or the realizer's overlay of `st`, which the
+    /// pool opens as `st` has it whenever it needs to); its index there;
+    /// and, for a page viewed on an engine over its source's bytes, where
+    /// else it is should PDFium refuse them, its view found again. An error
+    /// when `st` hasn't the page.
+    pub fn locate(
+        &self,
+        st: &DocState,
+        page: PageId,
+        view: &PageView,
+        inputs: &ViewInputs,
+        budget: Budget,
+    ) -> Result<(Target<EngineKey>, PageIndex, Option<Fallback<EngineKey>>)> {
+        let target = self.target(st, page, view, inputs, budget)?;
+        let fallback = self.fallback(st, page, view, inputs, budget);
+        Ok((target, PageIndex(view.index), fallback))
+    }
+
     /// For a page viewed on an engine over its source's bytes
-    /// ([`over_source`]), where it renders from should PDFium refuse them:
+    /// ([`over_source`]), where it's read from should PDFium refuse them:
     /// its view found again, once the pool has told the source, which is
-    /// its group's. The job is the same, a view's turn being the page's
-    /// from its base page either way.
+    /// its group's. A render's job is the same, a view's turn being the
+    /// page's from its base page either way.
     fn fallback(
         &self,
         st: &DocState,
@@ -150,14 +176,12 @@ impl Views {
     /// The engine page `page` of `st`, viewed under `inputs` as `view`,
     /// renders from, opened in `budget`: its source's base engine, or the
     /// realizer's overlay of `st`, which the pool opens as `st` has it
-    /// whenever it needs to. A caller that keeps a page's view, as the
-    /// screen does for the key its images are found by, asks for its
-    /// engine with it. An overlay over the source's bytes tells the source
-    /// when PDFium refuses it, as its base engine does; one viewed before
-    /// the source was refused, which the page no longer views, fails as
-    /// refused without opening, so its render's fallback finds the page's
-    /// view again.
-    pub fn target(
+    /// whenever it needs to. An overlay over the source's bytes tells the
+    /// source when PDFium refuses it, as its base engine does; one viewed
+    /// before the source was refused, which the page no longer views,
+    /// fails as refused without opening, so its request's fallback finds
+    /// the page's view again.
+    fn target(
         &self,
         st: &DocState,
         page: PageId,
@@ -197,10 +221,10 @@ impl Views {
         })
     }
 
-    /// Source `src`'s base engine, opened in `budget`: what its pages
-    /// render from untouched, and what their text is read from by index.
-    /// It doesn't keep the source, and tells it when PDFium refuses its
-    /// bytes.
+    /// Source `src`'s base engine, opened in `budget`: what its untouched
+    /// pages render from and their text is read from, and what a document
+    /// asks of its file (its form). It doesn't keep the source, and tells
+    /// it when PDFium refuses its bytes.
     pub fn base(&self, src: &Src, budget: Budget) -> Target<EngineKey> {
         let (weak, probe) = (src.downgrade(), src.downgrade());
         let open = move || {
@@ -223,6 +247,13 @@ fn over_source(src: &Src, engine: EngineKey) -> bool {
     matches!(engine, EngineKey::Base(_)) || src.base_sound()
 }
 
+/// A receiver answered already, with `done`.
+pub(crate) fn answered<T>(done: Result<T>) -> oneshot::Receiver<Result<T>> {
+    let (tx, rx) = oneshot::channel();
+    let _ = tx.send(done);
+    rx
+}
+
 /// Tells `src`, while it lives, that PDFium refused its bytes.
 fn refuse(src: &Src) -> impl Fn() + Send + Sync + 'static {
     let weak = src.downgrade();
@@ -235,12 +266,12 @@ fn refuse(src: &Src) -> impl Fn() + Send + Sync + 'static {
 
 /// A snapshot's pages as OCR reads them (M10.5 §10.4): each realized under
 /// [`ViewInputs::content_only`], so an unsaved header, a widget or a
-/// comment is never read as the page's content, and drawn in the
-/// background's budget, which never closes an engine the screen shows. A
-/// page's text is its source page's, read from its base engine, until
-/// slice 14's text service.
+/// comment is never read as the page's content, drawn and its text read
+/// there ([`Text`]) in the background's budget, which never closes an
+/// engine the screen shows.
 pub struct ViewPages {
     views: Views,
+    text: Text,
     snap: Snapshot,
     inputs: ViewInputs,
 }
@@ -249,6 +280,7 @@ impl ViewPages {
     /// The pages of `snap`, drawn by `views`.
     pub fn new(views: Views, snap: Snapshot) -> ViewPages {
         ViewPages {
+            text: Text::new(views.clone(), Budget::Background),
             views,
             snap,
             inputs: ViewInputs::content_only(),
@@ -269,11 +301,9 @@ impl ViewPages {
 
 impl PageSource for ViewPages {
     fn text_len(&self, page: &OcrPage) -> Result<usize> {
-        let def = self.snap.state.def(page.id);
-        let base = &def.context("a page of the document")?.base;
-        let target = self.views.base(&base.src, Budget::Background);
-        let rx = (self.views.pool()).page_text_len(target, PageIndex(base.index));
-        block_on(rx).context("the render thread is gone")?
+        let rx = self.text.chars(&self.snap.state, page.id, &self.inputs);
+        let chars = block_on(rx).context("the render thread is gone")??;
+        Ok(chars.text_len())
     }
 
     /// The page's view turns the job from its engine's page to the page's

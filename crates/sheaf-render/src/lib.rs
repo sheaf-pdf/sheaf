@@ -10,19 +10,20 @@
 //!
 //! PDFium is process-global and not thread-safe, so every use of it holds one
 //! lock (`pdfium::lock`): the pool's worker and the threads that open an
-//! engine of their own (a print, an export, a scan for blank pages) take
-//! turns, a call into an engine at a time.
+//! engine of their own (a print, an export, Trim White's scan) take turns,
+//! a call into an engine at a time. A scan for blank pages, like OCR,
+//! reads pages through the pool.
 
 pub mod pool;
 
 pub(crate) use pool::Segments;
-pub use pool::{Budget, EnginePool, Fallback, Opened, Opener, Owner, Req, Target};
+pub use pool::{Budget, EnginePool, Fallback, Opened, Opener, Owner, Req, Target, Walked};
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use sheaf_edit::{PageSize, Rotation};
+use sheaf_edit::{Box2, PageSize, Rotation};
 use sheaf_image::raster::{PixelFormat, Raster};
 
 /// Zero-based index of a page within a *source file* (what the engine sees).
@@ -102,31 +103,21 @@ impl Draw {
     };
 }
 
-/// Axis-aligned rectangle in page points, top-left origin, in the page's
-/// *displayed* orientation (i.e. after /Rotate).
+/// One character the engine read on a page (see [`Renderer::page_chars`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
+pub struct EngineChar {
+    pub ch: char,
+    /// Its loose box in PageSpace (M10.5 §5: the page's user space, y
+    /// up, so `y` is its bottom edge); None for the spaces and line
+    /// breaks the engine adds between words and lines.
+    pub rect: Option<Box2>,
+    /// Which way it's drawn, in degrees counter-clockwise from PageSpace's
+    /// x: 90 runs up the page, as a `/Rotate 90` page's upright text does.
+    pub angle: f32,
 }
 
 /// A page's characters, each with its box (see [`Renderer::page_chars`]).
-pub type PageCharList = Vec<(char, Option<Rect>)>;
-
-/// One search match: the page it's on and the glyph boxes that make it up
-/// (usually one, more if the match wraps a line).
-#[derive(Debug, Clone)]
-pub struct SearchHit {
-    pub page: u32,
-    pub rects: Vec<Rect>,
-    /// The matched text.
-    pub text: String,
-    /// A pattern's capture groups 1…n (None where a group didn't take
-    /// part); empty for a literal search.
-    pub groups: Vec<Option<String>>,
-}
+pub type PageCharList = Vec<EngineChar>;
 
 /// What kind of form a document has, as PDFium tells (M10 proposal 19).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -143,40 +134,24 @@ pub enum FormType {
     XfaFull,
 }
 
-/// Progress of a document-wide search, streamed as pages are scanned.
-#[derive(Debug)]
-pub enum SearchEvent {
-    /// Hits found on one page (only sent when non-empty).
-    Hits(Vec<SearchHit>),
-    /// Pages scanned so far.
-    Progress(u32),
-    Done,
-}
-
 /// Synchronous engine interface. Implementations may block.
 pub trait Renderer {
     fn page_count(&self) -> u32;
     /// The document's form, as the engine classes it.
     fn form_type(&self) -> FormType;
     fn page_size(&self, page: PageIndex) -> Result<PageSize>;
-    /// All matches of `query` on one page.
-    fn search_page(&self, page: PageIndex, query: &str, match_case: bool)
-    -> Result<Vec<SearchHit>>;
-    /// All matches of a regular expression on one page, run over the
-    /// page's extracted text.
-    fn pattern_search_page(&self, page: PageIndex, re: &regex::Regex) -> Result<Vec<SearchHit>>;
-    /// Glyph boxes (merged per line) of text intersecting `rect`, in the
-    /// page's displayed space. Used to turn a drag into a text highlight.
-    fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>>;
-    /// How many real characters of text the page has: glyphs the engine
-    /// synthesizes (spaces, line breaks) and whitespace don't count. Zero
-    /// means an image-only page, an OCR candidate.
+    /// How many real characters of text the page has, by PDFium's own
+    /// count: glyphs the engine synthesizes (spaces, line breaks) and
+    /// whitespace don't count. What tests check sheaf_doc's
+    /// `PageChars::text_len`, which OCR's check and blank detection count
+    /// a page's text by, against.
     fn page_text_len(&self, page: PageIndex) -> Result<usize>;
     /// The page's text in reading order, as the engine extracts it.
     fn page_text(&self, page: PageIndex) -> Result<String>;
-    /// The page's characters in the engine's order, each with its box (in
-    /// the displayed space); `None` for the spaces and line breaks the
-    /// engine adds between words and lines.
+    /// The page's characters in the engine's order, each with its box in
+    /// PageSpace and the angle it's drawn at (see [`EngineChar`]). The
+    /// boxes are the engine's as it gives them, in the page's own space,
+    /// so neither the page's `/Rotate` nor its crop box moves them.
     fn page_chars(&self, page: PageIndex) -> Result<PageCharList>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
@@ -336,19 +311,6 @@ pub mod pdfium {
     }
 
     impl PdfiumEngine {
-        pub fn open(path: impl AsRef<Path>, password: Option<&str>) -> Result<Self> {
-            let path = path.as_ref();
-            // Read the whole file up front. PDFium otherwise pulls objects
-            // lazily with many small random reads, which is fine on local
-            // SSDs but disastrous on network/9P mounts (3.4 s vs 0.27 s to
-            // enumerate 7k page sizes in one measurement). One sequential read
-            // of even a few hundred MB is cheap by comparison, and it's what a
-            // viewer wants anyway. Truly huge files can revisit this.
-            let bytes = sheaf_util::read_file(path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            Self::open_bytes(bytes, password).with_context(|| format!("opening {}", path.display()))
-        }
-
         /// Open a file already in memory, sharing the buffer: the document
         /// model keeps the same bytes, so saves read what PDFium shows.
         pub fn open_bytes(bytes: Arc<[u8]>, password: Option<&str>) -> Result<Self> {
@@ -663,67 +625,6 @@ pub mod pdfium {
             })
         }
 
-        fn search_page(
-            &self,
-            page: PageIndex,
-            query: &str,
-            match_case: bool,
-        ) -> Result<Vec<SearchHit>> {
-            if query.is_empty() {
-                return Ok(Vec::new());
-            }
-            let _pdfium = lock();
-            let p = self.doc.pages().get(page.0 as i32)?;
-            let text = p.text()?;
-            let opts = PdfSearchOptions::new().match_case(match_case);
-            let search = text.search(query, &opts)?;
-
-            // Map page-space boxes to the displayed orientation via
-            // FPDF_PageToDevice, with a scaled "device" so the integer
-            // output keeps sub-point precision.
-            const SCALE: f32 = 16.0;
-            let (pw, ph) = (p.width().value, p.height().value);
-            let cfg =
-                PdfRenderConfig::new().set_fixed_size((pw * SCALE) as i32, (ph * SCALE) as i32);
-            let to_display = |x: f32, y: f32| -> Option<(f32, f32)> {
-                let (dx, dy) = p
-                    .points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &cfg)
-                    .ok()?;
-                Some((dx as f32 / SCALE, dy as f32 / SCALE))
-            };
-
-            let mut hits = Vec::new();
-            for segments in search.iter(PdfSearchDirection::SearchForward) {
-                let mut rects = Vec::new();
-                let mut text = String::new();
-                for seg in segments.iter() {
-                    text.push_str(&seg.text());
-                    let b = seg.bounds();
-                    let (Some((x0, y0)), Some((x1, y1))) = (
-                        to_display(b.left().value, b.bottom().value),
-                        to_display(b.right().value, b.top().value),
-                    ) else {
-                        continue;
-                    };
-                    rects.push(Rect {
-                        x: x0.min(x1),
-                        y: y0.min(y1),
-                        w: (x1 - x0).abs(),
-                        h: (y1 - y0).abs(),
-                    });
-                }
-                if !rects.is_empty() {
-                    hits.push(SearchHit {
-                        page: page.0,
-                        rects,
-                        text,
-                        groups: Vec::new(),
-                    });
-                }
-            }
-            Ok(hits)
-        }
-
         fn page_text_len(&self, page: PageIndex) -> Result<usize> {
             let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
@@ -740,34 +641,24 @@ pub mod pdfium {
             let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
             let text = p.text()?;
-            const SCALE: f32 = 16.0;
-            let (pw, ph) = (p.width().value, p.height().value);
-            let cfg =
-                PdfRenderConfig::new().set_fixed_size((pw * SCALE) as i32, (ph * SCALE) as i32);
-            let to_display = |x: f32, y: f32| -> Option<(f32, f32)> {
-                let (dx, dy) = p
-                    .points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &cfg)
-                    .ok()?;
-                Some((dx as f32 / SCALE, dy as f32 / SCALE))
-            };
             let mut out = Vec::new();
             for c in text.chars().iter() {
                 let Some(ch) = c.unicode_char() else { continue };
+                // PDFium's boxes are in the page's user space: PageSpace.
                 let rect = if c.is_generated().unwrap_or(false) {
                     None
                 } else {
-                    c.loose_bounds().ok().and_then(|b| {
-                        let (x0, y0) = to_display(b.left().value, b.bottom().value)?;
-                        let (x1, y1) = to_display(b.right().value, b.top().value)?;
-                        Some(Rect {
-                            x: x0.min(x1),
-                            y: y0.min(y1),
-                            w: (x1 - x0).abs(),
-                            h: (y1 - y0).abs(),
-                        })
+                    c.loose_bounds().ok().map(|b| Box2 {
+                        x: b.left().value,
+                        y: b.bottom().value,
+                        w: b.right().value - b.left().value,
+                        h: b.top().value - b.bottom().value,
                     })
                 };
-                out.push((ch, rect));
+                // PDFium's angle is `atan2(c, a)` of the character's
+                // matrix: clockwise, in y-up user space.
+                let angle = c.angle_degrees().map_or(0.0, |cw| (360.0 - cw) % 360.0);
+                out.push(EngineChar { ch, rect, angle });
             }
             Ok(out)
         }
@@ -776,157 +667,6 @@ pub mod pdfium {
             let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
             Ok(p.text()?.all())
-        }
-
-        fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>> {
-            let _pdfium = lock();
-            let p = self.doc.pages().get(page.0 as i32)?;
-            let text = p.text()?;
-            const SCALE: f32 = 16.0;
-            let (pw, ph) = (p.width().value, p.height().value);
-            let cfg =
-                PdfRenderConfig::new().set_fixed_size((pw * SCALE) as i32, (ph * SCALE) as i32);
-            let to_display = |x: f32, y: f32| -> Option<(f32, f32)> {
-                let (dx, dy) = p
-                    .points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &cfg)
-                    .ok()?;
-                Some((dx as f32 / SCALE, dy as f32 / SCALE))
-            };
-            let (rx0, ry0, rx1, ry1) = (rect.x, rect.y, rect.x + rect.w, rect.y + rect.h);
-            let mut rects: Vec<Rect> = Vec::new();
-            for c in text.chars().iter() {
-                if c.is_generated().unwrap_or(false) {
-                    continue;
-                }
-                let Ok(b) = c.loose_bounds() else { continue };
-                let (Some((x0, y0)), Some((x1, y1))) = (
-                    to_display(b.left().value, b.bottom().value),
-                    to_display(b.right().value, b.top().value),
-                ) else {
-                    continue;
-                };
-                let r = Rect {
-                    x: x0.min(x1),
-                    y: y0.min(y1),
-                    w: (x1 - x0).abs(),
-                    h: (y1 - y0).abs(),
-                };
-                // Keep glyphs whose centre is inside the drag rectangle.
-                let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-                if cx < rx0 || cx > rx1 || cy < ry0 || cy > ry1 {
-                    continue;
-                }
-                match rects.last_mut() {
-                    Some(prev)
-                        if (prev.y - r.y).abs() < prev.h.max(r.h) * 0.5 && r.x >= prev.x - 1.0 =>
-                    {
-                        let right = (prev.x + prev.w).max(r.x + r.w);
-                        let bottom = (prev.y + prev.h).max(r.y + r.h);
-                        prev.x = prev.x.min(r.x);
-                        prev.y = prev.y.min(r.y);
-                        prev.w = right - prev.x;
-                        prev.h = bottom - prev.y;
-                    }
-                    _ => rects.push(r),
-                }
-            }
-            Ok(rects)
-        }
-
-        fn pattern_search_page(
-            &self,
-            page: PageIndex,
-            re: &regex::Regex,
-        ) -> Result<Vec<SearchHit>> {
-            let _pdfium = lock();
-            let p = self.doc.pages().get(page.0 as i32)?;
-            let text = p.text()?;
-            let chars = text.chars();
-            if chars.is_empty() {
-                return Ok(Vec::new());
-            }
-
-            // Build the page string and remember each char's byte offset and
-            // box, so regex byte ranges map back to glyphs. Generated chars
-            // (synthesized spaces/newlines) still count — "\b" needs them —
-            // but carry no box so they never draw.
-            let mut s = String::with_capacity(chars.len());
-            let mut starts: Vec<usize> = Vec::with_capacity(chars.len());
-            let mut boxes: Vec<Option<PdfRect>> = Vec::with_capacity(chars.len());
-            for c in chars.iter() {
-                let ch = c.unicode_char().unwrap_or(' ');
-                starts.push(s.len());
-                s.push(ch);
-                let generated = c.is_generated().unwrap_or(false);
-                boxes.push(if generated {
-                    None
-                } else {
-                    c.loose_bounds().ok()
-                });
-            }
-
-            const SCALE: f32 = 16.0;
-            let (pw, ph) = (p.width().value, p.height().value);
-            let cfg =
-                PdfRenderConfig::new().set_fixed_size((pw * SCALE) as i32, (ph * SCALE) as i32);
-            let to_display = |x: f32, y: f32| -> Option<(f32, f32)> {
-                let (dx, dy) = p
-                    .points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &cfg)
-                    .ok()?;
-                Some((dx as f32 / SCALE, dy as f32 / SCALE))
-            };
-            let display_rect = |b: &PdfRect| -> Option<Rect> {
-                let (x0, y0) = to_display(b.left().value, b.bottom().value)?;
-                let (x1, y1) = to_display(b.right().value, b.top().value)?;
-                Some(Rect {
-                    x: x0.min(x1),
-                    y: y0.min(y1),
-                    w: (x1 - x0).abs(),
-                    h: (y1 - y0).abs(),
-                })
-            };
-
-            let mut hits = Vec::new();
-            for caps in re.captures_iter(&s) {
-                let m = caps.get(0).expect("group 0 always matches");
-                if m.is_empty() {
-                    continue;
-                }
-                let first = starts.partition_point(|&b| b < m.start());
-                let last = starts.partition_point(|&b| b < m.end());
-                // Merge glyph boxes into one rect per line.
-                let mut rects: Vec<Rect> = Vec::new();
-                for b in boxes[first..last].iter().flatten() {
-                    let Some(r) = display_rect(b) else { continue };
-                    match rects.last_mut() {
-                        Some(prev)
-                            if (prev.y - r.y).abs() < prev.h.max(r.h) * 0.5
-                                && r.x >= prev.x - 1.0 =>
-                        {
-                            let right = (prev.x + prev.w).max(r.x + r.w);
-                            let bottom = (prev.y + prev.h).max(r.y + r.h);
-                            prev.x = prev.x.min(r.x);
-                            prev.y = prev.y.min(r.y);
-                            prev.w = right - prev.x;
-                            prev.h = bottom - prev.y;
-                        }
-                        _ => rects.push(r),
-                    }
-                }
-                if !rects.is_empty() {
-                    hits.push(SearchHit {
-                        page: page.0,
-                        rects,
-                        text: m.as_str().to_string(),
-                        groups: caps
-                            .iter()
-                            .skip(1)
-                            .map(|g| g.map(|g| g.as_str().to_string()))
-                            .collect(),
-                    });
-                }
-            }
-            Ok(hits)
         }
 
         fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster> {
@@ -949,11 +689,4 @@ pub struct Rendered {
     pub request: RenderRequest,
     pub raster: Raster,
     pub render_time: std::time::Duration,
-}
-
-/// What a document-wide search looks for.
-#[derive(Clone)]
-pub enum Matcher {
-    Literal { query: String, match_case: bool },
-    Pattern(std::sync::Arc<regex::Regex>),
 }

@@ -327,20 +327,33 @@ impl Guest for TestPlugin {
                     Err(e) => Err(format!("denied: {e}")),
                 }
             }
+            // Page 1's matches of the query, and its words and text boxes
+            // in its top 50 points, each with its boxes:
+            // "hits Form@0,10 4x10; words ...; boxes 0,10 9x10".
             "find" => {
+                use sheaf_plugin_api::types::{Box2, TextMatch};
                 let q = args_json.unwrap_or_default();
                 let p = document::pages().first().map(|p| p.id).ok_or("no pages")?;
-                let hits = text::search(p, &q, false)?;
-                let boxes = text::text_boxes(
-                    p,
-                    sheaf_plugin_api::types::Box2 {
-                        x: 0.0,
-                        y: 0.0,
-                        w: 1000.0,
-                        h: 1000.0,
-                    },
-                )?;
-                Err(format!("{} hits, {} boxes", hits.len(), boxes.len()))
+                let top = Box2 {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1000.0,
+                    h: 50.0,
+                };
+                let boxes = |rs: &[Box2]| {
+                    let each = rs
+                        .iter()
+                        .map(|r| format!("{},{} {}x{}", r.x, r.y, r.w, r.h));
+                    each.collect::<Vec<_>>().join("+")
+                };
+                let matched = |ms: Vec<TextMatch>| {
+                    let each = ms.iter().map(|m| format!("{}@{}", m.text, boxes(&m.rects)));
+                    each.collect::<Vec<_>>().join(" ")
+                };
+                let hits = matched(text::search(p, &q, false)?);
+                let words = matched(text::words(p, Some(top))?);
+                let lines = boxes(&text::text_boxes(p, top)?);
+                Err(format!("hits {hits}; words {words}; boxes {lines}"))
             }
             // OCR page 1; report the words and whether a layer was stored.
             "ocr" => {

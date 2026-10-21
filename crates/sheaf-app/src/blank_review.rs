@@ -1,11 +1,12 @@
 //! Document > Find Blank Pages…: the search runs as a planner (jobs.rs)
-//! over a snapshot (`sheaf_ops::blank::find`), then a review sheet over
-//! the document shows each page found, with a thumbnail, why, and a
-//! checkbox. Blank and "intentionally blank" pages start checked, "nearly
-//! blank" ones don't. "Delete N pages" removes the checked ones in one
-//! undo step, on the version the search measured (M10.5 §8.5): a page
-//! changed since conflicts, and the delete is lowered again over what
-//! else changed. Nothing is deleted without that click.
+//! over a snapshot, its pages read through the document's views
+//! (`sheaf_ops::blank::find`), then a review sheet over the document
+//! shows each page found, with a thumbnail, why, and a checkbox. Blank
+//! and "intentionally blank" pages start checked, "nearly blank" ones
+//! don't. "Delete N pages" removes the checked ones in one undo step, on
+//! the version the search measured (M10.5 §8.5): a page changed since
+//! conflicts, and the delete is lowered again over what else changed.
+//! Nothing is deleted without that click.
 
 use std::collections::HashSet;
 
@@ -42,11 +43,11 @@ impl DocView {
             return;
         };
         let planning = doc.model.snapshot();
-        let snapshot = planning.clone();
+        let (snapshot, views) = (planning.clone(), doc.views.clone());
         self.blank_review = None;
         self.run_planner(
             "Find blank pages",
-            move |p| sheaf_ops::blank::find(&snapshot, pages.as_deref(), params, p),
+            move |p| sheaf_ops::blank::find(&snapshot, &views, pages.as_deref(), params, p),
             |s| {
                 Some(format!(
                     "Looking for blank pages: {} of {}…",

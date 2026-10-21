@@ -10,7 +10,7 @@ use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
-fn red_page() -> std::path::PathBuf {
+fn red_page() -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(
@@ -27,15 +27,14 @@ fn red_page() -> std::path::PathBuf {
     );
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
-    let path = std::env::temp_dir().join(format!("sheaf-red-{}.pdf", std::process::id()));
-    pdf.save(&path).unwrap();
-    path
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
 }
 
 #[test]
 fn bgra_and_rgba_are_what_they_say() {
-    let path = red_page();
-    let engine = PdfiumEngine::open(&path, None).unwrap();
+    let engine = PdfiumEngine::open_bytes(red_page().into(), None).unwrap();
     let page = Job::Page {
         width: 20,
         rotation: Rotation::R0,
@@ -55,5 +54,4 @@ fn bgra_and_rgba_are_what_they_say() {
         let rgba = engine.render(PageIndex(0), job, PixelFormat::Rgba).unwrap();
         assert_eq!(&rgba.data[..4], &[255, 0, 0, 255], "{job:?} as RGBA");
     }
-    let _ = std::fs::remove_file(path);
 }

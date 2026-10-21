@@ -20,11 +20,21 @@
 //!   with no unpinned engine left to close, the heaviest base engine
 //!   heavier than [`ENGINE_BYTES`] closes, pinned or not, and opens again
 //!   at its next request, whoever's request took it past.
-//! - **Background** requests (OCR, Trim White, plugins' page scans) use any
-//!   open engine, leaving the screen's order alone, and otherwise open one
-//!   of their own, at most [`BACKGROUND_ENGINES`] in [`BACKGROUND_BYTES`],
-//!   so they never close one of the screen's to make room. A screen
-//!   request for one of theirs makes it the screen's.
+//! - **Background** requests (OCR, blank detection, plugins' text and page
+//!   scans) use any open engine, leaving the screen's order alone, and
+//!   otherwise open one of their own, at most [`BACKGROUND_ENGINES`], so
+//!   they never close one of the screen's to make room. Their group and
+//!   patch engines weigh at most [`BACKGROUND_BYTES`]; their base engines
+//!   grow into what the screen's engines leave of [`SCREEN_BYTES`], and
+//!   past it the heaviest heavier than [`ENGINE_BYTES`] closes, so a walk
+//!   over a 7k document opens its base engine again about as often as the
+//!   screen's does (not every 400 pages). A screen request for one of
+//!   theirs makes it the screen's.
+//! - **Walks** hold the engine they read their last page on: neither
+//!   budget's count or bytes close it, as if pinned, until the walk reads
+//!   on another or ends, so a walk past pinned engines filling
+//!   [`SCREEN_ENGINES`] doesn't open its group's engine again for each
+//!   page.
 //! - **Liveness:** an engine whose [`Opener`] says its source is gone
 //!   closes at the worker's next turn.
 //! - **Failures:** an engine that doesn't open isn't tried again while its
@@ -32,8 +42,9 @@
 //!   it did before (a key names what its engine opens), and a damaged
 //!   file's repair takes tens of milliseconds a try. An opener that asks
 //!   is told when PDFium refuses its engine's bytes ([`OpenError::Refused`],
-//!   [`Opener::on_refused`]), and a render that says where else its page
-//!   is ([`Req::fallback`]) renders from there instead.
+//!   [`Opener::on_refused`]), and a render or a query that says where else
+//!   its page is ([`Req::fallback`], [`EnginePool::query`]) reads it from
+//!   there instead.
 //!
 //! PDFium tells nothing of an engine's memory, so engines are weighed by
 //! an estimate: [`OPEN_BYTES`], the bytes of the segments the engine alone
@@ -46,13 +57,16 @@
 //! batch render once, and each is answered with the image, whoever asked
 //! (the pool is the whole process's); a render whose receivers are all
 //! dropped is skipped; queries run in the order they came, before the
-//! batch's renders; and a document search walks its pages `SEARCH_CHUNK`
-//! at a time between renders. The worker blocks on its channel when no
-//! walk is pending, and ends when the last handle is dropped.
+//! batch's renders; and a walk over a document's pages (Find's, Patterns';
+//! [`EnginePool::walk`]) reads them `WALK_CHUNK` at a time between
+//! renders, in their order, each on its own engine and falling back as a
+//! query does. The worker blocks on its channel when no walk is pending,
+//! and ends when the last handle is dropped.
 //!
-//! **Panics:** an opener, a render, a query or a search step that panics
-//! (a malformed file) fails its own request with why, as an engine that
-//! doesn't open does, and the worker goes on serving every other.
+//! **Panics:** an opener, a fallback, a render, a query or a walk's page
+//! that panics (a malformed file) fails its own request, or page, with
+//! why, as an engine that doesn't open does, and the worker goes on
+//! serving every other.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -67,10 +81,7 @@ use futures::channel::{mpsc as stream, oneshot};
 use sheaf_image::raster::PixelFormat;
 
 use crate::pdfium::PdfiumEngine;
-use crate::{
-    Draw, FormType, Job, Matcher, OpenError, PageCharList, PageIndex, Rect, RenderRequest,
-    Rendered, Renderer, SearchEvent, SearchHit,
-};
+use crate::{Draw, FormType, Job, OpenError, PageIndex, RenderRequest, Rendered, Renderer};
 
 /// The screen's group and patch engines at most, pinned ones included:
 /// two groups for each pane of a split window and two for the thumbnail
@@ -94,8 +105,8 @@ pub const BACKGROUND_BYTES: usize = 32 << 20;
 /// only once it weighs more, so one just opened again isn't closed at once.
 pub const ENGINE_BYTES: usize = 16 << 20;
 
-/// Pages a search walks a turn, between renders.
-const SEARCH_CHUNK: u32 = 4;
+/// Pages a walk reads a turn, between renders.
+const WALK_CHUNK: usize = 4;
 
 /// What an engine weighs open, by estimate: slice 2's scoped group engines
 /// measured 0.8, 3.6 and 1.2 MB before their pages (the synthetic, heavy
@@ -241,9 +252,11 @@ impl Opener {
 /// Whose engines a request may open, and close to make room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Budget {
-    /// The page view's and the thumbnail strip's, and dialogs' previews.
+    /// The page view's and the thumbnail strip's, dialogs' previews, and
+    /// Find's and selection's text.
     Screen,
-    /// Walks over a document's pages: OCR, Trim White, plugins' scans.
+    /// Walks over a document's pages: OCR, blank detection, plugins' text
+    /// and scans.
     Background,
 }
 
@@ -256,9 +269,19 @@ pub struct Target<K> {
     pub budget: Budget,
 }
 
-/// Where else a render's page is, should PDFium refuse its engine's
-/// bytes: an engine and the page's index there. Run on the worker, once.
+/// Where else a render's or a query's page is, should PDFium refuse its
+/// engine's bytes: an engine and the page's index there. Run on the
+/// worker, once.
 pub type Fallback<K> = Box<dyn FnOnce() -> Result<(Target<K>, PageIndex)> + Send>;
+
+/// How far a walk over a document's pages has got ([`EnginePool::walk`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Walked {
+    /// The pages at the first `n` positions are read.
+    Scanned(usize),
+    /// Every page is read.
+    Done,
+}
 
 /// A render of a page of an engine.
 pub struct Req<K> {
@@ -368,8 +391,43 @@ fn answer(mut replies: Vec<Reply>, done: Result<Rendered>) {
 /// Where a render's answer goes.
 type Reply = oneshot::Sender<Result<Rendered>>;
 
-/// A query's work, given its engine or why there's none.
-type Work = Box<dyn FnOnce(Result<&PdfiumEngine>) + Send>;
+/// A query's work, given its engine and the page it loads there (its
+/// fallback's, should it have fallen back), or why there's no engine.
+type Work = Box<dyn FnOnce(Result<(&PdfiumEngine, Option<PageIndex>)>) + Send>;
+
+/// Where a walk reads the page at a position: its engine, its index there,
+/// and where else it is should PDFium refuse that engine's bytes.
+type Item<K> = dyn Fn(usize) -> Result<(Target<K>, PageIndex, Option<Fallback<K>>)> + Send;
+
+/// A walk's work on the page at a position, given the engine and the page
+/// it reads.
+type Step = dyn Fn(&PdfiumEngine, PageIndex, usize) -> Result<()> + Send;
+
+/// Who a walk tells how far it has got: a channel's sender, whatever it
+/// carries besides.
+trait Listener: Send {
+    fn tell(&self, walked: Walked);
+    /// Whether the receiver is dropped.
+    fn gone(&self) -> bool;
+}
+
+impl<T: From<Walked> + Send> Listener for stream::UnboundedSender<T> {
+    fn tell(&self, walked: Walked) {
+        let _ = self.unbounded_send(walked.into());
+    }
+
+    fn gone(&self) -> bool {
+        self.is_closed()
+    }
+}
+
+/// Where a request whose engine didn't open, for `e`, reads its page
+/// instead: its fallback's engine and page, the fallback run once, when
+/// PDFium refused the engine's bytes; otherwise it fails, for `e`.
+fn fall_back<K>(e: anyhow::Error, fallback: Option<Fallback<K>>) -> Result<(Target<K>, PageIndex)> {
+    let fallback = fallback.filter(|_| OpenError::is_refused(&e)).ok_or(e)?;
+    guarded("a fallback", fallback)
+}
 
 enum Msg<K> {
     Render(Req<K>, Reply),
@@ -377,21 +435,20 @@ enum Msg<K> {
         target: Target<K>,
         /// The page it loads.
         page: Option<PageIndex>,
+        /// Where else that page is, should PDFium refuse `target`'s bytes.
+        fallback: Option<Fallback<K>>,
         work: Work,
     },
-    Search {
-        target: Target<K>,
-        matcher: Matcher,
-        tx: stream::UnboundedSender<SearchEvent>,
-    },
+    Walk(Walk<K>),
     Pin(Owner, Vec<K>),
     Look(mpsc::Sender<Look<K>>),
 }
 
-/// What the worker holds: each engine, its budget and its weight; and its
-/// thread, as Linux numbers it.
+/// What the worker holds: each engine, its budget and its weight; how
+/// many times it has opened one; and its thread, as Linux numbers it.
 struct Look<K> {
     engines: Vec<(K, Budget, usize)>,
+    opened: usize,
     task: Option<u32>,
 }
 
@@ -427,91 +484,64 @@ impl<K: Clone + Eq + Hash + Send + 'static> EnginePool<K> {
         rx
     }
 
-    /// How many real characters of text a page has (see
-    /// [`Renderer::page_text_len`]). Zero means an OCR candidate.
-    pub fn page_text_len(
+    /// `f` run on page `page` of `target`'s engine, on the worker; or, when
+    /// PDFium refuses that engine's bytes, on the page `fallback` says is
+    /// where else it is, the fallback run once, as a render's is. `f` is
+    /// given the page it reads. Queries run in the order they came, before
+    /// their batch's renders; one that panics fails alone.
+    pub fn query<T: Send + 'static>(
         &self,
         target: Target<K>,
         page: PageIndex,
-    ) -> oneshot::Receiver<Result<usize>> {
-        self.ask(target, Some(page), move |e| e.page_text_len(page))
-    }
-
-    /// A page's extracted text (see [`Renderer::page_text`]).
-    pub fn page_text(
-        &self,
-        target: Target<K>,
-        page: PageIndex,
-    ) -> oneshot::Receiver<Result<String>> {
-        self.ask(target, Some(page), move |e| e.page_text(page))
-    }
-
-    /// The page's characters and their boxes (see [`Renderer::page_chars`]).
-    pub fn page_chars(
-        &self,
-        target: Target<K>,
-        page: PageIndex,
-    ) -> oneshot::Receiver<Result<PageCharList>> {
-        self.ask(target, Some(page), move |e| e.page_chars(page))
-    }
-
-    /// Glyph boxes of text under a drag rectangle (displayed page space).
-    pub fn text_boxes_in_rect(
-        &self,
-        target: Target<K>,
-        page: PageIndex,
-        rect: Rect,
-    ) -> oneshot::Receiver<Result<Vec<Rect>>> {
-        self.ask(target, Some(page), move |e| {
-            e.text_boxes_in_rect(page, rect)
+        fallback: Option<Fallback<K>>,
+        f: impl FnOnce(&PdfiumEngine, PageIndex) -> Result<T> + Send + 'static,
+    ) -> oneshot::Receiver<Result<T>> {
+        // A query that loads a page is given one, its own or its fallback's.
+        self.ask(target, Some(page), fallback, move |e, at| {
+            f(e, at.unwrap_or(page))
         })
     }
 
-    /// Every occurrence of `query` on one page, like Find but for one page
-    /// and beside any search running.
-    pub fn search_page(
-        &self,
-        target: Target<K>,
-        page: PageIndex,
-        query: String,
-        match_case: bool,
-    ) -> oneshot::Receiver<Result<Vec<SearchHit>>> {
-        self.ask(target, Some(page), move |e| {
-            e.search_page(page, &query, match_case)
-        })
-    }
-
-    /// Every match of `re` on one page, with its boxes.
-    pub fn pattern_search_page(
-        &self,
-        target: Target<K>,
-        page: PageIndex,
-        re: Arc<regex::Regex>,
-    ) -> oneshot::Receiver<Result<Vec<SearchHit>>> {
-        self.ask(target, Some(page), move |e| {
-            e.pattern_search_page(page, &re)
-        })
-    }
-
-    /// The kind of form the engine's document has.
+    /// The kind of form the engine's document has. With no fallback: a
+    /// document asks it of its file's base engine, and is told so when
+    /// PDFium refuses the file.
     pub fn form_type(&self, target: Target<K>) -> oneshot::Receiver<Result<FormType>> {
-        self.ask(target, None, |e| Ok(e.form_type()))
+        self.ask(target, None, None, |e, _| Ok(e.form_type()))
     }
 
-    /// Searches every page of an engine's document. Events stream until
-    /// `Done`; dropping the receiver ends the search.
-    pub fn search(
+    /// Walks the pages at `count` positions, in their order,
+    /// `WALK_CHUNK` a turn between renders: `item`, run on the worker as
+    /// the walk reaches a position, says where its page is read (its
+    /// engine, its index there, and where else it is should PDFium refuse
+    /// that engine's bytes, as a query's fallback does), and `work` reads
+    /// it there, sending what it finds where it likes. A page whose item
+    /// or work fails or panics, or whose engine doesn't open, is passed
+    /// over, logged. The engine it read its last page on stays open while
+    /// it goes on. `tx` is told how far the walk has got after each turn,
+    /// and when it's done; dropping its receiver ends the walk at its next
+    /// turn.
+    pub fn walk<T: From<Walked> + Send + 'static>(
         &self,
-        target: Target<K>,
-        matcher: Matcher,
-    ) -> stream::UnboundedReceiver<SearchEvent> {
-        let (tx, rx) = stream::unbounded();
-        self.send(Msg::Search {
-            target,
-            matcher,
-            tx,
-        });
-        rx
+        count: usize,
+        item: impl Fn(usize) -> Result<(Target<K>, PageIndex, Option<Fallback<K>>)> + Send + 'static,
+        work: impl Fn(&PdfiumEngine, PageIndex, usize) -> Result<()> + Send + 'static,
+        tx: stream::UnboundedSender<T>,
+    ) {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        self.send(Msg::Walk(Walk {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            count,
+            next: 0,
+            item: Box::new(item),
+            work: Box::new(work),
+            tx: Box::new(tx),
+        }));
+    }
+
+    /// How many times the worker has opened an engine, one opened again
+    /// counted again.
+    pub fn opened(&self) -> usize {
+        self.look().opened
     }
 
     /// The engines open.
@@ -538,6 +568,7 @@ impl<K: Clone + Eq + Hash + Send + 'static> EnginePool<K> {
         self.send(Msg::Look(tx));
         rx.recv().unwrap_or(Look {
             engines: Vec::new(),
+            opened: 0,
             task: None,
         })
     }
@@ -546,13 +577,19 @@ impl<K: Clone + Eq + Hash + Send + 'static> EnginePool<K> {
         &self,
         target: Target<K>,
         page: Option<PageIndex>,
-        f: impl FnOnce(&PdfiumEngine) -> Result<T> + Send + 'static,
+        fallback: Option<Fallback<K>>,
+        f: impl FnOnce(&PdfiumEngine, Option<PageIndex>) -> Result<T> + Send + 'static,
     ) -> oneshot::Receiver<Result<T>> {
         let (tx, rx) = oneshot::channel();
-        let work: Work = Box::new(move |engine| {
-            let _ = tx.send(engine.and_then(|e| guarded("a query", || f(e))));
+        let work: Work = Box::new(move |asked| {
+            let _ = tx.send(asked.and_then(|(e, page)| guarded("a query", || f(e, page))));
         });
-        self.send(Msg::Ask { target, page, work });
+        self.send(Msg::Ask {
+            target,
+            page,
+            fallback,
+            work,
+        });
         rx
     }
 
@@ -584,13 +621,17 @@ impl Slot {
     }
 }
 
-/// A document search in progress, resumed between renders so it never
-/// delays a visible page.
+/// A walk over a document's pages in progress, resumed between renders so
+/// it never delays a visible page.
 struct Walk<K> {
-    target: Target<K>,
-    matcher: Matcher,
-    next: u32,
-    tx: stream::UnboundedSender<SearchEvent>,
+    /// Which walk it is, for what it holds.
+    id: u64,
+    count: usize,
+    /// The position it reads next.
+    next: usize,
+    item: Box<Item<K>>,
+    work: Box<Step>,
+    tx: Box<dyn Listener>,
 }
 
 struct Worker<K> {
@@ -600,8 +641,13 @@ struct Worker<K> {
     pins: HashMap<Owner, Vec<K>>,
     pinned: HashSet<K>,
     walks: Vec<Walk<K>>,
+    /// The engine each walk read its last page on, and its budget, by the
+    /// walk's id: closed by no count until the walk moves on.
+    held: HashMap<u64, (K, Budget)>,
     /// Counts uses, for the least recently used.
     tick: u64,
+    /// Engines opened, one opened again counted again.
+    opened: usize,
     task: Option<u32>,
 }
 
@@ -613,7 +659,9 @@ impl<K: Clone + Eq + Hash> Worker<K> {
             pins: HashMap::new(),
             pinned: HashSet::new(),
             walks: Vec::new(),
+            held: HashMap::new(),
             tick: 0,
+            opened: 0,
             task: task(),
         }
     }
@@ -658,24 +706,13 @@ impl<K: Clone + Eq + Hash> Worker<K> {
                             None => renders.push((req, vec![reply])),
                         }
                     }
-                    Msg::Ask { target, page, work } => match self.engine(&target) {
-                        Ok(slot) => {
-                            work(Ok(&slot.engine));
-                            slot.pages.extend(page.map(|p| p.0));
-                            self.settle(target.budget);
-                        }
-                        Err(e) => work(Err(e)),
-                    },
-                    Msg::Search {
+                    Msg::Ask {
                         target,
-                        matcher,
-                        tx,
-                    } => self.walks.push(Walk {
-                        target,
-                        matcher,
-                        next: 0,
-                        tx,
-                    }),
+                        page,
+                        fallback,
+                        work,
+                    } => self.ask(target, page, fallback, work),
+                    Msg::Walk(walk) => self.walks.push(walk),
                     Msg::Pin(owner, keys) => self.pin(owner, keys),
                     Msg::Look(reply) => looks.push(reply),
                 }
@@ -716,6 +753,7 @@ impl<K: Clone + Eq + Hash> Worker<K> {
                 }
             };
             self.engines.insert(target.engine.clone(), slot);
+            self.opened += 1;
         }
         let pinned = self.pinned.contains(&target.engine);
         let slot = (self.engines.get_mut(&target.engine)).expect("an engine just opened");
@@ -753,13 +791,41 @@ impl<K: Clone + Eq + Hash> Worker<K> {
         })
     }
 
+    /// Runs a query's `work` on `target`'s engine, which loads `page`; or
+    /// on its fallback's engine and page, when PDFium refuses `target`'s
+    /// bytes.
+    fn ask(
+        &mut self,
+        mut target: Target<K>,
+        mut page: Option<PageIndex>,
+        fallback: Option<Fallback<K>>,
+        work: Work,
+    ) {
+        let slot = match self.engine(&target) {
+            Ok(slot) => Ok(slot),
+            Err(e) => match fall_back(e, fallback) {
+                Ok((instead, at)) => {
+                    (target, page) = (instead, Some(at));
+                    self.engine(&target)
+                }
+                Err(e) => Err(e),
+            },
+        };
+        match slot {
+            Ok(slot) => {
+                work(Ok((&slot.engine, page)));
+                slot.pages.extend(page.map(|p| p.0));
+                self.settle(target.budget);
+            }
+            Err(e) => work(Err(e)),
+        }
+    }
+
     fn render(&mut self, mut req: Req<K>) -> Result<Rendered> {
         let slot = match self.engine(&req.target) {
             Ok(slot) => slot,
             Err(e) => {
-                let refused = OpenError::is_refused(&e);
-                let fallback = (req.fallback.take()).filter(|_| refused).ok_or(e)?;
-                (req.target, req.page) = fallback()?;
+                (req.target, req.page) = fall_back(e, req.fallback.take())?;
                 self.engine(&req.target)?
             }
         };
@@ -781,30 +847,29 @@ impl<K: Clone + Eq + Hash> Worker<K> {
     }
 
     /// Closes what's past `budget`'s caps after a request of its, the
-    /// least recently used unpinned engine first, and then a base engine
-    /// past its bound (the module's rules).
+    /// least recently used engine neither pinned nor held by a walk first,
+    /// and then a base engine past its bound (the module's rules).
     fn settle(&mut self, budget: Budget) {
         match budget {
             Budget::Screen => {
                 while self.count(budget) > SCREEN_ENGINES && self.close_lru(budget, false) {}
-                while self.weight(budget) > SCREEN_BYTES && self.close_lru(budget, true) {}
+                while self.weight(budget, true) > SCREEN_BYTES && self.close_lru(budget, true) {}
             }
             Budget::Background => {
-                while (self.count(budget) > BACKGROUND_ENGINES
-                    || self.weight(budget) > BACKGROUND_BYTES)
-                    && self.close_lru(budget, true)
+                while self.count(budget) > BACKGROUND_ENGINES && self.close_lru(budget, true) {}
+                while self.weight(budget, false) > BACKGROUND_BYTES && self.close_lru(budget, false)
+                {
+                }
+                // Its base engines, in what the screen's leave.
+                let left = SCREEN_BYTES.saturating_sub(self.weight(Budget::Screen, true));
+                while self.weight(budget, true) - self.weight(budget, false) > left
+                    && self.close_heaviest_base(budget)
                 {}
             }
         }
-        while self.weight(Budget::Screen) > SCREEN_BYTES {
-            let heaviest = (self.engines.iter())
-                .filter(|(_, s)| s.base && s.budget == Budget::Screen)
-                .filter(|(_, s)| s.weight() > ENGINE_BYTES)
-                .max_by_key(|(_, s)| s.weight())
-                .map(|(k, _)| k.clone());
-            let Some(k) = heaviest else { break };
-            self.engines.remove(&k);
-        }
+        while self.weight(Budget::Screen, true) > SCREEN_BYTES
+            && self.close_heaviest_base(Budget::Screen)
+        {}
     }
 
     /// The engines `budget` counts: the screen's group and patch engines,
@@ -815,22 +880,36 @@ impl<K: Clone + Eq + Hash> Worker<K> {
             .count()
     }
 
-    fn weight(&self, budget: Budget) -> usize {
+    /// What `budget`'s engines weigh, its base engines only with `bases`.
+    fn weight(&self, budget: Budget, bases: bool) -> usize {
         (self.engines.values())
-            .filter(|s| s.budget == budget)
+            .filter(|s| s.budget == budget && (bases || !s.base))
             .map(Slot::weight)
             .sum()
     }
 
-    /// Closes `budget`'s least recently used unpinned engine, a base
-    /// engine only when `bases`: whether there was one.
+    /// Closes `budget`'s least recently used engine neither pinned nor
+    /// held by a walk, a base engine only when `bases`: whether there was
+    /// one.
     fn close_lru(&mut self, budget: Budget, bases: bool) -> bool {
+        let held = |k: &K| self.held.values().any(|(h, _)| h == k);
         let lru = (self.engines.iter())
-            .filter(|(k, s)| s.budget == budget && !self.pinned.contains(*k))
+            .filter(|(k, s)| s.budget == budget && !self.pinned.contains(*k) && !held(k))
             .filter(|(_, s)| bases || !s.base)
             .min_by_key(|(_, s)| s.used)
             .map(|(k, _)| k.clone());
         lru.is_some_and(|k| self.engines.remove(&k).is_some())
+    }
+
+    /// Closes `budget`'s heaviest base engine heavier than
+    /// [`ENGINE_BYTES`], pinned or held or not: whether there was one.
+    fn close_heaviest_base(&mut self, budget: Budget) -> bool {
+        let heaviest = (self.engines.iter())
+            .filter(|(_, s)| s.base && s.budget == budget)
+            .filter(|(_, s)| s.weight() > ENGINE_BYTES)
+            .max_by_key(|(_, s)| s.weight())
+            .map(|(k, _)| k.clone());
+        heaviest.is_some_and(|k| self.engines.remove(&k).is_some())
     }
 
     fn pin(&mut self, owner: Owner, keys: Vec<K>) {
@@ -847,58 +926,56 @@ impl<K: Clone + Eq + Hash> Worker<K> {
         self.settle(Budget::Screen);
     }
 
-    /// Closes the engines whose source is gone, forgets those that didn't
-    /// open, and ends the walks over one.
+    /// Closes the engines whose source is gone, and forgets those that
+    /// didn't open.
     fn sweep(&mut self) {
         self.engines.retain(|_, s| (s.alive)());
         self.failed.retain(|_, (_, alive)| alive());
-        self.walks.retain(|w| (w.target.open.alive)());
     }
 
-    /// Takes each walk a chunk further.
+    /// Takes each walk whose receiver is still there a turn further: its
+    /// next `WALK_CHUNK` pages, each read on its own engine. A walk that
+    /// ends lets go of the engine it held.
     fn walk(&mut self) {
         for mut w in std::mem::take(&mut self.walks) {
-            if w.tx.is_closed() {
-                continue;
+            if !w.tx.gone() {
+                let to = (w.next + WALK_CHUNK).min(w.count);
+                for at in w.next..to {
+                    if let Err(e) = self.read(&w, at) {
+                        log::warn!("a walk's page {at}: {e:#}");
+                    }
+                }
+                w.next = to;
+                w.tx.tell(Walked::Scanned(to));
+                if to < w.count {
+                    self.walks.push(w);
+                    continue;
+                }
+                w.tx.tell(Walked::Done);
             }
-            match guarded("a search", || self.chunk(&mut w)) {
-                Ok(false) => self.walks.push(w),
-                Ok(true) => {
-                    let _ = w.tx.unbounded_send(SearchEvent::Done);
-                }
-                Err(e) => {
-                    log::warn!("search: {e:#}");
-                    let _ = w.tx.unbounded_send(SearchEvent::Done);
-                }
+            if let Some((_, budget)) = self.held.remove(&w.id) {
+                self.settle(budget);
             }
         }
     }
 
-    /// Searches `w`'s next chunk of pages: whether it was the last.
-    fn chunk(&mut self, w: &mut Walk<K>) -> Result<bool> {
-        let slot = self.engine(&w.target)?;
-        let count = slot.engine.page_count();
-        let to = (w.next + SEARCH_CHUNK).min(count);
-        for i in w.next..to {
-            let found = match &w.matcher {
-                Matcher::Literal { query, match_case } => {
-                    slot.engine.search_page(PageIndex(i), query, *match_case)
-                }
-                Matcher::Pattern(re) => slot.engine.pattern_search_page(PageIndex(i), re),
-            };
-            slot.pages.insert(i);
-            match found {
-                Ok(hits) if !hits.is_empty() => {
-                    let _ = w.tx.unbounded_send(SearchEvent::Hits(hits));
-                }
-                Ok(_) => {}
-                Err(e) => log::warn!("search page {i}: {e:#}"),
+    /// Runs `w`'s work on the page at position `at`, on the engine its item
+    /// names; or on its fallback's engine and page, when PDFium refuses
+    /// that engine's bytes.
+    fn read(&mut self, w: &Walk<K>, at: usize) -> Result<()> {
+        let (mut target, mut page, fallback) = guarded("a walk's page", || (w.item)(at))?;
+        let slot = match self.engine(&target) {
+            Ok(slot) => slot,
+            Err(e) => {
+                (target, page) = fall_back(e, fallback)?;
+                self.engine(&target)?
             }
-        }
-        w.next = to;
-        let _ = w.tx.unbounded_send(SearchEvent::Progress(to));
-        self.settle(w.target.budget);
-        Ok(to >= count)
+        };
+        let read = guarded("a walk's page", || (w.work)(&slot.engine, page, at));
+        slot.pages.insert(page.0);
+        self.held.insert(w.id, (target.engine, target.budget));
+        self.settle(target.budget);
+        read
     }
 
     fn look(&self) -> Look<K> {
@@ -906,6 +983,7 @@ impl<K: Clone + Eq + Hash> Worker<K> {
             engines: (self.engines.iter())
                 .map(|(k, s)| (k.clone(), s.budget, s.weight()))
                 .collect(),
+            opened: self.opened,
             task: self.task,
         }
     }

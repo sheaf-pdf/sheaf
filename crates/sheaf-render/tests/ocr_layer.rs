@@ -1,8 +1,8 @@
 //! The OCR text layer `sheaf-doc` writes must be real text to PDFium: this
-//! saves a layer and checks the engine finds the words where the glyphs
-//! are, for every combination of the file's own `/Rotate` and the turn
-//! the page was shown with when it was recognized, on a page whose crop
-//! box is off the origin.
+//! saves a layer and checks Find, over the characters the engine reads,
+//! hits the words where the glyphs are, for every combination of the
+//! file's own `/Rotate` and the turn the page was shown with when it was
+//! recognized, on a page whose crop box is off the origin.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself; it
 //! fails rather than skips without it so CI can't silently lose it.
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::materialize::Came;
 use sheaf_doc::tx::fixture::{self, ocr};
-use sheaf_doc::{Box2, Document, FixedCount, OcrWord, PageChars, Pt, Store};
+use sheaf_doc::{Box2, Document, FixedCount, OcrWord, PageChars, Pt, Query, Store};
 use sheaf_edit::{Rotation, Turn};
 use sheaf_render::PageIndex;
 use sheaf_render::Renderer;
@@ -64,19 +64,6 @@ fn word(text: &str, b: Box2) -> OcrWord {
         rect: b,
         confidence: 1.0,
     }
-}
-
-fn to_box(r: &sheaf_render::Rect) -> Box2 {
-    Box2 {
-        x: r.x,
-        y: r.y,
-        w: r.w,
-        h: r.h,
-    }
-}
-
-fn union(rects: &[sheaf_render::Rect]) -> Box2 {
-    rects.iter().map(to_box).reduce(Box2::union).unwrap()
 }
 
 fn close(a: f32, b: f32) -> bool {
@@ -136,73 +123,66 @@ fn check(rotate: i64, by: Rotation) {
         &shown,
         "test",
     );
-    let unsaved = PageChars::from_layer(&layer);
-    let unsaved_hit = |query: &str| {
-        let hits = sheaf_doc::text_layer::search(&layer, query, true);
-        hits[0].rects.iter().copied().reduce(Box2::union).unwrap()
-    };
     let layers = [(page, Arc::new(layer.clone()))];
     model.commit_ops(ocr(layers), "ocr").unwrap();
     let out = dir.join("ocr.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
 
-    // The saved page's /Rotate is the page's rotation, so PDFium's
-    // displayed space is the frame the words were recognized in, and
-    // through the saved page's geometry its hits are in PageSpace.
+    // The saved page's /Rotate is the page's rotation, so the page shows
+    // as it did when its words were recognized.
     let base = sheaf_doc::forms::fixture::source(std::fs::read(&out).unwrap()).geom(0);
     assert_eq!(base.rotate, shown.rotate);
-    let engine = PdfiumEngine::open(&out, None).unwrap();
+    let engine = PdfiumEngine::open_bytes(sheaf_util::read_file(&out).unwrap(), None).unwrap();
     let ctx = format!("rotate {rotate}, by {by:?}");
     assert_eq!(engine.page_text_len(PageIndex(0)).unwrap(), 10, "{ctx}");
-    let hits = engine.search_page(PageIndex(0), "hello", false).unwrap();
-    assert_eq!(hits.len(), 1, "{ctx}: {hits:?}");
-    let r = union(&hits[0].rects);
-    assert!(close_box(r, hello), "{ctx}: hit {r:?} vs word {hello:?}");
-    let r = base.from_view().apply_box(r);
-    let want = unsaved_hit("Hello");
-    assert!(close_box(r, want), "{ctx}: hit {r:?} vs unsaved {want:?}");
-    // The gap between the words became a space, so a phrase matches too.
-    let hits = engine
-        .search_page(PageIndex(0), "Hello World", true)
-        .unwrap();
-    assert_eq!(hits.len(), 1, "{ctx}: {hits:?}");
-    let r = base.from_view().apply_box(union(&hits[0].rects));
-    let want = unsaved_hit("Hello World");
-    assert!(close_box(r, want), "{ctx}: phrase hit {r:?} vs {want:?}");
-
-    // Selecting text: the saved page's characters read the same, and a
-    // point on "W" is just before it.
-    let chars = PageChars::from_engine(
-        engine
-            .page_chars(PageIndex(0))
-            .unwrap()
-            .into_iter()
-            .map(|(c, r)| (c, r.as_ref().map(to_box)))
-            .collect(),
-        &base,
+    let read = engine.page_chars(PageIndex(0)).unwrap();
+    let chars = PageChars::from_engine(read.into_iter().map(|c| (c.ch, c.rect, c.angle)));
+    // Find hits a word on its box in PageSpace, where it shows as it was
+    // recognized; and the gap between the words became a space, so a
+    // phrase matches too.
+    let found = |query: &str| {
+        let q = Query::literal(query, false).unwrap();
+        let hits = chars.find(&q);
+        assert_eq!(hits.len(), 1, "{ctx}: {query}: {hits:?}");
+        hits[0].rects.iter().copied().reduce(Box2::union).unwrap()
+    };
+    let (hello_at, world_at) = (layer.words[0].rect, layer.words[1].rect);
+    let r = found("hello");
+    assert!(
+        close_box(r, hello_at),
+        "{ctx}: hit {r:?} vs word {hello_at:?}"
     );
+    let shows = base.to_view().apply_box(r);
+    assert!(
+        close_box(shows, hello),
+        "{ctx}: shows {shows:?} vs {hello:?}"
+    );
+    let r = found("Hello World");
+    let both = hello_at.union(world_at);
+    assert!(close_box(r, both), "{ctx}: phrase hit {r:?} vs {both:?}");
+
+    // Selecting text: the saved page's characters read the same, upright
+    // in the frame the layer was recognized in (the turn PDFium says they
+    // are drawn at), and a point on "W" is just before it.
     assert_eq!(chars.text(0, chars.len()).trim(), "Hello World", "{ctx}");
-    assert_eq!(chars.upright, unsaved.upright, "{ctx}");
+    assert_eq!(chars.upright, layer.upright, "{ctx}");
     let on_w = shown.from_view().apply(Pt {
         x: world.x + 2.0,
         y: world.y + 6.0,
     });
     let at = chars.boundary_at(on_w, 0.0).expect("on the text");
     assert_eq!(chars.text(at, chars.len()).trim(), "World", "{ctx}");
-    // Before the save, the layer's characters are where PDFium puts them.
-    assert_eq!(unsaved.text(0, unsaved.len()), "Hello World", "{ctx}");
-    let w_of = |c: &PageChars| {
-        c.glyphs
-            .iter()
-            .find(|g| g.ch == 'W')
-            .and_then(|g| g.rect)
-            .unwrap()
-    };
-    let (saved_w, unsaved_w) = (w_of(&chars), w_of(&unsaved));
-    assert!(
-        close_box(saved_w, unsaved_w),
-        "{ctx}: W at {saved_w:?} saved, {unsaved_w:?} unsaved"
-    );
+    // Each word PDFium reads is the layer's, on its box in PageSpace.
+    let words = chars.words();
+    assert_eq!(words.len(), layer.words.len(), "{ctx}: {words:?}");
+    for ((text, _, saved), w) in words.iter().zip(&layer.words) {
+        assert_eq!(text, &w.text, "{ctx}");
+        let unsaved = w.rect;
+        assert!(
+            close_box(*saved, unsaved),
+            "{ctx}: {text} at {saved:?} saved, {unsaved:?} in the layer"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -229,7 +209,7 @@ fn image_only_page_has_no_text() {
     let dir = tempdir();
     let src = dir.join("blank.pdf");
     blank_pdf(&src, 0);
-    let engine = PdfiumEngine::open(&src, None).unwrap();
+    let engine = PdfiumEngine::open_bytes(sheaf_util::read_file(&src).unwrap(), None).unwrap();
     assert_eq!(engine.page_text_len(PageIndex(0)).unwrap(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }

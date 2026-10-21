@@ -60,11 +60,11 @@ pub use model::{
     GroupKind, Invariant, Layer, Mark, OutlineId, PageBase, PageDef, PageId, Snapshot, SourceId,
     Static, Step, Target, TextStyle, VersionId, VersionView,
 };
-pub use page_chars::{Glyph, PageChars};
+pub use page_chars::{Glyph, PageChars, Query, TextHit, TextOpts, TextService};
 pub use realize::{MarkDraw, OcgOverride, RenderKey, ViewInputs, render_key, render_reads};
 pub use source::{ObjRef, Source};
 pub use store::{Blob, BlobId, BlobRef, Src, Store};
-pub use text_layer::{OcrWord, TextHit, TextLayer};
+pub use text_layer::{OcrWord, TextLayer};
 pub use tx::{
     Actor, Base, Commit, CommitOpts, Derive, EditError, Grant, Identity, JobKind, Notice, Preview,
     ResolvedOp, Stale, Tx, notice_text,

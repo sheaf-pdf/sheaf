@@ -1,26 +1,35 @@
 //! Selecting text on the page with the Select tool, and what acts on it:
 //! Copy, and the text markup tools (select, then press U, as Acrobat's
-//! quick actions). It works on a page's characters ([`PageChars`]): the
-//! engine's, or an OCR layer's that isn't saved yet.
+//! quick actions). It works on a page's characters ([`PageChars`]) as the
+//! screen shows the page, from the document's text (`sheaf_ops::text`,
+//! M10.5 §10.5), each page read where it's drawn from: an inserted,
+//! duplicated or cropped page, a header and recognized text not yet
+//! saved, and the pages of a file PDFium refuses select as they show. The
+//! calculator's picks and markup dragged over text read a page's
+//! characters the same way ([`DocView::with_chars`]).
 //!
 //! A drag that starts on text selects from there to the pointer, in
-//! reading order; a double-click takes a word. A selection is on one page.
+//! reading order; a double-click takes a word. A selection is on one page,
+//! of the characters it was made in, which it keeps: an edit that changes
+//! how the page draws but not its text (a comment on it hidden, a page
+//! numbered after it deleted) leaves it painted and copied as it was.
 //! Points here are in PageSpace, as the characters are.
 
 use std::sync::Arc;
 
 use gpui::{ClipboardItem, Context};
-use sheaf_doc::{AnnotKind, Box2, PageChars, PageId, Pt, SourceId, TextLayer};
+use sheaf_doc::{AnnotKind, Box2, PageChars, PageId, Pt, render_key};
 use sheaf_edit::Rotation;
-use sheaf_render::{Budget, PageIndex};
 
 use crate::docview::{DocView, State};
 use crate::markup_tools::Tool;
 
-/// Text selected on one page: two boundaries in its characters.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Text selected on one page: two boundaries in the characters it was
+/// selected in.
+#[derive(Debug, Clone)]
 pub struct TextSel {
     pub page: PageId,
+    pub chars: Arc<PageChars>,
     pub anchor: usize,
     pub head: usize,
 }
@@ -52,62 +61,19 @@ pub struct TextDrag {
     pub released: bool,
 }
 
-/// What a page's characters were read from. When the page changes, so
-/// does this, and they're read again.
-#[derive(Clone)]
-pub enum CharsKey {
-    Engine(SourceId, u32),
-    Layer(Arc<TextLayer>),
-}
-
-impl PartialEq for CharsKey {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (CharsKey::Engine(s, i), CharsKey::Engine(t, j)) => s == t && i == j,
-            (CharsKey::Layer(a), CharsKey::Layer(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        }
-    }
-}
-
-/// Pages whose characters are kept, past which the cache starts over.
-const CACHED_PAGES: usize = 64;
-
 impl DocView {
-    /// Where page `page`'s characters come from now.
-    fn chars_key(&self, page: PageId) -> Option<CharsKey> {
-        let State::Ready(doc) = &self.state else {
-            return None;
-        };
-        let st = doc.model.state();
-        if let Some(layer) = st.ocr_text(page) {
-            return Some(CharsKey::Layer(layer.clone()));
-        }
-        let base = &st.def(page)?.base;
-        Some(CharsKey::Engine(base.src.id(), base.index))
-    }
-
-    /// Page `page`'s characters, if they've been read and are current.
+    /// Page `page`'s characters as the screen shows it now, if they've
+    /// been read.
     pub(crate) fn cached_chars(&self, page: PageId) -> Option<Arc<PageChars>> {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        let (key, chars) = doc.page_chars.get(&page)?;
-        (Some(key) == self.chars_key(page).as_ref()).then(|| chars.clone())
+        doc.text.cached(doc.model.state(), page, &doc.inputs)
     }
 
-    fn cache_chars(&mut self, page: PageId, key: CharsKey, chars: Arc<PageChars>) {
-        if let State::Ready(doc) = &mut self.state {
-            if doc.page_chars.len() >= CACHED_PAGES {
-                doc.page_chars.clear();
-            }
-            doc.page_chars.insert(page, (key, chars));
-        }
-    }
-
-    /// Run `f` with page `page`'s characters: now if they're at hand, or
-    /// once the engine has read them. None when the page has no text
-    /// source.
+    /// Run `f` with page `page`'s characters as the screen shows it: now
+    /// if they're at hand, or once the render worker has read them. None
+    /// when they can't be read.
     pub(crate) fn with_chars(
         &mut self,
         page: PageId,
@@ -117,64 +83,33 @@ impl DocView {
         if let Some(chars) = self.cached_chars(page) {
             return f(self, Some(chars), cx);
         }
-        let Some(key) = self.chars_key(page) else {
-            return f(self, None, cx);
-        };
         let State::Ready(doc) = &mut self.state else {
             return f(self, None, cx);
         };
-        match key.clone() {
-            CharsKey::Layer(layer) => {
-                let chars = Arc::new(PageChars::from_layer(&layer));
-                self.cache_chars(page, key, chars.clone());
-                f(self, Some(chars), cx)
-            }
-            CharsKey::Engine(source, index) => {
-                let src = (doc.model.state().def(page))
-                    .map(|def| &def.base.src)
-                    .filter(|src| src.id() == source);
-                let Some(src) = src else {
-                    return f(self, None, cx);
+        let st = doc.model.state();
+        let asked = render_key(st, page, &doc.inputs);
+        let rx = doc.text.chars(st, page, &doc.inputs);
+        doc.chars_loading.insert(page);
+        cx.spawn(async move |this, cx| {
+            let read = rx.await.ok().and_then(|r| r.ok());
+            this.update(cx, |v, cx| {
+                let now = match &mut v.state {
+                    State::Ready(doc) => {
+                        doc.chars_loading.remove(&page);
+                        render_key(doc.model.state(), page, &doc.inputs)
+                    }
+                    _ => None,
                 };
-                let (base, target) = (src.geom(index), doc.views.base(src, Budget::Screen));
-                doc.chars_loading.insert(page);
-                let rx = doc.views.pool().page_chars(target, PageIndex(index));
-                cx.spawn(async move |this, cx| {
-                    let read = rx.await.ok().and_then(|r| r.ok());
-                    this.update(cx, |v, cx| {
-                        if let State::Ready(doc) = &mut v.state {
-                            doc.chars_loading.remove(&page);
-                        }
-                        let chars = read.map(|list| {
-                            let list = list
-                                .into_iter()
-                                .map(|(c, r)| {
-                                    (
-                                        c,
-                                        r.map(|r| Box2 {
-                                            x: r.x,
-                                            y: r.y,
-                                            w: r.w,
-                                            h: r.h,
-                                        }),
-                                    )
-                                })
-                                .collect();
-                            Arc::new(PageChars::from_engine(list, &base))
-                        });
-                        // The page may have changed while the engine read it.
-                        if let Some(c) = &chars
-                            && v.chars_key(page).as_ref() == Some(&key)
-                        {
-                            v.cache_chars(page, key, c.clone());
-                        }
-                        f(v, chars, cx);
-                    })
-                    .ok();
-                })
-                .detach();
-            }
-        }
+                // The page changed while it was read, so what was read
+                // isn't what it shows: read it as it is now.
+                if read.is_some() && now != asked {
+                    return v.with_chars(page, cx, f);
+                }
+                f(v, read, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Read page `page`'s characters ahead of need (the pointer is over
@@ -258,11 +193,12 @@ impl DocView {
                 }
                 let sel = TextSel {
                     page,
+                    chars: c,
                     anchor: a,
                     head: b,
                 };
                 if let State::Ready(doc) = &mut v.state {
-                    doc.text_sel = Some(sel);
+                    doc.text_sel = Some(sel.clone());
                 }
                 v.text_selected(sel, cx);
                 cx.notify();
@@ -303,6 +239,7 @@ impl DocView {
             page: d.page,
             anchor,
             head: c.boundary_near(d.current),
+            chars: c.clone(),
         });
         if let State::Ready(doc) = &mut self.state {
             doc.text_sel = sel;
@@ -353,8 +290,8 @@ impl DocView {
             return;
         };
         doc.text_drag = None;
-        let sel = doc.text_sel;
-        if sel.is_some_and(|s| s.is_empty()) {
+        let sel = doc.text_sel.clone();
+        if sel.as_ref().is_some_and(|s| s.is_empty()) {
             doc.text_sel = None;
         }
         if let Some(sel) = sel {
@@ -371,7 +308,7 @@ impl DocView {
             {
                 self.markup_selection(self.tool, cx)
             }
-            Tool::TextEdit if sel.is_empty() => self.start_insert(sel.page, sel.anchor, cx),
+            Tool::TextEdit if sel.is_empty() => self.start_insert(&sel, cx),
             Tool::TextEdit => self.start_replace(cx),
             _ => {}
         }
@@ -390,16 +327,20 @@ impl DocView {
         }
     }
 
-    /// The selected text, and the page and boxes it covers, when there is
-    /// a selection and its page's characters are at hand.
-    pub(crate) fn selected_text(&self) -> Option<(PageId, String, Vec<Box2>)> {
+    /// The selection, when it has any text.
+    fn selection(&self) -> Option<&TextSel> {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        let sel = doc.text_sel.filter(|s| !s.is_empty())?;
-        let c = self.cached_chars(sel.page)?;
+        doc.text_sel.as_ref().filter(|s| !s.is_empty())
+    }
+
+    /// The selected text, and the page and boxes it covers, when there is
+    /// a selection.
+    pub(crate) fn selected_text(&self) -> Option<(PageId, String, Vec<Box2>)> {
+        let sel = self.selection()?;
         let (a, b) = sel.range();
-        Some((sel.page, c.text(a, b), c.rects(a, b)))
+        Some((sel.page, sel.chars.text(a, b), sel.chars.rects(a, b)))
     }
 
     /// Copy the selected text. False when nothing is selected.
@@ -447,16 +388,16 @@ impl DocView {
 
     /// Mark up the selected text with `tool`'s markup.
     fn markup_selection(&mut self, tool: Tool, cx: &mut Context<Self>) {
-        let Some((page, _, rects)) = self.selected_text() else {
+        let Some(upright) = self.selection().map(|s| s.chars.upright) else {
             return;
         };
-        let Some(chars) = self.cached_chars(page) else {
+        let Some((page, _, rects)) = self.selected_text() else {
             return;
         };
         if rects.is_empty() {
             return;
         }
-        self.add_text_markup(tool, page, rects, chars.upright, cx);
+        self.add_text_markup(tool, page, rects, upright, cx);
         self.clear_text_sel(cx);
     }
 
@@ -491,14 +432,9 @@ impl DocView {
         let Some((page, struck, rects)) = self.selected_text() else {
             return;
         };
-        let at = match &self.state {
-            State::Ready(doc) => doc.text_sel.and_then(|sel| {
-                let c = self.cached_chars(sel.page)?;
-                // After the last character crossed out.
-                Some((c.caret_at(sel.range().1)?, c.upright))
-            }),
-            _ => None,
-        };
+        // After the last character crossed out.
+        let at = (self.selection())
+            .and_then(|sel| Some((sel.chars.caret_at(sel.range().1)?, sel.chars.upright)));
         let Some((at, turn)) = at else {
             return;
         };
@@ -513,15 +449,14 @@ impl DocView {
         cx.notify();
     }
 
-    /// Text Edits at a click in the text: a caret at boundary `at`, and the
-    /// editor for what to insert.
-    fn start_insert(&mut self, page: PageId, at: usize, cx: &mut Context<Self>) {
-        let Some((at, turn)) = self
-            .cached_chars(page)
-            .and_then(|c| Some((c.caret_at(at)?, c.upright)))
-        else {
+    /// Text Edits at a click in the text, `sel` empty: a caret where it
+    /// is, and the editor for what to insert.
+    fn start_insert(&mut self, sel: &TextSel, cx: &mut Context<Self>) {
+        let page = sel.page;
+        let Some(at) = sel.chars.caret_at(sel.anchor) else {
             return;
         };
+        let turn = sel.chars.upright;
         let color = crate::markup_tools::color_of(Tool::TextEdit, cx);
         let mut a = self.new_annot(AnnotKind::Insert { at }, color);
         a.turn = turn;

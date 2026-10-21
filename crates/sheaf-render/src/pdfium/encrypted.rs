@@ -46,7 +46,7 @@ fn shown(bytes: &[u8], password: Option<&str>) -> Shown {
         .page_chars(PageIndex(0))
         .unwrap()
         .into_iter()
-        .map(|(c, _)| c)
+        .map(|c| c.ch)
         .collect();
     let (annots, fields) = {
         let _pdfium = lock();

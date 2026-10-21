@@ -201,12 +201,18 @@ stay as you wrote them, since a plugin never learns who the user is
 
 **`text`**: `page-text`, `pattern-search(page, regex)`,
 `search(page, query, match-case)`, `text-boxes(page, rect)` and
-`words(page, rect?)` (every word with its box). Matches come
-with their boxes in page coordinates: points, top-left origin, the page as
-the file displays it (the same space annotations use). Pattern matches also
-carry their capture groups. OCR text the user hasn't saved yet counts.
-This frame is 0.3's and stays so: sheaf keeps pages' geometry in their
-unrotated user space now, and converts at the API's edge.
+`words(page, rect?)` (every word with its box). A page's text is the page
+as the file will draw it once saved: its own text, OCR text the user
+hasn't saved yet and an unsaved header or footer, but never a form
+field's value or any annotation's text. Words are apart by a space and
+lines by a newline; a `search`'s words match where the page's are apart
+by any whitespace, so a phrase wrapped onto the next line is found; it
+ignores case unless `match-case`. Matches come with their boxes in page
+coordinates: points, top-left origin, the page as the file displays it
+(the same space annotations use). Pattern matches also carry their
+capture groups. This frame is 0.3's and stays so: sheaf keeps pages'
+geometry in their unrotated user space now, and converts at the API's
+edge.
 
 **`edits`**: `submit(label, edits)` queues a batch of edits labelled `label`.
 Batches are applied in order **after your call returns**, all of a call's as
@@ -214,9 +220,10 @@ one undo step, labelled as its first is, so ids of things a batch creates
 (bookmarks, annotations) aren't known during the call. Your call sees the
 document as it is at its first read or submit, and its edits are applied to
 it as it read it: what it read is checked when they land (the pages it
-listed, a page's annotations, a page's text, or what a render of it drew:
-the page, the annotations and form fields drawn, the header and, when the
-header numbers pages, their order; the outline, a mark it updates), and
+listed, a page's annotations, or what a render of it drew: the page, the
+annotations and form fields drawn, the header and, when the header numbers
+pages, their order; for its text, the same less the annotations and
+fields; the outline, a mark it updates), and
 when the user has changed any of it since, none of the
 edits are applied, and the user sees which change got in the way. Listing
 the pages reads their order, so a page inserted, moved or deleted anywhere

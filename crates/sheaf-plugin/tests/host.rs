@@ -4,18 +4,18 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use arc_swap::ArcSwap;
 use futures::executor::block_on;
 use sheaf_doc::geom::Geom;
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture;
 use sheaf_doc::{
-    Actor, Box2, Commit, CommitOpts, DestView, Document, EditError, FixedCount, PageId, Snapshot,
-    Src, Store,
+    Actor, Box2, Commit, CommitOpts, DestView, Document, EditError, FixedCount, PageChars, PageId,
+    Snapshot, Store, TextOpts, TextService, ViewInputs,
 };
 use sheaf_edit::{MarkKind, Op, PageRef, PageSel, Rotation, Sibling, Turn};
 use sheaf_plugin::ui::{
@@ -23,7 +23,7 @@ use sheaf_plugin::ui::{
 };
 use sheaf_plugin::{
     Call, CallContext, CallOutput, DocContext, DocEvent, EditBatch, Grants, Limits, LoadOptions,
-    Manifest, Plugin, PluginError, Runtime, Status, TextMatch, TextSource,
+    Manifest, Plugin, PluginError, Runtime, Status,
 };
 
 fn workspace_root() -> PathBuf {
@@ -89,64 +89,61 @@ fn load(name: &str, limits: Limits) -> Plugin {
         .load(dir, manifest, LoadOptions::default())
 }
 
-/// Pattern search over plain text, with a made-up box per match (x from
-/// the match's offset, y from its line).
-fn search(text: &str, re: &regex::Regex) -> Vec<TextMatch> {
-    re.captures_iter(text)
-        .map(|c| (c.get(0).unwrap(), c))
-        .map(|(m, c)| TextMatch {
-            text: m.as_str().to_string(),
-            groups: c
-                .iter()
-                .skip(1)
-                .map(|g| g.map(|g| g.as_str().to_string()))
-                .collect(),
-            rects: vec![sheaf_doc::Box2 {
-                x: m.start() as f32,
-                y: 10.0 + 100.0 * text[..m.start()].matches('\n').count() as f32,
-                w: m.len() as f32,
-                h: 10.0,
-            }],
-        })
-        .collect()
+/// Pages' text as a fake engine draws it: a page's from `text`, by its
+/// index in its source; its line n at y = 10 + 100n of the page as the
+/// file shows it (the API's frame), character k at x = k, a point wide
+/// and 10 tall, upright there. Handed over in PageSpace, as the text
+/// service hands it, and what each read was under kept.
+struct FakeText {
+    text: Box<dyn Fn(u32) -> String + Send + Sync>,
+    asked: Mutex<Vec<TextOpts>>,
 }
 
-struct FakeText;
-
-impl TextSource for FakeText {
-    fn page_text(&self, _src: &Src, index: u32) -> Result<String> {
-        Ok(format!("Form {}\nsecond line", 1040 + index))
+impl FakeText {
+    /// "Form 1040" and a second line on the first page, "Form 1041" on
+    /// the next, and so on.
+    fn forms() -> FakeText {
+        FakeText::new(|index| format!("Form {}\nsecond line", 1040 + index))
     }
 
-    fn pattern_search(
-        &self,
-        src: &Src,
-        index: u32,
-        re: &Arc<regex::Regex>,
-    ) -> Result<Vec<TextMatch>> {
-        Ok(search(&self.page_text(src, index)?, re))
+    /// `pages`, in order; past them, none.
+    fn pages(pages: Vec<&'static str>) -> FakeText {
+        FakeText::new(move |index| pages.get(index as usize).copied().unwrap_or("").into())
     }
 
-    fn search(
-        &self,
-        src: &Src,
-        index: u32,
-        query: &str,
-        match_case: bool,
-    ) -> Result<Vec<TextMatch>> {
-        let re = regex::RegexBuilder::new(&regex::escape(query))
-            .case_insensitive(!match_case)
-            .build()?;
-        Ok(search(&self.page_text(src, index)?, &re))
+    fn new(text: impl Fn(u32) -> String + Send + Sync + 'static) -> FakeText {
+        FakeText {
+            text: Box::new(text),
+            asked: Mutex::new(Vec::new()),
+        }
     }
 
-    fn text_boxes(
-        &self,
-        _src: &Src,
-        _index: u32,
-        rect: sheaf_doc::Box2,
-    ) -> Result<Vec<sheaf_doc::Box2>> {
-        Ok(vec![rect])
+    /// What each read so far was under.
+    fn asked(&self) -> Vec<TextOpts> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+impl TextService for FakeText {
+    fn chars(&self, snap: &Snapshot, page: PageId, o: &TextOpts) -> Result<Arc<PageChars>> {
+        self.asked.lock().unwrap().push(o.clone());
+        let base = &snap.state.def(page).context("a page of the document")?.base;
+        let frame = base.src.geom(base.index);
+        let (from_view, angle) = (frame.from_view(), frame.rotate.degrees() as f32);
+        let text = (self.text)(base.index);
+        let mut chars = Vec::new();
+        for (n, line) in text.split('\n').enumerate() {
+            for (k, ch) in line.chars().enumerate() {
+                let shown = Box2 {
+                    x: k as f32,
+                    y: 10.0 + 100.0 * n as f32,
+                    w: 1.0,
+                    h: 10.0,
+                };
+                chars.push((ch, Some(from_view.apply_box(shown)), angle));
+            }
+        }
+        Ok(Arc::new(PageChars::from_engine(chars)))
     }
 }
 
@@ -199,7 +196,7 @@ fn ctx(d: &Document) -> CallContext {
             cell: cell(d),
             selection: d.page(1).into_iter().collect(),
             current_page: Some(d.page(0).unwrap()),
-            text: Arc::new(FakeText),
+            text: Arc::new(FakeText::forms()),
             ocr: None,
             render: None,
         }),
@@ -253,34 +250,6 @@ fn command_returns_edits_that_apply_as_one_step() {
     assert_eq!(top_level(&d).len(), 3);
     d.undo().unwrap();
     assert!(top_level(&d).is_empty(), "one undo reverts them all");
-}
-
-#[test]
-fn unsaved_ocr_text_wins_over_the_engine() {
-    let p = load("ocr-text", Limits::default());
-    let mut d = doc(2);
-    let id = d.page(0).unwrap();
-    let layer = sheaf_doc::text_layer::from_engine(
-        vec![sheaf_doc::OcrWord {
-            text: "Schedule C".into(),
-            rect: sheaf_doc::Box2 {
-                x: 10.0,
-                y: 10.0,
-                w: 80.0,
-                h: 12.0,
-            },
-            confidence: 0.9,
-        }],
-        &d.geom(d.page(0).unwrap()),
-        "test",
-    );
-    d.commit_ops(fixture::ocr([(id, Arc::new(layer))]), "ocr")
-        .unwrap();
-    let out = run(&p, "bookmark", None, ctx(&d)).unwrap();
-    assert!(matches!(
-        &out.batches[0].ops[0],
-        Op::AddBookmark { title, .. } if title == "Schedule C"
-    ));
 }
 
 #[test]
@@ -423,51 +392,6 @@ fn discover_finds_plugins_and_reports_bad_ones() {
     assert!(sheaf_plugin::discover(&root.join("nope")).is_empty());
 }
 
-/// Texts keyed by page index; pages past the end are blank.
-struct Pages(Vec<&'static str>);
-
-impl TextSource for Pages {
-    fn page_text(&self, _src: &Src, index: u32) -> Result<String> {
-        Ok(self
-            .0
-            .get(index as usize)
-            .copied()
-            .unwrap_or("")
-            .to_string())
-    }
-
-    fn pattern_search(
-        &self,
-        src: &Src,
-        index: u32,
-        re: &Arc<regex::Regex>,
-    ) -> Result<Vec<TextMatch>> {
-        Ok(search(&self.page_text(src, index)?, re))
-    }
-
-    fn search(
-        &self,
-        src: &Src,
-        index: u32,
-        query: &str,
-        match_case: bool,
-    ) -> Result<Vec<TextMatch>> {
-        let re = regex::RegexBuilder::new(&regex::escape(query))
-            .case_insensitive(!match_case)
-            .build()?;
-        Ok(search(&self.page_text(src, index)?, &re))
-    }
-
-    fn text_boxes(
-        &self,
-        _src: &Src,
-        _index: u32,
-        rect: sheaf_doc::Box2,
-    ) -> Result<Vec<sheaf_doc::Box2>> {
-        Ok(vec![rect])
-    }
-}
-
 #[test]
 fn tax_form_bookmarks_example() {
     let src = workspace_root().join("plugins/tax-form-bookmarks");
@@ -478,14 +402,13 @@ fn tax_form_bookmarks_example() {
         Manifest::load(&dir).unwrap(),
         LoadOptions::default(),
     );
-    let texts = Pages(vec![
+    let text: Arc<dyn TextService> = Arc::new(FakeText::pages(vec![
         "Form 1040 U.S. Individual Income Tax Return",
         "Form 1040 (2025) Page 2",
         "SCHEDULE C\n(Form 1040)",
         "PAYER'S name\nJPMorgan Chase Bank\nForm 1099-INT",
         "Notes to self",
-    ]);
-    let text: Arc<dyn TextSource> = Arc::new(texts);
+    ]));
     let mut d = doc(5);
     let ctx = |d: &Document| CallContext {
         doc: Some(DocContext {
@@ -622,9 +545,10 @@ fn forms_round_trip_and_waiting_is_free() {
 
 /// A call's reads are the slots it decided by, in the document as it read
 /// it, its base (M10.5 §14.3): listing the pages reads their order, what
-/// each shows and its boxes, and a page's text what it shows; a page's
-/// annotations read its list of them and each mark shown; the outline its
-/// top level and each bookmark.
+/// each shows and its boxes, and a page's text what of the page the file
+/// will draw as text (what it shows, and no annotation, a mark on it
+/// neither); a page's annotations read its list of them and each mark
+/// shown; the outline its top level and each bookmark.
 #[test]
 fn a_call_s_reads_are_the_slots_it_decided_by() {
     use sheaf_doc::prim::Key;
@@ -679,6 +603,8 @@ fn a_call_s_reads_are_the_slots_it_decided_by() {
     let mut on_first = listed();
     on_first.extend([Key::PageAnnots(first), Key::Annot(mark)]);
     assert_eq!(out.reads, on_first);
+    let out = run(&p, "bookmark", None, ctx(&d)).unwrap();
+    assert_eq!(out.reads, listed(), "text reads no mark");
 }
 
 /// A user who turns a page while a plugin's form is open: the document
@@ -793,7 +719,7 @@ fn amount_crossref_bundled_plugin() {
         Manifest::load(&dir).unwrap(),
         LoadOptions::default(),
     );
-    let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
+    let text: Arc<dyn TextService> = Arc::new(FakeText::pages(vec![
         "Schedule K-1 box 1 ordinary income 12,345.67",
         "Form 1040 line 8 $12,345.67 and fee 99.00 and 2,000.00",
         "Workpaper total (12,345.67) memo 12,345.67 rounded 2,000.00",
@@ -974,12 +900,42 @@ fn granted_directories_are_reachable_and_only_as_granted() {
     assert_eq!(std::fs::read_to_string(rw.join("f.txt")).unwrap(), "x");
 }
 
+/// A plugin's text is the page as the file will draw it (M10.5 §14.3),
+/// read under the plugin's inputs. Matches, words and text boxes are in
+/// the page's frame, the file's own `/Rotate` applied and nothing sheaf
+/// turned: on a page the file turns 90°, its crop box off the origin, they
+/// are where the fake engine drew them there, and a region given in that
+/// frame takes the text in it alone. Search folds case.
 #[test]
-fn search_and_text_boxes() {
+fn text_comes_as_the_file_draws_it_in_the_page_s_frame() {
     let p = load("find", Limits::default());
-    let d = doc(1);
-    let err = run(&p, "find", Some("FORM"), ctx(&d)).unwrap_err();
-    assert_eq!(err, PluginError::Failed("1 hits, 1 boxes".into()));
+    let mut d = turned_doc();
+    let page = d.page(0).unwrap();
+    assert_eq!(frame(&d, 0).rotate, Rotation::R90);
+    let text = Arc::new(FakeText::forms());
+    let ctx = |d: &Document| {
+        let mut c = ctx(d);
+        c.doc.as_mut().unwrap().text = text.clone();
+        c
+    };
+    let want = PluginError::Failed(
+        "hits Form@0,10 4x10; words Form@0,10 4x10 1040@5,10 4x10; boxes 0,10 9x10".into(),
+    );
+    assert_eq!(run(&p, "find", Some("FORM"), ctx(&d)).unwrap_err(), want);
+    // In PageSpace, where the service hands it, the first line runs up the
+    // page from (30, 30).
+    let o = TextOpts {
+        inputs: ViewInputs::plugin_text(),
+    };
+    let chars = text.chars(&d.snapshot(), page, &o).unwrap();
+    let f = chars.glyphs[0].rect.unwrap();
+    assert_eq!((f.x, f.y, f.w, f.h), (30.0, 30.0, 10.0, 1.0));
+    d.commit_ops(vec![fixture::rotate(&[page], Turn::Quarter)], "Rotate")
+        .unwrap();
+    assert_eq!(run(&p, "find", Some("FORM"), ctx(&d)).unwrap_err(), want);
+    let asked = text.asked();
+    assert_eq!(asked.len(), 7);
+    assert!(asked.iter().all(|a| *a == o), "{asked:?}");
 }
 
 struct FakeOcr;
@@ -1044,7 +1000,7 @@ fn bookmark_from_pattern_bundled_plugin() {
         Manifest::load(&dir).unwrap(),
         LoadOptions::default(),
     );
-    let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
+    let text: Arc<dyn TextService> = Arc::new(FakeText::pages(vec![
         "Invoice 101\nfor services",
         "nothing here",
         "Invoice 102\nsecond line\nInvoice 103",
@@ -1178,8 +1134,8 @@ fn subtotal_bundled_plugin() {
             .events
             .contains(&sheaf_plugin::EventKind::Region)
     );
-    // The fake engine puts line n at y = 10 + 100n, word x at its offset.
-    let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
+    // The fake engine puts line n at y = 10 + 100n, character k at x = k.
+    let text: Arc<dyn TextService> = Arc::new(FakeText::pages(vec![
         "Rent $1,200.00 W-2\nFees (34.50) 2025\nTotal 9,999",
     ]));
     let d = doc(1);
@@ -1291,7 +1247,7 @@ fn currency_convert_bundled_plugin() {
             },
         )
     };
-    let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
+    let text: Arc<dyn TextService> = Arc::new(FakeText::pages(vec![
         "Invoice total €1.234,56 and fee GBP 20.00",
         "Already dollars: $500.00",
     ]));
@@ -1468,7 +1424,7 @@ fn duplicate_pages_bundled_plugin() {
             ..LoadOptions::default()
         },
     );
-    let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
+    let text: Arc<dyn TextService> = Arc::new(FakeText::pages(vec![
         "Statement 101 total 5,000",
         "Invoice 7",
         "Statement 101 total 5,000",
@@ -1741,7 +1697,7 @@ fn api_03_sees_every_kind_and_its_preferences() {
 /// A plugin's page coordinates are the page as the file shows it
 /// (`wit/sheaf.wit`): on a `/Rotate 90` page with its CropBox off the
 /// origin, what it places is stored in PageSpace and reads back as it
-/// placed it.
+/// placed it, and its text is found where it shows.
 #[test]
 fn a_plugin_works_in_the_page_as_the_file_shows_it() {
     let p = load("frames", Limits::default());
@@ -1839,29 +1795,14 @@ fn a_plugin_works_in_the_page_as_the_file_shows_it() {
         )
     );
 
-    // Unsaved OCR text, PageSpace in the model, is found where it shows.
-    let layer = sheaf_doc::text_layer::from_engine(
-        vec![sheaf_doc::OcrWord {
-            text: "1040".into(),
-            rect: Box2 {
-                x: 50.0,
-                y: 60.0,
-                w: 30.0,
-                h: 10.0,
-            },
-            confidence: 0.9,
-        }],
-        &d.geom(d.page(0).unwrap()),
-        "test",
-    );
-    d.commit_ops(fixture::ocr([(page, Arc::new(layer))]), "ocr")
-        .unwrap();
+    // Text, which the text service hands over in PageSpace, is found
+    // where it shows: where the fake engine drew it, on the turned page as
+    // on the plain one.
     let ui = Arc::new(FakeUi::default());
     run(&p, "panel", Some(r"\d{4}"), with_ui(&d, &ui)).unwrap();
     let panels = ui.panels.lock().unwrap();
     let details: Vec<&str> = panels[0].1.iter().map(|r| r.detail.as_str()).collect();
-    // The second page's is the engine's, which is already in the frame.
-    assert_eq!(details, ["50,60", "5,10"]);
+    assert_eq!(details, ["5,10", "5,10"]);
 }
 
 /// A region event is PageSpace; a plugin gets it as the file shows the

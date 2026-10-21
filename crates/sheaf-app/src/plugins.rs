@@ -27,18 +27,19 @@ use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use gpui::{App, Context, Entity, Global, KeyBinding, KeyBindingContextPredicate, Window};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::realize::{EngineKey, ViewInputs};
+use sheaf_doc::realize::ViewInputs;
 use sheaf_doc::{
     Actor, Cause, ChangeSet, Commit, CommitOpts, Document, EditError, GroupKind, PageId, Snapshot,
-    Src, Stale, Tx,
+    Stale, TextService, Tx,
 };
+use sheaf_ops::text::Text;
 use sheaf_ops::views::{ViewPages, Views};
 use sheaf_plugin::ui::{FieldAnswer, Form, PanelRow, ShowPanel, Ui};
 use sheaf_plugin::{
     Call, CallContext, CallOutput, Limits, LoadOptions, Manifest, Permissions, Plugin, PluginError,
-    Runtime, Status, TextMatch, TextSource,
+    Runtime, Status,
 };
-use sheaf_render::{Budget, Job, PageIndex};
+use sheaf_render::{Budget, Job};
 
 use crate::availability::When;
 use crate::commands::{Command, CommandRegistry, Run, ShowPluginPanel, Target};
@@ -870,87 +871,6 @@ fn register(m: &Manifest, dir: &Path, cx: &mut App) -> Vec<String> {
     errors
 }
 
-/// Page text and pattern search from the sources' base engines, in the
-/// pool's background budget, until M10.5 slice 14's text service.
-struct EngineText(Views);
-
-impl EngineText {
-    /// What source `src`'s text is read from.
-    fn base(&self, src: &Src) -> sheaf_render::Target<EngineKey> {
-        self.0.base(src, Budget::Background)
-    }
-}
-
-impl TextSource for EngineText {
-    fn page_text(&self, src: &Src, index: u32) -> Result<String> {
-        let rx = self.0.pool().page_text(self.base(src), PageIndex(index));
-        futures::executor::block_on(rx).context("render thread is gone")?
-    }
-
-    fn pattern_search(
-        &self,
-        src: &Src,
-        index: u32,
-        re: &Arc<regex::Regex>,
-    ) -> Result<Vec<TextMatch>> {
-        let page = PageIndex(index);
-        let rx = (self.0.pool()).pattern_search_page(self.base(src), page, re.clone());
-        let hits = futures::executor::block_on(rx).context("render thread is gone")??;
-        Ok(Self::hits(hits))
-    }
-
-    fn search(
-        &self,
-        src: &Src,
-        index: u32,
-        query: &str,
-        match_case: bool,
-    ) -> Result<Vec<TextMatch>> {
-        let (page, query) = (PageIndex(index), query.to_string());
-        let rx = (self.0.pool()).search_page(self.base(src), page, query, match_case);
-        let hits = futures::executor::block_on(rx).context("render thread is gone")??;
-        Ok(Self::hits(hits))
-    }
-
-    fn text_boxes(
-        &self,
-        src: &Src,
-        index: u32,
-        rect: sheaf_doc::Box2,
-    ) -> Result<Vec<sheaf_doc::Box2>> {
-        let rect = sheaf_render::Rect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: rect.h,
-        };
-        let rx = (self.0.pool()).text_boxes_in_rect(self.base(src), PageIndex(index), rect);
-        let boxes = futures::executor::block_on(rx).context("render thread is gone")??;
-        Ok(boxes.into_iter().map(to_box).collect())
-    }
-}
-
-impl EngineText {
-    fn hits(hits: Vec<sheaf_render::SearchHit>) -> Vec<TextMatch> {
-        hits.into_iter()
-            .map(|h| TextMatch {
-                text: h.text,
-                rects: h.rects.into_iter().map(to_box).collect(),
-                groups: h.groups,
-            })
-            .collect()
-    }
-}
-
-fn to_box(r: sheaf_render::Rect) -> sheaf_doc::Box2 {
-    sheaf_doc::Box2 {
-        x: r.x,
-        y: r.y,
-        w: r.w,
-        h: r.h,
-    }
-}
-
 /// OCR for plugins: one page at a time through `sheaf_ocr::job`, drawn as
 /// the app's OCR draws pages ([`ViewPages`]), from the call's base, with
 /// the user's engine and options as they were when the plugin started.
@@ -1182,8 +1102,10 @@ pub fn ocr_source(views: &Views, config: sheaf_ocr::OcrConfig) -> Arc<dyn sheaf_
     Arc::new(EngineOcr(views.clone(), config))
 }
 
-pub fn text_source(views: &Views) -> Arc<dyn TextSource> {
-    Arc::new(EngineText(views.clone()))
+/// Pages' text for plugins, read through `views` in the background
+/// budget, each page from what it draws (M10.5 §10.5).
+pub fn text_source(views: &Views) -> Arc<dyn TextService> {
+    Arc::new(Text::new(views.clone(), Budget::Background))
 }
 
 enum CallKind {
@@ -1659,7 +1581,7 @@ mod tests {
         use sheaf_edit::{Rotation, Turn};
         use sheaf_image::raster::PixelFormat;
         use sheaf_render::pdfium::PdfiumEngine;
-        use sheaf_render::{EnginePool, Renderer};
+        use sheaf_render::{EnginePool, PageIndex, Renderer};
         let store = sheaf_doc::Store::new();
         let primary = sheaf_doc::store::blank(&store, 2);
         let policy = Box::new(sheaf_doc::FixedCount(10));

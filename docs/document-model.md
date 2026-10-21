@@ -462,13 +462,13 @@ not what's stored.
   way in, a mark's `turn` the frame's rotation. `page-info`'s size is the
   page as shown, sheaf's turn included, while its coordinates aren't;
   API 0.4's to-view and from-view matrices end that (slice 20).
-- **PDFium's text is still in the source page's displayed space**
-  (`page_chars`, `search_page`, `pattern_search_page` and
-  `text_boxes_in_rect`, through a device 16 times the page's size) until
-  slice 14's text service. The app maps it into PageSpace where it
-  arrives, through the source page's `from_view` (`PageChars::from_engine`,
-  `merge_source_hits`); the plugins' text source passes it on as it is,
-  since that is 0.3's frame.
+- **PDFium's text is PageSpace** (slice 14): `page_chars` gives each
+  character's loose box as PDFium has it, in the page's user space, with
+  the angle it's drawn at, and `PageChars` finds lines in the frame most
+  of the page's characters are drawn upright in, not by its `/Rotate`
+  (Text and printing). The device 16 times the page's size that mapped
+  text into the displayed space is gone; plugins' text is mapped into
+  0.3's frame at the API's edge, as marks are.
 - **The clipboard** (version 2) holds marks in the edit frame of the page
   they were copied from, each turned relative to it. A paste maps them
   through the target page's frame, so they land where they were seen and
@@ -2694,10 +2694,11 @@ print preview nor what OCR reads:
 
 | Consumer | Inputs | Draws |
 |---|---|---|
-| The page view, the thumbnails, blank review's previews, the Header & Footer preview | `screen()`, with `hidden`, `dragging` and `ocg_off` the view's | everything; sheaf's marks GPUI draws over the page (`ByHost`) |
+| The page view, the thumbnails, blank review's previews, the Header & Footer preview; Find, Patterns, selection, calculator picks and text markup (slice 14) | `screen()`, with `hidden`, `dragging` and `ocg_off` the view's | everything; sheaf's marks GPUI draws over the page (`ByHost`) |
 | Print preview | `print(markup)` | with "Comments and markups", as the screen; without, no marks and no other tools' comments (as `print_pdf` prints), the form's widgets either way |
-| OCR (`ViewPages`), blank review's reads, plugins' text, search and recognition | `content_only()` | the page's own content: no header, recognized text, widgets or annotations, at its shown box |
+| OCR (`ViewPages`), blank detection and blank review's reads, plugins' recognition | `content_only()`; blank detection's text with `ocr_over` (slice 14) | the page's own content: no header, recognized text, widgets or annotations, at its shown box |
 | Plugins' renders | `plugin()`: `screen()` with `marks: ByEngine`, for the render and its reads alike | as the saved file will draw it, sheaf's marks and the unsaved header included, in the file's own orientation |
+| Plugins' text (slice 14) | `plugin_text()`: `plugin()` with no marks, widgets or other tools' annotations, for the text and its reads alike | what of the page PDFium reads as text: its content, the unsaved header and recognized text; no annotation's text, which PDFium's text page never reads |
 
 `foreign` (other tools' comments and links) isn't in §10.1's list: print
 preview without markup and `content_only` draw no annotations at all,
@@ -2765,12 +2766,12 @@ nowhere), and `Order` when a generator on the page that the file doesn't
 draw numbers pages or a drawn link is on it; never `Geom`.
 `Tx::read_render(p, inputs)` notes them as the transaction's decision
 reads: an OCR flush and blank review's delete under `content_only`, a
-plugin's text, search and recognition likewise (as free functions,
-`render_reads`, into `HostState`), and a plugin's render under its own
-inputs. Two changes still don't conflict with such a read: a generator
-added after it, whose id no read could name, and a page that a link
-leading nowhere comes to lead to again by a replace (the link's target
-showing again without an order change); both change the key.
+plugin's recognition likewise (as free functions, `render_reads`, into
+`HostState`), and a plugin's render and, from slice 14, its text under
+its own inputs. Two changes still don't conflict with such a read: a
+generator added after it, whose id no read could name, and a page that a
+link leading nowhere comes to lead to again by a replace (the link's
+target showing again without an order change); both change the key.
 
 ### The realizer
 
@@ -2849,16 +2850,16 @@ plugins' renders and the dialogs' previews never see the failure, and as
 a render key is what a page draws, not where from, the image that lands
 is under the key the next frame's view has, so no blank image is kept and
 nothing is asked again. A section PDFium refuses over a base it reads
-would be drawn standalone too; `realize_corpus` fails on one. What reads
-the base engine or the file still fails on such a source: queries of the
-base engine (text, Find, Patterns, selection, plugin text, OCR's "skip
-pages with text" check, which fails each page, the form type) until slice
-14's text service; printing, which opens the file's path in PDFium
-(`PdfiumEngine::open(path)`) until slice 14 prints from bytes; and Remove
-Blank Pages and Trim White, which open the source's bytes in an engine of
-their own (`sheaf_ops::engine_for`) until slices 14 and 15. The
-document's notice says its pages are drawn from sheaf's copy and Find
-and selection don't work on it.
+would be drawn standalone too; `realize_corpus` fails on one. From slice
+14 a page's text is read the same way (a query's fallback), so text,
+Find, Patterns, selection, plugin text, OCR's "skip pages with text"
+check and Remove Blank Pages work on such a source, and printing it
+prints sheaf's own print file from memory, as every print does (Text and
+printing). What still fails on it is the form type's query, which has no
+page to fall back to and is how the document learns of the refusal, and
+Trim White, which opens the source's bytes in an engine of its own
+(`sheaf_ops::engine_for`) until slice 15. The document's notice says its
+pages are drawn from sheaf's copy.
 
 **The overlay** is an emission (`EmitScope::Pages`, `EmitBase::Overlay`)
 over the source's bytes, with that source the emission's own and no
@@ -2944,18 +2945,18 @@ fills each read across the segments' boundary (`Segments`, slice 2) by
 `overlay` says whether it's a base engine; and its probe says whether the
 source is still a document's (a `Weak<Source>`). sheaf-render doesn't
 depend on sheaf-doc, so the pool is generic over its key and knows
-nothing of the realizer. Renders (`Req`), text queries
-(`page_text_len`, `page_text`, `page_chars`, `text_boxes_in_rect`,
-`search_page`, `pattern_search_page`, `form_type`) and document searches
-(`search`, four pages a turn between renders, several at once, ended by
-dropping the receiver) keep the old worker's ways: priorities, and a
-dropped receiver's render skipped. Requests in a batch for one render (an
-engine's page by one job, drawing and format) render once and each is
-answered with the image, since in a pool of the whole process two
-documents, print preview or a plugin may ask for the same one. An
-opener, a render, a query or a search step that panics (a malformed
-file) fails its own request with why, as an engine that doesn't open
-does, and the worker serves every other.
+nothing of the realizer. Renders (`Req`), queries (`query`, a closure
+run on an engine's page, falling back as a render does, from slice 14;
+`form_type`) and walks over a document's pages (`walk`, slice 14: four
+pages a turn between renders, each on its own engine, several at once,
+ended by dropping the receiver) keep the old worker's ways: priorities,
+and a dropped receiver's render skipped. Requests in a batch for one
+render (an engine's page by one job, drawing and format) render once and
+each is answered with the image, since in a pool of the whole process
+two documents, print preview or a plugin may ask for the same one. An
+opener, a fallback, a render, a query or a walk's page that panics (a
+malformed file) fails its own request, or page, with why, as an engine
+that doesn't open does, and the worker serves every other.
 
 - **Pinned** engines are each pane's, the thumbnail strip's and print
   preview's visible ones (`docview::Pins`, which tells the pool only
@@ -2971,10 +2972,21 @@ does, and the worker serves every other.
   next request (about every 1,256 distinct pages a lone base engine draws,
   by the estimate; on the heavy 7k each reopen takes about 0.7 s, its
   form environment loading every field).
-- **The background's** requests (OCR, plugins' scans) use any open
-  engine without moving the screen's order, and otherwise open their own,
-  at most 2 in 32 MB, so a walk never closes a screen engine; a screen
-  request or a pin makes one of theirs the screen's.
+- **The background's** requests (OCR, blank detection, plugins' text
+  and scans) use any open engine without moving the screen's order, and
+  otherwise open their own, at most 2, so a walk never closes a screen
+  engine; a screen request or a pin makes one of theirs the screen's.
+  Their group and patch engines weigh at most 32 MB. From slice 14 their
+  base engines grow into what the screen's engines leave of 96 MB, and
+  past it the heaviest over 16 MB closes, as the screen's does: held to
+  32 MB, a base engine opened again every ~380 pages (19 times in Find
+  Blank Pages over the synthetic 7k; 6 now).
+- **Walks** (from slice 14) hold the engine they read their last page
+  on: no count or byte rule but the base engines' closes it until the
+  walk reads on another or ends. With pinned engines filling the
+  screen's 6, Find's group engine closed after every page it read and
+  opened again for the next (6,232 opens over the headed synthetic 7k,
+  37.5 s; 49 and 12.1 s held).
 - **Weights** are an estimate, since PDFium reports none: 4 MiB an engine
   (`OPEN_BYTES`, slice 2's scoped engines measured 0.8–3.6 MB open), 75 KiB
   a page loaded (`PAGE_BYTES`, the scanned's 74 KB a page) and the bytes of
@@ -2992,7 +3004,7 @@ does, and the worker serves every other.
   told (`Opener::on_refused`), and a render that names where else its
   page is (`Req::fallback`) renders from there (the realizer's section,
   above).
-- **Idle,** the worker blocks on its channel; with no search walking it
+- **Idle,** the worker blocks on its channel; with no walk pending it
   wakes only for a request.
 
 ### The app on views
@@ -3027,28 +3039,29 @@ does, and the worker serves every other.
   pinned while the dialog is open.
 - **OCR** reads pages through `ViewPages`: each page of the run's snapshot
   realized under `content_only`, in the background's budget at the lowest
-  priority, turned as it shows; its text length from the base engine.
+  priority, turned as it shows; from slice 14 its text length is the
+  text service's (`Text`, the background's budget) under `content_only`,
+  each page read from its own view.
   sheaf-ocr's `PageSource` takes the `OcrPage` (`text_len(&OcrPage)`,
   `render(&OcrPage, width)`), one source a run. OCR no longer reads
   widgets or comments as a page's content.
-- **Plugins.** `TextSource` reads a source page (`&Src`, index) from its
-  base engine, `OcrSource::recognize` and `RenderSource::render` take the
-  call's snapshot and the page: a recognition through `ViewPages`, a
-  render realized under `ByEngine` inputs in the background's budget, in
-  the file's own orientation (docs/plugins.md).
-- **Text, search and opening.** Find and Patterns walk the primary's base
-  engine (`Doc::search`, the screen's budget, a new search dropping the
-  old one's receiver); text selection reads a page's characters from its
-  source's base engine. Text from an edited page's realization, and
-  unsaved OCR text, are slice 14's text service. Opening, recovering and
+- **Plugins.** A call's text is the text service's (from slice 14;
+  `DocContext.text`, until then `TextSource` by source page), and
+  `OcrSource::recognize` and `RenderSource::render` take the call's
+  snapshot and the page: a recognition through `ViewPages`, a render
+  realized under `ByEngine` inputs in the background's budget, in the
+  file's own orientation (docs/plugins.md).
+- **Text, search and opening.** Find, Patterns and text selection read
+  each page from its view through the text service (from slice 14, Text
+  and printing; slice 13 had Find read the primary's base engine, and
+  selection each page's source's). Opening, recovering and
   inserting open no engine: `DocView::ask_form_type` asks the primary's
   base engine for its form type at install, which is what first opens it
   (the XFA-only bar waits for it), and a PDFium failure there becomes the
   document's notice ("The pages can't be drawn: …") rather than a failed
   open, or, when PDFium refused the file, that its pages are drawn from
-  sheaf's copy and Find and selection don't work on it; a password is the
-  model's reader's to ask for. `--timing` prints
-  the engine's open on a line of its own.
+  sheaf's copy; a password is the model's reader's to ask for.
+  `--timing` prints the engine's open on a line of its own.
 - **The Header & Footer dialog's preview** lowers its op on the current
   version off the UI thread (a newer lowering supersedes an older one's
   picture, by a generation token; an op equal to the last isn't lowered
@@ -3108,6 +3121,237 @@ and its pages are viewed again, each from its group; a section refused
 over a base PDFium reads fails instead. `SHEAF_REALIZE_ONLY`, corpus
 paths comma-separated, narrows a run to those files by hand (set but
 naming none, it fails).
+
+## Text and printing (M10.5 slice 14)
+
+A page's text is read from what it draws, as its pixels are: the text
+service reads each page's characters from the engine and page its view
+renders from, under the inputs its caller passes, so the screen, the
+file and the text agree (§10.5 of `todos/m10.5-edit-api.md`). An
+inserted file's page, a duplicate, a crop, a page with recognized text
+or a header not yet saved, and every page of a source PDFium refuses have
+the text they draw. Printing, print preview and page images come from
+bytes in memory, and nothing reaches disk (§10.6).
+
+```rust
+pub trait TextService: Send + Sync {                  // sheaf_doc, blocking
+    fn chars(&self, snap: &Snapshot, page: PageId, o: &TextOpts) -> Result<Arc<PageChars>>;
+}
+pub struct TextOpts { pub inputs: ViewInputs }
+pub enum Query { Literal { query: String, match_case: bool }, Pattern(Arc<Regex>) }
+impl PageChars { pub fn find(&self, q: &Query) -> Vec<TextHit>; pub fn text_len(&self) -> usize; }
+pub struct Text { views: Views, budget: Budget, .. } // sheaf_ops::text, impl TextService
+impl Text {
+    pub fn chars(&self, st, page, inputs) -> oneshot::Receiver<Result<Arc<PageChars>>>;
+    pub fn cached(&self, st, page, inputs) -> Option<Arc<PageChars>>; // a paint's
+    pub fn search(&self, st, q: Query, inputs) -> mpsc::UnboundedReceiver<Found>;
+}
+impl<K> EnginePool<K> {                               // sheaf_render::pool
+    pub fn query<T>(&self, target, page, fallback: Option<Fallback<K>>,
+                    f: impl FnOnce(&PdfiumEngine, PageIndex) -> Result<T>) -> oneshot::Receiver<Result<T>>;
+    pub fn walk<T: From<Walked>>(&self, count, item, work, tx: UnboundedSender<T>);
+}
+```
+
+### Characters in PageSpace
+
+`Renderer::page_chars` gives each character PDFium extracts with its
+loose box as PDFium has it, in the page's user space (PageSpace, §5), and
+the angle it's drawn at, counter-clockwise (PDFium's
+`FPDFText_GetCharAngle` is clockwise, and is turned around); a character
+PDFium generates (a space between words, a line break) has no box. The
+device 16 times the page's size that mapped text into the displayed
+frame is gone. `PageChars::from_engine` reads lines in the frame most
+of the boxed characters are drawn upright in (`upright`, the nearest
+quarter turn, the lesser on a tie, R0 with none), not by the page's
+`/Rotate`, so text that runs down the page selects a line at a time, and
+a page's characters don't depend on its `/Rotate` or crop box: the same
+for a page and its turned or cropped copy (its render key still has its
+boxes). A page whose text reads upright as it shows reads as before.
+`pdfium::frames` checks every turned or offset corpus page's character
+boxes, mapped through the page's `to_view`, against PDFium's own
+page-to-device mapping within 1/16 pt (on a plain page the frame is the
+y flip `to_view_is_pdfium_s_page_to_device_on_every_page` checks), and
+sheaf-ops' text tests check each turned or offset corpus page
+duplicated, read from its group's realization, against its source page
+(780,238 characters, none apart, asserted as a floor over the full
+corpus).
+
+`PageChars::find` matches the text as `text()` reads it: words apart by
+a space, lines by a line break. A literal's words match where the
+page's are apart by any whitespace, a line break, two spaces or a
+no-break space, as `FPDFText_Find`'s did, so a phrase wrapped onto the
+next line is found, a rect on each line. It's one regex, compiled once
+per search (`Query::literal`): the query's words escaped and joined by
+`\s+`, case-insensitive unless it matches case, and its matches don't
+overlap. A
+pattern runs over the characters as they read and keeps its capture
+groups; a match of separators alone isn't one. Each hit has a rect a
+line, in PageSpace. This replaces PDFium's `FPDFText_Find` and the OCR
+layers' search beside it, so every consumer matches the same way.
+
+### The text service
+
+`Text` (sheaf-ops) is one document's text in one budget: the app's
+`Doc.text` in the screen's, plugins' and blank detection's in the
+background's. A page's characters are read on the pool's worker by a
+query (`EnginePool::query`): its view (`Views::view`), then where that
+view reads it (`Views::locate`: the engine, the page's index there, and
+the fallback a render of it would have), then `page_chars` and
+`PageChars::from_engine` on the engine. What's read is kept by the page's
+render key, the last 64 pages (`CHARS_KEPT`, the oldest read let go
+first): a page that draws the same under the same inputs, in this state
+or another, or as a duplicate, is read once, and anything it draws
+changing changes its key, so an edit reads it again. §10.5's cache of
+untouched pages by source and index is this one, since an untouched
+page's key is its base page's. `Text::cached` is the paint's, which can't
+wait; `TextService::chars` blocks, for a thread that may wait on the pool
+(a plugin call's, blank detection's), never the worker's.
+
+A query is the pool's generic request: a closure run on the page of the
+engine, given the page it reads. It falls back as a render does: when
+PDFium refuses the engine's bytes, the fallback runs once on the worker
+and the closure reads the page of the engine it names (the page's group,
+a file of its own), so a source PDFium refuses has text, through its
+groups, even for a page viewed on its base before the refusal was known.
+A password error doesn't fall back, and a fallback that panics fails its
+query alone. The form type's query has no page and no fallback: it's how
+a document learns PDFium refused its file.
+
+What each consumer reads under (`TextOpts.inputs`, §10.4):
+
+| Consumer | Inputs | Budget |
+|---|---|---|
+| Find and Patterns, selection, calculator picks, text markup (the app's `Doc.text`) | the screen's (`Doc.inputs`) | the screen's |
+| A plugin's `page-text`, `search`, `pattern-search`, `text-boxes` and `words` | `plugin_text()`, the page's text as the saved file will draw it (§14.3) | the background's, a `Text` a call |
+| OCR's "skip pages with text" (`ViewPages::text_len`) | `content_only()` | the background's |
+| Blank detection's text | `content_only()` with `ocr_over` | the background's |
+
+PDFium extracts a page's text from its content, never from a widget's
+appearance, so no consumer reads a form field's value as text; §10.5's
+`fields` (fields' display text, M10 slice 14) has no use yet, and
+`TextOpts` names only the inputs.
+
+### Find and Patterns
+
+A search walks the document's own order on the pool's worker
+(`Text::search` over `EnginePool::walk`), four pages a turn between
+renders: at each position the walk views the page and locates it, then
+reads its characters on that page's engine (falling back as a query
+does), runs `find`, and sends the page's hits with its position and id
+(`Found::Hits`), then how far it has got (`Found::Scanned`), and `Done`
+last, on one channel so a page's hits come before its `Scanned`. Each page
+is read where its view is: an untouched page on its source's base engine,
+an edited, inserted or duplicated one on its group's realization, a
+crop's on its derived copy (until slice 15 makes crop geometry). A walk
+keeps nothing of what it reads (a 7k walk never evicts the screen's
+selection characters), holds its state until it's done or its receiver
+is dropped (the app drops it on a new search and at close), and passes
+over, logged, a page whose engine doesn't open or whose read fails or
+panics. It holds the engine it reads on, so the screen's count never
+closes a group's engine between two of its pages. The worker blocks on its channel when no walk is pending. The app
+reads under the screen's inputs, so a header not yet saved and recognized
+text are found, and hits are in PageSpace, by `PageId` and position
+(`Hit::on`).
+
+### The app's text
+
+Text selection, calculator picks and markup dragged over text go through
+`DocView::with_chars`, which answers from `Doc.text`'s cache or asks for
+the page and calls back when it's read; an answer whose page's render
+key changed while it was read (an edit in between) is read again as the
+page is now. A selection keeps the characters it was made in
+(`TextSel.chars`), and paints, copies and marks up from them, so an edit
+that changes the page's render key leaves it working: a comment on it
+hidden, or a page deleted under a "Page <<1>> of <<N>>" header (a turn
+changes the key only where a generator is laid out in the turned page;
+characters are in PageSpace). On a page with recognized text and a
+header, the text reads in draw order: the page's own, then the
+recognized words, then the header.
+
+When PDFium refuses the primary, the notice says "PDFium can't read this
+file as saved, so its pages are drawn from sheaf's copy": Find, Patterns,
+selection and plugin text read its pages from their groups.
+
+### Plugins, blank detection and OCR
+
+- **Plugins.** A call's `DocContext.text` is a `TextService`, a `Text` of
+  its own in the background's budget. Its text calls read under
+  `plugin_text()`, what of `plugin()` PDFium reads as text, and record
+  that page's `render_reads` under it (the page, every generator, and the
+  order where a page-numbering header calls for it), so an unsaved
+  header's edit conflicts with a call that read the page's text and a
+  comment's doesn't; `recognize` still reads `content_only()`. Matches go out through the
+  page's 0.3 frame (`to_frame`), a rect a plugin passes to `text-boxes`
+  coming back through its inverse. The OCR layer's own special cases
+  (searching an unsaved layer beside PDFium, `ocr_text` branches) are
+  gone: the realization draws the layer.
+- **Blank detection** (`blank::find`, Find Blank Pages and `sheaf
+  remove-blanks`) walks the wanted pages in the document's order through
+  the document's views: annotations first as before, then the page's text
+  under `content_only` with `ocr_over` (recognized text not yet saved
+  still counts, as it did; a header never does), then its pixels under
+  `content_only`, rendered at about 60 dpi by the pool in the
+  background's budget, with `progress.check` between pages. A failed text
+  read counts as no text, so the pixels decide. A page at a time, each a
+  query: over the synthetic 7k 12.3 s and 6 base engine opens, beside
+  10.4 s for its old engine's `page_text` (the heavy's pages all have
+  annotations, so none is read). It no longer opens an
+  engine of its own (`engine_for` remains for Trim White until slice 15);
+  the command line, which has no process pool, makes views of its own
+  (`Views::start`).
+- **OCR's "skip pages with text"** reads each page's text length through
+  `ViewPages`' `Text` under `content_only`, so a page of a refused source
+  is checked through its group rather than failing.
+
+### Printing and page images
+
+The print file (`save::print_pdf`) is made in memory and handed to the
+spooler from there (`sheaf_print::submit(job, Arc<[u8]>)`): CUPS runs
+`lp <options> -`, reading the job on its stdin from a thread of its own
+while `lp`'s output is read (a failed `lp` says why first; a write that
+fails after `lp` succeeded fails the job), and GDI opens the bytes with
+`PdfiumEngine::open_bytes`. That was `PdfiumEngine::open(path)`'s last
+use, and it's gone: PDFium opens only bytes. Print preview draws through
+the views (slice 13), and image export (PNG, TIFF) renders print_pdf's
+bytes on an engine of its own, already in memory before this slice; the
+only file it writes is its output's, the TIFF through a `.part` beside
+it. A child-process test runs print, print preview and both exports with
+`TMPDIR` an empty, unwritable directory and a fake `lp` reading its
+stdin. A source PDFium refuses prints: its print file is sheaf's own.
+
+**Deleted:** the app's own character cache (`CharsKey`, `chars_key`,
+`cache_chars`, `CACHED_PAGES`, `Doc.page_chars`) and
+`PageChars::from_layer`; Find on the primary's base engine
+(`Doc::search`, `index_of_source_page`, `layer_hits`,
+`merge_source_hits`, `Matcher`, `SearchEvent`, the pool's one-engine
+search); the OCR layers' own search (`text_layer::search`,
+`pattern_search` and their helpers, `TextLayer::text` and
+`boxes_in_rect`); the 16× device and the queries through it
+(`Renderer::search_page`, `pattern_search_page`, `text_boxes_in_rect`,
+`SearchHit`, `sheaf_render::Rect`) and the pool's text queries
+(`page_chars`, `page_text`, `page_text_len` and the rest, now `query`);
+plugins' `TextSource`, `TextMatch` and `EngineText`; blank detection's
+own engine; the print temp file and `PdfiumEngine::open(path)`.
+`tests/retired.rs` lists them, but for `sheaf_render::Rect`, whose name
+`geom::Rect` still has.
+
+**Numbers** (AMD EPYC 7302P, release; the 7k gate harness, one run each,
+no baseline or gate):
+
+| Find "Draft" over every page, the screen's budget and inputs | Synthetic | Heavy |
+|---|---|---|
+| as opened (no hit; every page on the base engine) | 11.4 s, 612 pages/s, 6 engines opened | 8.0 s, 874 pages/s, 6 engines opened |
+| a header on every page (7,000 hits, each page from its group) | 12.2 s, 574 pages/s, 55 engines opened | 9.1 s, 773 pages/s, 55 engines opened |
+
+As opened, the base engine opens six times: once, then again each time
+the pages it has loaded take the screen's engines past 96 MB (about every
+1,200 pages, as the pool's bound says); headed, each of the 55 groups'
+engines opens once and the base engine never. Reading a page's
+characters with their boxes is about 1.2× PDFium's own `FPDFText_Find`
+on the same page (one engine, no pool: 11.1 s against 9.0–9.3 s for the
+synthetic's 7,000 pages, 7.5 s against 6.2 s for the heavy's), since it
+asks PDFium four things a character.
 
 ## Non-goals of this design
 
@@ -3254,12 +3498,12 @@ put with the page's `PageDef`.
   Undoing the run, or jumping away from it, makes its next flush
   `GroupEnded`: the run stops ("OCR stopped: its results were undone")
   rather than put undone results back.
-- **Search.** PDFium can't see unsaved layers, so Find and Patterns run the
-  same literal/regex search over the pages' `OcrText` layers
-  (`text_layer::search`, `pattern_search`, until slice 14's text service)
-  and merge the hits with PDFium's, dropping PDFium's for any page that
-  has a layer. Hits are addressed by `PageId`, so inserted pages and
-  reordered pages work too.
+- **Search.** An unsaved layer is drawn into its page's realization,
+  invisible, as a save writes it, so Find, Patterns, selection, plugins
+  and blank detection read its words from the page as they read any text
+  (M10.5 slice 14's text service, under inputs with `ocr_over`; until
+  then a search of the layers merged beside PDFium's). Hits are addressed
+  by `PageId` and position, so inserted and reordered pages work too.
 
 ## Open questions
 

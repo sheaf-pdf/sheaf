@@ -8,6 +8,7 @@ use clap::{Args, ValueEnum};
 use sheaf_image::blank::Sensitivity;
 use sheaf_ops::blank::BlankParams;
 use sheaf_ops::export::stem_of;
+use sheaf_ops::views::Views;
 
 #[derive(Args)]
 #[command(about = "Remove blank pages from a PDF")]
@@ -79,8 +80,9 @@ pub fn run(args: BlanksArgs, quiet: bool) -> anyhow::Result<()> {
         },
         keep_intentional: args.keep_intentional,
     };
+    let views = Views::start()?;
     let found = crate::progress::run("looking", quiet, |p| {
-        sheaf_ops::blank::find(&snap, pages.as_deref(), params, p)
+        sheaf_ops::blank::find(&snap, &views, pages.as_deref(), params, p)
     })?;
     let (drop, keep): (Vec<_>, Vec<_>) = found
         .into_iter()

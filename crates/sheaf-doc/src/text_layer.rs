@@ -3,9 +3,9 @@
 //! A [`TextLayer`] is the words an OCR engine recognized on one page. It
 //! lives in [`DocState`](crate::DocState) until the document is saved, when
 //! it is written into the page as an invisible text layer (text render mode
-//! 3) so PDFium, Acrobat and everything else can search and select it. The
-//! model-side search over unsaved layers lives here too, so Find works
-//! before the first save.
+//! 3) so PDFium, Acrobat and everything else can search and select it.
+//! Until then a page's realization draws it the same way, so Find and
+//! selection read it from there (M10.5 §10.5).
 //!
 //! Word rects are in PageSpace (M10.5 §5), like marks, so cropping or
 //! turning the page moves none of them. The frame the text reads upright
@@ -57,20 +57,6 @@ pub(crate) fn upright_box(layer: &TextLayer, w: &OcrWord) -> Box2 {
     Affine::upright(layer.upright).apply_box(w.rect)
 }
 
-/// An upright-frame box back in PageSpace.
-pub(crate) fn unrotate_from_upright(layer: &TextLayer, b: Box2) -> Box2 {
-    Affine::upright(layer.upright).inverse().apply_box(b)
-}
-
-/// The line word `word` is on.
-fn line_of(layer: &TextLayer, word: usize) -> usize {
-    layer
-        .lines
-        .iter()
-        .position(|l| l.contains(&word))
-        .unwrap_or(0)
-}
-
 /// Order `words` into lines (top to bottom, then left to right) and return
 /// the index range of each line. A word joins the current line when its
 /// vertical overlap with it is at least half the smaller height.
@@ -111,157 +97,6 @@ fn group_lines(words: &mut Vec<OcrWord>) -> Vec<Range<usize>> {
 pub(crate) fn overlaps_line(line: Box2, r: Box2) -> bool {
     let overlap = line.bottom().min(r.bottom()) - line.y.max(r.y);
     overlap >= 0.5 * line.h.min(r.h)
-}
-
-// ----- search ---------------------------------------------------------------
-
-/// A match in a layer: one rect per line it spans, in PageSpace.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TextHit {
-    pub rects: Vec<Box2>,
-    pub text: String,
-    /// A pattern's capture groups 1…n (None where a group didn't take
-    /// part); empty for a literal search.
-    pub groups: Vec<Option<String>>,
-}
-
-/// The page as one string: words joined by a space within a line, lines
-/// joined by a newline, with each character's owner word.
-struct PageText {
-    s: String,
-    chars: Vec<char>,
-    /// Byte offset of each char in `s`.
-    starts: Vec<usize>,
-    /// `(word index, char index within the word)`; None for separators.
-    owner: Vec<Option<(usize, usize)>>,
-}
-
-fn page_text(layer: &TextLayer) -> PageText {
-    let mut t = PageText {
-        s: String::new(),
-        chars: Vec::new(),
-        starts: Vec::new(),
-        owner: Vec::new(),
-    };
-    let push = |ch: char, owner: Option<(usize, usize)>, t: &mut PageText| {
-        t.starts.push(t.s.len());
-        t.s.push(ch);
-        t.chars.push(ch);
-        t.owner.push(owner);
-    };
-    for (li, line) in layer.lines.iter().enumerate() {
-        if li > 0 {
-            push('\n', None, &mut t);
-        }
-        for (k, wi) in line.clone().enumerate() {
-            if k > 0 {
-                push(' ', None, &mut t);
-            }
-            for (ci, ch) in layer.words[wi].text.chars().enumerate() {
-                push(ch, Some((wi, ci)), &mut t);
-            }
-        }
-    }
-    t
-}
-
-fn fold(c: char) -> char {
-    c.to_lowercase().next().unwrap_or(c)
-}
-
-/// Literal search, like Find.
-pub fn search(layer: &TextLayer, query: &str, match_case: bool) -> Vec<TextHit> {
-    let q: Vec<char> = if match_case {
-        query.chars().collect()
-    } else {
-        query.chars().map(fold).collect()
-    };
-    if q.is_empty() || layer.is_empty() {
-        return Vec::new();
-    }
-    let t = page_text(layer);
-    let hay: Vec<char> = if match_case {
-        t.chars.clone()
-    } else {
-        t.chars.iter().copied().map(fold).collect()
-    };
-    let mut hits = Vec::new();
-    let mut i = 0;
-    while i + q.len() <= hay.len() {
-        if hay[i..i + q.len()] == q[..] {
-            hits.extend(hit_from_span(layer, &t, i, i + q.len()));
-            i += q.len();
-        } else {
-            i += 1;
-        }
-    }
-    hits
-}
-
-/// Regex search, like the Patterns panel.
-pub fn pattern_search(layer: &TextLayer, re: &regex::Regex) -> Vec<TextHit> {
-    if layer.is_empty() {
-        return Vec::new();
-    }
-    let t = page_text(layer);
-    let mut hits = Vec::new();
-    for caps in re.captures_iter(&t.s) {
-        let m = caps.get(0).expect("group 0 always matches");
-        if m.is_empty() {
-            continue;
-        }
-        let first = t.starts.partition_point(|&b| b < m.start());
-        let last = t.starts.partition_point(|&b| b < m.end());
-        if let Some(mut hit) = hit_from_span(layer, &t, first, last) {
-            hit.groups = caps
-                .iter()
-                .skip(1)
-                .map(|g| g.map(|g| g.as_str().to_string()))
-                .collect();
-            hits.push(hit);
-        }
-    }
-    hits
-}
-
-/// The hit for chars `start..end` of the page string: per touched word, the
-/// proportional slice of its box (every glyph advances equally once
-/// written), unioned per line.
-fn hit_from_span(layer: &TextLayer, t: &PageText, start: usize, end: usize) -> Option<TextHit> {
-    // (word, first char, one past last char) in order of first appearance.
-    let mut spans: Vec<(usize, usize, usize)> = Vec::new();
-    for o in t.owner[start..end].iter().flatten() {
-        match spans.last_mut() {
-            Some((w, _, c1)) if *w == o.0 => *c1 = o.1 + 1,
-            _ => spans.push((o.0, o.1, o.1 + 1)),
-        }
-    }
-    if spans.is_empty() {
-        return None;
-    }
-    let mut rects: Vec<(usize, Box2)> = Vec::new();
-    for (wi, c0, c1) in spans {
-        let w = &layer.words[wi];
-        let n = w.text.chars().count().max(1) as f32;
-        let up = upright_box(layer, w);
-        let slice = Box2 {
-            x: up.x + up.w * c0 as f32 / n,
-            y: up.y,
-            w: up.w * (c1 - c0) as f32 / n,
-            h: up.h,
-        };
-        let r = unrotate_from_upright(layer, slice);
-        let line = line_of(layer, wi);
-        match rects.last_mut() {
-            Some((l, prev)) if *l == line => *prev = prev.union(r),
-            _ => rects.push((line, r)),
-        }
-    }
-    Some(TextHit {
-        rects: rects.into_iter().map(|(_, r)| r).collect(),
-        text: t.chars[start..end].iter().collect(),
-        groups: Vec::new(),
-    })
 }
 
 // ----- PDF writing ------------------------------------------------------------
@@ -508,7 +343,6 @@ mod tests {
                 (up.w - seen.w).abs() < 1e-3 && (up.h - seen.h).abs() < 1e-3,
                 "{r:?}: {up:?}"
             );
-            assert_eq!(unrotate_from_upright(&l, up), l.words[0].rect, "{r:?}");
         }
         // On a Letter page turned 90°, the top-left as shown is PageSpace's
         // bottom-left.
@@ -522,106 +356,6 @@ mod tests {
                 h: 10.0
             }
         );
-    }
-
-    #[test]
-    fn literal_search_spans_words_on_a_line() {
-        let l = two_lines();
-        let hits = search(&l, "lo wor", false);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].text, "lo Wor");
-        assert_eq!(hits[0].rects.len(), 1);
-        let r = hits[0].rects[0];
-        // "lo" is the last 2 of 5 chars of Hello: starts at 72 + 50*3/5.
-        assert!((r.x - 102.0).abs() < 1e-3, "{r:?}");
-        // "Wor" is the first 3 of 5 chars of World: ends at 130 + 50*3/5.
-        assert!((r.right() - 160.0).abs() < 1e-3, "{r:?}");
-        // The line is 100 to 110 down the page: 682 to 692 up it.
-        assert!(
-            (r.y - 682.0).abs() < 1e-3 && (r.h - 10.0).abs() < 1e-3,
-            "{r:?}"
-        );
-        assert!(search(&l, "lo wor", true).is_empty());
-        assert!(search(&l, "", false).is_empty());
-        assert!(
-            search(&l, "hello second", false).is_empty(),
-            "no match across lines"
-        );
-    }
-
-    #[test]
-    fn repeated_and_partial_matches() {
-        let l = layer(vec![word("aaaa", 0.0, 0.0, 40.0, 10.0)], Rotation::R0);
-        let hits = search(&l, "aa", true);
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[1].rects[0].x, 20.0);
-        assert_eq!(hits[1].rects[0].w, 20.0);
-    }
-
-    #[test]
-    fn pattern_search_maps_bytes_to_words() {
-        let l = layer(
-            vec![
-                word("SSN", 10.0, 10.0, 30.0, 10.0),
-                word("123-45-6789", 50.0, 10.0, 110.0, 10.0),
-                word("état", 10.0, 30.0, 40.0, 10.0),
-            ],
-            Rotation::R0,
-        );
-        let re = regex::Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap();
-        let hits = pattern_search(&l, &re);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].text, "123-45-6789");
-        assert_eq!(hits[0].rects[0].x, 50.0);
-        assert_eq!(hits[0].rects[0].w, 110.0);
-        // Multi-byte chars before a match don't shift it.
-        let re = regex::Regex::new("tat").unwrap();
-        let hits = pattern_search(&l, &re);
-        assert_eq!(hits.len(), 1);
-        assert!((hits[0].rects[0].x - 20.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn search_in_a_turned_frame_returns_page_space_rects() {
-        // Recognized with the page shown turned 90°: the word sits at the
-        // top-left as shown, PageSpace's bottom-left, and runs up the page.
-        let l = layer(vec![word("Hi", 0.0, 0.0, 20.0, 10.0)], Rotation::R90);
-        assert_eq!(
-            l.words[0].rect,
-            Box2 {
-                x: 0.0,
-                y: 0.0,
-                w: 10.0,
-                h: 20.0
-            }
-        );
-        let hits = search(&l, "i", true);
-        // The second half of the word along the upright frame's x is its
-        // upper half in PageSpace.
-        assert_eq!(
-            hits[0].rects[0],
-            Box2 {
-                x: 0.0,
-                y: 10.0,
-                w: 10.0,
-                h: 10.0
-            }
-        );
-    }
-
-    #[test]
-    fn boxes_in_rect_merges_per_line() {
-        let l = two_lines();
-        // The lines are 682 to 692 and 661 to 672 up the page.
-        let boxes = l.boxes_in_rect(Box2 {
-            x: 60.0,
-            y: 650.0,
-            w: 200.0,
-            h: 50.0,
-        });
-        assert_eq!(boxes.len(), 2);
-        assert_eq!(boxes[0].x, 72.0);
-        assert_eq!(boxes[0].right(), 180.0);
     }
 
     #[test]

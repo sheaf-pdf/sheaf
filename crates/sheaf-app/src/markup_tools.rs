@@ -1064,11 +1064,11 @@ impl DocView {
         }
     }
 
-    /// Mark up the text a rectangle dragged off the text covered (the
-    /// engine's, or an unsaved OCR layer's), with `rect` and the markup in
-    /// PageSpace, turned as the text reads. Where there's no text, a
-    /// highlight covers the area, turned `drawn`, as the page showed when
-    /// it was dragged; the line markups do nothing.
+    /// Mark up the text a rectangle dragged off the text covered (as the
+    /// page shows, recognized text not yet saved too), with `rect` and the
+    /// markup in PageSpace, turned as the text reads. Where there's no
+    /// text, a highlight covers the area, turned `drawn`, as the page
+    /// showed when it was dragged; the line markups do nothing.
     fn markup_from_drag(
         &mut self,
         tool: Tool,

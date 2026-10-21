@@ -173,8 +173,8 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Zoom (fit page / fit width / custom), rotate view | ✅ rotate view is display only (Ctrl+Shift+Plus/Minus) |
 | Thumbnails sidebar (lazy, virtualized) | ✅ |
 | Bookmarks (outline) sidebar | ✅ |
-| Text search (find in document) | ✅ progressive; ~6 ms/page |
-| Select and copy text | ✅ Select tool (V): drag over text, or double-click a word; Ctrl+C copies it. Recognized (OCR) text works before it's saved. Press U with text selected to highlight it |
+| Text search (find in document) | ✅ progressive, in page order, through what each page shows: inserted, duplicated and cropped pages, and a header or recognized (OCR) text before it's saved; about 1–2 ms a page on 7,000-page files |
+| Select and copy text | ✅ Select tool (V): drag over text, or double-click a word; Ctrl+C copies it. Recognized (OCR) text and a header work before they're saved. Press U with text selected to highlight it |
 | Pattern search (regex: SSNs, EINs, amounts, dates) — separate tool from Find, shared engine with redaction | ✅ Patterns panel, Ctrl+Shift+F |
 | User-defined patterns: add, save, and delete presets; several date formats built in | ✅ `patterns.json`; right-click a preset |
 | Multiple documents, one window each | ✅ |

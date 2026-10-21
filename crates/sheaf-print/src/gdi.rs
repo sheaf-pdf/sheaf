@@ -1,9 +1,9 @@
 //! Windows printing through GDI. The printer's driver settings (paper,
 //! orientation, copies, duplex) go in its DEVMODE; each page of the
-//! print PDF is rasterized by PDFium at the device's resolution, in bands,
-//! and blitted where [`crate::place`] puts it.
+//! print PDF, opened from memory, is rasterized by PDFium at the device's
+//! resolution, in bands, and blitted where [`crate::place`] puts it.
 
-use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use sheaf_edit::Rotation;
@@ -212,8 +212,8 @@ fn devmode(name: &str) -> Option<DevMode> {
     }
 }
 
-pub fn submit(job: &JobSettings, pdf: &Path) -> Result<String> {
-    let engine = PdfiumEngine::open(pdf, None)?;
+pub fn submit(job: &JobSettings, pdf: Arc<[u8]>) -> Result<String> {
+    let engine = PdfiumEngine::open_bytes(pdf, None)?;
     let pages = engine.page_count();
     if pages == 0 {
         bail!("nothing to print");

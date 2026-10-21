@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use sheaf_edit::fixture::{blob, every_op, layer};
 use sheaf_edit::{
     AnnotId, AnnotRef, BlobId, BlobSel, BookmarkPatch, BookmarkRef, Envelope, Local, Op, OutlineId,
-    PageId, PageRef, Patch, RangeSet, Rotation, TextLayer, Turn,
+    PageId, PageRef, Patch, RangeSet, Rotation, Turn,
 };
 
 fn pos(s: &str) -> RangeSet {
@@ -351,14 +351,4 @@ fn blob_ids_are_written_as_b_hex_and_length() {
     ] {
         assert!(read::<BlobId>(json!(bad)).is_err(), "{bad}");
     }
-}
-
-#[test]
-fn a_layer_reads_as_its_lines() {
-    assert_eq!(layer().text(), "Form 1040");
-    let two = TextLayer {
-        lines: vec![0..1, 1..2],
-        ..TextLayer::clone(&layer())
-    };
-    assert_eq!(two.text(), "Form\n1040");
 }

@@ -91,7 +91,14 @@
 //! weighed and by the RSS added; and the thumbnail strip after a crop of
 //! every page and the legacy header, every page's preview drawn through a
 //! pool of its own, two panes' groups pinned, with each group's assembly
-//! in the time. From slice 13 the crop and Bates' apply open no engine on
+//! in the time. Slice 14's are Find over every page of the synthetic and
+//! the heavy through the text service, as opened and with a header on
+//! every page, with the engines its pool opened (the base engine again
+//! past its bound), with neither a baseline nor a gate, one run each; and
+//! alone in `text_walks_on_the_synthetic_and_heavy_7k`, Find Blank Pages
+//! over every page and Find with a header on every page past six pinned
+//! group engines, with the engines each opened. From
+//! slice 13 the crop and Bates' apply open no engine on
 //! the copies they make, as the app's don't (its render worker opens one
 //! when a page of a copy is first drawn), where their rows counted one
 //! each before. So far slice 1's history bench, slice 3's geometry walk,
@@ -112,6 +119,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use futures::executor::block_on;
 use lopdf::Object;
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
@@ -125,12 +133,14 @@ use sheaf_doc::tx::fixture::{
 };
 use sheaf_doc::{
     Actor, Annot, AnnotId, AnnotKind, Base, Box2, CommitOpts, Derive, Document, GroupKind, JobKind,
-    OcrWord, PageId, Src, Stale, Store, TextLayer, ViewInputs,
+    OcrWord, PageId, Query, Src, Stale, Store, TextLayer, ViewInputs,
 };
 use sheaf_edit::{Anchor, Op, PageRef, Rotation, Style, Turn};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
+use sheaf_ops::blank::{self, BlankParams};
 use sheaf_ops::crop::{CropSpec, Margins};
+use sheaf_ops::text::{Found, Text};
 use sheaf_ops::views::Views;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::pool::{SCREEN_BYTES, SCREEN_ENGINES};
@@ -648,7 +658,7 @@ fn gates(kind: Kind) {
     let (cold, _) = measure(RUNS, || {
         drop(engine.take());
         let (t, e) = timed(|| {
-            let e = PdfiumEngine::open(&path, None).unwrap();
+            let e = PdfiumEngine::open_bytes(sheaf_util::read_file(&path).unwrap(), None).unwrap();
             e.render(PageIndex(middle), page(1024), PixelFormat::Bgra)
                 .unwrap();
             e
@@ -772,9 +782,46 @@ fn gates(kind: Kind) {
         gate: format!("≤ {SCREEN_ENGINES}, asserted"),
     });
 
+    // Find over every page through the text service (slice 14), one run
+    // each, a walk taking seconds: "Draft", on no page of the file as
+    // opened, every page read from the base engine, which opens again past
+    // its bound (§10.3); then with a header on every page, which it finds
+    // once a page, each read from its group's realization. No baseline or
+    // gate.
+    if kind != Kind::Scanned {
+        for headed in [false, true] {
+            if headed {
+                let every = set_header(header("Draft <<1>>"), None);
+                doc.commit_ops(vec![every], "header").unwrap();
+            }
+            let (took, hits, opened) = find_every_page(&doc, 0);
+            assert_eq!(hits, if headed { PAGES as usize } else { 0 });
+            let what = match headed {
+                false => "Find over every page (text service), as opened",
+                true => "Find over every page (text service), header on every page",
+            };
+            rows.push(Row::time(what, took, f64::NAN, ""));
+            rows.push(Row {
+                what: format!("{what}, rate"),
+                now: Some(f64::from(PAGES) / took.as_secs_f64()),
+                unit: "pages/s",
+                baseline: f64::NAN,
+                gate: String::new(),
+            });
+            rows.push(Row {
+                what: format!("{what}, engines opened"),
+                now: Some(opened as f64),
+                unit: "",
+                baseline: f64::NAN,
+                gate: String::new(),
+            });
+        }
+        doc.undo().unwrap();
+    }
+
     // Previews of the pages from the middle on, as the thumbnail strip
     // renders them.
-    let engine = PdfiumEngine::open(&path, None).unwrap();
+    let engine = PdfiumEngine::open_bytes(sheaf_util::read_file(&path).unwrap(), None).unwrap();
     let (fill, ()) = timed(|| {
         for i in middle..middle + FILL {
             engine
@@ -1189,6 +1236,37 @@ fn gates(kind: Kind) {
     }
 }
 
+/// Find for "Draft" over every page of `doc` as the app's Find walks it
+/// (slice 14): through a pool and a text of their own, in the screen's
+/// budget, under the screen's inputs, with the engines of its first
+/// `pinned` groups drawn and pinned first, as panes and the strip pin
+/// theirs. The time to its end, the matches found, and the engines
+/// the pool opened while it walked.
+fn find_every_page(doc: &Document, pinned: usize) -> (Duration, usize, usize) {
+    let pool = EnginePool::new().unwrap();
+    let views = Views::new(pool.clone());
+    let keys = (0..pinned)
+        .map(|g| drawn(&views, doc, doc.page(g * GROUP as usize).unwrap(), 1024))
+        .collect();
+    pool.pin(pool.owner(), keys);
+    let before = pool.opened();
+    let text = Text::new(views, Budget::Screen);
+    let q = Query::literal("Draft", false).unwrap();
+    let walk = text.search(doc.state(), q, &ViewInputs::screen());
+    let (took, told) = timed(|| block_on(walk.collect::<Vec<Found>>()));
+    assert!(
+        matches!(told.last(), Some(Found::Done)),
+        "Find ran to its end"
+    );
+    let hits = (told.iter())
+        .map(|found| match found {
+            Found::Hits { hits, .. } => hits.len(),
+            _ => 0,
+        })
+        .sum();
+    (took, hits, pool.opened() - before)
+}
+
 /// The middle page `middle` of `doc` with a header and recognized text,
 /// told apart by `run`.
 fn edit_middle(doc: &mut Document, middle: PageId, run: usize) {
@@ -1520,6 +1598,57 @@ fn drawn(views: &Views, doc: &Document, id: PageId, width: u32) -> EngineKey {
     let rx = (views.draw(st, id, &view, &screen, job, format, 1, budget)).unwrap();
     block_on(rx).expect("the render thread is gone").unwrap();
     view.engine
+}
+
+/// Slice 14's walks over every page of the synthetic and heavy 7k, with
+/// neither a baseline nor a gate: Find Blank Pages as `sheaf
+/// remove-blanks` runs it, through a pool of its own in the background's
+/// budget, the text of every page without annotations read;
+/// and Find with a header on every page and [`SCREEN_ENGINES`] groups'
+/// engines pinned, as a split window and the strip pin theirs, so the
+/// walk's own group engine is the only one the screen's count may close.
+/// Each with the engines its pool opened.
+#[test]
+#[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
+fn text_walks_on_the_synthetic_and_heavy_7k() {
+    for kind in [Kind::Synthetic, Kind::Heavy] {
+        let path = fixture(kind);
+        let cache = path.parent().unwrap().join("cache");
+        // SAFETY: every test here sets the same value before anything reads it.
+        unsafe { std::env::set_var("SHEAF_CACHE_DIR", &cache) };
+        let mut doc = sheaf_doc::open::file(&path, None).unwrap().doc;
+        let pool = EnginePool::new().unwrap();
+        let views = Views::new(pool.clone());
+        let snap = doc.snapshot();
+        let params = BlankParams::default();
+        let (blanks, found) = timed(|| blank::find(&snap, &views, None, params, &NoProgress));
+        let found = found.unwrap().len();
+        let blanks_opened = pool.opened();
+        drop((snap, views, pool));
+        let every = set_header(header("Draft <<1>>"), None);
+        doc.commit_ops(vec![every], "header").unwrap();
+        let (find, hits, find_opened) = find_every_page(&doc, SCREEN_ENGINES);
+        assert_eq!(hits, PAGES as usize);
+        let count = |what: &str, n: usize| Row {
+            what: what.into(),
+            now: Some(n as f64),
+            unit: "",
+            baseline: f64::NAN,
+            gate: String::new(),
+        };
+        let find_what = format!("Find, header on every page, {SCREEN_ENGINES} groups pinned");
+        print_table(
+            &format!("text walks on the {} 7k (slice 14)", kind.name()),
+            "baseline",
+            &[
+                Row::time("Find Blank Pages, every page", blanks, f64::NAN, ""),
+                count("Find Blank Pages, pages found", found),
+                count("Find Blank Pages, engines opened", blanks_opened),
+                Row::time(&find_what, find, f64::NAN, ""),
+                count(&format!("{find_what}, engines opened"), find_opened),
+            ],
+        );
+    }
 }
 
 /// AddMark (slice 1's AnnotAdd) and a full reorder at 7,000 pages with

@@ -6704,6 +6704,7 @@ dependencies = [
  "sheaf-edit",
  "sheaf-image",
  "sheaf-render",
+ "sheaf-util",
  "tesseract-rs",
  "thiserror 2.0.21",
 ]
@@ -6775,6 +6776,7 @@ dependencies = [
  "sheaf-edit",
  "sheaf-image",
  "sheaf-render",
+ "tempfile",
  "windows 0.61.3",
 ]
 
@@ -6791,7 +6793,6 @@ dependencies = [
  "lopdf",
  "parking_lot",
  "pdfium-render",
- "regex",
  "sheaf-doc",
  "sheaf-edit",
  "sheaf-image",

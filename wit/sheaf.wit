@@ -273,7 +273,9 @@ interface document {
     current-page: func() -> option<page-id>;
 }
 
-/// Page text, including OCR layers not yet saved.
+/// Page text as the file will draw it once saved: OCR text and a header or
+/// footer not yet saved included, form fields' values and annotations'
+/// text left out.
 interface text {
     use types.{page-id, text-match, box2};
 

@@ -36,6 +36,11 @@ fn tempdir() -> PathBuf {
     d
 }
 
+/// An engine on the file at `path`.
+fn engine_on(path: &Path) -> PdfiumEngine {
+    PdfiumEngine::open_bytes(sheaf_util::read_file(path).unwrap(), None).unwrap()
+}
+
 /// A one-page Letter PDF with no content and the given `/Rotate`.
 fn blank_pdf(path: &Path, rotate: i64) {
     let mut pdf = Pdf::with_version("1.5");
@@ -217,7 +222,7 @@ fn check(rotate: i64) {
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
 
     // One pixel per point, in the page as shown.
-    let engine = PdfiumEngine::open(&out, None).unwrap();
+    let engine = engine_on(&out);
     let raster = engine
         .render(
             PageIndex(0),
@@ -482,7 +487,7 @@ fn tapes_draw_turned_and_from_old_text() {
     let out = dir.join("tapes.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
 
-    let engine = PdfiumEngine::open(&out, None).unwrap();
+    let engine = engine_on(&out);
     let r = engine
         .render(
             PageIndex(0),
@@ -573,7 +578,7 @@ fn clouds_and_callouts_draw() {
     }
     let out = dir.join("shapes.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
-    let engine = PdfiumEngine::open(&out, None).unwrap();
+    let engine = engine_on(&out);
     let r = engine
         .render(
             PageIndex(0),

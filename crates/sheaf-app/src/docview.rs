@@ -19,7 +19,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use futures::StreamExt;
-use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::oneshot;
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, ObjectFit,
@@ -50,9 +49,9 @@ use sheaf_doc::{
 };
 use sheaf_edit::{Anchor, AnnotRef, BlobSel, MarkPatch, NewMark, Op, PageRef, PageSel, Turn};
 use sheaf_image::raster::PixelFormat;
+use sheaf_ops::text::{Found, Text};
 use sheaf_ops::views::Views;
 use sheaf_render::{Budget, EnginePool, Job, OpenError, Owner, Rendered};
-use sheaf_render::{Matcher, SearchEvent, SearchHit};
 
 use crate::comments_panel::ExportKind;
 use crate::{
@@ -121,6 +120,10 @@ pub(crate) struct Doc {
     /// What renders each page (M10.5 §10): its view, from the document's
     /// realizer, drawn by the process's pool ([`engines`]).
     pub(crate) views: Views,
+    /// The pages' text, read through `views` in the screen's budget (M10.5
+    /// §10.5): what Find and Patterns search, and what text is selected,
+    /// picked and marked up from.
+    pub(crate) text: Text,
     /// What the screen draws besides the pages' own (M10.5 §10.4): the
     /// comments hidden, the one dragged and the layers turned off, as data
     /// ([`Doc::set_inputs`]). The panes, the thumbnails and the blank-page
@@ -217,11 +220,7 @@ pub(crate) struct Doc {
     /// Text selected with the Select tool (see text_select.rs).
     pub(crate) text_sel: Option<crate::text_select::TextSel>,
     pub(crate) text_drag: Option<crate::text_select::TextDrag>,
-    /// Pages' characters, as read for selecting text, with what they were
-    /// read from.
-    pub(crate) page_chars:
-        HashMap<PageId, (crate::text_select::CharsKey, Arc<sheaf_doc::PageChars>)>,
-    /// Pages whose characters the engine is reading.
+    /// Pages whose characters `text` is reading for the screen.
     pub(crate) chars_loading: HashSet<PageId>,
     pub(crate) annot_editor: Option<AnnotEditor>,
     /// A polygon, polyline or cloud being drawn (see shapes.rs).
@@ -271,10 +270,12 @@ impl Doc {
         #[cfg(feature = "plugins")]
         let plugin_cell = Arc::new(arc_swap::ArcSwap::from_pointee(model.snapshot()));
         let views = Views::new(engines());
+        let text = Text::new(views.clone(), Budget::Screen);
         let strip_pins = Pins::new(views.pool());
         Doc {
             model,
             views,
+            text,
             inputs: ViewInputs::screen(),
             changes: 0,
             last_change: None,
@@ -316,7 +317,6 @@ impl Doc {
             hidden_marks: HashSet::new(),
             text_sel: None,
             text_drag: None,
-            page_chars: HashMap::new(),
             chars_loading: HashSet::new(),
             annot_editor: None,
             poly: None,
@@ -392,15 +392,6 @@ impl Doc {
             .collect()
     }
 
-    /// Every page of the primary file searched for `matcher` by its base
-    /// engine, a few pages at a time between renders, until the receiver
-    /// is dropped: the text PDFium has, which unsaved OCR layers aren't in
-    /// (their callers search those).
-    pub(crate) fn search(&self, matcher: Matcher) -> UnboundedReceiver<SearchEvent> {
-        let primary = self.views.base(self.model.primary(), Budget::Screen);
-        self.views.pool().search(primary, matcher)
-    }
-
     /// The page at position `index`.
     pub(crate) fn page_id(&self, index: usize) -> Option<PageId> {
         self.model.page(index)
@@ -461,81 +452,6 @@ impl Doc {
         self.pane_mut().pending_scroll = Some(to);
     }
 
-    /// Display index of the primary source's page `index`, if it's still in
-    /// the document (search hits are reported in source pages).
-    pub(crate) fn index_of_source_page(&self, index: u32) -> Option<usize> {
-        let primary = self.model.primary();
-        (self.model.state().pages())
-            .position(|(_, def, _)| def.base.src == *primary && def.base.index == index)
-    }
-
-    /// Matches in unsaved OCR layers, which PDFium can't see, in document
-    /// order. `find` runs the query over one layer.
-    pub(crate) fn layer_hits(
-        &self,
-        find: impl Fn(&sheaf_doc::TextLayer) -> Vec<sheaf_doc::TextHit>,
-    ) -> Vec<Hit> {
-        let state = self.model.state();
-        let mut out = Vec::new();
-        for (order, (page, def, _)) in state.pages().enumerate() {
-            let Some(layer) = def.content.ocr_text() else {
-                continue;
-            };
-            for h in find(layer) {
-                out.push(Hit {
-                    page,
-                    order,
-                    rects: h.rects,
-                    text: h.text,
-                });
-            }
-        }
-        out
-    }
-
-    /// Merge hits from the primary file's own text into `hits`, keeping
-    /// document order. A page with an OCR layer the model draws is
-    /// skipped: the layer's hits stand in for it (the engine shows the
-    /// page without it, before a save and after), so nothing is counted
-    /// twice. The engine's
-    /// boxes are on its page as the file shows it; they're kept in
-    /// PageSpace.
-    pub(crate) fn merge_source_hits(&self, hits: &mut Vec<Hit>, incoming: Vec<SearchHit>) {
-        let state = self.model.state();
-        let primary = self.model.primary();
-        for h in incoming {
-            let Some(order) = self.index_of_source_page(h.page) else {
-                continue;
-            };
-            let page = state.order()[order];
-            if state.ocr_text(page).is_some() {
-                continue;
-            }
-            let from_view = primary.geom(h.page).from_view();
-            let at = hits.partition_point(|x| x.order <= order);
-            hits.insert(
-                at,
-                Hit {
-                    page,
-                    order,
-                    rects: h
-                        .rects
-                        .into_iter()
-                        .map(|r| {
-                            from_view.apply_box(Box2 {
-                                x: r.x,
-                                y: r.y,
-                                w: r.w,
-                                h: r.h,
-                            })
-                        })
-                        .collect(),
-                    text: h.text,
-                },
-            );
-        }
-    }
-
     /// Catch up with `ch`, a change the document went through: what's
     /// selected or read of what it removed goes, the screen's inputs follow
     /// the comments it has now, and the panes lay the pages out again when
@@ -571,13 +487,12 @@ impl Doc {
         if ch.pages_removed.is_empty() {
             return false;
         }
-        if (self.text_sel).is_some_and(|s| ch.pages_removed.contains(&s.page)) {
+        if (self.text_sel.as_ref()).is_some_and(|s| ch.pages_removed.contains(&s.page)) {
             self.text_sel = None;
         }
         let before = self.selection.len();
         for p in &ch.pages_removed {
             self.selection.remove(p);
-            self.page_chars.remove(p);
         }
         self.selection.len() != before
     }
@@ -927,16 +842,31 @@ pub(crate) struct Saving {
     started: Instant,
 }
 
-/// A search match, addressed by page id so it survives reordering and so
-/// unsaved OCR layers (which PDFium can't see) can contribute.
+/// A search match, addressed by page id so it survives reordering.
 #[derive(Debug, Clone)]
 pub(crate) struct Hit {
     pub page: PageId,
-    /// Display index when the hit was recorded; keeps hits in document order.
+    /// The page's position in the document searched.
     pub order: usize,
     /// In PageSpace.
     pub rects: Vec<Box2>,
     pub text: String,
+}
+
+impl Hit {
+    /// The matches a search found on `page`, at `position`.
+    pub(crate) fn on(
+        position: usize,
+        page: PageId,
+        found: Vec<sheaf_doc::TextHit>,
+    ) -> impl Iterator<Item = Hit> {
+        found.into_iter().map(move |h| Hit {
+            page,
+            order: position,
+            rects: h.rects,
+            text: h.text,
+        })
+    }
 }
 
 /// An open search bar and the running / finished query behind it.
@@ -949,7 +879,8 @@ pub(crate) struct Search {
     /// Hits in document order.
     hits: Vec<Hit>,
     current: Option<usize>,
-    scanned: u32,
+    /// The positions searched so far.
+    scanned: usize,
     done: bool,
     /// Dropping this cancels the worker-side search.
     _task: Option<Task<()>>,
@@ -1187,8 +1118,8 @@ impl DocView {
     /// opens it on the render worker before the first page asks: the form
     /// bar's guess until the form is read. That the engine didn't open is
     /// the document's notice: its pages then draw nothing, unless PDFium
-    /// refused the file, whose pages are then drawn from sheaf's copy
-    /// (`sheaf_ops::views`), though its text can't be found or selected.
+    /// refused the file, whose pages are then drawn, and their text read,
+    /// from sheaf's copy (`sheaf_ops::views`).
     fn ask_form_type(&mut self, cx: &mut Context<Self>) {
         let State::Ready(doc) = &self.state else {
             return;
@@ -1220,7 +1151,7 @@ impl DocView {
                     Err(e) if OpenError::is_refused(&e) => {
                         doc.notice = Some(
                             "PDFium can't read this file as saved, so its pages are drawn from \
-                             sheaf's copy, and Find and text selection don't work on it"
+                             sheaf's copy"
                                 .into(),
                         )
                     }
@@ -3191,18 +3122,16 @@ impl DocView {
             return;
         }
         search.done = false;
-        // Unsaved OCR layers are invisible to PDFium; search them here.
-        let seeded = doc.layer_hits(|l| sheaf_doc::text_layer::search(l, &query, false));
-        let has_seed = !seeded.is_empty();
-        search.hits = seeded;
         self.search_started = Some(Instant::now());
         let Some(search) = &mut self.search else {
             return;
         };
-        let mut rx = doc.search(Matcher::Literal {
-            query,
-            match_case: false,
-        });
+        let Ok(query) = sheaf_doc::Query::literal(&query, false) else {
+            search.done = true;
+            cx.notify();
+            return;
+        };
+        let mut rx = doc.text.search(doc.model.state(), query, &doc.inputs);
         search._task = Some(cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.next().await {
                 let stop = this
@@ -3211,17 +3140,19 @@ impl DocView {
                             return true;
                         };
                         match ev {
-                            SearchEvent::Hits(hits) => {
+                            Found::Hits {
+                                position,
+                                page,
+                                hits,
+                            } => {
                                 let first = search.hits.is_empty();
-                                if let State::Ready(doc) = &view.state {
-                                    doc.merge_source_hits(&mut search.hits, hits);
-                                }
+                                search.hits.extend(Hit::on(position, page, hits));
                                 if first && !search.hits.is_empty() {
                                     view.go_to_hit(0, cx);
                                 }
                             }
-                            SearchEvent::Progress(n) => search.scanned = n,
-                            SearchEvent::Done => {
+                            Found::Scanned(n) => search.scanned = n,
+                            Found::Done => {
                                 search.done = true;
                                 if view.timing
                                     && let Some(t) = view.search_started.take()
@@ -3245,9 +3176,6 @@ impl DocView {
                 }
             }
         }));
-        if has_seed {
-            self.go_to_hit(0, cx);
-        }
         cx.notify();
     }
 
@@ -3740,8 +3668,9 @@ impl DocView {
         })
     }
 
-    /// Run a print job: write the print file in the background, then hand
-    /// it to the printer (or, for Save as PDF, ask where to save it).
+    /// Run a print job: make the print file in the background and hand it
+    /// to the printer from memory ([`send_print`]), or, for Save as PDF,
+    /// ask where to save it.
     pub(crate) fn print(&mut self, req: crate::print_dialog::PrintRequest, cx: &mut Context<Self>) {
         if self.still_opening(cx) {
             return;
@@ -3799,21 +3728,7 @@ impl DocView {
             let t = Instant::now();
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    let bytes = save::print_pdf(&snapshot, &req.pages, req.markup)?;
-                    let tmp = std::env::temp_dir().join(format!(
-                        "sheaf-print-{}-{}.pdf",
-                        std::process::id(),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0)
-                    ));
-                    std::fs::write(&tmp, bytes)?;
-                    let sent = sheaf_print::submit(&req.job, &tmp);
-                    let _ = std::fs::remove_file(&tmp);
-                    sent
-                })
+                .spawn(async move { send_print(&snapshot, &req) })
                 .await;
             this.update(cx, |v, cx| {
                 if timing {
@@ -3857,6 +3772,17 @@ impl DocView {
             _ => 0,
         }
     }
+}
+
+/// Prints `req`'s pages of `snapshot`: their print file, made in memory
+/// and handed to the printer from there, so no file is written (M10.5
+/// §10.6). What the spooler said.
+fn send_print(
+    snapshot: &sheaf_doc::Snapshot,
+    req: &crate::print_dialog::PrintRequest,
+) -> anyhow::Result<String> {
+    let bytes = save::print_pdf(snapshot, &req.pages, req.markup)?;
+    sheaf_print::submit(&req.job, bytes.into())
 }
 
 /// Whether opening failed for a wrong or missing password, as the source's
@@ -4537,12 +4463,10 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         ));
     }
     // Selected text.
-    if let Some(sel) = doc.text_sel.filter(|s| s.page == pl.pref.id)
-        && let Some((_, chars)) = doc.page_chars.get(&sel.page)
-    {
+    if let Some(sel) = doc.text_sel.as_ref().filter(|s| s.page == pl.pref.id) {
         let (a, b) = sel.range();
         page_div = page_div.children(
-            chars
+            (sel.chars)
                 .rects(a, b)
                 .into_iter()
                 .map(|r| place(to_pane.apply_box(r)).bg(theme::SELECTION)),
@@ -6728,11 +6652,14 @@ mod tests {
     /// What a change removes leaves the selection (M10.5 §14.1): a mark
     /// whose add is undone is no longer selected, nor a page deleted, its
     /// characters or the text selected on it; a mark added on another page
-    /// leaves the marks selected as they were, and so does the delete.
+    /// leaves the marks selected as they were, and so does the delete. The
+    /// characters read go by the pages' render keys, so a page deleted has
+    /// none, and the page beside it, its mark drawn by GPUI, keeps its own.
     #[test]
     #[cfg(target_os = "linux")]
     fn what_a_change_removes_leaves_the_selection() {
-        use crate::text_select::{CharsKey, TextSel};
+        use crate::text_select::TextSel;
+        use sheaf_doc::{TextOpts, TextService};
         use std::sync::atomic::{AtomicBool, Ordering};
         let (_dir, path) = blank_file(3);
         let (model, _) = as_the_view_opens(&path, false).unwrap();
@@ -6765,16 +6692,16 @@ mod tests {
                     let doc = shown(view);
                     doc.selected_marks = vec![(pages[0], first), (pages[0], second)];
                     doc.selection = HashSet::from([pages[1], pages[2]]);
-                    let chars = Arc::new(sheaf_doc::PageChars {
-                        glyphs: Vec::new(),
-                        upright: Rotation::R0,
-                    });
-                    for (i, &p) in pages.iter().enumerate().skip(1) {
-                        let key = CharsKey::Engine(doc.model.primary().id(), i as u32);
-                        doc.page_chars.insert(p, (key, chars.clone()));
-                    }
+                    let snap = doc.model.snapshot();
+                    let opts = TextOpts {
+                        inputs: doc.inputs.clone(),
+                    };
+                    let chars: Vec<_> = (pages[1..].iter())
+                        .map(|&p| TextService::chars(&doc.text, &snap, p, &opts).unwrap())
+                        .collect();
                     doc.text_sel = Some(TextSel {
                         page: pages[1],
+                        chars: chars[0].clone(),
                         anchor: 0,
                         head: 0,
                     });
@@ -6792,9 +6719,9 @@ mod tests {
                     let doc = shown(view);
                     assert_eq!(doc.selected_marks, [(pages[0], first)]);
                     assert_eq!(doc.selection, HashSet::from([pages[2]]));
-                    let read: Vec<PageId> = doc.page_chars.keys().copied().collect();
-                    assert_eq!(read, [pages[2]]);
                     assert!(doc.text_sel.is_none());
+                    assert!(view.cached_chars(pages[1]).is_none());
+                    assert!(view.cached_chars(pages[2]).is_some());
                 });
                 ran.store(true, Ordering::Relaxed);
                 cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
@@ -7619,6 +7546,108 @@ mod tests {
         assert!(ran.load(Ordering::Relaxed));
     }
 
+    /// Printing, print preview and image export write no file (M10.5
+    /// §10.6). The test runs in a process of its own whose temporary
+    /// directory it can't write to, so a file made there, kept or not,
+    /// fails it. There a page with a mark is drawn as print preview draws
+    /// it (under print's inputs), printed with its markup ([`send_print`])
+    /// through a fake `lp`, which keeps what it reads on its stdin beside
+    /// the file, and exported to PNG and to TIFF beside the file. The
+    /// directory stays empty, and `lp` got the print file, both its pages.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn printing_previewing_and_exporting_write_no_temp_file() {
+        use sheaf_ops::export::{ExportJob, Format, TiffMode};
+        use sheaf_render::Renderer;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(path) = std::env::var_os(ALONE).map(PathBuf::from) else {
+            let name = "docview::tests::printing_previewing_and_exporting_write_no_temp_file";
+            let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+            let at = |name| dir.path().join(name);
+            let (path, tmp, bin, job) = (at("print.pdf"), at("tmp"), at("bin"), at("job.pdf"));
+            std::fs::write(&path, said(2)).unwrap();
+            std::fs::create_dir(&tmp).unwrap();
+            std::fs::create_dir(&bin).unwrap();
+            let lp = bin.join("lp");
+            let reply = "echo 'request id is fake-1 (1 file(s))'";
+            let script = format!("#!/bin/sh\ncat > '{}'\n{reply}\n", job.display());
+            std::fs::write(&lp, script).unwrap();
+            let mode = std::fs::Permissions::from_mode;
+            std::fs::set_permissions(&lp, mode(0o755)).unwrap();
+            std::fs::set_permissions(&tmp, mode(0o555)).unwrap();
+            alone(name, &path, &[("TMPDIR", &tmp), ("SHEAF_CUPS_BIN", &bin)]);
+            let left: Vec<_> = std::fs::read_dir(&tmp).unwrap().collect();
+            assert!(left.is_empty(), "{left:?}");
+            let printed = std::fs::read(&job).unwrap();
+            assert!(printed.starts_with(b"%PDF"), "lp got the print file");
+            let engine = sheaf_render::pdfium::PdfiumEngine::open_bytes(printed.into(), None);
+            assert_eq!(engine.unwrap().page_count(), 2);
+            return;
+        };
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let out = path.with_file_name("pages");
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    let page = shown(view).page_id(0).unwrap();
+                    let rect = Box2 {
+                        x: 300.0,
+                        y: 600.0,
+                        w: 80.0,
+                        h: 50.0,
+                    };
+                    let square = view.new_annot(AnnotKind::Square { rect }, [200, 0, 0]);
+                    assert!(view.add_annot(page, square, "Square", cx).is_some());
+                    let prefs = crate::print_dialog::PrintPrefs::default();
+                    let ctx = view.print_context(prefs.clone()).unwrap();
+                    let rx = ctx.render_preview(page, 400, true);
+                    let preview = futures::executor::block_on(rx).unwrap().unwrap();
+                    assert_eq!(preview.raster.width, 400);
+                    let pages: Vec<PageId> = ctx.snapshot.state.order().iter().copied().collect();
+                    let job = sheaf_print::JobSettings {
+                        printer: "Office".into(),
+                        title: ctx.title.clone(),
+                        copies: 1,
+                        collate: true,
+                        paper: sheaf_print::Paper::letter(),
+                        sizing: sheaf_print::Sizing::ShrinkOversized,
+                        orientation: sheaf_print::Orientation::Auto,
+                        duplex: sheaf_print::Duplex::Off,
+                    };
+                    let req = crate::print_dialog::PrintRequest {
+                        job,
+                        pages: pages.clone(),
+                        markup: true,
+                        save_pdf: false,
+                        prefs,
+                    };
+                    assert_eq!(send_print(&ctx.snapshot, &req).unwrap(), "request fake-1");
+                    for format in [Format::Png, Format::Tiff(TiffMode::Color)] {
+                        let job = ExportJob {
+                            pages: pages.clone(),
+                            markup: true,
+                            dpi: 36,
+                            format,
+                            dir: out.clone(),
+                            stem: "print".into(),
+                        };
+                        let progress = &sheaf_ops::NoProgress;
+                        let files = sheaf_ops::export::run(&ctx.snapshot, &job, progress).unwrap();
+                        assert_eq!(files.len(), if format.single_file() { 1 } else { 2 });
+                        assert!(files.iter().all(|f| f.starts_with(&out) && f.is_file()));
+                    }
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
     /// The threads of this process.
     #[cfg(target_os = "linux")]
     fn tasks() -> usize {
@@ -7778,7 +7807,9 @@ mod tests {
     /// the page from its group instead; the next frame views the page on
     /// its group under the same key, so the image that landed is the one
     /// shown and nothing is asked again. The form type's ask then finds the
-    /// engine refused too, and the notice says the pages are sheaf's copy.
+    /// engine refused too, and the notice says the pages are sheaf's copy;
+    /// and Find finds a page's text, and the Select tool reads it, from its
+    /// group (slice 14).
     #[test]
     #[cfg(target_os = "linux")]
     fn a_file_pdfium_refuses_draws_its_pages() {
@@ -7788,6 +7819,7 @@ mod tests {
         let path = dir.path().join("refused.pdf");
         std::fs::write(&path, revision_cut_out(said(2))).unwrap();
         let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let first = model.page(0).unwrap();
         let ran = Arc::new(AtomicBool::new(false));
         gpui_platform::headless().run({
             let ran = ran.clone();
@@ -7823,6 +7855,18 @@ mod tests {
                     }
                     let notice = notice(cx).expect("a notice");
                     assert!(notice.contains("drawn from sheaf's copy"), "{notice}");
+                    assert!(!notice.contains("don't work"), "{notice}");
+                    let hits = found(&view, "page 1", cx).await;
+                    let read =
+                        cx.update(|cx| view.update(cx, |v, cx| select_text(v, &[first], cx)));
+                    let text = selected(&read, 1, cx).await.remove(&first).flatten();
+                    assert_eq!(text.as_deref(), Some("page 0"));
+                    cx.update(|cx| {
+                        let State::Ready(doc) = &view.read(cx).state else {
+                            panic!("ready");
+                        };
+                        assert!(hit_in_order(doc, &hits, &order(doc)[1..]), "{hits:?}");
+                    });
                     ran.store(true, Ordering::Relaxed);
                     cx.update(|cx| cx.quit());
                 })
@@ -7863,71 +7907,403 @@ mod tests {
         bytes
     }
 
-    /// Find and Patterns search the primary file's text through the render
-    /// worker's walk over its base engine: Find "page 3" finds the fourth
-    /// page alone, a pattern for any page number finds every page, each
-    /// hit on its page, by id, in the document's order; and a new search
-    /// replaces the one before it. The Select tool reads a page's
-    /// characters from the same engine.
+    /// Find for `query` in `view`, the bar opened if it isn't, once it's
+    /// done: its hits.
+    #[cfg(target_os = "linux")]
+    async fn found(view: &Entity<DocView>, query: &str, cx: &mut gpui::AsyncApp) -> Vec<Hit> {
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                if v.search.is_none() {
+                    v.new_search(cx);
+                }
+                v.start_search(query.into(), cx)
+            })
+        });
+        for _ in 0..1000 {
+            if cx.update(|cx| (view.read(cx).search.as_ref()).is_some_and(|s| s.done)) {
+                break;
+            }
+            let tick = std::time::Duration::from_millis(10);
+            cx.background_executor().timer(tick).await;
+        }
+        cx.update(|cx| {
+            let search = view.read(cx).search.as_ref().unwrap();
+            assert!(search.done, "{query:?} is searched");
+            search.hits.clone()
+        })
+    }
+
+    /// What the Select tool reads of each of `pages` in `v`, as each is
+    /// read: its text, or None when it can't be read.
+    #[cfg(target_os = "linux")]
+    fn select_text(v: &mut DocView, pages: &[PageId], cx: &mut Context<DocView>) -> Selected {
+        let read = Selected::default();
+        for &page in pages {
+            let read = read.clone();
+            v.with_chars(page, cx, move |_, chars, _| {
+                let text = chars.map(|c| c.text(0, c.len()));
+                read.borrow_mut().insert(page, text);
+            });
+        }
+        read
+    }
+
+    /// Pages' text as the Select tool reads it, by page.
+    #[cfg(target_os = "linux")]
+    type Selected = std::rc::Rc<std::cell::RefCell<HashMap<PageId, Option<String>>>>;
+
+    /// What [`select_text`] read, once `n` pages are.
+    #[cfg(target_os = "linux")]
+    async fn selected(
+        read: &Selected,
+        n: usize,
+        cx: &mut gpui::AsyncApp,
+    ) -> HashMap<PageId, Option<String>> {
+        for _ in 0..1000 {
+            if read.borrow().len() == n {
+                break;
+            }
+            let tick = std::time::Duration::from_millis(10);
+            cx.background_executor().timer(tick).await;
+        }
+        let read = read.take();
+        assert_eq!(read.len(), n, "the pages are read: {read:?}");
+        read
+    }
+
+    /// Whether `hits` are on `pages`, in turn, each at its page's position
+    /// in `doc` and on its visible box, in PageSpace.
+    #[cfg(target_os = "linux")]
+    fn hit_in_order(doc: &Doc, hits: &[Hit], pages: &[PageId]) -> bool {
+        let st = doc.model.state();
+        let on = |h: &Hit| {
+            let v = st.geom(h.page).unwrap().visible();
+            (h.rects.iter())
+                .all(|r| r.x >= v.x0 && r.y >= v.y0 && r.right() <= v.x1 && r.bottom() <= v.y1)
+        };
+        let found: Vec<PageId> = hits.iter().map(|h| h.page).collect();
+        found == pages && (hits.iter()).all(|h| st.page_at(h.order) == Some(h.page) && on(h))
+    }
+
+    /// Find and Patterns search every page as it draws, through the render
+    /// worker's walk over the document's order (M10.5 §10.5): a page of an
+    /// inserted file, a duplicate, a crop and a page with recognized text
+    /// and a header not yet saved are found as the file's own pages are,
+    /// each hit on its page, by id, at its position, on its visible box in
+    /// PageSpace. Find "page 3" finds the page alone, and "PAGE" every page;
+    /// a pattern finds every page, and the recognized words; the header's
+    /// text finds the pages it's on; and a new search replaces the one
+    /// before it. The Select tool reads each page as it shows too: the
+    /// inserted page, the duplicate and the crop, and the header and the
+    /// recognized words not yet saved.
     #[test]
     #[cfg(target_os = "linux")]
     fn find_and_patterns_search_through_the_pool() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
+        use sheaf_doc::tx::fixture as fx;
         use std::sync::atomic::{AtomicBool, Ordering};
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
         let path = dir.path().join("said.pdf");
         std::fs::write(&path, said(6)).unwrap();
-        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let (mut model, _) = as_the_view_opens(&path, false).unwrap();
+        let p: Vec<PageId> = (0..6).map(|i| model.page(i).unwrap()).collect();
+        // Page 7 of another file before the third page, the fifth page
+        // duplicated, the second cropped, and the last recognized and
+        // headed, as is the first.
+        let kind = sheaf_doc::store::BlobKind::file(std::path::Path::new("eight.pdf"), None);
+        let eight = model.store().open(said(8).into(), kind).unwrap();
+        let ops = vec![
+            fx::insert(&eight, 7..8, "eight.pdf", Some(p[2])),
+            fx::duplicate(&[p[4]]),
+        ];
+        model.commit_ops(ops, "Insert").unwrap();
+        let word = |text: &str, x| sheaf_doc::OcrWord {
+            text: text.into(),
+            rect: Box2 {
+                x,
+                y: 600.0,
+                w: 50.0,
+                h: 14.0,
+            },
+            confidence: 0.9,
+        };
+        let seen = vec![word("Total", 300.0), word("42", 360.0)];
+        let layer = sheaf_doc::text_layer::from_engine(seen, &model.geom(p[5]), "test");
+        let mut ops = fx::ocr([(p[5], Arc::new(layer))]);
+        ops.push(fx::set_header(fx::header("Draft"), Some(&[p[0], p[5]])));
+        model.commit_ops(ops, "OCR").unwrap();
+        let margins = sheaf_ops::crop::Margins {
+            top: 40.0,
+            right: 30.0,
+            bottom: 50.0,
+            left: 20.0,
+        };
+        let spec = sheaf_ops::crop::CropSpec::Margins(margins);
+        let snap = model.snapshot();
+        let progress = &sheaf_ops::NoProgress;
+        let plan = sheaf_ops::crop::plan(model.store(), &snap, &[p[1]], spec, progress).unwrap();
+        plan[0].note(&mut model);
+        let pages = plan[0].bases().collect();
+        (model.commit_page_base(pages, sheaf_doc::Derive::Crop, "Crop")).unwrap();
+        let st = model.state();
+        let [inserted, copy] = [2, 6].map(|i| st.page_at(i).unwrap());
+        assert_eq!(st.def(inserted).unwrap().base.src.id(), eight.id());
+        assert!(st.def(copy).unwrap().copy > 0);
         let ran = Arc::new(AtomicBool::new(false));
         gpui_platform::headless().run({
             let ran = ran.clone();
             move |cx| {
                 let view = view_of(model, &path, cx);
-                let read: Rc<RefCell<Option<String>>> = Rc::default();
-                view.update(cx, |v, cx| {
+                let selectable = [p[3], inserted, copy, p[1], p[5]];
+                let read = view.update(cx, |v, cx| {
                     v.new_search(cx);
                     v.start_search("page 2".into(), cx);
-                    v.start_search("page 3".into(), cx);
-                    v.start_pattern_search(r"page \d".into(), cx);
-                    let page = shown(v).page_id(3).unwrap();
-                    let read = read.clone();
-                    v.with_chars(page, cx, move |_, chars, _| {
-                        let chars = chars.expect("the page's characters");
-                        *read.borrow_mut() = Some(chars.text(0, chars.len()));
-                    });
+                    v.start_pattern_search(r"page \d|Total \d+".into(), cx);
+                    select_text(v, &selectable, cx)
                 });
                 cx.spawn(async move |cx| {
-                    let done = |cx: &mut gpui::AsyncApp| {
-                        cx.update(|cx| {
-                            let v = view.read(cx);
-                            let (find, pattern) = (v.search.as_ref(), v.pattern.as_ref());
-                            find.is_some_and(|s| s.done) && pattern.is_some_and(|p| p.done)
-                        }) && read.borrow().is_some()
+                    let hits = found(&view, "page 3", cx).await;
+                    let patterned = |cx: &mut gpui::AsyncApp| {
+                        cx.update(|cx| view.read(cx).pattern.as_ref().is_some_and(|p| p.done))
                     };
                     for _ in 0..1000 {
-                        if done(cx) {
+                        if patterned(cx) {
                             break;
                         }
                         let tick = std::time::Duration::from_millis(10);
                         cx.background_executor().timer(tick).await;
                     }
+                    let read = selected(&read, selectable.len(), cx).await;
+                    let paged = found(&view, "PAGE", cx).await;
+                    let headed = found(&view, "draft", cx).await;
+                    let recognized = found(&view, "total 42", cx).await;
                     cx.update(|cx| {
                         let v = view.read(cx);
                         let State::Ready(doc) = &v.state else {
                             panic!("ready");
                         };
                         let order = order(doc);
-                        let find = v.search.as_ref().unwrap();
-                        assert!(find.done && find.scanned == 6);
-                        let found: Vec<PageId> = find.hits.iter().map(|h| h.page).collect();
-                        assert_eq!(found, [order[3]]);
+                        assert!(hit_in_order(doc, &hits, &[p[3]]), "{hits:?}");
+                        assert_eq!(hits[0].text, "page 3");
+                        assert!(hit_in_order(doc, &paged, &order), "{paged:?}");
                         let pattern = v.pattern.as_ref().unwrap();
-                        assert!(pattern.done && pattern.scanned == 6);
-                        let found: Vec<PageId> = pattern.hits.iter().map(|h| h.page).collect();
-                        assert_eq!(found, order);
+                        assert!(pattern.done && pattern.scanned == order.len());
+                        let every: Vec<PageId> = order.iter().copied().chain([p[5]]).collect();
+                        assert!(
+                            hit_in_order(doc, &pattern.hits, &every),
+                            "{:?}",
+                            pattern.hits
+                        );
+                        let texts: Vec<&str> = pattern.hits.iter().map(|h| &h.text[..]).collect();
+                        let want = [0, 1, 7, 2, 3, 4, 4, 5].map(|i| format!("page {i}"));
+                        assert_eq!(texts[..8], want);
+                        assert_eq!(texts[8], "Total 42");
+                        // Each page's line is at 72, 400 in PageSpace, y up,
+                        // whatever its crop.
+                        for h in &pattern.hits[..8] {
+                            let r = h.rects[0];
+                            let at = (r.x - 72.0).abs() < 1.0 && r.y < 400.0 && r.bottom() > 400.0;
+                            assert!(at, "{h:?}");
+                        }
+                        assert!(hit_in_order(doc, &headed, &[p[0], p[5]]), "{headed:?}");
+                        assert!(hit_in_order(doc, &recognized, &[p[5]]), "{recognized:?}");
+                        let find = v.search.as_ref().unwrap();
+                        assert_eq!(find.scanned, order.len());
                     });
-                    assert_eq!(read.borrow().as_deref(), Some("page 3"));
+                    let text = |page| read[&page].as_deref().expect("the page's characters");
+                    assert_eq!(text(p[3]), "page 3");
+                    assert_eq!(text(inserted), "page 7");
+                    assert_eq!(text(copy), "page 4");
+                    assert_eq!(text(p[1]), "page 1");
+                    // In the order the page draws them: its own text, the
+                    // recognized words over it, then the header.
+                    assert_eq!(text(p[5]), "page 5\nTotal 42\nDraft");
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// The calculator's Pick reads the page's text as the screen shows it
+    /// (M10.5 §10.5): where a click finds no number, words recognized there
+    /// and not yet saved, which the page's realization draws, give one,
+    /// read again as the page changed, and it goes onto the tape.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_pick_reads_a_number_recognized_but_not_saved() {
+        use sheaf_edit::tape::Row;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("said.pdf");
+        std::fs::write(&path, said(1)).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let page = model.page(0).unwrap();
+        let word = |text: &str, x| sheaf_doc::OcrWord {
+            text: text.into(),
+            rect: Box2 {
+                x,
+                y: 600.0,
+                w: 50.0,
+                h: 14.0,
+            },
+            confidence: 0.9,
+        };
+        let seen = vec![word("Total", 300.0), word("42", 360.0)];
+        let geom = model.geom(page);
+        let layer = sheaf_doc::text_layer::from_engine(seen, &geom, "test");
+        let ops = sheaf_doc::tx::fixture::ocr([(page, Arc::new(layer))]);
+        // On "42", as the page shows.
+        let on = geom.from_view().apply(Pt { x: 380.0, y: 607.0 });
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                let pick = move |v: &mut DocView, cx: &mut Context<DocView>| {
+                    v.ensure_calc(cx);
+                    v.calc.as_mut().unwrap().picking = true;
+                    assert!(v.pick_number_at(page, on, 1.0, cx));
+                };
+                view.update(cx, pick);
+                cx.spawn(async move |cx| {
+                    let told = |cx: &mut gpui::AsyncApp| {
+                        cx.update(|cx| view.update(cx, |v, _| shown(v).notice.take()))
+                    };
+                    let entries = |cx: &mut gpui::AsyncApp| {
+                        cx.update(|cx| {
+                            let calc = view.read(cx).calc.as_ref().unwrap();
+                            (calc.tape.lines.iter())
+                                .filter_map(|l| match l.row {
+                                    Row::Entry { value, .. } => Some(value),
+                                    _ => None,
+                                })
+                                .collect::<Vec<f64>>()
+                        })
+                    };
+                    let tick = std::time::Duration::from_millis(10);
+                    let mut notice = None;
+                    for _ in 0..1000 {
+                        notice = told(cx);
+                        if notice.is_some() {
+                            break;
+                        }
+                        cx.background_executor().timer(tick).await;
+                    }
+                    assert_eq!(notice.as_deref(), Some("No number there"));
+                    cx.update(|cx| {
+                        view.update(cx, |v, cx| {
+                            let tx = v.lower(ops, "OCR", cx).unwrap();
+                            v.commit(tx, CommitOpts::labelled("OCR"), cx).unwrap();
+                            // The commit's own notice.
+                            shown(v).notice = None;
+                            pick(v, cx);
+                        })
+                    });
+                    for _ in 0..1000 {
+                        notice = told(cx);
+                        if !entries(cx).is_empty() || notice.is_some() {
+                            break;
+                        }
+                        cx.background_executor().timer(tick).await;
+                    }
+                    assert_eq!(entries(cx), [42.0], "{notice:?}");
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A page that changes while its characters are read is read again,
+    /// as it is now: what the Select tool gets is never what the page
+    /// showed before (a header added meanwhile is in it).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_page_changed_while_read_is_read_again() {
+        use sheaf_doc::tx::fixture as fx;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("said.pdf");
+        std::fs::write(&path, said(1)).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let page = model.page(0).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                let read = view.update(cx, |v, cx| {
+                    let read = select_text(v, &[page], cx);
+                    let ops = vec![fx::set_header(fx::header("Draft"), None)];
+                    let tx = v.lower(ops, "Header", cx).unwrap();
+                    v.commit(tx, CommitOpts::labelled("Header"), cx).unwrap();
+                    read
+                });
+                cx.spawn(async move |cx| {
+                    let read = selected(&read, 1, cx).await;
+                    assert_eq!(read[&page].as_deref(), Some("page 0\nDraft"));
+                    // And they're kept for the page as it is.
+                    let kept = cx.update(|cx| view.read(cx).cached_chars(page));
+                    assert_eq!(kept.map(|c| c.text(0, c.len())), read[&page]);
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A selection keeps the characters it was made in: with "Page <<1>>
+    /// of <<N>>" on every page, a page deleted after the selected one
+    /// changes how that page draws, and so its render key, and the
+    /// selection still copies, with no read of the page.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_selection_outlives_a_change_to_how_its_page_draws() {
+        use crate::text_select::TextSel;
+        use sheaf_doc::tx::fixture as fx;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("said.pdf");
+        std::fs::write(&path, said(3)).unwrap();
+        let (mut model, _) = as_the_view_opens(&path, false).unwrap();
+        let p: Vec<PageId> = (0..3).map(|i| model.page(i).unwrap()).collect();
+        let numbered = fx::set_header(fx::header("Page <<1>> of <<N>>"), None);
+        model.commit_ops(vec![numbered], "Header").unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                let read = view.update(cx, |v, cx| select_text(v, &[p[1]], cx));
+                cx.spawn(async move |cx| {
+                    let read = selected(&read, 1, cx).await;
+                    assert!(read[&p[1]].as_deref().unwrap().starts_with("page 1\n"));
+                    cx.update(|cx| {
+                        view.update(cx, |v, cx| {
+                            let chars = v.cached_chars(p[1]).unwrap();
+                            shown(v).text_sel = Some(TextSel {
+                                page: p[1],
+                                chars,
+                                anchor: 0,
+                                head: 6,
+                            });
+                            let tx = v.lower(vec![fx::delete(&[p[2]])], "Delete", cx);
+                            v.commit(tx.unwrap(), CommitOpts::labelled("Delete"), cx)
+                                .unwrap();
+                            assert!(v.cached_chars(p[1]).is_none(), "its key changed");
+                            let text = v.selected_text().map(|(_, text, _)| text);
+                            assert_eq!(text.as_deref(), Some("page 1"));
+                            assert!(v.copy_text(cx));
+                            let told = shown(v).notice.as_deref();
+                            assert_eq!(told, Some("Copied 5 characters"));
+                        })
+                    });
                     ran.store(true, Ordering::Relaxed);
                     cx.update(|cx| cx.quit());
                 })

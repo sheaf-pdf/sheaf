@@ -4,12 +4,14 @@
 //! own engines and never close the screen's; what the engines weigh stays
 //! under the cap, and a base engine is opened again past its bound; an
 //! engine whose source is gone closes, and one that doesn't open is tried
-//! once; one PDFium refuses tells its opener, and a render with a fallback
-//! draws from there; a dropped receiver skips its render and a burst
-//! renders once;
-//! encrypted files open from segments; the worker sleeps when there's
-//! nothing to do; and a render's flags draw the form's widgets alone, or
-//! nothing but the page.
+//! once; one PDFium refuses tells its opener, and a render or a query with
+//! a fallback reads its page from there; a dropped receiver skips its
+//! render and a burst renders once;
+//! encrypted files open from segments; a walk reads its pages in their
+//! order, each on its own engine or its fallback's, and ends when its
+//! receiver is dropped; the worker sleeps when there's nothing to do; and
+//! a render's flags draw the form's widgets alone, or nothing but the
+//! page.
 //!
 //! Checks of the whole process (its threads, its memory) run in a process
 //! of their own, the test binary run again for that one test.
@@ -20,6 +22,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+use futures::StreamExt;
+use futures::channel::mpsc;
 use futures::executor::block_on;
 use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::forms::fixture::{Form, row};
@@ -28,10 +32,12 @@ use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::pool::{
-    BACKGROUND_ENGINES, OPEN_BYTES, Opened, PAGE_BYTES, SCREEN_BYTES, SCREEN_ENGINES,
+    BACKGROUND_BYTES, BACKGROUND_ENGINES, OPEN_BYTES, Opened, PAGE_BYTES, SCREEN_BYTES,
+    SCREEN_ENGINES,
 };
 use sheaf_render::{
-    Budget, Draw, EnginePool, Job, OpenError, Opener, PageIndex, Rendered, Renderer, Req, Target,
+    Budget, Draw, EnginePool, Fallback, Job, OpenError, Opener, PageIndex, Rendered, Renderer, Req,
+    Target, Walked,
 };
 
 /// Set in a process that runs one test alone.
@@ -375,10 +381,11 @@ fn engine_bytes_stay_under_the_cap_after_200_groups() {
     }
 }
 
-/// Holds the worker inside an opener until the test lets it go.
+/// Holds the worker inside an opener, or a walk's work, until the test
+/// lets it go.
 #[derive(Default)]
 struct Gate {
-    /// Whether the opener has started, and whether it may go on.
+    /// Whether the worker is held, and whether it may go on.
     state: Mutex<(bool, bool)>,
     changed: Condvar,
 }
@@ -387,15 +394,20 @@ impl Gate {
     fn opener(self: &Arc<Gate>, bytes: &Arc<[u8]>) -> Opener {
         let (gate, bytes) = (self.clone(), bytes.clone());
         let open = move || {
-            let mut state = gate.state.lock().unwrap();
-            state.0 = true;
-            gate.changed.notify_all();
-            while !state.1 {
-                state = gate.changed.wait(state).unwrap();
-            }
+            gate.hold();
             Ok((vec![bytes.clone()], None))
         };
         Opener::overlay(open, || true)
+    }
+
+    /// Holds the calling thread until the test lets it go.
+    fn hold(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.0 = true;
+        self.changed.notify_all();
+        while !state.1 {
+            state = self.changed.wait(state).unwrap();
+        }
     }
 
     fn entered(&self) {
@@ -622,6 +634,52 @@ fn a_refused_engine_tells_its_opener_and_renders_from_the_fallback() {
     assert_eq!(told.load(Ordering::SeqCst), 3);
 }
 
+/// A query of an engine PDFium refuses reads its page from its fallback
+/// instead, run once, as a render does, and is given the page it reads
+/// there; without a fallback, it fails as refused. A fallback that panics
+/// fails its own query alone, and a failure that isn't a refusal (a
+/// password) falls back to nothing.
+#[test]
+fn a_refused_query_reads_from_its_fallback() {
+    let pool = Pool::new();
+    let junk: Arc<[u8]> = Arc::from(&b"%PDF-1.7 and nothing more"[..]);
+    let refused = || pool.target(0, &junk, true, Budget::Screen);
+    let runs = Arc::new(AtomicUsize::new(0));
+    let instead = |runs: &Arc<AtomicUsize>| -> Fallback<u32> {
+        let (runs, there) = (runs.clone(), pool.target(9, &pdf(3), false, Budget::Screen));
+        Box::new(move || {
+            runs.fetch_add(1, Ordering::SeqCst);
+            Ok((there, PageIndex(2)))
+        })
+    };
+    let text = |e: &PdfiumEngine, page: PageIndex| Ok((page, e.page_text(page)?));
+    let ask = |target, fallback| block_on(pool.pool.query(target, PageIndex(0), fallback, text));
+    let read = ask(refused(), Some(instead(&runs))).unwrap().unwrap();
+    assert_eq!(read, (PageIndex(2), "page 2".to_string()));
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let failed = ask(refused(), None).unwrap().expect_err("no fallback");
+    assert!(OpenError::is_refused(&failed), "{failed:#}");
+    let panics: Fallback<u32> = Box::new(|| panic!("a malformed fallback"));
+    let failed = ask(refused(), Some(panics))
+        .unwrap()
+        .expect_err("it panicked");
+    assert!(
+        format!("{failed:#}").contains("a malformed fallback"),
+        "{failed:#}"
+    );
+    assert_eq!(pool.probe(0).opens(), 1);
+    let plain = form();
+    let [(_, state), ..] = rc4_aes_128_and_aes_256(&plain);
+    let [locked, _] = encrypted(&plain, &state, |_| {});
+    let locked = pool.target(1, &locked.into(), true, Budget::Screen);
+    let failed = ask(locked, Some(instead(&runs))).unwrap();
+    let failed = failed.expect_err("no fallback for a password");
+    assert!(OpenError::is_password(&failed), "{failed:#}");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let read = ask(pool.target(2, &pdf(1), true, Budget::Screen), None);
+    assert_eq!(read.unwrap().unwrap(), (PageIndex(0), "page 0".to_string()));
+}
+
 /// A base engine, pinned, grows with every page it loads until the
 /// screen's engines weigh more than the cap: then it closes, and opens
 /// again at the next request.
@@ -633,7 +691,8 @@ fn a_base_engine_is_reopened_past_its_bound() {
     pool.pool.pin(pool.pool.owner(), vec![0]);
     let len = |page: usize| {
         let target = pool.target(0, &bytes, true, Budget::Screen);
-        block_on(pool.pool.page_text_len(target, PageIndex(page as u32)))
+        let count = |e: &PdfiumEngine, page| e.page_text_len(page);
+        block_on(pool.pool.query(target, PageIndex(page as u32), None, count))
             .unwrap()
             .unwrap()
     };
@@ -646,6 +705,66 @@ fn a_base_engine_is_reopened_past_its_bound() {
     assert!(pool.open().is_empty());
     len(bound);
     assert_eq!((pool.probe(0).opens(), pool.open()), (2, [0].into()));
+}
+
+/// A background base engine isn't held to the background's bytes: it
+/// grows into what the screen's engines leave of their cap, a group's
+/// engine of the screen's open beside it, and past that closes and opens
+/// again at the next request, as the screen's own does. It never closes
+/// the screen's engine to make room.
+#[test]
+fn a_background_base_engine_grows_into_what_the_screen_leaves() {
+    let screen = OPEN_BYTES + PAGE_BYTES;
+    let bound = (SCREEN_BYTES - screen - OPEN_BYTES) / PAGE_BYTES + 1;
+    assert!(OPEN_BYTES + bound * PAGE_BYTES > 2 * BACKGROUND_BYTES);
+    let bytes = pdf(bound + 4);
+    let pool = Pool::new();
+    pool.group(9, &bytes);
+    let len = |page: usize| {
+        let target = pool.target(0, &bytes, true, Budget::Background);
+        let count = |e: &PdfiumEngine, page| e.page_text_len(page);
+        block_on(pool.pool.query(target, PageIndex(page as u32), None, count))
+            .unwrap()
+            .unwrap()
+    };
+    for page in 0..bound - 1 {
+        assert_eq!(len(page), 4 + page.to_string().len(), "page {page}");
+    }
+    assert_eq!((pool.probe(0).opens(), pool.open()), (1, [0, 9].into()));
+    assert_eq!(pool.pool.weighed(Budget::Screen), screen);
+    len(bound - 1);
+    assert_eq!(pool.open(), [9].into());
+    len(bound);
+    assert_eq!((pool.probe(0).opens(), pool.open()), (2, [0, 9].into()));
+    assert_eq!(pool.probe(9).opens(), 1);
+}
+
+/// A walk keeps the engine it reads on while it goes on reading there:
+/// with the screen's count filled by pinned engines, a walk over three
+/// groups' pages, each group's in a run, opens each group's engine once,
+/// and lets the last go when it ends.
+#[test]
+fn a_walk_keeps_its_engine_past_pinned_ones() {
+    let bytes = pdf(3);
+    let pool = Pool::new();
+    let pinned: BTreeSet<u32> = (0..SCREEN_ENGINES as u32).collect();
+    pool.pool
+        .pin(pool.pool.owner(), pinned.iter().copied().collect());
+    for &key in &pinned {
+        pool.group(key, &bytes);
+    }
+    let targets: Vec<Target<u32>> = (100..103)
+        .map(|key| pool.target(key, &bytes, false, Budget::Screen))
+        .collect();
+    let item = move |at: usize| Ok((targets[at / 9].clone(), PageIndex(at as u32 % 3), None));
+    let work = |_: &PdfiumEngine, _, _| Ok(());
+    let (tx, rx) = mpsc::unbounded::<Walked>();
+    pool.pool.walk(27, item, work, tx);
+    let told: Vec<Walked> = block_on(rx.collect());
+    assert_eq!(told.last(), Some(&Walked::Done));
+    let opens = [100, 101, 102].map(|key| pool.probe(key).opens());
+    assert_eq!(opens, [1; 3]);
+    assert_eq!(pool.open(), pinned);
 }
 
 /// Encrypted files, RC4-128, AES-128 and AES-256, with a cross-reference
@@ -710,34 +829,135 @@ fn cpu(task: u32) -> u64 {
     fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
 }
 
-/// Once a search walk has ended, the worker spends no CPU while nothing
-/// is asked of it: a tick at most, of its way back to its channel after
-/// answering where it is (a busy or polling worker takes about 30).
-#[cfg(target_os = "linux")]
-#[test]
-fn the_worker_sleeps_when_idle() {
-    use futures::StreamExt;
-    use sheaf_render::{Matcher, SearchEvent};
+/// What a walk's work and the walk itself tell, in the order told.
+#[derive(Debug, PartialEq)]
+enum Told {
+    /// The page read at a position, and its text.
+    Read(usize, PageIndex, String),
+    Walked(Walked),
+}
 
+impl From<Walked> for Told {
+    fn from(walked: Walked) -> Told {
+        Told::Walked(walked)
+    }
+}
+
+/// A walk reads the pages at its positions in their order, four a turn,
+/// each on the engine its item names: a base engine's, a group's, and one
+/// PDFium refuses, whose pages are read from their fallback's engine and
+/// page, a fallback run for each; a page whose item or work panics is
+/// passed over alone. It tells how far it has got after each turn, in
+/// order with what its work tells, and last that it's done. Then the worker
+/// spends no CPU while nothing is asked of it: a tick at most, of its way
+/// back to its channel after answering where it is (a busy or polling
+/// worker takes about 30).
+#[test]
+fn a_walk_reads_pages_of_many_engines_in_order_and_then_idles() {
     let bytes = pdf(40);
+    let junk: Arc<[u8]> = Arc::from(&b"%PDF-1.7 and nothing more"[..]);
     let pool = Pool::new();
-    let target = pool.target(0, &bytes, true, Budget::Screen);
-    let matcher = Matcher::Literal {
-        query: "page 3".into(),
-        match_case: false,
+    let targets = [
+        pool.target(0, &bytes, true, Budget::Screen),
+        pool.target(1, &bytes, false, Budget::Screen),
+        pool.target(2, &junk, true, Budget::Screen),
+    ];
+    let instead = pool.target(3, &bytes, false, Budget::Screen);
+    let runs = Arc::new(AtomicUsize::new(0));
+    let fallen = runs.clone();
+    // Position `at` reads page 39 - at.
+    let item = move |at: usize| {
+        if at == 7 {
+            panic!("a malformed page's view");
+        }
+        let page = PageIndex(39 - at as u32);
+        let (instead, fallen) = (instead.clone(), fallen.clone());
+        let fallback: Fallback<u32> = Box::new(move || {
+            fallen.fetch_add(1, Ordering::SeqCst);
+            Ok((instead, page))
+        });
+        Ok((targets[at % 3].clone(), page, Some(fallback)))
     };
-    let events: Vec<SearchEvent> = block_on(pool.pool.search(target, matcher).collect());
-    let hits = (events.iter())
-        .filter(|e| matches!(e, SearchEvent::Hits(_)))
-        .count();
-    assert_eq!(hits, 11, "page 3 and pages 30 to 39");
-    assert!(matches!(events.last(), Some(SearchEvent::Done)));
-    let task = pool.pool.worker_task().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    let was = cpu(task);
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let took = cpu(task) - was;
-    assert!(took <= 1, "{took} ticks");
+    let (tx, rx) = mpsc::unbounded::<Told>();
+    let read = tx.clone();
+    let work = move |e: &PdfiumEngine, page: PageIndex, at: usize| {
+        if at == 11 {
+            panic!("a malformed page");
+        }
+        let _ = read.unbounded_send(Told::Read(at, page, e.page_text(page)?));
+        Ok(())
+    };
+    pool.pool.walk(30, item, work, tx);
+    let told: Vec<Told> = block_on(rx.collect());
+    let mut want = Vec::new();
+    for turn in (0..30).step_by(4) {
+        for at in (turn..turn + 4).take_while(|&at| at < 30) {
+            if at != 7 && at != 11 {
+                let page = 39 - at;
+                want.push(Told::Read(
+                    at,
+                    PageIndex(page as u32),
+                    format!("page {page}"),
+                ));
+            }
+        }
+        want.push(Told::Walked(Walked::Scanned((turn + 4).min(30))));
+    }
+    want.push(Told::Walked(Walked::Done));
+    assert_eq!(told, want);
+    // Every third position from 2 is on the refused engine, opened once.
+    assert_eq!(runs.load(Ordering::SeqCst), 10);
+    let opens = [0, 1, 2, 3].map(|key| pool.probe(key).opens());
+    assert_eq!(opens, [1; 4]);
+    #[cfg(target_os = "linux")]
+    {
+        let task = pool.pool.worker_task().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let was = cpu(task);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let took = cpu(task) - was;
+        assert!(took <= 1, "{took} ticks");
+    }
+}
+
+/// A walk whose receiver is dropped ends at its next turn: the turn it was
+/// dropped in reads its pages, and no page after; and the walk lets go of
+/// what it holds.
+#[test]
+fn a_dropped_receiver_ends_its_walk() {
+    let bytes = pdf(1);
+    let pool = Pool::new();
+    let gate = Arc::new(Gate::default());
+    let (held, reads) = (Arc::new(()), Arc::new(AtomicUsize::new(0)));
+    let target = pool.target(0, &bytes, true, Budget::Screen);
+    // The walk holds what its item does, as a search holds its state.
+    let kept = held.clone();
+    let item = move |_| {
+        let _ = &kept;
+        Ok((target.clone(), PageIndex(0), None))
+    };
+    let (counted, waits) = (reads.clone(), gate.clone());
+    let work = move |_: &PdfiumEngine, _, at: usize| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        if at == 5 {
+            waits.hold();
+        }
+        Ok(())
+    };
+    let (tx, rx) = mpsc::unbounded::<Walked>();
+    pool.pool.walk(40, item, work, tx);
+    gate.entered();
+    drop(rx);
+    gate.release();
+    let text = |e: &PdfiumEngine, page| e.page_text(page);
+    for _ in 0..2 {
+        let target = pool.target(0, &bytes, true, Budget::Screen);
+        block_on(pool.pool.query(target, PageIndex(0), None, text))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), 8, "the turn of 4 to 7");
+    }
+    assert_eq!(Arc::strong_count(&held), 1);
 }
 
 /// What a page's `/Annots` lists in [`annotated`].

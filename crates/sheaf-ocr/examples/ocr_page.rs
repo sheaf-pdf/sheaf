@@ -3,7 +3,7 @@
 //!
 //! Usage: cargo run -p sheaf-ocr --features tesseract,oar --example ocr_page -- file.pdf [page] [tesseract|oar]
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use sheaf_edit::Rotation;
 use sheaf_image::raster::PixelFormat;
@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
     };
     let cfg = OcrConfig::default();
     let mut engine = build_engine(kind, &cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let pdf = PdfiumEngine::open(PathBuf::from(&path), None)?;
+    let pdf = PdfiumEngine::open_bytes(sheaf_util::read_file(Path::new(&path))?, None)?;
     let size = pdf.page_size(PageIndex(page - 1))?;
     let width = (size.width * cfg.dpi as f32 / 72.0).round() as u32;
     let raster = pdf.render(

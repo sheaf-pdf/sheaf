@@ -145,7 +145,7 @@ fn shown(bytes: Arc<[u8]>) -> anyhow::Result<Shown> {
     let chars = engine.page_chars(PageIndex(0)).ok().map(|chars| {
         let mut chars: Vec<char> = chars
             .into_iter()
-            .map(|(c, _)| if c == '\u{2}' { '-' } else { c })
+            .map(|c| if c.ch == '\u{2}' { '-' } else { c.ch })
             .filter(|c| !c.is_whitespace())
             .collect();
         chars.sort_unstable();

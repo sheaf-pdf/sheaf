@@ -77,6 +77,20 @@ impl ViewInputs {
         }
     }
 
+    /// A plugin's text, and the reads it records: what
+    /// [`plugin`](Self::plugin) draws that PDFium reads as a page's text,
+    /// its content with the generators and recognized text, and no
+    /// annotation, whose appearance PDFium never reads as text. So a
+    /// comment's edit doesn't conflict with a call that read only text.
+    pub fn plugin_text() -> ViewInputs {
+        ViewInputs {
+            marks: MarkDraw::Off,
+            widgets: false,
+            foreign: false,
+            ..ViewInputs::plugin()
+        }
+    }
+
     /// Print preview's: with `markup` its comments and marks, and without,
     /// neither; the form's widgets either way.
     pub fn print(markup: bool) -> ViewInputs {

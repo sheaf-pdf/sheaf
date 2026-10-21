@@ -5,9 +5,11 @@
 //! with recognized text, and one with a header, turned once by the job; a
 //! damaged base, as a file of its own; a base PDFium refuses, every page of
 //! it so, untouched or not, once the pool has found out, whichever engine
-//! over its bytes found it; a layer turned off, by a patch of the catalog; a comment hidden on its page and not its duplicate; a
-//! crop's comments, link and widget, and its content alone for OCR; and
-//! sheaf's marks, renamed at open or not, left to the screen.
+//! over its bytes found it, and its print file, which PDFium reads; a layer
+//! turned off, by a patch of the catalog; a comment hidden on its page and
+//! not its duplicate; a crop's comments, link and widget, and its content
+//! alone for OCR; and sheaf's marks, renamed at open or not, left to the
+//! screen.
 //!
 //! Each realization is the engine's segments read one after another, the
 //! base's bytes and the section after them. Pages are drawn through the
@@ -23,7 +25,6 @@
 mod common;
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -39,78 +40,27 @@ use sheaf_doc::realize::{EngineKey, GROUP, OcgOverride, PageView, Realization, V
 use sheaf_doc::serialize::fixture::{
     USER, encrypted, form, holds, rc4_aes_128_and_aes_256, revision_cut_out,
 };
-use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture as fx;
-use sheaf_doc::{Derive, Document, FixedCount, PageId, Store, TextLayer};
+use sheaf_doc::{Derive, Document, PageId, TextLayer};
 use sheaf_edit::{Rotation, Turn};
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_ocr::job::EngineFactory;
-use sheaf_ocr::{
-    EngineInfo, EngineKind, InputKind, OcrConfig, OcrEngine, OcrEvent, OcrImage, OcrRequest,
-    OcrWord, PageSource,
-};
+use sheaf_ocr::{EngineKind, OcrConfig, OcrEvent, OcrRequest, PageSource};
 use sheaf_ops::crop::{CropSpec, Margins};
 use sheaf_ops::views::{ViewPages, Views};
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 use sheaf_render::pool::BACKGROUND_ENGINES;
-use sheaf_render::{Budget, Draw, EnginePool, Job, OpenError, PageIndex, Renderer};
+use sheaf_render::{Budget, Draw, Job, OpenError, PageIndex, Renderer};
+
+use common::{Blind, file, opened, views};
 
 /// Renders are this wide.
 const WIDTH: u32 = 512;
 
-/// `bytes` opened as the app opens the file `name`, with `password`.
-fn opened(bytes: Vec<u8>, name: &str, password: Option<&str>) -> Document {
-    let store = Store::new();
-    let kind = BlobKind::file(Path::new(name), password);
-    let primary = store.open(bytes.into(), kind).unwrap();
-    let policy = Box::new(FixedCount(10));
-    let mut d = sheaf_doc::open::start(store, primary.clone(), name.into(), None, policy);
-    let facts = sheaf_doc::open::finish(&primary, &sheaf_ops::NoProgress);
-    d.ready(facts).unwrap();
-    d
-}
-
-/// A file of `n` Letter pages as lopdf writes it in `kind`, each drawing
-/// a few shapes and "page i" in Helvetica, which their parent node gives
-/// them.
-fn file(n: usize, kind: XrefType) -> Vec<u8> {
-    let mut pdf = Pdf::with_version("1.7");
-    let root = pdf.new_object_id();
-    let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-    });
-    let kids: Vec<Object> = (0..n)
-        .map(|i| {
-            let content = format!(
-                "0 0 1 rg 60 600 200 120 re f 1 0 0 rg {} 200 80 80 re f \
-                 BT /F1 28 Tf 72 400 Td (page {i}) Tj ET",
-                100 + 40 * i
-            );
-            let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
-            let page = dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
-            pdf.add_object(page).into()
-        })
-        .collect();
-    pdf.objects.insert(
-        root,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => n as i64,
-            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
-            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
-        }),
-    );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
-    pdf.trailer.set("Root", catalog);
-    pdf.reference_table.cross_reference_type = kind;
-    let mut bytes = Vec::new();
-    pdf.save_to(&mut bytes).unwrap();
-    bytes
-}
-
-/// A document's views, drawn by a pool of the test's own.
-fn views() -> Views {
-    Views::new(EnginePool::new().unwrap())
-}
+/// The pixels a page drawn from another writing of it may differ by from
+/// the Rewrite's: PDFium's anti-aliasing at an edge, as realize_corpus
+/// allows.
+const ANTI_ALIASING_PX: usize = 16;
 
 /// What page `page` of `d` renders from under `inputs`: its view, and
 /// what its engine opens.
@@ -473,6 +423,45 @@ fn a_base_pdfium_refuses_draws_every_page_from_its_realization() {
     let asked = block_on(views.pool().form_type(again.base(other.primary(), budget)));
     assert!(OpenError::is_refused(&asked.unwrap().unwrap_err()));
     assert!(other.primary().base_refused());
+}
+
+/// A file PDFium refuses prints (slice 14). Its print file is sheaf's own
+/// writing, which never asks PDFium of the source: opened from memory, as
+/// GDI opens it, it has every page, an unsaved header and a mark (drawn
+/// into its page) included, and each draws as the Rewrite's does but for
+/// anti-aliasing (realize_corpus's allowance, [`ANTI_ALIASING_PX`]).
+#[test]
+fn a_source_pdfium_refuses_prints() {
+    let bytes = revision_cut_out(file(3, XrefType::CrossReferenceTable));
+    let refused = PdfiumEngine::open_bytes(bytes.clone().into(), None).err();
+    assert!(OpenError::is_refused(&refused.expect("PDFium refuses it")));
+    let mut d = opened(bytes, "refused.pdf", None);
+    let [first, last] = [0, 2].map(|i| d.page(i).unwrap());
+    let ops = vec![
+        fx::set_header(fx::header("Draft"), Some(&[last])),
+        fx::add(first, &every_mark_kind()[3]),
+    ];
+    d.commit_ops(ops, "Edit").unwrap();
+    let pages: Vec<PageId> = d.state().order().iter().copied().collect();
+    let print = |markup| {
+        let printed = sheaf_doc::save::print_pdf(&d.snapshot(), &pages, markup).unwrap();
+        PdfiumEngine::open_bytes(printed.into(), None).unwrap()
+    };
+    let job = Job::Page {
+        width: WIDTH,
+        rotation: Rotation::R0,
+    };
+    let page = |engine: &PdfiumEngine, at| engine.render(PageIndex(at), job, PixelFormat::Rgba);
+    let (marked, bare) = (print(true), print(false));
+    assert_eq!(marked.page_count(), 3);
+    let saved = saved(&d);
+    for at in 0..3 {
+        let theirs = live(&saved, None, at, Rotation::R0);
+        let differ = differing(&page(&marked, at).unwrap(), &theirs);
+        assert!(differ <= ANTI_ALIASING_PX, "page {at}: {differ} px differ");
+    }
+    let [with, without] = [&marked, &bare].map(|e| page(e, 0).unwrap());
+    assert!(differing(&with, &without) > 0, "the mark prints");
 }
 
 /// `bytes` behind 2,000 bytes of junk: sheaf finds the header wherever it
@@ -864,33 +853,12 @@ fn ocr_reads_a_turned_page_as_it_shows_its_content_alone() {
     }
 }
 
-/// Reads no words, as fast as it's given pages.
-struct Blind;
-
-impl OcrEngine for Blind {
-    fn input(&self) -> InputKind {
-        InputKind::Gray
-    }
-
-    fn recognize(&mut self, _: OcrImage, _: u32) -> anyhow::Result<Vec<OcrWord>> {
-        Ok(Vec::new())
-    }
-
-    fn describe(&self) -> EngineInfo {
-        EngineInfo {
-            kind: EngineKind::Tesseract,
-            name: "blind".into(),
-            languages: Vec::new(),
-        }
-    }
-}
-
 /// OCR in the background closes none of the screen's engines (M10.5
 /// §10.3): with six group engines open for a pane, four pinned for what it
 /// shows and two it prefetched, a run over copies in three other groups,
-/// each drawn with its content alone by its group's engine through
-/// [`ViewPages`], its text read from the base engine, ends with every one
-/// of the six open, and no more engines of its own than the background's.
+/// each drawn, and its text read, with its content alone by its group's
+/// engine through [`ViewPages`], ends with every one of the six open, and
+/// no more engines of its own than the background's.
 #[test]
 fn background_ocr_doesn_t_evict_visible_engines() {
     let n = 9 * GROUP as usize;

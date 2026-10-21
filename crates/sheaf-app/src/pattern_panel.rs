@@ -14,7 +14,7 @@ use gpui::{
 };
 use sheaf_doc::{CommitOpts, PageId};
 use sheaf_edit::{BookmarkRef, Local, Op, Sibling};
-use sheaf_render::{Matcher, SearchEvent};
+use sheaf_ops::text::Found;
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
@@ -47,7 +47,8 @@ pub struct PatternSearch {
     /// Hits in document order.
     pub hits: Vec<Hit>,
     pub current: Option<usize>,
-    pub scanned: u32,
+    /// The positions searched so far.
+    pub scanned: usize,
     pub done: bool,
     pub started: Option<Instant>,
     pub _task: Option<Task<()>>,
@@ -144,12 +145,9 @@ impl DocView {
             }
         };
         ps.done = false;
-        // Unsaved OCR layers are invisible to PDFium; search them here.
-        let seeded = doc.layer_hits(|l| sheaf_doc::text_layer::pattern_search(l, &re));
-        let has_seed = !seeded.is_empty();
-        ps.hits = seeded;
         ps.started = Some(Instant::now());
-        let mut rx = doc.search(Matcher::Pattern(re));
+        let query = sheaf_doc::Query::Pattern(re);
+        let mut rx = doc.text.search(doc.model.state(), query, &doc.inputs);
         let timing = self.timing;
         let Some(ps) = &mut self.pattern else { return };
         ps._task =
@@ -159,17 +157,19 @@ impl DocView {
                     .update(cx, |view, cx| {
                         let Some(ps) = &mut view.pattern else { return true };
                         match ev {
-                            SearchEvent::Hits(hits) => {
+                            Found::Hits {
+                                position,
+                                page,
+                                hits,
+                            } => {
                                 let first = ps.hits.is_empty();
-                                if let State::Ready(doc) = &view.state {
-                                    doc.merge_source_hits(&mut ps.hits, hits);
-                                }
+                                ps.hits.extend(Hit::on(position, page, hits));
                                 if first && !ps.hits.is_empty() {
                                     view.go_to_pattern_hit(0, cx);
                                 }
                             }
-                            SearchEvent::Progress(n) => ps.scanned = n,
-                            SearchEvent::Done => {
+                            Found::Scanned(n) => ps.scanned = n,
+                            Found::Done => {
                                 ps.done = true;
                                 if timing && let Some(t) = ps.started.take() {
                                     eprintln!(
@@ -191,9 +191,6 @@ impl DocView {
                     }
                 }
             }));
-        if has_seed {
-            self.go_to_pattern_hit(0, cx);
-        }
         cx.notify();
     }
 

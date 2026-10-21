@@ -21,8 +21,9 @@
 //! Place then updates it where it is.
 //!
 //! Pick (a sheaf extension; PDFlyer's numbers are typed): while it's on, a
-//! click on a number on the page adds it, read from the page's text (or
-//! its unsaved OCR), and Shift+drag over a region adds every number in it.
+//! click on a number on the page adds it, read from the page's text as it
+//! shows (recognized text not yet saved too), and Shift+drag over a region
+//! adds every number in it.
 //! Each can get a tickmark beside it.
 
 use gpui::{
@@ -76,7 +77,7 @@ impl CalcTape {
 }
 
 impl DocView {
-    fn ensure_calc(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_calc(&mut self, cx: &mut Context<Self>) {
         if self.calc.is_some() {
             return;
         }
