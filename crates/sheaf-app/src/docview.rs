@@ -6171,7 +6171,6 @@ mod tests {
     use super::*;
     use anyhow::Context as _;
     use sheaf_edit::{BookmarkRef, Local, Sibling};
-    use sheaf_ops::crop;
 
     /// The bookmarks a commit made come into view, walking up from each:
     /// their ancestors open, older ones and made ones alike, and so does a
@@ -7778,6 +7777,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn two_overlapping_trims_both_land() {
         use sheaf_doc::geom::Rect;
+        use sheaf_ops::crop;
         use std::sync::atomic::{AtomicBool, Ordering};
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
         let path = dir.path().join("said.pdf");
