@@ -36,11 +36,12 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 | M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | v0.9 |
 | M14 | **Document processing**: compare, optimize, PDF/A, accessibility | Archival and output parity | v0.10 |
 | M15 | **Automation → v1.0**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | v1.0 |
-| M16 | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from any combination of ops, with approval | Agents work on documents through sheaf's own ops | after v1.0 |
+| M16 | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from any combination of ops, with approval | Agents work on documents through sheaf's own ops | — |
 
 M6 has no release of its own; it ships in v0.2 together with Scan & OCR.
 M10.5 has none either; it sits between M10 slices 5 and 6, and ships in
-v0.6 with the rest of M10.
+v0.6 with the rest of M10. M16 has no fixed place in the order: it lands
+as soon as the pieces it builds on are ready.
 
 Each milestone is broken into slices when it starts, as M1–M4 were. Slices
 below are a first cut.
@@ -453,8 +454,9 @@ inside sheaf stays under [Pending](#agent-panel-claude-and-codex).
 - **Commands an agent should never run,** and writes that never get
   "always allow": saves, exports and anything else that writes files.
 
-Builds on M10.5 (ops, plans, version tokens), the M6 plugin API's reads
-and M9's edit history.
+Builds on M10.5 (ops, version tokens, plugin API 0.4's reads), M6's
+command registry and M9's edit history. It lands as soon as those are
+ready, without waiting for M15 or v1.0.
 
 Slices: read tools, history and commands → plans and approval → command
 schemas and the dialog fallback → consent, settings and the send log →
