@@ -7,8 +7,8 @@ How sheaf gets from v0.1 ("the fast workpaper binder") to feature parity with
 tools. Adobe's cloud features (shared review, Send for Signature, Document
 Cloud storage) are not included; see [Not planned](#not-planned).
 
-Ordering principle: the next thing a tax/audit preparer would otherwise open
-Acrobat for comes first. The hardest engine work (in-place content editing)
+Ordering principle: among milestones whose dependencies are met, the next
+thing a tax/audit preparer would otherwise open Acrobat for comes first. The hardest engine work (in-place content editing)
 comes late, once the object-layer groundwork from earlier milestones exists.
 
 The README [feature tables](README.md#features) remain the authoritative
@@ -22,24 +22,78 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 
 ## Milestones
 
-| # | Milestone | Proves | Release |
-|---|---|---|---|
-| M5 | **Scan & OCR**: searchable text layer, scan cleanup, scanner intake, separator sheets | Scanned binders become searchable | v0.2 |
-| M6 | **Plugins**: WASM components, declarative UI, command registry | Extensibility without forking | — |
-| M7 | **Viewing & output**: page modes, split view, panels, print, image/TIFF/text export | Viewing and printing never need Acrobat | v0.3 |
-| M8 | **Page tools**: split, insert/replace, crop, labels, headers/footers, Bates, watermarks | Binder assembly is complete | v0.4 |
-| M9 | **Markup completion**: mark editing, remaining annotation types, custom stamps, replies and status, PDFlyer stamps/connectors/tape, FDF/XFDF, measurement | Review workflow parity | v0.5 |
-| M10 | **Forms**: fill, calculate, create, import/export, flatten | Tax forms are filled and calculated in sheaf | v0.6 |
-| M10.5 | **The edit API**: page content in the model, one op vocabulary over one primitive, saves as outputs, one emitter for screen and file | M11–M15 edit content without reworking the core | — |
-| M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | v0.7 |
-| M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | v0.8 |
-| M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | v0.9 |
-| M14 | **Document processing**: compare, optimize, PDF/A, accessibility | Archival and output parity | v0.10 |
-| M15 | **Automation → v1.0**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | v1.0 |
+| # | Milestone | Proves | Status | Depends on |
+|---|---|---|---|---|
+| M5 | **Scan & OCR**: searchable text layer, scan cleanup, scanner intake, separator sheets | Scanned binders become searchable | Done except scanner intake and separator sheets | Nothing unbuilt. Best after M10.5 slice 19, which rebuilds the scan and insert paths they use |
+| M6 | **Plugins**: WASM components, declarative UI, command registry | Extensibility without forking | Done | — |
+| M7 | **Viewing & output**: page modes, split view, panels, print, image/TIFF/text export | Viewing and printing never need Acrobat | Done | — |
+| M8 | **Page tools**: split, insert/replace, crop, labels, headers/footers, Bates, watermarks | Binder assembly is complete | Done | — |
+| M9 | **Markup completion**: mark editing, remaining annotation types, custom stamps, replies and status, PDFlyer stamps/connectors/tape, FDF/XFDF, measurement | Review workflow parity | Done | — |
+| M10 | **Forms**: fill, calculate, create, import/export, flatten | Tax forms are filled and calculated in sheaf | Paused after slice 5 | All of M10.5 (a ruling: M10.5 proposal 11) |
+| M10.5 | **The edit API**: page content in the model, one op vocabulary over one primitive, saves as outputs, one emitter for screen and file | M11–M15 edit content without reworking the core | In progress: slices 1–12 merged | — |
+| M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | Planned | M10.5; M10 slice 15, for flattening in Remove Hidden Information; M10 slices 23–26 if sanitize removes field scripts rather than whole fields (open) |
+| M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | Sketched | M10.5; M10 slices 23–26 if signing creates new signature fields (open) |
+| M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | Sketched | M10.5; M11 (content interpreter, image editing) |
+| M14 | **Document processing**: compare, optimize, PDF/A, accessibility | Archival and output parity | Sketched | M10.5; M11 (content interpreter), for optimize |
+| M15 | **Automation**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | Sketched; CLI groundwork shipped | Batch: M10.5, plus each step's milestone (M10's `sheaf form` for fill and flatten, M11 for redact by pattern, M14 for optimize). Parity audit and stabilization: last, after everything else |
+| M16 | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from any combination of ops, with approval | Agents work on documents through sheaf's own ops | Sketched | M10.5 |
 
-M6 has no release of its own; it ships in v0.2 together with Scan & OCR.
-M10.5 has none either; it sits between M10 slices 5 and 6, and ships in
-v0.6 with the rest of M10.
+**Depends on** lists the unbuilt work a milestone needs first, or the part
+of it named after "for": it uses that work's code, types or
+infrastructure. When only part of another milestone is needed, that part
+is named. Finished work isn't listed. Two entries are rulings rather than
+code: M10 resumes only after all of M10.5, and M15's parity audit comes
+last. "(open)" marks an edge that waits on a decision. Release numbers
+aren't tracked: everything here is pre-release, so dependencies decide the
+order.
+
+The work that's left, by dependency. Arrows run from a milestone to the
+work it unblocks: solid arrows are needed, dotted ones are soft, open or
+"comes last".
+
+```mermaid
+graph LR
+  fin["Done: M5 except two slices, M6–M9, M10 slices 1–5"]
+  M10_5["M10.5 The edit API"]
+  M5r["M5: scanner intake, separator sheets"]
+  M10a["M10 slices 6–17: appearances, filling, flatten, form data"]
+  M10b["M10 slices 18–29: calculation, Prepare Form, detection, plugin API"]
+  M11["M11 Security and redaction"]
+  M12["M12 Signatures"]
+  M13["M13 Content editing"]
+  M14["M14 Document processing"]
+  M15a["M15: batch actions and CLI"]
+  M15b["M15: parity audit and stabilization (last)"]
+  M16["M16 Agent tools (MCP)"]
+  Panel["Agent panel (Pending)"]
+
+  fin --> M10_5
+  M10_5 --> M10a --> M10b
+  M10_5 -.->|"slice 19 rebuilds scan and insert"| M5r
+  M10_5 --> M11
+  M10a -->|"slice 15: flatten fields"| M11
+  M10b -.->|"slices 23–26: field scripts (open)"| M11
+  M10_5 --> M12
+  M10b -.->|"slices 23–26: signature fields (open)"| M12
+  M11 -->|"content interpreter"| M13
+  M11 -->|"content interpreter"| M14
+  M13 -.-|"shared: all-uses index"| M14
+  M10_5 --> M15a
+  M10a -->|"sheaf form"| M15a
+  M11 -->|"redact by pattern"| M15a
+  M14 -->|"optimize"| M15a
+  M10_5 --> M16
+  M16 --> Panel
+  M16 -.-|"shared: command schemas"| M15a
+  M5r & M10b & M12 & M13 & M15a & M16 -.-> M15b
+
+  classDef done fill:#e4e4e4,stroke:#8a8a8a,color:#555
+  classDef active fill:#fff1c2,stroke:#b08900,color:#333
+  classDef pending stroke-dasharray:5 5
+  class fin done
+  class M10_5 active
+  class Panel pending
+```
 
 Each milestone is broken into slices when it starts, as M1–M4 were. Slices
 below are a first cut.
@@ -209,7 +263,7 @@ bugs found while planning, is in [`todos/m9.md`](todos/m9.md).
 - Calculator tape that picks up numbers by clicking page text. A sheaf
   extension: PDFlyer's tape numbers are typed.
 - Measurement: distance, perimeter, area, with page scale and calibration.
-  The cut line: it can move later without holding up v0.5.
+  It was M9's cut line, the item that could have moved later.
 
 Slices: single instance ✅ → preferences and state ✅ → groundwork and
 bug fixes ✅ → edit history ✅ → editing marks ✅ → text selection ✅ → text
@@ -218,7 +272,7 @@ replies and status ✅ → comment filters ✅ → stamps ✅ → connector grou
 Status ✅ → tape format ✅ → tape from page text ✅ → shapes ✅ → file attachments ✅ →
 summary and CSV ✅ → FDF/XFDF ✅ → measurement ✅ → plugin API 0.3 and docs ✅ →
 deleting means deleted ✅ (added 2026-10-14 from M11 planning: deleted pages
-stayed in saved files; it must land before v0.5). Done 2026-10-15 (Linux);
+stayed in saved files, and M11's redaction builds on the fix). Done 2026-10-15 (Linux);
 notes in [`todos/m9.md`](todos/m9.md).
 
 ### M10: Forms
@@ -295,8 +349,8 @@ header/footer and Bates → OCR → exports and `sheaf edit` → plugin API
 
 ### M11: Security & redaction
 
-Planned 2026-10-14; follows M10 (M10 was first skipped, then started
-2026-10-15 ahead of it).
+Planned 2026-10-14. It needs M10.5, and M10's flatten (slice 15) for
+Remove Hidden Information; see the table.
 The plan, with the decisions made while planning, the proposals for
 kickoff and the bugs found, is in [`todos/m11.md`](todos/m11.md).
 
@@ -327,8 +381,9 @@ information → plugin API and docs.
 Deleted pages that stayed in saved files, found while planning, are fixed
 in M9 (deleting means deleted) rather than here.
 
-**Shared infrastructure:** the content-stream parser/rewriter in `sheaf-doc`
-built here is the base for M13 content editing and M14 optimize.
+**Shared infrastructure:** M10.5 slice 6 built the content lexer and
+writer. The content interpreter built here on them is the base for M13
+content editing and M14 optimize.
 
 ### M12: Signatures
 
@@ -343,9 +398,9 @@ built here is the base for M13 content editing and M14 optimize.
 Slices: Fill & Sign → sign with PKCS#12 → verify panel → Windows store and
 PKCS#11 → timestamps + LTV → certify/lock.
 
-Incremental save (done in M2) is a prerequisite: signing must never rewrite
-earlier revisions. Removing content forces a full rewrite (M9), so on a
-signed file a save after a removal has to ask first.
+Signing appends: it must never rewrite earlier revisions, and M10.5's
+Append (slice 10) provides that. On a signed file, a save that has to
+rewrite already asks first.
 
 Follow-up: certificate encryption ❓ (`/Adobe.PubSec`; moved from M11
 2026-10-14). It needs the certificate stores built here, and sheaf has
@@ -366,7 +421,7 @@ encryption.
 Slices: object selection + move/delete → add text/image → image edit/replace →
 text edit within a line → block reflow → links.
 
-Builds on the M11 content-stream rewriter.
+Builds on M11's content interpreter.
 
 ### M14: Document processing
 
@@ -381,7 +436,7 @@ Builds on the M11 content-stream rewriter.
 **Decide at kickoff:** how far to go on the ❓ items. They matter for
 archival requirements but not for daily binder work.
 
-### M15: Automation → v1.0
+### M15: Automation
 
 - Action Wizard-style batch actions: run a sequence of commands (OCR, Bates,
   optimize, redact by pattern, flatten, export) over files and folders.
@@ -397,8 +452,69 @@ archival requirements but not for daily binder work.
 - Parity audit: walk Acrobat Pro's menus and tools and PDFlyer's toolbar
   item by item; anything still missing becomes a slice here or is moved to
   Not planned with a reason.
-- Stabilization for 1.0: corpus round-trip tests, Windows bundle and CI
+- Stabilization: corpus round-trip tests, Windows bundle and CI
   workflows exercised, settings/keymap format declared stable.
+
+### M16: Agent tools (MCP)
+
+Added 2026-10-20. An MCP server through which an AI agent works on a
+document the way a plugin does. It reads and inspects the document, and
+it builds transactions from any combination of sheaf's ops, which the
+user approves before they commit. The design so far is in
+[`todos/agent.md`](todos/agent.md) (its slices 1 and 2) and in the M10.5
+plan's §20 ("The agent milestone"). The chat panel that hosts an agent
+inside sheaf stays under [Pending](#agent-panel-claude-and-codex).
+
+- **`sheaf mcp`:** a stdio MCP server (`rmcp`) that Claude Code, Claude
+  Desktop, Codex or any other MCP client runs. It needs no panel in
+  sheaf, and sheaf never handles the agent's sign-in.
+- **Reads, as a plugin's:**
+  - the document's pages, outline and marks, and the selection;
+  - text, OCR layers included;
+  - page images, with caps on size and count;
+  - the edit history;
+  - every command with its help text, plugin commands included.
+
+  Every read returns the version it saw.
+- **Transactions of any ops:**
+  - The agent submits sheaf-edit `Op` JSON, the vocabulary of plugin
+    API 0.4.
+  - `Document::plan` lowers a batch into one transaction with a
+    preview. The user approves the preview in the sheaf window, and
+    `commit(plan)` commits exactly what was shown, as one version
+    authored by the agent on the user's behalf.
+  - A plan expires if the document changed underneath it. Reads are
+    tracked per agent session, so a user edit elsewhere doesn't refuse a
+    plan. MCP itself has no sessions since its 2026-07-28 revision, so
+    the session is a handle sheaf issues and the agent passes back.
+- **Commands:** a command with an argument schema runs without its
+  dialog; one without opens its dialog pre-filled. M15's batch actions
+  need the same schemas.
+- **Revert this turn,** and a log of what was sent.
+- **Consent and policy:**
+  - consent before a document first goes to a cloud agent (IRC §7216);
+  - field values behind per-document consent;
+  - `[agent] enabled` in `settings.toml`, so a firm can switch agents
+    off.
+
+**Decide at kickoff:**
+- **Which ops an approved plan may hold** beyond a plugin's. Crop,
+  watermark and flatten need a manifest permission for plugins, and
+  inserting and replacing pages is the user's alone. Also whether
+  "semantic edits only, at first" (M10.5 decision 6) still holds.
+- **How `sheaf mcp` reaches the running sheaf.** `agent.md` planned on
+  the single-instance socket. M10.5 left the transport to this milestone
+  (proposal 36).
+- **Commands an agent should never run,** and writes that never get
+  "always allow": saves, exports and anything else that writes files.
+
+Builds on M10.5 (ops, version tokens, plugin API 0.4's reads), M6's
+command registry and M9's edit history, so it can start once M10.5 is
+done.
+
+Slices: read tools, history and commands → plans and approval → command
+schemas and the dialog fallback → consent, settings and the send log →
+docs.
 
 ---
 
@@ -574,20 +690,18 @@ a lock file, merge later), are in
 A chat panel where the user works with an AI agent on the open document,
 like Zed's external agents. sheaf launches the agent (Claude Code or
 Codex), and the agent handles sign-in with the user's own subscription;
-sheaf takes no API keys and never sees a credential. The agent sees the
-document, its edit history, and every command with its help text, plugin
-commands included. It runs commands and edits live, with the user's
-approval. Each approved call is one version in the history, and a whole
-turn can be reverted. Decisions and research (2026-10-14) are in
-[`todos/agent.md`](todos/agent.md).
-- **Placement:** its own milestone, one of the last.
+sheaf takes no API keys and never sees a credential. The agent works
+through [M16](#m16-agent-tools-mcp)'s tools: it sees the document, its
+edit history, and every command with its help text, plugin commands
+included, and it runs commands and transactions with the user's
+approval. The panel adds threads, streamed replies, tool-call cards with
+the approvals, and launching the agent over ACP. Decisions and research
+(2026-10-14) are in [`todos/agent.md`](todos/agent.md) (its slices 3–6).
+- **Placement:** after M16, whose tools it hosts.
 - **Overlap:**
-  - M6 plugin host API. The agent's read tools are the WIT `document`,
-    `text` and `render` interfaces, and its edits are the same `Edit`
-    batches.
+  - M16: the reads, transactions, approvals, version checks and
+    "revert this turn" are its tools.
   - M9 slice 4 edit history (done): versions, edits in words, jumps.
-  - M9 slice 1: `sheaf mcp` reaches the running sheaf through the
-    single-instance socket.
   - M15 batch actions. Both need commands that take arguments instead of
     a dialog. Until a command has them, the agent opens its dialog
     pre-filled, so this needn't wait for M15.
