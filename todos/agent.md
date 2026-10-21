@@ -1,10 +1,16 @@
 # Agent panel: Claude and Codex in a sheaf window
 
-Status: **proposed** (2026-10-14). Listed under Pending in
-[`ROADMAP.md`](../ROADMAP.md#agent-panel-claude-and-codex); expected to
-become its own milestone, one of the last. Nothing is built. This memo
-records the decisions so far, the research behind them, and a first cut
-of the slices.
+Status: **proposed** (2026-10-14). Nothing is built. This memo records
+the decisions so far, the research behind them, and a first cut of the
+slices.
+- **`sheaf mcp` and its tools are M16** (Greg, 2026-10-20; slices 1 and
+  2 below). See [`ROADMAP.md`](../ROADMAP.md#m16-agent-tools-mcp).
+- **The panel stays under Pending** (slices 3–6). See
+  [`ROADMAP.md`](../ROADMAP.md#agent-panel-claude-and-codex).
+- **M10.5 changes the tools' design:** edits become sheaf-edit `Op`
+  JSON through `Document::plan` and `commit(plan)`, with version
+  tokens. Its slice 20 updates this memo; until then, the M10.5 plan's
+  §20 and "Changes to other plans" hold.
 
 ## The idea
 

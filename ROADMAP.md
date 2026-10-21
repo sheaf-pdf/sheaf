@@ -36,6 +36,7 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 | M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | v0.9 |
 | M14 | **Document processing**: compare, optimize, PDF/A, accessibility | Archival and output parity | v0.10 |
 | M15 | **Automation → v1.0**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | v1.0 |
+| M16 | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from any combination of ops, with approval | Agents work on documents through sheaf's own ops | after v1.0 |
 
 M6 has no release of its own; it ships in v0.2 together with Scan & OCR.
 M10.5 has none either; it sits between M10 slices 5 and 6, and ships in
@@ -400,6 +401,65 @@ archival requirements but not for daily binder work.
 - Stabilization for 1.0: corpus round-trip tests, Windows bundle and CI
   workflows exercised, settings/keymap format declared stable.
 
+### M16: Agent tools (MCP)
+
+Added 2026-10-20. An MCP server through which an AI agent works on a
+document the way a plugin does. It reads and inspects the document, and
+it builds transactions from any combination of sheaf's ops, which the
+user approves before they commit. The design so far is in
+[`todos/agent.md`](todos/agent.md) (its slices 1 and 2) and in the M10.5
+plan's §20 ("The agent milestone"). The chat panel that hosts an agent
+inside sheaf stays under [Pending](#agent-panel-claude-and-codex).
+
+- **`sheaf mcp`:** a stdio MCP server (`rmcp`) that Claude Code, Claude
+  Desktop, Codex or any other MCP client runs. It needs no panel in
+  sheaf, and sheaf never handles the agent's sign-in.
+- **Reads, as a plugin's:**
+  - the document's pages, outline and marks, and the selection;
+  - text, OCR layers included;
+  - page images, with caps on size and count;
+  - the edit history;
+  - every command with its help text, plugin commands included.
+
+  Every read returns the version it saw.
+- **Transactions of any ops:**
+  - The agent submits sheaf-edit `Op` JSON, the vocabulary of plugin
+    API 0.4.
+  - `Document::plan` lowers a batch into one transaction with a
+    preview. The user approves the preview in the sheaf window, and
+    `commit(plan)` commits exactly what was shown, as one version
+    authored by the agent on the user's behalf.
+  - A plan expires if the document changed underneath it. Reads are
+    tracked per MCP session, so a user edit elsewhere doesn't refuse a
+    plan.
+- **Commands:** a command with an argument schema runs without its
+  dialog; one without opens its dialog pre-filled. M15's batch actions
+  need the same schemas.
+- **Revert this turn,** and a log of what was sent.
+- **Consent and policy:**
+  - consent before a document first goes to a cloud agent (IRC §7216);
+  - field values behind per-document consent;
+  - `[agent] enabled` in `settings.toml`, so a firm can switch agents
+    off.
+
+**Decide at kickoff:**
+- **Which ops an approved plan may hold** beyond a plugin's. Crop,
+  watermark and flatten need a manifest permission for plugins, and
+  inserting and replacing pages is the user's alone. Also whether
+  "semantic edits only, at first" (M10.5 decision 6) still holds.
+- **How `sheaf mcp` reaches the running sheaf.** `agent.md` planned on
+  the single-instance socket. M10.5 left the transport to this milestone
+  (proposal 36).
+- **Commands an agent should never run,** and writes that never get
+  "always allow": saves, exports and anything else that writes files.
+
+Builds on M10.5 (ops, plans, version tokens), the M6 plugin API's reads
+and M9's edit history.
+
+Slices: read tools, history and commands → plans and approval → command
+schemas and the dialog fallback → consent, settings and the send log →
+docs.
+
 ---
 
 ## Parity checklist
@@ -574,20 +634,18 @@ a lock file, merge later), are in
 A chat panel where the user works with an AI agent on the open document,
 like Zed's external agents. sheaf launches the agent (Claude Code or
 Codex), and the agent handles sign-in with the user's own subscription;
-sheaf takes no API keys and never sees a credential. The agent sees the
-document, its edit history, and every command with its help text, plugin
-commands included. It runs commands and edits live, with the user's
-approval. Each approved call is one version in the history, and a whole
-turn can be reverted. Decisions and research (2026-10-14) are in
-[`todos/agent.md`](todos/agent.md).
-- **Placement:** its own milestone, one of the last.
+sheaf takes no API keys and never sees a credential. The agent works
+through [M16](#m16-agent-tools-mcp)'s tools: it sees the document, its
+edit history, and every command with its help text, plugin commands
+included, and it runs commands and transactions with the user's
+approval. The panel adds threads, streamed replies, tool-call cards with
+the approvals, and launching the agent over ACP. Decisions and research
+(2026-10-14) are in [`todos/agent.md`](todos/agent.md) (its slices 3–6).
+- **Placement:** after M16, whose tools it hosts.
 - **Overlap:**
-  - M6 plugin host API. The agent's read tools are the WIT `document`,
-    `text` and `render` interfaces, and its edits are the same `Edit`
-    batches.
+  - M16: the reads, transactions, approvals, version checks and
+    "revert this turn" are its tools.
   - M9 slice 4 edit history (done): versions, edits in words, jumps.
-  - M9 slice 1: `sheaf mcp` reaches the running sheaf through the
-    single-instance socket.
   - M15 batch actions. Both need commands that take arguments instead of
     a dialog. Until a command has them, the agent opens its dialog
     pre-filled, so this needn't wait for M15.
