@@ -4,12 +4,13 @@
 //! read through accessors: no struct literal outside this module can make
 //! one whose derived indexes don't fit its tables.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::sync::{Arc, OnceLock};
 
 use im::Vector;
+use lopdf::ObjectId;
 use sheaf_edit::Rotation;
 
 use super::{
@@ -22,6 +23,7 @@ use crate::geom::Geom;
 use crate::labels::{LabelRange, LabelSpec};
 use crate::prim::{Key, Mismatch, Val};
 use crate::stamps::HeaderFooter;
+use crate::store::BlobId;
 use crate::text_layer::TextLayer;
 
 /// One immutable snapshot of the document. Only tests compare whole
@@ -67,6 +69,16 @@ struct Indexes {
     /// asked: the clones of one `order` share it, and a new `order`
     /// starts another.
     pos: Arc<OnceLock<HashMap<PageId, u32>>>,
+    /// The pages the header/footer is on, each with the Bates number it
+    /// draws there when it counts them, built the first time one is asked:
+    /// a new order, or new generators, start another.
+    header: Arc<OnceLock<HashMap<PageId, Option<u64>>>>,
+    /// The page showing each copy of each source page, by the source, the
+    /// page's object and the copy, built the first time one is asked. Of
+    /// two that do (a page the tree lists twice), the first in order: a new
+    /// order, or a page put showing another copy, starts another. Ordered,
+    /// so a page's copies are found together ([`DocState::page_named`]).
+    shows: Arc<OnceLock<BTreeMap<Shown, PageId>>>,
     /// Every named annotation by its page and a hash of its `/NM`, kept
     /// current as annotations are set. `/NM` need only be unique on its
     /// page, and files don't always keep that, so a name holds every
@@ -80,6 +92,10 @@ struct Indexes {
     /// The hash each node is under in `names`.
     named: im::HashMap<FieldId, u64>,
 }
+
+/// A copy of a source page, as [`DocState::page_showing`] finds the page
+/// showing it: the source, the page's object and the copy.
+type Shown = (BlobId, ObjectId, u32);
 
 /// The hash the indexes key a name by: the same in every state.
 fn name_hash(name: &str) -> u64 {
@@ -163,6 +179,18 @@ impl PartialEq for DocState {
             && *fields == other.fields
             && *form == other.form
     }
+}
+
+/// The tables of a state that what a page draws is made of, by reference
+/// ([`DocState::render_tables`]).
+pub(crate) struct RenderTables<'a> {
+    pub(crate) pages: &'a im::HashMap<PageId, Arc<PageDef>>,
+    pub(crate) geoms: &'a im::HashMap<PageId, Arc<Geom>>,
+    pub(crate) page_annots: &'a im::HashMap<PageId, Vector<AnnotId>>,
+    pub(crate) annots: &'a im::HashMap<AnnotId, AnnotRec>,
+    pub(crate) generators: &'a im::OrdMap<GenId, Arc<Generator>>,
+    pub(crate) fields: &'a im::OrdMap<FieldId, Arc<FieldNode>>,
+    pub(crate) form: &'a Arc<FormDoc>,
 }
 
 /// Makes a [`DocState`]: its pages in order, with what each shows and its
@@ -299,14 +327,23 @@ impl DocState {
                 Some(Val::Order(v)) => {
                     self.order = v;
                     self.idx.pos = Arc::default();
+                    self.idx.header = Arc::default();
+                    self.idx.shows = Arc::default();
                 }
                 _ => return misfit,
             },
-            Key::Page(page) => match val {
-                Some(Val::Page(v)) => _ = self.pages.insert(page, v),
-                None => _ = self.pages.remove(&page),
-                _ => return misfit,
-            },
+            Key::Page(page) => {
+                let old = match val {
+                    Some(Val::Page(v)) => self.pages.insert(page, v),
+                    None => self.pages.remove(&page),
+                    _ => return misfit,
+                };
+                // What it shows is all the page map knows of it.
+                let shows = |def: &PageDef| (def.base.src.id(), def.base.index, def.copy);
+                if old.as_deref().map(shows) != self.pages.get(&page).map(|d| shows(d)) {
+                    self.idx.shows = Arc::default();
+                }
+            }
             Key::Geom(page) => match val {
                 Some(Val::Geom(v)) => _ = self.geoms.insert(page, v),
                 None => _ = self.geoms.remove(&page),
@@ -343,11 +380,14 @@ impl DocState {
                 None => self.labels = None,
                 _ => return misfit,
             },
-            Key::Generator(id) => match val {
-                Some(Val::Generator(v)) => _ = self.generators.insert(id, v),
-                None => _ = self.generators.remove(&id),
-                _ => return misfit,
-            },
+            Key::Generator(id) => {
+                match val {
+                    Some(Val::Generator(v)) => _ = self.generators.insert(id, v),
+                    None => _ = self.generators.remove(&id),
+                    _ => return misfit,
+                }
+                self.idx.header = Arc::default();
+            }
             Key::Field(id) => {
                 let new = match val {
                     Some(Val::Field(v)) => Some(v),
@@ -438,8 +478,156 @@ impl DocState {
         pos.get(&id).map(|&i| i as usize)
     }
 
+    /// Whether the header/footer is on page `id`: O(1) once a state of
+    /// this order and these generators has found one.
+    pub fn header_covers(&self, id: PageId) -> bool {
+        match self.header_footer() {
+            Some(hf) if hf.pages.is_some() => self.header_pages().contains_key(&id),
+            Some(_) => self.pages.contains_key(&id),
+            None => false,
+        }
+    }
+
+    /// The Bates number the header/footer draws on page `id`: None when it
+    /// doesn't count them, or isn't on the page. O(1) once a state of this
+    /// order and these generators has numbered its pages.
+    pub fn bates_of(&self, id: PageId) -> Option<u64> {
+        self.header_footer()?.bates.as_ref()?;
+        self.header_pages().get(&id).copied().flatten()
+    }
+
+    /// The header/footer's pages, and their Bates numbers.
+    fn header_pages(&self) -> &HashMap<PageId, Option<u64>> {
+        self.idx.header.get_or_init(|| self.number_header_pages())
+    }
+
+    /// The header/footer's pages in this order, as
+    /// [`HeaderFooter::bates_numbers`] numbers them.
+    fn number_header_pages(&self) -> HashMap<PageId, Option<u64>> {
+        let Some(hf) = self.header_footer() else {
+            return HashMap::new();
+        };
+        let scope: Option<HashSet<PageId>> =
+            (hf.pages.as_ref()).map(|p| p.iter().copied().collect());
+        let mut next = hf.bates.as_ref().map(|b| b.start);
+        let mut on = HashMap::new();
+        for &id in &self.order {
+            if scope.as_ref().is_none_or(|scope| scope.contains(&id)) {
+                on.insert(id, next);
+                next = next.map(|n| n + 1);
+            }
+        }
+        on
+    }
+
+    /// The page showing copy `copy` of the page whose object is `object` in
+    /// source `blob`: of two that do, the first in order. O(1) once a state
+    /// of this order and these pages has found one.
+    pub fn page_showing(&self, blob: BlobId, object: ObjectId, copy: u32) -> Option<PageId> {
+        self.shown_pages().get(&(blob, object, copy)).copied()
+    }
+
+    /// The page a reference to the page whose object is `object` in source
+    /// `blob`, read as copy `copy` of it, names: the page showing that copy,
+    /// else the lowest copy any page shows; None when none does. What a
+    /// copied reference to a page is written as
+    /// ([`page_named`](crate::materialize::copy::page_named)), found as
+    /// [`page_showing`](Self::page_showing) finds a page.
+    pub(crate) fn page_named(&self, blob: BlobId, object: ObjectId, copy: u32) -> Option<PageId> {
+        crate::materialize::copy::page_named(self.shown_pages(), blob, object, copy)
+    }
+
+    /// The pages showing copies of the page whose object is `object` in
+    /// source `blob`, by copy: what a group of the realizer finds its
+    /// pages by (M10.5 §10.1). O(log n) and those, once the page map is
+    /// built.
+    pub(crate) fn pages_showing(
+        &self,
+        blob: BlobId,
+        object: ObjectId,
+    ) -> impl Iterator<Item = PageId> + '_ {
+        let copies = (blob, object, 0)..=(blob, object, u32::MAX);
+        self.shown_pages().range(copies).map(|(_, &page)| page)
+    }
+
+    fn shown_pages(&self) -> &BTreeMap<Shown, PageId> {
+        self.idx.shows.get_or_init(|| self.map_shown())
+    }
+
+    /// The page showing each copy of each source page.
+    fn map_shown(&self) -> BTreeMap<Shown, PageId> {
+        let mut shows = BTreeMap::new();
+        for (id, def, _) in self.pages() {
+            if let Some(facts) = def.base.src.page(def.base.index) {
+                let shown = (def.base.src.id(), facts.id, def.copy);
+                shows.entry(shown).or_insert(id);
+            }
+        }
+        shows
+    }
+
+    /// The tables what a page draws is made of (M10.5 §10.2), out of every
+    /// one, so a table added fails to compile here until rendering says
+    /// whether it draws (§2's registry rule): the pages, their boxes and
+    /// annotations, the form, and the generators. Where a page is and how
+    /// many there are come from the positions found
+    /// ([`pos_of`](Self::pos_of)); bookmarks and labels draw nothing.
+    pub(crate) fn render_tables(&self) -> RenderTables<'_> {
+        let DocState {
+            order: _,
+            pages,
+            geoms,
+            bookmarks: _,
+            outline_roots: _,
+            page_annots,
+            annots,
+            labels: _,
+            generators,
+            fields,
+            form,
+            idx: _,
+        } = self;
+        RenderTables {
+            pages,
+            geoms,
+            page_annots,
+            annots,
+            generators,
+            fields,
+            form,
+        }
+    }
+
+    /// Whether `other` draws as this state does by holding its very tables,
+    /// clones of them: the same order and the same
+    /// [`render_tables`](Self::render_tables), each one table in memory.
+    /// O(1), and false for equal tables made apart: what the realizer
+    /// knows a state by.
+    pub(crate) fn draws_alike(&self, other: &DocState) -> bool {
+        let RenderTables {
+            pages,
+            geoms,
+            page_annots,
+            annots,
+            generators,
+            fields,
+            form,
+        } = self.render_tables();
+        let theirs = other.render_tables();
+        Arc::ptr_eq(&self.idx.pos, &other.idx.pos)
+            && pages.ptr_eq(theirs.pages)
+            && geoms.ptr_eq(theirs.geoms)
+            && page_annots.ptr_eq(theirs.page_annots)
+            && annots.ptr_eq(theirs.annots)
+            && generators.ptr_eq(theirs.generators)
+            && fields.ptr_eq(theirs.fields)
+            && Arc::ptr_eq(form, theirs.form)
+    }
+
     /// What page `id` shows.
     pub fn def(&self, id: PageId) -> Option<&Arc<PageDef>> {
+        #[cfg(test)]
+        visits::page(id);
         self.pages.get(&id)
     }
 
@@ -450,9 +638,11 @@ impl DocState {
 
     /// Every page in order, with what it shows and its boxes.
     pub fn pages(&self) -> impl ExactSizeIterator<Item = (PageId, &Arc<PageDef>, &Arc<Geom>)> {
-        self.order
-            .iter()
-            .map(|&id| (id, &self.pages[&id], &self.geoms[&id]))
+        self.order.iter().map(|&id| {
+            #[cfg(test)]
+            visits::page(id);
+            (id, &self.pages[&id], &self.geoms[&id])
+        })
     }
 
     /// Page `id`'s recognized text, which no file holds yet.
@@ -507,6 +697,8 @@ impl DocState {
 
     /// Annotation `id`.
     pub fn annot(&self, id: AnnotId) -> Option<&AnnotRec> {
+        #[cfg(test)]
+        visits::annot(id);
         self.annots.get(&id)
     }
 
@@ -517,13 +709,15 @@ impl DocState {
 
     /// Page `page`'s annotations, in `/Annots` order.
     pub fn annots_on(&self, page: PageId) -> impl Iterator<Item = (AnnotId, &AnnotRec)> {
-        let ids = self.page_annots.get(&page).into_iter().flatten();
-        ids.filter_map(|&id| Some((id, self.annots.get(&id)?)))
+        let ids = self.annot_ids_on(page).into_iter().flatten();
+        ids.filter_map(|&id| Some((id, self.annot(id)?)))
     }
 
     /// The ids of page `page`'s annotations, in `/Annots` order; None when
     /// it has none.
     pub fn annot_ids_on(&self, page: PageId) -> Option<&Vector<AnnotId>> {
+        #[cfg(test)]
+        visits::page(page);
         self.page_annots.get(&page)
     }
 
@@ -548,14 +742,17 @@ impl DocState {
 
     /// Every annotation, in no order.
     pub fn annots(&self) -> impl Iterator<Item = (AnnotId, &AnnotRec)> {
-        self.annots.iter().map(|(&id, rec)| (id, rec))
+        self.annots.iter().map(|(&id, rec)| {
+            #[cfg(test)]
+            visits::annot(id);
+            (id, rec)
+        })
     }
 
     /// Every one of sheaf's marks, with its page, in no order.
     pub fn marks(&self) -> impl Iterator<Item = (PageId, &Annot)> {
-        self.annots
-            .values()
-            .filter_map(|rec| Some((rec.page, rec.mark()?)))
+        self.annots()
+            .filter_map(|(_, rec)| Some((rec.page, rec.mark()?)))
     }
 
     /// How many annotations there are.
@@ -591,12 +788,18 @@ impl DocState {
 
     /// Field node `id`.
     pub fn field(&self, id: FieldId) -> Option<&Arc<FieldNode>> {
+        #[cfg(test)]
+        visits::field(id);
         self.fields.get(&id)
     }
 
     /// Every field node, by id.
     pub fn fields(&self) -> impl Iterator<Item = (FieldId, &Arc<FieldNode>)> {
-        self.fields.iter().map(|(&id, node)| (id, node))
+        self.fields.iter().map(|(&id, node)| {
+            #[cfg(test)]
+            visits::field(id);
+            (id, node)
+        })
     }
 
     /// How many field nodes there are.
@@ -606,9 +809,8 @@ impl DocState {
 
     /// Every terminal field, by id.
     pub fn terminals(&self) -> impl Iterator<Item = (FieldId, &FieldNode, &Terminal)> {
-        self.fields
-            .iter()
-            .filter_map(|(&id, node)| Some((id, &**node, &**node.term.as_ref()?)))
+        self.fields()
+            .filter_map(|(id, node)| Some((id, &**node, &**node.term.as_ref()?)))
     }
 
     /// The form as a whole.
@@ -991,6 +1193,16 @@ impl DocState {
                 Invariant::Index("the positions aren't the order's".into())
             })?;
         }
+        if let Some(header) = idx.header.get() {
+            hold(*header == self.number_header_pages(), || {
+                Invariant::Index("the header/footer's pages aren't its own".into())
+            })?;
+        }
+        if let Some(shows) = idx.shows.get() {
+            hold(*shows == self.map_shown(), || {
+                Invariant::Index("the page map isn't what the pages show".into())
+            })?;
+        }
         // Each finds every record it should, and no more.
         let mut named = 0;
         for (&id, a) in annots {
@@ -1161,8 +1373,10 @@ impl DocState {
     /// §3.9): for each slot of a per-page, per-annotation, per-field,
     /// per-bookmark or per-generator map, a path down from the root, and
     /// for an annotation or a field, others in the indexes that find it by
-    /// name; for a new order, the positions it finds. A whole value (the
-    /// top-level bookmarks, the labels, the form) is its prim's.
+    /// name; for a new order, the positions and the page map it finds, and
+    /// for a new order or new generators, the header/footer's pages. A
+    /// whole value (the top-level bookmarks, the labels, the form) is its
+    /// prim's.
     pub(crate) fn snapshot_bytes(&self, keys: impl IntoIterator<Item = Key>) -> usize {
         let DocState {
             order,
@@ -1193,13 +1407,28 @@ impl DocState {
                 Key::OutlineRoots | Key::Labels | Key::Form => {}
             }
         }
-        // A hash table of positions, about an eighth of it empty.
+        // A hash table of positions, about an eighth of it empty, and the
+        // page map, a B-tree whose nodes are about two-thirds full.
+        let table = |len: usize, entry: usize| len * (entry + 1) * 8 / 7;
+        let tree = |len: usize, entry: usize| len * entry * 3 / 2;
         let positions = match new_order {
-            true => order.len() * (size_of::<(PageId, u32)>() + 1) * 8 / 7,
+            true => {
+                table(order.len(), size_of::<(PageId, u32)>())
+                    + tree(order.len(), size_of::<(Shown, PageId)>())
+            }
             false => 0,
+        };
+        // A header/footer on every page counting nothing needs no table.
+        let header = match self.header_footer() {
+            Some(hf) if (new_order || gens > 0) && (hf.pages.is_some() || hf.bates.is_some()) => {
+                let on = hf.pages.as_ref().map_or(order.len(), Vec::len);
+                table(on, size_of::<(PageId, Option<u64>)>())
+            }
+            _ => 0,
         };
         size_of::<DocState>()
             + positions
+            + header
             + path_copies::<(PageId, Arc<PageDef>)>(p, pages.len(), HAMT)
             + path_copies::<(PageId, Arc<Geom>)>(g, geoms.len(), HAMT)
             + path_copies::<(OutlineId, Arc<Bookmark>)>(b, bookmarks.len(), HAMT)
@@ -1236,6 +1465,66 @@ fn path_copies<E>(touched: usize, len: usize, fanout: usize) -> usize {
     }
 }
 
+/// For tests: what reads of states on a thread visit while [`watching`]
+/// watches them, by id: each page a walk of the pages comes to, or whose
+/// definition or annotations are looked up; each annotation and each
+/// field node. What a state's own tables read as they're built counts too,
+/// so a test builds them first.
+///
+/// [`watching`]: visits::watching
+#[cfg(test)]
+pub(crate) mod visits {
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+
+    use crate::annot::AnnotId;
+    use crate::forms::FieldId;
+    use crate::model::PageId;
+
+    #[derive(Debug, Default)]
+    pub(crate) struct Visits {
+        pub(crate) pages: BTreeSet<PageId>,
+        pub(crate) annots: BTreeSet<AnnotId>,
+        pub(crate) fields: BTreeSet<FieldId>,
+    }
+
+    thread_local! {
+        static WATCHED: RefCell<Option<Visits>> = const { RefCell::new(None) };
+    }
+
+    /// `run`, and what it visited.
+    pub(crate) fn watching<R>(run: impl FnOnce() -> R) -> (R, Visits) {
+        struct Stop;
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                WATCHED.take();
+            }
+        }
+        WATCHED.set(Some(Visits::default()));
+        let stop = Stop;
+        let out = run();
+        let seen = WATCHED.take().unwrap_or_default();
+        drop(stop);
+        (out, seen)
+    }
+
+    fn seen(note: impl FnOnce(&mut Visits)) {
+        WATCHED.with_borrow_mut(|watched| watched.as_mut().map(note));
+    }
+
+    pub(super) fn page(id: PageId) {
+        seen(|v| _ = v.pages.insert(id));
+    }
+
+    pub(super) fn annot(id: AnnotId) {
+        seen(|v| _ = v.annots.insert(id));
+    }
+
+    pub(super) fn field(id: FieldId) {
+        seen(|v| _ = v.fields.insert(id));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1255,19 +1544,32 @@ mod tests {
         let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
         let p0 = d.state().order()[0];
         let add = crate::tx::fixture::add(p0, &square(0));
-        d.commit_ops(vec![add], "add").unwrap();
+        let header = crate::tx::fixture::set_header(numbered(), Some(&[p0]));
+        d.commit_ops(vec![add, header], "add").unwrap();
         let st = d.state().clone();
         assert_eq!(st.pos_of(p0), Some(0));
+        assert_eq!(st.bates_of(p0), Some(100));
+        let def = st.def(p0).unwrap();
+        let object = def.base.src.page(def.base.index).unwrap().id;
+        assert_eq!(st.page_showing(def.base.src.id(), object, 0), Some(p0));
         assert_eq!(st.check_invariants(), Ok(()));
         let (mark, rec) = st.annots_on(p0).find(|(_, a)| a.mark().is_some()).unwrap();
         let named = nm_key(mark, rec).unwrap();
         let field = st.terminals().next().unwrap().0;
         let hash = name_hash(&st.full_name(field).unwrap());
         type Breaks<'a> = &'a dyn Fn(&mut Indexes);
-        let cases: [(Breaks, &str); 6] = [
+        let cases: [(Breaks, &str); 8] = [
             (
                 &|idx| idx.pos = Arc::new(OnceLock::from(HashMap::from([(p0, 1)]))),
                 "the positions aren't the order's",
+            ),
+            (
+                &|idx| idx.header = Arc::new(OnceLock::from(HashMap::from([(p0, Some(7))]))),
+                "the header/footer's pages aren't its own",
+            ),
+            (
+                &|idx| idx.shows = Arc::new(OnceLock::from(BTreeMap::new())),
+                "the page map isn't what the pages show",
             ),
             (
                 &|idx| {
@@ -1308,5 +1610,93 @@ mod tests {
                 other => panic!("{says}: {other:?}"),
             }
         }
+    }
+
+    /// A header of Bates numbers from 100.
+    fn numbered() -> sheaf_edit::HeaderFooterSpec {
+        sheaf_edit::HeaderFooterSpec {
+            bates: Some(crate::stamps::Bates {
+                start: 100,
+                ..Default::default()
+            }),
+            ..crate::tx::fixture::header("<<bates>>")
+        }
+    }
+
+    /// The header/footer's pages and Bates numbers are those
+    /// [`HeaderFooter::bates_numbers`] counts in the order, after a move
+    /// and with a scope or without; the page map finds a duplicate as the
+    /// copy it is, and the first in order of two that show one.
+    #[test]
+    fn the_state_s_tables_find_what_a_walk_does() {
+        use crate::tx::fixture::{duplicate, move_pages, set_header};
+        let mut d = crate::tx::tests::doc_of(6, &[]);
+        let ids: Vec<PageId> = d.state().order().iter().copied().collect();
+        let numbered_as_walked = |st: &DocState| {
+            let order: Vec<PageId> = st.order().iter().copied().collect();
+            let hf = st.header_footer().unwrap();
+            let bates: Vec<Option<u64>> = order.iter().map(|&id| st.bates_of(id)).collect();
+            assert_eq!(bates, hf.bates_numbers(&order));
+            for &id in &order {
+                assert_eq!(st.header_covers(id), hf.covers(id), "{id:?}");
+            }
+            assert_eq!(st.check_invariants(), Ok(()));
+        };
+        let scoped = set_header(numbered(), Some(&[ids[1], ids[3], ids[4]]));
+        d.commit_ops(vec![scoped], "Header").unwrap();
+        numbered_as_walked(d.state());
+        d.commit_ops(vec![move_pages(&[ids[4]], Some(ids[0]))], "Move")
+            .unwrap();
+        numbered_as_walked(d.state());
+        d.commit_ops(vec![set_header(numbered(), None)], "Header")
+            .unwrap();
+        numbered_as_walked(d.state());
+
+        d.commit_ops(vec![duplicate(&[ids[2]])], "Duplicate")
+            .unwrap();
+        let st = d.state();
+        let copy = st.page_at(st.pos_of(ids[2]).unwrap() + 1).unwrap();
+        let def = st.def(ids[2]).unwrap();
+        let (blob, object) = (def.base.src.id(), def.base.src.page(2).unwrap().id);
+        assert_eq!(st.page_showing(blob, object, 0), Some(ids[2]));
+        assert_eq!(st.page_showing(blob, object, 1), Some(copy));
+        assert_eq!(st.page_showing(blob, object, 2), None);
+        // A tree that lists its first page again, as copy 1 of it, and a
+        // duplicate of the first, copy 1 too: of the two, the first in
+        // order is found, before a move and after; a page shown from
+        // another page leaves the map.
+        let mut f = crate::forms::fixture::Form::new(2);
+        let tree = f
+            .dict(f.catalog)
+            .get(b"Pages")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let first = f.pages[0];
+        let kids: Vec<lopdf::Object> = [first, f.pages[1], first].map(Into::into).into();
+        f.dict(tree).set("Kids", kids);
+        f.dict(tree).set("Count", 3);
+        let mut d = crate::tx::tests::opened(f.bytes(), "twice.pdf");
+        let [p0, p1, again] = [0, 1, 2].map(|i| d.page(i).unwrap());
+        d.commit_ops(vec![duplicate(&[p0])], "Duplicate").unwrap();
+        let copy = d.page(1).unwrap();
+        let st = d.state();
+        let blob = d.primary().id();
+        assert_eq!(st.def(again).unwrap().copy, 1);
+        assert_eq!(st.page_showing(blob, first, 0), Some(p0));
+        assert_eq!(st.page_showing(blob, first, 1), Some(copy));
+        d.commit_ops(vec![move_pages(&[again], Some(p0))], "Move")
+            .unwrap();
+        assert_eq!(d.state().page_showing(blob, first, 1), Some(again));
+        let second = f.pages[1];
+        assert_eq!(d.state().page_showing(blob, second, 0), Some(p1));
+        let other = crate::store::blank(d.store(), 1);
+        let replace = crate::tx::fixture::replace(&[p1], &other, [0], "b.pdf");
+        d.commit_ops(vec![replace], "Replace").unwrap();
+        let st = d.state();
+        assert_eq!(st.page_showing(blob, second, 0), None);
+        let shown = other.page(0).unwrap().id;
+        assert_eq!(st.page_showing(other.id(), shown, 0), Some(p1));
+        assert_eq!(st.check_invariants(), Ok(()));
     }
 }

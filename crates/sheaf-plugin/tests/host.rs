@@ -14,8 +14,8 @@ use sheaf_doc::geom::Geom;
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture;
 use sheaf_doc::{
-    Actor, Box2, Commit, CommitOpts, DestView, Document, EditError, FixedCount, Snapshot, SourceId,
-    Store,
+    Actor, Box2, Commit, CommitOpts, DestView, Document, EditError, FixedCount, PageId, Snapshot,
+    Src, Store,
 };
 use sheaf_edit::{MarkKind, Op, PageRef, PageSel, Rotation, Sibling, Turn};
 use sheaf_plugin::ui::{
@@ -114,22 +114,22 @@ fn search(text: &str, re: &regex::Regex) -> Vec<TextMatch> {
 struct FakeText;
 
 impl TextSource for FakeText {
-    fn page_text(&self, _source: SourceId, index: u32) -> Result<String> {
+    fn page_text(&self, _src: &Src, index: u32) -> Result<String> {
         Ok(format!("Form {}\nsecond line", 1040 + index))
     }
 
     fn pattern_search(
         &self,
-        source: SourceId,
+        src: &Src,
         index: u32,
         re: &Arc<regex::Regex>,
     ) -> Result<Vec<TextMatch>> {
-        Ok(search(&self.page_text(source, index)?, re))
+        Ok(search(&self.page_text(src, index)?, re))
     }
 
     fn search(
         &self,
-        source: SourceId,
+        src: &Src,
         index: u32,
         query: &str,
         match_case: bool,
@@ -137,12 +137,12 @@ impl TextSource for FakeText {
         let re = regex::RegexBuilder::new(&regex::escape(query))
             .case_insensitive(!match_case)
             .build()?;
-        Ok(search(&self.page_text(source, index)?, &re))
+        Ok(search(&self.page_text(src, index)?, &re))
     }
 
     fn text_boxes(
         &self,
-        _source: SourceId,
+        _src: &Src,
         _index: u32,
         rect: sheaf_doc::Box2,
     ) -> Result<Vec<sheaf_doc::Box2>> {
@@ -427,7 +427,7 @@ fn discover_finds_plugins_and_reports_bad_ones() {
 struct Pages(Vec<&'static str>);
 
 impl TextSource for Pages {
-    fn page_text(&self, _source: SourceId, index: u32) -> Result<String> {
+    fn page_text(&self, _src: &Src, index: u32) -> Result<String> {
         Ok(self
             .0
             .get(index as usize)
@@ -438,16 +438,16 @@ impl TextSource for Pages {
 
     fn pattern_search(
         &self,
-        source: SourceId,
+        src: &Src,
         index: u32,
         re: &Arc<regex::Regex>,
     ) -> Result<Vec<TextMatch>> {
-        Ok(search(&self.page_text(source, index)?, re))
+        Ok(search(&self.page_text(src, index)?, re))
     }
 
     fn search(
         &self,
-        source: SourceId,
+        src: &Src,
         index: u32,
         query: &str,
         match_case: bool,
@@ -455,12 +455,12 @@ impl TextSource for Pages {
         let re = regex::RegexBuilder::new(&regex::escape(query))
             .case_insensitive(!match_case)
             .build()?;
-        Ok(search(&self.page_text(source, index)?, &re))
+        Ok(search(&self.page_text(src, index)?, &re))
     }
 
     fn text_boxes(
         &self,
-        _source: SourceId,
+        _src: &Src,
         _index: u32,
         rect: sheaf_doc::Box2,
     ) -> Result<Vec<sheaf_doc::Box2>> {
@@ -987,15 +987,14 @@ struct FakeOcr;
 impl sheaf_plugin::OcrSource for FakeOcr {
     fn recognize(
         &self,
-        _page: sheaf_doc::PageId,
-        base: &sheaf_doc::PageBase,
-        geom: &sheaf_doc::geom::Geom,
-        _render: sheaf_edit::Rotation,
+        snap: &Snapshot,
+        page: PageId,
         language: Option<String>,
         _dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer> {
         // Slow, like a real engine: longer than the plugin's time limit.
         std::thread::sleep(Duration::from_millis(400));
+        let base = &snap.state.def(page).unwrap().base;
         Ok(sheaf_doc::text_layer::from_engine(
             vec![sheaf_doc::OcrWord {
                 text: format!("page{}", base.index),
@@ -1007,7 +1006,7 @@ impl sheaf_plugin::OcrSource for FakeOcr {
                 },
                 confidence: 0.9,
             }],
-            geom,
+            &snap.geom(page),
             &format!("fake-{}", language.unwrap_or_default()),
         ))
     }
@@ -1382,8 +1381,8 @@ struct FakeRender;
 impl sheaf_plugin::render::RenderSource for FakeRender {
     fn render(
         &self,
-        _source: SourceId,
-        _index: u32,
+        _snap: &Snapshot,
+        _page: PageId,
         _page_w: u32,
         _page_h: u32,
         (x0, y0, w, h): (u32, u32, u32, u32),
@@ -1432,13 +1431,13 @@ struct SeededRender(Vec<u64>);
 impl sheaf_plugin::render::RenderSource for SeededRender {
     fn render(
         &self,
-        _source: SourceId,
-        index: u32,
+        snap: &Snapshot,
+        page: PageId,
         page_w: u32,
         page_h: u32,
         (x0, y0, w, h): (u32, u32, u32, u32),
     ) -> Result<Vec<u8>> {
-        let seed = self.0[index as usize];
+        let seed = self.0[snap.state.pos_of(page).unwrap()];
         let mut out = Vec::with_capacity((w * h * 4) as usize);
         for y in y0..y0 + h {
             for x in x0..x0 + w {

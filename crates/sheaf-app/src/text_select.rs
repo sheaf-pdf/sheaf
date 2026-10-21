@@ -12,6 +12,7 @@ use std::sync::Arc;
 use gpui::{ClipboardItem, Context};
 use sheaf_doc::{AnnotKind, Box2, PageChars, PageId, Pt, SourceId, TextLayer};
 use sheaf_edit::Rotation;
+use sheaf_render::{Budget, PageIndex};
 
 use crate::docview::{DocView, State};
 use crate::markup_tools::Tool;
@@ -129,14 +130,15 @@ impl DocView {
                 f(self, Some(chars), cx)
             }
             CharsKey::Engine(source, index) => {
-                let base = (doc.model.state().def(page))
-                    .filter(|def| def.base.src.id() == source)
-                    .map(|def| def.base.src.geom(index));
-                let (Some(handle), Some(base)) = (doc.handles.get(&source).cloned(), base) else {
+                let src = (doc.model.state().def(page))
+                    .map(|def| &def.base.src)
+                    .filter(|src| src.id() == source);
+                let Some(src) = src else {
                     return f(self, None, cx);
                 };
+                let (base, target) = (src.geom(index), doc.views.base(src, Budget::Screen));
                 doc.chars_loading.insert(page);
-                let rx = handle.page_chars(index);
+                let rx = doc.views.pool().page_chars(target, PageIndex(index));
                 cx.spawn(async move |this, cx| {
                     let read = rx.await.ok().and_then(|r| r.ok());
                     this.update(cx, |v, cx| {

@@ -58,6 +58,21 @@ pub enum Kid {
     Page(PageId),
 }
 
+impl Shape {
+    /// One node over `pages`, in order: an overlay's root.
+    pub fn flat(pages: &[PageId]) -> Shape {
+        let root = PagesNode {
+            parent: None,
+            kids: pages.iter().map(|&p| Kid::Page(p)).collect(),
+            count: pages.len(),
+        };
+        Shape {
+            nodes: vec![root],
+            leaf: vec![0; pages.len()],
+        }
+    }
+}
+
 /// The balanced tree over `pages`, in order. No pages is a root with no
 /// kids.
 pub fn balanced(pages: &[PageId]) -> Shape {

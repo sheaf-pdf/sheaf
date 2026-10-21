@@ -18,6 +18,7 @@ pub mod prefs;
 pub mod scan;
 pub mod split;
 pub mod stamps;
+pub mod views;
 
 use std::collections::BTreeMap;
 

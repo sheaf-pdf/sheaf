@@ -396,6 +396,19 @@ impl fmt::Debug for BlobRef {
 #[derive(Clone)]
 pub struct Src(Arc<Source>);
 
+impl Src {
+    /// A reference that doesn't pin it: how an engine opened on its bytes
+    /// finds it gone (M10.5 §10.3).
+    pub fn downgrade(&self) -> Weak<Source> {
+        Arc::downgrade(&self.0)
+    }
+
+    /// The source `weak` refers to, while anything pins it.
+    pub fn upgrade(weak: &Weak<Source>) -> Option<Src> {
+        weak.upgrade().map(Src)
+    }
+}
+
 impl Deref for Src {
     type Target = Source;
 

@@ -31,7 +31,7 @@ use sheaf_edit::{BookmarkRef, Op, Turn};
 /// of its own, under one node that gives them their resources and media
 /// box; with document information and XMP metadata. With `tagged`, it
 /// has a structure tree, and each page its `/StructParents`.
-pub(super) fn file(tag: &str, n: usize, tagged: bool) -> Pdf {
+pub(crate) fn file(tag: &str, n: usize, tagged: bool) -> Pdf {
     let mut pdf = Pdf::with_version("1.5");
     let pages = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
@@ -85,7 +85,7 @@ fn text(text: &str) -> Vec<u8> {
 }
 
 /// `pdf` as lopdf writes it, with a cross-reference table.
-pub(super) fn bytes(pdf: &Pdf) -> Vec<u8> {
+pub(crate) fn bytes(pdf: &Pdf) -> Vec<u8> {
     let mut pdf = pdf.clone();
     pdf.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
     let mut out = Vec::new();
@@ -100,7 +100,7 @@ fn file_in(store: &Store, bytes: &[u8], name: &str, password: Option<&str>) -> S
 }
 
 /// A document over `bytes`, opened with `password`.
-pub(super) fn open(bytes: &[u8], password: Option<&str>) -> Document {
+pub(crate) fn open(bytes: &[u8], password: Option<&str>) -> Document {
     let store = Store::new();
     let primary = file_in(&store, bytes, "doc.pdf", password);
     let src = primary.clone();
@@ -113,13 +113,13 @@ pub(super) fn open(bytes: &[u8], password: Option<&str>) -> Document {
 /// A file to insert pages of: its source, held while it's used, and the
 /// name it goes by.
 #[derive(Clone)]
-pub(super) struct Other {
-    pub(super) src: Src,
-    pub(super) name: Arc<str>,
+pub(crate) struct Other {
+    pub(crate) src: Src,
+    pub(crate) name: Arc<str>,
 }
 
 /// `bytes`, read into `d`'s store as the file `name`.
-pub(super) fn add(d: &Document, bytes: &[u8], name: &str) -> Other {
+pub(crate) fn add(d: &Document, bytes: &[u8], name: &str) -> Other {
     Other {
         src: file_in(d.store(), bytes, name, None),
         name: name.into(),
@@ -127,7 +127,7 @@ pub(super) fn add(d: &Document, bytes: &[u8], name: &str) -> Other {
 }
 
 /// Page `index` of `other` inserted at the end of `d`.
-pub(super) fn insert(d: &mut Document, other: &Other, index: u32) {
+pub(crate) fn insert(d: &mut Document, other: &Other, index: u32) {
     let insert = fx::insert(&other.src, [index], &other.name, None);
     d.commit_ops(vec![insert], "insert").unwrap();
 }
@@ -1235,7 +1235,7 @@ fn crop(d: &mut Document, page: PageId, index: u32, crop: [f32; 4]) -> SourceId 
 
 /// `bytes`, a derived copy of page `index` of `d`'s primary, noted with
 /// `d`, and `page` rebased onto its first page.
-fn derive(d: &mut Document, bytes: &[u8], index: u32, page: PageId) -> SourceId {
+pub(crate) fn derive(d: &mut Document, bytes: &[u8], index: u32, page: PageId) -> SourceId {
     let kind = BlobKind::Pdf {
         password: None,
         origin: crate::store::Origin::Memory(crate::store::MemoryKind::Derived),

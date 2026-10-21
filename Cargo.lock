@@ -6569,6 +6569,7 @@ dependencies = [
  "im",
  "image",
  "log",
+ "lopdf",
  "regex",
  "resvg",
  "schemars",
@@ -6713,6 +6714,8 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "fastrand",
+ "flate2",
+ "futures",
  "image",
  "in-progress",
  "log",

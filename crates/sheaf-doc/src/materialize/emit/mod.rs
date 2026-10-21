@@ -40,6 +40,30 @@
 //! ([`RootValues`](super::record::RootValues)), so a key a save dropped
 //! stays gone, and the catalog says `/Version` when the section needs a
 //! later one than the file is (§11.7).
+//!
+//! **An overlay** ([`EmitScope::Pages`] over [`EmitBase::Overlay`], §10.1)
+//! writes some pages as a section over their source's own bytes, what
+//! PDFium draws them from under a view's inputs ([`ViewInputs`]). Its setup
+//! visits only those pages, their annotations and the fields with a widget
+//! on them; where a page is, the Bates numbers and which page shows a
+//! source's page are the state's own tables. The source is the emission's
+//! own, as a save's primary is: copy 0 of its objects is where it is, and
+//! copy 0 of its pages and annotations is claimed at their own numbers,
+//! while another copy, or another file's object, is built as a copy. The
+//! pages hang under one new root that lists only them, each with its four
+//! inheritable keys written out and its base page's `/Rotate`
+//! ([`RotatePolicy::KeepBase`]), which the render turns by the rest. The
+//! catalog is the source's over that root, with a form of the fields with
+//! a widget on those pages, and the layers the view turns off. What the
+//! view doesn't draw isn't written: sheaf's marks unless PDFium draws
+//! them, others' comments and links unless the view shows them, the header
+//! and footer and recognized text unless it asks for them; and what it
+//! hides, or a mark being dragged, is written flagged hidden under its own
+//! key. A derived copy's page is the page the copy has: the section goes
+//! over the copy's bytes. An overlay's frame ([`EmitScope::Frame`]) is the
+//! root, the catalog and the form alone, without the pages, so the realizer
+//! can emit each page on its own and keep it (its delta), and build the
+//! frame over the pages it puts together.
 
 pub mod annots;
 pub mod catalog;
@@ -57,14 +81,16 @@ use anyhow::{Context as _, Result, bail};
 use in_progress::Progress;
 use lopdf::{Dictionary, Object, ObjectId};
 
-use super::copy::{Closure, Scope};
+use super::copy::{Closure, Pages, Scope};
 use super::key::{NameTree, ObjKey};
 use super::plan::{Note, SaveTransform};
-use super::record::{SaveInput, SaveRecord};
+use super::record::SaveRecord;
 use crate::annot::{Annot, AnnotId, StampForm};
 use crate::content::sink::{self, Sink};
 use crate::content::{Res, ResBody, ResId, Reserved};
+use crate::forms::field::annot_flags;
 use crate::model::{AnnotBody, DerivedCopies, DocState, FormRef, PageId};
+use crate::realize::{MarkDraw, ViewInputs};
 use crate::source::ObjRef;
 use crate::store::{BlobId, Src};
 
@@ -137,7 +163,7 @@ pub struct Deferred {
     pub data: Arc<dyn Fn() -> Result<Vec<u8>> + Send + Sync>,
 }
 
-/// What an emission covers. Slice 13's overlays add some pages.
+/// What an emission covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmitScope {
     /// The whole document.
@@ -145,25 +171,62 @@ pub enum EmitScope {
     /// The keys an Append writes: the closure of what its path changed
     /// under what each depends on (`materialize::deps`).
     Keys(Arc<BTreeSet<ObjKey>>),
+    /// An overlay's pages, in the order its page tree lists them.
+    Pages(Arc<[PageId]>),
+    /// An overlay's frame over its pages: the root that lists them, the
+    /// catalog over it and the form of the fields with a widget on them,
+    /// without the pages themselves, each of which the realizer emits on
+    /// its own ([`EmitScope::Pages`] of one).
+    Frame(Arc<[PageId]>),
 }
 
 /// What an emission is written onto.
 #[derive(Clone, Copy)]
 pub enum EmitBase<'a> {
-    /// A whole new file over the primary's objects: every page placed in
-    /// a new tree, the root objects' unowned keys from the primary.
-    Rewrite,
-    /// The saved file an Append writes after, as `record` says it is: the
-    /// node each page written goes under, its page tree with the target's
-    /// pages placed in it when that changed it, and the sources whose
-    /// objects it has are copied again, their pages named otherwise now
+    /// A whole new file over `primary`'s objects: every page placed in a
+    /// new tree, the root objects' unowned keys from the primary. A derived
+    /// copy's page is written as the page `derived` says it was made from.
+    Rewrite {
+        primary: &'a Src,
+        derived: &'a DerivedCopies,
+    },
+    /// The saved file an Append writes after, `primary` the file it was,
+    /// as `record` says it is: the node each page written goes under, its
+    /// page tree with the target's pages placed in it when that changed it,
+    /// and the sources whose objects it has are copied again, their pages
+    /// named otherwise now
     /// ([`Closure::relinked`](super::deps::Closure::relinked)).
     Saved {
+        primary: &'a Src,
+        derived: &'a DerivedCopies,
         record: &'a SaveRecord,
         parents: &'a BTreeMap<PageId, ObjKey>,
         tree: Option<&'a tree::Spliced>,
         relinked: &'a BTreeSet<BlobId>,
     },
+    /// A source's own bytes, which an overlay's section goes after.
+    Overlay(&'a Overlay<'a>),
+}
+
+/// What an overlay is written over and for (M10.5 §10.1).
+pub struct Overlay<'a> {
+    /// The source whose bytes its section goes after: the emission's own,
+    /// as a save's primary is.
+    pub src: Src,
+    /// The view it's drawn for.
+    pub inputs: &'a ViewInputs,
+    pub rotate: RotatePolicy,
+}
+
+/// What a page's `/Rotate` is written from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotatePolicy {
+    /// Its `Geom`'s, as a save writes it.
+    Model,
+    /// Its base page's own, the value its file gives it, as an overlay
+    /// writes it: the render turns the page by the rest of its turn (its
+    /// job's, §5), so nothing is turned twice.
+    KeepBase,
 }
 
 /// An Append's emission, as the emitters see it.
@@ -281,12 +344,15 @@ pub(crate) struct Shown {
 
 /// What the emitters share while they emit.
 pub(crate) struct Cx<'a> {
-    pub(crate) input: &'a SaveInput,
+    /// The state written.
+    pub(crate) st: &'a DocState,
     /// An Append's scope and saved file: None for a whole file.
     pub(crate) append: Option<Append<'a>>,
+    /// An overlay's source and view: None for a save.
+    pub(crate) overlay: Option<&'a Overlay<'a>>,
     /// What save policy does to the form as it's written.
     pub(crate) transforms: &'a [SaveTransform],
-    pub(crate) primary: Src,
+    pub(crate) primary: &'a Src,
     /// The sources the pages are written from, by their blobs: what a
     /// placeholder to a source's object is read from.
     srcs: HashMap<BlobId, Src>,
@@ -294,7 +360,7 @@ pub(crate) struct Cx<'a> {
     pub(crate) shown: HashMap<PageId, Shown>,
     pub(crate) objects: Vec<(ObjKey, SymObject)>,
     pub(crate) syms: Syms,
-    pub(crate) closure: Closure,
+    pub(crate) closure: Closure<'a>,
     pub(crate) version: PdfVersion,
     pub(crate) notes: Vec<Note>,
     /// Each page's Bates number, by its place, when the header and footer
@@ -322,6 +388,42 @@ pub(crate) struct Cx<'a> {
 }
 
 impl<'a> Cx<'a> {
+    /// An emission of `st` over `primary`'s objects, `closure` copying
+    /// what it reaches, `transforms` applied: its pages, their sources and
+    /// what it's written onto still to say.
+    fn new(
+        st: &'a DocState,
+        primary: &'a Src,
+        closure: Closure<'a>,
+        transforms: &'a [SaveTransform],
+    ) -> Cx<'a> {
+        let version = PdfVersion::of(primary);
+        Cx {
+            st,
+            append: None,
+            overlay: None,
+            transforms,
+            primary,
+            srcs: HashMap::new(),
+            shown: HashMap::new(),
+            objects: Vec::new(),
+            syms: Syms::default(),
+            closure,
+            version,
+            notes: Vec::new(),
+            bates: Vec::new(),
+            owned: BTreeMap::new(),
+            claimed: HashSet::new(),
+            made: HashSet::new(),
+            untagged: BTreeSet::new(),
+            form: form::Plan::default(),
+            stamps: HashMap::new(),
+            files: HashMap::new(),
+            by_src: HashMap::new(),
+            groups: HashMap::new(),
+        }
+    }
+
     /// `obj` of `scope`'s source, its references placeholders (see
     /// [`Closure::sym`]).
     pub(crate) fn sym(&mut self, obj: &Object, scope: &Scope) -> Object {
@@ -367,6 +469,63 @@ impl<'a> Cx<'a> {
     /// The saved file an Append writes after: None for a whole file.
     pub(crate) fn saved(&self) -> Option<&'a SaveRecord> {
         self.append.as_ref().map(|a| a.record)
+    }
+
+    /// What a page's `/Rotate` is written from.
+    pub(crate) fn rotate(&self) -> RotatePolicy {
+        self.overlay.map_or(RotatePolicy::Model, |o| o.rotate)
+    }
+
+    /// Whether an annotation, `body`, is written: by a save, every one; by
+    /// an overlay, a widget (the render's flags say whether it's drawn),
+    /// one of sheaf's marks when PDFium draws them, and another tool's
+    /// comment or link when the view shows them.
+    pub(crate) fn draws(&self, body: &AnnotBody) -> bool {
+        let Some(o) = self.overlay else {
+            return true;
+        };
+        match body {
+            AnnotBody::Mark(_) => o.inputs.marks == MarkDraw::ByEngine,
+            AnnotBody::Foreign(_) => o.inputs.foreign,
+            AnnotBody::Widget(_) => true,
+        }
+    }
+
+    /// Whether annotation `aid` is written ([`draws`](Self::draws)).
+    pub(crate) fn draws_id(&self, aid: AnnotId) -> bool {
+        self.overlay.is_none() || (self.st.annot(aid)).is_some_and(|rec| self.draws(&rec.body))
+    }
+
+    /// Whether an annotation of a page the records don't hold is written,
+    /// a `widget` or not: a widget as the form's are, anything else as
+    /// another tool's comment is ([`draws`](Self::draws)).
+    pub(crate) fn draws_unmodeled(&self, widget: bool) -> bool {
+        widget || self.overlay.is_none_or(|o| o.inputs.foreign)
+    }
+
+    /// Whether an overlay writes annotation `aid` hidden: its view hides
+    /// it, or it's a mark being dragged, whose ghost the screen draws. A
+    /// save never does.
+    pub(crate) fn hides(&self, aid: AnnotId) -> bool {
+        self.overlay
+            .is_some_and(|o| o.inputs.hidden.contains(&aid) || o.inputs.dragging.contains(&aid))
+    }
+
+    /// `dict`, annotation `aid`'s as written, flagged Hidden (`/F`, ISO
+    /// 32000-1 12.5.3) when the overlay [`hides`](Self::hides) it: PDFium
+    /// draws it no more, and it keeps its key.
+    pub(crate) fn hidden(&self, aid: AnnotId, dict: &mut Dictionary) {
+        if !self.hides(aid) {
+            return;
+        }
+        let flags = match dict.get(b"F") {
+            Ok(&Object::Integer(f)) => f,
+            Ok(&Object::Reference(r)) => (self.read(r))
+                .and_then(|(f, _, _)| f.as_i64().ok())
+                .unwrap_or(0),
+            _ => 0,
+        };
+        dict.set("F", flags | i64::from(annot_flags::HIDDEN));
     }
 
     /// `key` written at `at`, the number of the primary's object it is,
@@ -647,34 +806,47 @@ fn origin(derived_copies: &DerivedCopies, src: &Src, index: u32) -> Option<(Src,
     at
 }
 
-/// `input`'s target state as `base` writes it, `scope` of it, with save
-/// policy's `transforms` applied, and `p` counting the pages and saying
-/// when to stop. A whole file is written as a Rewrite, and some keys onto
-/// a saved file.
+/// `st` as `base` writes it, `scope` of it, with save policy's
+/// `transforms` applied, and `p` counting the pages and saying when to
+/// stop. A whole file is written as a Rewrite, some keys onto a saved
+/// file, and some pages as an overlay over their source.
 pub fn emit(
-    input: &SaveInput,
+    st: &DocState,
     scope: EmitScope,
     base: EmitBase,
     transforms: &[SaveTransform],
     p: &dyn Progress,
 ) -> Result<Emission> {
-    let (keys, saved) = match (&scope, base) {
-        (EmitScope::All, EmitBase::Rewrite) => (None, None),
+    let (primary, derived, keys, saved) = match (&scope, base) {
+        (EmitScope::All, EmitBase::Rewrite { primary, derived }) => (primary, derived, None, None),
         (
             EmitScope::Keys(keys),
             EmitBase::Saved {
+                primary,
+                derived,
                 record,
                 parents,
                 tree,
                 relinked,
             },
-        ) => (Some(&**keys), Some((record, parents, tree, relinked))),
-        _ => bail!("only an Append emits some keys, and only onto the saved file"),
+        ) => (
+            primary,
+            derived,
+            Some(&**keys),
+            Some((record, parents, tree, relinked)),
+        ),
+        (EmitScope::Pages(pages), EmitBase::Overlay(overlay)) => {
+            return emit_overlay(st, pages, overlay, true, p);
+        }
+        (EmitScope::Frame(pages), EmitBase::Overlay(overlay)) => {
+            return emit_overlay(st, pages, overlay, false, p);
+        }
+        _ => bail!(
+            "a whole file is a Rewrite, some keys go onto the saved file, and some pages over \
+             their source"
+        ),
     };
-    let st = &input.target;
-    let primary = input.primary.clone();
-    let version = PdfVersion::of(&primary);
-    let shown = shown(st, &input.derived);
+    let shown = shown(st, derived);
     let pages = written_pages(st, &shown);
     let order: Vec<PageId> = st.order().iter().copied().collect();
     let bates = match st.header_footer() {
@@ -685,14 +857,15 @@ pub fn emit(
         .flat_map(|page| {
             std::iter::once(&page.src).chain(page.content.as_ref().map(|(src, _)| src))
         })
-        .chain([&primary])
+        .chain([primary])
         .map(|src| (src.id(), src.clone()))
         .collect();
-    let mut closure = Closure::new(primary.id(), pages);
+    let mut closure = Closure::new(primary.id(), Pages::Written(pages));
     if let Some((record, _, _, relinked)) = saved {
         closure.saved(record.map.clone(), relinked);
     }
-    let append = keys
+    let mut cx = Cx::new(st, primary, closure, transforms);
+    cx.append = keys
         .zip(saved)
         .map(|(keys, (record, parents, tree, _))| Append {
             keys,
@@ -701,30 +874,10 @@ pub fn emit(
             tree,
             extra: BTreeSet::new(),
         });
-    let mut cx = Cx {
-        input,
-        append,
-        transforms,
-        closure,
-        primary,
-        srcs,
-        shown,
-        objects: Vec::new(),
-        syms: Syms::default(),
-        version,
-        notes: Vec::new(),
-        bates,
-        owned: BTreeMap::new(),
-        claimed: HashSet::new(),
-        made: HashSet::new(),
-        untagged: BTreeSet::new(),
-        form: form::Plan::default(),
-        stamps: HashMap::new(),
-        files: HashMap::new(),
-        by_src: HashMap::new(),
-        groups: HashMap::new(),
-    };
-    claim(&mut cx);
+    cx.srcs = srcs;
+    cx.shown = shown;
+    cx.bates = bates;
+    claim(&mut cx, &order);
     if cx.append.is_some() {
         appended(&mut cx, &order, p)?;
     } else {
@@ -739,6 +892,75 @@ pub fn emit(
         tree::nodes(&mut cx, &shape);
         catalog::catalog(&mut cx, &order);
     }
+    finish(cx, p)
+}
+
+/// `pages` of `st`, each a page of `o`'s source, as overlay `o`'s section
+/// writes them over the source, `p` counting them: each page as its source
+/// page has it (a derived copy's page as the copy has it), under one root
+/// that lists them in order, and the catalog over that root. Without
+/// `with_pages`, the root and the catalog alone: the overlay's frame.
+fn emit_overlay(
+    st: &DocState,
+    pages: &[PageId],
+    o: &Overlay,
+    with_pages: bool,
+    p: &dyn Progress,
+) -> Result<Emission> {
+    let mut shown = HashMap::with_capacity(pages.len());
+    for &id in pages {
+        let def = (st.def(id)).with_context(|| format!("{id:?} isn't a page of the document"))?;
+        if def.base.src != o.src {
+            bail!("{id:?} isn't a page of the overlay's source");
+        }
+        let page = Shown {
+            src: def.base.src.clone(),
+            index: def.base.index,
+            copy: def.copy,
+            content: None,
+        };
+        shown.insert(id, page);
+    }
+    let srcs = (shown.values().map(|page| &page.src))
+        .chain([&o.src])
+        .map(|src| (src.id(), src.clone()))
+        .collect();
+    let within = pages.iter().copied().collect();
+    let closure = Closure::new(o.src.id(), Pages::Overlay { st, within });
+    let mut cx = Cx::new(st, &o.src, closure, &[]);
+    cx.overlay = Some(o);
+    cx.srcs = srcs;
+    cx.shown = shown;
+    // The catalog is written over the source's, which the base's trailer
+    // names.
+    let catalog = o
+        .src
+        .pdf()
+        .trailer()
+        .get(b"Root")
+        .and_then(Object::as_reference);
+    if let Ok(at) = catalog {
+        cx.own(ObjKey::Catalog, at);
+    }
+    claim(&mut cx, pages);
+    p.set_total(Some(pages.len() as u64), crate::PAGES);
+    let root = ObjKey::PagesNode(0);
+    for &id in pages.iter().filter(|_| with_pages) {
+        p.check()?;
+        let (Some(def), Some(geom), Some(pos)) = (st.def(id), st.geom(id), st.pos_of(id)) else {
+            bail!("{id:?} isn't a page of the document");
+        };
+        pages::page(&mut cx, id, def, geom, pos, root)?;
+        p.inc(1);
+    }
+    tree::nodes(&mut cx, &tree::Shape::flat(pages));
+    catalog::overlay(&mut cx);
+    finish(cx, p)
+}
+
+/// What `cx` emitted, once what its copies reach is copied too: for an
+/// Append, only what something it writes of the state reaches.
+fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
     while let Some(next) = cx.closure.next(&mut cx.syms) {
         p.check()?;
         let (key, obj) = next?;
@@ -778,8 +1000,7 @@ pub fn emit(
 /// when the section needs a later version than the file is, or the form
 /// or the outline came or went. `order` is the pages'.
 fn appended(cx: &mut Cx, order: &[PageId], p: &dyn Progress) -> Result<()> {
-    let input = cx.input;
-    let st = &input.target;
+    let st = cx.st;
     let append = cx.append.as_ref().expect("an Append");
     let (keys, record, parents, spliced) =
         (append.keys, append.record, append.parents, append.tree);
@@ -913,18 +1134,18 @@ fn refs(obj: &Object, to: &mut dyn FnMut(ObjectId)) {
     }
 }
 
-/// The primary's page objects the pages of `st` are written at (§11.5, bug
-/// 3), shown as `shown` says: each page that's copy 0 of a primary page,
-/// at the first of the page table's listings of it, the first such page in
-/// order taking it.
+/// The primary's page objects `pages`, in order, are written at (§11.5,
+/// bug 3), shown as `shown` says: each page that's copy 0 of a primary
+/// page, at the first of the page table's listings of it, the first such
+/// page in order taking it.
 pub(crate) fn owned_pages(
-    st: &DocState,
+    pages: impl IntoIterator<Item = PageId>,
     shown: &HashMap<PageId, Shown>,
     primary: BlobId,
 ) -> Vec<(PageId, ObjectId)> {
     let mut taken = HashSet::new();
     let mut out = Vec::new();
-    for (id, _, _) in st.pages() {
+    for id in pages {
         let page = &shown[&id];
         if page.src.id() == primary
             && page.copy == 0
@@ -941,19 +1162,19 @@ pub(crate) fn owned_pages(
 /// The primary's numbers the keys that are its objects keep (§11.5),
 /// claimed before anything is emitted, in a fixed order, so whichever
 /// emitter refers to one first, it's numbered alike: copy 0 of each primary
-/// page, the form's nodes ([`form::prepare`]), then each page's
-/// annotations read from the primary, copy 0 of them (a widget merged with
-/// its field is the field's). And every annotation read from a file, by
-/// its object and copy, for replies.
-fn claim(cx: &mut Cx) {
-    let input = cx.input;
-    let st = &input.target;
+/// page of `pages` (the emission's, in order), the form's nodes
+/// ([`form::prepare`]), then each page's annotations read from the
+/// primary, copy 0 of them (a widget merged with its field is the
+/// field's). And every annotation read from a file, by its object and
+/// copy, for replies.
+fn claim(cx: &mut Cx, pages: &[PageId]) {
+    let st = cx.st;
     let primary = cx.primary.id();
-    for (id, at) in owned_pages(st, &cx.shown, primary) {
+    for (id, at) in owned_pages(pages.iter().copied(), &cx.shown, primary) {
         cx.own(ObjKey::Page(id), at);
     }
     cx.form = form::prepare(cx);
-    for (id, _, _) in st.pages() {
+    for &id in pages {
         for &aid in st.annot_ids_on(id).into_iter().flatten() {
             let Some(rec) = st.annot(aid) else {
                 continue;

@@ -14,7 +14,7 @@ use gpui::{
 };
 use sheaf_doc::{CommitOpts, PageId};
 use sheaf_edit::{BookmarkRef, Local, Op, Sibling};
-use sheaf_render::SearchEvent;
+use sheaf_render::{Matcher, SearchEvent};
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
@@ -122,7 +122,6 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let handle = doc.primary().clone();
         let Some(ps) = &mut self.pattern else { return };
         ps.source = src.clone();
         ps.hits.clear();
@@ -150,7 +149,7 @@ impl DocView {
         let has_seed = !seeded.is_empty();
         ps.hits = seeded;
         ps.started = Some(Instant::now());
-        let mut rx = handle.pattern_search(re);
+        let mut rx = doc.search(Matcher::Pattern(re));
         let timing = self.timing;
         let Some(ps) = &mut self.pattern else { return };
         ps._task =

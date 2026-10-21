@@ -581,6 +581,66 @@ const RETIRED: &[(&str, u8)] = &[
     // each on the document as it is when the call returns.
     ("runtime::DocContext::snapshot", 12),
     ("plugins::plugin_tx", 12),
+    // A thread and an engine per source, and its handle wherever a page was
+    // drawn or read: one engine pool serves every engine (§10.3), and a
+    // page is drawn from its view (`Views`). The impl of OCR's page source
+    // for the handle goes with it, as `RenderHandle` names it.
+    ("RenderHandle", 13),
+    ("DocInfo", 13),
+    ("SearchWalk", 13),
+    ("worker_loop", 13),
+    ("Msg::HideAnnots", 13),
+    ("Msg::SetHidden", 13),
+    ("job::OcrPage::source", 13),
+    ("job::OcrPage::render", 13),
+    ("render::PageRenderer::base", 13),
+    ("print_dialog::PrintContext::handles", 13),
+    ("plugins::EngineText::handle", 13),
+    ("page_insert::PlannedInsert::handle", 13),
+    ("page_insert::with_engines", 13),
+    ("page_insert::Copies", 13),
+    ("docview::Doc::handles", 13),
+    ("docview::Doc::primary", 13),
+    ("engines_on", 13),
+    // Hiding by replaying it into each engine: what a page draws is data,
+    // `ViewInputs.hidden` and `ocg_off` (§10.4), each consumer passing its
+    // own, and the layers panel's choice a patch of the catalog, not a
+    // decrypted copy written again.
+    ("Renderer::hide_annots", 13),
+    ("Renderer::set_annots_hidden", 13),
+    ("pdfium::PdfiumEngine::hide_annots", 13),
+    ("pdfium::PdfiumEngine::set_annots_hidden", 13),
+    ("docview::Doc::take_in", 13),
+    ("docview::Doc::drawn_marks", 13),
+    ("docview::Doc::foreign_hidden", 13),
+    ("docview::Doc::layers_generation", 13),
+    ("docview::drawn_marks", 13),
+    ("docview::marks_by_page", 13),
+    ("docview::hide_renamed", 13),
+    ("comments_panel::DocView::sync_foreign_visibility", 13),
+    ("layers::set_hidden", 13),
+    // The header and footer drawn by GPUI over each page: the realizer
+    // draws it into the page's overlay.
+    ("docview::header_footer_elements", 13),
+    // Images dropped on a change and tiles invalidated for the whole
+    // document: images are found by render key (§10.2), and a page keeps
+    // its last drawn until its new one lands. The pane's layout holds no
+    // source page, so a page shown from another source page lays nothing
+    // out again.
+    ("docview::Doc::drop_stale_images", 13),
+    ("docview::Doc::invalidate_tiles", 13),
+    ("docview::Doc::tiles_invalidated", 13),
+    ("docview::Doc::shown", 13),
+    ("pane::Shown::source", 13),
+    ("pane::Shown::index", 13),
+    ("pane::Shown::render", 13),
+    // The emitter's save input: it reads the state, and a save's primary
+    // and derived copies come with its base (§11.1).
+    ("materialize::emit::Cx::input", 13),
+    // What a render answered names its page and job: its request's format
+    // and priority were never read (the review of slice 13).
+    ("RenderRequest::format", 13),
+    ("RenderRequest::priority", 13),
 ];
 
 /// Last segments only a path matches: names the new design uses again
@@ -737,6 +797,28 @@ const QUALIFIED_ONLY: &[&str] = &[
     // what anything else comes out as.
     "scripted",
     "outcome",
+    // Other handles and the handles a markup kind draws, the OCR run's job
+    // and a request's handler: not a source's render handle.
+    "handle",
+    "handles",
+    // A document's primary source (`Document::primary`), and a primary
+    // button.
+    "primary",
+    // An insert's form taken in (`tx::forms::take_in`).
+    "take_in",
+    // What every other plan and layout shows, and indices, renders and
+    // bases of every other kind: a page's index in its source, a view's
+    // in its engine, a page's base.
+    "shown",
+    "index",
+    "render",
+    "base",
+    // Every text input, and a save's input.
+    "input",
+    // A pool request's, a raster's and every other format and priority:
+    // not a render's answer's.
+    "format",
+    "priority",
 ];
 
 #[test]

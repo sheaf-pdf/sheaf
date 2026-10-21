@@ -1,13 +1,15 @@
 //! Optional content (layers): the groups in `/OCProperties`, listed in
-//! the default configuration's `/Order`, and a way to change which are
-//! shown for display. Visibility changes are never saved.
+//! the default configuration's `/Order`, and the catalog a view that
+//! changes which are shown draws the file with ([`ocg_patch`]). Visibility
+//! changes are never saved.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
+use lopdf::{Dictionary, Object, ObjectId};
 
 use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text;
+use crate::source::Source;
 
 /// An optional content group: its object number in the file.
 pub type LayerId = ObjectId;
@@ -163,71 +165,43 @@ fn oc_properties<P: Objects + ?Sized>(pdf: &P) -> Option<&Dictionary> {
         .ok()
 }
 
-/// Make exactly `off` hidden in the default configuration (and every
-/// other group shown), for rendering.
-pub fn set_hidden(pdf: &mut Pdf, off: &HashSet<ObjectId>) {
-    let Some(props) = oc_properties(pdf) else {
-        return;
-    };
-    let groups: Vec<ObjectId> = props
-        .get(b"OCGs")
-        .ok()
+/// `src`'s `/OCProperties` with its default configuration showing every
+/// group but `off`, whatever the file's hides: what a view of the file
+/// that hides those layers says in place of the file's, which never
+/// changes (an overlay's catalog, or a source's catalog-only patch, M10.5
+/// §10.1). A direct dictionary, its references the source's own numbers.
+/// None when the file has no layers.
+pub fn ocg_patch(src: &Source, off: &BTreeSet<LayerId>) -> Option<Object> {
+    let pdf = src.pdf();
+    let props = oc_properties(pdf)?;
+    let groups: Vec<ObjectId> = (props.get(b"OCGs").ok())
+        .and_then(|o| resolve(pdf, o))
         .and_then(|o| o.as_array().ok())
         .map(|a| a.iter().filter_map(|o| o.as_reference().ok()).collect())
         .unwrap_or_default();
-    let d_ref = props.get(b"D").ok().and_then(|o| o.as_reference().ok());
-    let refs = |set: Vec<ObjectId>| -> Object {
-        Object::Array(set.into_iter().map(Object::Reference).collect())
+    let mut d = (props.get(b"D").ok())
+        .and_then(|o| resolve(pdf, o))
+        .and_then(|o| o.as_dict().ok())
+        .cloned()
+        .unwrap_or_default();
+    let refs = |hidden: bool| -> Object {
+        let listed = groups.iter().filter(|g| off.contains(g) == hidden);
+        Object::Array(listed.map(|&g| Object::Reference(g)).collect())
     };
-    let on: Vec<ObjectId> = groups
-        .iter()
-        .copied()
-        .filter(|g| !off.contains(g))
-        .collect();
-    let hidden: Vec<ObjectId> = groups.iter().copied().filter(|g| off.contains(g)).collect();
-    let update = |d: &mut Dictionary| {
-        d.set("BaseState", Object::Name(b"ON".to_vec()));
-        d.set("ON", refs(on.clone()));
-        d.set("OFF", refs(hidden.clone()));
-        // Usage-based auto states (/AS) would override the lists.
-        d.remove(b"AS");
-    };
-    if let Some(id) = d_ref {
-        if let Ok(d) = pdf.get_dictionary_mut(id) {
-            update(d);
-        }
-        return;
-    }
-    // /D held directly (or /OCProperties itself is indirect).
-    let props_ref = pdf
-        .catalog()
-        .ok()
-        .and_then(|c| c.get(b"OCProperties").ok())
-        .and_then(|o| o.as_reference().ok());
-    let props = match props_ref {
-        Some(id) => pdf.get_dictionary_mut(id).ok(),
-        None => pdf
-            .catalog_mut()
-            .ok()
-            .and_then(|c| c.get_mut(b"OCProperties").ok())
-            .and_then(|o| o.as_dict_mut().ok()),
-    };
-    if let Some(props) = props {
-        match props.get_mut(b"D").ok().and_then(|o| o.as_dict_mut().ok()) {
-            Some(d) => update(d),
-            None => {
-                let mut d = Dictionary::new();
-                update(&mut d);
-                props.set("D", d);
-            }
-        }
-    }
+    d.set("BaseState", Object::Name(b"ON".to_vec()));
+    d.set("ON", refs(false));
+    d.set("OFF", refs(true));
+    // Usage-based auto states (/AS) would override the lists.
+    d.remove(b"AS");
+    let mut props = props.clone();
+    props.set("D", d);
+    Some(Object::Dictionary(props))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::dictionary;
+    use lopdf::{Document as Pdf, dictionary};
 
     fn sample() -> (Pdf, ObjectId, ObjectId, ObjectId) {
         let mut pdf = Pdf::with_version("1.7");
@@ -275,10 +249,14 @@ mod tests {
         );
     }
 
+    /// A view's patch shows every layer but those it turns off, the one
+    /// the file's default configuration hides included.
     #[test]
-    fn set_hidden_rewrites_the_default_config() {
+    fn a_patch_shows_every_layer_but_those_off() {
         let (mut pdf, a, _, c) = sample();
-        set_hidden(&mut pdf, &[a, c].into());
+        let src = crate::open::tests::lazily(&mut pdf);
+        let props = ocg_patch(&src, &[a, c].into()).unwrap();
+        pdf.catalog_mut().unwrap().set("OCProperties", props);
         let on: Vec<(String, bool)> = layers_in(&pdf)
             .into_iter()
             .filter(|l| l.id.is_some())
@@ -296,7 +274,9 @@ mod tests {
 
     #[test]
     fn files_without_layers_list_none() {
-        let pdf = crate::attachments::tests::sample();
+        let mut pdf = crate::attachments::tests::sample();
         assert!(layers_in(&pdf).is_empty());
+        let src = crate::open::tests::lazily(&mut pdf);
+        assert!(ocg_patch(&src, &BTreeSet::new()).is_none());
     }
 }

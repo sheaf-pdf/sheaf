@@ -428,8 +428,7 @@ pub struct ForeignAnnot {
     pub state: Option<(String, String)>,
     /// `/CreationDate`, or empty.
     pub created: String,
-    /// Its position in the page's `/Annots`, which is how PDFium counts
-    /// them too, so sheaf can hide it on screen.
+    /// Its position in the page's `/Annots`.
     pub slot: usize,
     /// The file hides it (`/F` bit 2): sheaf never shows it.
     pub hidden: bool,

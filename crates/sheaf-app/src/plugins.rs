@@ -27,16 +27,18 @@ use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use gpui::{App, Context, Entity, Global, KeyBinding, KeyBindingContextPredicate, Window};
 use serde::{Deserialize, Serialize};
+use sheaf_doc::realize::{EngineKey, ViewInputs};
 use sheaf_doc::{
-    Actor, Cause, ChangeSet, Commit, CommitOpts, Document, EditError, GroupKind, Snapshot,
-    SourceId, Stale, Tx,
+    Actor, Cause, ChangeSet, Commit, CommitOpts, Document, EditError, GroupKind, PageId, Snapshot,
+    Src, Stale, Tx,
 };
+use sheaf_ops::views::{ViewPages, Views};
 use sheaf_plugin::ui::{FieldAnswer, Form, PanelRow, ShowPanel, Ui};
 use sheaf_plugin::{
     Call, CallContext, CallOutput, Limits, LoadOptions, Manifest, Permissions, Plugin, PluginError,
     Runtime, Status, TextMatch, TextSource,
 };
-use sheaf_render::RenderHandle;
+use sheaf_render::{Budget, Job, PageIndex};
 
 use crate::availability::When;
 use crate::commands::{Command, CommandRegistry, Run, ShowPluginPanel, Target};
@@ -868,49 +870,51 @@ fn register(m: &Manifest, dir: &Path, cx: &mut App) -> Vec<String> {
     errors
 }
 
-/// Page text and pattern search from the document's render workers.
-struct EngineText(HashMap<SourceId, RenderHandle>);
+/// Page text and pattern search from the sources' base engines, in the
+/// pool's background budget, until M10.5 slice 14's text service.
+struct EngineText(Views);
 
 impl EngineText {
-    fn handle(&self, source: SourceId) -> Result<&RenderHandle> {
-        self.0.get(&source).context("source not open")
+    /// What source `src`'s text is read from.
+    fn base(&self, src: &Src) -> sheaf_render::Target<EngineKey> {
+        self.0.base(src, Budget::Background)
     }
 }
 
 impl TextSource for EngineText {
-    fn page_text(&self, source: SourceId, index: u32) -> Result<String> {
-        futures::executor::block_on(self.handle(source)?.page_text(index))
-            .context("render thread is gone")?
+    fn page_text(&self, src: &Src, index: u32) -> Result<String> {
+        let rx = self.0.pool().page_text(self.base(src), PageIndex(index));
+        futures::executor::block_on(rx).context("render thread is gone")?
     }
 
     fn pattern_search(
         &self,
-        source: SourceId,
+        src: &Src,
         index: u32,
         re: &Arc<regex::Regex>,
     ) -> Result<Vec<TextMatch>> {
-        let rx = self.handle(source)?.pattern_search_page(index, re.clone());
+        let page = PageIndex(index);
+        let rx = (self.0.pool()).pattern_search_page(self.base(src), page, re.clone());
         let hits = futures::executor::block_on(rx).context("render thread is gone")??;
         Ok(Self::hits(hits))
     }
 
     fn search(
         &self,
-        source: SourceId,
+        src: &Src,
         index: u32,
         query: &str,
         match_case: bool,
     ) -> Result<Vec<TextMatch>> {
-        let rx = self
-            .handle(source)?
-            .search_page(index, query.to_string(), match_case);
+        let (page, query) = (PageIndex(index), query.to_string());
+        let rx = (self.0.pool()).search_page(self.base(src), page, query, match_case);
         let hits = futures::executor::block_on(rx).context("render thread is gone")??;
         Ok(Self::hits(hits))
     }
 
     fn text_boxes(
         &self,
-        source: SourceId,
+        src: &Src,
         index: u32,
         rect: sheaf_doc::Box2,
     ) -> Result<Vec<sheaf_doc::Box2>> {
@@ -920,7 +924,7 @@ impl TextSource for EngineText {
             w: rect.w,
             h: rect.h,
         };
-        let rx = self.handle(source)?.text_boxes_in_rect(index, rect);
+        let rx = (self.0.pool()).text_boxes_in_rect(self.base(src), PageIndex(index), rect);
         let boxes = futures::executor::block_on(rx).context("render thread is gone")??;
         Ok(boxes.into_iter().map(to_box).collect())
     }
@@ -947,21 +951,20 @@ fn to_box(r: sheaf_render::Rect) -> sheaf_doc::Box2 {
     }
 }
 
-/// OCR for plugins: one page at a time through `sheaf_ocr::job`, with the
-/// user's engine and options as they were when the plugin started.
-struct EngineOcr(HashMap<SourceId, RenderHandle>, sheaf_ocr::OcrConfig);
+/// OCR for plugins: one page at a time through `sheaf_ocr::job`, drawn as
+/// the app's OCR draws pages ([`ViewPages`]), from the call's base, with
+/// the user's engine and options as they were when the plugin started.
+struct EngineOcr(Views, sheaf_ocr::OcrConfig);
 
 impl sheaf_plugin::OcrSource for EngineOcr {
     fn recognize(
         &self,
-        page: sheaf_doc::PageId,
-        base: &sheaf_doc::PageBase,
-        geom: &sheaf_doc::geom::Geom,
-        render: sheaf_edit::Rotation,
+        snap: &Snapshot,
+        page: PageId,
         language: Option<String>,
         dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer> {
-        use sheaf_ocr::{OcrEvent, OcrPage, OcrRequest, PageSource};
+        use sheaf_ocr::{OcrEvent, OcrRequest};
         let mut config = self.1.clone();
         if let Some(l) = language {
             sheaf_ocr::set_language(config.engine, &mut config, &l);
@@ -969,24 +972,14 @@ impl sheaf_plugin::OcrSource for EngineOcr {
         if let Some(d) = dpi {
             config.dpi = d;
         }
-        let sources: HashMap<SourceId, Arc<dyn PageSource>> = self
-            .0
-            .iter()
-            .map(|(sid, h)| (*sid, Arc::new(h.clone()) as Arc<dyn PageSource>))
-            .collect();
+        let pages = ViewPages::new(self.0.clone(), snap.clone());
         let req = OcrRequest {
-            pages: vec![OcrPage {
-                id: page,
-                source: base.src.id(),
-                index: base.index,
-                geom: *geom,
-                render,
-            }],
+            pages: vec![pages.page(page).context("no such page")?],
             skip_pages_with_text: false,
             engine: config.engine,
             config,
         };
-        let (_job, mut rx) = sheaf_ocr::job::start(req, sources);
+        let (_job, mut rx) = sheaf_ocr::job::start(req, Arc::new(pages));
         futures::executor::block_on(async {
             while let Some(ev) = rx.next().await {
                 match ev {
@@ -1002,36 +995,38 @@ impl sheaf_plugin::OcrSource for EngineOcr {
     }
 }
 
-/// Page images for plugins, from the render workers at the lowest priority
-/// (behind on-screen tiles).
-struct EngineRender(HashMap<SourceId, RenderHandle>);
+/// Page images for plugins, from the pages' realizations as the file will
+/// draw them, sheaf's marks and the unsaved header included (M10.5 §14.3),
+/// in the pool's background budget at the lowest priority (behind
+/// on-screen tiles).
+struct EngineRender(Views);
 
 impl sheaf_plugin::render::RenderSource for EngineRender {
     fn render(
         &self,
-        source: SourceId,
-        index: u32,
+        snap: &Snapshot,
+        page: PageId,
         page_w: u32,
         page_h: u32,
         (x, y, w, h): (u32, u32, u32, u32),
     ) -> Result<Vec<u8>> {
         use sheaf_image::raster::PixelFormat;
-        use sheaf_render::{Job, RenderRequest};
-        let handle = self.0.get(&source).context("source not open")?;
-        let rx = handle.render(RenderRequest {
-            page: sheaf_render::PageIndex(index),
-            job: Job::Tile {
-                page_width: page_w,
-                page_height: page_h,
-                x,
-                y,
-                w,
-                h,
-                rotation: sheaf_edit::Rotation::R0,
-            },
-            format: PixelFormat::Rgba,
-            priority: u8::MAX,
-        });
+        let inputs = ViewInputs::plugin();
+        let st = &snap.state;
+        let view = self.0.view(st, page, &inputs)?;
+        // In the file's own orientation: the engine's page, not turned by
+        // the view.
+        let job = Job::Tile {
+            page_width: page_w,
+            page_height: page_h,
+            x,
+            y,
+            w,
+            h,
+            rotation: sheaf_edit::Rotation::R0,
+        };
+        let (format, budget) = (PixelFormat::Rgba, Budget::Background);
+        let rx = (self.0).draw(st, page, &view, &inputs, job, format, u8::MAX, budget)?;
         let rendered = futures::executor::block_on(rx).context("render thread is gone")??;
         let r = rendered.raster;
         anyhow::ensure!(
@@ -1044,10 +1039,8 @@ impl sheaf_plugin::render::RenderSource for EngineRender {
     }
 }
 
-pub fn render_source(
-    handles: &HashMap<SourceId, RenderHandle>,
-) -> Arc<dyn sheaf_plugin::render::RenderSource> {
-    Arc::new(EngineRender(handles.clone()))
+pub fn render_source(views: &Views) -> Arc<dyn sheaf_plugin::render::RenderSource> {
+    Arc::new(EngineRender(views.clone()))
 }
 
 /// Plugin `id`'s name, as its manifest says: None when it isn't
@@ -1185,15 +1178,12 @@ impl DocView {
     }
 }
 
-pub fn ocr_source(
-    handles: &HashMap<SourceId, RenderHandle>,
-    config: sheaf_ocr::OcrConfig,
-) -> Arc<dyn sheaf_plugin::OcrSource> {
-    Arc::new(EngineOcr(handles.clone(), config))
+pub fn ocr_source(views: &Views, config: sheaf_ocr::OcrConfig) -> Arc<dyn sheaf_plugin::OcrSource> {
+    Arc::new(EngineOcr(views.clone(), config))
 }
 
-pub fn text_source(handles: &HashMap<SourceId, RenderHandle>) -> Arc<dyn TextSource> {
-    Arc::new(EngineText(handles.clone()))
+pub fn text_source(views: &Views) -> Arc<dyn TextSource> {
+    Arc::new(EngineText(views.clone()))
 }
 
 enum CallKind {
@@ -1656,6 +1646,61 @@ mod tests {
             None,
             sheaf_doc::history::default_policy(),
         )
+    }
+
+    /// A plugin's render draws the page as the file will (M10.5 §14.3),
+    /// in the file's own orientation: sheaf's unsaved mark and header with
+    /// it, on a page turned a quarter, as the Rewrite's page drawn turned
+    /// back shows them; and a page with neither, from its base engine, as
+    /// the file draws it.
+    #[test]
+    fn a_plugin_render_draws_sheaf_marks_and_the_unsaved_header() {
+        use sheaf_doc::tx::fixture::{add, header, rotate, set_header};
+        use sheaf_edit::{Rotation, Turn};
+        use sheaf_image::raster::PixelFormat;
+        use sheaf_render::pdfium::PdfiumEngine;
+        use sheaf_render::{EnginePool, Renderer};
+        let store = sheaf_doc::Store::new();
+        let primary = sheaf_doc::store::blank(&store, 2);
+        let policy = Box::new(sheaf_doc::FixedCount(10));
+        let mut d = Document::new(store, primary, "a.pdf".into(), None, &[], policy);
+        let [edited, alone] = [0, 1].map(|i| d.page(i).unwrap());
+        let square = &sheaf_doc::forms::fixture::every_mark_kind()[3];
+        let ops = vec![
+            set_header(header("DRAFT DRAFT DRAFT"), Some(&[edited])),
+            add(edited, square),
+            rotate(&[edited], Turn::Quarter),
+        ];
+        d.commit_ops(ops, "Edit").unwrap();
+        let views = Views::new(EnginePool::new().unwrap());
+        let source = render_source(&views);
+        let snap = d.snapshot();
+        let whole = (0, 0, 612, 792);
+        let ours = |page| source.render(&snap, page, 612, 792, whole).unwrap();
+        let saved = sheaf_doc::save::rewrite(&snap).unwrap();
+        let engine = PdfiumEngine::open_bytes(saved.into(), None).unwrap();
+        let theirs = |index, rotation| {
+            let job = Job::Tile {
+                page_width: 612,
+                page_height: 792,
+                x: 0,
+                y: 0,
+                w: 612,
+                h: 792,
+                rotation,
+            };
+            let page = PageIndex(index);
+            engine.render(page, job, PixelFormat::Rgba).unwrap().data
+        };
+        let drawn = ours(edited);
+        assert!(
+            drawn == theirs(0, Rotation::R270),
+            "as the file will draw it"
+        );
+        assert!(drawn.iter().any(|&v| v != 255), "the mark and header show");
+        let blank = ours(alone);
+        assert!(blank == theirs(1, Rotation::R0));
+        assert!(blank.iter().all(|&v| v == 255));
     }
 
     #[test]
@@ -2290,14 +2335,8 @@ mod tests {
         gpui_platform::headless().run({
             let ran = ran.clone();
             move |cx| {
-                let blank_doc = |cx: &mut App| {
-                    Doc::new(
-                        blank(1),
-                        HashMap::new(),
-                        cx.focus_handle(),
-                        Default::default(),
-                    )
-                };
+                let blank_doc =
+                    |cx: &mut App| Doc::new(blank(1), cx.focus_handle(), Default::default());
                 let view = cx.new(|cx| {
                     let launched = std::time::Instant::now();
                     let mut view = DocView::unopened("a.pdf".into(), None, false, launched, cx);

@@ -2,19 +2,25 @@
 //! rendered as tiles so only what's on screen is rasterized, with a cheap
 //! low-res preview under the tiles so something appears immediately. Also
 //! owns the per-document sidebar content (thumbnails, outline), since those
-//! share its render handles and caches.
+//! share its views and caches.
 //!
 //! The page sequence comes from `sheaf_doc::Document` (see
 //! docs/document-model.md): an order of pages, each showing a page of one
-//! of its source files, each file with its own render worker. Caches key by
-//! `PageId`, so reordering pages costs nothing visually.
+//! of its source files. A page drawn renders from its view (M10.5 §10):
+//! its source's engine while it's untouched, or else its group's overlay,
+//! on the process's one render worker ([`engines`]). Images are cached by
+//! what a page draws, its render key, so reordering pages, a save, or an
+//! edit of another page costs nothing visually, and duplicates share their
+//! images.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use futures::StreamExt;
+use futures::channel::mpsc::UnboundedReceiver;
+use futures::channel::oneshot;
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, ObjectFit,
     RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window, div,
@@ -23,10 +29,11 @@ use gpui::{
 use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::materialize::Came;
 use sheaf_doc::prim::Key;
+use sheaf_doc::realize::{EngineKey, PageView};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, FormRef, Pt};
+use sheaf_doc::{OcgOverride, RenderKey, ViewInputs};
 use sheaf_doc::{materialize, save};
 use sheaf_edit::{PageSize, Rotation};
-use sheaf_render::PageIndex;
 use sheaf_ui::button::Button;
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_area::{TextArea, TextAreaEvent};
@@ -39,12 +46,13 @@ use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Shown, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
 use sheaf_doc::tx::{CommitOpts, Grant, Rule, Tx, mark_kind, mark_style};
 use sheaf_doc::{
-    Actor, Cause, ChangeSet, Commit, Document, EditError, Identity, OutlineId, PageId, SourceId,
-    Src, Store,
+    Actor, Cause, ChangeSet, Commit, Document, EditError, Identity, OutlineId, PageId, Src, Store,
 };
 use sheaf_edit::{Anchor, AnnotRef, BlobSel, MarkPatch, NewMark, Op, PageRef, PageSel, Turn};
 use sheaf_image::raster::PixelFormat;
-use sheaf_render::{Job, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit};
+use sheaf_ops::views::Views;
+use sheaf_render::{Budget, EnginePool, Job, OpenError, Owner, Rendered};
+use sheaf_render::{Matcher, SearchEvent, SearchHit};
 
 use crate::comments_panel::ExportKind;
 use crate::{
@@ -104,11 +112,20 @@ pub(crate) struct Locked {
     focus_pending: bool,
 }
 
-type TileKey = (PageId, Job);
+/// An image by what it draws: a page's render key, and the job its
+/// engine drew it by (M10.5 §10.2).
+type TileKey = (RenderKey, Job);
 
 pub(crate) struct Doc {
     pub(crate) model: Document,
-    pub(crate) handles: HashMap<SourceId, RenderHandle>,
+    /// What renders each page (M10.5 §10): its view, from the document's
+    /// realizer, drawn by the process's pool ([`engines`]).
+    pub(crate) views: Views,
+    /// What the screen draws besides the pages' own (M10.5 §10.4): the
+    /// comments hidden, the one dragged and the layers turned off, as data
+    /// ([`Doc::set_inputs`]). The panes, the thumbnails and the blank-page
+    /// review draw with it.
+    pub(crate) inputs: ViewInputs,
     /// Bumped on every change the document goes through
     /// ([`DocView::on_change`]), so what's made from it (the Comments
     /// panel's view, the History rows, the page labels) can tell.
@@ -121,31 +138,30 @@ pub(crate) struct Doc {
     /// when the view was reopened on another meanwhile.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_cell: Arc<arc_swap::ArcSwap<sheaf_doc::Snapshot>>,
-    /// Bumped when where the pages go changed: their order, their boxes,
-    /// or the source page one shows. The panes' layouts are built at one
-    /// count, and again at the next.
+    /// Bumped when where the pages go changed: their order or their
+    /// boxes. The panes' layouts are built at one count, and again at the
+    /// next.
     pub(crate) layout: u64,
     /// One view of the document, or two when the window is split.
     pub(crate) panes: Vec<Pane>,
     /// The pane keys, menus and the status bar act on.
     pub(crate) active: usize,
-    /// Low-res whole-page renders, by page and the rotation drawn: the
-    /// thumbnails and a rotated view of the same page need both.
-    pub(crate) previews: HashMap<(PageId, Rotation), Arc<RenderImage>>,
+    /// Low-res whole-page renders, by the page's render key and the
+    /// rotation drawn: the thumbnails and a rotated view of the same page
+    /// need both. A page whose key a change leaves alone keeps its images,
+    /// and a save changes no key.
+    pub(crate) previews: HashMap<(RenderKey, Rotation), Arc<RenderImage>>,
     pub(crate) tiles: HashMap<TileKey, Arc<RenderImage>>,
-    /// The source page each page shows, as last checked: a page that now
-    /// shows another (replaced, cropped, or undone) drops its images, and
-    /// the pages are laid out again.
-    pub(crate) shown: HashMap<PageId, (SourceId, u32)>,
+    /// The key each page was last drawn by, at each rotation drawn: until
+    /// an image of its new key lands, a page that changed shows these
+    /// ([`Doc::image_key`]).
+    pub(crate) drawn: HashMap<(PageId, Rotation), RenderKey>,
     /// Dropping the task drops the oneshot receiver, which tells the worker
     /// to skip the render if it hasn't started.
     pub(crate) inflight: HashMap<TileKey, Task<()>>,
     /// Images we've stopped showing; GPU textures are released in `render`,
     /// the only place we have a `Window`.
     pub(crate) retired: Vec<Arc<RenderImage>>,
-    /// How many times every rendered image was dropped
-    /// ([`invalidate_tiles`](Self::invalidate_tiles)): a save never does.
-    pub(crate) tiles_invalidated: u64,
     pub(crate) first_paint: Option<Instant>,
     /// Last edit notice, shown in the status bar.
     pub(crate) notice: Option<String>,
@@ -153,10 +169,15 @@ pub(crate) struct Doc {
     pub(crate) reading: Option<sheaf_ops::Tracker>,
     // Sidebar state.
     pub(crate) thumb_scroll: ScrollHandle,
-    /// Pages whose previews the thumbnail panel is showing; kept cached.
-    pub(crate) thumb_keep: HashSet<(PageId, Rotation)>,
-    /// Previews the blank-page review is showing; kept cached.
-    pub(crate) review_keep: HashSet<(PageId, Rotation)>,
+    /// Pages whose previews the thumbnail panel is showing, with their keys
+    /// and the rotation drawn; kept cached, with what they were last drawn
+    /// by.
+    pub(crate) thumb_keep: HashSet<(PageId, RenderKey, Rotation)>,
+    /// The engines the thumbnail panel's visible pages render from.
+    pub(crate) strip_pins: Pins,
+    /// Previews the blank-page review is showing, as the thumbnails'; kept
+    /// cached.
+    pub(crate) review_keep: HashSet<(PageId, RenderKey, Rotation)>,
     /// Last page the thumbnail panel auto-scrolled to follow.
     pub(crate) thumb_followed: Option<PageId>,
     pub(crate) outline_expanded: HashSet<OutlineId>,
@@ -193,9 +214,6 @@ pub(crate) struct Doc {
     )>,
     /// Our marks the comment filter hides on the page.
     pub(crate) hidden_marks: HashSet<AnnotId>,
-    /// Other tools' comments sheaf has hidden in the engines: (source, page
-    /// in it, slot in its /Annots).
-    pub(crate) foreign_hidden: HashSet<(SourceId, u32, usize)>,
     /// Text selected with the Select tool (see text_select.rs).
     pub(crate) text_sel: Option<crate::text_select::TextSel>,
     pub(crate) text_drag: Option<crate::text_select::TextDrag>,
@@ -217,7 +235,8 @@ pub(crate) struct Doc {
     pub(crate) mark_menu: Option<gpui::Point<gpui::Pixels>>,
     /// Another tool's comment selected, here or in the Comments panel.
     pub(crate) selected_foreign: Option<AnnotId>,
-    /// Another tool's comment being dragged, made ours when it's let go.
+    /// Another tool's comment being dragged, made ours when it's let go:
+    /// the screen leaves it out meanwhile ([`Doc::set_inputs`]).
     pub(crate) adopting: Option<AnnotId>,
     /// Files embedded in the primary file, and its portfolio schema if it
     /// is one (see attachments_panel.rs), once the file has opened.
@@ -229,11 +248,10 @@ pub(crate) struct Doc {
     /// Optional content groups and which are hidden (see layers_panel.rs).
     pub(crate) layers: Vec<sheaf_doc::layers::Layer>,
     pub(crate) layers_hidden: HashSet<sheaf_doc::layers::LayerId>,
-    pub(crate) layers_generation: u64,
-    /// The primary file's marks that sheaf draws itself, as `/NM`s by page
-    /// index: PDFium is told not to draw them, again whenever its renderer
-    /// is reopened.
-    pub(crate) drawn_marks: Vec<(u32, Vec<String>)>,
+    /// The Layers panel has chosen which show: the screen draws the
+    /// primary with the hidden ones off from then on, its file's default
+    /// configuration aside.
+    pub(crate) layers_chosen: bool,
     /// Every page's label (from the model), and the change count it's for.
     pub(crate) labels: std::cell::RefCell<(u64, Option<std::sync::Arc<Vec<String>>>)>,
     /// With two panes: the top pane's share of the height.
@@ -243,22 +261,21 @@ pub(crate) struct Doc {
 }
 
 impl Doc {
-    /// A document's view state as it opens: `model`, rendered by
-    /// `handles`, in one pane, nothing rendered or selected yet.
+    /// A document's view state as it opens: `model`, in one pane, nothing
+    /// rendered or selected yet.
     pub(crate) fn new(
         model: Document,
-        handles: HashMap<SourceId, RenderHandle>,
         outline_focus: FocusHandle,
         measure_scale: sheaf_doc::measure::Scale,
     ) -> Doc {
-        let shown = (model.state().pages())
-            .map(|(id, def, _)| (id, (def.base.src.id(), def.base.index)))
-            .collect();
         #[cfg(feature = "plugins")]
         let plugin_cell = Arc::new(arc_swap::ArcSwap::from_pointee(model.snapshot()));
+        let views = Views::new(engines());
+        let strip_pins = Pins::new(views.pool());
         Doc {
             model,
-            handles,
+            views,
+            inputs: ViewInputs::screen(),
             changes: 0,
             last_change: None,
             #[cfg(feature = "plugins")]
@@ -268,15 +285,15 @@ impl Doc {
             active: 0,
             previews: HashMap::new(),
             tiles: HashMap::new(),
-            shown,
+            drawn: HashMap::new(),
             inflight: HashMap::new(),
             retired: Vec::new(),
-            tiles_invalidated: 0,
             first_paint: None,
             notice: None,
             reading: None,
             thumb_scroll: ScrollHandle::new(),
             thumb_keep: HashSet::new(),
+            strip_pins,
             review_keep: HashSet::new(),
             thumb_followed: None,
             outline_expanded: HashSet::new(),
@@ -297,7 +314,6 @@ impl Doc {
             comments_hidden: false,
             comment_view: None,
             hidden_marks: HashSet::new(),
-            foreign_hidden: HashSet::new(),
             text_sel: None,
             text_drag: None,
             page_chars: HashMap::new(),
@@ -317,8 +333,7 @@ impl Doc {
             forms: Default::default(),
             layers: Vec::new(),
             layers_hidden: HashSet::new(),
-            layers_generation: 0,
-            drawn_marks: Vec::new(),
+            layers_chosen: false,
             split: 0.5,
             split_drag: false,
         }
@@ -377,20 +392,13 @@ impl Doc {
             .collect()
     }
 
-    /// After pages of `src` came in with its marks: PDFium stops drawing
-    /// the marks sheaf now draws.
-    pub(crate) fn take_in(&mut self, src: &Src) {
-        let annots = src.annots();
-        let marks = annots.marks();
-        if !marks.is_empty()
-            && let Some(handle) = self.handles.get(&src.id())
-        {
-            let renamed = annots.renamed.iter().map(|r| (r.page, r.was));
-            drop(handle.hide_annots(marks_by_page(&marks, renamed)));
-        }
-    }
-    pub(crate) fn primary(&self) -> &RenderHandle {
-        &self.handles[&self.model.primary().id()]
+    /// Every page of the primary file searched for `matcher` by its base
+    /// engine, a few pages at a time between renders, until the receiver
+    /// is dropped: the text PDFium has, which unsaved OCR layers aren't in
+    /// (their callers search those).
+    pub(crate) fn search(&self, matcher: Matcher) -> UnboundedReceiver<SearchEvent> {
+        let primary = self.views.base(self.model.primary(), Budget::Screen);
+        self.views.pool().search(primary, matcher)
     }
 
     /// The page at position `index`.
@@ -529,17 +537,17 @@ impl Doc {
     }
 
     /// Catch up with `ch`, a change the document went through: what's
-    /// selected or read of what it removed goes, the images of pages that
-    /// show another source page now go, and the panes lay the pages out
-    /// again when they go elsewhere: their order, their boxes, or the
-    /// source page one shows changed (a layout holds each page's). Nothing
-    /// else is laid out again: a mark's edit isn't. Whether the page
-    /// selection changed.
+    /// selected or read of what it removed goes, the screen's inputs follow
+    /// the comments it has now, and the panes lay the pages out again when
+    /// they go elsewhere: their order or their boxes changed. Nothing else
+    /// is laid out again: a mark's edit isn't, nor a page shown from
+    /// another of its size. Images follow the pages' render keys (M10.5
+    /// §10.2), so none goes here. Whether the page selection changed.
     pub(crate) fn follow(&mut self, ch: &ChangeSet) -> bool {
         self.changes += 1;
         let selection = self.prune(ch);
-        let rebased = self.drop_stale_images(ch);
-        if ch.order || !ch.geometry.is_empty() || rebased {
+        self.set_inputs();
+        if ch.order || !ch.geometry.is_empty() {
             self.layout += 1;
             for p in &mut self.panes {
                 p.layout = None;
@@ -574,64 +582,153 @@ impl Doc {
         self.selection.len() != before
     }
 
-    /// Forget the images of the pages `ch` added or changed that now show
-    /// another source page: whether there were any.
-    fn drop_stale_images(&mut self, ch: &ChangeSet) -> bool {
+    /// The screen's inputs made again from what they follow (M10.5
+    /// §10.4): the comments the Comments panel's filter hides, or every
+    /// other tool's with View > Hide Comments, by id, so a comment hides on
+    /// its page alone: comments only, never a link, nor one its file hides
+    /// itself; the comment being dragged, whose ghost GPUI draws in its
+    /// place; and once the Layers panel has changed them, the primary's
+    /// layers it turns off. sheaf's marks GPUI draws, and hides, itself.
+    pub(crate) fn set_inputs(&mut self) {
         let st = self.model.state();
-        let mut stale: HashSet<PageId> = HashSet::new();
-        for &id in ch.content.iter().chain(&ch.pages_added) {
-            let Some(def) = st.def(id) else {
-                continue;
-            };
-            let now = (def.base.src.id(), def.base.index);
-            if let Some(was) = self.shown.insert(id, now)
-                && was != now
-            {
-                stale.insert(id);
-            }
-        }
-        if stale.is_empty() {
-            return false;
-        }
-        let tiles: Vec<TileKey> = self
-            .tiles
-            .keys()
-            .filter(|k| stale.contains(&k.0))
-            .copied()
-            .collect();
-        for k in tiles {
-            if let Some(im) = self.tiles.remove(&k) {
-                self.retired.push(im);
-            }
-        }
-        let previews: Vec<(PageId, Rotation)> = self
-            .previews
-            .keys()
-            .filter(|k| stale.contains(&k.0))
-            .copied()
-            .collect();
-        for k in previews {
-            if let Some(im) = self.previews.remove(&k) {
-                self.retired.push(im);
-            }
-        }
-        self.inflight.retain(|k, _| !stale.contains(&k.0));
-        true
+        let comment = |id: &AnnotId| {
+            let f = st.annot(*id).and_then(|a| a.foreign());
+            f.is_some_and(|f| !f.summary.is_link() && !f.summary.hidden)
+        };
+        let hidden: im::HashSet<AnnotId> = match self.comments_hidden {
+            true => st.annots().map(|(id, _)| id).filter(comment).collect(),
+            false => (self.comment_view.iter())
+                .flat_map(|(_, view)| &view.hidden_foreign)
+                .copied()
+                .filter(comment)
+                .collect(),
+        };
+        let ocg_off = self.layers_chosen.then(|| {
+            let off = self.layers_hidden.iter().copied().collect();
+            let primary = self.model.primary().id();
+            Arc::new(OcgOverride {
+                off: [(primary, off)].into(),
+            })
+        });
+        let dragging: im::HashSet<AnnotId> = self.adopting.into_iter().collect();
+        // The sets as they were when they haven't changed, so the realizer
+        // knows the inputs by their pointers and digests them once.
+        let was = &self.inputs;
+        let kept = |set: im::HashSet<AnnotId>, was: &Arc<im::HashSet<AnnotId>>| match set == **was {
+            true => was.clone(),
+            false => Arc::new(set),
+        };
+        self.inputs = ViewInputs {
+            hidden: kept(hidden, &was.hidden),
+            dragging: kept(dragging, &was.dragging),
+            ocg_off: match (ocg_off, &was.ocg_off) {
+                (Some(off), Some(was)) if off == *was => Some(was.clone()),
+                (off, _) => off,
+            },
+            ..ViewInputs::screen()
+        };
     }
 
-    /// Drop every rendered image so pages re-rasterize (after the engine's
-    /// view of a page changed, e.g. annotations hidden).
-    pub(crate) fn invalidate_tiles(&mut self) {
-        self.tiles_invalidated += 1;
-        for (_, im) in self.tiles.drain() {
-            self.retired.push(im);
+    /// The key page `id`'s images at `rotation` are found by, `key` being
+    /// what it draws now: `key`, once it has one there, which makes it the
+    /// key the page was last drawn by; until then that one's, so a page
+    /// that changed keeps its old image until its new one lands.
+    pub(crate) fn image_key(
+        &mut self,
+        id: PageId,
+        key: RenderKey,
+        rotation: Rotation,
+    ) -> RenderKey {
+        let drawn = self.previews.contains_key(&(key, rotation))
+            || (self.tiles.keys()).any(|(k, job)| *k == key && job.rotation() == rotation);
+        if drawn {
+            self.drawn.insert((id, rotation), key);
+            return key;
         }
-        for (_, im) in self.previews.drain() {
-            self.retired.push(im);
-        }
-        self.inflight.clear();
-        self.layout += 1;
+        self.drawn.get(&(id, rotation)).copied().unwrap_or(key)
     }
+
+    /// The pool's render of `want`, in the screen's budget: from its page's
+    /// realization, as the view found it and under the screen's inputs, as
+    /// they were when it was found. None when the page has gone.
+    pub(crate) fn request(
+        &self,
+        want: Want,
+    ) -> Option<oneshot::Receiver<anyhow::Result<Rendered>>> {
+        let (st, format) = (self.model.state(), PixelFormat::Bgra);
+        let (view, job, priority) = (&want.view, want.job, want.priority);
+        (self.views)
+            .draw(
+                st,
+                want.id,
+                view,
+                &self.inputs,
+                job,
+                format,
+                priority,
+                Budget::Screen,
+            )
+            .ok()
+    }
+}
+
+/// The process's engine pool (M10.5 §10.3): every document's pages render
+/// on its one worker, started with the first document.
+pub(crate) fn engines() -> EnginePool<EngineKey> {
+    static POOL: OnceLock<EnginePool<EngineKey>> = OnceLock::new();
+    let pool = POOL.get_or_init(|| EnginePool::new().expect("the render thread starts"));
+    pool.clone()
+}
+
+/// What one surface showing a document (a pane, the thumbnail strip)
+/// pins in the pool: the engines its visible pages render from, which no
+/// budget closes (M10.5 §10.3). Dropped with its surface, it unpins them.
+pub(crate) struct Pins {
+    pool: EnginePool<EngineKey>,
+    owner: Owner,
+    engines: Vec<EngineKey>,
+}
+
+impl Pins {
+    pub(crate) fn new(pool: &EnginePool<EngineKey>) -> Pins {
+        Pins {
+            pool: pool.clone(),
+            owner: pool.owner(),
+            engines: Vec::new(),
+        }
+    }
+
+    /// Pins `engines`, each once, in place of what it pinned before,
+    /// telling the pool only when they differ.
+    pub(crate) fn set(&mut self, engines: impl IntoIterator<Item = EngineKey>) {
+        let mut pinned = Vec::new();
+        for e in engines {
+            if !pinned.contains(&e) {
+                pinned.push(e);
+            }
+        }
+        if pinned != self.engines {
+            self.pool.pin(self.owner, pinned.clone());
+            self.engines = pinned;
+        }
+    }
+}
+
+impl Drop for Pins {
+    fn drop(&mut self) {
+        self.set([]);
+    }
+}
+
+/// A render a frame wants: page `id`'s, as `view` found it drawn, by
+/// `job` as its engine draws the page (the view's turn and the pane's in
+/// it), at `priority`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Want {
+    pub(crate) id: PageId,
+    pub(crate) view: PageView,
+    pub(crate) job: Job,
+    pub(crate) priority: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -982,7 +1079,9 @@ impl DocView {
                     // A save a crash cut short is undone first, so the file
                     // is the one its recovery sidecar was written against.
                     let torn = sheaf_doc::serialize::append::undo_torn(&path)
-                        .inspect_err(|e| log::warn!("undoing the last save to {}: {e}", path.display()))
+                        .inspect_err(|e| {
+                            log::warn!("undoing the last save to {}: {e}", path.display())
+                        })
                         .ok()
                         .flatten();
                     let recovery = sheaf_doc::recovery::find(&path);
@@ -992,28 +1091,26 @@ impl DocView {
                     let t = Instant::now();
                     let (primary, stamp) = store.read_file(&path, password.as_deref())?;
                     let walk = t.elapsed();
-                    let handle = RenderHandle::open_bytes(primary.bytes().clone(), password)?;
                     let name = sheaf_doc::store::file_name(&path);
                     let came = Came::Read {
                         path: path.as_path().into(),
                         stamp,
                     };
-                    anyhow::Ok((store, primary, name, came, handle, walk, recovery, torn))
+                    anyhow::Ok((store, primary, name, came, walk, recovery, torn))
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((store, primary, name, came, handle, walk, recovery, torn)) => {
+                    Ok((store, primary, name, came, walk, recovery, torn)) => {
                         if timing {
                             eprintln!(
-                                "[timing] open: {walk:?} source, {:?} engine, {:?} since launch, {} pages",
-                                handle.info().open_time,
+                                "[timing] open: {walk:?} source, {:?} since launch, {} pages",
                                 launched.elapsed(),
                                 primary.page_count()
                             );
                         }
                         viewer.pending_recovery = recovery;
-                        viewer.install(store, primary, name, came, handle, cx);
+                        viewer.install(store, primary, name, came, cx);
                         if let (Some(torn), State::Ready(doc)) = (torn, &mut viewer.state) {
                             doc.notice = Some(torn.to_string());
                         }
@@ -1050,19 +1147,19 @@ impl DocView {
         cx.notify();
     }
 
-    /// Show a file as it opens, a source in `store` with `handle` rendering
-    /// it, as the primary source under `name`, and read the rest of it on a
-    /// background thread (see [`Self::finish_open`]). How it `came` says
-    /// what the document knows of its file, for its record: the file as it
-    /// was read, or a restored document's base with what its recovery
-    /// sidecar holds that the file hasn't got.
+    /// Show a file as it opens, a source in `store`, as the primary source
+    /// under `name`, and read the rest of it on a background thread (see
+    /// [`Self::finish_open`]); its engine opens on the render worker,
+    /// asked its form ([`Self::ask_form_type`]). How it `came` says what
+    /// the document knows of its file, for its record: the file as it was
+    /// read, or a restored document's base with what its recovery sidecar
+    /// holds that the file hasn't got.
     fn install(
         &mut self,
         store: Arc<Store>,
         primary: Src,
         name: Arc<str>,
         came: Came,
-        handle: RenderHandle,
         cx: &mut Context<Self>,
     ) {
         let src = primary.clone();
@@ -1072,11 +1169,10 @@ impl DocView {
         self.sidecar_of = None;
         let opened = self.path.clone();
         cx.defer(move |cx| crate::recent::add(&opened, cx));
-        let mut handles = HashMap::new();
-        handles.insert(model.primary().id(), handle);
         let measure_scale = (crate::state::get(cx).measure_scale.clone()).unwrap_or_default();
-        let doc = Doc::new(model, handles, cx.focus_handle(), measure_scale);
+        let doc = Doc::new(model, cx.focus_handle(), measure_scale);
         self.state = State::Ready(Box::new(doc));
+        self.ask_form_type(cx);
         self.finish_open(src, recovered, cx);
         if let Some(src) = self.initial_pattern.take() {
             self.run_initial_pattern(src, cx);
@@ -1085,6 +1181,56 @@ impl DocView {
             self.new_search(cx);
             self.start_search(q, cx);
         }
+    }
+
+    /// Ask the primary file's base engine what form the file has, which
+    /// opens it on the render worker before the first page asks: the form
+    /// bar's guess until the form is read. That the engine didn't open is
+    /// the document's notice: its pages then draw nothing, unless PDFium
+    /// refused the file, whose pages are then drawn from sheaf's copy
+    /// (`sheaf_ops::views`), though its text can't be found or selected.
+    fn ask_form_type(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let primary = doc.model.primary().id();
+        let target = doc.views.base(doc.model.primary(), Budget::Screen);
+        let rx = doc.views.pool().form_type(target);
+        let (timing, launched, asked) = (self.timing, self.launched, Instant::now());
+        cx.spawn(async move |this, cx| {
+            let Ok(answer) = rx.await else { return };
+            this.update(cx, |view, cx| {
+                let State::Ready(doc) = &mut view.state else {
+                    return;
+                };
+                if doc.model.primary().id() != primary {
+                    return;
+                }
+                match answer {
+                    Ok(form_type) => {
+                        if timing {
+                            eprintln!(
+                                "[timing] engine: open in {:?}, {:?} since launch",
+                                asked.elapsed(),
+                                launched.elapsed()
+                            );
+                        }
+                        doc.forms.form_type = form_type;
+                    }
+                    Err(e) if OpenError::is_refused(&e) => {
+                        doc.notice = Some(
+                            "PDFium can't read this file as saved, so its pages are drawn from \
+                             sheaf's copy, and Find and text selection don't work on it"
+                                .into(),
+                        )
+                    }
+                    Err(e) => doc.notice = Some(format!("The pages can't be drawn: {e:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Ask whether to apply recovery data found next to the file.
@@ -1139,15 +1285,14 @@ impl DocView {
                         let store = Store::new();
                         let (primary, name, came) =
                             sheaf_doc::recovery::restore(&store, &path, &rec, password.as_deref())?;
-                        let handle = RenderHandle::open_bytes(primary.bytes().clone(), password)?;
-                        anyhow::Ok((store, primary, name, came, handle))
+                        anyhow::Ok((store, primary, name, came))
                     }
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((store, primary, name, came, handle)) => {
-                        viewer.install(store, primary, name, came, handle, cx);
+                    Ok((store, primary, name, came)) => {
+                        viewer.install(store, primary, name, came, cx);
                         if timing {
                             eprintln!("[timing] recovered unsaved changes in {:?}", t.elapsed());
                         }
@@ -1390,28 +1535,8 @@ impl DocView {
                 self.launched.elapsed()
             );
         }
-        let mut drawn = drawn_marks(st);
-        if !view.renamed.is_empty() {
-            let at = |&(page, id): &(PageId, AnnotId)| Some((st.pos_of(page)? as u32, id));
-            hide_renamed(&mut drawn, view.renamed.iter().filter_map(at));
-        }
         if doc.notice.is_none() {
             doc.notice = renamed_notice(view.renamed.len());
-        }
-        if !drawn.is_empty() {
-            doc.drawn_marks = drawn.clone();
-            let rx = doc.primary().hide_annots(drawn);
-            cx.spawn(async move |this, cx| {
-                let _ = rx.await;
-                this.update(cx, |view, cx| {
-                    if let State::Ready(doc) = &mut view.state {
-                        doc.invalidate_tiles();
-                    }
-                    cx.notify();
-                })
-                .ok();
-            })
-            .detach();
         }
         if recovered {
             doc.notice = Some("Recovered unsaved changes — Ctrl+S to keep them".into());
@@ -1619,9 +1744,9 @@ impl DocView {
             cell: doc.plugin_cell.clone(),
             selection,
             current_page: doc.page_id(doc.current_page()),
-            text: crate::plugins::text_source(&doc.handles),
-            ocr: Some(crate::plugins::ocr_source(&doc.handles, ocr)),
-            render: Some(crate::plugins::render_source(&doc.handles)),
+            text: crate::plugins::text_source(&doc.views),
+            ocr: Some(crate::plugins::ocr_source(&doc.views, ocr)),
+            render: Some(crate::plugins::render_source(&doc.views)),
         })
     }
 
@@ -3052,7 +3177,6 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let handle = doc.primary().clone();
         let Some(search) = &mut self.search else {
             return;
         };
@@ -3075,7 +3199,10 @@ impl DocView {
         let Some(search) = &mut self.search else {
             return;
         };
-        let mut rx = handle.search(query, false);
+        let mut rx = doc.search(Matcher::Literal {
+            query,
+            match_case: false,
+        });
         search._task = Some(cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.next().await {
                 let stop = this
@@ -3497,43 +3624,37 @@ impl DocView {
 
     // ----- rendering pipeline -------------------------------------------------
 
-    pub(crate) fn ensure_rendered(
-        &mut self,
-        pref: Shown,
-        want: RenderRequest,
-        cx: &mut Context<Self>,
-    ) {
+    /// Ask the pool for `want`'s image, unless it's had or asked for
+    /// already: under its key, whichever page asked, so duplicates share
+    /// it. It's taken in when it lands ([`Self::on_rendered`]).
+    pub(crate) fn ensure_rendered(&mut self, want: Want, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let key = (pref.id, want.job);
+        let key = (want.view.key, want.job);
         if doc.tiles.contains_key(&key) || doc.inflight.contains_key(&key) {
             return;
         }
         if let Job::Page { rotation, .. } = want.job
-            && doc.previews.contains_key(&(pref.id, rotation))
+            && doc.previews.contains_key(&(want.view.key, rotation))
         {
             return;
         }
-        let Some(handle) = doc.handles.get(&pref.source) else {
+        let Some(rx) = doc.request(want) else {
             return;
         };
-        let rx = handle.render(want);
         let task = cx.spawn(async move |this, cx| {
             let result = rx.await;
-            this.update(cx, |viewer, cx| {
-                viewer.on_rendered(pref.id, want, result, cx)
-            })
-            .ok();
+            this.update(cx, |viewer, cx| viewer.on_rendered(key, result, cx))
+                .ok();
         });
         doc.inflight.insert(key, task);
     }
 
     fn on_rendered(
         &mut self,
-        id: PageId,
-        want: RenderRequest,
-        result: Result<anyhow::Result<Rendered>, futures::channel::oneshot::Canceled>,
+        key: TileKey,
+        result: Result<anyhow::Result<Rendered>, oneshot::Canceled>,
         cx: &mut Context<Self>,
     ) {
         let timing = self.timing;
@@ -3541,23 +3662,23 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let key = (id, want.job);
         // We're running inside this task; detach rather than drop it.
         if let Some(task) = doc.inflight.remove(&key) {
             task.detach();
         }
         match result {
-            Err(_canceled) => {} // superseded or scrolled away
-            Ok(Err(e)) => log::error!("render {:?}: {e:#}", want),
+            // Only when the pool's worker is gone, which sending logged.
+            Err(_canceled) => {}
+            Ok(Err(e)) => log::error!("render {:?}: {e:#}", key.1),
             Ok(Ok(rendered)) => {
                 if timing {
-                    let kind = match want.job {
+                    let kind = match key.1 {
                         Job::Page { .. } => "preview",
                         Job::Tile { .. } => "tile",
                     };
                     eprintln!(
                         "[timing] page {} {kind} {}x{} rendered in {:?}",
-                        want.page.0,
+                        rendered.request.page.0,
                         rendered.raster.width,
                         rendered.raster.height,
                         rendered.render_time
@@ -3571,8 +3692,8 @@ impl DocView {
                 }
                 doc.first_paint.get_or_insert_with(Instant::now);
                 let image = Arc::new(to_render_image(rendered.raster));
-                let old = match want.job {
-                    Job::Page { rotation, .. } => doc.previews.insert((id, rotation), image),
+                let old = match key.1 {
+                    Job::Page { rotation, .. } => doc.previews.insert((key.0, rotation), image),
                     Job::Tile { .. } => doc.tiles.insert(key, image),
                 };
                 if let Some(old) = old {
@@ -3611,7 +3732,7 @@ impl DocView {
         Some(crate::print_dialog::PrintContext {
             title: self.file_name(),
             snapshot: doc.model.snapshot(),
-            handles: doc.handles.clone(),
+            views: doc.views.clone(),
             current: doc.current_page(),
             selected,
             bookmark,
@@ -3739,44 +3860,10 @@ impl DocView {
 }
 
 /// Whether opening failed for a wrong or missing password, as the source's
-/// reader or PDFium found.
+/// reader found: a file opens there, and PDFium opens it only to draw it
+/// (a password PDFium alone refused would be the document's notice).
 pub(crate) fn needs_password(e: &anyhow::Error) -> bool {
-    sheaf_doc::source::OpenError::is_password(e) || sheaf_render::OpenError::is_password(e)
-}
-
-/// Each page's marks as the `/NM`s PDFium should hide, by page index,
-/// with those the `renamed` ones had (by page index).
-pub(crate) fn marks_by_page(
-    by_index: &std::collections::HashMap<u32, Vec<sheaf_doc::Annot>>,
-    renamed: impl Iterator<Item = (u32, AnnotId)>,
-) -> Vec<(u32, Vec<String>)> {
-    let mut pages: Vec<(u32, Vec<String>)> = by_index
-        .iter()
-        .map(|(i, list)| (*i, list.iter().flat_map(|a| a.pdf_names()).collect()))
-        .collect();
-    hide_renamed(&mut pages, renamed);
-    pages
-}
-
-/// `pages`, the `/NM`s PDFium hides by page index, with the names the
-/// marks given new ids at open had (`renamed`, by page index): the file
-/// says those until it's saved.
-fn hide_renamed(
-    pages: &mut Vec<(u32, Vec<String>)>,
-    renamed: impl Iterator<Item = (u32, AnnotId)>,
-) {
-    let mut at: HashMap<u32, usize> = pages
-        .iter()
-        .enumerate()
-        .map(|(k, (i, _))| (*i, k))
-        .collect();
-    for (index, id) in renamed {
-        let k = *at.entry(index).or_insert_with(|| {
-            pages.push((index, Vec::new()));
-            pages.len() - 1
-        });
-        pages[k].1.extend(id.sheaf_names());
-    }
+    sheaf_doc::source::OpenError::is_password(e)
 }
 
 /// The notice for marks the open gave new ids, when there are any.
@@ -3906,19 +3993,6 @@ fn counted(n: usize, one: &str, many: &str) -> Option<String> {
     }
 }
 
-/// The marks sheaf draws itself, as `/NM`s by page index, when `st`'s
-/// pages are the primary file's in order, as it opened.
-fn drawn_marks(st: &sheaf_doc::DocState) -> Vec<(u32, Vec<String>)> {
-    st.order()
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &p)| {
-            let names: Vec<String> = st.marks_on(p).flat_map(|a| a.pdf_names()).collect();
-            (!names.is_empty()).then_some((i as u32, names))
-        })
-        .collect()
-}
-
 /// Wrap a BGRA raster as a GPUI image without copying the pixel data.
 /// `RenderImage` is documented as BGRA; `RgbaImage` here is just the container.
 pub(crate) fn to_render_image(raster: sheaf_image::raster::Raster) -> RenderImage {
@@ -3934,28 +4008,36 @@ impl Focusable for DocView {
     }
 }
 
-/// Everything `render` decides for one page: where it goes and which tiles
-/// cover the visible part of it.
+/// Everything `render` decides for one page: where it goes, what renders
+/// it, and which tiles cover the visible part of it.
 struct PagePlan {
     index: usize,
     /// As the pane shows it (rotate view included).
     pref: Shown,
+    /// Where it renders from, and what it draws (its key).
+    view: PageView,
+    /// The turn its images are drawn with: its own from its engine's page,
+    /// then the pane's.
+    rotation: Rotation,
+    /// The key its images are found by ([`Doc::image_key`]).
+    shows: RenderKey,
     left: f32,
     top: f32,
     w: f32,
     h: f32,
     dev_w: u32,
-    /// Tiles intersecting the (overdrawn) viewport, with priority.
+    /// Tiles intersecting the (overdrawn) viewport, as its engine draws
+    /// them, with priority.
     tiles: Vec<(Job, u8)>,
 }
 
 /// One pane's frame: its pages and the renders they want.
 struct PaneFrame {
     plans: Vec<PagePlan>,
-    /// Pages near the viewport whose images stay cached, with the rotation
-    /// this pane draws them at.
-    keep: Vec<(PageId, Rotation)>,
-    wants: Vec<(Shown, RenderRequest)>,
+    /// Pages near the viewport whose images stay cached, with their keys
+    /// and the rotation this pane draws them at.
+    keep: Vec<(PageId, RenderKey, Rotation)>,
+    wants: Vec<Want>,
 }
 
 /// In a non-continuous mode, pick the row a queued scroll lands on before
@@ -4009,8 +4091,8 @@ fn resolve_row(pane: &mut Pane, pages: usize) {
     }
 }
 
-/// Lay out pane `ix`, apply its queued scroll, and plan the renders its
-/// visible pages need.
+/// Lay out pane `ix`, apply its queued scroll, plan the renders its
+/// visible pages need, and pin the engines they render from.
 fn plan_pane(
     doc: &mut Doc,
     ix: usize,
@@ -4145,17 +4227,33 @@ fn plan_pane(
         .unwrap_or(0)
         .min(count - 1);
 
+    // What renders the pages near the viewport, and their keys.
+    let st = doc.model.state();
+    let near = visible.start.saturating_sub(KEEP)..(visible.end + KEEP).min(count);
+    let views: Vec<Option<PageView>> = (near.clone())
+        .map(|i| doc.views.view(st, layout.refs[i].id, &doc.inputs).ok())
+        .collect();
+    let view_of = |i: usize| views[i - near.start];
+    let turned = |view: &PageView| layout.rotation.plus(view.job.rotation);
+    for i in near.clone() {
+        if let Some(view) = view_of(i) {
+            frame
+                .keep
+                .push((layout.refs[i].id, view.key, turned(&view)));
+        }
+    }
+    let pins = pane.pins.get_or_insert_with(|| Pins::new(doc.views.pool()));
+    pins.set(visible.clone().filter_map(view_of).map(|v| v.engine));
+
     // Plan tiles for pages near the viewport.
     let overdraw = view_h * TILE_OVERDRAW;
     let fetch = visible.start.saturating_sub(PREFETCH)..(visible.end + PREFETCH).min(count);
-    for i in visible.start.saturating_sub(KEEP)..(visible.end + KEEP).min(count) {
-        let pref = &layout.refs[i];
-        frame.keep.push((pref.id, pref.render));
-    }
     for i in fetch {
-        let Some(r) = layout.rect(i) else { continue };
+        let (Some(r), Some(view)) = (layout.rect(i), view_of(i)) else {
+            continue;
+        };
         let pref = layout.refs[i];
-        let rotation = pref.render;
+        let rotation = turned(&view);
         let (left, top, w, h) = (r.left, r.top, r.w, r.h);
         let dev_w = (w * scale).round().max(1.0) as u32;
         let dev_h = (h * scale).round().max(1.0) as u32;
@@ -4163,18 +4261,15 @@ fn plan_pane(
         // same for prefetch pages — so an expensive off-screen
         // preview never delays on-screen tiles.
         let on_screen_page = visible.contains(&i);
-        frame.wants.push((
-            pref,
-            RenderRequest {
-                page: PageIndex(pref.index),
-                job: Job::Page {
-                    width: PREVIEW_W,
-                    rotation,
-                },
-                format: PixelFormat::Bgra,
-                priority: if on_screen_page { 0 } else { 2 },
+        frame.wants.push(Want {
+            id: pref.id,
+            view,
+            job: Job::Page {
+                width: PREVIEW_W,
+                rotation,
             },
-        ));
+            priority: if on_screen_page { 0 } else { 2 },
+        });
         // Visible part of this page, in page-local device px.
         let vis_x0 = ((scroll_x - left) * scale).max(0.0);
         let vis_x1 = ((scroll_x + view_w - left) * scale).min(dev_w as f32);
@@ -4214,20 +4309,20 @@ fn plan_pane(
                 }
             }
         }
-        for (job, priority) in &tiles {
-            frame.wants.push((
-                pref,
-                RenderRequest {
-                    page: PageIndex(pref.index),
-                    job: *job,
-                    format: PixelFormat::Bgra,
-                    priority: *priority,
-                },
-            ));
+        for &(job, priority) in &tiles {
+            frame.wants.push(Want {
+                id: pref.id,
+                view,
+                job,
+                priority,
+            });
         }
         frame.plans.push(PagePlan {
             index: i,
             pref,
+            view,
+            rotation,
+            shows: view.key,
             left,
             top,
             w,
@@ -4236,44 +4331,68 @@ fn plan_pane(
             tiles,
         });
     }
+    for pl in &mut frame.plans {
+        pl.shows = doc.image_key(pl.pref.id, pl.view.key, pl.rotation);
+    }
     frame
 }
 
-/// Drop cached images no pane needs: anything outside every pane's keep
-/// set; tiles at a rotation no pane draws the page at; and, per page,
-/// tiles at a stale zoom once every pane showing the page has all its
-/// tiles at the current one.
+/// Drop cached images no pane needs, by the keys they're found by: those
+/// of every pane's pages near the viewport, of the thumbnails' and the
+/// blank-page review's previews, and the keys each was last drawn by
+/// ([`Doc::image_key`]), until its own has an image. Out go anything
+/// outside those; tiles at a rotation no pane draws their key at; and, per
+/// key, tiles at a stale zoom once its tiles at the current one are all
+/// there. A key last drawn by keeps all its tiles until it gives way.
 fn evict(doc: &mut Doc, frames: &[PaneFrame]) {
     let wanted: HashSet<TileKey> = frames
         .iter()
         .flat_map(|f| &f.plans)
-        .flat_map(|pl| pl.tiles.iter().map(move |(j, _)| (pl.pref.id, *j)))
+        .flat_map(|pl| pl.tiles.iter().map(move |(j, _)| (pl.view.key, *j)))
         .collect();
-    let mut kept: HashMap<PageId, smallvec::SmallVec<[Rotation; 2]>> = HashMap::new();
-    for &(id, rot) in frames.iter().flat_map(|f| &f.keep) {
-        let rots = kept.entry(id).or_default();
-        if !rots.contains(&rot) {
-            rots.push(rot);
+    let panes: Vec<(PageId, RenderKey, Rotation)> =
+        frames.iter().flat_map(|f| f.keep.iter().copied()).collect();
+    let pages: HashSet<(PageId, Rotation)> = (panes.iter().chain(&doc.thumb_keep))
+        .chain(&doc.review_keep)
+        .map(|&(p, _, r)| (p, r))
+        .collect();
+    doc.drawn.retain(|at, _| pages.contains(at));
+    // Each page's key, and the one it was last drawn by.
+    let both = |&(p, k, r): &(PageId, RenderKey, Rotation)| {
+        let last = doc.drawn.get(&(p, r)).filter(|&&d| d != k);
+        [Some((k, r, false)), last.map(|&d| (d, r, true))]
+    };
+    let mut kept: HashMap<RenderKey, smallvec::SmallVec<[Rotation; 2]>> = HashMap::new();
+    let mut complete: HashMap<RenderKey, bool> = HashMap::new();
+    for pl in frames.iter().flat_map(|f| &f.plans) {
+        let done = (pl.tiles.iter()).all(|(j, _)| doc.tiles.contains_key(&(pl.view.key, *j)));
+        *complete.entry(pl.view.key).or_insert(true) &= done;
+    }
+    for (k, r, last) in panes.iter().flat_map(both).flatten() {
+        let rots = kept.entry(k).or_default();
+        if !rots.contains(&r) {
+            rots.push(r);
+        }
+        if last {
+            complete.entry(k).or_insert(false);
         }
     }
-    let mut complete: HashMap<PageId, bool> = HashMap::new();
-    for pl in frames.iter().flat_map(|f| &f.plans) {
-        let done = pl
-            .tiles
-            .iter()
-            .all(|(j, _)| doc.tiles.contains_key(&(pl.pref.id, *j)));
-        *complete.entry(pl.pref.id).or_insert(true) &= done;
-    }
+    let previews: HashSet<(RenderKey, Rotation)> = (panes.iter().chain(&doc.thumb_keep))
+        .chain(&doc.review_keep)
+        .flat_map(both)
+        .flatten()
+        .map(|(k, r, _)| (k, r))
+        .collect();
     let evict: Vec<TileKey> = doc
         .tiles
         .keys()
         .copied()
-        .filter(|k @ (p, j)| {
-            let Some(rots) = kept.get(p) else {
+        .filter(|t @ (k, j)| {
+            let Some(rots) = kept.get(k) else {
                 return true;
             };
             !rots.contains(&j.rotation())
-                || (!wanted.contains(k) && complete.get(p).copied().unwrap_or(true))
+                || (!wanted.contains(t) && complete.get(k).copied().unwrap_or(true))
         })
         .collect();
     for k in evict {
@@ -4281,15 +4400,8 @@ fn evict(doc: &mut Doc, frames: &[PaneFrame]) {
             doc.retired.push(im);
         }
     }
-    let keep_preview = |doc: &Doc, &(p, r): &(PageId, Rotation)| {
-        kept.get(&p).is_some_and(|rots| rots.contains(&r))
-            || doc.thumb_keep.contains(&(p, r))
-            || doc.review_keep.contains(&(p, r))
-    };
-    let evict: Vec<(PageId, Rotation)> = doc
-        .previews
-        .keys()
-        .filter(|k| !keep_preview(doc, k))
+    let evict: Vec<(RenderKey, Rotation)> = (doc.previews.keys())
+        .filter(|k| !previews.contains(k))
         .copied()
         .collect();
     for k in evict {
@@ -4297,17 +4409,10 @@ fn evict(doc: &mut Doc, frames: &[PaneFrame]) {
             doc.retired.push(im);
         }
     }
-    let keep_inflight: Vec<TileKey> = doc
-        .inflight
-        .keys()
-        .filter(|k| {
-            wanted.contains(k)
-                || matches!(k.1, Job::Page { rotation, .. } if keep_preview(doc, &(k.0, rotation)))
-        })
-        .copied()
-        .collect();
-    let keep_inflight: HashSet<TileKey> = keep_inflight.into_iter().collect();
-    doc.inflight.retain(|k, _| keep_inflight.contains(k));
+    doc.inflight.retain(|t, _| {
+        wanted.contains(t)
+            || matches!(t.1, Job::Page { rotation, .. } if previews.contains(&(t.0, rotation)))
+    });
 }
 
 /// What's drawn over pages besides the document's own marks.
@@ -4333,9 +4438,9 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         .h(px(pl.h))
         .bg(theme::PAGE)
         .shadow_md();
-    // The turn the page's images were rendered with.
-    let rot = pl.pref.render;
-    if let Some(prev) = doc.previews.get(&(pl.pref.id, rot)) {
+    // The key its images are found by, and the turn they were drawn with.
+    let (key, rot) = (pl.shows, pl.rotation);
+    if let Some(prev) = doc.previews.get(&(key, rot)) {
         page_div = page_div.child(
             div()
                 .absolute()
@@ -4346,7 +4451,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     let mut page_tiles: Vec<(&TileKey, &Arc<RenderImage>)> = doc
         .tiles
         .iter()
-        .filter(|((p, j), _)| *p == pl.pref.id && j.rotation() == rot)
+        .filter(|((k, j), _)| *k == key && j.rotation() == rot)
         .collect();
     // Stale zoom levels first so current ones paint over them.
     page_tiles.sort_by_key(|((_, j), _)| match j {
@@ -4443,8 +4548,6 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 .map(|r| place(to_pane.apply_box(r)).bg(theme::SELECTION)),
         );
     }
-    // A header/footer not yet saved into the file, drawn as it will be.
-    page_div = page_div.children(header_footer_elements(doc, pl, k));
     // Our markup, drawn over the page as the pane shows it, less what the
     // comment filter or View > Hide Comments hides.
     if !doc.comments_hidden {
@@ -4781,8 +4884,8 @@ impl DocView {
             .or_else(|| (!doc.model.is_ready()).then(|| opening_line(doc.reading.as_ref())))
             .map(Into::into);
         let wants: Vec<_> = frames.into_iter().flat_map(|f| f.wants).collect();
-        for (pref, want) in wants {
-            self.ensure_rendered(pref, want, cx);
+        for want in wants {
+            self.ensure_rendered(want, cx);
         }
         (body, status.into(), notice)
     }
@@ -5187,9 +5290,17 @@ impl Render for DocView {
 
 // ---------------------------------------------------------------------------
 // Sidebar panels. Rendered on behalf of the workspace via `update`, so they
-// can share this view's caches and render handles.
+// can share this view's caches and views.
 
 impl DocView {
+    /// The thumbnail strip isn't shown: the engines its pages render from
+    /// are no longer pinned for it.
+    pub fn unpin_strip(&mut self) {
+        if let State::Ready(doc) = &mut self.state {
+            doc.strip_pins.set([]);
+        }
+    }
+
     /// Thumbnail strip: virtualized, follows the current page, and is the
     /// page-organizer surface: click/Ctrl/Shift to select, drag to reorder.
     pub fn render_thumbnails(
@@ -5205,11 +5316,12 @@ impl DocView {
             doc.drop_target = None;
         }
         let refs: Vec<Shown> = (doc.model.state().pages())
-            .map(|(id, def, geom)| Shown::new(id, def, geom, Rotation::R0))
+            .map(|(id, _, geom)| Shown::new(id, geom, Rotation::R0))
             .collect();
         let count = refs.len();
         if count == 0 {
             doc.thumb_keep.clear();
+            doc.strip_pins.set([]);
             return div()
                 .p_2()
                 .text_sm()
@@ -5251,9 +5363,19 @@ impl DocView {
         }
 
         let visible = layout.visible_in(scroll_y, view_h);
-        doc.thumb_keep = (visible.start.saturating_sub(2)..(visible.end + 2).min(count))
-            .map(|i| (refs[i].id, refs[i].render))
+        // What renders the thumbnails near the visible ones, and their keys:
+        // the strip has no rotate view.
+        let st = doc.model.state();
+        let near = visible.start.saturating_sub(2)..(visible.end + 2).min(count);
+        let views: Vec<Option<PageView>> = (near.clone())
+            .map(|i| doc.views.view(st, refs[i].id, &doc.inputs).ok())
             .collect();
+        let view_of = |i: usize| views[i - near.start];
+        doc.thumb_keep = (near.clone())
+            .filter_map(|i| Some((refs[i].id, view_of(i)?)))
+            .map(|(id, v)| (id, v.key, v.job.rotation))
+            .collect();
+        (doc.strip_pins).set(visible.clone().filter_map(view_of).map(|v| v.engine));
 
         // Pages that are bookmark targets get a marker (a delete would cascade).
         let targets: HashSet<PageId> = doc
@@ -5271,21 +5393,21 @@ impl DocView {
         let mut items = Vec::new();
         for i in visible {
             let pref = &refs[i];
-            let rotation = pref.render;
-            wants.push((
-                *pref,
-                RenderRequest {
-                    page: PageIndex(pref.index),
+            let image = view_of(i).and_then(|view| {
+                let rotation = view.job.rotation;
+                wants.push(Want {
+                    id: pref.id,
+                    view,
                     job: Job::Page {
                         width: PREVIEW_W,
                         rotation,
                     },
-                    format: PixelFormat::Bgra,
                     priority: 2,
-                },
-            ));
+                });
+                let key = doc.image_key(pref.id, view.key, rotation);
+                doc.previews.get(&(key, rotation)).cloned()
+            });
             let h = thumb_w * sizes[i].height / sizes[i].width.max(1.0);
-            let image = doc.previews.get(&(pref.id, rotation)).cloned();
             let current = i == cur;
             let selected = selection.contains(&pref.id);
             let bookmarked = targets.contains(&pref.id);
@@ -5407,8 +5529,8 @@ impl DocView {
                     .children(indicator),
             )
             .into_any_element();
-        for (pref, want) in wants {
-            self.ensure_rendered(pref, want, cx);
+        for want in wants {
+            self.ensure_rendered(want, cx);
         }
         el
     }
@@ -5440,52 +5562,6 @@ impl Render for DragPreview {
                 format!("{} pages", self.count)
             })
     }
-}
-
-/// The header/footer on one page, in page-local logical px, where the
-/// page's file doesn't draw it (`stamps::drawn_over`), as a save draws it
-/// there. Only without a view rotation: GPUI can't turn text, and the
-/// header/footer reads upright on the page as the document has it.
-fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
-    let st = doc.model.state();
-    let Some(hf) = sheaf_doc::stamps::drawn_over(st, pl.pref.id) else {
-        return Vec::new();
-    };
-    let own = st.geom(pl.pref.id);
-    if own.is_none_or(|g| g.rotate != pl.pref.geom.rotate) {
-        return Vec::new();
-    }
-    let size = pl.pref.geom.shown();
-    let bates = if hf.bates.is_some() {
-        let ids: Vec<PageId> = st.order().iter().copied().collect();
-        hf.bates_numbers(&ids).get(pl.index).copied().flatten()
-    } else {
-        None
-    };
-    let facts = sheaf_doc::stamps::PageFacts {
-        index: pl.index,
-        count: st.page_count(),
-        bates,
-    };
-    let [r, g, b] = hf.color;
-    let color = rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32);
-    hf.layout(size, &facts)
-        .into_iter()
-        .map(|p| {
-            div()
-                .absolute()
-                .left(px(p.x * k))
-                .top(px((p.baseline - p.size * 0.9) * k))
-                .h(px(p.size * 1.1 * k))
-                .whitespace_nowrap()
-                .font_family("Liberation Sans")
-                .text_size(px(p.size * k))
-                .line_height(px(p.size * 1.1 * k))
-                .text_color(color)
-                .child(p.text)
-                .into_any_element()
-        })
-        .collect()
 }
 
 /// A shape's outline (a cloud's scallops when it's cloudy), filled when
@@ -6366,20 +6442,11 @@ mod tests {
         assert!(differ.is_empty(), "{differ:#?}");
     }
 
-    /// PDFium hides the marks given new ids at open under the names the
-    /// file still says, on their pages beside the others', and one notice
-    /// counts them.
+    /// One notice counts the marks given new ids at open (the screen
+    /// leaves the file's copies of them out, as it does every mark the
+    /// file lists: sheaf draws its own).
     #[test]
-    fn renamed_marks_are_hidden_by_their_old_names() {
-        let note = sheaf_doc::forms::fixture::note();
-        let marks = HashMap::from([(0, vec![note.clone()])]);
-        let renamed = [(0, AnnotId(7)), (2, AnnotId(8))];
-        let mut pages = marks_by_page(&marks, renamed.into_iter());
-        pages.sort_by_key(|(i, _)| *i);
-        let names = |id: u64| [format!("sheaf:{id}"), format!("sheaf:{id}:strike")];
-        let mut first = vec![note.name()];
-        first.extend(names(7));
-        assert_eq!(pages, [(0, first), (2, names(8).to_vec())]);
+    fn one_notice_counts_the_renamed_marks() {
         assert_eq!(renamed_notice(0), None);
         assert!(
             renamed_notice(1)
@@ -6460,15 +6527,22 @@ mod tests {
         }
     }
 
+    /// A 1×1 image, standing in for a render.
+    #[cfg(target_os = "linux")]
+    fn pixel() -> Arc<RenderImage> {
+        let pixel = image::Frame::new(image::RgbaImage::new(1, 1));
+        Arc::new(RenderImage::new(smallvec::smallvec![pixel]))
+    }
+
     /// A save changes nothing the document shows, so it drops nothing
     /// rendered: through the view's own end of a save (`finish_save`), the
-    /// tile counter doesn't move, and no tile or preview is dropped, by it
-    /// or page by page. Run in a headless app for the view's focus handle;
-    /// on Linux, where it needs no main thread. The file is in a `sheaf-`
-    /// temporary directory, which the recent files leave out.
+    /// page's render key stays as it was, and every tile and preview kept
+    /// under it is still there. Run in a headless app for the view's focus
+    /// handle; on Linux, where it needs no main thread. The file is in a
+    /// `sheaf-` temporary directory, which the recent files leave out.
     #[test]
     #[cfg(target_os = "linux")]
-    fn a_save_doesnt_move_the_tile_counter() {
+    fn a_save_keeps_every_image() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
         let path = dir.path().join("every-fact.pdf");
@@ -6481,21 +6555,18 @@ mod tests {
         gpui_platform::headless().run({
             let ran = ran.clone();
             move |cx| {
-                let mut doc =
-                    Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
-                doc.invalidate_tiles();
-                doc.retired.clear();
-                let pixel = || {
-                    let pixel = image::Frame::new(image::RgbaImage::new(1, 1));
-                    Arc::new(RenderImage::new(smallvec::smallvec![pixel]))
+                let mut doc = Doc::new(model, cx.focus_handle(), Default::default());
+                let key = |doc: &Doc| {
+                    let view = doc.views.view(doc.model.state(), page, &doc.inputs);
+                    view.unwrap().key
                 };
-                doc.previews.insert((page, Rotation::R90), pixel());
+                let was = key(&doc);
+                doc.previews.insert((was, Rotation::R90), pixel());
                 let job = Job::Page {
                     width: 100,
                     rotation: Rotation::R90,
                 };
-                doc.tiles.insert((page, job), pixel());
-                let before = doc.tiles_invalidated;
+                doc.tiles.insert((was, job), pixel());
                 let (saving, written) = written(&mut doc, &path);
                 let view = cx.new(|cx| {
                     let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
@@ -6508,8 +6579,9 @@ mod tests {
                         panic!("ready");
                     };
                     assert!(!doc.model.is_dirty() && !doc.saving);
-                    assert_eq!(doc.tiles_invalidated, before);
-                    assert_eq!((doc.previews.len(), doc.tiles.len()), (1, 1));
+                    assert_eq!(key(doc), was);
+                    assert!(doc.previews.contains_key(&(was, Rotation::R90)));
+                    assert!(doc.tiles.contains_key(&(was, job)));
                     assert!(doc.retired.is_empty());
                 });
                 ran.store(true, Ordering::Relaxed);
@@ -6539,8 +6611,7 @@ mod tests {
         gpui_platform::headless().run({
             let ran = ran.clone();
             move |cx| {
-                let mut doc =
-                    Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                let mut doc = Doc::new(model, cx.focus_handle(), Default::default());
                 let (saving, written) = written(&mut doc, &path);
                 // While it was written.
                 doc.model.commit_ops(turn(), "Rotate").unwrap();
@@ -6568,9 +6639,10 @@ mod tests {
     /// door ([`DocView::commit`]), an added mark leaves the layout count
     /// and the pane's layout as they were, while the change count moves,
     /// so the Comments panel's view is made again, with the mark. A turned
-    /// page lays the pages out anew, and so does a page shown from a copy
-    /// of the same size (a watermark's), whose boxes didn't change: a
-    /// layout holds the source page each page shows.
+    /// page lays the pages out anew. A page shown from a copy of the same
+    /// size (a watermark's), whose boxes didn't change, lays nothing out:
+    /// a layout holds no source page, and the page's render key changes,
+    /// so it's drawn again.
     #[test]
     #[cfg(target_os = "linux")]
     fn a_mark_edit_lays_nothing_out() {
@@ -6581,8 +6653,7 @@ mod tests {
         gpui_platform::headless().run({
             let ran = ran.clone();
             move |cx| {
-                let mut doc =
-                    Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                let mut doc = Doc::new(model, cx.focus_handle(), Default::default());
                 lay_out(&mut doc);
                 let view = cx.new(|cx| {
                     let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
@@ -6622,6 +6693,11 @@ mod tests {
                     // The second page, shown from a blank copy of it.
                     lay_out(doc);
                     let page = doc.page_id(1).unwrap();
+                    let key = |doc: &Doc| {
+                        let view = doc.views.view(doc.model.state(), page, &doc.inputs);
+                        view.unwrap().key
+                    };
+                    let was = key(doc);
                     let copy = sheaf_doc::store::blank(doc.model.store(), 1);
                     let mut tx = doc.model.tx(Actor::User);
                     let why = sheaf_doc::Derive::Watermark {
@@ -6633,8 +6709,14 @@ mod tests {
                     let change = c.unwrap().change;
                     assert!(change.geometry.is_empty() && change.content.contains(&page));
                     let doc = shown(view);
-                    assert_eq!(doc.layout, layout + 2);
-                    assert!(doc.panes[0].layout.is_none());
+                    assert_eq!(doc.layout, layout + 1);
+                    assert!(
+                        doc.panes[0]
+                            .layout
+                            .as_ref()
+                            .is_some_and(|l| l.layout == layout + 1)
+                    );
+                    assert_ne!(key(doc), was);
                 });
                 ran.store(true, Ordering::Relaxed);
                 cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
@@ -6658,7 +6740,7 @@ mod tests {
         gpui_platform::headless().run({
             let ran = ran.clone();
             move |cx| {
-                let doc = Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                let doc = Doc::new(model, cx.focus_handle(), Default::default());
                 let view = cx.new(|cx| {
                     let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
                     view.state = State::Ready(Box::new(doc));
@@ -6768,7 +6850,7 @@ mod tests {
         gpui_platform::headless().run({
             let ran = ran.clone();
             move |cx| {
-                let doc = Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+                let doc = Doc::new(model, cx.focus_handle(), Default::default());
                 let view = cx.new(|cx| {
                     let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
                     view.state = State::Ready(Box::new(doc));
@@ -6859,7 +6941,7 @@ mod tests {
     /// A view showing `model`, the document of the file at `path`.
     #[cfg(target_os = "linux")]
     fn view_of(model: Document, path: &std::path::Path, cx: &mut App) -> Entity<DocView> {
-        let doc = Doc::new(model, HashMap::new(), cx.focus_handle(), Default::default());
+        let doc = Doc::new(model, cx.focus_handle(), Default::default());
         cx.new(|cx| {
             let mut view = DocView::unopened(path.into(), None, false, Instant::now(), cx);
             view.state = State::Ready(Box::new(doc));
@@ -6891,8 +6973,8 @@ mod tests {
     /// An insert planned before a page that's deleted before it lands
     /// says why, and changes nothing (M10.5 §8.5): lowered again on the
     /// current version, its anchor names no page, so the version and the
-    /// pages stay as they were, and the engine opened on its file isn't
-    /// kept.
+    /// pages stay as they were, and nothing keeps the file it read: the
+    /// store lets it go.
     #[test]
     #[cfg(target_os = "linux")]
     fn an_insert_whose_anchor_went_says_so_and_changes_nothing() {
@@ -6921,7 +7003,7 @@ mod tests {
                     assert!(view.land(plan, "Insert blank.pdf", cx).is_none());
                     let doc = shown(view);
                     assert_eq!((doc.model.current_version(), order(doc)), was);
-                    assert!(!doc.handles.contains_key(&src));
+                    assert!(doc.model.store().get(src).is_none());
                     let notice = doc.notice.as_deref().unwrap_or_default();
                     assert!(notice.starts_with("Insert blank.pdf failed: "), "{notice}");
                     assert!(notice.ends_with("isn't there"), "{notice}");
@@ -6936,6 +7018,8 @@ mod tests {
     /// An insert planned while the user moves a page elsewhere lands too:
     /// lowered again on the moved pages, before the page it was planned
     /// before, and what it made keeps the ids its plan drew (M10.5 §8.5).
+    /// The document keeps the file, whose pages draw from its own engine,
+    /// which the render worker opens when one is drawn.
     #[test]
     #[cfg(target_os = "linux")]
     fn an_insert_during_a_move_lands_both() {
@@ -6965,7 +7049,9 @@ mod tests {
                     let made: Vec<PageId> = commit.created.pages().collect();
                     let doc = shown(view);
                     assert_eq!(order(doc), [made[0], made[1], b, c, a]);
-                    assert!(doc.handles.contains_key(&src));
+                    assert!(doc.model.store().get(src).is_some());
+                    let view = doc.views.view(doc.model.state(), made[0], &doc.inputs);
+                    assert_eq!(view.unwrap().engine, EngineKey::Base(src));
                     assert_eq!(doc.model.undo_label(), Some("Insert blank.pdf"));
                 });
                 ran.store(true, Ordering::Relaxed);
@@ -7151,6 +7237,697 @@ mod tests {
                         })
                     });
                     assert!(!landed.get());
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// `doc`'s first pane planned as a frame 800 by 600 px plans it, at a
+    /// device px a px, and its images let go as the frame lets them go.
+    #[cfg(target_os = "linux")]
+    fn frame(doc: &mut Doc) -> PaneFrame {
+        let frame = plan_pane(doc, 0, (800.0, 600.0), true, 1.0);
+        evict(doc, std::slice::from_ref(&frame));
+        frame
+    }
+
+    /// Every image `frame` wants, landed: a pixel under each one's key.
+    #[cfg(target_os = "linux")]
+    fn landed(doc: &mut Doc, frame: &PaneFrame) {
+        for w in &frame.wants {
+            match w.job {
+                Job::Page { rotation, .. } => doc.previews.insert((w.view.key, rotation), pixel()),
+                Job::Tile { .. } => doc.tiles.insert((w.view.key, w.job), pixel()),
+            };
+        }
+    }
+
+    /// Whether `want`'s image is had already.
+    #[cfg(target_os = "linux")]
+    fn had(doc: &Doc, want: &Want) -> bool {
+        match want.job {
+            Job::Page { rotation, .. } => doc.previews.contains_key(&(want.view.key, rotation)),
+            Job::Tile { .. } => doc.tiles.contains_key(&(want.view.key, want.job)),
+        }
+    }
+
+    /// The preview `frame` wants of page `index`.
+    #[cfg(target_os = "linux")]
+    fn preview(frame: &PaneFrame, index: usize) -> Want {
+        let pl = (frame.plans.iter()).find(|pl| pl.index == index);
+        let id = pl.expect("planned").pref.id;
+        (frame.wants.iter())
+            .find(|w| w.id == id && matches!(w.job, Job::Page { .. }))
+            .copied()
+            .expect("a preview")
+    }
+
+    /// `want`, rendered by the pool.
+    #[cfg(target_os = "linux")]
+    fn rendered(doc: &Doc, want: Want) -> Rendered {
+        let rx = doc.request(want).expect("the document's page");
+        futures::executor::block_on(rx).unwrap().unwrap()
+    }
+
+    /// An unsaved header shows under view rotation (M10.5 §10.4): no
+    /// overlay of GPUI's draws it, but the page's view is its group's
+    /// overlay, which does, and the pool's render of the pane's preview,
+    /// turned with the pane, has its ink at the right, where the page's top
+    /// went, and is otherwise the page drawn without it, from its base.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_unsaved_header_shows_under_view_rotation() {
+        use sheaf_doc::tx::fixture::{header, set_header};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(2);
+        let (mut model, _) = as_the_view_opens(&path, false).unwrap();
+        let page = model.page(0).unwrap();
+        let header = set_header(header("DRAFT DRAFT DRAFT"), Some(&[page]));
+        model.commit_ops(vec![header], "Header").unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let mut doc = Doc::new(model, cx.focus_handle(), Default::default());
+                doc.panes[0].rotation = Rotation::R90;
+                let drawn = frame(&mut doc);
+                assert!(matches!(drawn.plans[0].view.engine, EngineKey::Group(..)));
+                assert_eq!(drawn.plans[0].rotation, Rotation::R90);
+                let with = rendered(&doc, preview(&drawn, 0)).raster;
+                doc.inputs.generators = false;
+                let bare = frame(&mut doc);
+                assert!(matches!(bare.plans[0].view.engine, EngineKey::Base(_)));
+                let without = rendered(&doc, preview(&bare, 0)).raster;
+                assert_eq!((with.width, with.height), (without.width, without.height));
+                let columns: Vec<u32> = (with.data.chunks(4).zip(without.data.chunks(4)))
+                    .enumerate()
+                    .filter(|(_, (a, b))| a != b)
+                    .map(|(i, _)| i as u32 % with.width)
+                    .collect();
+                assert!(!columns.is_empty(), "the header shows");
+                assert!(columns.iter().all(|&x| x > with.width * 3 / 4), "turned");
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A square another tool drew, by `author`, with its appearance.
+    #[cfg(target_os = "linux")]
+    fn their_square(pdf: &mut lopdf::Document, author: &str) -> lopdf::ObjectId {
+        use lopdf::{Object, Stream, dictionary};
+        let ap = pdf.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 80.into(), 80.into()],
+            },
+            b"0 0.6 0 rg 0 0 80 80 re f".to_vec(),
+        ));
+        pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Square", "T" => Object::string_literal(author),
+            "NM" => Object::string_literal(format!("{author}'s")),
+            "Rect" => vec![200.into(), 300.into(), 280.into(), 380.into()],
+            "C" => vec![0.into(), 0.6.into(), 0.into()], "AP" => dictionary! { "N" => ap },
+        })
+    }
+
+    /// Hiding a comment draws its page again, and no other (M10.5
+    /// §10.2): as the Comments panel's filter hides it, its page's screen
+    /// key changes and no other page's does, so their images all stay
+    /// cached and the frame wants none of theirs anew; its page keeps its
+    /// old image until its new one lands.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn hiding_a_comment_rerenders_only_its_page() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut f = sheaf_doc::forms::fixture::Form::new(3);
+        for (page, author) in ["Alice", "Bob", "Bob"].into_iter().enumerate() {
+            let square = their_square(&mut f.pdf, author);
+            f.set_annots(page, &[square]);
+        }
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("comments.pdf");
+        std::fs::write(&path, f.bytes()).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    view.comment_view(cx);
+                    let doc = shown(view);
+                    let first = doc.page_id(0).unwrap();
+                    let before = frame(doc);
+                    landed(doc, &before);
+                    let before = frame(doc);
+                    assert_eq!(before.keep.len(), 3);
+                    doc.comment_filter.authors.insert("Alice".into());
+                    view.comment_view(cx);
+                    let doc = shown(view);
+                    assert_eq!(doc.inputs.hidden.len(), 1);
+                    let after = frame(doc);
+                    for (&(page, was, _), &(_, now, _)) in before.keep.iter().zip(&after.keep) {
+                        assert_eq!(was == now, page != first, "{page:?}");
+                    }
+                    let (theirs, ours): (Vec<&Want>, Vec<&Want>) =
+                        after.wants.iter().partition(|w| w.id != first);
+                    assert!(!theirs.is_empty() && theirs.iter().all(|w| had(doc, w)));
+                    assert!(ours.iter().all(|w| !had(doc, w)));
+                    let pl = &after.plans[0];
+                    assert_eq!(pl.shows, before.plans[0].view.key);
+                    assert!(doc.previews.contains_key(&(pl.shows, pl.rotation)));
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// Hiding a comment leaves print preview and what OCR reads as they
+    /// were (M10.5 §10.4): with View > Hide Comments, the comment's page
+    /// draws anew on screen, but print preview, passing print's own inputs,
+    /// finds and draws it as before, the comment with it, and OCR's input,
+    /// the page's content alone, is as before, without it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn hiding_a_comment_leaves_print_preview_and_the_ocr_input_alone() {
+        use sheaf_ocr::PageSource;
+        use sheaf_ops::views::ViewPages;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut f = sheaf_doc::forms::fixture::Form::new(1);
+        let square = their_square(&mut f.pdf, "Alice");
+        f.set_annots(0, &[square]);
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("comment.pdf");
+        std::fs::write(&path, f.bytes()).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    // The screen's key, print preview's and its picture (as
+                    // its view says its engine draws it), and OCR's picture
+                    // of the page.
+                    let drawn = |view: &mut DocView| {
+                        let prefs = crate::print_dialog::PrintPrefs::default();
+                        let ctx = view.print_context(prefs).unwrap();
+                        let page = ctx.snapshot.state.page_at(0).unwrap();
+                        let doc = shown(view);
+                        let screen = doc.views.view(doc.model.state(), page, &doc.inputs);
+                        let (preview, job) = ctx.preview(page, 400, true).unwrap();
+                        let rx = ctx.render_preview(page, 400, true);
+                        let printed = futures::executor::block_on(rx).unwrap().unwrap();
+                        let request = printed.request;
+                        assert_eq!((request.page.0, request.job), (preview.index, job));
+                        let pages = ViewPages::new(ctx.views.clone(), ctx.snapshot.clone());
+                        let read = pages.render(&pages.page(page).unwrap(), 400).unwrap();
+                        let key = preview.key;
+                        (screen.unwrap().key, key, printed.raster.data, read.data)
+                    };
+                    let (screen, key, printed, read) = drawn(view);
+                    view.toggle_comments_shown(cx);
+                    assert_eq!(shown(view).inputs.hidden.len(), 1);
+                    let hid = drawn(view);
+                    assert_ne!(hid.0, screen, "the screen draws the page anew");
+                    assert_eq!(hid.1, key);
+                    assert!(hid.2 == printed && hid.3 == read);
+                    let green = |px: &[u8]| px[1] > 120 && px[0] < 60 && px[2] < 60;
+                    assert!(printed.chunks(4).any(green), "print shows the comment");
+                    assert!(!read.chunks(4).any(green), "OCR never reads it");
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// An edit keeps its page's old image on screen until the new one
+    /// lands (M10.5 §10.2), and then no image of the old key is left: kept
+    /// while the page is drawn by it, let go once it isn't.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_edit_keeps_the_old_image_until_the_new_one_lands() {
+        use sheaf_doc::tx::fixture::{header, set_header};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(2);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    let doc = shown(view);
+                    let page = doc.page_id(0).unwrap();
+                    let first = frame(doc);
+                    landed(doc, &first);
+                    let old = frame(doc).plans[0].shows;
+                    assert_eq!(old, first.plans[0].view.key);
+                    let header = set_header(header("Draft"), Some(&[page]));
+                    let tx = view.lower(vec![header], "Header", cx).unwrap();
+                    view.commit(tx, CommitOpts::labelled("Header"), cx).unwrap();
+                    let doc = shown(view);
+                    let edited = frame(doc);
+                    let pl = &edited.plans[0];
+                    assert_ne!(pl.view.key, old);
+                    assert_eq!(pl.shows, old, "the old image, meanwhile");
+                    assert!(doc.previews.contains_key(&(old, pl.rotation)));
+                    let want = preview(&edited, 0);
+                    let new = rendered(doc, want);
+                    view.on_rendered((want.view.key, want.job), Ok(Ok(new)), cx);
+                    let doc = shown(view);
+                    let after = frame(doc);
+                    assert_eq!(after.plans[0].shows, want.view.key);
+                    assert!(!doc.previews.keys().any(|(k, _)| *k == old));
+                    assert!(!doc.tiles.keys().any(|(k, _)| *k == old));
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A Letter page drawing a blue box in layer "Notes", which its file
+    /// shows.
+    #[cfg(target_os = "linux")]
+    fn layered() -> Vec<u8> {
+        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        let mut pdf = Pdf::with_version("1.7");
+        let ocg = pdf.add_object(dictionary! {
+            "Type" => "OCG", "Name" => Object::string_literal("Notes"),
+        });
+        let drawn = b"/OC /L0 BDC 0 0 1 rg 100 300 400 300 re f EMC".to_vec();
+        let content = pdf.add_object(Stream::new(dictionary! {}, drawn));
+        let root = pdf.new_object_id();
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => root, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Properties" => dictionary! { "L0" => ocg } },
+        });
+        let kids = dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 };
+        pdf.objects.insert(root, Object::Dictionary(kids));
+        let props = dictionary! {
+            "OCGs" => vec![ocg.into()], "D" => dictionary! { "Order" => vec![ocg.into()] },
+        };
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => "Catalog", "Pages" => root, "OCProperties" => props,
+        });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// Set in the process a test runs alone in, to the file it opens.
+    #[cfg(target_os = "linux")]
+    const ALONE: &str = "SHEAF_APP_ALONE";
+
+    /// Runs test `name` again in a process of its own, [`ALONE`] set to
+    /// `path` and each of `env` set too, which must pass.
+    #[cfg(target_os = "linux")]
+    fn alone(name: &str, path: &std::path::Path, env: &[(&str, &std::path::Path)]) {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(ALONE, path)
+            .envs(env.iter().copied())
+            .output()
+            .unwrap();
+        let said = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        let (stdout, stderr) = (said(&out.stdout), said(&out.stderr));
+        assert!(out.status.success(), "{}\n{stdout}{stderr}", out.status);
+        assert!(stdout.contains("1 passed"), "{stdout}");
+    }
+
+    /// Layers write no file (M10.5 §10.6): in a process of its own, its
+    /// temporary directory empty, the Layers panel turns a layer off and
+    /// on again, and the page renders without it, from a patch of its
+    /// source's catalog, and with it, and the directory stays empty.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn using_layers_writes_no_temp_file() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(path) = std::env::var_os(ALONE).map(PathBuf::from) else {
+            let name = "docview::tests::using_layers_writes_no_temp_file";
+            let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+            let (path, tmp) = (dir.path().join("layers.pdf"), dir.path().join("tmp"));
+            std::fs::write(&path, layered()).unwrap();
+            std::fs::create_dir(&tmp).unwrap();
+            alone(name, &path, &[("TMPDIR", &tmp)]);
+            let left: Vec<_> = std::fs::read_dir(&tmp).unwrap().collect();
+            assert!(left.is_empty(), "{left:?}");
+            return;
+        };
+        let (model, facts) = as_the_view_opens(&path, false).unwrap();
+        let layer = facts.layers.iter().find_map(|l| l.id).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    shown(view).set_layers(facts.layers);
+                    let drawn = |view: &mut DocView| {
+                        let doc = shown(view);
+                        let want = preview(&frame(doc), 0);
+                        (want.view.engine, rendered(doc, want).raster.data)
+                    };
+                    let (engine, all) = drawn(view);
+                    assert!(matches!(engine, EngineKey::Base(_)));
+                    view.toggle_layer(layer, cx);
+                    let (engine, off) = drawn(view);
+                    assert!(matches!(engine, EngineKey::SourcePatch(..)));
+                    assert!(off != all, "the layer is off");
+                    view.toggle_layer(layer, cx);
+                    let (_, on) = drawn(view);
+                    assert!(on == all, "and on again");
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// The threads of this process.
+    #[cfg(target_os = "linux")]
+    fn tasks() -> usize {
+        std::fs::read_dir("/proc/self/task").unwrap().count()
+    }
+
+    /// Waits, a tick at a time, until `view` runs no planner.
+    #[cfg(target_os = "linux")]
+    async fn planned(view: &Entity<DocView>, cx: &mut gpui::AsyncApp) {
+        for _ in 0..1000 {
+            if cx.update(|cx| view.read(cx).planners.is_empty()) {
+                return;
+            }
+            let tick = std::time::Duration::from_millis(10);
+            cx.background_executor().timer(tick).await;
+        }
+        panic!("the planners ran on");
+    }
+
+    /// The process keeps as many threads as it had once its first pages
+    /// rendered, across 20 inserts and 20 crops (M10.5 §10.3): in a
+    /// process of its own, each file inserted (another each time) and each
+    /// crop of the first page lands through its planner, its pages render
+    /// from engines the one render worker opens, and no thread starts. The
+    /// count is taken after a first insert and crop: the first crop's copy,
+    /// read by lopdf until slice 15, starts rayon's pool, once.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_thread_count_is_constant_across_20_inserts_and_crops() {
+        use sheaf_ops::crop::{CropSpec, Margins};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(path) = std::env::var_os(ALONE).map(PathBuf::from) else {
+            let name = "docview::tests::the_thread_count_is_constant_across_20_inserts_and_crops";
+            let (_dir, path) = blank_file(2);
+            alone(name, &path, &[]);
+            return;
+        };
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let files: Vec<PathBuf> = (0..=20)
+            .map(|k| {
+                let file = dir.path().join(format!("{k}.pdf"));
+                let bytes = sheaf_doc::generated::blank_pages(600.0 + k as f32, 792.0, 1);
+                std::fs::write(&file, bytes.unwrap()).unwrap();
+                file
+            })
+            .collect();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                cx.spawn(async move |cx| {
+                    let drawn = |cx: &mut gpui::AsyncApp| {
+                        cx.update(|cx| {
+                            view.update(cx, |v, _| {
+                                let doc = shown(v);
+                                for want in frame(doc).wants {
+                                    rendered(doc, want);
+                                }
+                            })
+                        })
+                    };
+                    drawn(cx);
+                    let mut threads = Vec::new();
+                    for (k, file) in files.into_iter().enumerate() {
+                        cx.update(|cx| {
+                            view.update(cx, |v, cx| {
+                                let first = shown(v).page_id(0);
+                                v.insert_file(file, first, format!("{k}.pdf"), false, cx);
+                            })
+                        });
+                        planned(&view, cx).await;
+                        drawn(cx);
+                        cx.update(|cx| {
+                            view.update(cx, |v, cx| {
+                                let opened = v.model_snapshot().unwrap();
+                                let first = opened.state.page_at(0).unwrap();
+                                let margin = 4.0 + k as f32;
+                                let spec = CropSpec::Margins(Margins {
+                                    top: margin,
+                                    right: margin,
+                                    bottom: margin,
+                                    left: margin,
+                                });
+                                v.crop_pages(opened, vec![first], spec, cx);
+                            })
+                        });
+                        planned(&view, cx).await;
+                        drawn(cx);
+                        threads.push(tasks());
+                    }
+                    cx.update(|cx| {
+                        view.update(cx, |v, _| {
+                            let doc = shown(v);
+                            assert_eq!(doc.model.page_count(), 23);
+                            assert_eq!(doc.model.undo_label(), Some("Crop 1 page"));
+                        })
+                    });
+                    assert!(threads.iter().all(|&n| n == threads[0]), "{threads:?}");
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// The form bar learns the file's form from its base engine, which
+    /// the render worker opens when the view asks it, beside the first
+    /// page: an AcroForm, and none until it's said.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_form_type_comes_from_the_primary_s_engine() {
+        use sheaf_render::FormType;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("every-kind.pdf");
+        std::fs::write(&path, sheaf_doc::forms::fixture::every_kind().bytes()).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |v, cx| {
+                    assert_eq!(shown(v).forms.form_type, FormType::None);
+                    v.ask_form_type(cx);
+                });
+                cx.spawn(async move |cx| {
+                    let said = |cx: &mut gpui::AsyncApp| {
+                        cx.update(|cx| view.update(cx, |v, _| shown(v).forms.form_type))
+                    };
+                    for _ in 0..1000 {
+                        if said(cx) != FormType::None {
+                            break;
+                        }
+                        let tick = std::time::Duration::from_millis(10);
+                        cx.background_executor().timer(tick).await;
+                    }
+                    assert_eq!(said(cx), FormType::AcroForm);
+                    cx.update(|cx| view.update(cx, |v, _| assert!(shown(v).notice.is_none())));
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A file PDFium refuses but sheaf opens (as the corpus's 4422502,
+    /// M10.5 slice 13) draws its pages (Greg, 2026-10-20): the first frame
+    /// views them on the base engine, as nothing has tried it yet; the
+    /// render asked of it finds it refused, tells the source, and draws
+    /// the page from its group instead; the next frame views the page on
+    /// its group under the same key, so the image that landed is the one
+    /// shown and nothing is asked again. The form type's ask then finds the
+    /// engine refused too, and the notice says the pages are sheaf's copy.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_file_pdfium_refuses_draws_its_pages() {
+        use sheaf_doc::serialize::fixture::revision_cut_out;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("refused.pdf");
+        std::fs::write(&path, revision_cut_out(said(2))).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    let doc = shown(view);
+                    let want = preview(&frame(doc), 0);
+                    assert!(matches!(want.view.engine, EngineKey::Base(_)));
+                    let image = rendered(doc, want);
+                    assert!(doc.model.primary().base_refused());
+                    let inked = image.raster.data.chunks(4).any(|px| px[..3] != [255; 3]);
+                    assert!(inked, "the page is drawn");
+                    view.on_rendered((want.view.key, want.job), Ok(Ok(image)), cx);
+                    let doc = shown(view);
+                    let next = frame(doc);
+                    let pl = &next.plans[0];
+                    assert!(matches!(pl.view.engine, EngineKey::Group(..)));
+                    assert_eq!((pl.view.key, pl.shows), (want.view.key, want.view.key));
+                    assert!(had(doc, &preview(&next, 0)));
+                    view.ask_form_type(cx);
+                });
+                cx.spawn(async move |cx| {
+                    let notice = |cx: &mut gpui::AsyncApp| {
+                        cx.update(|cx| view.update(cx, |v, _| shown(v).notice.clone()))
+                    };
+                    for _ in 0..1000 {
+                        if notice(cx).is_some() {
+                            break;
+                        }
+                        let tick = std::time::Duration::from_millis(10);
+                        cx.background_executor().timer(tick).await;
+                    }
+                    let notice = notice(cx).expect("a notice");
+                    assert!(notice.contains("drawn from sheaf's copy"), "{notice}");
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A file of `n` Letter pages, each saying "page i".
+    #[cfg(target_os = "linux")]
+    fn said(n: usize) -> Vec<u8> {
+        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        let mut pdf = Pdf::with_version("1.7");
+        let root = pdf.new_object_id();
+        let font = pdf.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let kids: Vec<Object> = (0..n)
+            .map(|i| {
+                let content = format!("BT /F1 28 Tf 72 400 Td (page {i}) Tj ET").into_bytes();
+                let content = pdf.add_object(Stream::new(dictionary! {}, content));
+                let page =
+                    dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+                pdf.add_object(page).into()
+            })
+            .collect();
+        let pages = dictionary! {
+            "Type" => "Pages", "Kids" => kids, "Count" => n as i64,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+        };
+        pdf.objects.insert(root, Object::Dictionary(pages));
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// Find and Patterns search the primary file's text through the render
+    /// worker's walk over its base engine: Find "page 3" finds the fourth
+    /// page alone, a pattern for any page number finds every page, each
+    /// hit on its page, by id, in the document's order; and a new search
+    /// replaces the one before it. The Select tool reads a page's
+    /// characters from the same engine.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn find_and_patterns_search_through_the_pool() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("said.pdf");
+        std::fs::write(&path, said(6)).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                let read: Rc<RefCell<Option<String>>> = Rc::default();
+                view.update(cx, |v, cx| {
+                    v.new_search(cx);
+                    v.start_search("page 2".into(), cx);
+                    v.start_search("page 3".into(), cx);
+                    v.start_pattern_search(r"page \d".into(), cx);
+                    let page = shown(v).page_id(3).unwrap();
+                    let read = read.clone();
+                    v.with_chars(page, cx, move |_, chars, _| {
+                        let chars = chars.expect("the page's characters");
+                        *read.borrow_mut() = Some(chars.text(0, chars.len()));
+                    });
+                });
+                cx.spawn(async move |cx| {
+                    let done = |cx: &mut gpui::AsyncApp| {
+                        cx.update(|cx| {
+                            let v = view.read(cx);
+                            let (find, pattern) = (v.search.as_ref(), v.pattern.as_ref());
+                            find.is_some_and(|s| s.done) && pattern.is_some_and(|p| p.done)
+                        }) && read.borrow().is_some()
+                    };
+                    for _ in 0..1000 {
+                        if done(cx) {
+                            break;
+                        }
+                        let tick = std::time::Duration::from_millis(10);
+                        cx.background_executor().timer(tick).await;
+                    }
+                    cx.update(|cx| {
+                        let v = view.read(cx);
+                        let State::Ready(doc) = &v.state else {
+                            panic!("ready");
+                        };
+                        let order = order(doc);
+                        let find = v.search.as_ref().unwrap();
+                        assert!(find.done && find.scanned == 6);
+                        let found: Vec<PageId> = find.hits.iter().map(|h| h.page).collect();
+                        assert_eq!(found, [order[3]]);
+                        let pattern = v.pattern.as_ref().unwrap();
+                        assert!(pattern.done && pattern.scanned == 6);
+                        let found: Vec<PageId> = pattern.hits.iter().map(|h| h.page).collect();
+                        assert_eq!(found, order);
+                    });
+                    assert_eq!(read.borrow().as_deref(), Some("page 3"));
                     ran.store(true, Ordering::Relaxed);
                     cx.update(|cx| cx.quit());
                 })

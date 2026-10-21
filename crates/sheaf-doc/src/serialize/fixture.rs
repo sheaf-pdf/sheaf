@@ -5,8 +5,9 @@
 //! is one string, and a file whose objects are in an encrypted object
 //! stream, which lopdf can't write; and what the serializer's tests
 //! share: the edit they save, the bytes some writers put before the
-//! header, a file whose cross-reference table is long, and a search of the
-//! bytes written.
+//! header, a file whose cross-reference table is long, a file with a later
+//! revision cut out, which PDFium refuses, and a search of the bytes
+//! written.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -359,6 +360,32 @@ pub fn blank_table(count: usize) -> Vec<u8> {
     pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+/// `bytes`, a file with a cross-reference table, as the corpus's
+/// safedocs/4422502 is: a later revision cut out but for its trailer,
+/// which names a catalog past every object the file has, and its
+/// `startxref`, which leads into the middle of the first revision's
+/// table. PDFium rebuilds the cross-references, takes that trailer's
+/// `/Root`, finds no catalog and refuses the file (`FPDF_ERR_FORMAT`);
+/// sheaf's reader rebuilds them and reads the catalog the file has.
+pub fn revision_cut_out(mut bytes: Vec<u8>) -> Vec<u8> {
+    let max = Pdf::load_mem(&bytes).unwrap().max_id;
+    let at = bytes.windows(9).rposition(|w| w == b"startxref").unwrap() + 9;
+    let digits: String = (bytes[at..].iter())
+        .skip_while(|b| b.is_ascii_whitespace())
+        .take_while(|b| b.is_ascii_digit())
+        .map(|&b| b as char)
+        .collect();
+    let table: usize = digits.parse().unwrap();
+    let cut = format!(
+        "\ntrailer\n<< /Size {} /Root {} 0 R >>\nstartxref\n{}\n%%EOF\n",
+        max + 3,
+        max + 1,
+        table + 20
+    );
+    bytes.extend_from_slice(cut.as_bytes());
     bytes
 }
 

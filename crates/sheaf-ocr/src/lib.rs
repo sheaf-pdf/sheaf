@@ -7,7 +7,7 @@
 //! compiles so the app's UI can say "no engine in this build".
 //!
 //! [`job`] runs an engine over a list of pages on its own threads, renders
-//! pages through the app's render worker, and streams per-page
+//! them through a [`PageSource`] (the app's engines), and streams per-page
 //! [`TextLayer`](sheaf_doc::TextLayer)s back for the document model.
 
 pub mod config;

@@ -6,19 +6,18 @@
 //! rendered from, and lands by value: a page changed since keeps no text.
 //! Undoing the run stops it.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use gpui::{Context, Task};
-use sheaf_doc::prim::Key;
 use sheaf_doc::{
     Actor, Base, ChangeSet, CommitOpts, Document, EditError, GroupId, GroupKind, JobKind, PageId,
-    Snapshot, Stale, TextLayer,
+    Snapshot, Stale, TextLayer, ViewInputs,
 };
 use sheaf_edit::{Op, PageRef};
-use sheaf_ocr::{JobHandle, OcrConfig, OcrEvent, OcrPage, OcrRequest, PageSource, Scope};
+use sheaf_ocr::{JobHandle, OcrConfig, OcrEvent, OcrPage, OcrRequest, Scope};
+use sheaf_ops::views::ViewPages;
 
 use crate::docview::{DocView, State};
 use crate::ocr_dialog::OcrSpec;
@@ -114,24 +113,10 @@ impl DocView {
             cx.notify();
             return;
         }
-        let pages: Vec<OcrPage> = ids
-            .iter()
-            .filter_map(|&id| {
-                let base = &st.def(id)?.base;
-                Some(OcrPage {
-                    id,
-                    source: base.src.id(),
-                    index: base.index,
-                    geom: doc.model.geom(id),
-                    render: doc.model.render_delta(id),
-                })
-            })
-            .collect();
-        let sources: HashMap<_, Arc<dyn PageSource>> = doc
-            .handles
-            .iter()
-            .map(|(sid, h)| (*sid, Arc::new(h.clone()) as Arc<dyn PageSource>))
-            .collect();
+        // The version the run begins on, whose pages it renders.
+        let base = doc.model.snapshot();
+        let source = ViewPages::new(doc.views.clone(), base.clone());
+        let pages: Vec<OcrPage> = ids.iter().filter_map(|&id| source.page(id)).collect();
         let total = pages.len();
         let req = OcrRequest {
             pages,
@@ -139,9 +124,8 @@ impl DocView {
             engine: spec.engine,
             config,
         };
-        let (handle, mut rx) = sheaf_ocr::job::start(req, sources);
+        let (handle, mut rx) = sheaf_ocr::job::start(req, Arc::new(source));
         let group = doc.model.begin_group(GroupKind::Ocr);
-        let base = doc.model.snapshot();
         doc.notice = Some(format!("OCR: loading {}…", spec.engine.label()));
         let task = cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.next().await {
@@ -405,8 +389,8 @@ impl DocView {
 }
 
 /// `layers` committed in `run`'s group, made on the version the run began
-/// on and deciding by their pages as they were rendered, so a page changed
-/// since is a Conflict: the change.
+/// on and deciding by their pages as OCR read them (their own content, what
+/// each shows), so a page changed since is a Conflict: the change.
 fn flush(
     model: &mut Document,
     run: &OcrRun,
@@ -414,7 +398,7 @@ fn flush(
 ) -> Result<ChangeSet, EditError> {
     let mut tx = Document::tx_at(&run.base, model.lower_cx(Actor::Job(JobKind::Ocr)));
     for &(page, _) in layers {
-        tx.read(Key::Page(page));
+        tx.read_render(page, &ViewInputs::content_only());
     }
     let ops = (layers.iter())
         .map(|(page, layer)| Op::SetOcrText {

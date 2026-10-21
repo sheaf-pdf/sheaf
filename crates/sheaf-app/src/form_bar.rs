@@ -3,9 +3,10 @@
 //! form (proposal 19). sheaf shows such a file's own pages, as PDFium
 //! draws them, and page tools still work; it can't fill it.
 //!
-//! The bar shows as soon as the file opens when PDFium says the XFA is the
-//! form (`/NeedsRendering`), and from the field model's class once it's
-//! read, which also catches a static XFA form with no AcroForm fields.
+//! The bar shows as soon as the file's engine has opened when PDFium says
+//! the XFA is the form (`/NeedsRendering`), and from the field model's
+//! class once it's read, which also catches a static XFA form with no
+//! AcroForm fields.
 
 use std::sync::Arc;
 
@@ -30,6 +31,9 @@ pub(crate) struct Forms {
     /// The primary file's, once read. Inserted files' are their sources'
     /// (`Source::form`).
     pub(crate) primary: Option<Arc<FormFacts>>,
+    /// The primary file's form as PDFium classes it, once its base engine
+    /// has opened and said (`DocView::ask_form_type`).
+    pub(crate) form_type: FormType,
     /// The bar was dismissed, for this window's session.
     pub(crate) bar_dismissed: bool,
     /// The user agreed to a save removing an XFA copy that holds values
@@ -68,8 +72,7 @@ impl Doc {
         if self.forms.bar_dismissed {
             return None;
         }
-        let form_type = self.primary().info().form_type;
-        bar_message(self.forms.primary.as_deref(), form_type)
+        bar_message(self.forms.primary.as_deref(), self.forms.form_type)
     }
 }
 

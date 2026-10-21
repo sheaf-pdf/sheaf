@@ -101,11 +101,8 @@ pub(crate) fn duplicate(lw: &mut Lower, pages: &[PageId]) -> Result<(), EditErro
         lw.read(Key::Geom(id));
         lw.read(Key::PageAnnots(id));
         let copy = lw.page_id();
-        let def = PageDef {
-            copy: copies.take(&def.base),
-            ..PageDef::clone(&def)
-        };
-        let n = def.copy;
+        let n = copies.take(&def.base);
+        let def = PageDef::new(def.base.clone(), n, def.content.clone());
         lw.rec.put(Key::Page(copy), Some(Val::Page(Arc::new(def))));
         lw.rec.put(Key::Geom(copy), Some(Val::Geom(geom)));
         pairs.push((id, copy, n));
@@ -290,10 +287,7 @@ pub(crate) fn set_base(lw: &mut Lower, pages: &[(PageId, Src, u32)]) {
         let content = def.content.clone();
         let rotate = lw.rec.geom(*id).expect("a page's boxes").rotate;
         let (new, geom) = copies.page(src, *index);
-        let def = PageDef {
-            content,
-            ..PageDef::clone(&new)
-        };
+        let def = PageDef::new(new.base.clone(), new.copy, content);
         let geom = Geom { rotate, ..*geom };
         lw.rec.put(Key::Page(*id), Some(Val::Page(Arc::new(def))));
         lw.rec.put(Key::Geom(*id), Some(Val::Geom(Arc::new(geom))));
@@ -602,11 +596,8 @@ impl NextCopy {
             src: src.clone(),
             index,
         };
-        let def = PageDef {
-            copy: self.take(&base),
-            base,
-            content: ContentStack::empty(),
-        };
+        let copy = self.take(&base);
+        let def = PageDef::new(base, copy, ContentStack::empty());
         (Arc::new(def), Arc::new(src.geom(index)))
     }
 }

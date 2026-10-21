@@ -49,6 +49,7 @@ use crate::model::{
     PageId, Step, VersionId,
 };
 use crate::prim::{Key, Rec, Val, same};
+use crate::realize::ViewInputs;
 use crate::store::{Blob, BlobRef, Src, Store};
 
 pub(crate) mod bookmarks;
@@ -501,6 +502,18 @@ impl Tx {
     /// each read noted as a decision read.
     pub fn reader(&mut self) -> Reader<'_> {
         Reader { tx: self }
+    }
+
+    /// A decision read of what page `page` draws under `inputs`, for a
+    /// caller deciding by its pixels or its text: each slot it's drawn from
+    /// ([`render_reads`](crate::realize::render_reads)); under
+    /// [`ViewInputs::content_only`], what the page shows alone. The boxes
+    /// and turn the render used aren't read: a caller converting its pixels
+    /// keeps the render's transform (M10.5 §5).
+    pub fn read_render(&mut self, page: PageId, inputs: &ViewInputs) {
+        for key in crate::realize::render_reads(&self.state, page, inputs) {
+            self.reader().note(key);
+        }
     }
 
     /// Holds `blob` until the transaction is committed or dropped: a blob

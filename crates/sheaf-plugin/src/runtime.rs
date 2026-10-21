@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, anyhow};
 use arc_swap::ArcSwap;
 use futures::channel::oneshot;
 use sheaf_doc::prim::Key;
-use sheaf_doc::{Document, EditError, Grant, PageId, Snapshot, SourceId, Tx};
+use sheaf_doc::{Document, EditError, Grant, PageId, Snapshot, Src, Tx, ViewInputs};
 use sheaf_edit::Op;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline};
@@ -44,22 +44,23 @@ impl Default for Limits {
 }
 
 /// Reads a page's text from the engine, for pages without an unsaved OCR
-/// layer. The app implements it over its render workers.
+/// layer: source page `index` of `src`. The app implements it over its
+/// sources' base engines, until M10.5 slice 14's text service.
 pub trait TextSource: Send + Sync {
-    fn page_text(&self, source: SourceId, index: u32) -> Result<String>;
+    fn page_text(&self, src: &Src, index: u32) -> Result<String>;
     /// Every match of `re` on the page, with boxes in the page's displayed
     /// space: its source page as the file displays it, which is the API's
     /// page coordinates.
     fn pattern_search(
         &self,
-        source: SourceId,
+        src: &Src,
         index: u32,
         re: &Arc<regex::Regex>,
     ) -> Result<Vec<TextMatch>>;
     /// Every occurrence of `query`, like Find.
     fn search(
         &self,
-        source: SourceId,
+        src: &Src,
         index: u32,
         query: &str,
         match_case: bool,
@@ -67,7 +68,7 @@ pub trait TextSource: Send + Sync {
     /// Boxes of the text under `rect`, merged per line.
     fn text_boxes(
         &self,
-        source: SourceId,
+        src: &Src,
         index: u32,
         rect: sheaf_doc::Box2,
     ) -> Result<Vec<sheaf_doc::Box2>>;
@@ -75,15 +76,12 @@ pub trait TextSource: Send + Sync {
 
 /// Runs OCR for plugins. The app implements it over `sheaf_ocr`.
 pub trait OcrSource: Send + Sync {
-    /// Recognize `page`, which shows `base`, as it shows, `geom`
-    /// (`Snapshot::geom`), rendered turned `render` on top of its source
-    /// page's own `/Rotate` (`Snapshot::render_delta`).
+    /// Recognize page `page` of `snap`, the call's base, as it shows
+    /// (`Snapshot::geom`), from its content alone.
     fn recognize(
         &self,
+        snap: &Snapshot,
         page: PageId,
-        base: &sheaf_doc::PageBase,
-        geom: &sheaf_doc::geom::Geom,
-        render: sheaf_edit::Rotation,
         language: Option<String>,
         dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer>;
@@ -817,15 +815,16 @@ impl wasmtime_wasi_http::WasiHttpView for HostState {
 
 impl HostState {
     /// The call's document and base, the page, and the source page it
-    /// shows, for text calls, which read what the page shows.
+    /// shows, for text calls, which read the page's own content: what it
+    /// shows ([`ViewInputs::content_only`]).
     pub(crate) fn page_base(
         &mut self,
         page: u64,
     ) -> Result<(&DocContext, &Snapshot, PageId, &sheaf_doc::PageBase), String> {
         let id = PageId(page);
-        if self.base().is_some() {
-            self.read([Key::Page(id)]);
-        }
+        let reads = (self.base())
+            .map(|s| sheaf_doc::render_reads(&s.state, id, &ViewInputs::content_only()));
+        self.read(reads.into_iter().flatten());
         let (Some(d), Some(snap)) = (self.doc(), self.base()) else {
             return Err("no document is open".into());
         };

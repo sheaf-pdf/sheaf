@@ -14,10 +14,10 @@
 //! stays beside the history: its state, its record and the keys changed
 //! since, so the next save still appends. A version being saved never is.
 //! Pruning frees the files only pruned versions show pages of too: a
-//! source's blob goes with the last record holding it, and an engine
-//! opened on it keeps only its bytes, until slice 13's engine pool closes
-//! it. A source's bytes are never step bytes; the store counts each blob
-//! once.
+//! source's blob goes with the last record holding it, and the engine
+//! pool closes the engines opened on it once nothing holds the source (its
+//! liveness probe). A source's bytes are never step bytes; the store counts
+//! each blob once.
 
 /// Versions kept, with or without snapshots. Past this, versions on other
 /// branches go first, then the oldest on the current line.

@@ -19,7 +19,8 @@
 //! insert of a source's pages, or duplicate of them, and the form's own
 //! keys (`/DR`, `/CO`, `/DA`…) are written from [`FormDoc`].
 
-use std::sync::{Arc, LazyLock};
+use std::fmt;
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use anyhow::Result;
 use im::Vector;
@@ -35,8 +36,35 @@ use crate::stamps::HeaderFooter;
 use crate::store::{BlobRef, Src};
 use crate::text_layer::TextLayer;
 
-/// A page of the document.
-#[derive(Debug, Clone, PartialEq)]
+/// A record's digest of what it draws (M10.5 §10.2), worked out the first
+/// time it's asked for and kept with it. No part of what the record is: a
+/// clone, made to be changed, starts without one, and records are equal,
+/// or print, whatever theirs.
+#[derive(Default)]
+pub(crate) struct DigestCell(OnceLock<u128>);
+
+impl DigestCell {
+    /// The digest, worked out by `digest` the first time.
+    pub(crate) fn get_or_init(&self, digest: impl FnOnce() -> u128) -> u128 {
+        *self.0.get_or_init(digest)
+    }
+}
+
+impl Clone for DigestCell {
+    fn clone(&self) -> DigestCell {
+        DigestCell::default()
+    }
+}
+
+impl PartialEq for DigestCell {
+    fn eq(&self, _: &DigestCell) -> bool {
+        true
+    }
+}
+
+/// A page of the document. Made by [`PageDef::new`], and changed by making
+/// another, since it keeps its digest.
+#[derive(Clone, PartialEq)]
 pub struct PageDef {
     pub base: PageBase,
     /// Which copy of its base page it is, fixed when the page is made: 0
@@ -45,6 +73,47 @@ pub struct PageDef {
     pub copy: u32,
     /// [`ContentStack::empty`] when nothing is drawn over it.
     pub content: Arc<ContentStack>,
+    digest: DigestCell,
+}
+
+impl PageDef {
+    pub fn new(base: PageBase, copy: u32, content: Arc<ContentStack>) -> PageDef {
+        PageDef {
+            base,
+            copy,
+            content,
+            digest: DigestCell::default(),
+        }
+    }
+
+    /// A digest of what it draws: its base page and what's drawn over it,
+    /// not which copy it is, which draws the same (M10.5 §10.2). Worked
+    /// out once.
+    pub fn digest(&self) -> u128 {
+        let PageDef {
+            base,
+            copy: _,
+            content,
+            digest,
+        } = self;
+        digest.get_or_init(|| crate::realize::page_digest(base, content))
+    }
+}
+
+impl fmt::Debug for PageDef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let PageDef {
+            base,
+            copy,
+            content,
+            digest: _,
+        } = self;
+        f.debug_struct("PageDef")
+            .field("base", base)
+            .field("copy", copy)
+            .field("content", content)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The source page a page shows.
@@ -357,8 +426,9 @@ impl Terminal {
 /// `/Fields` (the roots), `/CO`, `/DA`, `/Q`, `/NeedAppearances` and
 /// `/SigFlags`, read from the opened file's. `/DR` isn't held: a save
 /// merges the instances' files' as it writes them (deciding its renames at
-/// lowering, §6.5, is left for later; see M10.5 slice 11's notes).
-#[derive(Debug, Clone, Default, PartialEq)]
+/// lowering, §6.5, is left for later; see M10.5 slice 11's notes). Changed
+/// by making another, since it keeps its digest.
+#[derive(Clone, Default, PartialEq)]
 pub struct FormDoc {
     /// The top of the field tree, in order.
     pub roots: Vector<FieldId>,
@@ -381,6 +451,37 @@ pub struct FormDoc {
     /// `/SigFlags`, the opened file's.
     pub sig_flags: i64,
     pub xfa: XfaState,
+    /// Its digest once worked out ([`FormDoc::digest`]): one made from
+    /// another's clone, or the default, starts without.
+    pub(crate) digest: DigestCell,
+}
+
+impl fmt::Debug for FormDoc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let FormDoc {
+            roots,
+            names,
+            scripts,
+            calc_order,
+            da,
+            align,
+            need_appearances,
+            sig_flags,
+            xfa,
+            digest: _,
+        } = self;
+        f.debug_struct("FormDoc")
+            .field("roots", roots)
+            .field("names", names)
+            .field("scripts", scripts)
+            .field("calc_order", calc_order)
+            .field("da", da)
+            .field("align", align)
+            .field("need_appearances", need_appearances)
+            .field("sig_flags", sig_flags)
+            .field("xfa", xfa)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The XFA part the opened file's form has beside its fields (M10
@@ -421,7 +522,15 @@ impl FormDoc {
                 dynamic: facts.dynamic,
                 values: facts.xfa_values,
             },
+            digest: DigestCell::default(),
         }
+    }
+
+    /// A digest of all of it: what a page whose widgets are drawn draws
+    /// them under (M10.5 §10.2). Worked out once.
+    pub fn digest(&self) -> u128 {
+        self.digest
+            .get_or_init(|| crate::realize::form_digest(self))
     }
 }
 
@@ -609,7 +718,34 @@ impl GenSpec {
     }
 }
 
+/// Which of a page's places in the document a generator's tokens read
+/// (M10.5 §3.5), besides the page's boxes and turn, which its layout always
+/// does: what a reorder changes on the pages it's on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CtxNeeds {
+    /// The page's position (`<<1>>`).
+    pub index: bool,
+    /// How many pages there are (`<<N>>`).
+    pub count: bool,
+    /// The page's Bates number (`<<bates>>`).
+    pub bates: bool,
+}
+
+impl CtxNeeds {
+    /// Whether it reads any of them.
+    pub fn any(self) -> bool {
+        self.index || self.count || self.bates
+    }
+}
+
 impl Generator {
+    /// What its tokens read of the pages it's on.
+    pub fn needs(&self) -> CtxNeeds {
+        match &self.spec {
+            GenSpec::HeaderFooter(hf) => hf.needs(),
+        }
+    }
+
     /// It once only the pages `stays` says stay are left: on those of the
     /// pages it names, or none when that's none of them; every page when it
     /// names none. How many of the pages it names went.

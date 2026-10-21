@@ -294,10 +294,12 @@ interface text {
 /// Read-only page images. A renderer draws a page (or part of it) at the
 /// resolution and in the pixel format you ask for; the pixels stay in
 /// sheaf until you read them, a strip or a tile at a time. Pages render as
-/// the file draws them (the orientation text and annotations use), without
-/// sheaf's own unsaved markup. Handles last for one call. Rendering time
-/// doesn't count against the call's limit; rendered pixels per call and
-/// images alive at once are capped.
+/// the file will draw them once saved: sheaf's own markup, an unsaved
+/// header or footer, and other tools' comments and form fields included,
+/// in the file's own orientation (the one text and annotations use; a page
+/// turned in sheaf isn't drawn turned). Handles last for one call.
+/// Rendering time doesn't count against the call's limit; rendered pixels
+/// per call and images alive at once are capped.
 interface render {
     use types.{page-id, box2, pt};
 
@@ -376,8 +378,10 @@ interface ocr {
         dpi: option<u32>,
     }
 
-    /// Recognize one page now with the user's OCR engine. Doesn't change the
-    /// document. Time spent here doesn't count against the call's limit.
+    /// Recognize one page now with the user's OCR engine. It reads the
+    /// page's own content: no form fields, comments, markup or unsaved
+    /// header. Doesn't change the document. Time spent here doesn't count
+    /// against the call's limit.
     recognize: func(page: page-id, options: ocr-options) -> result<text-layer, string>;
     /// The page's OCR layer that hasn't been saved yet, if any.
     page-text-layer: func(page: page-id) -> option<text-layer>;

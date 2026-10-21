@@ -85,11 +85,25 @@ pub fn strip_stamps(
     snap: &Snapshot,
     progress: &dyn Progress,
 ) -> Result<Vec<DerivedSource>> {
+    let pages: Vec<PageId> = snap.state.order().iter().copied().collect();
+    strip_stamps_of(store, snap, &pages, progress)
+}
+
+/// [`strip_stamps`] of pages `pages` of `snap` alone, as the Header &
+/// Footer dialog previews one.
+pub fn strip_stamps_of(
+    store: &Store,
+    snap: &Snapshot,
+    pages: &[PageId],
+    progress: &dyn Progress,
+) -> Result<Vec<DerivedSource>> {
     let kinds = sheaf_doc::stamps::HEADER_FOOTER;
-    progress.set_total(Some(snap.state.page_count() as u64), PAGES);
+    progress.set_total(Some(pages.len() as u64), PAGES);
     // (page, index in source, place in the document)
-    let pages = (snap.state.pages().enumerate())
-        .map(|(n, (id, def, _))| (def.base.src.clone(), (id, def.base.index, n as u32)));
+    let pages = (pages.iter()).filter_map(|&id| {
+        let (def, n) = (snap.state.def(id)?, snap.state.pos_of(id)?);
+        Some((def.base.src.clone(), (id, def.base.index, n as u32)))
+    });
     let by_source = crate::by_source(pages);
     let mut out = Vec::new();
     let mut done = 0;

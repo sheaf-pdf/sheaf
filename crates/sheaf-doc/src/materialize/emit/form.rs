@@ -41,22 +41,29 @@
 //! - **Save policy** ([`SaveTransform`]) applies here: `DropXfa` leaves
 //!   `/XFA` out, its tooltips in the fields' `/TU`; `FixSigFlags` drops
 //!   `/SigFlags` when nothing signed needs it (`DropUr3` is the catalog's).
+//! - **An overlay's form** is of the fields with a widget on its pages
+//!   ([`Plan::scoped`]): `/Fields` its roots among them, each node's
+//!   `/Kids` those of its nodes and its widgets that are, so PDFium loads
+//!   only them (slice 2's scoped groups). A field whose widgets are on
+//!   pages of other overlays too is in each, and `/CO` and scripts see
+//!   only the fields of their overlay.
 //!
 //! [`FormDoc`]: crate::model::FormDoc
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat};
 
 use super::Cx;
+use super::annots::derived;
 use crate::annot::AnnotId;
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::materialize::copy::Scope;
 use crate::materialize::key::{NameTree, ObjKey};
 use crate::materialize::plan::SaveTransform;
 use crate::materialize::record::ACROFORM_OWNED;
-use crate::model::{DocState, FieldNode, FormInst, PageId, Widget};
+use crate::model::{AnnotRec, DocState, FieldNode, FormInst, PageId, Widget};
 use crate::source::{Limits, ObjRef};
 use crate::store::{BlobId, Src};
 
@@ -118,6 +125,9 @@ pub(crate) struct Plan {
     pub(crate) keys: Vec<ObjKey>,
     /// Whether any was written anew, or the primary's form isn't modeled.
     pub(crate) touched: bool,
+    /// An overlay's fields: the nodes with a widget on its pages, and the
+    /// nodes above them. None for a save, which writes every one.
+    pub(crate) scoped: Option<BTreeSet<FieldId>>,
 }
 
 impl Plan {
@@ -134,13 +144,16 @@ impl Plan {
 }
 
 /// The form's plan, and its fields' claims to the primary's numbers: copy 0
-/// of the primary's own nodes keep theirs.
+/// of the primary's own nodes keep theirs. An overlay's is of the fields
+/// with a widget on its pages alone.
 pub(crate) fn prepare(cx: &mut Cx) -> Plan {
-    let input = cx.input;
-    let st = &input.target;
+    let st = cx.st;
+    let scoped = (cx.overlay).map(|_| scoped(st, cx.shown.keys().copied()));
+    let terminals = (nodes(st, scoped.as_ref()))
+        .filter_map(|(fid, node)| Some((fid, &**node, &**node.term.as_ref()?)));
     let mut merged = HashMap::new();
     let mut split = HashSet::new();
-    for (fid, node, term) in st.terminals() {
+    for (fid, node, term) in terminals {
         let Some(src) = &node.src else {
             continue;
         };
@@ -163,7 +176,7 @@ pub(crate) fn prepare(cx: &mut Cx) -> Plan {
         src: primary,
         copy: 0,
     };
-    for (fid, node) in st.fields() {
+    for (fid, node) in nodes(st, scoped.as_ref()) {
         if let Some(r) = &node.src
             && r.src.id() == primary
             && node.inst == own
@@ -171,12 +184,18 @@ pub(crate) fn prepare(cx: &mut Cx) -> Plan {
             cx.own(ObjKey::Field(fid), r.id);
         }
     }
-    let others = (sources(st).into_values())
+    let others = (sources(nodes(st, scoped.as_ref())).into_values())
         .filter(|src| src.id() != primary)
         .collect();
     let file = cx.primary.form();
-    let modeled = file.facts.damaged.is_none()
-        && (file.fields.is_empty() || st.form().names.contains_key(&own));
+    // An overlay over a derived copy draws the records' widgets, not the
+    // copy's copies of them, and its form lists only theirs: the copy's own
+    // fields, every one of the file's, would have PDFium load them all
+    // (until slice 17).
+    let copied = cx.overlay.is_some() && derived(cx.primary);
+    let modeled = copied
+        || file.facts.damaged.is_none()
+            && (file.fields.is_empty() || st.form().names.contains_key(&own));
     let mut plan = Plan {
         merged,
         split,
@@ -186,6 +205,7 @@ pub(crate) fn prepare(cx: &mut Cx) -> Plan {
         modeled,
         keys: Vec::new(),
         touched: !modeled,
+        scoped,
     };
     if !plan.others.is_empty() {
         merge_dr(cx, &mut plan);
@@ -193,11 +213,39 @@ pub(crate) fn prepare(cx: &mut Cx) -> Plan {
     plan
 }
 
-/// The sources `st`'s form instances are of, by their blobs: what their
-/// fields were read from.
-fn sources(st: &DocState) -> BTreeMap<BlobId, Src> {
-    (st.fields())
-        .filter_map(|(_, node)| node.src.as_ref())
+/// The field nodes with a widget on `pages`, and the nodes above them: an
+/// overlay's.
+fn scoped(st: &DocState, pages: impl Iterator<Item = PageId>) -> BTreeSet<FieldId> {
+    let mut nodes = BTreeSet::new();
+    for page in pages {
+        for (_, w) in st.widgets_on(page) {
+            let mut at = Some(w.field);
+            while let Some(fid) = at.filter(|&fid| nodes.insert(fid)) {
+                at = st.field(fid).and_then(|node| node.parent);
+            }
+        }
+    }
+    nodes
+}
+
+/// The field nodes of `st` an emission writes, by id: every one, or those
+/// `scoped` holds.
+fn nodes<'s>(
+    st: &'s DocState,
+    scoped: Option<&'s BTreeSet<FieldId>>,
+) -> Box<dyn Iterator<Item = (FieldId, &'s Arc<FieldNode>)> + 's> {
+    match scoped {
+        None => Box::new(st.fields()),
+        Some(scoped) => Box::new((scoped.iter()).filter_map(|&fid| Some((fid, st.field(fid)?)))),
+    }
+}
+
+/// The sources the form instances of `nodes` are of, by their blobs: what
+/// their fields were read from.
+fn sources<'s>(
+    nodes: impl Iterator<Item = (FieldId, &'s Arc<FieldNode>)>,
+) -> BTreeMap<BlobId, Src> {
+    (nodes.filter_map(|(_, node)| node.src.as_ref()))
         .map(|r| (r.src.id(), r.src.clone()))
         .collect()
 }
@@ -205,7 +253,9 @@ fn sources(st: &DocState) -> BTreeMap<BlobId, Src> {
 /// The files the form `st` holds is made of, as a written form's check
 /// compares it with them: `primary`, then the others its instances are of.
 pub(crate) fn inputs(st: &DocState, primary: &Src) -> Vec<Src> {
-    let others = sources(st).into_values().filter(|src| src != primary);
+    let others = sources(st.fields())
+        .into_values()
+        .filter(|src| src != primary);
     std::iter::once(primary.clone()).chain(others).collect()
 }
 
@@ -366,8 +416,7 @@ pub(crate) fn widget(
     if let Some(field) = cx.form.merged_into(aid) {
         return Some(cx.placeholder(ObjKey::Field(field)));
     }
-    let input = cx.input;
-    let st = &input.target;
+    let st = cx.st;
     let r = w.src.as_ref()?;
     let dict = r.src.pdf().get_dictionary(r.id).ok()?;
     let scope = Scope {
@@ -389,6 +438,7 @@ pub(crate) fn widget(
         && named(b"Parent", field)
         && (!dict.has(b"P") || named(b"P", page_at))
         && !cx.form.renamed.contains_key(&r.src.id())
+        && !cx.hides(aid)
     {
         cx.push_raw(key, r.clone());
         cx.form.keys.push(key);
@@ -414,6 +464,7 @@ pub(crate) fn widget(
     if st.field(w.field).is_some() {
         out.set("Parent", cx.placeholder(ObjKey::Field(w.field)));
     }
+    cx.hidden(aid, &mut out);
     put(cx, key, out, r, dict);
     Some(cx.placeholder(key))
 }
@@ -440,8 +491,7 @@ fn built(cx: &mut Cx, key: ObjKey, out: Dictionary) {
 /// The form's dictionary, its fields emitted: a reference to it, or None
 /// when there's no form (no fields, and none in the primary).
 pub(crate) fn acroform(cx: &mut Cx) -> Option<Object> {
-    let input = cx.input;
-    let st = &input.target;
+    let st = cx.st;
     let primary = cx.primary.clone();
     let read = form_of(&primary);
     if st.field_count() == 0 && read.is_none() {
@@ -456,6 +506,7 @@ pub(crate) fn acroform(cx: &mut Cx) -> Option<Object> {
     let fix_flags = transforms.contains(&SaveTransform::FixSigFlags);
     let mut fields = Fields {
         drop_xfa,
+        scoped: cx.form.scoped.clone(),
         written: HashSet::new(),
         gone: HashSet::new(),
         shown: HashMap::new(),
@@ -464,24 +515,33 @@ pub(crate) fn acroform(cx: &mut Cx) -> Option<Object> {
     };
     // What the records account for of the primary's own instance: a kid
     // of one of its fields that's none of these, and on no page, is on a
-    // page template.
-    for (_, node) in st.fields() {
-        if node.inst.copy == 0
-            && let Some(r) = node.src.as_ref().filter(|r| r.src.id() == primary.id())
-        {
-            fields.accounted.insert(r.id);
+    // page template. An overlay lists only what's on its pages.
+    if fields.scoped.is_none() {
+        for (_, node) in st.fields() {
+            if node.inst.copy == 0
+                && let Some(r) = node.src.as_ref().filter(|r| r.src.id() == primary.id())
+            {
+                fields.accounted.insert(r.id);
+            }
+        }
+        for (_, rec) in st.annots() {
+            if let Some(w) = rec.widget()
+                && w.inst.copy == 0
+                && let Some(r) = w.src.as_ref().filter(|r| r.src.id() == primary.id())
+            {
+                fields.accounted.insert(r.id);
+            }
         }
     }
-    for (_, rec) in st.annots() {
-        if let Some(w) = rec.widget()
-            && w.inst.copy == 0
-            && let Some(r) = w.src.as_ref().filter(|r| r.src.id() == primary.id())
-        {
-            fields.accounted.insert(r.id);
-        }
-    }
+    // An overlay's roots are those of its fields, by id.
+    let tops: Vec<FieldId> = match &fields.scoped {
+        None => doc.roots.iter().copied().collect(),
+        Some(scoped) => (scoped.iter().copied())
+            .filter(|&fid| st.field(fid).is_some_and(|node| node.parent.is_none()))
+            .collect(),
+    };
     let mut roots = Vec::new();
-    for &root in &doc.roots {
+    for root in tops {
         if fields.field(cx, root) {
             roots.push(cx.placeholder(ObjKey::Field(root)));
         }
@@ -564,10 +624,12 @@ pub(crate) fn acroform(cx: &mut Cx) -> Option<Object> {
     if doc.need_appearances {
         out.set("NeedAppearances", true);
     }
-    let signed = (st.terminals())
-        .any(|(_, _, t)| t.kind == FieldKind::Signature && t.value == Some(Value::Signed));
-    let needed = signed || primary.form().facts.certified;
-    if doc.sig_flags != 0 && !(fix_flags && !needed) {
+    let needed = || {
+        let signed = (st.terminals())
+            .any(|(_, _, t)| t.kind == FieldKind::Signature && t.value == Some(Value::Signed));
+        signed || primary.form().facts.certified
+    };
+    if doc.sig_flags != 0 && !(fix_flags && !needed()) {
         out.set("SigFlags", doc.sig_flags);
     }
     Some(push_form(cx, out, read))
@@ -598,6 +660,8 @@ fn push_form(
 struct Fields {
     /// `DropXfa`'s `tooltips_to_tu`, when the save drops XFA.
     drop_xfa: Option<bool>,
+    /// An overlay's nodes ([`Plan::scoped`]): None for a save.
+    scoped: Option<BTreeSet<FieldId>>,
     /// The nodes written so far.
     written: HashSet<FieldId>,
     /// The nodes left with no widgets, which aren't written.
@@ -624,8 +688,7 @@ impl Fields {
     ///
     /// [`showed`]: Self::showed
     fn field(&mut self, cx: &mut Cx, fid: FieldId) -> bool {
-        let input = cx.input;
-        let st = &input.target;
+        let st = cx.st;
         let Some(node) = st.field(fid) else {
             return false;
         };
@@ -634,7 +697,8 @@ impl Fields {
         }
         let mut kids = Vec::new();
         for &kid in &node.kids {
-            if self.field(cx, kid) {
+            let within = self.scoped.as_ref().is_none_or(|s| s.contains(&kid));
+            if within && self.field(cx, kid) {
                 kids.push(cx.placeholder(ObjKey::Field(kid)));
             }
         }
@@ -703,8 +767,7 @@ impl Fields {
         r: &ObjRef,
         kids: Vec<Object>,
     ) {
-        let input = cx.input;
-        let st = &input.target;
+        let st = cx.st;
         let Ok(read) = r.src.pdf().get_dictionary(r.id) else {
             return;
         };
@@ -713,21 +776,24 @@ impl Fields {
         let term = node.term.as_ref();
         let split = cx.form.split.contains(&fid);
         // The widget it's one object with, and that widget's page.
-        let one = (term.into_iter().flat_map(|t| t.widgets.iter()))
+        let merged = (term.into_iter().flat_map(|t| t.widgets.iter()))
             .find(|&&w| cx.form.merged_into(w) == Some(fid))
-            .and_then(|&w| Some(st.annot(w)?.page));
+            .copied();
+        let one = merged.and_then(|w| Some(st.annot(w)?.page));
         let tags = one.is_some_and(|page| cx.keeps_tags(page));
         let mut kids = kids;
         for &w in term.into_iter().flat_map(|t| t.widgets.iter()) {
-            if cx.form.merged_into(w).is_none() && st.annot(w).is_some_and(|a| a.widget().is_some())
-            {
+            // An overlay's are those on its pages.
+            let listed = |page| self.scoped.is_none() || cx.shown.contains_key(&page);
+            let widget = |a: &AnnotRec| a.widget().is_some() && listed(a.page);
+            if cx.form.merged_into(w).is_none() && st.annot(w).is_some_and(widget) {
                 kids.push(cx.placeholder(ObjKey::Annot(w)));
             }
         }
         // Widgets on page templates: a kid of the primary's own instance
         // nothing accounts for and that no page shows.
         let primary = cx.primary.id();
-        if copy == 0 && r.src.id() == primary && !split {
+        if copy == 0 && r.src.id() == primary && !split && self.scoped.is_none() {
             let pdf = r.src.pdf();
             let listed = (read.get(b"Kids").ok())
                 .and_then(|k| pdf.dereference(k).ok())
@@ -752,10 +818,14 @@ impl Fields {
             .then(|| term.and_then(|t| t.props.tooltip.as_deref()))
             .flatten();
         // Nothing of it changes: the file's object as it is, unbuilt.
+        let (da, q) = self.defaults(cx, node);
+        let defaults_kept = da.is_none_or(|_| read.has(b"DA")) && q.is_none_or(|_| read.has(b"Q"));
         if cx.owned_at(key) == Some(r.id)
             && !split
             && tip.is_none()
+            && defaults_kept
             && (one.is_none() || tags)
+            && merged.is_none_or(|w| !cx.hides(w))
             && self.as_read(cx, node, read, &kids, one)
         {
             cx.push_raw(key, r.clone());
@@ -792,6 +862,9 @@ impl Fields {
             out.set("Parent", cx.placeholder(ObjKey::Field(parent)));
         }
         self.push_down(cx, node, &mut out);
+        if let Some(w) = merged {
+            cx.hidden(w, &mut out);
+        }
         put(cx, ObjKey::Field(fid), out, r, read);
     }
 
@@ -841,15 +914,35 @@ impl Fields {
     /// Instance `node.inst`'s form's `/DA` and `/Q`, where they differ
     /// from the document's, onto `out`, `node`'s dictionary, when it's the
     /// top of its instance's tree (a root, or a parent sheaf made) and has
-    /// none of its own.
+    /// none of its own ([`defaults`](Self::defaults)).
     fn push_down(&self, cx: &mut Cx, node: &FieldNode, out: &mut Dictionary) {
-        let input = cx.input;
-        let st = &input.target;
-        if node.parent.is_some() || node.inst.src == cx.primary.id() {
-            return;
+        let (da, q) = self.defaults(cx, node);
+        if let Some(da) = da.filter(|_| !out.has(b"DA")) {
+            out.set("DA", Object::String(da, StringFormat::Literal));
         }
-        let Some(src) = (cx.form.others.iter()).find(|src| src.id() == node.inst.src) else {
-            return;
+        if let Some(q) = q.filter(|_| !out.has(b"Q")) {
+            out.set("Q", i64::from(q));
+        }
+    }
+
+    /// The `/DA` and `/Q` instance `node.inst`'s form gives its fields
+    /// where they differ from the document's, when `node` is the top of its
+    /// instance's tree: what [`push_down`](Self::push_down) puts on it. An
+    /// overlay's own source may be a file inserted, its form's defaults
+    /// the document's only when it's the file the document opened: so its
+    /// roots get them too, as a save's other files' do.
+    fn defaults(&self, cx: &Cx, node: &FieldNode) -> (Option<Vec<u8>>, Option<u8>) {
+        let st = cx.st;
+        let own = node.inst.src == cx.primary.id();
+        if node.parent.is_some() || (own && cx.overlay.is_none()) {
+            return (None, None);
+        }
+        let src = match own {
+            true => cx.primary,
+            false => match (cx.form.others.iter()).find(|src| src.id() == node.inst.src) {
+                Some(src) => src,
+                None => return (None, None),
+            },
         };
         let facts = &src.form().facts;
         let doc = st.form();
@@ -858,15 +951,8 @@ impl Fields {
             Some(renamed) => rename_in_da(da.as_bytes(), renamed),
             None => da.as_bytes().to_vec(),
         });
-        if let Some(da) =
-            da.filter(|da| Some(da.as_slice()) != doc.da.as_deref().map(str::as_bytes))
-            && !out.has(b"DA")
-        {
-            out.set("DA", Object::String(da, StringFormat::Literal));
-        }
-        if facts.align != doc.align && !out.has(b"Q") {
-            out.set("Q", i64::from(facts.align));
-        }
+        let da = da.filter(|da| Some(da.as_slice()) != doc.da.as_deref().map(str::as_bytes));
+        (da, (facts.align != doc.align).then_some(facts.align))
     }
 }
 

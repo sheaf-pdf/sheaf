@@ -25,7 +25,7 @@ use super::emit::Syms;
 use super::key::ObjKey;
 use super::record::ObjMap;
 use crate::attachments::Objects;
-use crate::model::PageId;
+use crate::model::{DocState, PageId};
 use crate::store::{BlobId, Src};
 
 /// Where references are followed from: `src`'s objects, as `copy` of
@@ -37,11 +37,10 @@ pub(crate) struct Scope<'a> {
 }
 
 /// The objects copies reach, by key, copied once each.
-pub(crate) struct Closure {
+pub(crate) struct Closure<'a> {
     primary: BlobId,
-    /// The pages written, by their source's blob, their object and their
-    /// copy: what a copied reference to a page names.
-    pages: BTreeMap<(BlobId, ObjectId, u32), PageId>,
+    /// The pages written: what a copied reference to a page names.
+    pages: Pages<'a>,
     /// Objects reached and not copied yet, in the order they were reached.
     queue: VecDeque<(Src, ObjectId, u32)>,
     queued: HashSet<ObjKey>,
@@ -62,13 +61,63 @@ pub(crate) struct Closure {
     relinked: BTreeSet<BlobId>,
 }
 
-impl Closure {
+/// The pages an emission writes, as a copied reference finds them.
+pub(crate) enum Pages<'a> {
+    /// A save's: each page, by its source's blob, its object and its copy
+    /// as the page is written ([`written_pages`]).
+    ///
+    /// [`written_pages`]: super::emit::written_pages
+    Written(BTreeMap<(BlobId, ObjectId, u32), PageId>),
+    /// An overlay's: the state's pages ([`DocState::page_named`]), of which
+    /// those `within` it are written there. A reference to any other names
+    /// nothing in it, though a link to one still leads somewhere.
+    Overlay {
+        st: &'a DocState,
+        within: HashSet<PageId>,
+    },
+}
+
+impl Pages<'_> {
+    /// The page written as copy `copy` of page `page` of `blob`, else as
+    /// its lowest copy written ([`page_named`]); in an overlay, one that's
+    /// written there.
+    fn named(&self, blob: BlobId, page: ObjectId, copy: u32) -> Option<PageId> {
+        match self {
+            Pages::Written(pages) => page_named(pages, blob, page, copy),
+            Pages::Overlay { st, within } => {
+                (st.page_named(blob, page, copy)).filter(|p| within.contains(p))
+            }
+        }
+    }
+
+    /// Whether copy 0 of page `page` of `blob` is written, or with `any`,
+    /// any copy of it: in an overlay, whether the document has it.
+    fn has(&self, blob: BlobId, page: ObjectId, any: bool) -> bool {
+        match (self, any) {
+            (Pages::Written(pages), false) => pages.contains_key(&(blob, page, 0)),
+            (Pages::Written(pages), true) => {
+                let copies = (blob, page, 0)..=(blob, page, u32::MAX);
+                pages.range(copies).next().is_some()
+            }
+            (Pages::Overlay { st, .. }, any) => page_of(st, blob, page, any).is_some(),
+        }
+    }
+}
+
+/// The page of `st` showing copy 0 of page `page` of `blob`, or with
+/// `any`, the one a reference to any copy of it names: where an overlay
+/// finds a reference to that page leads, written there or not.
+pub(crate) fn page_of(st: &DocState, blob: BlobId, page: ObjectId, any: bool) -> Option<PageId> {
+    match any {
+        false => st.page_showing(blob, page, 0),
+        true => st.page_named(blob, page, 0),
+    }
+}
+
+impl<'a> Closure<'a> {
     /// A closure over `primary`'s blob, whose copy 0 isn't copied, with
     /// `pages` the pages written.
-    pub(crate) fn new(
-        primary: BlobId,
-        pages: BTreeMap<(BlobId, ObjectId, u32), PageId>,
-    ) -> Closure {
+    pub(crate) fn new(primary: BlobId, pages: Pages<'a>) -> Closure<'a> {
         Closure {
             primary,
             pages,
@@ -105,15 +154,11 @@ impl Closure {
 
     /// Whether page `page` of `scope`'s source is written, as a reference
     /// to it from `scope` resolves: as the primary's copy 0 itself, or
-    /// else as any copy.
+    /// else as any copy. In an overlay, whether a save would write it.
     pub(crate) fn writes_page(&self, page: ObjectId, scope: &Scope) -> bool {
         let blob = scope.src.id();
-        if blob == self.primary && scope.copy == 0 {
-            return self.pages.contains_key(&(blob, page, 0));
-        }
-        (self.pages.range((blob, page, 0)..=(blob, page, u32::MAX)))
-            .next()
-            .is_some()
+        let own = blob == self.primary && scope.copy == 0;
+        self.pages.has(blob, page, !own)
     }
 
     /// `obj`, an object of `scope`'s source, with each reference a
@@ -178,7 +223,7 @@ impl Closure {
             return to.map_or(Object::Null, |key| syms.placeholder(key));
         }
         if is_page_node(pdf, r) {
-            return match page_named(&self.pages, blob, r, scope.copy) {
+            return match self.pages.named(blob, r, scope.copy) {
                 Some(page) => syms.placeholder(ObjKey::Page(page)),
                 None => Object::Null,
             };

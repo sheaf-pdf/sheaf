@@ -606,7 +606,9 @@ impl DocView {
         if let State::Ready(doc) = &mut self.state {
             doc.text_sel = None;
             doc.text_drag = None;
-            doc.adopting = None;
+            if doc.adopting.take().is_some() {
+                doc.set_inputs();
+            }
         }
         // Hit areas of a few screen pixels, whatever the zoom.
         let tolerance = 4.0 / k.max(0.01);
@@ -738,6 +740,7 @@ impl DocView {
                 doc.select_mark(None);
                 doc.selected_foreign = Some(id);
                 doc.adopting = Some(id);
+                doc.set_inputs();
                 doc.drag = Some(Drag {
                     page,
                     page_id,
@@ -913,6 +916,9 @@ impl DocView {
         };
         let Some(drag) = doc.drag.take() else { return };
         let adopting = doc.adopting.take();
+        if adopting.is_some() {
+            doc.set_inputs();
+        }
         let Some(edit) = doc.edit_geom(drag.page) else {
             return;
         };

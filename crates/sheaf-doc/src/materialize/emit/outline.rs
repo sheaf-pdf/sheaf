@@ -44,12 +44,11 @@ const STRUCTURE: [&[u8]; 6] = [b"Parent", b"Prev", b"Next", b"First", b"Last", b
 /// The outline's root, its bookmarks emitted: a reference to it, or None
 /// when there are no bookmarks.
 pub(crate) fn outline(cx: &mut Cx) -> Option<Object> {
-    let input = cx.input;
-    let st = &input.target;
+    let st = cx.st;
     if st.outline_roots().is_empty() {
         return None;
     }
-    let primary = &input.primary;
+    let primary = cx.primary;
     let pdf = primary.pdf();
     let held = (pdf.catalog().ok()).and_then(|c| c.get(b"Outlines").ok());
     let root_at = held.and_then(|o| o.as_reference().ok());
@@ -181,8 +180,7 @@ impl<'a> Items<'a> {
         parent: ObjKey,
         kids: &'a Vector<OutlineId>,
     ) -> (Option<ObjKey>, Option<ObjKey>, i64) {
-        let input = cx.input;
-        let st = &input.target;
+        let st = cx.st;
         let nodes: Vec<(OutlineId, &'a Bookmark)> = (kids.iter())
             .filter_map(|&id| Some((id, &**st.bookmark(id)?)))
             .collect();

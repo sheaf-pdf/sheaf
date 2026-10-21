@@ -3,7 +3,7 @@
 //! In the model it's one [`HeaderFooter`] per document: six slots (left,
 //! center and right of the header and of the footer) whose text can use
 //! tokens for the page number, page count, date, file name and Bates
-//! number. On screen it's drawn over each page whose file doesn't draw it
+//! number. It's drawn on each page it covers whose file doesn't draw it
 //! ([`drawn_over`]). A save writes it into such a page's content as
 //! marked-content artifacts, as Acrobat marks its headers and footers,
 //! `<</Type /Pagination /Subtype /Header>>`, the list named in the page's
@@ -26,7 +26,7 @@ use crate::content::{
     Pagination, PaginationKind, Res, ResCx, Reserved, ResourceNeeds, Std14,
 };
 use crate::geom::{Affine, Geom};
-use crate::model::{DocState, PageId};
+use crate::model::{CtxNeeds, DocState, PageId};
 use crate::source::{Limits, Source};
 
 /// Bates numbering: `<prefix><number, zero-padded to digits><suffix>`,
@@ -131,6 +131,19 @@ impl HeaderFooter {
         }
     }
 
+    /// What its tokens read of each page it's on (M10.5 §3.5): `<<1>>` its
+    /// position, `<<N>>` how many pages there are, and `<<bates>>`, when it
+    /// counts them, its Bates number. Its date and file are fixed when it's
+    /// set.
+    pub fn needs(&self) -> CtxNeeds {
+        let uses = |token: &str| self.texts.iter().any(|t| t.contains(token));
+        CtxNeeds {
+            index: uses("<<1>>"),
+            count: uses("<<N>>"),
+            bates: self.bates.is_some() && uses("<<bates>>"),
+        }
+    }
+
     /// Whether it's on page `id`.
     pub fn covers(&self, id: PageId) -> bool {
         self.pages.as_ref().is_none_or(|p| p.contains(&id))
@@ -149,16 +162,37 @@ impl HeaderFooter {
         }
     }
 
+    /// `text` with each token replaced by what it reads of the page `f`
+    /// says, in one pass, so a value (a file name, a date) is never read
+    /// for tokens again: what [`needs`](Self::needs) says of the texts
+    /// alone holds.
     fn expand(&self, text: &str, f: &PageFacts) -> String {
-        let page = (f.index as u64 + self.first_page_number as u64).to_string();
-        text.replace("<<1>>", &page)
-            .replace("<<N>>", &f.count.to_string())
-            .replace("<<date>>", &self.date)
-            .replace("<<file>>", &self.file)
-            .replace(
-                "<<bates>>",
-                &f.bates.map(|n| self.bates_text(n)).unwrap_or_default(),
-            )
+        const TOKENS: [&str; 5] = ["<<1>>", "<<N>>", "<<date>>", "<<file>>", "<<bates>>"];
+        let value = |token: usize| match token {
+            0 => (f.index as u64 + self.first_page_number as u64).to_string(),
+            1 => f.count.to_string(),
+            2 => self.date.clone(),
+            3 => self.file.clone(),
+            _ => f.bates.map(|n| self.bates_text(n)).unwrap_or_default(),
+        };
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find("<<") {
+            out.push_str(&rest[..at]);
+            rest = &rest[at..];
+            match TOKENS.iter().position(|t| rest.starts_with(t)) {
+                Some(token) => {
+                    out.push_str(&value(token));
+                    rest = &rest[TOKENS[token].len()..];
+                }
+                None => {
+                    out.push('<');
+                    rest = &rest[1..];
+                }
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     /// Each slot's text on the page `f` says, by slot, the empty ones left
@@ -184,6 +218,12 @@ impl HeaderFooter {
         };
         self.slots(&first)
             .any(|(_, text)| FONT.encode(&text).1.0 > 0)
+    }
+
+    /// Whether it draws anything on a page with facts `f`: a text of its
+    /// that isn't blank there, as [`layout`](Self::layout) places them.
+    pub fn draws(&self, f: &PageFacts) -> bool {
+        self.slots(f).next().is_some()
     }
 
     /// The texts on a page of `size` (as shown).
@@ -328,9 +368,9 @@ pub fn install(
 /// The header and footer drawn over page `id` of `st`: the state's, when
 /// it covers the page and the page's base, which `id` shows, doesn't draw
 /// it already ([`base_draws`]). What a Rewrite draws into the page, and
-/// what the screen draws over it, since the screen shows the base until
-/// the file is opened again: after a save too, which doesn't change what
-/// the document shows (M10.5 §9.1).
+/// what the page's realization draws into it for the screen (M10.5
+/// §10.4): after a save too, which doesn't change what the document shows
+/// (§9.1), since the base is the file as it was opened.
 pub fn drawn_over(st: &DocState, id: PageId) -> Option<&Arc<HeaderFooter>> {
     let hf = st.header_footer().filter(|hf| hf.covers(id))?;
     let def = st.def(id)?;
@@ -553,6 +593,27 @@ mod tests {
         assert!((placed[2].x + placed[2].width / 2.0 - 306.0).abs() < 0.01);
         assert!((placed[3].x + placed[3].width - 540.0).abs() < 0.01);
         assert_eq!(placed[2].baseline, 792.0 - 36.0);
+    }
+
+    /// Tokens are read from the texts alone: a file name or a date holding
+    /// one is drawn as it is, so what a header needs is what its texts use.
+    #[test]
+    fn a_token_in_a_value_is_drawn_as_it_is() {
+        let h = HeaderFooter {
+            texts: ["<<file>>", "<<date>>", "<<<1>>", "", "", ""].map(String::from),
+            file: "Exhibit <<bates>> of <<N>>.pdf".into(),
+            date: "<<1>>".into(),
+            ..hf()
+        };
+        let f = PageFacts {
+            index: 2,
+            count: 10,
+            bates: Some(101),
+        };
+        let texts: Vec<String> = h.slots(&f).map(|(_, text)| text).collect();
+        assert_eq!(texts, ["Exhibit <<bates>> of <<N>>.pdf", "<<1>>", "<3"]);
+        let needs = h.needs();
+        assert!(needs.index && !needs.count && !needs.bates, "{needs:?}");
     }
 
     #[test]

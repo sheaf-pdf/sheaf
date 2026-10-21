@@ -805,18 +805,23 @@ impl Workspace {
     }
 
     /// Follow a document's events: each change it goes through reaches
-    /// the Page Labels dialog, while open, whose preview follows the
-    /// document; a document opened in place of another (a recovery's)
-    /// closes the dialogs opened on that one; and every event reaches the
-    /// plugins that want it.
+    /// the Page Labels and Header & Footer dialogs, while open, whose
+    /// previews follow the document; a document opened in place of another
+    /// (a recovery's) closes the dialogs opened on that one; and every
+    /// event reaches the plugins that want it.
     fn watch(&mut self, doc: &Entity<DocView>, window: &mut Window, cx: &mut Context<Self>) {
         let id = doc.entity_id();
         let sub = cx.subscribe_in(doc, window, move |ws, doc, ev: &DocEvent, window, cx| {
             if let DocEvent::Changed { .. } = ev
-                && let Some((labels, _)) = &ws.labels
                 && let Some((now, lower)) = doc.read(cx).lowering_now()
             {
-                labels.update(cx, |d, cx| d.follow(now, lower, cx));
+                if let Some((labels, _)) = &ws.labels {
+                    let (now, lower) = (now.clone(), lower.clone());
+                    labels.update(cx, |d, cx| d.follow(now, lower, cx));
+                }
+                if let Some((header_footer, _)) = &ws.header_footer {
+                    header_footer.update(cx, |d, cx| d.follow(now, lower, cx));
+                }
             }
             if *ev == DocEvent::Opened
                 && let Some((now, _)) = doc.read(cx).lowering_now()
@@ -1552,7 +1557,7 @@ impl Workspace {
             return;
         };
         let ctx = doc.read_with(cx, |d, _| {
-            let opened = d.model_snapshot()?;
+            let (opened, lower) = d.lowering_now()?;
             let current = (opened.state.header_footer()).map(|hf| (**hf).clone());
             let scope = current
                 .as_ref()
@@ -1562,6 +1567,8 @@ impl Workspace {
             Some(crate::header_footer_dialog::HeaderFooterContext {
                 current,
                 opened,
+                lower,
+                previewer: d.previewer()?,
                 file: d
                     .path
                     .file_name()
@@ -1582,6 +1589,7 @@ impl Workspace {
             |ws, dialog, ev: &crate::header_footer_dialog::HeaderFooterEvent, window, cx| {
                 use crate::header_footer_dialog::HeaderFooterEvent;
                 let opened = dialog.read(cx).opened().clone();
+                dialog.update(cx, |d, _| d.release(window));
                 ws.header_footer = None;
                 ws.focus_active(window, cx);
                 if let Some(doc) = ws.doc().cloned() {
@@ -2679,6 +2687,13 @@ impl Render for Workspace {
         let left = show(self, Side::Left).then(|| self.render_dock(Side::Left, window, cx));
         let right = show(self, Side::Right).then(|| self.render_dock(Side::Right, window, cx));
         let bottom = show(self, Side::Bottom).then(|| self.render_dock(Side::Bottom, window, cx));
+        // The thumbnail strip pins its pages' engines only while it shows.
+        let strip = (Side::ALL.into_iter()).any(|side| {
+            show(self, side) && self.dock(side).active_panel() == Some(Panel::Thumbnails)
+        });
+        if !strip && let Some(doc) = self.doc().cloned() {
+            doc.update(cx, |d, _| d.unpin_strip());
+        }
         let menu = self
             .dock_menu
             .clone()

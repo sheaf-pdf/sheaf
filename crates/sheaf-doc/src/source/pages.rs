@@ -2,12 +2,12 @@
 //! them, with what each inherits. Walked when a source opens, without
 //! reading any page's content.
 //!
-//! PDFium renders pages by index (until slice 13), so the walk follows
-//! its traversal: depth first through `/Kids` from the catalog's `/Pages`,
-//! a kid with `/Kids` a node whatever its `/Type`, any other kid a page. A
-//! page object listed twice is two pages, which share what they hold. The
-//! walk stops at the root's `/Count` when PDFium counts by it, since
-//! PDFium loads no page past it. The inheritable keys come down the
+//! Base engines and overlays address PDFium's pages by index, so the walk
+//! follows its traversal: depth first through `/Kids` from the catalog's
+//! `/Pages`, a kid with `/Kids` a node whatever its `/Type`, any other kid
+//! a page. A page object listed twice is two pages, which share what they
+//! hold. The walk stops at the root's `/Count` when PDFium counts by it,
+//! since PDFium loads no page past it. The inheritable keys come down the
 //! `/Parent` chain from the page, as PDFium's `GetPageAttr` reads them,
 //! which needn't be the path the walk took to the page, so a page object's
 //! facts are the same wherever it's listed.

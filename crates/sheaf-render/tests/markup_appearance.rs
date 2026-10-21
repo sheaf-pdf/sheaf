@@ -7,10 +7,13 @@
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use in_progress::NoProgress;
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::annot::caret_box;
 use sheaf_doc::materialize::Came;
+use sheaf_doc::realize::{EngineKey, Realizer, ViewInputs};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::add;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Blob, Box2, Document, FixedCount, Pt, Store};
@@ -18,7 +21,7 @@ use sheaf_edit::{PageSize, Rotation};
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::PageIndex;
 use sheaf_render::pdfium::{PdfiumEngine, appearance_text};
-use sheaf_render::{Job, Renderer};
+use sheaf_render::{Draw, Job, Renderer};
 
 fn tempdir() -> PathBuf {
     // Counted, not timed: the tests run at once, and macOS's clock only
@@ -313,8 +316,12 @@ fn text_markup_draws_where_it_should_turned_further() {
     check(270);
 }
 
+/// Another tool's comment the screen hides is left out of its page's
+/// realization, which draws the page from an overlay with it hidden, and
+/// print preview's inputs, which hide nothing, draw it (M10.5 §10.4:
+/// hiding is data, each consumer's own).
 #[test]
-fn another_tools_comment_hides_and_shows_by_slot() {
+fn a_hidden_comment_is_left_out_of_the_screen_s_realization() {
     let dir = tempdir();
     let path = dir.join("square.pdf");
     let mut pdf = Pdf::with_version("1.5");
@@ -352,35 +359,44 @@ fn another_tools_comment_hides_and_shows_by_slot() {
     pdf.trailer.set("Root", catalog);
     pdf.save(&path).unwrap();
 
-    let engine = PdfiumEngine::open(&path, None).unwrap();
-    let red_at_center = |e: &PdfiumEngine| {
-        let r = e
-            .render(
-                PageIndex(0),
-                Job::Page {
-                    width: 612,
-                    rotation: Rotation::R0,
-                },
-                PixelFormat::Rgba,
-            )
-            .unwrap();
+    let store = Store::new();
+    let (primary, _) = store.read_file(&path, None).unwrap();
+    let policy = Box::new(FixedCount(10));
+    let mut d = sheaf_doc::open::start(store, primary.clone(), "square.pdf".into(), None, policy);
+    d.ready(sheaf_doc::open::finish(&primary, &NoProgress))
+        .unwrap();
+    let (st, page) = (d.state(), d.page(0).unwrap());
+    let (square, _) = (st.foreign_on(page))
+        .find(|(_, f)| !f.summary.is_link())
+        .unwrap();
+    let realizer = Realizer::new();
+    let red_at_center = |inputs: &ViewInputs| {
+        let view = realizer.view(st, page, inputs).unwrap();
+        let r = realizer.open(st, view.engine, inputs).unwrap();
+        let engine = PdfiumEngine::open_segments(r.segments, r.password.as_deref()).unwrap();
+        let job = Job::Page {
+            width: 612,
+            rotation: Rotation::R0,
+        };
+        let draw = Draw {
+            annots: view.annots,
+            forms: view.forms,
+        };
+        let page = PageIndex(view.index);
+        let r = (engine.render_with(page, job, PixelFormat::Rgba, draw)).unwrap();
         // (150, 150) in user space is 642 down from the top.
         let i = ((642 * r.width + 150) * 4) as usize;
-        r.data[i] > 200 && r.data[i + 1] < 80
+        (view.engine, r.data[i] > 200 && r.data[i + 1] < 80)
     };
-    assert!(red_at_center(&engine));
-    // Slot 1: the link is slot 0.
-    assert_eq!(
-        engine
-            .set_annots_hidden(PageIndex(0), &[(1, true)])
-            .unwrap(),
-        1
-    );
-    assert!(!red_at_center(&engine));
-    engine
-        .set_annots_hidden(PageIndex(0), &[(1, false)])
-        .unwrap();
-    assert!(red_at_center(&engine));
+    let (engine, red) = red_at_center(&ViewInputs::screen());
+    assert!(red && matches!(engine, EngineKey::Base(_)));
+    let hidden = ViewInputs {
+        hidden: Arc::new([square].into_iter().collect()),
+        ..ViewInputs::screen()
+    };
+    let (engine, red) = red_at_center(&hidden);
+    assert!(!red && matches!(engine, EngineKey::Group(..)));
+    assert!(red_at_center(&ViewInputs::print(true)).1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

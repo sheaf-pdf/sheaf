@@ -150,9 +150,10 @@ pub fn closure(
     // again, as for a page that shows another page.
     let primary = input.primary.id();
     let shown = emit::shown(now, &input.derived);
-    let owned: HashMap<PageId, ObjectId> = emit::owned_pages(now, &shown, primary)
-        .into_iter()
-        .collect();
+    let owned: HashMap<PageId, ObjectId> =
+        emit::owned_pages(now.order().iter().copied(), &shown, primary)
+            .into_iter()
+            .collect();
     let owners: HashMap<ObjectId, PageId> = owned.iter().map(|(&p, &at)| (at, p)).collect();
     let renumbered: BTreeSet<PageId> = (now.pages())
         .filter(|&(p, _, _)| {

@@ -37,6 +37,7 @@ pub mod page_chars;
 pub mod portfolio;
 pub mod prim;
 pub mod properties;
+pub mod realize;
 pub mod recovery;
 pub mod save;
 pub mod serialize;
@@ -54,12 +55,13 @@ pub use annot::{Annot, AnnotId, AnnotKind, Box2, Pt, default_author, pdf_date_no
 pub use change::{Cause, ChangeSet};
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
-    AnnotBody, AnnotRec, Bookmark, ContentStack, Derived, DerivedCopies, DocState, Document,
-    FlatOutlineItem, Foreign, FormInst, FormRef, GenId, GenSpec, Generator, GroupId, GroupKind,
-    Invariant, Layer, Mark, OutlineId, PageBase, PageDef, PageId, Snapshot, SourceId, Static, Step,
-    Target, TextStyle, VersionId, VersionView,
+    AnnotBody, AnnotRec, Bookmark, ContentStack, CtxNeeds, Derived, DerivedCopies, DocState,
+    Document, FlatOutlineItem, Foreign, FormInst, FormRef, GenId, GenSpec, Generator, GroupId,
+    GroupKind, Invariant, Layer, Mark, OutlineId, PageBase, PageDef, PageId, Snapshot, SourceId,
+    Static, Step, Target, TextStyle, VersionId, VersionView,
 };
 pub use page_chars::{Glyph, PageChars};
+pub use realize::{MarkDraw, OcgOverride, RenderKey, ViewInputs, render_key, render_reads};
 pub use source::{ObjRef, Source};
 pub use store::{Blob, BlobId, BlobRef, Src, Store};
 pub use text_layer::{OcrWord, TextHit, TextLayer};

@@ -10,19 +10,14 @@
 use std::collections::HashSet;
 
 use gpui::{AnyElement, Context, ObjectFit, ScrollHandle, div, img, prelude::*, px};
-use sheaf_doc::prim::Key;
-use sheaf_doc::{Actor, CommitOpts, Document, PageId, Snapshot, Stale};
-use sheaf_edit::Rotation;
+use sheaf_doc::{Actor, CommitOpts, Document, PageId, Snapshot, Stale, ViewInputs};
 use sheaf_edit::{Op, PageSel};
-use sheaf_image::raster::PixelFormat;
 use sheaf_ops::blank::{BlankParams, Candidate, Reason};
-use sheaf_render::PageIndex;
-use sheaf_render::{Job, RenderRequest};
+use sheaf_render::Job;
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::{dialog, theme};
 
-use crate::docview::{DocView, State};
-use crate::pane::Shown;
+use crate::docview::{DocView, State, Want};
 
 /// Thumbnail width in the review sheet.
 const THUMB: f32 = 120.0;
@@ -123,7 +118,7 @@ impl DocView {
         let planning = review.planning;
         let mut tx = Document::tx_at(&planning, doc.model.lower_cx(Actor::User));
         for &id in &ids {
-            tx.read(Key::Page(id));
+            tx.read_render(id, &ViewInputs::content_only());
         }
         let pages = PageSel::ids(ids);
         let Some(tx) = self.lower_in(tx, vec![Op::DeletePages { pages }], &label, cx) else {
@@ -148,33 +143,33 @@ impl DocView {
             .iter()
             .filter_map(|c| Some((st.pos_of(c.id)?, c.clone())))
             .collect();
+        // Each page as the screen draws it, upright.
+        let viewed: Vec<_> = (rows.iter())
+            .filter_map(|(at, c)| {
+                let id = st.order()[*at];
+                let view = doc.views.view(st, id, &doc.inputs).ok()?;
+                Some((*at, c, id, view, st.geom(id)?.shown()))
+            })
+            .collect();
         let mut wants = Vec::new();
         doc.review_keep.clear();
         let mut tiles = Vec::new();
-        for (at, c) in &rows {
-            let Some(pref) = Shown::of(st, st.order()[*at], Rotation::R0) else {
-                continue;
-            };
-            let rotation = pref.render;
-            doc.review_keep.insert((pref.id, rotation));
-            wants.push((
-                pref,
-                RenderRequest {
-                    page: PageIndex(pref.index),
-                    job: Job::Page {
-                        width: 320,
-                        rotation,
-                    },
-                    format: PixelFormat::Bgra,
-                    priority: 3,
+        for (at, c, id, view, size) in viewed {
+            let rotation = view.job.rotation;
+            doc.review_keep.insert((id, view.key, rotation));
+            wants.push(Want {
+                id,
+                view,
+                job: Job::Page {
+                    width: 320,
+                    rotation,
                 },
-            ));
-            let size = pref.geom.shown();
+                priority: 3,
+            });
             let h = THUMB * size.height / size.width.max(1.0);
-            let image = doc.previews.get(&(pref.id, rotation)).cloned();
-            let checked = review.checked.contains(&c.id);
-            let id = c.id;
-            let at = *at;
+            let key = doc.image_key(id, view.key, rotation);
+            let image = doc.previews.get(&(key, rotation)).cloned();
+            let checked = review.checked.contains(&id);
             let why = match c.reason {
                 Reason::NearlyBlank => format!("nearly blank, {:.2}% ink", c.ink * 100.0),
                 r => r.label().to_string(),
@@ -271,8 +266,8 @@ impl DocView {
                     ),
             )
             .into_any_element();
-        for (pref, want) in wants {
-            self.ensure_rendered(pref, want, cx);
+        for want in wants {
+            self.ensure_rendered(want, cx);
         }
         Some(sheet)
     }

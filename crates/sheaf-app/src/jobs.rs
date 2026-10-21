@@ -10,9 +10,12 @@
 //!   newest.
 
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::Context;
+use sheaf_doc::{PageId, Store};
+use sheaf_ops::views::Views;
 use sheaf_ops::{ProgressSnapshot as Snapshot, Tracker, was_cancelled};
 
 use crate::docview::{DocView, State};
@@ -339,4 +342,28 @@ impl DocView {
             _ => None,
         }
     }
+
+    /// What a dialog draws its preview of the document with.
+    pub(crate) fn previewer(&self) -> Option<Previewer> {
+        match &self.state {
+            State::Ready(doc) => Some(Previewer {
+                store: doc.model.store().clone(),
+                views: Views::new(doc.views.pool().clone()),
+                page: doc.page_id(doc.current_page())?,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// What a dialog draws its preview of the document with (M10.5 §8.6):
+/// the document's store, which a copy the preview makes goes into; the
+/// document's render worker, with a realizer of the dialog's own, since a
+/// preview's state is never the screen's; and the page it shows, the
+/// active pane's as it opened.
+#[derive(Clone)]
+pub(crate) struct Previewer {
+    pub(crate) store: Arc<Store>,
+    pub(crate) views: Views,
+    pub(crate) page: PageId,
 }

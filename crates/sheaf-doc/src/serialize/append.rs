@@ -30,6 +30,7 @@ use super::crypt::Crypt;
 use super::durable::{self, FileStamp, WriteError, read_range, startxref};
 use super::xref::{Entry, Section};
 use crate::materialize::ObjKey;
+use crate::source::Source;
 
 /// The file an update goes after, as its last section describes it.
 #[derive(Debug, Clone)]
@@ -53,6 +54,38 @@ pub struct Base {
     pub root: ObjectId,
     /// Its document information, as the trailer gives it.
     pub info: Option<ObjectId>,
+}
+
+impl Base {
+    /// `src`'s bytes, as their last section describes them: what an
+    /// overlay's section goes after (M10.5 §10.1). Its new numbers start
+    /// past `/Size`, every cross-reference stream's own number and every
+    /// number in use (slice 2's 5801985, whose newest xref stream is past
+    /// `/Size`). None when its trailer names no catalog.
+    pub fn over(src: &Source) -> Option<Base> {
+        let bytes = src.bytes();
+        let xref = src.xref();
+        let trailer = src.pdf().trailer();
+        let root = trailer.get(b"Root").and_then(Object::as_reference).ok()?;
+        let info = trailer.get(b"Info").and_then(Object::as_reference).ok();
+        let used = src.pdf().ids().map(|id| id.0.saturating_add(1)).max();
+        let size = [
+            xref.size,
+            xref.max_stream.map_or(0, |n| n.saturating_add(1)),
+            used.unwrap_or(0),
+        ];
+        Some(Base {
+            len: bytes.len(),
+            ends_line: matches!(bytes.last(), Some(b'\n' | b'\r')),
+            header: xref.header_offset,
+            prev: xref.start,
+            size: size.into_iter().max().unwrap_or(1).max(1),
+            kind: xref.kind,
+            first_id: xref.id.as_ref().map(|[first, _]| first.clone()),
+            root,
+            info,
+        })
+    }
 }
 
 /// An update as written.
