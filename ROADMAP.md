@@ -484,8 +484,9 @@ inside sheaf stays under [Pending](#agent-panel-claude-and-codex).
     `commit(plan)` commits exactly what was shown, as one version
     authored by the agent on the user's behalf.
   - A plan expires if the document changed underneath it. Reads are
-    tracked per MCP session, so a user edit elsewhere doesn't refuse a
-    plan.
+    tracked per agent session, so a user edit elsewhere doesn't refuse a
+    plan. MCP itself has no sessions since its 2026-07-28 revision, so
+    the session is a handle sheaf issues and the agent passes back.
 - **Commands:** a command with an argument schema runs without its
   dialog; one without opens its dialog pre-filled. M15's batch actions
   need the same schemas.
