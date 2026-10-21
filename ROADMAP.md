@@ -40,8 +40,8 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 
 M6 has no release of its own; it ships in v0.2 together with Scan & OCR.
 M10.5 has none either; it sits between M10 slices 5 and 6, and ships in
-v0.6 with the rest of M10. M16 has no fixed place in the order: it lands
-as soon as the pieces it builds on are ready.
+v0.6 with the rest of M10. M16 starts once the milestones it depends on
+are done (see its section).
 
 Each milestone is broken into slices when it starts, as M1–M4 were. Slices
 below are a first cut.
@@ -455,8 +455,8 @@ inside sheaf stays under [Pending](#agent-panel-claude-and-codex).
   "always allow": saves, exports and anything else that writes files.
 
 Builds on M10.5 (ops, version tokens, plugin API 0.4's reads), M6's
-command registry and M9's edit history. It lands as soon as those are
-ready, without waiting for M15 or v1.0.
+command registry and M9's edit history, so it can start once M10.5 is
+done.
 
 Slices: read tools, history and commands → plans and approval → command
 schemas and the dialog fallback → consent, settings and the send log →
