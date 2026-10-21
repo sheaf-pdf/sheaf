@@ -3,16 +3,21 @@
 //! same means nothing. `judge` over a path, what it found removed, the
 //! fields it touched and the slots that changed.
 
+use sheaf_edit::GridPos;
+
 use super::*;
 use crate::annot::{Box2, Pt};
+use crate::content::ResId;
 use crate::file::ForeignAnnot;
 use crate::forms::FieldKind;
 use crate::forms::field::Mk;
 use crate::labels::Style;
 use crate::model::{
-    FieldProps, FormDoc, FormInst, GenId, GenSpec, Mark, OutlineId, PageBase, SourceId, Target,
-    TextStyle, WidgetProps,
+    FieldProps, Filter, FormDoc, FormInst, GenId, GenSpec, ImageRef, LegacySel, Mark, MarkedSel,
+    OutlineId, PageBase, Placed, Scope, SourceId, StreamSel, Target, TextStyle, WatermarkGen,
+    WidgetProps,
 };
+use crate::source::ObjRef;
 use crate::stamps::HeaderFooter;
 use crate::store::{Src, Store};
 use crate::tape::{Line, Op, Row, Tape};
@@ -205,6 +210,54 @@ fn header(t: &str) -> Val {
     }))
 }
 
+/// A watermark at `z` drawing `content` at `position` on `scope`.
+fn watermark(content: WatermarkContent, position: GridPos, z: Z, scope: Scope) -> Val {
+    let wm = WatermarkGen {
+        content,
+        position,
+        z,
+        scope,
+        replaces: BTreeSet::from([WatermarkGen::kind_at(z)]),
+    };
+    Val::Generator(Arc::new(Generator {
+        id: GenId(1),
+        spec: GenSpec::Watermark(Arc::new(wm)),
+    }))
+}
+
+/// `text`, 72 points, red, a third opaque, at 45°.
+fn wm_text(text: &str, size: f32) -> WatermarkContent {
+    WatermarkContent::Text {
+        text: text.into(),
+        font: Default::default(),
+        size,
+        color: [200, 30, 30],
+        opacity: 0.3,
+        angle: 45.0,
+    }
+}
+
+/// The image object `n` of `src` draws, half the page wide.
+fn wm_image(src: &Src, n: u32, scale: f32) -> WatermarkContent {
+    WatermarkContent::Image {
+        image: ImageRef::Placed(Placed {
+            at: ObjRef {
+                src: src.clone(),
+                id: (n, 0),
+            },
+            res: ResId(u128::from(n)),
+            turns: 0,
+        }),
+        scale,
+        opacity: 1.0,
+    }
+}
+
+/// Pages `ids`.
+fn on(ids: &[u64]) -> Scope {
+    Scope::Pages(ids.iter().map(|&i| PageId(i)).collect())
+}
+
 fn layer(words: &str) -> Arc<TextLayer> {
     let word = OcrWord {
         text: words.into(),
@@ -222,6 +275,13 @@ fn layer(words: &str) -> Arc<TextLayer> {
 fn with_ocr(st: &DocState, i: u64, text: Option<Arc<TextLayer>>) -> Val {
     let def = st.def(PageId(i)).unwrap();
     let content = def.content.with_ocr_text(text);
+    Val::Page(Arc::new(PageDef::new(def.base.clone(), def.copy, content)))
+}
+
+/// `st`'s page `i` with `filter` added to its filters.
+fn with_filter(st: &DocState, i: u64, filter: Filter) -> Val {
+    let def = st.def(PageId(i)).unwrap();
+    let content = def.content.with_filter(filter);
     Val::Page(Arc::new(PageDef::new(def.base.clone(), def.copy, content)))
 }
 
@@ -603,6 +663,48 @@ fn recognized_text() {
     assert_eq!(p.flags, Flags::CONTENT);
 }
 
+/// A filter added takes what it filters out of the page: removed; taken
+/// off again, it's put back, and nothing's gone.
+#[test]
+fn filters_added_and_taken_off() {
+    let st = blank(2);
+    let page = Key::Page(PageId(0));
+    let filter = Filter::DropStreams(StreamSel::SheafGen(GenId(5)));
+    let p = path(&st, &[(page, Some(with_filter(&st, 0, filter.clone())))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
+    assert_eq!(p.sig, OTHER);
+    let filtered = holding(st.clone(), &[(page, with_filter(&st, 0, filter))]);
+    let p = path(&filtered, &[(page, Some(with_ocr(&st, 0, None)))]);
+    assert_eq!(p.flags, Flags::CONTENT);
+    assert!(removed(&p).is_empty());
+    let marked = Filter::DropMarked(MarkedSel::SheafGen(GenId(5)));
+    let p = path(
+        &filtered,
+        &[(page, Some(with_filter(&filtered, 0, marked)))],
+    );
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    let acrobat_s = Filter::DropMarked(MarkedSel::Pagination {
+        kinds: BTreeSet::from([crate::content::PaginationKind::Watermark]),
+        origins: BTreeSet::from([crate::content::PagOrigin::Acrobat]),
+    });
+    let p = path(&st, &[(page, Some(with_filter(&st, 0, acrobat_s.clone())))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
+    // What an older sheaf kept, taken out, is counted apart: what's drawn
+    // stays.
+    let older = Filter::StripLegacy(LegacySel::Marked(MarkedSel::Pagination {
+        kinds: BTreeSet::from([crate::content::PaginationKind::Watermark]),
+        origins: BTreeSet::from([crate::content::PagOrigin::SheafLegacy]),
+    }));
+    let p = path(&st, &[(page, Some(with_filter(&st, 0, older.clone())))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::OlderSettings, 1)]);
+    let both = holding(st.clone(), &[(page, with_filter(&st, 0, acrobat_s))]);
+    let p = path(&both, &[(page, Some(with_filter(&both, 0, older)))]);
+    assert_eq!(removed(&p), [(RemovedKind::OlderSettings, 1)]);
+}
+
 #[test]
 fn field_values() {
     let f = Key::Field(FieldId(0));
@@ -730,6 +832,104 @@ fn the_form_bookmarks_labels_and_generators() {
     );
 }
 
+/// A watermark (§7.1): added, it's drawn; laid out otherwise (where, how
+/// big, turned, colored, see-through), drawn again, which an Append
+/// writes. Drawing another text replaces its text; another image removes
+/// what it drew; so does leaving a page that's still a page, and going.
+#[test]
+fn watermarks_and_backgrounds() {
+    use sheaf_edit::GridPos::{Center, TopLeft};
+    let src = crate::store::blank(&Store::new(), 3);
+    let st = state_of(&src, 3);
+    let g = Key::Generator(GenId(1));
+    let over = |content, position, scope| watermark(content, position, Z::Over, scope);
+    let e = put(&st, g, Some(over(wm_text("A", 72.0), Center, Scope::All)));
+    assert_eq!((e.flags, e.sig), (Flags::CONTENT, OTHER));
+    let st = holding(st, &[(g, over(wm_text("A", 72.0), Center, on(&[0, 1])))]);
+    for laid_out in [
+        over(wm_text("A", 72.0), TopLeft, on(&[0, 1])),
+        over(wm_text("A", 40.0), Center, on(&[0, 1])),
+        over(wm_text("A", 72.0), Center, on(&[0, 1, 2])),
+        over(wm_text("A", 72.0), Center, Scope::All),
+    ] {
+        let p = path(&st, &[(g, Some(laid_out))]);
+        assert_eq!((p.flags, p.sig), (Flags::CONTENT, OTHER));
+        assert!(removed(&p).is_empty());
+    }
+    let text = Flags::REMOVES | Flags::REPLACES_TEXT;
+    let replaced = RemovedKind::Watermark { text: true };
+    for unsaid in [
+        over(wm_text("B", 72.0), Center, on(&[0, 1])),
+        over(wm_text("A", 72.0), Center, on(&[1])),
+        over(wm_image(&src, 9, 0.5), Center, on(&[0, 1])),
+    ] {
+        let p = path(&st, &[(g, Some(unsaid))]);
+        assert_eq!(p.flags, Flags::CONTENT | text);
+        assert_eq!(removed(&p), [(replaced, 1)]);
+    }
+    let p = path(&st, &[(g, None)]);
+    assert_eq!((p.flags, removed(&p)), (text, vec![(replaced, 1)]));
+    // A page gone from its pages with the page isn't what it removes.
+    let p = path(
+        &st,
+        &[
+            (Key::Order, Some(order(&[1, 2]))),
+            (Key::Page(PageId(0)), None),
+            (g, Some(over(wm_text("A", 72.0), Center, on(&[1])))),
+        ],
+    );
+    assert!(!removed(&p).iter().any(|(k, _)| *k == replaced));
+    // An image behind: another is removed, not text.
+    let under = |content| watermark(content, Center, Z::Under, Scope::All);
+    let st = holding(st, &[(g, under(wm_image(&src, 9, 0.5)))]);
+    let p = path(&st, &[(g, Some(under(wm_image(&src, 9, 1.0))))]);
+    assert_eq!(p.flags, Flags::CONTENT);
+    let p = path(&st, &[(g, Some(under(wm_image(&src, 8, 0.5))))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Background { text: false }, 1)]);
+    // From every page to one.
+    let narrowed = watermark(wm_image(&src, 9, 0.5), Center, Z::Under, on(&[0]));
+    let p = path(&st, &[(g, Some(narrowed))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+}
+
+/// A watermark replacing others' of its kind (§7.1's `replaces` row): on
+/// a page of the saved file whose base page holds Acrobat's, it takes that
+/// off; on one with none, or as a background, which replaces another kind,
+/// it's drawn; nor where the saved state's watermark replaced them
+/// already. A step reads no page's blocks.
+#[test]
+fn a_watermark_replacing_others_takes_them_off() {
+    use crate::materialize::others_tests::{ACROBAT, BODY, acrobat_file};
+    use sheaf_edit::GridPos::{Center, TopLeft};
+    let file = acrobat_file(&[&[BODY, ACROBAT], &[b"0 g".as_slice()]]);
+    let kind = crate::store::BlobKind::file(std::path::Path::new("acrobat.pdf"), None);
+    let src = Store::new().open(file.into(), kind).unwrap();
+    let st = state_of(&src, 2);
+    let g = Key::Generator(GenId(1));
+    let over = |position, scope| watermark(wm_text("A", 72.0), position, Z::Over, scope);
+    let p = path(&st, &[(g, Some(over(Center, Scope::All)))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
+    let p = path(&st, &[(g, Some(over(Center, on(&[1]))))]);
+    assert_eq!((p.flags, removed(&p)), (Flags::CONTENT, vec![]));
+    let behind = watermark(wm_text("A", 72.0), Center, Z::Under, Scope::All);
+    assert_eq!(put(&st, g, Some(behind)).flags, Flags::CONTENT);
+    let target = putting(&st, &[(g, Some(over(Center, Scope::All)))]);
+    let prims = [Prim {
+        key: g,
+        before: None,
+        after: target.get(&g),
+    }];
+    assert_eq!(
+        StepEffects::of(&st, &target, &prims).effects.flags,
+        Flags::CONTENT
+    );
+    let saved = holding(st, &[(g, over(Center, on(&[0])))]);
+    let p = path(&saved, &[(g, Some(over(TopLeft, Scope::All)))]);
+    assert_eq!((p.flags, removed(&p)), (Flags::CONTENT, vec![]));
+}
+
 /// A value a slot can't hold is judged as everything.
 #[test]
 fn a_misfit_is_everything() {
@@ -741,6 +941,7 @@ fn a_misfit_is_everything() {
 
 /// Values of every slot, a few each: the same twice over, built apart.
 fn samples(st: &DocState) -> Vec<(Key, Vec<Option<Val>>)> {
+    let wm = |text, position, z, scope| Some(watermark(wm_text(text, 72.0), position, z, scope));
     let annots = || {
         let mut vals = vec![None, Some(of_widget(widget(0, Some("Off"))))];
         vals.push(Some(of_widget(widget(0, Some("Yes")))));
@@ -795,6 +996,27 @@ fn samples(st: &DocState) -> Vec<(Key, Vec<Option<Val>>)> {
                 Some(with_ocr(st, 0, None)),
                 Some(with_ocr(st, 0, Some(layer("a")))),
                 Some(with_ocr(st, 0, Some(layer("b")))),
+                Some(with_filter(
+                    st,
+                    0,
+                    Filter::DropStreams(StreamSel::SheafGen(GenId(5))),
+                )),
+                Some(with_filter(
+                    st,
+                    0,
+                    Filter::DropMarked(MarkedSel::Pagination {
+                        kinds: BTreeSet::from([crate::content::PaginationKind::Watermark]),
+                        origins: BTreeSet::from([crate::content::PagOrigin::Acrobat]),
+                    }),
+                )),
+                Some(with_filter(
+                    st,
+                    0,
+                    Filter::StripLegacy(LegacySel::Marked(MarkedSel::Pagination {
+                        kinds: BTreeSet::from([crate::content::PaginationKind::Watermark]),
+                        origins: BTreeSet::from([crate::content::PagOrigin::SheafLegacy]),
+                    })),
+                )),
             ],
         ),
         (Key::Geom(PageId(0)), geoms().into()),
@@ -843,7 +1065,15 @@ fn samples(st: &DocState) -> Vec<(Key, Vec<Option<Val>>)> {
         ),
         (
             Key::Generator(GenId(1)),
-            vec![None, Some(header("a")), Some(header("b"))],
+            vec![
+                None,
+                Some(header("a")),
+                Some(header("b")),
+                wm("a", GridPos::Center, Z::Over, Scope::All),
+                wm("a", GridPos::Top, Z::Over, Scope::All),
+                wm("a", GridPos::Center, Z::Over, on(&[1])),
+                wm("b", GridPos::Center, Z::Under, Scope::All),
+            ],
         ),
     ];
     // Each value again, built apart from the first.

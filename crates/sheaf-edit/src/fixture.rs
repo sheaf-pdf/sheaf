@@ -9,10 +9,10 @@ use crate::measure::{Measured, Scale};
 use crate::tape::{self, Line, Row, Tape, TapeLook};
 use crate::{
     Anchor, AnnotId, AnnotRef, BatesSpec, BlobId, BlobSel, BookmarkPatch, BookmarkRef, Box2,
-    BoxSpec, Bring, Delta, DestView, FormBring, HeaderFooterSpec, Imported, LabelStyle, Local,
-    Margins, MarkKind, MarkPatch, NewMark, OcrWord, Op, OutlineBring, OutlineId, PageId,
-    PageLabelRange, PageRef, PageSel, PageSource, Patch, Pt, RangeSet, Rotation, ScopeSel, Sibling,
-    Style, TextLayer, TextStyle, Turn, Vec2,
+    BoxSpec, Bring, Delta, DestView, FontChoice, FormBring, GridPos, HeaderFooterSpec, Imported,
+    LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, OcrWord, Op, OutlineBring, OutlineId,
+    PageId, PageLabelRange, PageRef, PageSel, PageSource, Patch, Pt, RangeSet, Rotation, ScopeSel,
+    Sibling, Style, TextLayer, TextStyle, Turn, Vec2, WatermarkContent, WatermarkSpec, Z,
 };
 
 fn r(x: f32, y: f32, w: f32, h: f32) -> Box2 {
@@ -439,6 +439,51 @@ pub fn every_op() -> Vec<Op> {
         },
         Op::ClearOcrText {
             pages: PageSel::Positions(pos("1-7000")),
+        },
+        Op::SetWatermark {
+            spec: WatermarkSpec {
+                content: WatermarkContent::Text {
+                    text: "Café DRAFT".into(),
+                    font: FontChoice::TimesBoldItalic,
+                    size: 72.0,
+                    color: [200, 30, 30],
+                    opacity: 0.3,
+                    angle: 45.0,
+                },
+                position: GridPos::Center,
+            },
+            z: Z::Over,
+            scope: ScopeSel::All,
+        },
+        Op::SetWatermark {
+            spec: WatermarkSpec {
+                content: WatermarkContent::Image {
+                    image: Some(BlobSel::With("seal".into())),
+                    scale: 0.5,
+                    opacity: 0.2,
+                },
+                position: GridPos::BottomRight,
+            },
+            z: Z::Under,
+            scope: ScopeSel::Pages(PageSel::Positions(pos("2-4"))),
+        },
+        Op::SetWatermark {
+            spec: WatermarkSpec {
+                content: WatermarkContent::Page {
+                    pdf: Some(BlobSel::Asset(3)),
+                    page: 2,
+                    scale: 1.0,
+                    opacity: 1.0,
+                },
+                position: GridPos::TopLeft,
+            },
+            z: Z::Under,
+            scope: ScopeSel::All,
+        },
+        Op::RemoveWatermark {
+            z: None,
+            pages: PageSel::All,
+            include_authored: true,
         },
         Op::SetHeaderFooter {
             spec: HeaderFooterSpec {

@@ -7,18 +7,22 @@
 //!
 //! A page is untouched under some inputs when it's copy 0 of its base
 //! page, at the page's own object, with its boxes (its turn is the job's),
-//! nothing drawn over it that the inputs draw (recognized text with
-//! `ocr_over`, the header and footer with `generators`, where its file
-//! doesn't draw it already), and, as far as the render's flags draw them
-//! ([`ViewInputs::draws_annots`] the annotations, `widgets` the form's
-//! widgets), the annotations of its base page as they are: each drawn
-//! record as read from its own entry there, none hidden or dragged, no
-//! entry left out (a record deleted, or a kind the inputs leave to the
-//! screen, as sheaf's marks under [`MarkDraw::ByHost`]), each widget's
-//! `/Parent`s as the model's field tree has them, and the form's own keys
-//! the overlay writes from the document's as its file has them.
-//! A field's value isn't one of them: no save writes it before M10 slice
-//! 9's fills.
+//! no filter on its content, nothing drawn over it that the inputs draw
+//! (recognized text with `ocr_over`; with `generators`, the header and
+//! footer where its file doesn't draw it already), its own content as the
+//! emitter keeps it as it is ([`content::intact`]: the blocks of the
+//! document's generators its file holds, by their streams' markers, the
+//! watermarks and backgrounds on it laid out alike there, which with
+//! `generators` must hold one for each, and without hold none), and, as
+//! far as the render's flags draw them ([`ViewInputs::draws_annots`] the
+//! annotations, `widgets` the form's widgets), the annotations of its base
+//! page as they are: each drawn record as read from its own entry there,
+//! none hidden or dragged, no entry left out (a record deleted, or a kind
+//! the inputs leave to the screen, as sheaf's marks under
+//! [`MarkDraw::ByHost`]), each widget's `/Parent`s as the model's field
+//! tree has them, and the form's own keys the overlay writes from the
+//! document's as its file has them. A field's value isn't one of them: no
+//! save writes it before M10 slice 9's fills.
 
 use std::collections::HashSet;
 
@@ -28,8 +32,10 @@ use super::{MarkDraw, ViewInputs};
 use crate::annot::AnnotId;
 use crate::file::{PageAnnots, is_ours};
 use crate::forms::FieldId;
+use crate::geom::Geom;
 use crate::materialize::emit::Shown;
 use crate::materialize::emit::annots::{dead_link, derived, mark_kept};
+use crate::materialize::emit::content;
 use crate::model::{AnnotBody, DocState, FormInst, PageDef, PageId, Static, Widget};
 use crate::source::{ObjRef, PageFacts};
 use crate::stamps;
@@ -50,9 +56,10 @@ pub fn untouched(st: &DocState, page: PageId, inputs: &ViewInputs) -> bool {
     if def.copy != 0 || facts.repeat != 0 {
         return false;
     }
-    let drawn_over = (def.content.over.iter()).any(|layer| match &layer.body {
-        Static::OcrText(_) => inputs.ocr_over,
-    });
+    let drawn_over = !def.content.filters.is_empty()
+        || (def.content.over.iter()).any(|layer| match &layer.body {
+            Static::OcrText(_) => inputs.ocr_over,
+        });
     let boxes_kept = geom.media == facts.geom.media
         && geom.crop == facts.geom.crop
         && geom.trim == facts.geom.trim
@@ -61,21 +68,43 @@ pub fn untouched(st: &DocState, page: PageId, inputs: &ViewInputs) -> bool {
         && geom.user_unit == facts.geom.user_unit;
     !drawn_over
         && boxes_kept
-        && !generated(st, page, def, inputs)
+        && !generated(st, page, def, geom, facts, inputs)
         && annots_kept(st, page, def, facts, inputs)
 }
 
-/// Whether the header and footer draws on page `page`, showing `def`,
-/// under `inputs`: it covers the page, its file doesn't draw it already,
-/// and a text of it isn't blank there.
-fn generated(st: &DocState, page: PageId, def: &PageDef, inputs: &ViewInputs) -> bool {
+/// Whether a generator draws on page `page`, showing `def` with `geom`,
+/// under `inputs`, or the blocks of one its base page `facts` holds are
+/// set aside: the watermarks and backgrounds on it aren't the blocks its
+/// file holds ([`content::intact`]), or the header and footer covers the
+/// page, its file doesn't draw it already, and a text of it isn't blank
+/// there.
+fn generated(
+    st: &DocState,
+    page: PageId,
+    def: &PageDef,
+    geom: &Geom,
+    facts: &PageFacts,
+    inputs: &ViewInputs,
+) -> bool {
+    let on = match inputs.generators {
+        true => content::generators_on(st, page),
+        false => Vec::new(),
+    };
+    let marks = def.base.src.markers(def.base.index);
+    if !(on.is_empty() && marks.is_empty())
+        && !content::intact(st, page, &marks, &facts.contents, &on, |g| {
+            content::model_layout_digest(g, geom)
+        })
+    {
+        return true;
+    }
+    if !inputs.generators {
+        return false;
+    }
     let Some(hf) = st.header_footer() else {
         return false;
     };
-    if !inputs.generators
-        || !st.header_covers(page)
-        || stamps::base_draws(&def.base.src, def.base.index, hf)
-    {
+    if !st.header_covers(page) || stamps::base_draws(&def.base.src, def.base.index, hf) {
         return false;
     }
     let facts = stamps::PageFacts {
@@ -365,6 +394,7 @@ pub fn emission_is_base(st: &DocState, page: PageId, inputs: &ViewInputs) -> any
         src: src.clone(),
         inputs,
         rotate: RotatePolicy::KeepBase,
+        arts: None,
     };
     let scope = EmitScope::Pages([page].into());
     let e = emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress)?;

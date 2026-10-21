@@ -281,14 +281,16 @@ fn what_names_a_page_deleted_since_conflicts() {
     };
     let bookmark = |page| fx::bookmark(None, None, "Two", Some(page));
     let header = |page| fx::set_header(fx::header("Draft"), Some(&[page]));
-    let ops: [&dyn Fn(PageId) -> Op; 4] = [&note, &labels, &bookmark, &header];
+    let watermark =
+        |page| fx::set_watermark(fx::watermark("Draft"), sheaf_edit::Z::Under, Some(&[page]));
+    let ops: [&dyn Fn(PageId) -> Op; 5] = [&note, &labels, &bookmark, &header, &watermark];
     for op in ops {
         let mut d = doc_of(3, &[]);
         let [_, p1, _] = pages(&d);
         let (v, mut tx) = planned(&d);
         tx.apply(op(p1), &NoProgress).unwrap();
-        // The page had no annotations, label range, bookmark or header, so
-        // its delete wrote none of the slots the op does.
+        // The page had no annotations, label range, bookmark, header or
+        // watermark, so its delete wrote none of the slots the op does.
         d.commit_ops(vec![fx::delete(&[p1])], "Delete page 2")
             .unwrap();
         let e = refused(&mut d, |d| d.commit(tx, on(v, Stale::Validate)));
@@ -399,6 +401,32 @@ fn a_second_header_footer_from_one_base_conflicts() {
     let g = *d.state().generators().keys().next().unwrap();
     let e = refused(&mut d, |d| d.commit(b, on(v, Stale::Validate)));
     assert_eq!(e, conflict(Key::Generator(g), "Header A"));
+}
+
+/// Two watermarks of one z, set by dialogs opened on one version, can't
+/// both be: the second conflicts. A background beside the watermark can.
+#[test]
+fn a_second_watermark_of_one_z_from_one_base_conflicts() {
+    let mut d = doc_of(3, &[]);
+    let set = |text: &str, z| fx::set_watermark(fx::watermark(text), z, None);
+    let (v, mut a) = planned(&d);
+    a.apply(set("A", sheaf_edit::Z::Over), &NoProgress).unwrap();
+    let (_, mut b) = planned(&d);
+    b.apply(set("B", sheaf_edit::Z::Over), &NoProgress).unwrap();
+    let (_, mut under) = planned(&d);
+    under
+        .apply(set("C", sheaf_edit::Z::Under), &NoProgress)
+        .unwrap();
+    let opts = CommitOpts {
+        label: Some("Watermark A".into()),
+        ..on(v, Stale::Validate)
+    };
+    d.commit(a, opts).unwrap();
+    let g = d.state().watermark(sheaf_edit::Z::Over).unwrap().id;
+    let e = refused(&mut d, |d| d.commit(b, on(v, Stale::Validate)));
+    assert_eq!(e, conflict(Key::Generator(g), "Watermark A"));
+    d.commit(under, on(v, Stale::Validate)).unwrap();
+    assert_eq!(d.state().generators().len(), 2);
 }
 
 #[test]

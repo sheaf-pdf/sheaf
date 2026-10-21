@@ -24,9 +24,10 @@ use in_progress::NoProgress;
 use lopdf::{Object, ObjectId, dictionary};
 use proptest::prelude::*;
 use sheaf_edit::{
-    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Delta, Imported,
-    LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, Op, OutlineBring, PageRef, PageSel,
-    Patch, RangeSet, ScopeSel, Sibling, Style, Turn, Vec2,
+    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Delta, GridPos,
+    Imported, LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, Op, OutlineBring, PageRef,
+    PageSel, Patch, RangeSet, ScopeSel, Sibling, Style, Turn, Vec2, WatermarkContent,
+    WatermarkSpec, Z,
 };
 
 use super::tests::{flat, opened_doc, square, tl};
@@ -47,7 +48,7 @@ const PLUGIN: &str = "test-plugin";
 /// The ops a run makes versions of, by name: below [`KINDS`], an action
 /// is an op of the kind at its place here, the page rebase of a derived
 /// flow last (`Tx::set_page_base`).
-const OPS: [&str; 23] = [
+const OPS: [&str; 25] = [
     "move-pages",
     "rotate-pages",
     "delete-pages",
@@ -68,6 +69,8 @@ const OPS: [&str; 23] = [
     "adopt-annotations",
     "set-ocr-text",
     "clear-ocr-text",
+    "set-watermark",
+    "remove-watermark",
     "set-header-footer",
     "remove-header-footer",
     "set-page-base",
@@ -752,7 +755,10 @@ impl Run {
             "delete-annotations" if marks.is_empty() && foreign.is_empty() => "add-mark",
             "adopt-annotations" if adoptable.is_empty() => "add-mark",
             "clear-ocr-text" if layered.is_empty() => "set-ocr-text",
-            "remove-header-footer" if st.generators().is_empty() => "set-header-footer",
+            "remove-watermark" if st.watermark(Z::Over).or(st.watermark(Z::Under)).is_none() => {
+                "set-watermark"
+            }
+            "remove-header-footer" if st.header_footer().is_none() => "set-header-footer",
             k => k,
         };
         let page = |rng: &mut fastrand::Rng| pages[rng.usize(..pages.len())];
@@ -1265,6 +1271,32 @@ impl Run {
                     pages: select(rng, &ids, true),
                 }
             }
+            "set-watermark" => Op::SetWatermark {
+                spec: WatermarkSpec {
+                    content: WatermarkContent::Text {
+                        text: format!("w{}", rng.u8(..)),
+                        font: Default::default(),
+                        size: [36.0, 72.0][rng.usize(..2)],
+                        color: [rng.u8(..), 0, 0],
+                        opacity: rng.f32(),
+                        angle: [0.0, 45.0][rng.usize(..2)],
+                    },
+                    position: [GridPos::Center, GridPos::TopLeft][rng.usize(..2)],
+                },
+                z: [Z::Over, Z::Under][rng.usize(..2)],
+                scope: match rng.bool() {
+                    true => ScopeSel::All,
+                    false => ScopeSel::Pages(some_pages(rng)),
+                },
+            },
+            "remove-watermark" => Op::RemoveWatermark {
+                z: [None, Some(Z::Over), Some(Z::Under)][rng.usize(..3)],
+                pages: match rng.bool() {
+                    true => PageSel::All,
+                    false => some_pages(rng),
+                },
+                include_authored: rng.bool(),
+            },
             "set-header-footer" => Op::SetHeaderFooter {
                 spec: fx::header(&format!("h{}", rng.u8(..))),
                 scope: match rng.bool() {
@@ -1624,6 +1656,7 @@ fn each_kind_s_no_op_pushes_nothing() {
         ranges: Some(vec![fx::label(p0, LabelStyle::LowerRoman, "", 1)]),
     };
     let header = || fx::set_header(fx::header("Draft"), None);
+    let watermark = || fx::set_watermark(fx::watermark("Draft"), Z::Over, Some(&[p0]));
     let layer = tl("text");
     // What the no-ops leave as it is.
     let before = vec![
@@ -1631,6 +1664,7 @@ fn each_kind_s_no_op_pushes_nothing() {
         fx::delete_named(p1, &["theirs-2"]),
         roman(),
         header(),
+        watermark(),
         fx::ocr([(p2, layer.clone())]).remove(0),
     ];
     d.commit_ops(before, "before").unwrap();
@@ -1688,6 +1722,9 @@ fn each_kind_s_no_op_pushes_nothing() {
         Op::AdoptAnnotations { annots: Vec::new() },
         fx::ocr([(p2, layer)]).remove(0),
         fx::clear_ocr(&[p0]),
+        watermark(),
+        // Off a page it isn't on.
+        fx::remove_watermark(None, &[p1]),
         header(),
         Op::RemoveHeaderFooter { pages: none() },
     ];

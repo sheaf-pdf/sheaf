@@ -94,11 +94,17 @@ Bookmark             { title: Arc<str>, target: Option<Page { page, view } | Kep
 LabelSpec            { start: PageId, style, prefix, first }
                      a page-label range, anchored to the page it starts at.
 
-Generator            { id: GenId, spec: HeaderFooter(Arc<HeaderFooter>) }
-                     what sheaf draws on pages from one definition: until
-                     M10.5 slice 16, only the header and footer, read at open
-                     from /SheafHeaderFooter, with its own page scope and its
-                     Bates numbers counted at each Rewrite, as before.
+Generator            { id: GenId, spec: GenSpec }
+                     what sheaf draws on pages from one definition: the
+                     header and footer (GenSpec::HeaderFooter, until M10.5
+                     slice 17), read at open from /SheafHeaderFooter, with its
+                     own page scope and its Bates numbers counted at each
+                     Rewrite, as before; and from slice 16 a watermark or a
+                     background (GenSpec::Watermark: its content, position,
+                     z, Scope and the kinds it replaces), laid out on each
+                     page it covers when a save or a view draws the page,
+                     found again at open from /SheafGenerators (Watermarks
+                     and backgrounds as generators).
 
 DocState             { order: im::Vector<PageId>,
                        pages: im::HashMap<PageId, Arc<PageDef>>,
@@ -114,7 +120,8 @@ DocState             { order: im::Vector<PageId>,
                                                                 // file's form (FormInst)
                        form: Arc<FormDoc>,          // its roots, instances, scripts
                        labels: Option<Arc<[LabelSpec]>>,
-                       generators: im::OrdMap<GenId, Arc<Generator>> }  // the header/footer
+                       generators: im::OrdMap<GenId, Arc<Generator>> }  // the header/footer,
+                                                                // watermarks, backgrounds
                      a complete, immutable snapshot of what the user sees,
                      made by DocState::builder() and read through accessors.
                      Records hold Srcs and blobs, so a version keeps the bytes
@@ -215,9 +222,10 @@ blob, and a source parses the blob in place:
   the newest cross-reference stream that decodes is the trailer, as
   PDFium takes it.
 - **Bytes stay in memory.** PDFium opens the blob's own `Arc<[u8]>`
-  (the engine pool's base engine, `Views::base`). A derived copy
-  (watermarked, or a header and footer stripped) is a memory blob,
-  written nowhere; a crop makes none (M10.5 slice 15); blank and
+  (the engine pool's base engine, `Views::base`). A derived copy (a
+  header and footer stripped, until slice 17) is a memory blob, written
+  nowhere; a crop makes none (M10.5 slice 15), nor a watermark (slice
+  16); blank and
   image pages, and a library stamp nothing else holds (see Page content),
   are read back from the generated cache once, into blobs.
   `LazyPdf` can also read a file by position (`FileBytes`).
@@ -487,8 +495,8 @@ sheaf reads and writes page content through `sheaf-doc`'s `content`
 module, brought forward from M11, never through lopdf's
 `Content::decode` and `encode`, which re-encode what they read, drop
 comments and spacing, and end an inline image at the first `EI` they
-meet. The watermark's install and read (until slice 16) and the flatten
-(until 19) are their last users, and a clippy ban lands when the flatten
+meet. The flatten (until 19) is their last user, the watermark's install
+and read having gone in slice 16, and a clippy ban lands when the flatten
 goes (the plan's lint ledger).
 
 - **Lexing** (`content::lex`) gives each token with its bytes as
@@ -579,7 +587,8 @@ goes (the plan's lint ledger).
   cap, or met once that's spent, counts as having an artifact inside.
   Who drew an artifact (`PagOrigin`):
   - **`Sheaf`:** it's in a `/SheafBlock` stream or its list has
-    `/SheafGen` (nothing writes these until slices 16 to 18);
+    `/SheafGen` (watermarks and backgrounds from slice 16; the header and
+    footer and OCR text write them from slices 17 and 18);
   - **`SheafLegacy`:** sheaf before M10.5: `/SheafStamp` or
     `/SheafSettings` in its list, drawn in the `/SheafHF` font, or in a
     `/SheafOcrLayer` stream;
@@ -608,9 +617,12 @@ goes (the plan's lint ledger).
   of `Q`s stays (`Pagination::cuts`), the artifact's start and the rest
   of it cut either side, as sheaf's own header keeps its `Q` outside its
   range. The pages to strip are the ones whose blocks have such
-  artifacts (`derive::strip_stamps` and the watermark's), so a source
-  with none is never loaded, and the scan that decompressed every page
-  to look is gone.
+  artifacts (`derive::strip_stamps`), so a source with none is never
+  loaded, and the scan that decompressed every page to look is gone.
+  From slice 16 a watermark or background takes others' of its kind out
+  as a save writes the page, by filters on the page's content stack, and
+  Remove Watermark by origin, `include_authored` taking the author's too
+  (Watermarks and backgrounds as generators).
 - **`ContentWriter`** writes content the same bytes for the same calls,
   on any thread: `q`/`Q` and `cm`, gray, RGB and CMYK colors, graphics
   states (`/ExtGState` with opacity and blend mode), line styles, paths
@@ -651,7 +663,8 @@ goes (the plan's lint ledger).
   whose drawing would lose characters says so (`Notice::Unencodable`,
   from M10.5 slice 11: adding or changing a mark or a connector, the
   marks pages bring with them when inserted or replacing others, a header
-  and footer, and the app's watermark), and a commit tells it once a
+  and footer, and from slice 16 a watermark's text), and a commit tells
+  it once a
   document: "Some characters can't be drawn in the built-in fonts and show
   as “?” in the file; the text itself is kept". A tape's minus and subtotal sign, which
   Helvetica lacks, draw in Symbol. M10 slice 7's Noto fallback ends it.
@@ -890,9 +903,11 @@ pub enum Op {
     MoveMarks { marks: Vec<AnnotRef>, by: Delta, to_page: Option<PageRef> },
     DeleteAnnotations { annots: Vec<AnnotRef> },
     AdoptAnnotations { annots: Vec<AnnotRef> },
-    // OCR text, header and footer
+    // OCR text, watermarks and backgrounds, header and footer
     SetOcrText { page: PageRef, layer: Arc<TextLayer> },
     ClearOcrText { pages: PageSel },
+    SetWatermark { spec: WatermarkSpec, z: Z, scope: ScopeSel },       // slice 16
+    RemoveWatermark { z: Option<Z>, pages: PageSel, include_authored: bool },
     SetHeaderFooter { spec: HeaderFooterSpec, scope: ScopeSel },
     RemoveHeaderFooter { pages: PageSel },
 }
@@ -1006,7 +1021,8 @@ targets to sit after the preceding bookmark's pages.
   or copied, labels, bookmarks, sheaf's own marks); `Approval` changes or
   removes what the user didn't make in sheaf (another tool's comment,
   link or widget deleted or made a mark, OCR text cleared, the header set
-  or removed, from slice 15 a page's boxes set); `User` brings content in
+  or removed, from slice 15 a page's boxes set, from slice 16 a watermark
+  or background set or removed); `User` brings content in
   (pages inserted or replaced, OCR text set, a derived page base, an
   import's names and dates). A plugin gets `Plugin` only, until
   plugin API 0.4's permissions; an OCR job sets and clears OCR text and
@@ -1051,7 +1067,8 @@ targets to sit after the preceding bookmark's pages.
   lowered, its page numbers by `pos_of`, so a line costs what the op
   names; `describe::lines` shows a run of one kind as one line
   ("Recognize text on 7000 pages"), and the internal page base's line
-  names its flow (watermark, header stripped; crop's until slice 15). A
+  names its flow (header stripped; crop's until slice 15, the
+  watermark's until 16). A
   line says whether its op removed something (`Line.removes`), which the
   History panel marks with a "Removes" badge. `StepEffects` is a step's
   `Effects` (§7.1's flags and signature class) with the pages and keys
@@ -1095,10 +1112,12 @@ targets to sit after the preceding bookmark's pages.
   Result<Commit, EditError>`, from slice 12 the only way it changes the
   document but for OCR's flushes (below): a drag is `MoveMarks`, a handle,
   style or text change a `PatchMarks` naming only what changed
-  (`mark_changes`). Remove Header/Footer and the watermark show
-  pages of derived copies through the internal `Tx::set_page_base(pages,
-  Derive)`, no `Op` variant (until slice 17); from slice 15 a crop is
-  `SetPageBoxes` and makes no copy (Crop as geometry). Combine is one
+  (`mark_changes`). Remove Header/Footer shows pages of derived copies
+  through the internal `Tx::set_page_base(pages, Derive)`, no `Op`
+  variant (until slice 17); from slice 15 a crop is `SetPageBoxes` and
+  makes no copy (Crop as geometry), and from slice 16 a watermark or
+  background is `SetWatermark`, drawn by a generator (Watermarks and
+  backgrounds as generators). Combine is one
   transaction (`Actor::Job(Insert)`) on the first file's document: the
   first file's
   pages left out deleted, one `InsertPages` a further file, its bookmarks
@@ -1315,14 +1334,16 @@ impl DocView {
   (`plan_insert`, `plan_replace`), then land with `Relower`
   (`CommitOpts::based(v, stale, label)`); nothing opens an engine on the
   file, which the render worker opens when a page of it is first drawn
-  (from slice 13). Watermark / Background and Header & Footer
-  resolve their pages to ids on the version their dialog opened on,
-  make the copies off the UI thread, show them (`Tx::set_page_base` on
-  `tx_at(opened)`), commit with `Validate`, and only then keep the
-  copies. From slice 15 Crop Pages makes no copy: margins are one
-  `SetPageBoxes` committed with `Validate` on the version its dialog
-  opened on, and Trim White a planner that re-plans on a Conflict (Crop
-  as geometry). The labels dialog previews its op lowered on the current
+  (from slice 13). Header & Footer resolves its pages to ids on the
+  version its dialog opened on, makes the copies off the UI thread,
+  shows them (`Tx::set_page_base` on `tx_at(opened)`), commits with
+  `Validate`, and only then keeps the copies (until slice 17). From
+  slice 15 Crop Pages makes no copy: margins are one `SetPageBoxes`
+  committed with `Validate` on the version its dialog opened on, and
+  Trim White a planner that re-plans on a Conflict (Crop as geometry).
+  From slice 16 Watermark / Background is one `SetWatermark` committed
+  so too, and its Remove a planner (Watermarks and backgrounds as
+  generators). The labels dialog previews its op lowered on the current
   version (`Tx::preview`), again at each change, and commits on the
   version it opened on with `Validate`; once the labels changed since it
   opened, which that commit would find, it says it can't apply. The
@@ -1332,8 +1353,8 @@ impl DocView {
   again at each change of its settings or the document, and the page
   realized from that state under the screen's inputs; a lowering's
   picture shows only while no later lowering has begun. The Crop Pages
-  dialog previews the same way from slice 15, and Watermark adopts it in
-  slice 16. Blank review's
+  (slice 15) and Watermark / Background (slice 16) dialogs preview the
+  same way. Blank review's
   delete reads each confirmed page as its search measured it
   (`Tx::read_render(p, &ViewInputs::content_only())`: what the page
   shows, from M10.5 slice 13) and lands with `Relower`, so a page whose
@@ -1468,8 +1489,8 @@ Saves, Save As, extracted pages, Clean Copy, Export Flattened, print and
 recovery sidecars reach their bytes through `serialize/` (§11.7 of
 `todos/m10.5-edit-api.md`). lopdf's writer still writes:
 
-- the derived copies, in memory, until slices 16 and 17 delete them
-  (crop's went in slice 15);
+- the derived copies, in memory, until slice 17 deletes them (crop's
+  went in slice 15, the watermark's in 16);
 - the comment summary and FDF files, until slice 19's exports;
 - PDFs made from images and blank pages (`images::to_pdf`,
   `generated::blank_pages`): Images to PDF and a scan without OCR, at
@@ -1706,8 +1727,9 @@ below).
   it is (`SymObject::Raw`, judged by `Cx::unchanged`: the same values,
   each placeholder naming the number the file's object refers to).
 - **Derived pages, content and the outline** (`emit::{pages, content,
-  outline}`). A derived copy's page (a header stripped, a watermark; a
-  crop until slice 15) is written as the page its `derived` record (the
+  outline}`). A derived copy's page (a header stripped, until slice 17;
+  a crop until slice 15, a watermark until 16) is written as the page
+  its `derived` record (the
   document's table by blob, from M10.5 slice 11) says it was made from, through copies of copies (`emit::Shown`): that
   page's object (copy 0 of a primary page keeps its number), keys and
   annotations, with the copy's `/Contents` and `/Resources` copied in
@@ -1720,8 +1742,10 @@ below).
   re-OCR leaves one; the header and footer through `stamps::install`,
   Bates numbers counted, on each page it covers whose base doesn't draw it
   already (`stamps::base_draws`: its file's catalog says sheaf drew these
-  settings on that page; `Source::header_footer` reads it once, and a
-  derived copy says what it kept, `save::HeaderKept`). The page's own
+  settings on that page; `Source::header_footer` reads it once; a
+  derived copy said what it kept, `save::HeaderKept`, until slice 16
+  deleted the watermark's copies, the only ones that kept it). The
+  page's own
   streams are referenced, never re-encoded; a resource is one object a
   file (`ObjKey::Res`, its other objects `ObjKey::ResPart`), so every OCR
   page draws in one font, and identical blocks are one (`ObjKey::Block`,
@@ -2706,10 +2730,10 @@ print preview nor what OCR reads:
 
 | Consumer | Inputs | Draws |
 |---|---|---|
-| The page view, the thumbnails, blank review's previews, the Header & Footer and Crop Pages (slice 15) previews; Find, Patterns, selection, calculator picks and text markup (slice 14) | `screen()`, with `hidden`, `dragging` and `ocg_off` the view's | everything; sheaf's marks GPUI draws over the page (`ByHost`) |
+| The page view, the thumbnails, blank review's previews, the Header & Footer, Crop Pages (slice 15) and Watermark / Background (slice 16) previews; Find, Patterns, selection, calculator picks and text markup (slice 14) | `screen()`, with `hidden`, `dragging` and `ocg_off` the view's | everything; sheaf's marks GPUI draws over the page (`ByHost`) |
 | Print preview | `print(markup)` | with "Comments and markups", as the screen; without, no marks and no other tools' comments (as `print_pdf` prints), the form's widgets either way |
-| OCR (`ViewPages`), blank detection and blank review's reads, plugins' recognition; Trim White (slice 15), on its measuring state | `content_only()`; blank detection's text with `ocr_over` (slice 14) | the page's own content: no header, recognized text, widgets or annotations, at its shown box (Trim White's: its file's own crop box) |
-| Plugins' renders | `plugin()`: `screen()` with `marks: ByEngine`, for the render and its reads alike | as the saved file will draw it, sheaf's marks and the unsaved header included, in the file's own orientation |
+| OCR (`ViewPages`), blank detection and blank review's reads, plugins' recognition; Trim White (slice 15), on its measuring state | `content_only()`; blank detection's text with `ocr_over` (slice 14) | the page's own content: no header, watermark, background (slice 16: nor the blocks of the document's own that the file holds), recognized text, widgets or annotations, at its shown box (Trim White's: its file's own crop box) |
+| Plugins' renders | `plugin()`: `screen()` with `marks: ByEngine`, for the render and its reads alike | as the saved file will draw it, sheaf's marks and the unsaved header, watermarks and backgrounds included, in the file's own orientation |
 | Plugins' text (slice 14) | `plugin_text()`: `plugin()` with no marks, widgets or other tools' annotations, for the text and its reads alike | what of the page PDFium reads as text: its content, the unsaved header and recognized text; no annotation's text, which PDFium's text page never reads |
 
 `foreign` (other tools' comments and links) isn't in §10.1's list: print
@@ -2902,13 +2926,14 @@ the document; a visit counter in the tests holds it to that):
   annotations sheaf doesn't model only with `foreign`; widgets always
   (the flags decide); a reply isn't threaded to what isn't drawn,
   connectors carry no `/Dest`, recognized text only with `ocr_over`, the
-  header only with `generators`, links whose target page the document no
+  header, watermarks and backgrounds only with `generators`, links
+  whose target page the document no
   longer has are left out as a save leaves them, and a reference to a page
   outside the group is null.
 - **Copy 0 of the source's objects** keeps its own number; one unchanged
   isn't written (the base has it). Other blobs, and copies, are copied.
-- **A derived copy's page** (a watermark or a stripped header, until
-  slices 16 and 17; a crop until 15) is the page as the copy has it: the
+- **A derived copy's page** (a stripped header, until slice 17; a crop
+  until 15, a watermark until 16) is the page as the copy has it: the
   overlay goes over the copy's bytes, its records' widgets drawn from
   the records, the copy's own widget entries left out, and its form only
   the records' fields (the copy's own form copies every field of the
@@ -3509,11 +3534,13 @@ crops into a transaction made at that snapshot.
   Crop Pages dialog opened on, with `Validate`, on the UI thread: no copy
   is loaded, so the first crop no longer starts rayon's pool.
 - **A crop survives the derived flows.** A page's boxes are its own, not
-  its base's: `Tx::set_page_base` (Watermark / Background, Remove
-  Header/Footer, until slice 17) moves a page onto its copy keeping its
+  its base's: `Tx::set_page_base` (Remove Header/Footer, until slice 17;
+  Watermark / Background until 16) moves a page onto its copy keeping its
   `Geom` whole, the copy having its base's media box, and reads it, so
-  the flow conflicts with a crop made since it was planned. The
-  watermark is placed on each page's crop as the document shows it.
+  the flow conflicts with a crop made since it was planned. From slice
+  16 a watermark is a generator, laid out at emit on each page's crop as
+  the document shows it then, so one set before a later crop lands and
+  is centred on the new crop.
 - **The dialog's preview** (§8.6) is the Header & Footer dialog's,
   shared (`dialog_preview::Preview<K>`, keyed by the request,
   `crop_dialog::Request::{Margins(m), Trim}`): the request lowered off
@@ -3556,6 +3583,330 @@ does), a page at a time on the pool's worker; the walk is timed after
 an untimed one that counts its group engines and reads each page's
 facts cold, as the app has by the time it trims. Making it faster is a
 later perf pass's.
+
+## Watermarks and backgrounds as generators (M10.5 slice 16)
+
+A watermark (over the page's content) or a background (under it) is a
+generator: one record in the state (`GenSpec::Watermark`), laid out on
+each page it covers when a save writes the page or a view draws it, on
+the page as it shows then. Setting one is an op and so is taking one
+off; a file sheaf saved with one finds it again when it opens; and what
+other programs drew of its kind goes from the pages it draws on (§3.5,
+§6.5, §11.4, proposals 30, 31 and 39 and bugs 16–18 and 28 of
+`todos/m10.5-edit-api.md`). The derived copy that drew a watermark into
+a copy of each page is gone, and with it `watermark::install` and
+`read`, the per-page ExtGState, font and image, the `/SheafWM*` names
+and `SheafSettings`, which nothing writes now.
+
+```rust
+pub enum Z { Under, Over }                                    // sheaf_edit, kebab-case
+pub enum GridPos { TopLeft, Top, TopRight, Left, Center, Right, BottomLeft, Bottom, BottomRight }
+pub enum FontChoice { Helvetica, HelveticaBold, /* …the 12 Std14 text faces */ }
+pub struct WatermarkSpec { pub content: WatermarkContent, pub position: GridPos }
+pub enum WatermarkContent {
+    Text { text: String, font: FontChoice, size: f32, color: Color, opacity: f32, angle: f32 },
+    Image { image: Option<BlobSel>, scale: f32, opacity: f32 },
+    Page { pdf: Option<BlobSel>, page: u32 /* 1-based */, scale: f32, opacity: f32 },
+}
+Op::SetWatermark { spec: WatermarkSpec, z: Z, scope: ScopeSel }
+Op::RemoveWatermark { z: Option<Z>, pages: PageSel, include_authored: bool }
+
+pub struct WatermarkGen { pub content: WatermarkContent, pub position: GridPos,  // sheaf_doc::model
+                          pub z: Z, pub scope: Scope, pub replaces: BTreeSet<PaginationKind> }
+pub enum Scope { All, Pages(im::OrdSet<PageId>) }
+pub enum ImageRef { Blob(BlobRef), Placed(Placed) }
+pub enum PageForm { Blob { pdf: BlobRef, index: u32 }, Placed(Placed) }
+pub struct Placed { pub at: ObjRef, pub res: ResId, pub turns: u8 }
+pub enum Filter { DropMarked(MarkedSel), DropStreams(StreamSel), StripLegacy(LegacySel) }
+pub enum MarkedSel { SheafGen(GenId),
+                     Pagination { kinds: BTreeSet<PaginationKind>, origins: BTreeSet<PagOrigin> } }
+pub enum StreamSel { SheafGen(GenId) }
+pub enum LegacySel { Marked(MarkedSel) }
+impl Generator { pub fn covers(&self, page: PageId) -> bool; pub fn z(&self) -> Z;
+                 pub fn scope(&self) -> Cow<'_, Scope>; pub fn replaces(&self) -> &BTreeSet<PaginationKind>; }
+```
+
+`Generator` is still `{ id, spec }`: a watermark carries its own z,
+scope and `replaces` in its record, and `covers`, `z`, `scope` and
+`replaces` read them as §3.5's fields would be (the header's are made
+from `HeaderFooter.pages`, `Over` and none) until slice 17 moves them
+onto `Generator` for both. `GenId` is one type, `content::blocks::GenId`
+(`g<hex>`), which `model` re-exports.
+
+### The ops
+
+- **`SetWatermark`** puts the watermark at its z in place of the one
+  there, keeping that one's `GenId`, so the blocks a file holds of it
+  stay its own and one laid out alike is used again; else it draws a new
+  id. It checks its values (text not empty once trimmed, size finite and
+  above 0, opacity 0–1, scale above 0 and at most 2, the angle finite,
+  the scope not empty), each failure `EditError::Invalid` naming the
+  field ("set-watermark: the size is 0, not above 0"). An image is an
+  image blob (`BlobKind::Image`, its type sniffed by
+  `sheaf_image::io::sniff`) and a page is a page of a PDF blob that
+  parses (page 0 is Invalid, one past the end NotFound); a stamp grant is
+  Invalid. With no `image` or `pdf`, it keeps what the watermark at its
+  z draws now, so a reopened image moves or scales without being
+  embedded again (Invalid when nothing's drawn there). `replaces` is
+  `{Watermark}` over the content and `{Background}` under it. Text the
+  face can't draw all of is kept exactly and told
+  (`Notice::Unencodable`). It reads no content and no `Geom`: the layout
+  is the emitter's, so a watermark set before a later crop lands and is
+  centred on the crop. Lines: "Add a watermark to all pages", "Add a
+  background to pages 2, 3", "Change the watermark on …".
+- **`RemoveWatermark`** narrows each generator of its z (both, with
+  none) to the pages it's left on, and removes one left on none; an
+  `All` scope becomes `Pages(order − pages)`, which reads `Order`. Then
+  it reads each page's blocks (`Source::blocks`, a read of `Page(p)`)
+  for what others drew of its kind and adds filters: `DropStreams` for
+  another file's blocks in streams of their own, `DropMarked(SheafGen)`
+  for blocks another tool merged into a stream, and a `Pagination`
+  filter for Acrobat's and an older sheaf's ranges, the author's own
+  too with `include_authored`, each origin only where a splice takes at
+  least one of its ranges. What it found, by who drew it, and what it
+  left in place is counted at lowering, in its resolved op's `others`
+  (`tx::OthersFound`), and said in its line: "Remove the
+  watermark from pages 1, 2 (2 made in Acrobat; 12 the author's left in
+  place)". Ranges a splice refuses, forms that draw one, and pages that
+  can't be read are counted, never a failure (D61). A step's line is
+  described after it's lowered, so the counts reach it.
+- **Invariants and cascades.** One watermark a z; a scope's pages
+  exist, and a `Pages` scope is never empty (one on no page is
+  removed). A deleted page leaves the scope (`on_pages_left`), a
+  duplicate joins a `Pages` scope, and a commit made before a page
+  went that names it conflicts. Both ops need `Cap::Approval`.
+- **Effects** (§7.1). Added, or changed only in its layout (position,
+  size, angle, colour, opacity, font, scale, z, or a wider scope):
+  `CONTENT`, so it can append. Other text, another image or page, a page
+  left that's still in the document, or the watermark removed: `REMOVES`
+  (`RemovedKind::Watermark` or `Background`), and `REPLACES_TEXT` when
+  it was text. A filter added is `CONTENT | REMOVES`
+  (`RemovedKind::Filtered`, "page's watermark or background from another
+  program or file"), and so is a watermark newly drawn on a saved page
+  that holds others' of its kind, which a save's `judge` finds from the
+  page's blocks (a step's own judging doesn't read them).
+
+### Drawn on save
+
+- **The layout** (`generate::layout`): upright on the page's visible box
+  as it shows, turned as the page is turned, in a cell of a 3×3 grid, 36
+  pt in from a side it keeps to, its rotated bounding box inside; an
+  image or page `scale` of the shown width wide, a JPEG's quarter turns
+  honoured. Text is in the `FontChoice`'s standard 14 face, a character
+  it can't draw `?`. The content is `/Artifact /Sh… BDC q /Sh… gs cm …
+  Q EMC`, its property list `<< /Type /Pagination /Subtype /Watermark
+  (or /Background) /SheafGen (g…) >>` named in `/Properties` like every
+  resource it adds, its graphics state `/ca` and `/CA`. The layout's
+  digest (`/L`) is of its operators and its resources' ids, never their
+  names; the recipe's (`/R`) is the render key's digest of the
+  watermark (`generate::recipe_digest`).
+- **Blocks and isolation** (`emit::content`). A covered page's
+  `/Contents` is `[under…, QOpen, base′…, QClose, over…]`. Each block is
+  a stream of its own marked `/SheafBlock << /K /Gen /G (g…) /L <…> /R
+  <…> >>`, keyed by its bytes (`ObjKey::Block`), so a watermark laid out
+  alike on 7,000 pages is one object; a page whose image or page can't
+  be had gets an empty block, so its scope can still be read back. The
+  page's own content is isolated by shared marked streams
+  (`Shared::QOpen(n)`, `Shared::QClose(n)`, `/SheafBlock << /K /Isolate
+  >>`) counted by its balance (§3.4): `open = 1 + d`, `close = 1 + d +
+  net`, `d` the deepest its `Q`s go below where it starts, so no `Q` of
+  its undoes theirs and nothing it leaves set reaches the watermark. Its
+  streams are referenced, never re-encoded. A page whose content can't be
+  read gets no watermark, one Note naming every such page ("No watermark
+  or background is drawn on page 3, whose content can't be read."), and
+  the save goes on.
+- **`PageRes`.** The page's resources are a new dictionary
+  (`ObjKey::PageRes { base, dropped, added }`, by the base Resources'
+  identity and the digests of the names dropped and added): its base
+  page's, the categories it adds to copied one level down, the names it
+  draws with (`/Sh…`) clear of every name the base binds. Pages that
+  share base Resources share one; the font, graphics state and image are
+  one object a file. `/Thumb` goes whenever `/Contents` changes. Images
+  are decoded once a blob and pages made forms once a page (`Cx.arts`).
+- **`/SheafGenerators`** in the catalog (`ObjKey::Generators`, a root)
+  is an indirect literal string of versioned JSON (`v: 1`), ASCII with
+  every other character `\uXXXX`: each watermark's id, kind, z, scope
+  (`all` or `pages`, the pages read back from the blocks), `replaces` and
+  spec, an image or page as `{"placed": "<the ResId it was drawn as>",
+  "turns": n}`, never a path or an object number. No watermark, no key.
+- **The PDF version** (§11.7). Marked artifacts and transparency need
+  1.4 (`PdfVersion::ARTIFACTS`): a 1.3 file's Rewrite is `%PDF-1.4`, and
+  its Append writes the catalog's `/Version /1.4` (`needs_after`; the
+  planner classes it `OTHER`). ISO 32000-1 marks `/Subtype` in an
+  artifact's list as 1.7; sheaf follows the slice's 1.4, for Greg.
+- **Append.** A change of `Generator(g)` writes `/SheafGenerators`, the
+  catalog when the first watermark comes or the last goes, and the pages
+  covered before or after; a change of scope alone writes only the pages
+  that came or went. Adding a watermark to a saved file appends its
+  pages, its block, the shared resources and the JSON, and a turned
+  page's Append writes the page and one block.
+- **The removal check** (§11.9) judges the new keys on record inputs:
+  `PageRes`, like `Res` and `Shared`, says nothing of its own; a block
+  is judged by what the page draws (`Drawn::on`, which adds each
+  covering watermark's text, or a hash of its image or page); and the
+  old `/SheafGenerators` by every watermark's text, image or page, saved
+  against now. So a layout change appends with no veto, and a text
+  change plans a Rewrite.
+- **A PDF/A or PDF/UA claim** (`Source::conformance`, slice 3's fact)
+  gets a Note when a save draws a generator: a Rewrite for each it
+  draws, an Append for those its path changes (the header and footer
+  counted too): "This file claims PDF/A-2b; the watermark sheaf draws on
+  it isn't made to conform, so the saved file no longer does". A claim
+  that can't be read is logged, with no Note.
+
+### Drawn on screen
+
+A view draws the generators when its inputs do (`ViewInputs.generators`:
+the screen's, a plugin's and print preview's), through the same
+emission as a save, so a page renders as the saved file will. Under
+`content_only()` (OCR, blank detection, Trim White) none is drawn, and
+the blocks of the document's own its file holds are set aside there too.
+A covered page is untouched only where its file already holds the blocks
+drawn, in place (`intact`, through `untouched`'s `generated`); the render
+key holds what each covering watermark draws, not its scope, so a
+reorder re-renders no watermarked page. Images and pages are kept by the
+realizer, at most four (`content::Arts`), so a group's deltas decode an
+image once; the realizer never decodes an image in the store to tell
+whether a page is intact, and counts such a page as changed.
+
+### Found again after reopen
+
+- **Markers.** A source whose catalog has `/SheafGenerators` (or a
+  derived copy, until slice 17) is `marked()`, and only then are each
+  page's stream markers read (`Source::markers(i)`): each `/Contents`
+  stream's dictionary, never decompressed, once a stream. The corpus has
+  none, so its files take the paths they took before.
+- **Recognition** (`Source::generators()`, `generate::read`): each
+  `/SheafGenerators` entry alone, one that can't be read whole passed
+  over with a log line (a version it doesn't know, a bad id, values the
+  op would refuse, `replaces` other than its own z's kind, a `pages`
+  scope with no block, an image or page it can't bind, a second of one
+  id or z). A page holds a generator's block by its streams' markers, or,
+  on a page with no block in a stream of its own whose resources name a
+  list with `/SheafGen` in `/Properties`, by the ranges its content marks
+  (a block another tool merged into a stream, `qpdf --coalesce-contents`,
+  say).
+  `pages` is the pages holding one of its blocks, empty ones too; `all`
+  stays `All` unless a page whose content can be read holds none (a page
+  another tool added), when it's the pages that do, with a log line. An
+  image or page is bound by decompressing a block in a stream of its
+  own, finding its `Do`, and looking that name up in the page's
+  `/XObject`, its subtype checked (`ImageRef::Placed`,
+  `PageForm::Placed`). At ready they're in the state, their ids and the
+  file's in `DocState.opened_generators`.
+- **Backed blocks** (`DocState::backs(g, page)`: a generator of the
+  state that covers the page; or, on a page of the opened file (or of a
+  derived copy, until slice 17), a generator of the state or one the
+  opened file had) are set aside from the page's own content (base′)
+  whenever it's written, so a watermark changed, removed by either op, a
+  cascade, an extract, a Clean Copy or a print leaves no block, and
+  nesting never grows (five cycles of save, reopen and watermark keep the
+  deepest `q` at 2). Another file's blocks (inserted pages, an earlier
+  save of the same file's among them, whose generator ids are the
+  document's) are kept, with the streams that isolate them, until a
+  filter takes them out or a covering generator of their id draws the
+  page anew. A stream is marked by its dictionary, read again in the
+  rebuild whatever the catalog says, and one marked `/Isolate` that
+  holds more than `q`s or `Q`s is the page's own content, kept, which
+  the removal check judges on its text. A block laid
+  out alike (`/L`) is the file's stream, an isolating stream of as many
+  as base′ needs is used again, and a page whose blocks are all alike, in
+  place around its isolated content, is written as it is (`intact`, the
+  one rule the emitter, `untouched` and the render key share). Names
+  only what's set aside or cut used are dropped from the page's
+  resources, and one a new block binds to the same object keeps the
+  file's binding. A PDFium `FPDF_SaveAsCopy` re-save keeps the blocks
+  found (an ignored test).
+
+### Others' watermarks (proposal 31)
+
+What a generator draws on a page replaces what others drew there of its
+`replaces` kinds: Acrobat's, an older sheaf's and another file's blocks
+(`PagOrigin::REPLACED`), never the author's own, which only Remove with
+`include_authored` takes. The cut is made at emit (`replacing`), only on
+a page whose blocks hold such a range, through `content::splice_each`
+(each range spliced out alone where the whole set can't be) into
+`ObjKey::Filtered` copies, so a stream other pages share stays whole for
+them; Acrobat's leading `Q` stays (`Pagination::cuts`), and another
+file's block of a replaced kind, a stream of its own, is left out whole
+with its isolation. Names only the cut ranges used leave the page's
+resources, so Acrobat's form, its graphics state and its fonts are
+unlinked and a Rewrite holds none of them. A range a splice refuses
+stays, said once a save: "1 watermark or background other programs or
+files drew stays on page 1: taking it out would change what else the
+page draws." `PageBlocks::selected` (and `Pagination::selected_by`) is
+the one rule the emitter, Remove's lowering and the effects use, and
+`Pagination::generator` tells a block's generator, so a backed one isn't
+counted. The cut goes with drawing the generators: under `content_only`
+a replaced artifact stays as the file has it, so OCR may read a
+replaced Acrobat watermark's text.
+
+### An older sheaf's settings, and Clean Copy
+
+`Filter::StripLegacy(LegacySel::Marked(sel))` writes the property lists
+of the ranges selected again without `LEGACY_KEYS` (`/SheafSettings`,
+with its image's local path, and `/SheafStamp`), keeping what they draw:
+`lex::without_entries` removes the entries and the spaces before them
+and keeps every other byte, and the result must read back
+(`lex::object`) as the list less those keys, or the rewrite is refused
+(`SpliceError::List`: a named list, one across streams, a key that isn't
+a name or a value that isn't an object, a range that doesn't open with
+`BDC`). Rewrites go in the same `Filtered` copies as cuts
+(`Spliced::streams(content, rewrites)`; one inside a taken cut goes with
+it); a refused one keeps the settings, with a Note. Clean Copy, and
+print and page images without markup, read each page's blocks and add
+the filter where an older sheaf drew a watermark or background
+(`save::without_markup`); adding it is `CONTENT | REMOVES`
+(`RemovedKind::OlderSettings`), so an Append can't leave the path in an
+earlier revision. Every older sheaf's list rewrites (lopdf wrote them,
+one operation a stream); in the corpus one Word list split across two
+streams is refused. Once cleaned, such a range reads as the author's
+(`Authored`), and its `/SheafWM*` names, like named lists' settings,
+are slice 19's RemovePrivateData's.
+
+### The app
+
+The Watermark… and Background… dialog is the op's: text, font (a family
+row and a style row for the 12 faces), size, colour, opacity, angle
+(text only), the 3×3 position, the pages; or an image or a PDF, whose
+page 1 is drawn, read and interned off the UI thread (`read_art`); or
+what the watermark at that z draws now ("the image in the file" after a
+reopen), sent as `image: None` or `pdf: None`. It starts from the
+generator at its z (`Start::at`), or DRAFT over the content and
+CONFIDENTIAL under it. Its preview is Crop's and the header's
+(`Preview<Op>`, `Previewer::page_in`): the op lowered in `tx_at(now)` on
+the previewed page, drawn under `screen()`. Apply commits the op
+synchronously with `Validate` on the version the dialog opened on,
+holding the file chosen until it lands ("Watermark" or "Background");
+Remove is a planner, since its lowering reads every page's content, with
+an "the author's own too" choice for `include_authored`, removing from
+every page. The notice is the commit's line and notices (the
+Unencodable sentence, or what Remove found by who drew it), or "No
+watermark to remove". Choosing the menu item again closes the dialog.
+
+**Deleted:** `derive::watermark`, `current_watermark` and `has_kinds`;
+all of `watermark.rs` (`Watermark`, `Mark`, `Anchor`, `FONT`,
+`install`, `read`, the per-page ExtGState, font and image and the
+`/SheafWM*` names); `Derive::Watermark` and `RemoveWatermark` with
+`set_base`'s Unencodable arm; `save::HeaderKept` and `derived_copy`'s
+`header` and geometry parameters; `stamps::WATERMARK` and `BACKGROUND`
+(`stamps::strip` is the header and footer's alone until slice 17); the
+app's `apply_watermark`, `open_watermark` and the dialog's `behind` and
+`current`. `tests/retired.rs` lists them.
+
+**Numbers** (AMD EPYC 7302P, release; the 7k gate harness):
+
+| Row | Synthetic | Heavy | Scanned |
+|---|---|---|---|
+| thumbnail strip after a crop, a watermark and the header (asserted ≥ 310 pages/s, ≤ 96 MB weighed and RSS added) | 413 pages/s, 80.7 MB, 26.2 MB (slice 15, no watermark: 446) | 344 pages/s, 80.7 MB, 63.0 MB (372) | 162 pages/s, 80.7 MB, 77.6 MB (167) |
+| watermark every page, the commit | 0.014 ms | 0.014 ms | 0.015 ms |
+| a text watermark and an image background on every page: Rewrite, file, Append | 343 ms, 3.97 MB, 483 ms | 890 ms, 18.5 MB, 681 ms | 1,028 ms, 475 MB, 691 ms |
+| that file opened again: ready, both found | 92.7 ms | 496 ms | 536 ms |
+| its census (asserted): images, fonts, graphics states, forms added; page resources | 1, 1, 1, 0; 1 of 1 | 1, 1, 1, 0; 70 of 70 | 1, 1, 1, 0; 7,000 of 7,000 |
+
+The strip draws a watermark on every page now, which costs it about
+0.2 ms a page on the heavy; the census counts what the written pages'
+resources bind that the file's didn't, page by page.
 
 ## Non-goals of this design
 
@@ -3696,8 +4047,9 @@ put with the page's `PageDef`.
   into fragments, which History's "Undo all of …" takes back at once
   (`revert_group`); a flush during a save lands in a version after the
   sealed one, which stays unsaved. A page whose slot changed since (its
-  base re-pointed by a watermark or a header stripped; a crop re-pointed
-  it too until slice 15 made crop geometry, which a flush lands beside)
+  base re-pointed by a header stripped; a watermark and a crop re-pointed
+  it too until slices 16 and 15 made them a generator and geometry,
+  which a flush lands beside)
   is a Conflict: the flush is retried page by page, the other pages keep
   their text, and the run's message counts the changed ones. Undoing the
   run, or jumping away from it, makes its next flush `GroupEnded`: the

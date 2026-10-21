@@ -9,8 +9,10 @@
 //! actions go, where each annotation that goes somewhere goes, the
 //! records' or not, and which name another page as theirs; the outline;
 //! the page labels; the field tree and values; the form's own keys and
-//! whether it has an XFA part; the header and footer; and where the open
-//! action goes.
+//! whether it has an XFA part; the header and footer; the watermarks and
+//! backgrounds found again; and where the open action goes. Half the runs
+//! start from a file sheaf saved with a watermark and a background, so
+//! what's found is set aside or kept as edits and saves go.
 //!
 //! Over ops since slice 11, with fixed cases beside it: labels moved with
 //! their first page, links to pages a later Append brings, a node split and
@@ -38,7 +40,7 @@ use std::sync::Arc;
 use in_progress::NoProgress;
 use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use proptest::prelude::*;
-use sheaf_edit::{Anchor, Op, PageRef, Style as MarkStyle, Turn};
+use sheaf_edit::{Anchor, Op, PageRef, Style as MarkStyle, Turn, Z};
 
 use super::append::Refused;
 use super::plan::{Onto, Strategy, forced_append};
@@ -57,7 +59,8 @@ use crate::history::{AllOf, FixedCount, MemoryBudget};
 use crate::labels::{LabelRange, LabelSpec, Style};
 use crate::model::history_tests::{self, Run, with_theirs};
 use crate::model::{
-    AnnotBody, DocState, Document, FieldProps, FormInst, PageId, Target, TextStyle, XfaState,
+    AnnotBody, DocState, Document, FieldProps, FormInst, ImageRef, PageForm, PageId, Scope, Target,
+    TextStyle, WatermarkContent, XfaState,
 };
 use crate::stamps::HeaderFooter;
 use crate::store::Src;
@@ -232,6 +235,10 @@ struct Reopened {
     form: (Vec<String>, Option<Arc<str>>, u8, bool, i64, XfaState),
     /// The header and footer, and the places of the pages it's on.
     header: Option<(HeaderFooter, Option<Vec<usize>>)>,
+    /// The watermarks and backgrounds found: each one's z, what it draws
+    /// and where, what it replaces, and the places of the pages it's on
+    /// (None: every page).
+    watermarks: Vec<(Z, String, Option<Vec<usize>>)>,
     /// Where the catalog's `/OpenAction` goes, when it has one.
     open: Option<Dest>,
 }
@@ -423,6 +430,33 @@ fn reopened(path: &Path) -> Reopened {
         };
         (hf, on)
     });
+    let watermarks = [Z::Under, Z::Over]
+        .into_iter()
+        .filter_map(|z| {
+            let g = st.watermark(z)?;
+            let wm = g.spec.watermark()?;
+            // An image or a page by what it was drawn as, not where it is.
+            let draws = match &wm.content {
+                WatermarkContent::Image {
+                    image: ImageRef::Placed(p),
+                    scale,
+                    opacity,
+                } => format!("image {:?} {} {scale} {opacity}", p.res, p.turns),
+                WatermarkContent::Page {
+                    page: PageForm::Placed(p),
+                    scale,
+                    opacity,
+                } => format!("page {:?} {scale} {opacity}", p.res),
+                other => format!("{other:?}"),
+            };
+            let on = match g.scope().as_ref() {
+                Scope::All => None,
+                Scope::Pages(pages) => Some(places(st, &pages.iter().copied().collect::<Vec<_>>())),
+            };
+            let said = format!("{draws} {:?} {:?}", wm.position, wm.replaces);
+            Some((z, said, on))
+        })
+        .collect();
     Reopened {
         pages,
         outline,
@@ -437,6 +471,7 @@ fn reopened(path: &Path) -> Reopened {
             form.xfa,
         ),
         header,
+        watermarks,
         open: opened_at(&opened.doc),
     }
 }
@@ -531,6 +566,7 @@ fn differences(saved: &Reopened, fresh: &Reopened) -> Vec<String> {
     part("labels".into(), &saved.labels, &fresh.labels);
     part("form".into(), &saved.form, &fresh.form);
     part("header".into(), &saved.header, &fresh.header);
+    part("watermarks".into(), &saved.watermarks, &fresh.watermarks);
     part("the open action".into(), &saved.open, &fresh.open);
     out
 }
@@ -620,13 +656,33 @@ fn forced(doc: &mut Document, path: &Path) -> Strategy {
 const SAVES: u8 = history_tests::PRUNE + 1;
 const ACTIONS: u8 = SAVES + 9;
 
-/// A run of `actions` over [`files`], with an XFA part when `xfa`: the
-/// saves compared as they're made.
-fn run(xfa: bool, actions: &[(u8, u64)]) {
+/// `bytes` saved by sheaf with a watermark on every page and a background
+/// on the second, which an open finds again: a file of `dir`'s.
+fn watermarked(dir: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    let path = dir.join("marked.pdf");
+    std::fs::write(&path, bytes).unwrap();
+    let mut doc = crate::open::file(&path, None).unwrap().doc;
+    let second = doc.page(1).unwrap();
+    let ops = vec![
+        fx::set_watermark(fx::watermark("DRAFT"), Z::Over, None),
+        fx::set_watermark(fx::watermark("under"), Z::Under, Some(&[second])),
+    ];
+    doc.commit_ops(ops, "watermark").unwrap();
+    How::Rewritten.write(&doc)
+}
+
+/// A run of `actions` over [`files`], with an XFA part when `xfa`, and
+/// the document's file saved by sheaf with a watermark and a background
+/// when `marked`: the saves compared as they're made.
+fn run(xfa: bool, marked: bool, actions: &[(u8, u64)]) {
     // Mark ids come from the thread's generator: the same ones each run.
     fastrand::seed(1);
     let dir = scratch();
     let (primary, other) = files_opening(xfa, true);
+    let primary = match marked {
+        true => watermarked(&dir, primary),
+        false => primary,
+    };
     let a = dir.join("a.pdf");
     std::fs::write(&a, primary).unwrap();
     let b = dir.join("b.pdf");
@@ -666,8 +722,12 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
-    fn append_rewrite_reopen_alike(xfa in any::<bool>(), actions in runs()) {
-        run(xfa, &actions);
+    fn append_rewrite_reopen_alike(
+        xfa in any::<bool>(),
+        marked in any::<bool>(),
+        actions in runs(),
+    ) {
+        run(xfa, marked, &actions);
     }
 }
 
@@ -676,8 +736,12 @@ proptest! {
 
     #[test]
     #[ignore = "1,024 cases: cargo test -p sheaf-doc --release -- --ignored append_rewrite"]
-    fn append_rewrite_reopen_alike_1024(xfa in any::<bool>(), actions in runs()) {
-        run(xfa, &actions);
+    fn append_rewrite_reopen_alike_1024(
+        xfa in any::<bool>(),
+        marked in any::<bool>(),
+        actions in runs(),
+    ) {
+        run(xfa, marked, &actions);
     }
 }
 
@@ -1351,8 +1415,7 @@ fn a_derived_copy_made_copy_0_by_a_move(
     let copy = doc.page(1).unwrap();
     assert_eq!(doc.state().def(copy).unwrap().copy, 1);
     let primary = doc.primary().clone();
-    let stripped = crate::save::HeaderKept::No;
-    let bytes = crate::save::derived_copy(&primary, &[0, 0], stripped, &mut |_, page, _, _| {
+    let bytes = crate::save::derived_copy(&primary, &[0, 0], &mut |_, page, _| {
         let crop = [0.0f32, 0.0, 400.0, 500.0].map(Object::from);
         page.set("CropBox", crop.to_vec());
         Ok(())

@@ -429,6 +429,14 @@ pub mod pdfium {
             appearances(&self.doc, page, width)
         }
 
+        /// The document as PDFium writes it (`FPDF_SaveAsCopy`), as another
+        /// tool built on PDFium would save it: what such a save keeps of
+        /// what sheaf wrote.
+        pub fn save_copy(&self) -> Result<Vec<u8>> {
+            let _pdfium = lock();
+            Ok(self.doc.save_to_bytes()?)
+        }
+
         /// A page `width` pixels wide, RGBA, transparent where nothing is
         /// drawn: a stamp's picture, to lay over another page.
         pub fn render_transparent(&self, page: PageIndex, width: u32) -> Result<Raster> {

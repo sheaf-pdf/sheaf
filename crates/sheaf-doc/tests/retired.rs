@@ -732,6 +732,33 @@ const RETIRED: &[(&str, u8)] = &[
     ("tx::resolve::Derive::Crop", 15),
     ("crop_dialog::CropEvent::Crop", 15),
     ("crop_dialog::CropContext::size", 15),
+    // The watermark and background as a derived copy with a mark drawn on
+    // its pages: they are generators (`GenSpec::Watermark`), set and taken
+    // off by ops (`SetWatermark`, `RemoveWatermark`) and drawn at emit
+    // (`generate::layout`), so nothing writes `SheafSettings` or the
+    // `/SheafWM*` names, nothing reads a watermark back from a page, and
+    // no copy keeps a header for one. Remove Header/Footer keeps
+    // `stamps::strip` for its own kinds until slice 17. The dialog starts
+    // from the generator at its z; `crop_dialog::why` moved to
+    // `dialog_preview::why`, so it has no row.
+    ("derive::watermark", 16),
+    ("derive::current_watermark", 16),
+    ("derive::has_kinds", 16),
+    ("watermark::Watermark", 16),
+    ("watermark::Mark", 16),
+    ("watermark::Anchor", 16),
+    ("watermark::FONT", 16),
+    ("watermark::install", 16),
+    ("watermark::read", 16),
+    ("tx::resolve::Derive::Watermark", 16),
+    ("tx::resolve::Derive::RemoveWatermark", 16),
+    ("save::HeaderKept", 16),
+    ("stamps::WATERMARK", 16),
+    ("stamps::BACKGROUND", 16),
+    ("page_insert::DocView::apply_watermark", 16),
+    ("workspace::Workspace::open_watermark", 16),
+    ("watermark_dialog::WatermarkContext::behind", 16),
+    ("watermark_dialog::WatermarkContext::current", 16),
 ];
 
 /// Last segments only a path matches: names the new design uses again
@@ -949,6 +976,23 @@ const QUALIFIED_ONLY: &[&str] = &[
     // describe's `Boxes::Crop`, a `SetPageBoxes` that sets the crop alone:
     // not a derived flow's or the dialog's event.
     "Crop",
+    // The generator's own: `PaginationKind::Watermark` and `GenSpec::
+    // Watermark`, `Op::RemoveWatermark` and `ResolvedOp::RemoveWatermark`,
+    // `DocState::watermark`, `GenSpec::watermark` and the fixtures'
+    // `watermark`: not the old module's, `Derive`'s or derive.rs's.
+    "Watermark",
+    "RemoveWatermark",
+    "watermark",
+    // A mark of sheaf's (`model::Mark`), where a note's mark is anchored
+    // (`sheaf_edit::Anchor`), the OCR layer's and the header's installers
+    // (`text_layer::install` until slice 18, `stamps::install` until 17),
+    // and every other read: not the old watermark module's.
+    "Mark",
+    "Anchor",
+    "install",
+    "read",
+    // Every other current thing: a theme's, a list's, the instance's.
+    "current",
 ];
 
 #[test]

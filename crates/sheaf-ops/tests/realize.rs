@@ -8,8 +8,8 @@
 //! over its bytes found it, and its print file, which PDFium reads; a layer
 //! turned off, by a patch of the catalog; a comment hidden on its page and
 //! not its duplicate; a crop's comments, link and widget, and its content
-//! alone for OCR; and sheaf's marks, renamed at open or not, left to the
-//! screen.
+//! alone for OCR; sheaf's marks, renamed at open or not, left to the
+//! screen; and watermarks and backgrounds not yet saved (slice 16).
 //!
 //! Each realization is the engine's segments read one after another, the
 //! base's bytes and the section after them. Pages are drawn through the
@@ -40,9 +40,10 @@ use sheaf_doc::realize::{EngineKey, GROUP, OcgOverride, PageView, Realization, V
 use sheaf_doc::serialize::fixture::{
     USER, encrypted, form, holds, rc4_aes_128_and_aes_256, revision_cut_out,
 };
+use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{Document, PageId, TextLayer};
-use sheaf_edit::{Margins, Rotation, Turn};
+use sheaf_edit::{BlobSel, GridPos, Margins, Rotation, Turn, WatermarkContent, WatermarkSpec, Z};
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_ocr::job::EngineFactory;
 use sheaf_ocr::{EngineKind, OcrConfig, OcrEvent, OcrRequest, PageSource};
@@ -330,6 +331,73 @@ fn an_unsaved_header_shows_under_view_rotation() {
     let ours = drawn(&views, &d, p1, &ViewInputs::screen(), Rotation::R0);
     let base = live(d.primary().bytes(), None, 1, Rotation::R90);
     assert_ne!(differing(&ours, &base), 0, "the header shows");
+}
+
+/// Watermarks not yet saved show as the saved file draws them: a text
+/// watermark over two pages, an image background under two, one page with
+/// both turned a quarter, each drawn from its group's overlay as the
+/// Rewrite draws it, the turned one turned once by its job, in a pane
+/// turned or not, the group's section writing what they share once. The
+/// page under neither draws from the base, and OCR's inputs, which draw no
+/// generator, view every page there.
+#[test]
+fn unsaved_watermarks_render_as_saved() {
+    let mut d = opened(file(4, XrefType::CrossReferenceTable), "a.pdf", None);
+    let [p0, p1, p2, p3] = [0, 1, 2, 3].map(|i| d.page(i).unwrap());
+    let rgb = image::RgbImage::from_fn(8, 4, |x, _| image::Rgb([30 * x as u8, 90, 160]));
+    let png = sheaf_image::encode::png(&rgb, 72).unwrap();
+    let blob = (d.store())
+        .intern(png.as_slice().into(), BlobKind::image(&png).unwrap())
+        .unwrap();
+    let image = WatermarkSpec {
+        content: WatermarkContent::Image {
+            image: Some(BlobSel::Id(blob.id())),
+            scale: 0.5,
+            opacity: 0.6,
+        },
+        position: GridPos::BottomRight,
+    };
+    let ops = vec![
+        fx::set_watermark(fx::watermark("Draft"), Z::Over, Some(&[p0, p2])),
+        fx::set_watermark(image, Z::Under, Some(&[p1, p2])),
+        fx::rotate(&[p2], Turn::Quarter),
+    ];
+    d.commit_ops(ops, "Watermarks").unwrap();
+    let saved = saved(&d);
+    let views = views();
+    let st = d.state();
+    for page in [p0, p1] {
+        let view = views.view(st, page, &ViewInputs::plugin()).unwrap();
+        assert!(matches!(view.engine, EngineKey::Group(..)), "{view:?}");
+        renders_as_saved(&views, &d, page, &saved, st.pos_of(page).unwrap() as u32);
+    }
+    let view = views.view(st, p2, &ViewInputs::plugin()).unwrap();
+    assert!(matches!(view.engine, EngineKey::Group(..)), "{view:?}");
+    assert_eq!(view.job.rotation, Rotation::R90);
+    for pane in [Rotation::R0, Rotation::R90] {
+        let ours = drawn(&views, &d, p2, &ViewInputs::plugin(), pane);
+        let theirs = live(&saved, None, 2, pane);
+        assert_eq!(differing(&ours, &theirs), 0, "{pane:?}");
+    }
+    let view = views.view(st, p3, &ViewInputs::plugin()).unwrap();
+    assert!(matches!(view.engine, EngineKey::Base(_)), "{view:?}");
+    for page in [p0, p1, p2, p3] {
+        let view = views.view(st, page, &ViewInputs::content_only()).unwrap();
+        assert!(matches!(view.engine, EngineKey::Base(_)), "{view:?}");
+    }
+    let plain = appearances(d.primary().bytes(), None, 0);
+    let ours = appearances_of(&views, &d, p0, &ViewInputs::plugin());
+    assert_ne!(differing(&ours, &plain), 0, "the watermark shows");
+    // The pages' deltas share what they draw with: the section writes each
+    // number once, and the watermark's font once.
+    let (_, r) = realized(&views, &d, p0, &ViewInputs::plugin());
+    let section = &r.segments[1];
+    let written = numbered(section);
+    let unique: HashSet<u32> = written.iter().copied().collect();
+    assert_eq!(unique.len(), written.len(), "{written:?}");
+    let font = b"/BaseFont/Helvetica-Bold";
+    let fonts = (section.windows(font.len())).filter(|w| w == font).count();
+    assert_eq!(fonts, 1);
 }
 
 /// `bytes` with its `startxref` pointing nowhere, so a reader rebuilds

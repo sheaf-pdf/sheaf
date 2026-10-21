@@ -17,7 +17,7 @@ use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::FixedCount;
 use crate::materialize::{self, AskAnswers, Came, How, StrategyKind, Why};
 use crate::model::{Document, FlatOutlineItem, Mark, PageId};
-use crate::save::{HeaderKept, derived_copy, rewrite, rewrite_to_path, text_string};
+use crate::save::{derived_copy, rewrite, rewrite_to_path, text_string};
 use crate::serialize::crypt::Crypt;
 use crate::store::{BlobKind, Src, Store};
 use crate::tx::fixture as fx;
@@ -2749,15 +2749,10 @@ fn header_footer_is_drawn_stored_and_strippable() {
         Some((stored, scope))
     );
     // Stripped, both pages come back clean.
-    let bytes = derived_copy(
-        &info(&Store::new(), &out),
-        &[0, 1],
-        HeaderKept::No,
-        &mut |pdf, d, _, at| {
-            assert!(crate::stamps::strip(pdf, d, at as u32, HEADER_FOOTER)?);
-            Ok(())
-        },
-    )
+    let bytes = derived_copy(&info(&Store::new(), &out), &[0, 1], &mut |pdf, d, at| {
+        assert!(crate::stamps::strip(pdf, d, at as u32)?);
+        Ok(())
+    })
     .unwrap();
     let clean = crate::forms::fixture::source(bytes);
     for i in 0..clean.page_count() {

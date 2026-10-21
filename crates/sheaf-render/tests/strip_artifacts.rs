@@ -130,7 +130,7 @@ fn stripped_leaves_the_rest(streams: &[&[u8]]) {
     assert_eq!(found, [(PaginationKind::Header, PagOrigin::Acrobat)]);
 
     let before = render(&mut pdf);
-    assert!(stamps::strip(&mut pdf, &mut dict, 0, stamps::HEADER_FOOTER).unwrap());
+    assert!(stamps::strip(&mut pdf, &mut dict, 0).unwrap());
     pdf.objects.insert(page, Object::Dictionary(dict));
     let after = render(&mut pdf);
     assert_eq!((before.width, before.height), (W, H));

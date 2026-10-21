@@ -70,10 +70,14 @@ pub mod graph;
 pub mod key;
 pub mod number;
 #[cfg(test)]
+pub(crate) mod others_tests;
+#[cfg(test)]
 mod overlay_tests;
 pub mod plan;
 #[cfg(test)]
 mod plan_tests;
+#[cfg(test)]
+mod recognized_tests;
 pub mod record;
 pub mod removal;
 #[cfg(test)]
@@ -86,6 +90,8 @@ mod saving_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod verify;
+#[cfg(test)]
+pub(crate) mod watermark_tests;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};

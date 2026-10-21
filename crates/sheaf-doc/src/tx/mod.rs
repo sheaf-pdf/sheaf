@@ -72,12 +72,16 @@ mod cascade_tests;
 mod stale_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod watermark_tests;
 
 pub use caps::{Actor, Cap, JobKind, Target, actor_allows, cap_of};
 pub use cascade::{Cascade, Rule};
 pub use error::{EditError, Notice, notice_text};
 pub use marks::{mark_changes, mark_kind, mark_patch, mark_style};
-pub use resolve::{At, BookmarkChange, Derive, ResolvedOp, incoming, op_name, ready_to_insert};
+pub use resolve::{
+    At, BookmarkChange, Derive, OthersFound, ResolvedOp, incoming, op_name, ready_to_insert,
+};
 
 /// Who the user is, as the host fills a mark in (§6.8): the name marks are
 /// by, the initials dynamic stamps write, and how they write the date and
@@ -634,17 +638,18 @@ impl Tx {
     /// `pins` holds first: what it made, and the ids it drew.
     fn lower(
         &mut self,
-        op: ResolvedOp,
+        mut op: ResolvedOp,
         reads: BTreeSet<Key>,
         pins: Drawn,
         p: &dyn Progress,
     ) -> Result<(OpResult, Drawn), EditError> {
         let before = self.state.clone();
-        let line = crate::describe::describe(&op, &before);
         let mut lw = Lower::new(Rec::new(before.clone()), &self.cx, p, op.name());
         lw.reads = reads;
         lw.pins = pins.reversed();
-        lower_op(&mut lw, &op)?;
+        lower_op(&mut lw, &mut op)?;
+        // Said once lowered, which may count what it found.
+        let line = crate::describe::describe(&op, &before);
         let cascades = cascade::settle(&mut lw)?;
         let Lower {
             rec,
@@ -1024,7 +1029,7 @@ impl<'a> Lower<'a> {
 }
 
 /// `op` lowered into `lw`.
-fn lower_op(lw: &mut Lower, op: &ResolvedOp) -> Result<(), EditError> {
+fn lower_op(lw: &mut Lower, op: &mut ResolvedOp) -> Result<(), EditError> {
     use ResolvedOp as R;
     match op {
         R::MovePages { pages, before } => {
@@ -1063,16 +1068,8 @@ fn lower_op(lw: &mut Lower, op: &ResolvedOp) -> Result<(), EditError> {
             pages::set_labels(lw, ranges.clone());
             Ok(())
         }
-        R::SetPageBase { pages, why } => {
+        R::SetPageBase { pages, .. } => {
             pages::set_base(lw, pages);
-            // A watermark's text is drawn into the copies, out of the
-            // model's sight: the flow says what it drew.
-            if let Derive::Watermark {
-                unencodable: true, ..
-            } = why
-            {
-                lw.notices.push(Notice::Unencodable);
-            }
             Ok(())
         }
         R::AddBookmark {
@@ -1147,9 +1144,24 @@ fn lower_op(lw: &mut Lower, op: &ResolvedOp) -> Result<(), EditError> {
             Ok(())
         }
         R::ClearOcrText { pages } => {
-            for &page in pages {
+            for &page in pages.iter() {
                 content::set_ocr(lw, page, None);
             }
+            Ok(())
+        }
+        R::SetWatermark {
+            content: drawn,
+            position,
+            z,
+            scope,
+        } => content::set_watermark(lw, drawn, *position, *z, scope.as_ref()),
+        R::RemoveWatermark {
+            z,
+            pages,
+            include_authored,
+            others,
+        } => {
+            *others = content::remove_watermark(lw, *z, pages, *include_authored);
             Ok(())
         }
         R::SetHeaderFooter { spec, scope } => {

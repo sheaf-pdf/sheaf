@@ -19,13 +19,15 @@ use std::sync::{Arc, OnceLock};
 
 use bitflags::bitflags;
 use im::Vector;
+use sheaf_edit::Z;
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
+use crate::content::{GenId, PagOrigin, PaginationKind};
 use crate::forms::{FieldId, Value};
 use crate::labels::LabelSpec;
 use crate::model::{
-    AnnotBody, AnnotRec, Bookmark, DocState, FieldNode, Foreign, Generator, Layer, PageDef, PageId,
-    Static, Terminal, Widget,
+    AnnotBody, AnnotRec, Bookmark, DocState, FieldNode, Filter, Foreign, GenSpec, Generator, Layer,
+    PageDef, PageId, Scope, Static, Terminal, WatermarkContent, WatermarkGen, Widget,
 };
 use crate::prim::{Key, Prim, Val, same};
 use crate::store::BlobId;
@@ -220,6 +222,22 @@ pub enum RemovedKind {
     LabelPrefixes,
     /// A header and footer drawn with other text, or no longer drawn.
     HeaderFooter,
+    /// A watermark drawing another text, image or page, on fewer pages, or
+    /// no longer drawn; `text`, when it drew text.
+    Watermark {
+        text: bool,
+    },
+    /// Likewise a background.
+    Background {
+        text: bool,
+    },
+    /// Pages a filter, or a generator's `replaces`, takes others'
+    /// watermarks or backgrounds off: another file's, another program's
+    /// (§3.4, §11.4).
+    Filtered,
+    /// Pages a filter takes the settings an older sheaf kept out of, an
+    /// image's path among them, what they drew kept (§15's `StripLegacy`).
+    OlderSettings,
     /// The form's XFA part, which a save drops (§11.8): one.
     XfaDatasets,
     /// What a recovery sidecar's sections removed or replaced (§11.10),
@@ -242,6 +260,8 @@ impl RemovedKind {
             | K::Widgets
             | K::Fields
             | K::Bookmarks
+            | K::Filtered
+            | K::OlderSettings
             | K::XfaDatasets
             | K::Recovered
             | K::Found => false,
@@ -252,6 +272,7 @@ impl RemovedKind {
             | K::BookmarkTitles
             | K::LabelPrefixes
             | K::HeaderFooter => true,
+            K::Watermark { text } | K::Background { text } => text,
         }
     }
 }
@@ -273,6 +294,16 @@ impl fmt::Display for Removed {
             K::BookmarkTitles => ("bookmark's title", "bookmarks' titles"),
             K::LabelPrefixes => ("page label prefix", "page label prefixes"),
             K::HeaderFooter => ("header and footer", "headers and footers"),
+            K::Watermark { .. } => ("watermark", "watermarks"),
+            K::Background { .. } => ("background", "backgrounds"),
+            K::Filtered => (
+                "page's watermark or background from another program or file",
+                "pages' watermarks or backgrounds from other programs or files",
+            ),
+            K::OlderSettings => (
+                "page's watermark settings from an older sheaf",
+                "pages' watermark settings from an older sheaf",
+            ),
             K::XfaDatasets => ("form's XFA part", "forms' XFA parts"),
             K::Recovered => return f.write_str("what the recovered changes removed"),
             K::Found => return f.write_str("removed text the removal check found"),
@@ -307,7 +338,9 @@ pub struct PathEffects {
 }
 
 /// What [`classify`] judges a change against: the saved file's state, and
-/// the state being saved.
+/// the state being saved, and through their pages' sources the blocks
+/// those pages hold, which a save's path reads for what a watermark
+/// replaces and a step never does.
 pub struct ClassifyCx<'a> {
     pub saved: &'a DocState,
     pub target: &'a DocState,
@@ -517,7 +550,7 @@ fn judged(
         Key::Field(_) => field(fields(before)?, fields(after)?, found),
         Key::Form => Effects::of(Flags::FORM, SigClass::OTHER),
         Key::Labels => page_labels(labels(before)?, labels(after)?, found),
-        Key::Generator(_) => generator(generators(before)?, generators(after)?, found),
+        Key::Generator(_) => generator(generators(before)?, generators(after)?, cx, found),
     })
 }
 
@@ -560,6 +593,24 @@ fn page(
     let now = b.map_or(&none, |def| &def.content.over);
     if was != now {
         flags |= Flags::CONTENT;
+    }
+    // A filter added takes out what the page drew, or what an older sheaf
+    // kept in it; one gone puts it back.
+    let unfiltered = Vector::new();
+    let had = (a.filter(|a| b.is_some_and(|b| a.base == b.base)))
+        .map_or(&unfiltered, |def| &def.content.filters);
+    let has = b.map_or(&unfiltered, |def| &def.content.filters);
+    if had != has {
+        flags |= Flags::CONTENT;
+    }
+    let added = || has.iter().filter(|f| !had.contains(f));
+    if added().any(|f| !matches!(f, Filter::StripLegacy(_))) {
+        flags |= Flags::REMOVES;
+        found.removed(RemovedKind::Filtered, 1);
+    }
+    if added().any(|f| matches!(f, Filter::StripLegacy(_))) {
+        flags |= Flags::REMOVES;
+        found.removed(RemovedKind::OlderSettings, 1);
     }
     let shown = |l: &Layer| match &l.body {
         Static::OcrText(text) => cx.shown().ocr.contains(&addr(text)),
@@ -881,22 +932,125 @@ fn page_labels(
 }
 
 /// A generator added, changed or removed. One that was drawn in the saved
-/// file, changed or gone, takes the text it drew with it.
-fn generator(a: Option<&Arc<Generator>>, b: Option<&Arc<Generator>>, found: &mut Found) -> Effects {
+/// file, gone, takes what it drew with it; so does a watermark drawing
+/// another text, image or page, or on fewer pages, and a header/footer
+/// changed at all. A watermark only laid out otherwise is drawn again
+/// (§7.1). One that replaces others' artifacts on pages of the saved file
+/// that drew them takes those off ([`replaced`]).
+fn generator(
+    a: Option<&Arc<Generator>>,
+    b: Option<&Arc<Generator>>,
+    cx: &ClassifyCx,
+    found: &mut Found,
+) -> Effects {
+    let drawn = |b: Option<&Arc<Generator>>| match b {
+        Some(_) => Flags::CONTENT,
+        None => Flags::empty(),
+    };
     let flags = match (a, b) {
         (None, None) => Flags::empty(),
         (None, Some(_)) => Flags::CONTENT,
-        (Some(_), b) => {
-            found.removed(RemovedKind::HeaderFooter, 1);
-            let drawn = if b.is_some() {
+        (Some(a), b) => match (&a.spec, b.map(|b| &b.spec)) {
+            (GenSpec::Watermark(was), Some(GenSpec::Watermark(now))) if !unsaid(was, now, cx) => {
                 Flags::CONTENT
-            } else {
-                Flags::empty()
-            };
-            drawn | Flags::REMOVES | Flags::REPLACES_TEXT
+            }
+            (GenSpec::Watermark(was), _) => {
+                let text = matches!(was.content, WatermarkContent::Text { .. });
+                let kind = match was.z {
+                    Z::Over => RemovedKind::Watermark { text },
+                    Z::Under => RemovedKind::Background { text },
+                };
+                found.removed(kind, 1);
+                let replaced = match text {
+                    true => Flags::REPLACES_TEXT,
+                    false => Flags::empty(),
+                };
+                drawn(b) | Flags::REMOVES | replaced
+            }
+            (GenSpec::HeaderFooter(_), _) => {
+                found.removed(RemovedKind::HeaderFooter, 1);
+                drawn(b) | Flags::REMOVES | Flags::REPLACES_TEXT
+            }
+        },
+    };
+    let others = match replaced(b, cx) {
+        0 => Flags::empty(),
+        n => {
+            found.removed(RemovedKind::Filtered, n);
+            Flags::CONTENT | Flags::REMOVES
         }
     };
-    Effects::of(flags, SigClass::OTHER)
+    Effects::of(flags | others, SigClass::OTHER)
+}
+
+/// How many pages of the saved file watermark `b` takes others' artifacts
+/// off as it's drawn there now (§7.1's `replaces` row): those it covers
+/// that showed the same base page then, which holds pagination artifacts
+/// of a kind it replaces and the saved state's generators there didn't,
+/// drawn by any tool but the author ([`PagOrigin::REPLACED`]), a block of
+/// a generator the document backs aside. Read from the pages' blocks, which
+/// their sources keep once read: judging a save's path reads them, and a
+/// step's never does, judging what one step did in O(what it touched).
+fn replaced(b: Option<&Arc<Generator>>, cx: &ClassifyCx) -> usize {
+    let Some(wm) = b.and_then(|g| g.spec.watermark()) else {
+        return 0;
+    };
+    if cx.step || wm.replaces.is_empty() {
+        return 0;
+    }
+    let origins = BTreeSet::from(PagOrigin::REPLACED);
+    let pages: Box<dyn Iterator<Item = &PageId>> = match &wm.scope {
+        Scope::All => Box::new(cx.target.order().iter()),
+        Scope::Pages(on) => Box::new(on.iter()),
+    };
+    let mut n = 0;
+    for &p in pages {
+        let (Some(then), Some(now)) = (cx.saved.def(p), cx.target.def(p)) else {
+            continue;
+        };
+        if then.base != now.base {
+            continue;
+        }
+        let saved_replaced = |k: &PaginationKind| {
+            (cx.saved.generators().values()).any(|g| g.covers(p) && g.replaces().contains(k))
+        };
+        let kinds: BTreeSet<PaginationKind> = (wm.replaces.iter())
+            .filter(|k| !saved_replaced(k))
+            .copied()
+            .collect();
+        if kinds.is_empty() {
+            continue;
+        }
+        let Ok(blocks) = then.base.src.blocks(then.base.index) else {
+            continue;
+        };
+        let ours = |id: Option<GenId>| id.is_some_and(|id| cx.target.backs(id, p));
+        if (blocks.selected(&kinds, &origins)).any(|r| !ours(r.generator)) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Whether watermark `was`, become `now`, no longer draws something it
+/// drew: another text, image or page, or not on a page it was on that's
+/// still a page. Where it is, how big, turned, colored or see-through it
+/// is, and its z, are how it's laid out.
+fn unsaid(was: &WatermarkGen, now: &WatermarkGen, cx: &ClassifyCx) -> bool {
+    use WatermarkContent as C;
+    let another = match (&was.content, &now.content) {
+        (C::Text { text: a, .. }, C::Text { text: b, .. }) => a != b,
+        (C::Image { image: a, .. }, C::Image { image: b, .. }) => a != b,
+        (C::Page { page: a, .. }, C::Page { page: b, .. }) => a != b,
+        _ => true,
+    };
+    let off = |on: &im::OrdSet<PageId>, p: &PageId| !on.contains(p) && cx.target.def(*p).is_some();
+    another
+        || match (&was.scope, &now.scope) {
+            (_, Scope::All) => false,
+            (Scope::All, Scope::Pages(on)) => cx.saved.order().iter().any(|p| off(on, p)),
+            (Scope::Pages(was), Scope::Pages(on)) => was.iter().any(|p| off(on, p)),
+        }
 }
 
 /// Adds the full names of the fields a change to `key` touches to `names`,

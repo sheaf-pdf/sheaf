@@ -6,8 +6,9 @@
 //!
 //! What a source says about itself is a pure function of its bytes, read
 //! once: the page table when it opens; its conformance claims, what its
-//! pages hold beside their content, its form and signatures, and the
-//! header and footer sheaf drew, when first asked; and whether PDFium
+//! pages hold beside their content, its form and signatures, the header
+//! and footer sheaf drew, and the watermarks and backgrounds and the
+//! streams of their blocks, when first asked; and whether PDFium
 //! refuses the bytes, once an engine has tried them. Sources come from the
 //! [`Store`](crate::store::Store), one per distinct file.
 
@@ -19,25 +20,28 @@ pub(crate) mod lazy_tests;
 mod limits;
 mod pages;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 
 use in_progress::{NoProgress, Progress};
 use lopdf::{LazyPdf, Object, ObjectId, XrefFacts};
 use sheaf_edit::PageSize;
 
-use crate::content::{ContentError, DrawnForms, PageBlocks};
+use crate::content::{ContentError, DrawnForms, Marker, PageBlocks};
 use crate::forms::FileForm;
 use crate::forms::sigs::Signatures;
+use crate::generate::Saved;
 use crate::geom::Geom;
+use crate::materialize::emit::catalog::GENERATORS;
 use crate::model::FlatOutlineItem;
 use crate::open::FileAnnots;
 use crate::serialize::crypt::Crypt;
 use crate::stamps::HeaderFooter;
-use crate::store::{Blob, BlobCollision, BlobId, Src};
+use crate::store::{Blob, BlobCollision, BlobId, BlobKind, MemoryKind, Origin, Src};
 
 pub use conformance::{Conformance, PdfA};
 pub use limits::{ContentLimits, FormLimits, Limits, PageTreeLimits};
@@ -55,6 +59,13 @@ pub struct Source {
     /// its pages draw.
     blocks: Box<[OnceLock<Arc<PageBlocks>>]>,
     forms: DrawnForms,
+    /// Whether its pages may hold sheaf's markers, each page's, once asked
+    /// for, and what each stream read for them is marked as, so a stream
+    /// pages share (a block, an isolating stream) is read once.
+    marked: OnceLock<bool>,
+    markers: Box<[OnceLock<Markers>]>,
+    stream_marks: Mutex<HashMap<ObjectId, Option<Marker>>>,
+    generators: OnceLock<Arc<[Saved]>>,
     conformance: OnceLock<Conformance>,
     annots: OnceLock<Arc<FileAnnots>>,
     outline: OnceLock<Arc<[FlatOutlineItem]>>,
@@ -68,6 +79,10 @@ pub struct Source {
 /// A header and footer sheaf drew, as its file's catalog stores it, and
 /// the indexes of the pages it's on (None: every page).
 pub type StoredHeaderFooter = (HeaderFooter, Option<Vec<usize>>);
+
+/// The streams of a page's `/Contents` sheaf marked, in order, by object
+/// ([`Source::markers`]).
+pub type Markers = Arc<[(ObjectId, Marker)]>;
 
 /// An object of a source: what a record was read from, so what sheaf
 /// doesn't model of it survives (M10.5 §2, rule 1). It pins the source.
@@ -138,6 +153,10 @@ impl Source {
             limits: *limits,
             blocks: pages.iter().map(|_| OnceLock::new()).collect(),
             forms: DrawnForms::default(),
+            marked: OnceLock::new(),
+            markers: pages.iter().map(|_| OnceLock::new()).collect(),
+            stream_marks: Mutex::default(),
+            generators: OnceLock::new(),
             pages,
             conformance: OnceLock::new(),
             annots: OnceLock::new(),
@@ -284,6 +303,59 @@ impl Source {
         self.blocks
             .get(index as usize)
             .is_some_and(|slot| slot.get().is_some())
+    }
+
+    /// Whether its pages may hold sheaf's blocks and the streams that
+    /// isolate them (§11.4): its catalog says what sheaf's generators are
+    /// (`/SheafGenerators`), or it's a copy sheaf made of another file's
+    /// pages (`Derived`, until slice 17), which keeps their streams but not
+    /// the catalog. The markers of a file with neither aren't read, so the
+    /// pages of every other file are written as they were.
+    pub fn marked(&self) -> bool {
+        *self.marked.get_or_init(|| {
+            let derived = matches!(
+                self.blob.kind(),
+                BlobKind::Pdf {
+                    origin: Origin::Memory(MemoryKind::Derived),
+                    ..
+                }
+            );
+            derived || (self.pdf.catalog()).is_ok_and(|c| c.has(GENERATORS.as_bytes()))
+        })
+    }
+
+    /// The streams of page `index`'s `/Contents` that sheaf marked, by
+    /// their dictionaries alone, read once, never decompressed: its
+    /// generators' blocks and the streams that isolate the page's own
+    /// content. None on a page of a file that isn't [`marked`](Self::marked),
+    /// or past the last page; a stream that can't be read is none.
+    pub fn markers(&self, index: u32) -> Markers {
+        static NONE: LazyLock<Markers> = LazyLock::new(|| Arc::from([]));
+        let (Some(slot), Some(page)) = (self.markers.get(index as usize), self.page(index)) else {
+            return NONE.clone();
+        };
+        if !self.marked() {
+            return NONE.clone();
+        }
+        slot.get_or_init(|| {
+            let read = |id: ObjectId| {
+                let obj = self.pdf.object_unkept(id).ok()?;
+                Marker::of(&obj.as_stream().ok()?.dict)
+            };
+            let mut known = (self.stream_marks.lock()).unwrap_or_else(PoisonError::into_inner);
+            (page.contents.iter())
+                .filter_map(|&id| Some((id, (*known.entry(id).or_insert_with(|| read(id)))?)))
+                .collect()
+        })
+        .clone()
+    }
+
+    /// The watermarks and backgrounds its catalog and blocks say sheaf drew
+    /// on it (§3.5, [`crate::generate::read`]), read once; none for a file
+    /// that isn't [`marked`](Self::marked). Each that can't be read whole
+    /// is passed over, with a log line.
+    pub fn generators(&self) -> &Arc<[Saved]> {
+        (self.generators).get_or_init(|| crate::generate::read(self).into())
     }
 
     /// What its pages hold beside their content: sheaf's marks and other

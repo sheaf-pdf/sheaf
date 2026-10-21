@@ -126,6 +126,8 @@ pub fn cap_of(op: &ResolvedOp, targets: &[Target]) -> Cap {
         R::SetPageBoxes { .. }
         | R::AdoptAnnotations { .. }
         | R::ClearOcrText { .. }
+        | R::SetWatermark { .. }
+        | R::RemoveWatermark { .. }
         | R::SetHeaderFooter { .. }
         | R::RemoveHeaderFooter { .. } => Cap::Approval,
         R::InsertPages { .. }

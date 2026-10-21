@@ -13,8 +13,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, Object, ObjectId};
-use sheaf_edit::{BookmarkPatch, Turn};
+use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
+use sheaf_edit::{BookmarkPatch, Turn, Z};
 
 use super::removal_tests::{layer, note, opened, said, scratch, text_file, warned};
 use super::rewrite_tests::says;
@@ -838,5 +838,99 @@ fn a_rewrite_says_why() {
     assert_eq!(
         removed(RemovedKind::Recovered, 1).to_string(),
         "what the recovered changes removed"
+    );
+}
+
+/// A file of one page whose XMP metadata holds `description`, its claims
+/// ([`crate::source::tests::xmp`]).
+fn claiming(description: &str) -> Vec<u8> {
+    let mut pdf = Pdf::load_mem(&text_file(1)).unwrap();
+    let xml = crate::source::tests::xmp(description);
+    let metadata = Stream::new(
+        dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+        xml.into_bytes(),
+    );
+    let metadata = pdf.add_object(metadata);
+    pdf.catalog_mut().unwrap().set("Metadata", metadata);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+/// A save that draws a watermark, a background or the header and footer
+/// on a file claiming PDF/A or PDF/UA says the saved file no longer
+/// conforms, naming the claims and what's drawn (proposal 39): a Rewrite
+/// all it draws, an Append those it changes. One that draws nothing
+/// doesn't, nor one of a file that claims nothing, and a claim that can't
+/// be read is logged.
+#[test]
+fn a_claim_what_sheaf_draws_breaks_gets_a_note() {
+    let dir = scratch();
+    let pdfa = "<rdf:Description rdf:about=\"\" \
+         xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"2\" pdfaid:conformance=\"B\"/>";
+    let pdfua = "<rdf:Description rdf:about=\"\" \
+         xmlns:pdfuaid=\"http://www.aiim.org/pdfua/ns/id/\" pdfuaid:part=\"1\"/>";
+    let unreadable = "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" \
+         pdfaid:part=\"two\"/>";
+    let claims = |plan: &SavePlan| -> Vec<String> {
+        (plan.notes.iter())
+            .map(|n| n.0.clone())
+            .filter(|n| n.contains("claims"))
+            .collect()
+    };
+    let watermark = || fx::set_watermark(fx::watermark("Draft"), Z::Over, None);
+    let told = |claimed: &str| {
+        format!(
+            "This file claims {claimed}; the watermark sheaf draws on it isn't made to conform, \
+             so the saved file no longer does"
+        )
+    };
+    // PDF/A-2b, before a save and after one, when an Append draws it.
+    let (path, mut doc) = opened(&dir, "pdfa.pdf", &claiming(pdfa));
+    assert_eq!(claims(&planned(&doc, &path)), Vec::<String>::new());
+    doc.commit_ops(vec![watermark()], "watermark").unwrap();
+    let plan = planned(&doc, &path);
+    assert!(matches!(plan.strategy, Strategy::Append { .. }), "{plan:?}");
+    assert_eq!(claims(&plan), [told("PDF/A-2b")]);
+    let report = saved(&mut doc, &path, AskAnswers::default()).unwrap();
+    assert!(report.notes.contains(&Note(told("PDF/A-2b"))), "{report:?}");
+    // An Append that draws none, the claim broken already.
+    comment(&mut doc, "later");
+    let plan = planned(&doc, &path);
+    assert!(matches!(plan.strategy, Strategy::Append { .. }), "{plan:?}");
+    assert_eq!(claims(&plan), Vec::<String>::new());
+    // A Rewrite says it, of everything it draws.
+    let page = doc.page(0).unwrap();
+    let background = fx::set_watermark(fx::watermark("Copy"), Z::Under, None);
+    let header = fx::set_header(fx::header("Header"), Some(&[page]));
+    doc.commit_ops(vec![background, header], "more").unwrap();
+    let plan = planned(&doc, &path);
+    assert!(
+        matches!(plan.strategy, Strategy::Rewrite { .. }),
+        "{plan:?}"
+    );
+    let all = "This file claims PDF/A-2b; the watermark, the background and the header and \
+         footer sheaf draws on it aren't made to conform, so the saved file no longer does";
+    assert_eq!(claims(&plan), [all]);
+    // PDF/UA-1, and both.
+    let (path, mut doc) = opened(&dir, "pdfua.pdf", &claiming(pdfua));
+    doc.commit_ops(vec![watermark()], "watermark").unwrap();
+    assert_eq!(claims(&planned(&doc, &path)), [told("PDF/UA-1")]);
+    let (path, mut doc) = opened(&dir, "both.pdf", &claiming(&format!("{pdfa}{pdfua}")));
+    doc.commit_ops(vec![watermark()], "watermark").unwrap();
+    let both = told("PDF/A-2b and PDF/UA-1");
+    assert_eq!(claims(&planned(&doc, &path)), [both]);
+    // No claim, no note.
+    let (path, mut doc) = opened(&dir, "plain.pdf", &text_file(1));
+    doc.commit_ops(vec![watermark()], "watermark").unwrap();
+    assert_eq!(claims(&planned(&doc, &path)), Vec::<String>::new());
+    // A claim that can't be read: logged, no note.
+    let (path, mut doc) = opened(&dir, "unreadable.pdf", &claiming(unreadable));
+    doc.commit_ops(vec![watermark()], "watermark").unwrap();
+    let (plan, logged) = warned(|| planned(&doc, &path));
+    assert_eq!(claims(&plan), Vec::<String>::new());
+    assert!(
+        logged.iter().any(|w| w.contains("conformance claims")),
+        "{logged:?}"
     );
 }

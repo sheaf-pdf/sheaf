@@ -8,8 +8,11 @@
 //! The outline comes from its emitter ([`super::outline`]), and the form
 //! from its ([`super::form`]), which also gives `/Names /JavaScript` when
 //! forms from other files bring document scripts, and `/Perms` without
-//! Reader's usage rights when the save drops them (`DropUr3`). The header
-//! gives the version (§11.7), so a Rewrite writes no `/Version`.
+//! Reader's usage rights when the save drops them (`DropUr3`).
+//! `/SheafGenerators` names a string of its own
+//! ([`ObjKey::Generators`]) saying what the watermarks are, when there
+//! are any. The header gives the version (§11.7), so a Rewrite writes no
+//! `/Version`.
 //!
 //! An Append's catalog ([`appended`]) holds the keys the state doesn't own
 //! as the saved file holds them ([`RootValues`]), so a key a save dropped
@@ -91,7 +94,20 @@ pub(crate) fn catalog(cx: &mut Cx, order: &[PageId]) {
         let settings = crate::stamps::to_catalog(hf, order);
         out.set(crate::stamps::CATALOG_KEY, settings);
     }
+    if let Some(json) = crate::generate::catalog_json(st, |c| super::content::drawn_as(cx, c)) {
+        cx.push(ObjKey::Generators, generators(json));
+        out.set(GENERATORS, cx.placeholder(ObjKey::Generators));
+    }
     cx.push(ObjKey::Catalog, Object::Dictionary(out));
+}
+
+/// The catalog's key for what the document's generators are.
+pub(crate) const GENERATORS: &str = "SheafGenerators";
+
+/// `/SheafGenerators`' object: its JSON, a string of its own
+/// ([`crate::generate::catalog_json`]).
+pub(crate) fn generators(json: Vec<u8>) -> Object {
+    Object::String(json, lopdf::StringFormat::Literal)
 }
 
 /// What an Append's catalog names that its emission decided: the page
@@ -175,6 +191,9 @@ pub(crate) fn appended(cx: &mut Cx, order: &[PageId], parts: Parts) {
     if let Some(hf) = st.header_footer() {
         let settings = crate::stamps::to_catalog(hf, order);
         out.set(crate::stamps::CATALOG_KEY, settings);
+    }
+    if (st.generators().values()).any(|g| g.spec.watermark().is_some()) {
+        out.set(GENERATORS, cx.placeholder(ObjKey::Generators));
     }
     let version: PdfVersion = cx.version.max(record.pdf_version);
     out.set("Version", Object::Name(version.to_string().into_bytes()));

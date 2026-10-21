@@ -4,18 +4,18 @@
 //! read through accessors: no struct literal outside this module can make
 //! one whose derived indexes don't fit its tables.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::sync::{Arc, OnceLock};
 
 use im::Vector;
 use lopdf::ObjectId;
-use sheaf_edit::Rotation;
+use sheaf_edit::{Rotation, Z};
 
 use super::{
-    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, GenId, GenSpec, Generator, Mark,
-    OutlineId, PageDef, PageId, Terminal, Widget,
+    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, GenId, Generator, Mark, OutlineId,
+    PageDef, PageId, Scope, Terminal, Widget,
 };
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::forms::{FieldId, full_name_of};
@@ -23,7 +23,7 @@ use crate::geom::Geom;
 use crate::labels::{LabelRange, LabelSpec};
 use crate::prim::{Key, Mismatch, Val};
 use crate::stamps::HeaderFooter;
-use crate::store::BlobId;
+use crate::store::{BlobId, BlobKind, MemoryKind, Origin};
 use crate::text_layer::TextLayer;
 
 /// One immutable snapshot of the document. Only tests compare whole
@@ -52,11 +52,23 @@ pub struct DocState {
     /// What sheaf draws on pages from one definition each:
     /// [`Key::Generator`].
     generators: im::OrdMap<GenId, Arc<Generator>>,
+    /// The generators the file the document opened had, by id, whatever
+    /// became of them since: whose blocks in its pages are its own
+    /// ([`DocState::backs`]). Never changed by an edit.
+    opened_generators: Arc<Opened>,
     /// Every node of the form's field tree: [`Key::Field`].
     fields: im::OrdMap<FieldId, Arc<FieldNode>>,
     /// The form as a whole: [`Key::Form`].
     form: Arc<FormDoc>,
     idx: Indexes,
+}
+
+/// The generators the file a document opened had, by id, and that file
+/// ([`DocState::backs`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Opened {
+    file: Option<BlobId>,
+    ids: BTreeSet<GenId>,
 }
 
 /// What a state derives from its tables to find things without a scan:
@@ -163,6 +175,7 @@ impl PartialEq for DocState {
             annots,
             labels,
             generators,
+            opened_generators,
             fields,
             form,
             idx: _,
@@ -176,6 +189,7 @@ impl PartialEq for DocState {
             && *annots == other.annots
             && *labels == other.labels
             && *generators == other.generators
+            && *opened_generators == other.opened_generators
             && *fields == other.fields
             && *form == other.form
     }
@@ -254,6 +268,28 @@ impl Builder {
         self
     }
 
+    /// `ids`, the generators `file`, the file the document opened, has
+    /// ([`DocState::backs`]).
+    pub fn opened_generators(
+        mut self,
+        file: BlobId,
+        ids: impl IntoIterator<Item = GenId>,
+    ) -> Builder {
+        self.st.opened_generators = Arc::new(Opened {
+            file: Some(file),
+            ids: ids.into_iter().collect(),
+        });
+        self
+    }
+
+    /// The file the document `st` is a state of opened, and the generators
+    /// it had, as `st` has them: what a state made of `st`'s pages backs as
+    /// `st` does.
+    pub fn opened_as(mut self, st: &DocState) -> Builder {
+        self.st.opened_generators = st.opened_generators.clone();
+        self
+    }
+
     /// `fields`, every node of the form's field tree, and `form`, the
     /// form they make, in place of those it has.
     pub fn form(
@@ -294,6 +330,7 @@ impl DocState {
                 annots: im::HashMap::new(),
                 labels: None,
                 generators: im::OrdMap::new(),
+                opened_generators: Arc::default(),
                 fields: im::OrdMap::new(),
                 form: Arc::default(),
                 idx: Indexes::default(),
@@ -583,6 +620,8 @@ impl DocState {
             annots,
             labels: _,
             generators,
+            // Read through `backs`.
+            opened_generators: _,
             fields,
             form,
             idx: _,
@@ -693,6 +732,42 @@ impl DocState {
         self.generators
             .values()
             .find_map(|g| g.spec.header_footer())
+    }
+
+    /// The generator of the watermark (`z` over) or the background
+    /// (under).
+    pub fn watermark(&self, z: Z) -> Option<&Arc<Generator>> {
+        (self.generators.values()).find(|g| g.spec.watermark().is_some_and(|wm| wm.z == z))
+    }
+
+    /// Whether a block of generator `id` in page `page`'s own content is
+    /// the document's (M10.5 §3.5): `id` is a generator of its that covers
+    /// the page, and draws it anew; or the page is one of the file it
+    /// opened (or of a copy sheaf derived of pages, until slice 17), and
+    /// `id` one of its generators, or one that file had, which an edit
+    /// since removed. Such a block is what a save lays out again or leaves
+    /// out, never the page's content; any other, another file's, is, though
+    /// it names a generator of the document's, as every revision of a file
+    /// does: a page brought in from another revision keeps it.
+    pub fn backs(&self, id: GenId, page: PageId) -> bool {
+        if self.generators.get(&id).is_some_and(|g| g.covers(page)) {
+            return true;
+        }
+        let opened = &self.opened_generators;
+        let file = |def: &Arc<PageDef>| {
+            let src = &def.base.src;
+            Some(src.id()) == opened.file
+                || matches!(
+                    src.blob().kind(),
+                    BlobKind::Pdf {
+                        origin: Origin::Memory(MemoryKind::Derived),
+                        ..
+                    }
+                )
+        };
+        (self.generators.contains_key(&id) || opened.ids.contains(&id))
+            && opened.file.is_some()
+            && self.pages.get(&page).is_some_and(file)
     }
 
     /// Annotation `id`.
@@ -988,6 +1063,7 @@ impl DocState {
             annots,
             labels,
             generators,
+            opened_generators: _,
             fields,
             form,
             idx,
@@ -1174,10 +1250,22 @@ impl DocState {
         hold(headers <= 1, || {
             Invariant::Generators(format!("{headers} draw a header/footer"))
         })?;
+        for z in [Z::Under, Z::Over] {
+            let drawn = (generators.values())
+                .filter(|g| g.spec.watermark().is_some_and(|wm| wm.z == z))
+                .count();
+            hold(drawn <= 1, || {
+                Invariant::Generators(format!("{drawn} draw the {z:?} watermark"))
+            })?;
+        }
         for g in generators.values() {
-            let scope = match &g.spec {
-                GenSpec::HeaderFooter(hf) => hf.pages.iter().flatten(),
+            let Scope::Pages(scope) = &*g.scope() else {
+                continue;
             };
+            let named = g.spec.header_footer().is_some() || !scope.is_empty();
+            hold(named, || {
+                Invariant::Generators(format!("{:?} is on no page", g.id))
+            })?;
             for &page in scope {
                 hold(pages.contains_key(&page), || {
                     Invariant::Generators(format!("{:?} is on {page:?}, which isn't a page", g.id))
@@ -1236,7 +1324,8 @@ impl DocState {
     /// a version other than its own (M10.5 §8.5's `Stale::Validate`), at
     /// `keys`, breaks a rule of uniqueness that neither state it came from
     /// (`was`: that version's and the transaction's) broke: the generator
-    /// of a written one's kind and z ([`GenSpec::same_place`]), the
+    /// of a written one's kind and z
+    /// ([`GenSpec::same_place`](super::GenSpec::same_place)), the
     /// annotation a written one's `/NM` names on its page too, the node a
     /// written one's full name, or one under it, names too, the page that
     /// shows the copy of its source page a written one now does. Files
@@ -1347,11 +1436,10 @@ impl DocState {
                     named.extend(self.labels.iter().flat_map(|l| l.iter().map(|s| s.start)))
                 }
                 Key::Generator(g) => {
-                    if let Some(g) = self.generators.get(&g) {
-                        let scope = match &g.spec {
-                            GenSpec::HeaderFooter(hf) => hf.pages.iter().flatten(),
-                        };
-                        named.extend(scope);
+                    if let Some(g) = self.generators.get(&g)
+                        && let Scope::Pages(scope) = &*g.scope()
+                    {
+                        named.extend(scope.iter().copied());
                     }
                 }
                 Key::Order
@@ -1388,6 +1476,8 @@ impl DocState {
             annots,
             labels: _,
             generators,
+            // One for every version, which none changes.
+            opened_generators: _,
             fields,
             form: _,
             idx,

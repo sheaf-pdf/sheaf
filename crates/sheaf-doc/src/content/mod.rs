@@ -9,9 +9,11 @@
 //!   read within [`ContentLimits`](crate::source::ContentLimits), and
 //!   places in it mapped back to a stream.
 //! - [`marked`], [`balance`] and [`names_used`]: its marked ranges, its
-//!   `q`/`Q` balance and the resource names it uses.
+//!   `q`/`Q` balance and the resource names it uses; [`kept`], the last
+//!   two of what's left once ranges are taken out.
 //! - [`splice`]: its streams with ranges taken out, byte for byte, when
-//!   that's safe, and refused when it isn't.
+//!   that's safe, and refused when it isn't; and [`without_keys`], a
+//!   marked range's property list written again without some keys.
 //! - [`PageBlocks`]: its pagination artifacts and who drew them, and
 //!   sheaf's own blocks.
 //! - [`text_bag`]: the words it draws, decoded through its fonts.
@@ -48,16 +50,16 @@ mod writer_tests;
 
 pub use balance::{Balance, balance};
 pub use blocks::{
-    BlockAt, BlockId, ContentError, DrawnForms, GenId, LegacyOcr, PagOrigin, PageBlocks,
-    Pagination, PaginationKind, SheafBlock, SheafBlockRef,
+    BlockAt, BlockId, ContentError, DrawnForms, GenId, LegacyOcr, Marker, PagOrigin, PageBlocks,
+    Pagination, PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{Font, FontRes, Glyphless, Std14, Unencoded, wrap_with};
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};
 pub use marked::{Marked, PropertiesDict, Props, marked};
-pub use names::{NameSet, ResKind, names_used};
+pub use names::{Kept, NameSet, ResKind, kept, names_used};
 pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, contents};
 pub use res::{Res, ResBody, ResId};
-pub use splice::{SpliceError, splice};
+pub use splice::{Rewrite, SpliceError, Spliced, splice, splice_each, without_keys};
 pub use text_bag::{FontDecoders, TextBag, text_bag};
 pub use to_lopdf::ResObjects;
 pub use writer::{

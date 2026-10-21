@@ -12,6 +12,7 @@ use gpui::{
     Subscription, Task, Window, WindowHandle, anchored, deferred, div, prelude::*, px,
 };
 use sheaf_doc::Snapshot;
+use sheaf_edit::Z;
 use sheaf_ui::frame;
 use sheaf_ui::menu_bar::MenuBar;
 use sheaf_ui::palette::{Palette, PaletteEvent};
@@ -805,10 +806,10 @@ impl Workspace {
     }
 
     /// Follow a document's events: each change it goes through reaches
-    /// the Page Labels, Header & Footer and Crop Pages dialogs, while open,
-    /// whose previews follow the document; a document opened in place of
-    /// another (a recovery's) closes the dialogs opened on that one; and
-    /// every event reaches the plugins that want it.
+    /// the Page Labels, Header & Footer, Watermark and Crop Pages dialogs,
+    /// while open, whose previews follow the document; a document opened
+    /// in place of another (a recovery's) closes the dialogs opened on
+    /// that one; and every event reaches the plugins that want it.
     fn watch(&mut self, doc: &Entity<DocView>, window: &mut Window, cx: &mut Context<Self>) {
         let id = doc.entity_id();
         let sub = cx.subscribe_in(doc, window, move |ws, doc, ev: &DocEvent, window, cx| {
@@ -822,6 +823,10 @@ impl Workspace {
                 if let Some((header_footer, _)) = &ws.header_footer {
                     let (now, lower) = (now.clone(), lower.clone());
                     header_footer.update(cx, |d, cx| d.follow(now, lower, cx));
+                }
+                if let Some((watermark, _)) = &ws.watermark {
+                    let (now, lower) = (now.clone(), lower.clone());
+                    watermark.update(cx, |d, cx| d.follow(now, lower, cx));
                 }
                 if let Some((crop, _)) = &ws.crop {
                     crop.update(cx, |d, cx| d.follow(now, lower, cx));
@@ -862,8 +867,9 @@ impl Workspace {
         if let Some((dialog, _)) = header_footer.take_if(|(d, _)| another(d.read(cx).opened())) {
             dialog.update(cx, |d, _| d.release(window));
         }
-        if (self.watermark.as_ref()).is_some_and(|(d, _)| another(d.read(cx).opened())) {
-            self.watermark = None;
+        let watermark = &mut self.watermark;
+        if let Some((dialog, _)) = watermark.take_if(|(d, _)| another(d.read(cx).opened())) {
+            dialog.update(cx, |d, _| d.release(window));
         }
         cx.notify();
     }
@@ -1496,65 +1502,66 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Watermark… or Background…: read what's there (in the background,
-    /// since it means opening the files), then the dialog.
-    fn open_watermark(&mut self, behind: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.watermark.is_some() || self.still_opening(cx) {
+    /// Watermark… (`z` over) or Background… (under): the dialog, which
+    /// starts from the document's watermark at `z`; again, it closes. The
+    /// other z's open, it closes and this one opens.
+    fn toggle_watermark(&mut self, z: Z, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((dialog, _)) = self.watermark.take() {
+            let again = dialog.read(cx).z() == z;
+            dialog.update(cx, |d, _| d.release(window));
+            self.focus_active(window, cx);
+            cx.notify();
+            if again {
+                return;
+            }
+        }
+        if self.still_opening(cx) {
             return;
         }
         let Some(doc) = self.doc().cloned() else {
             return;
         };
-        let Some(snapshot) = doc.read(cx).model_snapshot() else {
+        let ctx = doc.read_with(cx, |d, _| {
+            let (opened, lower) = d.lowering_now()?;
+            Some(crate::watermark_dialog::WatermarkContext {
+                z,
+                opened,
+                lower,
+                previewer: d.previewer()?,
+            })
+        });
+        let Some(ctx) = ctx else {
             return;
         };
-        let opened = snapshot.clone();
-        cx.spawn_in(window, async move |ws, cx| {
-            let current = cx
-                .background_executor()
-                .spawn(async move { sheaf_ops::derive::current_watermark(&snapshot, behind) })
-                .await;
-            ws.update_in(cx, |ws, window, cx| {
-                let ctx = crate::watermark_dialog::WatermarkContext {
-                    behind,
-                    current,
-                    opened,
-                };
-                let dialog =
-                    cx.new(|cx| crate::watermark_dialog::WatermarkDialog::new(ctx, window, cx));
-                let sub = cx.subscribe_in(
-                    &dialog,
-                    window,
-                    move |ws, dialog, ev: &crate::watermark_dialog::WatermarkEvent, window, cx| {
-                        use crate::watermark_dialog::WatermarkEvent;
-                        let opened = dialog.read(cx).opened().clone();
-                        ws.watermark = None;
-                        ws.focus_active(window, cx);
-                        if let Some(doc) = ws.doc().cloned() {
-                            match ev {
-                                WatermarkEvent::Apply(wm, pages) => {
-                                    let (wm, pages) = ((**wm).clone(), pages.clone());
-                                    doc.update(cx, |d, cx| {
-                                        d.apply_watermark(opened, behind, Some(wm), pages, cx)
-                                    });
-                                }
-                                WatermarkEvent::Remove => {
-                                    doc.update(cx, |d, cx| {
-                                        d.apply_watermark(opened, behind, None, None, cx)
-                                    });
-                                }
-                                WatermarkEvent::Dismiss => {}
-                            }
+        let dialog = cx.new(|cx| crate::watermark_dialog::WatermarkDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            move |ws, dialog, ev: &crate::watermark_dialog::WatermarkEvent, window, cx| {
+                use crate::watermark_dialog::WatermarkEvent;
+                let opened = dialog.read(cx).opened().clone();
+                dialog.update(cx, |d, _| d.release(window));
+                ws.watermark = None;
+                ws.focus_active(window, cx);
+                if let Some(doc) = ws.doc().cloned() {
+                    match ev {
+                        WatermarkEvent::Apply(set, holds) => {
+                            let (set, holds) = ((**set).clone(), holds.clone());
+                            doc.update(cx, |d, cx| d.set_watermark(opened, set, holds, cx));
                         }
-                        cx.notify();
-                    },
-                );
-                ws.watermark = Some((dialog, sub));
+                        &WatermarkEvent::Remove { include_authored } => {
+                            doc.update(cx, |d, cx| {
+                                d.remove_watermark(opened, z, include_authored, cx)
+                            });
+                        }
+                        WatermarkEvent::Dismiss => {}
+                    }
+                }
                 cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            },
+        );
+        self.watermark = Some((dialog, sub));
+        cx.notify();
     }
 
     /// Header & Footer… (or Bates Numbering…, which starts with Bates on).
@@ -2903,10 +2910,10 @@ impl Render for Workspace {
                 ws.open_header_footer(true, window, cx)
             }))
             .on_action(cx.listener(|ws, _: &crate::AddWatermark, window, cx| {
-                ws.open_watermark(false, window, cx)
+                ws.toggle_watermark(Z::Over, window, cx)
             }))
             .on_action(cx.listener(|ws, _: &crate::AddBackground, window, cx| {
-                ws.open_watermark(true, window, cx)
+                ws.toggle_watermark(Z::Under, window, cx)
             }))
             .on_action(
                 cx.listener(|ws, _: &crate::BookmarksFromPages, window, cx| {

@@ -104,7 +104,7 @@ pub(crate) fn overlaps_line(line: Box2, r: Box2) -> bool {
 /// Resource name of the layer's font on a page, until slice 18's blocks.
 pub(crate) const FONT_NAME: &str = "SheafOcr";
 /// Marks the content streams we add, so a re-save can find and replace them.
-const MARKER: &str = "SheafOcrLayer";
+pub(crate) const MARKER: &str = "SheafOcrLayer";
 
 /// The content stream for `layer`: invisible text, one `Tj` per word,
 /// fitted to the word's box by horizontal scaling, in [`Glyphless`] named

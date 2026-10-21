@@ -1,6 +1,6 @@
-//! Pages that show a generated copy of their source page: with a
-//! watermark drawn on, or with the header/footer the file had drawn
-//! stripped out. The copies are made in memory and interned into the
+//! Pages that show a generated copy of their source page, with the
+//! header/footer the file had drawn stripped out, until slice 17 makes
+//! that an edit. The copies are made in memory and interned into the
 //! document's store, and noted with the document as copies of their
 //! originals' pages ([`Document::add_derived`]); a transaction's
 //! [`set_page_base`](sheaf_doc::Tx::set_page_base) then moves the
@@ -9,8 +9,7 @@
 
 use anyhow::Result;
 use in_progress::Progress;
-use sheaf_doc::content::{ContentError, PaginationKind};
-use sheaf_doc::save::HeaderKept;
+use sheaf_doc::content::ContentError;
 use sheaf_doc::store::{BlobKind, MemoryKind, Origin};
 use sheaf_doc::{Derived, Document, PAGES, PageId, Snapshot, Src, Store};
 
@@ -63,17 +62,12 @@ pub(crate) fn copy_of(
     })
 }
 
-/// Whether page `index` of `src` has pagination artifacts of `kinds`
-/// that `stamps::strip` removes, by its blocks: an error names `page`, its
+/// Whether page `index` of `src` has a header or footer that
+/// `stamps::strip` removes, by its blocks: an error names `page`, its
 /// place in the document.
-fn has_kinds(
-    src: &Src,
-    index: u32,
-    page: u32,
-    kinds: &[PaginationKind],
-) -> Result<bool, ContentError> {
+fn has_header(src: &Src, index: u32, page: u32) -> Result<bool, ContentError> {
     let blocks = src.blocks(index).map_err(|e| e.on_page(page))?;
-    Ok(sheaf_doc::stamps::stripped(&blocks, kinds).next().is_some())
+    Ok(sheaf_doc::stamps::stripped(&blocks).next().is_some())
 }
 
 /// Pages whose content has header/footer artifacts sheaf or Acrobat drew,
@@ -96,7 +90,6 @@ pub fn strip_stamps_of(
     pages: &[PageId],
     progress: &dyn Progress,
 ) -> Result<Vec<DerivedSource>> {
-    let kinds = sheaf_doc::stamps::HEADER_FOOTER;
     progress.set_total(Some(pages.len() as u64), PAGES);
     // (page, index in source, place in the document)
     let pages = (pages.iter()).filter_map(|&id| {
@@ -110,7 +103,7 @@ pub fn strip_stamps_of(
         let mut keep = Vec::new();
         for (id, index, n) in pages {
             progress.check()?;
-            if has_kinds(&src, index, n, kinds)? {
+            if has_header(&src, index, n)? {
                 keep.push((id, index, n));
             }
             done += 1;
@@ -120,9 +113,8 @@ pub fn strip_stamps_of(
             continue;
         }
         let list: Vec<u32> = keep.iter().map(|k| k.1).collect();
-        let stripped = HeaderKept::No;
-        let bytes = sheaf_doc::save::derived_copy(&src, &list, stripped, &mut |pdf, d, _, at| {
-            sheaf_doc::stamps::strip(pdf, d, keep[at].2, kinds)?;
+        let bytes = sheaf_doc::save::derived_copy(&src, &list, &mut |pdf, d, at| {
+            sheaf_doc::stamps::strip(pdf, d, keep[at].2)?;
             Ok(())
         })?;
         let shown = (keep.iter().enumerate())
@@ -131,85 +123,6 @@ pub fn strip_stamps_of(
         out.push(copy_of(store, bytes, &src, list, shown)?);
     }
     Ok(out)
-}
-
-/// Pages with `wm` drawn on (sheaf's and Acrobat's of its kind stripped
-/// first), and pages outside `scope` that have one of those stripped;
-/// `None` strips only. Each page's boxes and rotation are passed on, so
-/// the mark sits on its crop, upright as the page is shown. The copies
-/// are sources in `store`.
-pub fn watermark(
-    store: &Store,
-    snap: &Snapshot,
-    behind: bool,
-    wm: Option<&sheaf_doc::watermark::Watermark>,
-    scope: &[PageId],
-    progress: &dyn Progress,
-) -> Result<Vec<DerivedSource>> {
-    let kinds = if behind {
-        sheaf_doc::stamps::BACKGROUND
-    } else {
-        sheaf_doc::stamps::WATERMARK
-    };
-    progress.set_total(Some(snap.state.page_count() as u64), PAGES);
-    // (page, index in source, place in the document, draw?, its boxes)
-    let pages = snap.state.pages().enumerate().map(|(n, (id, def, geom))| {
-        let draw = wm.is_some() && scope.contains(&id);
-        let page = (id, def.base.index, n as u32, draw, **geom);
-        (def.base.src.clone(), page)
-    });
-    let by_source = crate::by_source(pages);
-    let mut out = Vec::new();
-    let mut done = 0;
-    for (src, pages) in by_source {
-        let mut keep = Vec::new();
-        for page @ (_, index, n, draw, _) in pages {
-            progress.check()?;
-            if draw || has_kinds(&src, index, n, kinds)? {
-                keep.push(page);
-            }
-            done += 1;
-            progress.set(done);
-        }
-        if keep.is_empty() {
-            continue;
-        }
-        let list: Vec<u32> = keep.iter().map(|k| k.1).collect();
-        let kept = HeaderKept::Yes;
-        let bytes = sheaf_doc::save::derived_copy(&src, &list, kept, &mut |pdf, d, _, at| {
-            let (_, _, n, draw, geom) = keep[at];
-            sheaf_doc::stamps::strip(pdf, d, n, kinds)?;
-            if draw && let Some(wm) = wm {
-                sheaf_doc::watermark::install(pdf, d, wm, &geom)?;
-            }
-            Ok(())
-        })?;
-        let shown = (keep.iter().enumerate())
-            .map(|(k, &(id, ..))| (id, k as u32))
-            .collect();
-        out.push(copy_of(store, bytes, &src, list, shown)?);
-    }
-    Ok(out)
-}
-
-/// The watermark (or background) settings on the first page that has
-/// one sheaf wrote, for the dialog to start from.
-pub fn current_watermark(snap: &Snapshot, behind: bool) -> Option<sheaf_doc::watermark::Watermark> {
-    let pages = (snap.state.pages()).map(|(_, def, _)| (def.base.src.clone(), def.base.index));
-    for (src, indexes) in crate::by_source(pages) {
-        let file = sheaf_doc::materialize::graph::eager(&src).ok()?;
-        let objs: Vec<_> = file.get_pages().into_values().collect();
-        for i in indexes {
-            if let Some(d) = objs
-                .get(i as usize)
-                .and_then(|&o| file.get_dictionary(o).ok())
-                && let Some(wm) = sheaf_doc::watermark::read(&file, d, behind)
-            {
-                return Some(wm);
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -269,11 +182,6 @@ mod tests {
         let d = doc(&[b"0 g"]);
         assert!(
             strip_stamps(d.store(), &d.snapshot(), &NoProgress)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            watermark(d.store(), &d.snapshot(), false, None, &[], &NoProgress)
                 .unwrap()
                 .is_empty()
         );

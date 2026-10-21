@@ -1,8 +1,9 @@
 //! A page keeps its form through the page tools (M10 slice 3). A crop is
-//! the page's box, so it keeps its own fields, and nothing is made of the
-//! page (M10.5 slice 15); watermark and Remove
-//! Header/Footer carry them into the copy they make; either way the page
-//! shows them, and a save writes them back as they were (bug 1). A
+//! the page's box and a watermark is drawn on the page as a save writes
+//! it, so either keeps the page's own fields, and nothing is made of the
+//! page (M10.5 slices 15 and 16); Remove Header/Footer carries them into
+//! the copy it makes; either way the page shows them, and a save writes
+//! them back as they were (bug 1). A
 //! removed page's widgets leave the file, values and all, even ones only
 //! the structure tree's parent tree reaches (bug 5). A form left with no
 //! fields goes, and direct-object fields are pruned too (bug 10). Each by
@@ -19,12 +20,12 @@ use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::Form;
 use sheaf_doc::realize::ViewInputs;
 use sheaf_doc::store::{BlobKind, MemoryKind, Origin};
-use sheaf_doc::tx::fixture::{delete, set_header};
-use sheaf_doc::{Actor, CommitOpts, Derive, Document, PageId};
-use sheaf_edit::{Margins, Op, PageSel, Rotation};
+use sheaf_doc::tx::fixture::{delete, remove_watermark, set_header, set_watermark, watermark};
+use sheaf_doc::{Actor, CommitOpts, Derive, PageId};
+use sheaf_edit::{Margins, Op, PageSel, Rotation, Z};
 use sheaf_image::raster::PixelFormat;
-use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
-use sheaf_render::{Budget, Job, PageIndex, Renderer};
+use sheaf_render::pdfium::render_appearances;
+use sheaf_render::{Budget, Job, PageIndex};
 
 mod common;
 use common::*;
@@ -42,21 +43,6 @@ fn crop_box(bytes: &[u8], page: usize) -> Vec<f64> {
         .iter()
         .map(|o| o.as_float().unwrap())
         .collect()
-}
-
-/// Move `pages` of `doc` onto derived copies, as the app does.
-fn rebase(
-    doc: &mut Document,
-    derived: Vec<sheaf_ops::derive::DerivedSource>,
-    why: Derive,
-    what: &str,
-) {
-    assert!(!derived.is_empty(), "{what} made no copy");
-    for d in derived {
-        d.note(doc);
-        let pages = d.bases().collect();
-        doc.commit_page_base(pages, why, what).unwrap();
-    }
 }
 
 sheaf_doc::both_ways!(
@@ -174,53 +160,63 @@ fn annots_of(bytes: &[u8], page: usize) -> Vec<(ObjectId, String)> {
         .collect()
 }
 
-/// A watermark on both pages, and with `remove`, taken off again (a
-/// copy of a copy), written `how`.
+/// Each widget on `bytes`' pages has its page as its `/P`.
+fn on_their_pages(bytes: &[u8]) -> bool {
+    let pdf = Pdf::load_mem(bytes).unwrap();
+    pdf.get_pages().into_values().all(|page| {
+        let annots = pdf.get_dictionary(page).unwrap().get(b"Annots");
+        let annots = annots
+            .and_then(|a| pdf.dereference(a))
+            .map(|(_, a)| a.clone());
+        let annots = annots.ok().and_then(|a| a.as_array().ok().cloned());
+        (annots.unwrap_or_default().iter()).all(|a| {
+            let d = pdf.get_dictionary(a.as_reference().unwrap()).unwrap();
+            d.get(b"Subtype").unwrap().as_name().unwrap() != b"Widget"
+                || d.get(b"P").and_then(Object::as_reference).ok() == Some(page)
+        })
+    })
+}
+
+/// A watermark on both pages, and with `remove`, taken off again, written
+/// `how`: edits of the document, so nothing is made of the pages, in the
+/// store or the cache ([`own_cache`]); on screen the document's views draw
+/// the fields; and the file has the form, its values, each widget on its
+/// page, the values drawn, and the mark, or not, the form check clean.
 fn watermarked(remove: bool, how: How) {
     let name = if remove { "unmarked" } else { "marked" };
     let dir = scratch(&format!("{name}-{how:?}"));
     let path = write(&dir, "form.pdf", &mut two_page_form());
     let mut doc = open(&path);
     let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
-    let wm = sheaf_doc::watermark::Watermark::default();
-    let snap = doc.snapshot();
-    let derived = sheaf_ops::derive::watermark(
-        doc.store(),
-        &snap,
-        false,
-        Some(&wm),
-        &pages,
-        &sheaf_ops::NoProgress,
-    )
-    .unwrap();
-    let copy = derived[0].src.bytes().clone();
-    let shown = PdfiumEngine::open_bytes(copy.clone(), None).unwrap();
-    let r = shown
-        .render_page(PageIndex(1), 612, PixelFormat::Rgba)
-        .unwrap();
-    assert!(
-        blue_in(&r, 0, 792.0) > HALF_A_ROW,
-        "the copy draws the field"
-    );
-    clean(&copy, "the watermarked copy");
-    let drawn = Derive::Watermark {
-        behind: false,
-        unencodable: false,
-    };
-    rebase(&mut doc, derived, drawn, "Watermark");
+    let set = set_watermark(watermark("DRAFT"), Z::Over, None);
+    doc.commit_ops(vec![set], "Watermark").unwrap();
     if remove {
-        let snap = doc.snapshot();
-        let derived = sheaf_ops::derive::watermark(
-            doc.store(),
-            &snap,
-            false,
-            None,
-            &pages,
-            &sheaf_ops::NoProgress,
+        let removed = remove_watermark(Some(Z::Over), &pages);
+        doc.commit_ops(vec![removed], "Remove watermark").unwrap();
+    }
+    assert!(doc.derived().is_empty(), "no copy");
+    let copies = (doc.store().sources().into_iter()).filter(|src| {
+        matches!(
+            src.blob().kind(),
+            BlobKind::Pdf {
+                origin: Origin::Memory(MemoryKind::Derived),
+                ..
+            }
         )
-        .unwrap();
-        let removed = Derive::RemoveWatermark { behind: false };
-        rebase(&mut doc, derived, removed, "Remove Watermark");
+    });
+    assert_eq!(copies.count(), 0, "no copy in the store");
+    let job = Job::Page {
+        width: 612,
+        rotation: Rotation::R0,
+    };
+    let (format, budget, screen) = (PixelFormat::Rgba, Budget::Screen, ViewInputs::screen());
+    for &page in &pages {
+        let rx = views().render(doc.state(), page, &screen, job, format, 0, budget);
+        let r = block_on(rx).unwrap().unwrap().raster;
+        assert!(
+            blue_in(&r, 0, 792.0) > HALF_A_ROW,
+            "{page:?} draws its field"
+        );
     }
     let bytes = written(&doc, how);
     let what = format!("{name}, {how:?}");
@@ -232,6 +228,7 @@ fn watermarked(remove: bool, how: How) {
         ("Alpha", "Beta"),
         "{what}"
     );
+    assert!(on_their_pages(&bytes), "{what}");
     for page in 0..2 {
         let r = render_appearances(&bytes, None, PageIndex(page), 612).unwrap();
         assert!(blue_in(&r, 0, 792.0) > HALF_A_ROW, "{what}: page {page}");
@@ -246,7 +243,11 @@ sheaf_doc::both_ways!(
 );
 
 fn marked_by(how: How) {
-    watermarked(false, how);
+    let test = match how {
+        How::Rewritten => "a_watermarked_form_keeps_its_fields",
+        How::Appended => "a_watermarked_form_keeps_its_fields_appended",
+    };
+    own_cache(test, || watermarked(false, how));
 }
 
 sheaf_doc::both_ways!(
@@ -255,7 +256,11 @@ sheaf_doc::both_ways!(
 );
 
 fn unmarked_by(how: How) {
-    watermarked(true, how);
+    let test = match how {
+        How::Rewritten => "a_form_with_its_watermark_removed_keeps_its_fields",
+        How::Appended => "a_form_with_its_watermark_removed_keeps_its_fields_appended",
+    };
+    own_cache(test, || watermarked(true, how));
 }
 
 /// Tag `form` as Acrobat tags some forms: beside each widget's `/Form`

@@ -34,9 +34,10 @@ mod stale;
 mod state;
 
 pub use records::{
-    AnnotBody, AnnotRec, Bookmark, ContentStack, CtxNeeds, FieldNode, FieldProps, Foreign, FormDoc,
-    FormInst, FormRef, GenId, GenSpec, Generator, Layer, Mark, PageBase, PageDef, ScriptState,
-    Static, Target, Terminal, Widget, WidgetProps, XfaState,
+    AnnotBody, AnnotRec, Bookmark, ContentStack, CtxNeeds, FieldNode, FieldProps, Filter, Foreign,
+    FormDoc, FormInst, FormRef, GenId, GenSpec, Generator, ImageRef, LEGACY_KEYS, Layer, LegacySel,
+    Mark, MarkedSel, PageBase, PageDef, PageForm, Placed, Scope, ScriptState, Static, StreamSel,
+    Target, Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps, XfaState,
 };
 pub use sheaf_edit::{OutlineId, PageId, SourceId, TextStyle};
 pub(crate) use state::RenderTables;
@@ -45,11 +46,11 @@ pub(crate) use state::visits;
 pub use state::{Builder, DocState, Invariant};
 
 /// Where a derived copy's pages come from (a copy sheaf made of another
-/// source's pages: watermarked, a header/footer stripped): its
-/// page `k` is a copy of page `pages[k]` of `from`. A save writes each as
-/// the page it was made from, with its annotations and form fields, and
-/// the copy's content (M10 bug 1). Kept beside the history, by the copy's
-/// blob ([`Document::add_derived`]), until slice 17 makes these edits.
+/// source's pages, a header/footer stripped): its page `k` is a copy of
+/// page `pages[k]` of `from`. A save writes each as the page it was made
+/// from, with its annotations and form fields, and the copy's content (M10
+/// bug 1). Kept beside the history, by the copy's blob
+/// ([`Document::add_derived`]), until slice 17 makes it an edit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Derived {
     pub from: Src,
@@ -632,14 +633,21 @@ impl Document {
             .labels
             .map(|ranges| crate::labels::to_specs(&ranges, &by_index).into())
             .filter(|specs: &Arc<[_]>| !specs.is_empty());
+        // The watermarks and backgrounds sheaf drew, each the generator its
+        // blocks name, on the pages that hold them.
+        let watermarks: Vec<Arc<Generator>> = (facts.generators.iter())
+            .filter_map(|saved| saved.generator(&src, |i| at(i as usize)))
+            .map(Arc::new)
+            .collect();
+        let opened: Vec<GenId> = watermarks.iter().map(|g| g.id).collect();
         // The header/footer sheaf drew, as the generator that draws it, its
         // id drawn from the file's hash, so the same bytes open the same.
         let hash = src.id().hash;
         let mut rng = fastrand::Rng::with_seed(hash as u64 ^ (hash >> 64) as u64);
-        let generator = facts.header_footer.map(|(mut hf, scope)| {
+        let header = facts.header_footer.map(|(mut hf, scope)| {
             hf.pages = scope.map(|ix| ix.into_iter().filter_map(at).collect());
             Arc::new(Generator {
-                id: GenId::draw(&mut rng, |_| false),
+                id: GenId::draw(&mut rng, |id| opened.contains(&id)),
                 spec: GenSpec::HeaderFooter(Arc::new(hf)),
             })
         });
@@ -704,7 +712,8 @@ impl Document {
             .outline(roots_outline, bookmarks)
             .annots(annots)
             .labels(labels)
-            .generators(generator)
+            .generators(header.into_iter().chain(watermarks))
+            .opened_generators(src.id(), opened)
             .form(fields, Arc::new(form_doc))
             .build();
         debug_assert_eq!(state.check_invariants(), Ok(()));

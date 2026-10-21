@@ -20,7 +20,7 @@ use crate::geom::{Geom, MIN_SIDE, Rect};
 use crate::labels::LabelSpec;
 use crate::model::{
     AnnotBody, AnnotRec, Bookmark, ContentStack, DocState, Foreign, FormRef, GenSpec, Generator,
-    Mark, PageBase, PageDef, PageId,
+    Mark, PageBase, PageDef, PageId, Scope, WatermarkGen,
 };
 use crate::open::FileBody;
 use crate::prim::{Key, Val};
@@ -228,13 +228,32 @@ pub(crate) fn duplicate(lw: &mut Lower, pages: &[PageId]) -> Result<(), EditErro
     Ok(())
 }
 
-/// Each copy in `pairs` (a page, its copy, and the copy's number) in the
-/// header/footer's pages, after its page, when that is.
+/// Each copy in `pairs` (a page, its copy, and the copy's number) on the
+/// pages of each generator that names its page: the header/footer's after
+/// its page, a watermark's among them.
 fn join_scope(lw: &mut Lower, pairs: &[(PageId, PageId, u32)]) {
     let copy_of: HashMap<PageId, PageId> = pairs.iter().map(|&(p, c, _)| (p, c)).collect();
     let generators: Vec<Arc<Generator>> = lw.rec.generators().values().cloned().collect();
     for g in generators {
         let spec = match &g.spec {
+            GenSpec::Watermark(wm) => {
+                let Scope::Pages(on) = &wm.scope else {
+                    continue;
+                };
+                let copies: Vec<PageId> = (pairs.iter())
+                    .filter(|(p, ..)| on.contains(p))
+                    .map(|&(_, copy, _)| copy)
+                    .collect();
+                if copies.is_empty() {
+                    continue;
+                }
+                let mut on = on.clone();
+                on.extend(copies);
+                GenSpec::Watermark(Arc::new(WatermarkGen {
+                    scope: Scope::Pages(on),
+                    ..WatermarkGen::clone(wm)
+                }))
+            }
             GenSpec::HeaderFooter(hf) => {
                 let Some(scope) = hf
                     .pages

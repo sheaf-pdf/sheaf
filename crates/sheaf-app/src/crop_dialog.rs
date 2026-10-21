@@ -19,7 +19,7 @@ use gpui::{
     Subscription, Window, div, prelude::*, px,
 };
 use sheaf_doc::tx::LowerCx;
-use sheaf_doc::{Document, EditError, PageId, Snapshot, ViewInputs};
+use sheaf_doc::{Document, PageId, Snapshot, ViewInputs};
 use sheaf_edit::{Margins, PageSize, Rotation};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::{NoProgress, crop};
@@ -28,7 +28,7 @@ use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
 
-use crate::dialog_preview::{Preview, drawn_width};
+use crate::dialog_preview::{Preview, drawn_width, why};
 use crate::jobs::Previewer;
 use crate::{DialogCancel, DialogLeft, DialogNext, DialogPrev, DialogRight, DialogRun};
 
@@ -139,15 +139,6 @@ fn draw_preview(
     let (st, screen, format) = (tx.state(), ViewInputs::screen(), PixelFormat::Bgra);
     let drawn = (previewer.views).render(st, page, &screen, job, format, 0, Budget::Screen);
     Ok((shown, drawn))
-}
-
-/// Why a crop can't be made, as the dialog tells it: an invalid one's
-/// reason alone ("those margins leave nothing of page 2").
-fn why(e: EditError) -> anyhow::Error {
-    match e {
-        EditError::Invalid { why, .. } => anyhow::anyhow!(why),
-        e => e.into(),
-    }
 }
 
 /// The size of a page that shows `shown`, in `unit`, as the hint says it.

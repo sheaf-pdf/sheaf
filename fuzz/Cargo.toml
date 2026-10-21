@@ -68,3 +68,10 @@ path = "fuzz_targets/op_json.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sheaf_generators"
+path = "fuzz_targets/sheaf_generators.rs"
+test = false
+doc = false
+bench = false

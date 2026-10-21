@@ -1,14 +1,15 @@
-//! A dialog's preview of its edit (M10.5 §8.6), as the Header & Footer and
-//! Crop Pages dialogs draw it: what the settings ask lowered on the
-//! document as it is now, off the UI thread, again at each change of the
-//! settings and each change the document goes through, and the page the
-//! dialog shows realized from the state that leaves, as applying would
+//! A dialog's preview of its edit (M10.5 §8.6), as the Header & Footer,
+//! Watermark and Crop Pages dialogs draw it: what the settings ask lowered
+//! on the document as it is now, off the UI thread, again at each change
+//! of the settings and each change the document goes through, and the page
+//! the dialog shows realized from the state that leaves, as applying would
 //! draw it ([`Previewer`](crate::jobs::Previewer)). A lowering's picture
 //! shows only while no later one has begun ([`Preview`]).
 
 use std::sync::Arc;
 
 use gpui::{AnyElement, ObjectFit, RenderImage, Task, Window, div, img, prelude::*, px};
+use sheaf_doc::EditError;
 use sheaf_edit::PageSize;
 use sheaf_image::raster::Raster;
 use sheaf_ui::{dialog, theme};
@@ -28,6 +29,15 @@ fn wide(shown: PageSize) -> f32 {
 /// at, `scale` device px a logical px.
 pub(crate) fn drawn_width(shown: PageSize, scale: f32) -> u32 {
     (wide(shown) * scale).round().max(1.0) as u32
+}
+
+/// Why a dialog's edit can't be made, as its preview tells it: an invalid
+/// one's reason alone ("those margins leave nothing of page 2").
+pub(crate) fn why(e: EditError) -> anyhow::Error {
+    match e {
+        EditError::Invalid { why, .. } => anyhow::anyhow!(why),
+        e => e.into(),
+    }
 }
 
 /// A dialog's preview: lowered and drawn off the UI thread, each lowering

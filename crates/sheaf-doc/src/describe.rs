@@ -6,11 +6,11 @@
 //! one line ([`lines`]): a batch of 7,000 is "Recognize text on 7000
 //! pages".
 
-use sheaf_edit::MarkKind;
+use sheaf_edit::{MarkKind, Z};
 
 use crate::effects::Flags;
 use crate::model::{AnnotBody, DocState, PageId, Step};
-use crate::tx::{Derive, ResolvedOp};
+use crate::tx::{Derive, OthersFound, ResolvedOp};
 
 /// A line of the History panel: what some steps did, and whether they
 /// removed content that was there (its badge).
@@ -121,6 +121,25 @@ pub fn describe(op: &ResolvedOp, before: &DocState) -> String {
         R::ClearOcrText { pages: ids } => {
             format!("Remove recognized text from {}", pages(ids))
         }
+        R::SetWatermark { z, scope, .. } => {
+            let on = match scope {
+                None => "all pages".into(),
+                Some(ids) => pages(&ids.iter().copied().collect::<Vec<_>>()),
+            };
+            match before.watermark(*z) {
+                Some(_) => format!("Change the {} on {on}", drawn_as(Some(*z))),
+                None => format!("Add a {} to {on}", drawn_as(Some(*z))),
+            }
+        }
+        R::RemoveWatermark {
+            z,
+            pages: ids,
+            others,
+            ..
+        } => {
+            let found = others_found(others);
+            format!("Remove the {} from {}{found}", drawn_as(*z), pages(ids))
+        }
         R::SetHeaderFooter { .. } => "Set the header and footer".into(),
         R::RemoveHeaderFooter { .. } => "Remove the header and footer".into(),
         R::SetPageBase { pages: list, why } => {
@@ -172,12 +191,86 @@ fn boxes_line(b: Boxes, pages: &str) -> String {
     }
 }
 
+/// What the watermark at `z` is called; both, when there's none.
+fn drawn_as(z: Option<Z>) -> &'static str {
+    match z {
+        Some(Z::Over) => "watermark",
+        Some(Z::Under) => "background",
+        None => "watermark and background",
+    }
+}
+
+/// What a watermark's removal found of others' (§6.5, D61), as its line
+/// says it after the pages: " (2 made in Acrobat; 12 the author's left in
+/// place)", or nothing when it found none.
+fn others_found(o: &OthersFound) -> String {
+    let OthersFound {
+        acrobat,
+        other_files,
+        older_sheaf,
+        authored,
+        authored_left,
+        refused,
+        in_forms,
+        unreadable,
+    } = *o;
+    let them = |n: usize| if n == 1 { "it" } else { "them" };
+    let were = |n: usize| if n == 1 { "it was" } else { "they were" };
+    let said = [
+        (acrobat, format!("{acrobat} made in Acrobat")),
+        (other_files, format!("{other_files} from other files")),
+        (older_sheaf, format!("{older_sheaf} made by an older sheaf")),
+        (authored, format!("{authored} the author's")),
+        (
+            authored_left,
+            format!("{authored_left} the author's left in place"),
+        ),
+        (
+            refused,
+            format!(
+                "{refused} left in place, as taking {} out would change the page",
+                them(refused)
+            ),
+        ),
+        (
+            in_forms,
+            format!(
+                "any inside forms on {} left in place",
+                count(in_forms, "page")
+            ),
+        ),
+        (
+            unreadable,
+            format!(
+                "{} that can't be read left as {}",
+                count(unreadable, "page"),
+                were(unreadable)
+            ),
+        ),
+    ];
+    let said: Vec<String> = (said.into_iter())
+        .filter(|(n, _)| *n > 0)
+        .map(|(_, text)| text)
+        .collect();
+    match said.is_empty() {
+        true => String::new(),
+        false => format!(" ({})", said.join("; ")),
+    }
+}
+
+/// Whether a run of watermark ops is of one z, or each of both.
+fn one_z(run: &[Step]) -> bool {
+    let z = |op: &ResolvedOp| match op {
+        ResolvedOp::SetWatermark { z, .. } => Some(*z),
+        ResolvedOp::RemoveWatermark { z, .. } => *z,
+        _ => None,
+    };
+    run.iter().all(|s| z(&s.op) == z(&run[0].op))
+}
+
 /// What a derived flow did to `pages`, the pages it names.
 fn derived(why: Derive, pages: &str) -> String {
-    let layer = |behind: bool| if behind { "background" } else { "watermark" };
     match why {
-        Derive::Watermark { behind, .. } => format!("Add a {} to {pages}", layer(behind)),
-        Derive::RemoveWatermark { behind } => format!("Remove the {} from {pages}", layer(behind)),
         Derive::StripHeaderFooter => format!("Remove the header and footer from {pages}"),
     }
 }
@@ -243,6 +336,18 @@ fn run_line(run: &[Step]) -> String {
         R::SetPageLabels { .. } | R::SetHeaderFooter { .. } | R::RemoveHeaderFooter { .. } => {
             run[n - 1].line.clone()
         }
+        // Likewise each of a z; of more than one, they're both changed.
+        R::SetWatermark { .. } if one_z(run) => run[n - 1].line.clone(),
+        R::SetWatermark { .. } => format!("Change the {}", drawn_as(None)),
+        R::RemoveWatermark { z, .. } => {
+            let z = z.filter(|_| one_z(run));
+            let others = (run.iter()).fold(OthersFound::default(), |sum, s| match &*s.op {
+                R::RemoveWatermark { others, .. } => sum.plus(*others),
+                _ => sum,
+            });
+            let found = others_found(&others);
+            format!("Remove the {} from {}{found}", drawn_as(z), pages())
+        }
         // A version's only step.
         R::Revert { .. } => run[0].line.clone(),
     }
@@ -258,6 +363,7 @@ fn page_count(op: &ResolvedOp) -> usize {
         | R::DuplicatePages { pages, .. }
         | R::SetPageBoxes { pages, .. }
         | R::ClearOcrText { pages }
+        | R::RemoveWatermark { pages, .. }
         | R::RemoveHeaderFooter { pages } => pages.len(),
         R::InsertPages { pages, .. } => pages.len(),
         R::ReplacePages { with, .. } => with.len(),
@@ -346,7 +452,7 @@ fn on_page(page: PageId, st: &DocState) -> String {
 
 /// "page 3", "pages 2, 5", "pages 4–6", or a count when one of them isn't
 /// in the document.
-fn pages_text(ids: &[PageId], st: &DocState) -> String {
+pub(crate) fn pages_text(ids: &[PageId], st: &DocState) -> String {
     let mut wanted = ids.to_vec();
     wanted.sort_unstable();
     wanted.dedup();
@@ -439,19 +545,9 @@ mod tests {
             why,
         };
         let st = d.state();
-        let removed = Derive::RemoveWatermark { behind: false };
-        assert_eq!(
-            describe(&on(2, removed), st),
-            "Remove the watermark from page 3"
-        );
         assert_eq!(
             describe(&on(0, Derive::StripHeaderFooter), st),
             "Remove the header and footer from page 1"
         );
-        let behind = Derive::Watermark {
-            behind: true,
-            unencodable: false,
-        };
-        assert_eq!(describe(&on(1, behind), st), "Add a background to page 2");
     }
 }

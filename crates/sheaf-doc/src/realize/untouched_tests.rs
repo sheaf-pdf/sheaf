@@ -16,6 +16,7 @@ use super::fixture::{every_input, hiding, layer, their_comment};
 use super::*;
 use crate::forms::Value;
 use crate::forms::fixture::Form;
+use crate::materialize::others_tests::{ACROBAT, BODY, acrobat_file};
 use crate::materialize::tests::{add, bytes, derive, file, insert, open};
 use crate::model::history_tests::{with_ours, with_theirs};
 use crate::model::{FieldNode, Terminal};
@@ -53,9 +54,7 @@ fn theirs() -> Form {
 /// `d`'s page `page`, its primary's page `index`, shown from a derived
 /// copy of it, its boxes as they were, as the derived flows make one.
 fn copied(d: &mut crate::Document, index: u32, page: PageId) {
-    let kept = crate::save::HeaderKept::Yes;
-    let copy =
-        crate::save::derived_copy(d.primary(), &[index], kept, &mut |_, _, _, _| Ok(())).unwrap();
+    let copy = crate::save::derived_copy(d.primary(), &[index], &mut |_, _, _| Ok(())).unwrap();
     derive(d, &copy, index, page);
 }
 
@@ -65,9 +64,11 @@ fn copied(d: &mut crate::Document, index: u32, page: PageId) {
 /// resources, whose overlay writes them out under another parent; sheaf's
 /// marks in the file, which the screen draws itself; a comment hidden or
 /// deleted; a field's value, which no save writes yet; a header; recognized
-/// text; a duplicate; a turned page, which the job turns; a derived
-/// copy's page; a crop; fields whose `/Parent` isn't the parent whose
-/// `/Kids` lists them; a link to a page deleted.
+/// text; a duplicate; a turned page, which the job turns; a watermark and a
+/// background, which OCR's inputs don't draw, and the same found again in
+/// the file, then moved and removed; a derived copy's page; a
+/// crop; fields whose `/Parent` isn't the parent whose `/Kids` lists them;
+/// a link to a page deleted.
 #[test]
 fn the_predicate_agrees_with_the_emission_in_every_case() {
     let all = |n: usize| vec![true; n];
@@ -128,6 +129,51 @@ fn the_predicate_agrees_with_the_emission_in_every_case() {
     assert_eq!(agree(d.state(), "edited"), [false, false, true, false]);
     let ocr = verdicts(d.state(), &ViewInputs::content_only(), "edited");
     assert_eq!(ocr, [true, true, true, false]);
+    // A watermark and a background, which every consumer but OCR draws.
+    let mut d = opened(theirs().bytes(), "form.pdf");
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let set = |z, page| fx::set_watermark(fx::watermark("Draft"), z, Some(&[page]));
+    let ops = vec![set(sheaf_edit::Z::Over, p0), set(sheaf_edit::Z::Under, p1)];
+    d.commit_ops(ops, "Watermarks").unwrap();
+    assert_eq!(agree(d.state(), "watermarked"), [false, false, true]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "watermarked");
+    assert_eq!(ocr, all(3));
+    // The same, saved and found again: drawn as the file draws them where
+    // they're as they were, but under OCR's inputs, which set their blocks
+    // aside; moved or removed, set aside where they were.
+    let saved = crate::materialize::How::Rewritten.write(&d);
+    let mut d = opened(saved, "found.pdf");
+    assert_eq!(agree(d.state(), "found"), all(3));
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "found");
+    assert_eq!(ocr, [false, false, true]);
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let mut moved = fx::watermark("Draft");
+    moved.position = sheaf_edit::GridPos::Top;
+    let moved = fx::set_watermark(moved, sheaf_edit::Z::Over, Some(&[p0]));
+    d.commit_ops(vec![moved], "Move").unwrap();
+    assert_eq!(agree(d.state(), "moved"), [false, true, true]);
+    let removed = fx::remove_watermark(Some(sheaf_edit::Z::Under), &[p1]);
+    d.commit_ops(vec![removed], "Remove").unwrap();
+    assert_eq!(agree(d.state(), "removed"), [false, false, true]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "removed");
+    assert_eq!(ocr, [false, false, true]);
+    // Acrobat's watermark on both pages, one under a watermark of the
+    // document's, which replaces it where it's drawn, and so not under
+    // OCR's inputs; the other's taken off by a filter, under any.
+    let other: &[u8] = b"BT /F1 12 Tf 72 700 Td (other) Tj ET";
+    let streams: [&[&[u8]]; 2] = [&[BODY, ACROBAT], &[other, ACROBAT]];
+    let mut d = opened(acrobat_file(&streams), "acrobat.pdf");
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let mine = fx::set_watermark(fx::watermark("Draft"), sheaf_edit::Z::Over, Some(&[p0]));
+    d.commit_ops(vec![mine], "Watermark").unwrap();
+    assert_eq!(agree(d.state(), "acrobat's replaced"), [false, true]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "acrobat's replaced");
+    assert_eq!(ocr, all(2));
+    let removed = fx::remove_watermark(Some(sheaf_edit::Z::Over), &[p1]);
+    d.commit_ops(vec![removed], "Remove").unwrap();
+    assert_eq!(agree(d.state(), "acrobat's removed"), [false, false]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "acrobat's removed");
+    assert_eq!(ocr, [true, false]);
     // A derived copy: the page is the copy's, its bytes its own, but for
     // the widgets its records draw from the page it was made from.
     let mut d = open(&bytes(&file("A", 2, false)), None);
@@ -344,6 +390,38 @@ fn deltas_are_kept_by_page_and_key_under_their_cap() {
         .map(|((page, _), _, _)| *page)
         .collect();
     assert_eq!(left, order[1..]);
+}
+
+/// An image watermark on every page of a group is made once a realizer:
+/// each page's delta, emitted alone, draws the image the first made, and
+/// so does a group made again for another edit. Another realizer makes it
+/// once of its own.
+#[test]
+fn a_watermark_s_image_is_made_once_a_realizer() {
+    use crate::materialize::emit::content::ARTS_MADE;
+    use crate::materialize::watermark_tests::{image_watermark, png};
+    let mut d = open(&bytes(&file("A", 3, false)), None);
+    let (_png, spec) = image_watermark(&d, &png());
+    let set = fx::set_watermark(spec, sheaf_edit::Z::Over, None);
+    d.commit_ops(vec![set], "Watermark").unwrap();
+    let screen = ViewInputs::screen();
+    let first = d.page(0).unwrap();
+    let realizer = Realizer::new();
+    let made = ARTS_MADE.get();
+    let opened = |realizer: &Realizer, d: &crate::Document| {
+        let view = realizer.view(d.state(), first, &screen).unwrap();
+        realizer.open(d.state(), view.engine, &screen).unwrap();
+    };
+    opened(&realizer, &d);
+    assert_eq!(kept(&realizer).len(), 3);
+    assert_eq!(ARTS_MADE.get() - made, 1);
+    let background = fx::set_watermark(fx::watermark("Copy"), sheaf_edit::Z::Under, None);
+    d.commit_ops(vec![background], "Background").unwrap();
+    opened(&realizer, &d);
+    assert_eq!(kept(&realizer).len(), 6);
+    assert_eq!(ARTS_MADE.get() - made, 1);
+    opened(&Realizer::new(), &d);
+    assert_eq!(ARTS_MADE.get() - made, 2);
 }
 
 /// A view asked for again and again under inputs hiding comments digests

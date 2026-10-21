@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use sheaf_edit::{
-    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Box2, BoxSpec, Bring, HeaderFooterSpec,
-    LabelStyle, Margins, NewMark, Op, PageLabelRange, PageRef, PageSel, PageSource, Patch,
-    RangeSet, ScopeSel, Sibling, Turn,
+    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Box2, BoxSpec, Bring, FontChoice,
+    GridPos, HeaderFooterSpec, LabelStyle, Margins, NewMark, Op, PageLabelRange, PageRef, PageSel,
+    PageSource, Patch, RangeSet, ScopeSel, Sibling, Turn, WatermarkContent, WatermarkSpec, Z,
 };
 
 use super::{Actor, Commit, CommitOpts, Derive, EditError, JobKind, Tx};
@@ -335,6 +335,43 @@ pub fn set_header(spec: HeaderFooterSpec, pages: Option<&[PageId]>) -> Op {
             None => ScopeSel::All,
             Some(pages) => ScopeSel::Pages(ids(pages)),
         },
+    }
+}
+
+/// A watermark of `text`, in the middle of the page, in the watermark
+/// dialog's defaults.
+pub fn watermark(text: &str) -> WatermarkSpec {
+    WatermarkSpec {
+        content: WatermarkContent::Text {
+            text: text.into(),
+            font: FontChoice::HelveticaBold,
+            size: 72.0,
+            color: [200, 30, 30],
+            opacity: 0.3,
+            angle: 45.0,
+        },
+        position: GridPos::Center,
+    }
+}
+
+/// `spec` set at `z` on `pages`, or on every page.
+pub fn set_watermark(spec: WatermarkSpec, z: Z, pages: Option<&[PageId]>) -> Op {
+    Op::SetWatermark {
+        spec,
+        z,
+        scope: match pages {
+            None => ScopeSel::All,
+            Some(pages) => ScopeSel::Pages(ids(pages)),
+        },
+    }
+}
+
+/// The watermark at `z`, or both, taken off `pages`.
+pub fn remove_watermark(z: Option<Z>, pages: &[PageId]) -> Op {
+    Op::RemoveWatermark {
+        z,
+        pages: ids(pages),
+        include_authored: false,
     }
 }
 

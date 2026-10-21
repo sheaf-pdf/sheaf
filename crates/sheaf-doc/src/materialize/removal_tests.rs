@@ -694,6 +694,18 @@ fn checked(
     }
     let mut dict = old.get_dictionary(page).unwrap().clone();
     dict.set("Resources", dictionary! { "XObject" => xobjects });
+    check_of(&old, doc, page, objects, dict)
+}
+
+/// What the removal check finds when a section writes `doc`'s first page,
+/// at `page` in the file `old` reads, as `dict`, and `objects`.
+fn check_of(
+    old: &LazyPdf,
+    doc: &Document,
+    page: ObjectId,
+    mut objects: BTreeMap<ObjectId, (ObjKey, Object)>,
+    dict: Dictionary,
+) -> Option<Found> {
     let id = doc.page(0).unwrap();
     objects.insert(page, (ObjKey::Page(id), dict.into()));
     let input = doc.recovery_input();
@@ -701,7 +713,7 @@ fn checked(
     let catalog = saved.record.map.keys[&ObjKey::Catalog];
     let primary = input.primary.id();
     removal::check(&Section {
-        old: &old,
+        old,
         objects: &objects,
         trailer: &[catalog],
         saved,
@@ -711,6 +723,57 @@ fn checked(
         said: &BTreeSet::new(),
         lim: &Limits::DEFAULT,
     })
+}
+
+/// A stream that says it isolates a page's content, but that another tool
+/// made draw text too, is judged on its text: a section that unlinks it
+/// finds the text gone. One that isolates alone says nothing.
+#[test]
+fn an_isolating_stream_that_draws_is_read() {
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, "a.pdf", &text_file(1));
+    let set = fx::set_watermark(fx::watermark("DRAFT"), sheaf_edit::Z::Over, None);
+    doc.commit_ops(vec![set], "watermark").unwrap();
+    save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
+    let mut pdf = Pdf::load(&path).unwrap();
+    let page = pdf.get_pages()[&1];
+    let ids = super::recognized_tests::contents(&pdf, page);
+    let (open, close) = (ids[0], ids[2]);
+    let mut stream = pdf.get_object(open).unwrap().as_stream().unwrap().clone();
+    stream.dict.remove(b"Filter");
+    stream.set_content(b"q BT /F1 12 Tf 72 300 Td (Secret) Tj ET".to_vec());
+    pdf.objects.insert(open, stream.into());
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    let (path, doc) = opened(&dir, "b.pdf", &bytes);
+    let old = LazyPdf::open(
+        Arc::<[u8]>::from(std::fs::read(&path).unwrap()),
+        None,
+        &Limits::DEFAULT.reader,
+    )
+    .unwrap();
+    let without = |gone: ObjectId| {
+        let mut dict = old.get_dictionary(page).unwrap().clone();
+        let left: Vec<Object> = (ids.iter())
+            .filter(|&&c| c != gone)
+            .map(|&c| Object::Reference(c))
+            .collect();
+        dict.set("Contents", left);
+        check_of(&old, &doc, page, BTreeMap::new(), dict)
+    };
+    let key = ObjKey::Base {
+        blob: doc.primary().id(),
+        obj: open,
+        copy: 0,
+    };
+    let gone = Found {
+        key,
+        derived: false,
+        said: false,
+    };
+    assert_eq!(without(open), Some(gone));
+    assert_eq!(without(close), None);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn helvetica() -> Dictionary {

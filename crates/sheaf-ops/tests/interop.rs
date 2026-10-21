@@ -14,6 +14,12 @@
 //! a delete undone after its save, whose planned Append is a Rewrite for
 //! the objects the first save pruned.
 //!
+//! From slice 16 a page with Acrobat's watermark, given a watermark and a
+//! background of sheaf's that replace it, written either way, then opened
+//! again and its watermark moved, then both removed, passes `qpdf
+//! --check`, and pdf.js loads it and reads each of sheaf's text once,
+//! inside its `/Artifact`, and nothing of Acrobat's.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`. A test
 //! whose tools are missing says so and passes. Run with
@@ -31,9 +37,12 @@ use sheaf_doc::serialize::fixture::{
     PREFIX, USER, attachment_only, edited, encrypted, form, object_streams_encrypted,
     rc4_aes_128_and_aes_256, written,
 };
-use sheaf_doc::tx::fixture::{add, delete, delete_named, move_pages, ocr, patch_bookmark, rotate};
+use sheaf_doc::tx::fixture::{
+    add, delete, delete_named, move_pages, ocr, patch_bookmark, remove_watermark, rotate,
+    set_watermark, watermark,
+};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DestView, OcrWord, PageId, Snapshot};
-use sheaf_edit::{BookmarkPatch, Margins, Op, PageRef, Rotation, Sibling, Turn};
+use sheaf_edit::{BookmarkPatch, GridPos, Margins, Op, PageRef, Rotation, Sibling, Turn, Z};
 
 mod common;
 use common::scratch;
@@ -795,4 +804,138 @@ fn read_as_stored(said: &str, stored: &Stored, how: How) {
             word.text
         );
     }
+}
+
+/// What pdf.js reads of the first page's text: where each marked content
+/// begins, by its tag, and ends, and each text item's string between; then
+/// how many operators the page draws with, its fonts, graphics states and
+/// images loaded.
+const PDFJS_MARKED: &str = r#"
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const [lib, file] = process.argv.slice(2);
+const pdfjs = await import(pathToFileURL(lib).href);
+const data = new Uint8Array(readFileSync(file));
+const doc = await pdfjs.getDocument({ data, verbosity: 0 }).promise;
+const page = await doc.getPage(1);
+const content = await page.getTextContent({ includeMarkedContent: true });
+for (const item of content.items) {
+  if (item.type === "beginMarkedContent" || item.type === "beginMarkedContentProps") {
+    console.log(`begin ${item.tag}`);
+  } else if (item.type === "endMarkedContent") {
+    console.log("end");
+  } else if (item.str?.trim()) {
+    console.log(`text ${JSON.stringify(item.str)}`);
+  }
+}
+console.log(`operators ${(await page.getOperatorList()).fnArray.length}`);
+"#;
+
+sheaf_doc::both_ways!(
+    #[ignore = "needs qpdf, or node and pdf.js"]
+    a_watermark_s_blocks_read_in_pdfjs,
+    a_watermark_s_blocks_read_in_pdfjs_appended: watermark_blocks_read
+);
+
+/// A one-page form whose page draws, after its own content and in a
+/// stream of its own, the watermark Acrobat would add: `/Fm0`, a form whose
+/// `/PieceInfo` says so, drawing "ACROBAT".
+fn with_acrobat_s_watermark() -> Form {
+    let mut f = Form::new(1);
+    let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
+        "DocSettings" => dictionary! {}, "Private" => "Watermark",
+    } };
+    let form = f.pdf.add_object(lopdf::Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
+            "BBox" => vec![0.into(), 0.into(), 300.into(), 60.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => f.helv } },
+        },
+        b"0 0 1 rg BT /F1 48 Tf 4 12 Td (ACROBAT) Tj ET".to_vec(),
+    ));
+    let theirs = f.pdf.add_object(lopdf::Stream::new(
+        dictionary! {},
+        b"/Artifact <</Type /Pagination /Subtype /Watermark>> BDC q \
+          1 0 0 1 150 350 cm /Fm0 Do Q EMC"
+            .to_vec(),
+    ));
+    let page = f.pages[0];
+    let own = f.dict(page).get(b"Contents").unwrap().clone();
+    f.dict(page).set("Contents", vec![own, theirs.into()]);
+    let resources = f.dict(page).get_mut(b"Resources").unwrap();
+    let xobjects = dictionary! { "Fm0" => form };
+    resources.as_dict_mut().unwrap().set("XObject", xobjects);
+    f
+}
+
+/// A page with Acrobat's watermark given a watermark over it, which
+/// replaces Acrobat's, and a background under it, written `how`; then
+/// saved `how`, opened again with both found, and its watermark moved,
+/// written `how` again; then both removed and written `how`: each file
+/// passes `qpdf --check`, and pdf.js loads the page and reads the
+/// background's text, the page's own, then the watermark's, each of
+/// sheaf's once and inside its `/Artifact`, and nothing of Acrobat's.
+fn watermark_blocks_read(how: How) {
+    let (qpdf, pdfjs) = (qpdf(), pdfjs());
+    if qpdf.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch(&format!("interop-watermark-{how:?}"));
+    let script = dir.join("marked.mjs");
+    std::fs::write(&script, PDFJS_MARKED).unwrap();
+    let base = common::write(&dir, "watermark.pdf", &mut with_acrobat_s_watermark());
+    let acrobat = std::fs::read(&base).unwrap();
+    let mut doc = sheaf_doc::open::file(&base, None).unwrap().doc;
+    let ops = vec![
+        set_watermark(watermark("DRAFT"), Z::Over, None),
+        set_watermark(watermark("COPY"), Z::Under, None),
+    ];
+    doc.commit_ops(ops, "Watermark").unwrap();
+    let set = how.write(&doc);
+    how.save(&mut doc, &base);
+    let mut doc = sheaf_doc::open::file(&base, None).unwrap().doc;
+    let mut moved = watermark("DRAFT");
+    moved.position = GridPos::Top;
+    doc.commit_ops(vec![set_watermark(moved, Z::Over, None)], "Move")
+        .unwrap();
+    let moved = how.write(&doc);
+    let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
+    let remove = remove_watermark(None, &pages);
+    doc.commit_ops(vec![remove], "Remove").unwrap();
+    let ours = "begin Artifact\ntext \"COPY\"\nend\n\
+                text \"Page 1\"\n\
+                begin Artifact\ntext \"DRAFT\"\nend";
+    let outputs = [
+        (
+            "acrobat",
+            acrobat,
+            "text \"Page 1\"\nbegin Artifact\ntext \"ACROBAT\"\nend",
+        ),
+        ("set", set, ours),
+        ("moved", moved, ours),
+        ("removed", how.write(&doc), "text \"Page 1\""),
+    ];
+    for (what, bytes, want) in outputs {
+        let path = dir.join(format!("watermark-{what}-{how:?}.pdf"));
+        std::fs::write(&path, &bytes).unwrap();
+        if let Some(qpdf) = &qpdf {
+            run(Command::new(qpdf).arg("--check").arg(&path))
+                .unwrap_or_else(|e| panic!("qpdf --check, {what}, {how:?}: {e}"));
+            println!("qpdf --check, {what}, {how:?}: passes");
+        }
+        if let Some(pdfjs) = &pdfjs {
+            let said = run(Command::new("node").arg(&script).arg(pdfjs).arg(&path)).unwrap();
+            println!("pdf.js, {what}, {how:?}:\n{said}");
+            let (read, operators) = said.trim_end().rsplit_once('\n').unwrap();
+            assert_eq!(read, want, "pdf.js, {what}, {how:?}");
+            let operators: usize = operators
+                .strip_prefix("operators ")
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(operators > 0, "pdf.js, {what}, {how:?}: {said}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

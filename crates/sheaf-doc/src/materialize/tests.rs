@@ -1226,18 +1226,8 @@ fn drawn(src: &Src, index: u32) -> Vec<u8> {
         .collect()
 }
 
-/// A derived copy of page `index` of `d`'s primary, as the derived flows
-/// make one, noted with `d`, and the page rebased onto it.
-fn copied(d: &mut Document, page: PageId, index: u32) -> SourceId {
-    let kept = crate::save::HeaderKept::Yes;
-    let bytes =
-        crate::save::derived_copy(d.primary(), &[index], kept, &mut |_, _, _, _| Ok(())).unwrap();
-    derive(d, &bytes, index, page)
-}
-
-/// `bytes`, a derived copy of page `index` of `d`'s primary, keeping the
-/// header its file drew, noted with `d`, and `page` rebased onto its first
-/// page.
+/// `bytes`, a derived copy of page `index` of `d`'s primary, noted with
+/// `d`, and `page` rebased onto its first page.
 pub(crate) fn derive(d: &mut Document, bytes: &[u8], index: u32, page: PageId) -> SourceId {
     let kind = BlobKind::Pdf {
         password: None,
@@ -1250,19 +1240,16 @@ pub(crate) fn derive(d: &mut Document, bytes: &[u8], index: u32, page: PageId) -
     };
     d.add_derived(&copy, derived);
     let source = copy.id();
-    let why = crate::tx::Derive::Watermark {
-        behind: false,
-        unencodable: false,
-    };
+    let why = crate::tx::Derive::StripHeaderFooter;
     d.commit_page_base(vec![(page, copy, 0)], why, "rebase")
         .unwrap();
     source
 }
 
 /// A header and footer is drawn once on each page a Rewrite writes; opened
-/// again, the pages that draw it already aren't drawn on twice, a derived
-/// copy's and a cropped one among them, and a page from another file is
-/// drawn on, numbered where it is.
+/// again, the pages that draw it already aren't drawn on twice, a cropped
+/// one among them, and a page from another file is drawn on, numbered
+/// where it is.
 #[test]
 fn the_header_is_drawn_once_and_not_again_where_the_base_draws_it() {
     let mut d = open(&bytes(&file("A", 2, false)), None);
@@ -1276,8 +1263,7 @@ fn the_header_is_drawn_once_and_not_again_where_the_base_draws_it() {
 
     let mut d = open(&first.bytes, None);
     assert_eq!(d.state().header_footer().unwrap().texts, head.texts);
-    let [first_page, second] = [0, 1].map(|i| d.page(i).unwrap());
-    copied(&mut d, first_page, 0);
+    let second = d.page(1).unwrap();
     let half_inch = sheaf_edit::Margins {
         top: 36.0,
         bottom: 36.0,
@@ -1423,18 +1409,13 @@ fn a_derived_page_is_written_as_its_original_object_with_derived_content() {
     let before = bytes(&pdf);
     let mut d = open(&before, None);
     let first = d.page(0).unwrap();
-    let redrawn = crate::save::derived_copy(
-        d.primary(),
-        &[0],
-        crate::save::HeaderKept::Yes,
-        &mut |pdf, page, _, _| {
-            let stream = Stream::new(dictionary! {}, b"0 0 m 9 9 l S".to_vec());
-            page.set("Contents", pdf.add_object(stream));
-            let crop = [0.0f32, 0.0, 300.0, 400.0].map(Object::from);
-            page.set("CropBox", crop.to_vec());
-            Ok(())
-        },
-    )
+    let redrawn = crate::save::derived_copy(d.primary(), &[0], &mut |pdf, page, _| {
+        let stream = Stream::new(dictionary! {}, b"0 0 m 9 9 l S".to_vec());
+        page.set("Contents", pdf.add_object(stream));
+        let crop = [0.0f32, 0.0, 300.0, 400.0].map(Object::from);
+        page.set("CropBox", crop.to_vec());
+        Ok(())
+    })
     .unwrap();
     derive(&mut d, &redrawn, 0, first);
     let out = rewrite(&d, Profile::default());

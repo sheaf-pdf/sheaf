@@ -237,6 +237,26 @@ impl Reserved {
         Reserved { names }
     }
 
+    /// The names `needs` gives, kept too: content written after with
+    /// these resources goes with it on one page.
+    pub fn take(&mut self, needs: &ResourceNeeds) {
+        for need in &needs.0 {
+            let ids = self
+                .names
+                .entry((need.kind, need.name.clone()))
+                .or_default();
+            if !ids.contains(&need.res.id) {
+                ids.push(need.res.id);
+            }
+        }
+    }
+
+    /// `name` in `kind` bound to nothing: a name the resources go without
+    /// once what used it is taken out, free to name anything again.
+    pub fn forget(&mut self, kind: ResKind, name: &[u8]) {
+        self.names.remove(&(kind, name.to_vec()));
+    }
+
     /// Whether `name` may name `id` in `kind`.
     fn allows(&self, kind: ResKind, name: &[u8], id: ResId) -> bool {
         self.names
@@ -512,6 +532,12 @@ impl<'f> ContentWriter<'f> {
     /// next name up where `reserved`, a name given, or one made before
     /// has it.
     pub fn finish(self, reserved: &Reserved, given: &[(ResId, &str)]) -> (Vec<u8>, ResourceNeeds) {
+        self.named(reserved, given)
+    }
+
+    /// The content as [`finish`](Self::finish) gives it, the writer kept:
+    /// what's written once can be named for each page it goes on.
+    pub fn named(&self, reserved: &Reserved, given: &[(ResId, &str)]) -> (Vec<u8>, ResourceNeeds) {
         let given_name = |id: ResId| {
             let (_, name) = given.iter().find(|(given, _)| *given == id)?;
             Some(name.as_bytes().to_vec())
@@ -523,8 +549,9 @@ impl<'f> ContentWriter<'f> {
             .collect();
         let needs: Vec<Need> = self
             .needs
-            .into_iter()
+            .iter()
             .map(|(kind, res)| {
+                let (kind, res) = (*kind, res.clone());
                 let name =
                     given_name(res.id).unwrap_or_else(|| fresh(kind, res.id, reserved, &taken));
                 taken.insert((kind, name.clone()));

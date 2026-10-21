@@ -19,6 +19,26 @@ use crate::tape::{Tape, TapeLook};
 /// A color: red, green and blue, 0–255.
 pub type Color = [u8; 3];
 
+/// A face text is drawn in: one of the standard 14 fonts' text faces,
+/// which every reader has, so none is embedded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum FontChoice {
+    Helvetica,
+    #[default]
+    HelveticaBold,
+    HelveticaOblique,
+    HelveticaBoldOblique,
+    TimesRoman,
+    TimesBold,
+    TimesItalic,
+    TimesBoldItalic,
+    Courier,
+    CourierBold,
+    CourierOblique,
+    CourierBoldOblique,
+}
+
 /// How a mark is drawn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

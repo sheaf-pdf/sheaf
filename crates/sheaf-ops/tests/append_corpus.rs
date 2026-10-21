@@ -10,6 +10,11 @@
 //!   reopens cropped, an Append writing that page's dictionary and
 //!   nothing else, and the form check finds nothing in the file it didn't
 //!   find before; where the plan rewrites or asks, why is counted;
+//! - a watermark's round trip (M10.5 slice 16; ignored, as a corpus
+//!   tier): every file watermarked on every page, saved each way, keeps
+//!   its form check's findings, opens with the watermark found on every
+//!   page, Acrobat's own replaced but where a splice refuses one, and
+//!   taken off is a Rewrite whose file holds and draws none of its text;
 //! - deleted means deleted, both ways, on every file (ignored, as it
 //!   takes about seven minutes; each slice's Verify and commit run it): a
 //!   page, a mark, a reply, a mark's text, another tool's comment or a
@@ -39,15 +44,23 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use lopdf::{Document as Pdf, Object, ObjectId};
+use sheaf_doc::content::{
+    FontDecoders, PagOrigin, PageContent, PaginationKind, ResCx, TextBag, text_bag,
+};
+use sheaf_doc::forms::Finding;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::sigs::Verdict;
 use sheaf_doc::materialize::{
     Ask, AskAnswers, How, Onto, SaveStop, Strategy, StrategyKind, Why, forced_append, materialize,
     plan, removal, save, save_rewritten, write_file,
 };
-use sheaf_doc::tx::fixture::{add, bookmark, crop, delete, delete_annots, delete_bookmark, update};
+use sheaf_doc::model::Scope;
+use sheaf_doc::tx::fixture::{
+    add, bookmark, crop, delete, delete_annots, delete_bookmark, remove_watermark, set_watermark,
+    update, watermark as fx_watermark,
+};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, PageId, Pt};
-use sheaf_edit::{Margins, Rotation};
+use sheaf_edit::{Margins, Rotation, Z};
 
 mod common;
 
@@ -415,6 +428,231 @@ fn crop_appends_only_page_dicts() {
         println!("{path}: {why}");
     }
     assert!(failed.is_empty());
+}
+
+// ----- A watermark's round trip ---------------------------------------------
+
+/// Corpus paths, comma-separated, to run [`watermark_round_trips`] on alone
+/// (`SHEAF_WATERMARK_ONLY=forms/irs/f1040.pdf,…`): for looking at a few
+/// files by hand. Unset, it takes every file.
+const WATERMARK_ONLY: &str = "SHEAF_WATERMARK_ONLY";
+
+/// The text of the watermark every file takes.
+const WATERMARK: &str = "SHEAF-CORPUS-WATERMARK";
+
+/// What a watermark's round trips through a copy of a file came to.
+#[derive(Default)]
+struct RoundTrip {
+    /// Why the first save each way was a Rewrite where it was asked to
+    /// append: the file can't take an Append.
+    declined: Vec<String>,
+    /// Acrobat's watermarks on its pages, and those left once each way's
+    /// first save replaced them, which a splice refused.
+    acrobat: usize,
+    acrobat_left: usize,
+}
+
+/// The pagination artifacts of `doc`'s file of kind `kind` drawn by
+/// `origin`, page by page, counted.
+fn artifacts(doc: &Document, kind: PaginationKind, origin: PagOrigin) -> usize {
+    let src = doc.primary();
+    (0..src.page_count())
+        .filter_map(|i| src.blocks(i).ok())
+        .map(|b| {
+            (b.pagination.iter())
+                .filter(|p| p.kind == kind && p.origin == origin)
+                .count()
+        })
+        .sum()
+}
+
+/// The words `doc`'s file draws on its pages, decoded through its fonts:
+/// none of a page whose content can't be read.
+fn drawn_words(doc: &Document) -> TextBag {
+    let src = doc.primary();
+    let (pdf, lim) = (src.pdf(), src.limits());
+    let mut bag = TextBag::default();
+    for page in (0..src.page_count()).filter_map(|i| src.page(i)) {
+        let Ok(content) = PageContent::read(pdf, &page.contents, lim) else {
+            continue;
+        };
+        let resources = page.resources.as_deref();
+        let fonts = FontDecoders::read(pdf, resources, lim);
+        let res = ResCx::read(pdf, resources);
+        if let Ok(words) = text_bag(content.concat(), &res, lim, &fonts) {
+            bag.extend(&words);
+        }
+    }
+    bag
+}
+
+/// Whether `finding` is what a save told to break signatures and drop an
+/// XFA part's values may leave: what save policy decides, and asks about
+/// first.
+fn told(finding: &Finding) -> bool {
+    matches!(
+        finding,
+        Finding::StaleSignature { .. }
+            | Finding::StaleSigFlags { .. }
+            | Finding::XfaMismatch { .. }
+            | Finding::EarlierValues { .. }
+    )
+}
+
+/// How many times `bag` holds `word`.
+fn times(bag: &TextBag, word: &str) -> usize {
+    bag.words().find(|(w, _)| *w == word).map_or(0, |(_, n)| n)
+}
+
+/// A copy of `entry`'s file watermarked on every page, saved each way
+/// (an Append where the file takes one), then opened again and the
+/// watermark taken off, saved as planned: None when it doesn't open.
+fn watermarked(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<RoundTrip, String>> {
+    let original = std::fs::read(corpus.path(entry)).ok()?;
+    let was = sheaf_doc::forms::check(&original, None).ok();
+    let mut trip = RoundTrip::default();
+    for how in [How::Rewritten, How::Appended] {
+        let path = copy_of(entry, corpus, dir, &format!("wm-{how:?}-"))?;
+        let outcome = (|| {
+            let mut doc = opened(&path)?;
+            let acrobat = artifacts(&doc, PaginationKind::Watermark, PagOrigin::Acrobat);
+            Some(
+                round_trip(&mut doc, &path, how, was.as_ref()).map(|(declined, left)| {
+                    trip.declined.extend(declined);
+                    trip.acrobat += acrobat;
+                    trip.acrobat_left += left;
+                }),
+            )
+        })();
+        remove(&path);
+        if let Err(e) = outcome? {
+            return Some(Err(format!("{how:?}: {e}")));
+        }
+    }
+    Some(Ok(trip))
+}
+
+/// [`watermarked`]'s saves of `doc`, opened from `path`, the first `how`,
+/// the file's form check `was` before: why the first wasn't an Append
+/// asked for, and how many of Acrobat's watermarks it left.
+fn round_trip(
+    doc: &mut Document,
+    path: &Path,
+    how: How,
+    was: Option<&sheaf_doc::forms::Report>,
+) -> Result<(Option<String>, usize), String> {
+    let set = set_watermark(fx_watermark(WATERMARK), Z::Over, None);
+    doc.commit_ops(vec![set], "watermark")
+        .map_err(|e| format!("no watermark: {e}"))?;
+    let declined = match how {
+        How::Rewritten => save_rewritten(doc, path).map(|_| None),
+        How::Appended => appended_or_not(doc, path).map(|strategy| match strategy {
+            Strategy::Rewrite { why } => Some(reasons(&why)),
+            _ => None,
+        }),
+    }
+    .map_err(|stop| format!("the first save stopped: {stop}"))?;
+    let bytes = std::fs::read(path).unwrap();
+    if let Some(was) = was {
+        let now = sheaf_doc::forms::check(&bytes, None).map_err(|e| format!("check: {e:#}"))?;
+        let added: Vec<_> = (now.findings.iter())
+            .filter(|f| !was.findings.contains(f) && !told(f))
+            .collect();
+        if !added.is_empty() {
+            return Err(format!("the form check finds {added:?}"));
+        }
+    }
+    let mut again = opened(path).ok_or("the saved file doesn't open")?;
+    let found = again
+        .state()
+        .watermark(Z::Over)
+        .ok_or("its watermark isn't found")?;
+    if *found.scope() != Scope::All {
+        return Err(format!("found on {:?}, not every page", found.scope()));
+    }
+    let left = artifacts(&again, PaginationKind::Watermark, PagOrigin::Acrobat);
+    let pages: Vec<PageId> = again.state().order().iter().copied().collect();
+    again
+        .commit_ops(vec![remove_watermark(Some(Z::Over), &pages)], "remove")
+        .map_err(|e| format!("not removed: {e}"))?;
+    let answers = AskAnswers {
+        break_signatures: true,
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    let report = save(&mut again, path, &answers, &NoProgress).map_err(|e| format!("{e}"))?;
+    if report.strategy != Some(StrategyKind::Rewrite) {
+        return Err(format!("removed, saved as {:?}", report.strategy));
+    }
+    if readable(&std::fs::read(path).unwrap(), &written_as(WATERMARK)) {
+        return Err("removed, its text can still be read".into());
+    }
+    let reopened = opened(path).ok_or("the file it was removed from doesn't open")?;
+    if times(&drawn_words(&reopened), WATERMARK) > 0 {
+        return Err("removed, its text is still drawn".into());
+    }
+    Ok((declined, left))
+}
+
+/// Every file watermarked on every page, saved each way, opened again and
+/// the watermark taken off (slice 16): the form check finds nothing the
+/// file didn't have before; the watermark is found again, on every page;
+/// Acrobat's watermarks are replaced, but where a splice refuses to take
+/// one out, which only the page of one file's needs; taken off, the save
+/// is a Rewrite, and its text can't be read in the file or drawn.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn watermark_round_trips() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let dir = scratch("watermarked");
+    let entries = common::narrowed(WATERMARK_ONLY, corpus.manifest().unwrap(), |e| &e.path);
+    let outcomes = each_entry(&entries, |entry| watermarked(entry, &corpus, &dir));
+    let (mut files, mut acrobat) = (0, 0);
+    let mut declined: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut left, mut failed) = (BTreeMap::new(), BTreeMap::new());
+    for (entry, outcome) in entries.iter().zip(outcomes) {
+        match outcome {
+            None => {}
+            Some(Ok(trip)) => {
+                files += 1;
+                acrobat += trip.acrobat;
+                for why in trip.declined {
+                    *declined.entry(why).or_default() += 1;
+                }
+                if trip.acrobat_left > 0 {
+                    left.insert(entry.path.as_str(), trip.acrobat_left);
+                }
+            }
+            Some(Err(e)) => {
+                files += 1;
+                failed.insert(entry.path.clone(), e);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    println!(
+        "{files} of {} files watermarked both ways, found again and removed; of Acrobat's \
+         watermarks on their pages, {acrobat} each way's together, {} left ({left:?}); {} failed",
+        entries.len(),
+        left.values().sum::<usize>(),
+        failed.len(),
+    );
+    for (why, n) in &declined {
+        println!("  appended as a Rewrite for {why}: {n}");
+    }
+    for (path, why) in &failed {
+        println!("{path}: {why}");
+    }
+    assert!(failed.is_empty());
+    // Its watermark has the body's `q` and `BT` inside its range, which no
+    // splice can take without the body: left each way.
+    let refused = "forms/safedocs/0112530.pdf";
+    assert!(
+        left.iter().all(|(&path, &n)| path == refused && n == 2),
+        "{left:?}"
+    );
 }
 
 // ----- Deleted means deleted, both ways --------------------------------------

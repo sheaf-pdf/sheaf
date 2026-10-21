@@ -18,12 +18,19 @@
 //!   measured in the same way, measuring again on the current one when
 //!   that conflicts. The dialog previews its page as either would draw it
 //!   (`crop_dialog`).
-//! - **Derived pages:** Watermark / Background and Header & Footer show
-//!   pages from copies made of them off the UI thread, over the version
-//!   their dialog opened on, and commit on that version as a crop does.
-//!   The Header & Footer dialog previews its page as it would draw
-//!   (`header_footer_dialog`); Watermark's adopts that preview in M10.5
-//!   slice 16.
+//! - **Watermark / Background** is the document's watermark at that z
+//!   (M10.5 slice 16), laid out on each page as a save writes it. Setting
+//!   it is one op, committed on the version the dialog opened on as a
+//!   crop is. Remove is a planner: its lowering reads each page's content
+//!   off the UI thread, for the watermarks other programs and files drew,
+//!   which it takes off too and counts by who drew them (§6.5, D61), and
+//!   it commits on the version the dialog opened on; the notice is its
+//!   line, with those counts. The dialog previews its page as applying
+//!   would draw it (`watermark_dialog`).
+//! - **Derived pages:** Header & Footer shows pages from copies made of
+//!   them off the UI thread, over the version its dialog opened on, and
+//!   commits on that version as a crop does, until slice 17. The dialog
+//!   previews its page as it would draw (`header_footer_dialog`).
 //! - **Page Labels**, from its dialog, commits on the version the dialog
 //!   opened on in the same way.
 //!
@@ -40,12 +47,12 @@ use sheaf_doc::images::PageFit;
 use sheaf_doc::labels::Style;
 use sheaf_doc::tx::LowerCx;
 use sheaf_doc::{
-    Actor, Commit, CommitOpts, Derive, DocState, Document, EditError, JobKind, PageId, Snapshot,
-    Src, Stale, Store, Tx, VersionId,
+    Actor, Blob, Commit, CommitOpts, Derive, DocState, Document, EditError, JobKind, PageId,
+    Snapshot, Src, Stale, Store, Tx, VersionId,
 };
 use sheaf_edit::{
     BlobSel, BoxSpec, Bring, FormBring, Margins, Op, OutlineBring, PageLabelRange, PageRef,
-    PageSel, PageSize, PageSource, Patch, RangeSet, ScopeSel,
+    PageSel, PageSize, PageSource, Patch, RangeSet, ScopeSel, Z,
 };
 use sheaf_ops::crop::{self, Trimmed};
 use sheaf_ops::derive::DerivedSource;
@@ -788,64 +795,94 @@ impl DocView {
 }
 
 impl DocView {
-    /// Document > Watermark / Background: draw `wm` on pages `pages` (None:
-    /// all) of `opened`, the version the dialog opened on, stripping the
-    /// old one of its kind everywhere; with `wm` None, remove it. Pages
-    /// show generated copies, so what's on screen is what's saved.
-    pub(crate) fn apply_watermark(
+    /// Document > Watermark / Background: `set`, the dialog's op, which
+    /// sets the watermark at its z on the pages it names of `opened`, the
+    /// version the dialog opened on, committed on that version, holding
+    /// `holds`, the file it draws, until it is. Text its font can't draw
+    /// all of is said in the notice, and so is a change of nothing.
+    pub(crate) fn set_watermark(
         &mut self,
         opened: Snapshot,
-        behind: bool,
-        wm: Option<sheaf_doc::watermark::Watermark>,
-        pages: Option<Vec<PageId>>,
+        set: Op,
+        holds: Option<Blob>,
+        cx: &mut Context<Self>,
+    ) {
+        let (label, none) = match &set {
+            Op::SetWatermark { z: Z::Under, .. } => ("Background", "No change to the background"),
+            _ => ("Watermark", "No change to the watermark"),
+        };
+        let Some(mut tx) = self.user_tx_at(&opened) else {
+            return;
+        };
+        if let Some(blob) = holds {
+            tx.pin(blob);
+        }
+        let Some(tx) = self.lower_in(tx, vec![set], label, cx) else {
+            return;
+        };
+        let opts = CommitOpts::based(opened.version, Stale::Validate, label);
+        if let Ok(commit) = self.commit(tx, opts, cx) {
+            self.set_notice(watermark_notice(&commit, none), cx);
+        }
+    }
+
+    /// Document > Watermark / Background, Remove: the watermark at `z`
+    /// taken off every page of `opened`, the version the dialog opened on,
+    /// and those other programs and files drew, the author's own too with
+    /// `include_authored`. A planner: lowering reads each page's content
+    /// off the UI thread (§6.5), and the op commits on `opened`. The notice
+    /// is its line, which counts what it found of others' by who drew
+    /// them, and what it left in place (D61).
+    pub(crate) fn remove_watermark(
+        &mut self,
+        opened: Snapshot,
+        z: Z,
+        include_authored: bool,
         cx: &mut Context<Self>,
     ) {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let store = doc.model.store().clone();
-        let scope: Vec<PageId> =
-            pages.unwrap_or_else(|| opened.state.order().iter().copied().collect());
-        let what = if behind { "Background" } else { "Watermark" };
-        let label = if wm.is_some() {
-            what.to_string()
-        } else {
-            format!("Remove {}", what.to_lowercase())
+        let lower = doc.model.lower_cx(Actor::User);
+        let label = match z {
+            Z::Over => "Remove watermark",
+            Z::Under => "Remove background",
         };
-        // Its text is drawn into the copies, out of the model's sight.
-        let why = match &wm {
-            Some(wm) => Derive::Watermark {
-                behind,
-                unencodable: wm.unencodable(),
-            },
-            None => Derive::RemoveWatermark { behind },
+        let remove = Op::RemoveWatermark {
+            z: Some(z),
+            pages: PageSel::ids(opened.state.order().iter().copied()),
+            include_authored,
         };
         let work = {
             let opened = opened.clone();
             move |p: &Tracker| {
-                let wm = wm.as_ref();
-                sheaf_ops::derive::watermark(&store, &opened, behind, wm, &scope, p)
+                let mut tx = Document::tx_at(&opened, lower);
+                tx.apply(remove, p)?;
+                Ok(tx)
             }
         };
-        let land = {
-            let label = label.clone();
-            move |v: &mut DocView, copies: Vec<DerivedSource>, cx: &mut Context<DocView>| {
-                if copies.is_empty() {
-                    return Some(format!("No {} to remove", what.to_lowercase()));
-                }
-                let n: usize = copies.iter().map(|c| c.pages.len()).sum();
-                let tx = v.user_tx_at(&opened)?;
-                let tx = v.show_copies(tx, &copies, why, &label, cx)?;
-                let opts = CommitOpts::based(opened.version, Stale::Validate, label.as_str());
-                let commit = v.commit(tx, opts, cx).ok()?;
-                v.keep_copies(&copies);
-                let mut notice = format!("{label}: {n} page{}", if n == 1 { "" } else { "s" });
-                if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
-                    notice = format!("{notice}. {told}");
-                }
-                Some(notice)
-            }
+        let land = move |v: &mut DocView, tx: Tx, cx: &mut Context<DocView>| {
+            let opts = CommitOpts::based(opened.version, Stale::Validate, label);
+            let commit = v.commit(tx, opts, cx).ok()?;
+            let none = match z {
+                Z::Over => "No watermark to remove",
+                Z::Under => "No background to remove",
+            };
+            Some(watermark_notice(&commit, none))
         };
-        self.run_planner(&label, work, |_| None, land, cx);
+        self.run_planner(label, work, |_| None, land, cx);
+    }
+}
+
+/// What the reader is told of a watermark's `commit`: its line, with its
+/// notices, or `none` when it changed nothing.
+fn watermark_notice(commit: &Commit, none: &str) -> String {
+    let line = commit.lines.first().filter(|_| commit.version.is_some());
+    let Some(line) = line else {
+        return none.to_string();
+    };
+    match sheaf_doc::notice_text(&commit.notices) {
+        Some(told) => format!("{}. {told}", line.text),
+        None => line.text.clone(),
     }
 }

@@ -423,38 +423,27 @@ fn same_settings(a: &HeaderFooter, b: &HeaderFooter) -> bool {
             == (&b.first_page_number, &b.date, &b.file, &b.bates)
 }
 
-/// Pagination kinds, by what's removed together.
+/// The pagination kinds a header and footer are.
 pub const HEADER_FOOTER: &[PaginationKind] = &[PaginationKind::Header, PaginationKind::Footer];
-pub const WATERMARK: &[PaginationKind] = &[PaginationKind::Watermark];
-pub const BACKGROUND: &[PaginationKind] = &[PaginationKind::Background];
 
-/// The pagination artifacts of `kinds` that [`strip`] removes from a page
-/// whose blocks are `blocks`: Acrobat's and sheaf's, never an author's own
-/// (proposal 31), which slice 17's `include_authored` asks for.
-pub fn stripped<'a>(
-    blocks: &'a PageBlocks,
-    kinds: &'a [PaginationKind],
-) -> impl Iterator<Item = &'a Pagination> + 'a {
+/// The headers and footers [`strip`] removes from a page whose blocks are
+/// `blocks`: Acrobat's and sheaf's, never an author's own (proposal 31),
+/// which slice 17's `include_authored` asks for.
+pub fn stripped(blocks: &PageBlocks) -> impl Iterator<Item = &Pagination> {
     blocks
         .pagination
         .iter()
-        .filter(|p| kinds.contains(&p.kind) && p.origin != PagOrigin::Authored)
+        .filter(|p| HEADER_FOOTER.contains(&p.kind) && p.origin != PagOrigin::Authored)
 }
 
-/// Remove the pagination artifacts of `kinds` ([`HEADER_FOOTER`],
-/// [`WATERMARK`], [`BACKGROUND`]) that Acrobat or sheaf drew from `page`'s
+/// Remove the headers and footers Acrobat or sheaf drew from `page`'s
 /// content ([`stripped`]); `index` is the page's, from 0, for errors. The
 /// page's streams are spliced: what isn't removed stays byte for byte, and
 /// each stream that changes is written as a new object, so a page that
 /// shares it keeps it. Content that can't be read, or an artifact that
 /// can't be removed without changing what else the page draws, is an
 /// error, and nothing is changed. Returns whether any were found.
-pub fn strip(
-    pdf: &mut Pdf,
-    page: &mut Dictionary,
-    index: u32,
-    kinds: &[PaginationKind],
-) -> Result<bool, ContentError> {
+pub fn strip(pdf: &mut Pdf, page: &mut Dictionary, index: u32) -> Result<bool, ContentError> {
     let lim = Limits::DEFAULT;
     let read = |fault| ContentError::Read { page: index, fault };
     let content = PageContent::read(pdf, &content::contents(page), &lim).map_err(read)?;
@@ -463,7 +452,7 @@ pub fn strip(
         PageBlocks::of(pdf, &content, resources, &lim, &DrawnForms::default()).map_err(read)?;
     let res = ResCx::read(pdf, resources);
     let mut drop = Vec::new();
-    for p in stripped(&blocks, kinds) {
+    for p in stripped(&blocks) {
         let cuts = p.cuts(content.concat(), &res, &lim);
         drop.extend(cuts.map_err(|e| read(content.fault(e)))?);
     }
@@ -779,7 +768,7 @@ mod tests {
             [(PaginationKind::Header, content::PagOrigin::SheafLegacy)]
         );
 
-        assert!(strip(&mut pdf, &mut first, 0, HEADER_FOOTER).unwrap());
+        assert!(strip(&mut pdf, &mut first, 0).unwrap());
         assert!(!blocks(&pdf, &first).has(HEADER_FOOTER));
         let after = streams(&pdf, &first);
         let kept: Vec<&[u8]> = after.iter().map(|(_, s)| s.trim_ascii()).collect();
@@ -822,9 +811,9 @@ mod tests {
     const HEADER: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Header /SheafStamp true>> BDC \
         q BT /F1 9 Tf (Head) Tj ET Q EMC";
 
-    /// Strip takes sheaf's and Acrobat's artifacts of its kinds, and leaves
-    /// the rest byte for byte: other kinds, other artifacts, and an
-    /// author's own running heads (proposal 31).
+    /// Strip takes sheaf's and Acrobat's headers and footers, and leaves
+    /// the rest byte for byte: other kinds (a watermark), other artifacts,
+    /// and an author's own running heads (proposal 31).
     #[test]
     fn strip_removes_its_kinds_and_nothing_else() {
         let mut pdf = Pdf::with_version("1.7");
@@ -841,7 +830,7 @@ mod tests {
         ]
         .concat();
         let mut page = page_of(&mut pdf, &[&content]);
-        assert!(strip(&mut pdf, &mut page, 0, HEADER_FOOTER).unwrap());
+        assert!(strip(&mut pdf, &mut page, 0).unwrap());
         // Byte for byte, but for sheaf's header and footer.
         let [(_, out)] = &streams(&pdf, &page)[..] else {
             panic!("one stream")
@@ -855,8 +844,7 @@ mod tests {
              /Artifact <</Type /Pagination /Subtype /Watermark /SheafStamp true>> BDC \
              (wm) Tj EMC\n0 0 1 rg"
         );
-        assert!(!strip(&mut pdf, &mut page, 0, HEADER_FOOTER).unwrap());
-        assert!(strip(&mut pdf, &mut page, 0, WATERMARK).unwrap());
+        assert!(!strip(&mut pdf, &mut page, 0).unwrap());
     }
 
     /// Unfiltered data holding ` EI ` is counted, not scanned for: a strip
@@ -867,7 +855,7 @@ mod tests {
         let content = [HEADER, b"\nq 6 0 0 1 0 0 cm ", image, b" Q"].concat();
         let mut pdf = Pdf::with_version("1.7");
         let mut page = page_of(&mut pdf, &[&content]);
-        assert!(strip(&mut pdf, &mut page, 0, HEADER_FOOTER).unwrap());
+        assert!(strip(&mut pdf, &mut page, 0).unwrap());
         let [(_, out)] = &streams(&pdf, &page)[..] else {
             panic!("one stream")
         };
@@ -888,7 +876,7 @@ mod tests {
             ],
         );
         let before = streams(&pdf, &page);
-        assert!(strip(&mut pdf, &mut page, 0, HEADER_FOOTER).unwrap());
+        assert!(strip(&mut pdf, &mut page, 0).unwrap());
         let after = streams(&pdf, &page);
         assert_eq!(after[0].1, b"q 0 0 1 rg ");
         assert_eq!(after[1].1, b" 0 0 9 9 re f Q");
@@ -909,7 +897,7 @@ mod tests {
         let shared = pdf.add_object(Stream::new(dictionary! {}, HEADER.to_vec()));
         let mut first = dictionary! { "Contents" => shared };
         let second = dictionary! { "Contents" => shared };
-        assert!(strip(&mut pdf, &mut first, 0, HEADER_FOOTER).unwrap());
+        assert!(strip(&mut pdf, &mut first, 0).unwrap());
         assert_ne!(content::contents(&first), [shared]);
         assert_eq!(streams(&pdf, &first)[0].1, b"");
         assert_eq!(streams(&pdf, &second), [(shared, HEADER.to_vec())]);
@@ -934,7 +922,7 @@ mod tests {
         ] {
             let mut page = dictionary! { "Contents" => contents };
             let before = page.clone();
-            let e = strip(&mut pdf, &mut page, 11, HEADER_FOOTER).unwrap_err();
+            let e = strip(&mut pdf, &mut page, 11).unwrap_err();
             assert!(matches!(e, ContentError::Read { page: 11, .. }), "{e}");
             assert_eq!(
                 e.to_string(),
@@ -956,7 +944,7 @@ mod tests {
                 (Body) Tj ET"],
         );
         let before = page.clone();
-        let e = strip(&mut pdf, &mut page, 2, HEADER_FOOTER).unwrap_err();
+        let e = strip(&mut pdf, &mut page, 2).unwrap_err();
         assert!(matches!(e, ContentError::Unsafe { page: 2, .. }), "{e}");
         assert_eq!(page, before);
     }

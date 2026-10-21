@@ -24,6 +24,8 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
+use sheaf_edit::Z;
+
 use super::append::Refused;
 use super::emit::content;
 use super::key::ObjKey;
@@ -31,6 +33,8 @@ use super::record::{SaveInput, SaveRecord, TailFlags};
 use crate::effects::{AnnotOps, Flags, PathEffects, Removed, RemovedKind, SigClass, judge};
 use crate::forms::rules;
 use crate::forms::sigs::{Pending, SigImpact, sig_impact};
+use crate::model::{GenSpec, Generator};
+use crate::prim::Key;
 use crate::serialize::durable::FileStamp;
 
 /// What a save does, and what it asks first.
@@ -179,6 +183,11 @@ impl fmt::Display for Why {
 /// `items` as a list: "1 page, 2 comments and 1 bookmark".
 fn listed(items: &[Removed]) -> String {
     let words: Vec<String> = items.iter().map(Removed::to_string).collect();
+    joined(&words)
+}
+
+/// `words` as a list: "a", "a and b", "a, b and c".
+fn joined(words: &[String]) -> String {
     match words.split_last() {
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
@@ -610,7 +619,7 @@ impl Appending {
             Some(anyway),
             None,
         ));
-        let notes = transform_asks(input, &self.transforms, &mut asks);
+        let notes = told(input, Some(path), &self.transforms, &mut asks);
         SavePlan {
             strategy: Strategy::Append { onto },
             asks,
@@ -671,7 +680,7 @@ fn rewritten(
         SigClass::all(),
         AnnotOps::all(),
     );
-    let notes = transform_asks(input, &transforms, &mut asks);
+    let notes = told(input, None, &transforms, &mut asks);
     SavePlan {
         strategy,
         asks,
@@ -792,14 +801,14 @@ pub(crate) fn sidecar(input: &SaveInput) -> Option<(SavePlan, TailFlags)> {
 /// form transforms for an Append of its path, written in the section.
 #[cfg(any(test, feature = "fixtures"))]
 pub fn forced_append(input: &SaveInput, onto: Onto) -> SavePlan {
-    let transforms = match &input.saved {
-        Some(saved) => {
-            let path = judge(&saved.state, &input.target, &input.path_keys);
-            Appending::of(input, &saved.record, &path).transforms
-        }
+    let path = (input.saved.as_ref())
+        .map(|saved| (saved, judge(&saved.state, &input.target, &input.path_keys)));
+    let transforms = match &path {
+        Some((saved, path)) => Appending::of(input, &saved.record, path).transforms,
         None => Vec::new(),
     };
-    let notes = transform_asks(input, &transforms, &mut Vec::new());
+    let path = path.as_ref().map(|(_, path)| path);
+    let notes = told(input, path, &transforms, &mut Vec::new());
     SavePlan {
         strategy: Strategy::Append { onto },
         asks: Vec::new(),
@@ -808,11 +817,14 @@ pub fn forced_append(input: &SaveInput, onto: Onto) -> SavePlan {
     }
 }
 
-/// What the reader is told of save policy's `transforms` of a save of
-/// `input`, with what they ask first put in `asks`: dropping an XFA part
-/// whose datasets hold values.
-fn transform_asks(
+/// What the reader is told of a save of `input`, an Append of `path` from
+/// the saved file or else a Rewrite: what save policy's `transforms` do,
+/// with what they ask first put in `asks` (dropping an XFA part whose
+/// datasets hold values); and a conformance claim what it draws breaks
+/// ([`claim_broken`]).
+fn told(
     input: &SaveInput,
+    path: Option<&PathEffects>,
     transforms: &[SaveTransform],
     asks: &mut Vec<Ask>,
 ) -> Vec<Note> {
@@ -832,7 +844,63 @@ fn transform_asks(
             SaveTransform::FixSigFlags => {}
         }
     }
+    notes.extend(claim_broken(input, path));
     notes
+}
+
+/// The note a save of `input`, an Append of `path` or else a Rewrite, gives
+/// when its primary's metadata claims PDF/A or PDF/UA and it draws sheaf's
+/// generators, which aren't made to conform (proposal 39): a text's font
+/// isn't embedded, and a watermark is drawn with transparency. A Rewrite
+/// draws every one; an Append, those its path changes, as one it doesn't
+/// change broke the claim in an earlier save already. Converting the file,
+/// or taking the claim off, is M14's. None when nothing is drawn or nothing
+/// claimed, and when the claims can't be read, which is logged.
+fn claim_broken(input: &SaveInput, path: Option<&PathEffects>) -> Option<Note> {
+    let drawn: Vec<&Arc<Generator>> = (input.target.generators().iter())
+        .filter(|&(&id, _)| path.is_none_or(|p| p.changed.contains(&Key::Generator(id))))
+        .map(|(_, g)| g)
+        .collect();
+    if drawn.is_empty() {
+        return None;
+    }
+    let claims = (input.primary.conformance())
+        .inspect_err(|e| log::warn!("the file's conformance claims can't be read: {e:#}"))
+        .ok()?;
+    let claimed: Vec<String> = (claims.pdfa.map(|a| a.to_string()))
+        .into_iter()
+        .chain(claims.pdfua.map(|part| format!("PDF/UA-{part}")))
+        .collect();
+    if claimed.is_empty() {
+        return None;
+    }
+    let (mut watermark, mut background, mut header) = (false, false, false);
+    for g in drawn {
+        match (&g.spec, g.z()) {
+            (GenSpec::HeaderFooter(_), _) => header = true,
+            (GenSpec::Watermark(_), Z::Over) => watermark = true,
+            (GenSpec::Watermark(_), Z::Under) => background = true,
+        }
+    }
+    let drawn: Vec<String> = [
+        (watermark, "the watermark"),
+        (background, "the background"),
+        (header, "the header and footer"),
+    ]
+    .into_iter()
+    .filter(|(drawn, _)| *drawn)
+    .map(|(_, what)| what.to_string())
+    .collect();
+    let isnt = match drawn.len() {
+        1 => "isn't",
+        _ => "aren't",
+    };
+    Some(Note(format!(
+        "This file claims {}; {} sheaf draws on it {isnt} made to conform, so the saved file no \
+         longer does",
+        joined(&claimed),
+        joined(&drawn),
+    )))
 }
 
 /// The first of `plan`'s asks `answers` doesn't answer: what the reader

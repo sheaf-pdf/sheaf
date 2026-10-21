@@ -455,8 +455,7 @@ fn copies_hold_only_the_pages_copied() {
     assert_eq!(page_annots(&bytes, 0), 1);
     // A derived copy is a copy of the page alone.
     let src = model.snapshot().primary;
-    let kept = crate::save::HeaderKept::Yes;
-    let bytes = crate::save::derived_copy(&src, &[0], kept, &mut |_, _, _, _| Ok(())).unwrap();
+    let bytes = crate::save::derived_copy(&src, &[0], &mut |_, _, _| Ok(())).unwrap();
     assert!(!says(&bytes, "MARK A 1") && !says(&bytes, "MARK A 2"));
     assert_eq!(page_annots(&bytes, 0), 0);
     // So is a stamp made from a page, and the forms the summary draws.

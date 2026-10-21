@@ -108,10 +108,17 @@
 //! run of Trim White over every page cropped, as the app's planner trims:
 //! measured through a pool of its own in the background's budget, its crops
 //! committed by value, with the engines it opened, and the group engines a
-//! second walk opened. From slice 13 Bates' apply opens no engine on the
-//! copies it makes, as the app's doesn't (its render worker opens one when
-//! a page of a copy is first drawn), where its row counted one before. So
-//! far slice 1's history bench, slice 3's geometry walk, slice 4's ready,
+//! second walk opened. Slice 16's are a watermark set on every page, the
+//! commit timed, and with an image background under every page too, the
+//! Rewrite that draws both and the Append onto the file as opened, and the
+//! file it writes opened again, ready with both found, with neither a
+//! baseline nor a gate, and the census of that Rewrite's pages
+//! ([`Census`]); and from slice 16 the thumbnail strip draws a watermark on
+//! every page beside the crop and the header, as the gate table's row
+//! says. From slice 13 Bates' apply opens no engine on the copies it
+//! makes, as the app's doesn't (its render worker opens one when a page of
+//! a copy is first drawn), where its row counted one before. So far slice
+//! 1's history bench, slice 3's geometry walk, slice 4's ready,
 //! slice 5's ready on 20,000 of sheaf's marks, slice 8's mark adds, slice
 //! 9's Rewrite, slice 10's incremental save on the scanned 7k
 //! ([`INCREMENTAL_GATE_MS`]), slice 11's check of a delete on every fixture
@@ -122,7 +129,9 @@
 //! [`REALIZE_GATE_HEAVY`]), engines after 200 groups and the thumbnail
 //! strip's memory ([`SCREEN_BYTES`]) and its rate ([`STRIP_GATE`]), and
 //! slice 15's crop of every page, as made and validated after a delete, on
-//! every fixture ([`CROP_GATE`]) assert, after their tables print.
+//! every fixture ([`CROP_GATE`]), and slice 16's census of a watermark and
+//! an image background on every page, on every fixture, assert, after
+//! their tables print.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -133,7 +142,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use futures::executor::block_on;
 use in_progress::{Level, Progress, Unit};
-use lopdf::Object;
+use lopdf::{Dictionary, Object, ObjectId};
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
 use sheaf_doc::realize::{EngineKey, GROUP, Realizer};
@@ -142,12 +151,16 @@ use sheaf_doc::stamps::{Bates, HeaderFooter};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::{
     add, crop, delete, duplicate, header, insert, move_pages, ocr, rotate, set_header,
+    set_watermark, watermark,
 };
 use sheaf_doc::{
-    Actor, Annot, AnnotId, AnnotKind, Base, Box2, CommitOpts, Derive, Document, GroupKind, JobKind,
-    OcrWord, PageId, Query, Snapshot, Stale, Store, TextLayer, ViewInputs,
+    Actor, Annot, AnnotId, AnnotKind, Base, Blob, Box2, CommitOpts, Derive, Document, GroupKind,
+    JobKind, OcrWord, PageId, Query, Snapshot, Src, Stale, Store, TextLayer, ViewInputs,
 };
-use sheaf_edit::{Anchor, Margins, Op, PageRef, Rotation, Style, Turn};
+use sheaf_edit::{
+    Anchor, BlobSel, GridPos, Margins, Op, PageRef, Rotation, Style, Turn, WatermarkContent,
+    WatermarkSpec, Z,
+};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
 use sheaf_ops::blank::{self, BlankParams};
@@ -978,6 +991,82 @@ fn gates(kind: Kind) {
         gate: String::new(),
     });
 
+    // A watermark on every page, as the Watermark dialog sets it (slice
+    // 16): one op over the document, laid out on each page when a save or
+    // an overlay writes it, so the commit touches no page. Then with an
+    // image background under every page too: the Rewrite that draws both,
+    // the Append onto the file as opened, and the census of the Rewrite's
+    // pages, asserted: what their resources name that the file's didn't
+    // is one image, one font and one graphics state, and the pages have
+    // one resources dictionary for each the file's pages had. No baseline.
+    let (commit_watermark, _) = measure(QUICK_RUNS, || {
+        let (t, ()) = timed(|| {
+            doc.commit_ops(vec![every_watermark()], "Watermark")
+                .unwrap();
+        });
+        doc.undo().unwrap();
+        t
+    });
+    rows.push(Row::time(
+        "watermark all pages, commit",
+        commit_watermark,
+        f64::NAN,
+        "",
+    ));
+    let image = background_image(&doc);
+    let ops = vec![every_watermark(), image_background(&image)];
+    doc.commit_ops(ops, "Watermarks").unwrap();
+    let snap = doc.snapshot();
+    let mut watermarked_mb = 0.0;
+    let (watermarked_rewrite, _) = measure(RUNS, || {
+        let (t, bytes) = timed(|| sheaf_doc::save::rewrite(&snap).unwrap());
+        watermarked_mb = mb(bytes.len() as u64);
+        t
+    });
+    let written = sheaf_doc::save::rewrite(&snap).unwrap();
+    // That file opened again, its watermark and background found: ready,
+    // with every page's streams' dictionaries read for their markers.
+    let marked = dir.join(format!("{}-{PAGES}-watermarked.pdf", kind.name()));
+    std::fs::write(&marked, &written).unwrap();
+    let census = Census::of(doc.primary(), written);
+    drop(snap);
+    let (found_ready, _) = measure(QUICK_RUNS, || {
+        let (t, opened) = timed(|| sheaf_doc::open::file(&marked, None).unwrap());
+        assert_eq!(opened.doc.state().generators().len(), 2, "both found");
+        t
+    });
+    std::fs::remove_file(&marked).unwrap();
+    let (watermarked_append, _) = measure(RUNS, || planned_and_put_back(&mut doc, &work));
+    doc.undo().unwrap();
+    drop(image);
+    let what = "watermark + image background, all pages";
+    rows.push(Row::time(
+        &format!("{what}, Rewrite"),
+        watermarked_rewrite,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row {
+        what: format!("{what}, Rewrite, the file written"),
+        now: Some(watermarked_mb),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: String::new(),
+    });
+    rows.push(Row::time(
+        &format!("{what}, Append"),
+        watermarked_append,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row::time(
+        &format!("{what}, ready, found again"),
+        found_ready,
+        f64::NAN,
+        "",
+    ));
+    rows.extend(census.rows());
+
     // Crop every page by half an inch a side, as the Crop Pages dialog
     // does from slice 15: one op over every page's boxes, in a transaction
     // made on the version the dialog opened on, committed by value
@@ -1016,16 +1105,19 @@ fn gates(kind: Kind) {
         crop_gate,
     ));
 
-    // The thumbnail strip (slice 13's gate): every page cropped, and the
-    // legacy header on all of them, then every page's preview in order as
-    // the strip draws them, through a pool of its own whose two panes pin
-    // their groups (12 and 13, 26 and 27, as slice 2 measured it). Each
-    // group's overlay is realized when its first page is drawn, by a
-    // realizer that has seen nothing, so its assembly is in the time. The
-    // screen's engines are weighed after each group.
+    // The thumbnail strip (slice 13's gate): every page cropped, a
+    // watermark on every page (slice 16) and the legacy header on all of
+    // them, then every page's preview in order as the strip draws them,
+    // through a pool of its own whose two panes pin their groups (12 and
+    // 13, 26 and 27, as slice 2 measured it). Each group's overlay is
+    // realized when its first page is drawn, by a realizer that has seen
+    // nothing, so its assembly is in the time. The screen's engines are
+    // weighed after each group.
     let snap = doc.snapshot();
     cropped(&mut doc, &snap, &ids, half_inch);
     drop(snap);
+    doc.commit_ops(vec![every_watermark()], "Watermark")
+        .unwrap();
     let mut texts: [String; 6] = Default::default();
     texts[1] = "Draft".into();
     texts[4] = "Page <<1>> of <<N>>".into();
@@ -1055,15 +1147,16 @@ fn gates(kind: Kind) {
         })
     });
     drop((views, pool));
-    doc.undo().unwrap();
-    doc.undo().unwrap();
+    for _ in 0..3 {
+        doc.undo().unwrap();
+    }
     let strip_rate = f64::from(PAGES) / fill_all.as_secs_f64();
     let gate = match kind {
         Kind::Scanned => String::new(),
         _ => format!("≥ {STRIP_GATE} pages/s, asserted"),
     };
     rows.push(Row {
-        what: format!("thumbnail strip, crop + header, {PREVIEW_W} px"),
+        what: format!("thumbnail strip, crop + watermark + header, {PREVIEW_W} px"),
         now: Some(strip_rate),
         unit: "pages/s",
         baseline: kind.strip_pages_per_s(),
@@ -1164,6 +1257,7 @@ fn gates(kind: Kind) {
             "realize + open + render took {realized:?}, over {gate:?}"
         );
     }
+    census.assert();
     assert!(
         all < CROP_GATE,
         "a crop of every page took {all:?}, over {CROP_GATE:?}"
@@ -1644,6 +1738,163 @@ fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) {
     tx.apply(set, &NoProgress).unwrap();
     doc.commit(tx, CommitOpts::labelled("Header & footer"))
         .unwrap();
+}
+
+/// A text watermark over every page, as the Watermark dialog sets one.
+fn every_watermark() -> Op {
+    set_watermark(watermark("DRAFT"), Z::Over, None)
+}
+
+/// A PNG interned in `doc`'s store, held while it's named: a background's
+/// image, 600 by 400 pixels of a gradient.
+fn background_image(doc: &Document) -> Blob {
+    let rgb = image::RgbImage::from_fn(600, 400, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+    });
+    let png = sheaf_image::encode::png(&rgb, 72).unwrap();
+    let kind = BlobKind::image(&png).expect("a PNG is an image");
+    doc.store().intern(png.into(), kind).unwrap()
+}
+
+/// `image` under every page, half its width, as translucent as
+/// [`every_watermark`], so the two share a graphics state.
+fn image_background(image: &Blob) -> Op {
+    let spec = WatermarkSpec {
+        content: WatermarkContent::Image {
+            image: Some(BlobSel::Id(image.id())),
+            scale: 0.5,
+            opacity: 0.3,
+        },
+        position: GridPos::Center,
+    };
+    set_watermark(spec, Z::Under, None)
+}
+
+/// What a Rewrite's pages draw with that their file's didn't, page by
+/// page (slice 16's census): the objects their resources name under names
+/// the file's pages' resources don't have, by kind, and the resources
+/// dictionaries the pages have, beside how many the file's had (by the
+/// object, or the dictionary written inline).
+struct Census {
+    images: HashSet<ObjectId>,
+    forms: HashSet<ObjectId>,
+    fonts: HashSet<ObjectId>,
+    states: HashSet<ObjectId>,
+    properties: HashSet<ObjectId>,
+    page_res: HashSet<ObjectId>,
+    base_res: HashSet<String>,
+}
+
+impl Census {
+    /// Of `written`, a Rewrite of a document of `file`'s pages in order,
+    /// a watermark and an image background on every one.
+    fn of(file: &Src, written: Vec<u8>) -> Census {
+        let store = Store::new();
+        let kind = BlobKind::file(Path::new("census.pdf"), None);
+        let blob = store.intern(written.into(), kind).unwrap();
+        let out = store.source(&blob).unwrap();
+        assert_eq!(out.page_count(), file.page_count());
+        let mut census = Census {
+            images: HashSet::new(),
+            forms: HashSet::new(),
+            fonts: HashSet::new(),
+            states: HashSet::new(),
+            properties: HashSet::new(),
+            page_res: HashSet::new(),
+            base_res: HashSet::new(),
+        };
+        let dict = |src: &Src, o: &Object| -> Option<Dictionary> {
+            Some(src.pdf().dereference(o).ok()?.1.as_dict().ok()?.clone())
+        };
+        for (was, now) in file.pages().iter().zip(out.pages()) {
+            let base = was.resources.as_deref();
+            census.base_res.insert(match base {
+                Some(Object::Reference(r)) => format!("{r:?}"),
+                inline => format!("{inline:?}"),
+            });
+            let Some(Object::Reference(at)) = now.resources.as_deref() else {
+                panic!("a watermarked page's resources are its own object");
+            };
+            census.page_res.insert(*at);
+            let base = base.and_then(|o| dict(file, o)).unwrap_or_default();
+            let res = out.pdf().get_dictionary(*at).unwrap().clone();
+            for category in [b"XObject".as_slice(), b"Font", b"ExtGState", b"Properties"] {
+                let names = |src: &Src, d: &Dictionary| {
+                    (d.get(category).ok())
+                        .and_then(|o| dict(src, o))
+                        .unwrap_or_default()
+                };
+                let (had, has) = (names(file, &base), names(&out, &res));
+                for (name, value) in has.iter().filter(|(name, _)| !had.has(name)) {
+                    let Object::Reference(id) = value else {
+                        panic!("{} is written inline", String::from_utf8_lossy(name));
+                    };
+                    let subtype = (out.pdf().get(*id).ok())
+                        .and_then(|o| o.as_stream().ok().map(|s| s.dict.clone()))
+                        .and_then(|d| {
+                            d.get(b"Subtype")
+                                .and_then(Object::as_name)
+                                .ok()
+                                .map(<[u8]>::to_vec)
+                        });
+                    let set = match (category, subtype.as_deref()) {
+                        (b"XObject", Some(b"Image")) => &mut census.images,
+                        (b"XObject", _) => &mut census.forms,
+                        (b"Font", _) => &mut census.fonts,
+                        (b"ExtGState", _) => &mut census.states,
+                        _ => &mut census.properties,
+                    };
+                    set.insert(*id);
+                }
+            }
+        }
+        census
+    }
+
+    /// Its rows: what it counts, and what's asserted of it.
+    fn rows(&self) -> Vec<Row> {
+        let count = |what: &str, n: usize, gate: String| Row {
+            what: format!("census: {what}"),
+            now: Some(n as f64),
+            unit: "",
+            baseline: f64::NAN,
+            gate,
+        };
+        let one = || "1, asserted".to_string();
+        vec![
+            count("images added", self.images.len(), one()),
+            count("fonts added", self.fonts.len(), one()),
+            count("graphics states added", self.states.len(), one()),
+            count("forms added", self.forms.len(), "0, asserted".into()),
+            count("property lists added", self.properties.len(), String::new()),
+            count(
+                "pages' resources dictionaries",
+                self.page_res.len(),
+                format!("the file's {}, asserted", self.base_res.len()),
+            ),
+        ]
+    }
+
+    /// One image, one font and one graphics state added to the file, no
+    /// form, and a resources dictionary for each the file's pages had.
+    fn assert(&self) {
+        let counts = [
+            self.images.len(),
+            self.fonts.len(),
+            self.states.len(),
+            self.forms.len(),
+        ];
+        assert_eq!(
+            counts,
+            [1, 1, 1, 0],
+            "the watermark's images, fonts, graphics states and forms"
+        );
+        assert_eq!(
+            self.page_res.len(),
+            self.base_res.len(),
+            "a resources dictionary for each the file's pages had"
+        );
+    }
 }
 
 /// Page `id` of `doc` drawn `width` wide under the screen's inputs by

@@ -1,8 +1,11 @@
 //! The resource names content uses: what a page's `/Resources` must keep
-//! for it, by category, for pruning what a removal leaves unused.
+//! for it, by category, for pruning what a removal leaves unused; and what
+//! content keeps once ranges of it are taken out, its balance and names
+//! with those only the ranges used, in one pass ([`kept`]).
 
 use std::collections::BTreeSet;
 
+use super::balance::Balance;
 use super::lex::{self, LexError, ResCx, Tok};
 use super::page::{Concat, SpanAcross};
 use crate::source::Limits;
@@ -63,12 +66,23 @@ impl NameSet {
             .map(|(_, name)| name.as_slice())
     }
 
+    /// Every name, each in its category, in order.
+    pub fn iter(&self) -> impl Iterator<Item = (ResKind, &[u8])> {
+        self.names
+            .iter()
+            .map(|(kind, name)| (*kind, name.as_slice()))
+    }
+
     pub fn len(&self) -> usize {
         self.names.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
+    }
+
+    pub fn remove(&mut self, kind: ResKind, name: &[u8]) {
+        self.names.remove(&(kind, name.to_vec()));
     }
 
     fn insert(&mut self, kind: ResKind, name: Option<impl Into<Vec<u8>>>) {
@@ -91,17 +105,42 @@ pub fn names_used(
     lim: &Limits,
     except: &[SpanAcross],
 ) -> Result<NameSet, LexError> {
-    let except: Vec<_> = except.iter().filter_map(|&s| content.offsets(s)).collect();
+    Ok(kept(content, res, lim, except)?.names)
+}
+
+/// What's left of `content` once `drop` is taken out, read in one pass.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Kept {
+    /// How its `q`s and `Q`s balance.
+    pub balance: Balance,
+    /// The resource names it uses ([`names_used`]).
+    pub names: NameSet,
+    /// The names only what's taken out uses, which the resources of what's
+    /// kept can go without.
+    pub dropped: NameSet,
+}
+
+/// What `content`, lexed with `res`, keeps once the steps inside `drop`
+/// (ranges about to be taken out, whole streams among them) are taken out.
+pub fn kept(
+    content: &Concat,
+    res: &ResCx,
+    lim: &Limits,
+    drop: &[SpanAcross],
+) -> Result<Kept, LexError> {
+    let drop: Vec<_> = drop.iter().filter_map(|&s| content.offsets(s)).collect();
     let s = content.bytes();
-    let mut names = NameSet::default();
+    let mut kept = Kept::default();
+    let mut inside = NameSet::default();
     lex::steps(s, res, lim, |step| {
         let range = step.range();
-        if except
+        let dropped = drop
             .iter()
-            .any(|e| e.start <= range.start && range.end <= e.end)
-        {
-            return Ok::<_, LexError>(());
-        }
+            .any(|d| d.start <= range.start && range.end <= d.end);
+        let names = match dropped {
+            true => &mut inside,
+            false => &mut kept.names,
+        };
         let name = |i| step.name(i);
         match step.tok {
             Tok::Op(b"Tf") => names.insert(ResKind::Font, name(1)),
@@ -122,9 +161,16 @@ pub fn names_used(
             }
             _ => {}
         }
-        Ok(())
+        if !dropped && let Tok::Op(op) = step.tok {
+            kept.balance.take(op);
+        }
+        Ok::<_, LexError>(())
     })?;
-    Ok(names)
+    kept.dropped.names = (inside.names)
+        .into_iter()
+        .filter(|n| !kept.names.names.contains(n))
+        .collect();
+    Ok(kept)
 }
 
 /// Whether a color space name is a device space or `/Pattern`: no

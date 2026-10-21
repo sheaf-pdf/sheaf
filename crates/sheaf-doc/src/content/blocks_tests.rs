@@ -306,6 +306,7 @@ fn marked_content_may_open_in_one_range_and_close_in_another() {
     let pagination = Pagination {
         kind: PaginationKind::Header,
         origin: PagOrigin::Acrobat,
+        generator: None,
         span: header,
     };
     let cuts = pagination.cuts(&c, &ResCx::none(), LIM).unwrap();
@@ -396,6 +397,121 @@ fn ranges_must_lie_between_steps() {
     assert!(is_unsafe(without(s, b"/A BMC EMC")));
     assert!(is_unsafe(without(s, b"/A BMC EMC 4 5")));
     assert_eq!(without(s, b"1 2 3 /A BMC EMC").unwrap(), b" 4 5 6 re f");
+}
+
+/// What an older sheaf kept in a list.
+const KEYS: [&[u8]; 2] = [b"SheafSettings", b"SheafStamp"];
+
+/// The list of the range that opens `streams` written again without
+/// [`KEYS`], and the streams as they're then.
+fn rewritten(streams: &[&[u8]]) -> Result<(Option<Rewrite>, Vec<Vec<u8>>), SpliceError> {
+    let c = Concat::new(streams);
+    let range = marked(&c, &PropertiesDict::default(), &ResCx::none(), LIM).unwrap()[0].span;
+    let rewrite = without_keys(&c, &ResCx::none(), LIM, range, &KEYS)?;
+    let rewrites: Vec<Rewrite> = rewrite.iter().cloned().collect();
+    Ok((rewrite, content_with(&c, &[], &rewrites)))
+}
+
+/// `c`'s streams with `groups` taken out and `rewrites` made.
+fn content_with(c: &Concat, groups: &[Vec<SpanAcross>], rewrites: &[Rewrite]) -> Vec<Vec<u8>> {
+    let spliced = splice_each(c, &ResCx::none(), LIM, groups);
+    match spliced.streams(c, rewrites) {
+        Some(streams) => streams.into_iter().map(Cow::into_owned).collect(),
+        None => (0..c.stream_count())
+            .map(|i| c.stream(i).to_vec())
+            .collect(),
+    }
+}
+
+/// An older sheaf's list loses its keys and keeps every other byte as it
+/// was written: comments, spacing, line ends, a key written with an
+/// escape, and a dictionary inside it, whose own keys are its own.
+#[test]
+fn a_list_is_written_again_without_its_keys() {
+    // As lopdf wrote them, with no space between entries.
+    let s: &[u8] = b"/Artifact <</Type/Pagination/Subtype/Watermark/SheafStamp true\
+        /SheafSettings({\"path\":\"/home/me/logo.png\"})>> BDC\nq\n/SheafWMgs gs Q\nEMC\n";
+    let (rewrite, made) = rewritten(&[s]).unwrap();
+    assert!(rewrite.is_some());
+    assert_eq!(
+        made,
+        [b"/Artifact <</Type/Pagination/Subtype/Watermark>> BDC\nq\n/SheafWMgs gs Q\nEMC\n"]
+    );
+    let s: &[u8] = b"q /Artifact << /Type /Pagination % its kind\n  /Subtype /Watermark\t\
+        /SheafStamp true /Inner <</SheafStamp 1>> % a note\n /Sheaf#53ettings (x)\n>> BDC Q EMC";
+    let c = Concat::new(&[s]);
+    let range = span_of(s, &s[2..]);
+    let rewrite = without_keys(&c, &ResCx::none(), LIM, range, &KEYS).unwrap();
+    assert_eq!(
+        content_with(&c, &[], &[rewrite.unwrap()]),
+        [
+            &b"q /Artifact << /Type /Pagination % its kind\n  /Subtype /Watermark \
+            /Inner <</SheafStamp 1>> % a note\n\n>> BDC Q EMC"[..]
+        ]
+    );
+    // With none of them, there's nothing to write.
+    let s: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Watermark>> BDC EMC";
+    assert_eq!(rewritten(&[s]).unwrap(), (None, vec![s.to_vec()]));
+}
+
+/// Only a list written in the content, in one stream, whose entries are
+/// names and objects, is written again.
+#[test]
+fn a_list_that_cant_be_written_again_is_refused() {
+    let refused = |streams: &[&[u8]]| matches!(rewritten(streams), Err(SpliceError::List(_)));
+    // Named, so in the resources; or marked with no list at all.
+    assert!(refused(&[b"/Artifact /P0 BDC EMC"]));
+    assert!(refused(&[b"/Artifact BMC EMC"]));
+    // Across two streams.
+    assert!(refused(&[
+        b"/Artifact <</Subtype /Watermark /SheafStamp",
+        b" true>> BDC EMC"
+    ]));
+    // An entry whose key isn't a name, or whose value isn't an object.
+    assert!(refused(&[b"/Artifact <</SheafStamp true 1 2>> BDC EMC"]));
+    assert!(refused(&[b"/Artifact <</SheafStamp true /A b>> BDC EMC"]));
+    // A range that doesn't start at its tag.
+    let s: &[u8] = b"/Artifact <</SheafStamp true>> BDC 0 0 9 9 re f EMC";
+    let c = Concat::new(&[s]);
+    let at = without_keys(&c, &ResCx::none(), LIM, span_of(s, b"0 0 9 9 re f"), &KEYS);
+    assert!(matches!(at, Err(SpliceError::List(_))));
+}
+
+/// A list written again goes with the cuts a splice takes: in a range
+/// taken out, it goes with it; elsewhere, it's made in what's kept, a
+/// range a splice refuses among it.
+#[test]
+fn a_list_written_again_goes_with_what_s_taken_out() {
+    let s: &[u8] = b"/Artifact <</Subtype /Watermark /SheafStamp true>> BDC Q EMC \
+        /Artifact <</Subtype /Background /SheafStamp true>> BDC 0 0 9 9 re f EMC";
+    let c = Concat::new(&[s]);
+    let ranges: Vec<SpanAcross> = (marked(&c, &PropertiesDict::default(), &ResCx::none(), LIM))
+        .unwrap()
+        .iter()
+        .map(|m| m.span)
+        .collect();
+    let rewrites: Vec<Rewrite> = (ranges.iter())
+        .map(|&r| {
+            without_keys(&c, &ResCx::none(), LIM, r, &KEYS)
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    let spliced = splice_each(&c, &ResCx::none(), LIM, &[vec![ranges[1]]]);
+    assert_eq!(spliced.taken, [true]);
+    assert!(spliced.takes(&c, ranges[1]) && !spliced.takes(&c, ranges[0]));
+    assert_eq!(
+        content_with(&c, &[vec![ranges[1]]], &rewrites),
+        [&b"/Artifact <</Subtype /Watermark>> BDC Q EMC "[..]]
+    );
+    // The first's `Q` would end what's before it: refused, it stays.
+    let refused = splice_each(&c, &ResCx::none(), LIM, &[vec![ranges[0]]]);
+    assert_eq!(refused.taken, [false]);
+    assert_eq!(
+        content_with(&c, &[vec![ranges[0]]], &rewrites),
+        [&b"/Artifact <</Subtype /Watermark>> BDC Q EMC \
+            /Artifact <</Subtype /Background>> BDC 0 0 9 9 re f EMC"[..]]
+    );
 }
 
 #[test]

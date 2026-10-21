@@ -9,6 +9,7 @@
 //! [`Source::blocks`]: crate::source::Source::blocks
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -70,7 +71,17 @@ pub enum PagOrigin {
     Authored,
 }
 
-/// A generator's id, as sheaf writes it in a block: `(g<hex>)`.
+impl PagOrigin {
+    /// Whose a generator's `replaces` takes out on the pages it covers
+    /// (§11.4), and RemoveWatermark by default: every tool's but the
+    /// author's own, which only `include_authored` asks for (proposal 31).
+    pub const REPLACED: [PagOrigin; 3] =
+        [PagOrigin::Sheaf, PagOrigin::SheafLegacy, PagOrigin::Acrobat];
+}
+
+/// A generator's id: random in [1, 2^53), as an id a file will hold is
+/// (M10.5 §4), so two files' never meet. sheaf writes it in a block as
+/// `(g<hex>)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GenId(pub u64);
 
@@ -81,6 +92,23 @@ pub struct BlockId(pub u64);
 impl GenId {
     pub fn parse(s: &[u8]) -> Option<GenId> {
         hex_id(s, b'g').map(GenId)
+    }
+
+    /// One drawn from `rng` that `taken` says no generator has.
+    pub(crate) fn draw(rng: &mut fastrand::Rng, taken: impl Fn(GenId) -> bool) -> GenId {
+        loop {
+            let id = GenId(rng.u64(1..1 << 53));
+            if !taken(id) {
+                return id;
+            }
+        }
+    }
+}
+
+/// As a block names it: `g` and its hex, which [`GenId::parse`] reads.
+impl fmt::Display for GenId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "g{:x}", self.0)
     }
 }
 
@@ -142,6 +170,9 @@ pub struct LegacyOcr {
 pub struct Pagination {
     pub kind: PaginationKind,
     pub origin: PagOrigin,
+    /// The generator whose block it is, by its stream's marker or its
+    /// list's `/SheafGen`: sheaf's own.
+    pub generator: Option<GenId>,
     pub span: SpanAcross,
 }
 
@@ -184,6 +215,15 @@ impl Pagination {
                 content.span(range.start + q.end..range.end),
             ],
         })
+    }
+
+    /// Whether it's of one of `kinds`, drawn by one of `origins`.
+    pub fn selected_by(
+        &self,
+        kinds: &BTreeSet<PaginationKind>,
+        origins: &BTreeSet<PagOrigin>,
+    ) -> bool {
+        kinds.contains(&self.kind) && origins.contains(&self.origin)
     }
 }
 
@@ -306,12 +346,18 @@ impl PageBlocks {
             .map(|d| {
                 let range = &marked[d.index];
                 let mark = mark_of(range).unwrap_or(&StreamMark::Plain);
+                let generator = match (mark, marked_block(range)) {
+                    (StreamMark::Block(SheafBlock::Gen(g)), _) => Some(*g),
+                    (_, Some(SheafBlock::Gen(g))) => Some(g),
+                    _ => None,
+                };
                 Pagination {
                     kind: d.kind,
                     origin: d.origin(range, mark, |form| {
                         xobject(objects, resources, form)
                             .is_some_and(|id| known.acrobat(objects, id))
                     }),
+                    generator,
                     span: range.span,
                 }
             })
@@ -372,6 +418,24 @@ impl PageBlocks {
     pub fn has(&self, kinds: &[PaginationKind]) -> bool {
         self.pagination.iter().any(|p| kinds.contains(&p.kind))
     }
+
+    /// Its pagination artifacts of `kinds` that `origins` drew: what a
+    /// filter, a generator's `replaces` and RemoveWatermark select (§3.4).
+    pub fn selected<'a>(
+        &'a self,
+        kinds: &'a BTreeSet<PaginationKind>,
+        origins: &'a BTreeSet<PagOrigin>,
+    ) -> impl Iterator<Item = &'a Pagination> + 'a {
+        (self.pagination.iter()).filter(|p| p.selected_by(kinds, origins))
+    }
+
+    /// The kind of pagination artifact generator `id`'s blocks draw here,
+    /// by their property lists: None when none draws one.
+    pub fn kind_of(&self, id: GenId) -> Option<PaginationKind> {
+        (self.marked.iter())
+            .filter(|m| marked_block(m) == Some(SheafBlock::Gen(id)))
+            .find_map(pagination)
+    }
 }
 
 /// What a stream's dictionary marks it as.
@@ -406,6 +470,59 @@ impl StreamMark {
         };
         mark.unwrap_or(StreamMark::Plain)
     }
+}
+
+/// What sheaf marked a `/Contents` stream as, by its dictionary alone
+/// (§11.4): a generator's block, with the digest of its layout (`/L`, None
+/// when it isn't 16 bytes), or a stream that isolates the page's own
+/// content. What a source reads of a page's streams without decompressing
+/// them ([`Source::markers`]).
+///
+/// [`Source::markers`]: crate::source::Source::markers
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Marker {
+    Gen { id: GenId, layout: Option<u128> },
+    Isolate,
+}
+
+impl Marker {
+    /// What `dict`, a stream's dictionary, marks it as, if anything.
+    pub fn of(dict: &Dictionary) -> Option<Marker> {
+        match StreamMark::of(dict) {
+            StreamMark::Block(SheafBlock::Gen(id)) => {
+                let layout = (dict.get(b"SheafBlock").and_then(Object::as_dict).ok())
+                    .and_then(|block| block.get(b"L").ok()?.as_str().ok())
+                    .and_then(|l| Some(u128::from_be_bytes(l.try_into().ok()?)));
+                Some(Marker::Gen { id, layout })
+            }
+            StreamMark::Isolate => Some(Marker::Isolate),
+            StreamMark::Plain
+            | StreamMark::Block(SheafBlock::Ocr(_) | SheafBlock::Flat(_))
+            | StreamMark::OcrLayer => None,
+        }
+    }
+}
+
+/// What a stream that isolates content holds, decoded: its one operator
+/// (`q` or `Q`) and how many of it. None for anything else, as a stream
+/// marked [`Marker::Isolate`] that another tool changed may hold, which is
+/// the page's own content.
+pub fn isolates(stream: &[u8]) -> Option<(u8, u32)> {
+    let space = |b: &u8| matches!(b, 0 | b'\t' | b'\n' | 0x0c | b'\r' | b' ');
+    let mut ops = stream.split(space).filter(|t| !t.is_empty());
+    let op = match ops.next()? {
+        b"q" => b'q',
+        b"Q" => b'Q',
+        _ => return None,
+    };
+    let mut n = 1u32;
+    for t in ops {
+        if t != [op] {
+            return None;
+        }
+        n = n.checked_add(1)?;
+    }
+    Some((op, n))
 }
 
 /// The block of sheaf's a range's list marks: `/SheafGen` on a

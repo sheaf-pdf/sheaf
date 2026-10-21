@@ -17,14 +17,16 @@
 //! - **`/StructParents`** stays only on copy 0 of a primary page, whose
 //!   structure tree is written; a copy and a page from another file lose
 //!   it, with a note when their file was tagged.
-//! - **`/Thumb`** goes when sheaf draws over the page.
+//! - **`/Thumb`** goes when what sheaf draws changes the page's
+//!   `/Contents`: something drawn over it, a watermark, or blocks of
+//!   sheaf's set aside or filtered out.
 //! - **References** are copy 0 of what they name, shared by every copy of
 //!   the page. `/Annots` is the page's records' ([`super::annots`]): a
 //!   copy's annotations are its own.
 //! - **Copy 0 of a primary page owns the page's object** (bug 3): numbering
 //!   writes it at its own number, wherever the page moved (claimed before
 //!   anything is emitted, `emit::claim`).
-//! - **A derived copy's page** (a header stripped, a watermark: its
+//! - **A derived copy's page** (a header stripped: its
 //!   [`Derived`](crate::Derived) record) is written as the page it was made
 //!   from ([`Shown`]): that page's object, keys and annotations, with the
 //!   copy's `/Contents` and `/Resources` copied in (M10 bug 1), until slice
@@ -78,7 +80,6 @@ pub(crate) fn page(
         None => None,
     };
     let was = &facts.geom;
-    let drawn_over = !def.content.over.is_empty();
     let mut out = Dictionary::new();
     out.set("Type", Object::Name(b"Page".to_vec()));
     out.set("Parent", cx.placeholder(parent));
@@ -97,7 +98,8 @@ pub(crate) fn page(
                 untagged |= !keep;
                 keep
             }
-            b"Thumb" => !drawn_over && drawn.is_none(),
+            // Until what's drawn changes, below.
+            b"Thumb" => drawn.is_none(),
             b"TrimBox" => geom.trim == was.trim,
             b"BleedBox" => geom.bleed == was.bleed,
             b"ArtBox" => geom.art == was.art,
@@ -180,7 +182,11 @@ pub(crate) fn page(
         out.set("UserUnit", geom.user_unit);
     }
 
+    let contents = out.get(b"Contents").ok().cloned();
     super::content::page(cx, id, def, geom, pos, &mut out);
+    if out.get(b"Contents").ok() != contents.as_ref() {
+        out.remove(b"Thumb");
+    }
     if untagged {
         let name = cx.file_name(id);
         cx.untagged(&src, &name);

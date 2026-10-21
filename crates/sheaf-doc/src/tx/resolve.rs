@@ -14,9 +14,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use sheaf_edit::{
-    AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Color, Delta, DestView,
+    AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Color, Delta, DestView, GridPos,
     HeaderFooterSpec, Imported, Local, MarkKind, MarkPatch, NewMark, Op, PageRef, PageSel,
-    PageSource, Patch, ScopeSel, Sibling, Style, TextStyle, Turn,
+    PageSource, Patch, ScopeSel, Sibling, Style, TextStyle, Turn, Z,
 };
 
 use super::Made;
@@ -24,10 +24,10 @@ use super::error::EditError;
 use super::{Grant, LowerCx};
 use crate::annot::{AnnotId, AnnotKind, Box2};
 use crate::labels::LabelSpec;
-use crate::model::{DocState, Foreign, OutlineId, PageId};
+use crate::model::{DocState, Foreign, ImageRef, OutlineId, PageForm, PageId, WatermarkContent};
 use crate::open::FileBody;
 use crate::prim::Key;
-use crate::store::{Blob, BlobId, BlobRef, Src, Store};
+use crate::store::{Blob, BlobId, BlobKind, BlobRef, Src, Store};
 use crate::text_layer::TextLayer;
 
 /// An op with its references resolved: ids for pages, bookmarks and
@@ -141,6 +141,22 @@ pub enum ResolvedOp {
     ClearOcrText {
         pages: Vec<PageId>,
     },
+    /// `content` with its file held; `scope` None: every page, those added
+    /// later too.
+    SetWatermark {
+        content: WatermarkContent,
+        position: GridPos,
+        z: Z,
+        scope: Option<im::OrdSet<PageId>>,
+    },
+    /// `z` None: the watermark and the background. `others` is what its
+    /// lowering found of others' on its pages, none before.
+    RemoveWatermark {
+        z: Option<Z>,
+        pages: Vec<PageId>,
+        include_authored: bool,
+        others: OthersFound,
+    },
     /// `scope` None: every page, those added later too.
     SetHeaderFooter {
         spec: HeaderFooterSpec,
@@ -171,6 +187,46 @@ pub enum ResolvedOp {
     },
 }
 
+/// What a [`ResolvedOp::RemoveWatermark`] found of others' watermarks and
+/// backgrounds on its pages, as its lowering counted them (§6.5, D61), each
+/// artifact once: those it takes out, by who drew them, and those it
+/// leaves in place. What its line says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OthersFound {
+    /// Taken out: Acrobat's; sheaf's in another file, which no generator
+    /// of the document's backs; sheaf's from before M10.5; and the author's
+    /// own, with `include_authored`.
+    pub acrobat: usize,
+    pub other_files: usize,
+    pub older_sheaf: usize,
+    pub authored: usize,
+    /// Left in place: the author's, without `include_authored` or where a
+    /// splice refuses them; and others' a splice refuses, which taking out
+    /// would change what else the page draws.
+    pub authored_left: usize,
+    pub refused: usize,
+    /// Pages that draw one inside a form, left in place, and pages whose
+    /// content can't be read.
+    pub in_forms: usize,
+    pub unreadable: usize,
+}
+
+impl OthersFound {
+    /// Its counts and `other`'s, added.
+    pub fn plus(self, other: OthersFound) -> OthersFound {
+        OthersFound {
+            acrobat: self.acrobat + other.acrobat,
+            other_files: self.other_files + other.other_files,
+            older_sheaf: self.older_sheaf + other.older_sheaf,
+            authored: self.authored + other.authored,
+            authored_left: self.authored_left + other.authored_left,
+            refused: self.refused + other.refused,
+            in_forms: self.in_forms + other.in_forms,
+            unreadable: self.unreadable + other.unreadable,
+        }
+    }
+}
+
 /// Where among its siblings a bookmark goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum At {
@@ -190,19 +246,11 @@ pub struct BookmarkChange {
 }
 
 /// Which derived flow made a [`ResolvedOp::SetPageBase`]'s copies: what
-/// its line says it did ("Add a watermark to pages 3–5", not "Change the
-/// content of", M10.5 bug 8).
+/// its line says it did ("Remove the header and footer from pages 3–5",
+/// not "Change the content of", M10.5 bug 8). It goes with derived copies
+/// in slice 17.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Derive {
-    /// A watermark, or a background when `behind`, drawn on; its text
-    /// draws characters the built-in fonts can't when `unencodable`.
-    Watermark {
-        behind: bool,
-        unencodable: bool,
-    },
-    RemoveWatermark {
-        behind: bool,
-    },
     /// The header and footer the file drew, stripped from it.
     StripHeaderFooter,
 }
@@ -230,6 +278,8 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::AdoptAnnotations { .. } => "adopt-annotations",
         Op::SetOcrText { .. } => "set-ocr-text",
         Op::ClearOcrText { .. } => "clear-ocr-text",
+        Op::SetWatermark { .. } => "set-watermark",
+        Op::RemoveWatermark { .. } => "remove-watermark",
         Op::SetHeaderFooter { .. } => "set-header-footer",
         Op::RemoveHeaderFooter { .. } => "remove-header-footer",
         _ => "op",
@@ -262,6 +312,8 @@ impl ResolvedOp {
             R::AdoptAnnotations { .. } => "adopt-annotations",
             R::SetOcrText { .. } => "set-ocr-text",
             R::ClearOcrText { .. } => "clear-ocr-text",
+            R::SetWatermark { .. } => "set-watermark",
+            R::RemoveWatermark { .. } => "remove-watermark",
             R::SetHeaderFooter { .. } => "set-header-footer",
             R::RemoveHeaderFooter { .. } => "remove-header-footer",
             R::SetPageBase { .. } => "set-page-base",
@@ -584,6 +636,25 @@ impl Resolver<'_> {
             },
             Op::ClearOcrText { pages } => R::ClearOcrText {
                 pages: self.pages(pages)?,
+            },
+            Op::SetWatermark { spec, z, scope } => R::SetWatermark {
+                content: self.watermark(&spec.content, *z)?,
+                position: spec.position,
+                z: *z,
+                scope: match scope {
+                    ScopeSel::All => None,
+                    ScopeSel::Pages(pages) => Some(self.pages(pages)?.into_iter().collect()),
+                },
+            },
+            Op::RemoveWatermark {
+                z,
+                pages,
+                include_authored,
+            } => R::RemoveWatermark {
+                z: *z,
+                pages: self.pages(pages)?,
+                include_authored: *include_authored,
+                others: OthersFound::default(),
             },
             Op::SetHeaderFooter { spec, scope } => R::SetHeaderFooter {
                 spec: spec.clone(),
@@ -924,6 +995,114 @@ impl Resolver<'_> {
                 .ok_or_else(|| self.not_found(format!("the file named “{name}”"))),
             BlobSel::Asset(n) => (self.grants.get(*n as usize).cloned())
                 .ok_or_else(|| self.not_found(format!("asset {n}"))),
+        }
+    }
+
+    /// What a watermark of `content` draws, its file as `content` names
+    /// it held: an image's an image file, a page's a PDF that has the
+    /// page.
+    fn watermark(
+        &self,
+        content: &sheaf_edit::WatermarkContent,
+        z: Z,
+    ) -> Result<WatermarkContent, EditError> {
+        use sheaf_edit::WatermarkContent as C;
+        // What the watermark at `z` draws now, which one naming no file
+        // keeps.
+        let drawn = || self.st.watermark(z).and_then(|g| g.spec.watermark());
+        Ok(match content {
+            C::Text {
+                text,
+                font,
+                size,
+                color,
+                opacity,
+                angle,
+            } => WatermarkContent::Text {
+                text: text.as_str().into(),
+                font: *font,
+                size: *size,
+                color: *color,
+                opacity: *opacity,
+                angle: *angle,
+            },
+            C::Image {
+                image: None,
+                scale,
+                opacity,
+            } => match drawn().map(|wm| &wm.content) {
+                Some(WatermarkContent::Image { image, .. }) => WatermarkContent::Image {
+                    image: image.clone(),
+                    scale: *scale,
+                    opacity: *opacity,
+                },
+                _ => return Err(self.invalid("no image is drawn at its z to keep")),
+            },
+            C::Page {
+                pdf: None,
+                scale,
+                opacity,
+                ..
+            } => match drawn().map(|wm| &wm.content) {
+                Some(WatermarkContent::Page { page, .. }) => WatermarkContent::Page {
+                    page: page.clone(),
+                    scale: *scale,
+                    opacity: *opacity,
+                },
+                _ => return Err(self.invalid("no page is drawn at its z to keep")),
+            },
+            C::Image {
+                image: Some(image),
+                scale,
+                opacity,
+            } => {
+                // By its bytes: a blob keeps the kind it was first
+                // interned as, an attachment's say.
+                let image = self.file(image)?;
+                if BlobKind::image(image.bytes()).is_none() {
+                    return Err(self.invalid("the watermark's image isn't an image file"));
+                }
+                WatermarkContent::Image {
+                    image: ImageRef::Blob(image),
+                    scale: *scale,
+                    opacity: *opacity,
+                }
+            }
+            C::Page {
+                pdf: Some(pdf),
+                page,
+                scale,
+                opacity,
+            } => {
+                // By its bytes, as an image is.
+                let pdf = self.file(pdf)?;
+                if BlobKind::image(pdf.bytes()).is_some() {
+                    return Err(self.invalid("the watermark's page isn't a PDF's"));
+                }
+                let src = (self.cx.store.source(pdf.blob()))
+                    .map_err(|e| self.invalid(format!("the watermark's PDF can't be read: {e}")))?;
+                let count = src.page_count();
+                let index = match page.checked_sub(1) {
+                    None => return Err(self.invalid("the watermark's page is 1-based")),
+                    Some(index) if index >= count => {
+                        return Err(self.not_found(format!("page {page} of the file's {count}")));
+                    }
+                    Some(index) => index,
+                };
+                WatermarkContent::Page {
+                    page: PageForm::Blob { pdf, index },
+                    scale: *scale,
+                    opacity: *opacity,
+                }
+            }
+        })
+    }
+
+    /// The file `sel` names: a blob, not a stamp's page.
+    fn file(&self, sel: &BlobSel) -> Result<BlobRef, EditError> {
+        match self.blob(sel)? {
+            Grant::Blob(b) => Ok(b),
+            Grant::Stamp { .. } => Err(self.invalid("a stamp's page isn't a file")),
         }
     }
 

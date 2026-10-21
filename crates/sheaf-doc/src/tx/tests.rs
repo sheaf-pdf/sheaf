@@ -435,6 +435,25 @@ fn every_op(d: &Document) -> Vec<ResolvedOp> {
         R::ClearOcrText {
             pages: pages.clone(),
         },
+        R::SetWatermark {
+            content: crate::model::WatermarkContent::Text {
+                text: "DRAFT".into(),
+                font: Default::default(),
+                size: 72.0,
+                color: [0, 0, 0],
+                opacity: 0.3,
+                angle: 45.0,
+            },
+            position: Default::default(),
+            z: sheaf_edit::Z::Over,
+            scope: None,
+        },
+        R::RemoveWatermark {
+            z: None,
+            pages: pages.clone(),
+            include_authored: true,
+            others: Default::default(),
+        },
         R::SetHeaderFooter { spec, scope: None },
         R::RemoveHeaderFooter { pages },
         R::SetPageBase {
@@ -458,7 +477,7 @@ fn caps_cover_every_op_target_and_actor() {
     let ops = every_op(&d);
     let names: std::collections::BTreeSet<&str> = ops.iter().map(ResolvedOp::name).collect();
     assert_eq!(names.len(), ops.len(), "one op of each kind");
-    assert_eq!(names.len(), 24, "every kind there is");
+    assert_eq!(names.len(), 26, "every kind there is");
     let actors = [
         Actor::User,
         Actor::Cli,
@@ -478,6 +497,8 @@ fn caps_cover_every_op_target_and_actor() {
                     | R::SetPageBoxes { .. }
                     | R::AdoptAnnotations { .. }
                     | R::ClearOcrText { .. }
+                    | R::SetWatermark { .. }
+                    | R::RemoveWatermark { .. }
                     | R::SetHeaderFooter { .. }
                     | R::RemoveHeaderFooter { .. },
                     _,

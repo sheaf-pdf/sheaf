@@ -3,8 +3,8 @@
 //! - **Jobs** write files (Export Pages, Split Document), one at a time
 //!   ([`DocView::run_job`]).
 //! - **Planners** plan an edit off the UI thread, over a snapshot (an
-//!   insert, Trim White, a watermark, a header and footer, a comment
-//!   import, the blank-page search), and land it on the UI thread,
+//!   insert, Trim White, a watermark's removal, a header and footer, a
+//!   comment import, the blank-page search), and land it on the UI thread,
 //!   committed with the snapshot's version as its base
 //!   ([`DocView::run_planner`]). Any number run at once, beside a job and
 //!   OCR's own run; Escape stops the newest.
@@ -358,10 +358,11 @@ impl DocView {
 }
 
 /// What a dialog draws its preview of the document with (M10.5 §8.6):
-/// the document's store, which a copy the preview makes goes into; the
-/// document's render worker, with a realizer of the dialog's own, since a
-/// preview's state is never the screen's; and the page it shows, the
-/// active pane's as it opened.
+/// the document's store, which a copy the preview makes, or a file the
+/// dialog reads for its edit to draw, goes into; the document's render
+/// worker, with a realizer of the dialog's own, since a preview's state is
+/// never the screen's; and the page it shows, the active pane's as it
+/// opened.
 #[derive(Clone)]
 pub(crate) struct Previewer {
     pub(crate) store: Arc<Store>,

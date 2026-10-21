@@ -1,7 +1,8 @@
 //! The realizer over real files (M10.5 slice 13): over every form of the
 //! corpus and a sample of its pool, each file edited (a header on its
-//! first, middle and last page, another tool's comment deleted and a
-//! field's value set where it has them, nothing turned). Two tiers:
+//! first, middle and last page, from slice 16 a watermark there too, which
+//! replaces others' watermarks on them, another tool's comment deleted and
+//! a field's value set where it has them, nothing turned). Two tiers:
 //!
 //! - **The predicate:** on every page, under each consumer's inputs (the
 //!   screen's, a plugin's, print preview's with and without markup, and
@@ -54,6 +55,7 @@ use sheaf_doc::realize::{EngineKey, PageView, Realizer, ViewInputs, emission_is_
 use sheaf_doc::serialize::crypt::Crypt;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{DocState, Document, PageId};
+use sheaf_edit::Z;
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 use sheaf_render::{OpenError, PageIndex};
 
@@ -381,7 +383,8 @@ fn edit_and_check(d: &mut Document, tier: Tier, out: &mut Outcome) -> anyhow::Re
     let mut covered: Vec<PageId> = [0, n / 2, n - 1].map(|i| order[i]).to_vec();
     covered.dedup();
     let header = fx::set_header(fx::header("Realized <<1>> of <<n>>"), Some(&covered));
-    d.commit_ops(vec![header], "Header")?;
+    let watermark = fx::set_watermark(fx::watermark("REALIZED"), Z::Over, Some(&covered));
+    d.commit_ops(vec![header, watermark], "Header and watermark")?;
     let mut edited: BTreeSet<PageId> = covered.iter().copied().collect();
     let comment = (order.iter()).find_map(|&p| {
         let (id, _) = (d.state().foreign_on(p)).find(|(_, f)| !f.summary.is_link())?;

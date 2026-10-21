@@ -37,7 +37,7 @@ fn rect(r: [i64; 4]) -> Object {
 /// saying its number, as lopdf writes it in `kind`: the root gives every
 /// page its box and its font, and the first node, of more than one,
 /// turns its pages a quarter on a smaller box.
-fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
+pub(super) fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
     let mut pdf = Pdf::with_version(version);
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
@@ -88,7 +88,7 @@ fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
 
 /// `doc` saved over its file as the plan says, which must be an Append:
 /// the file's bytes before, and the section after them.
-fn planned_in_place(doc: &mut Document) -> (Vec<u8>, Vec<u8>) {
+pub(super) fn planned_in_place(doc: &mut Document) -> (Vec<u8>, Vec<u8>) {
     let path = doc.file().unwrap().0.to_path_buf();
     let was = std::fs::read(&path).unwrap();
     let report = save(doc, &path, &AskAnswers::default(), &NoProgress).unwrap();
@@ -102,7 +102,7 @@ fn planned_in_place(doc: &mut Document) -> (Vec<u8>, Vec<u8>) {
 /// `doc`'s current version appended to its file in place, whatever a plan
 /// would decide ([`save_appended`]), the save recorded: the file's bytes
 /// before, and the section after them.
-fn appended_in_place(doc: &mut Document) -> Result<(Vec<u8>, Vec<u8>), SaveStop> {
+pub(super) fn appended_in_place(doc: &mut Document) -> Result<(Vec<u8>, Vec<u8>), SaveStop> {
     let path = doc.file().unwrap().0.to_path_buf();
     let was = std::fs::read(&path).unwrap();
     save_appended(doc, &path)?;
@@ -118,7 +118,7 @@ fn lazy(bytes: &[u8]) -> LazyPdf {
 
 /// The objects `section`, after a file of `base` bytes, writes: those
 /// that read from past its end, but its cross-reference stream.
-fn written(base: usize, section: &[u8], whole: &Path) -> BTreeSet<ObjectId> {
+pub(super) fn written(base: usize, section: &[u8], whole: &Path) -> BTreeSet<ObjectId> {
     let bytes = std::fs::read(whole).unwrap();
     assert_eq!(bytes.len(), base + section.len());
     let pdf = lazy(&bytes);
@@ -129,7 +129,7 @@ fn written(base: usize, section: &[u8], whole: &Path) -> BTreeSet<ObjectId> {
 }
 
 /// The keys `doc`'s saved record has at `numbers`.
-fn keys_at(doc: &Document, numbers: &BTreeSet<ObjectId>) -> BTreeSet<ObjKey> {
+pub(super) fn keys_at(doc: &Document, numbers: &BTreeSet<ObjectId>) -> BTreeSet<ObjKey> {
     let map = &doc.saved_record().unwrap().map;
     (map.keys.iter())
         .filter(|(_, at)| numbers.contains(at))
@@ -137,7 +137,7 @@ fn keys_at(doc: &Document, numbers: &BTreeSet<ObjectId>) -> BTreeSet<ObjKey> {
         .collect()
 }
 
-fn square(id: u64) -> Annot {
+pub(super) fn square(id: u64) -> Annot {
     Annot {
         id: AnnotId(id),
         kind: AnnotKind::Square {

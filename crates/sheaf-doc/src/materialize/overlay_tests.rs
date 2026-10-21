@@ -40,6 +40,7 @@ fn emitted(
         src: src.clone(),
         inputs,
         rotate,
+        arts: None,
     };
     let scope = EmitScope::Pages(pages.into());
     let e = emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress).unwrap();
@@ -596,18 +597,13 @@ fn top(st: &DocState, fid: crate::forms::FieldId) -> crate::forms::FieldId {
 fn a_derived_copy_s_page_is_emitted_as_the_copy_has_it() {
     let mut d = opened(theirs(2).bytes(), "form.pdf");
     let first = d.page(0).unwrap();
-    let redrawn = crate::save::derived_copy(
-        d.primary(),
-        &[0],
-        crate::save::HeaderKept::Yes,
-        &mut |pdf, page, _, _| {
-            let stream = Stream::new(dictionary! {}, b"0 0 m 9 9 l S".to_vec());
-            page.set("Contents", pdf.add_object(stream));
-            let crop = [0.0f32, 0.0, 300.0, 400.0].map(Object::from);
-            page.set("CropBox", crop.to_vec());
-            Ok(())
-        },
-    )
+    let redrawn = crate::save::derived_copy(d.primary(), &[0], &mut |pdf, page, _| {
+        let stream = Stream::new(dictionary! {}, b"0 0 m 9 9 l S".to_vec());
+        page.set("Contents", pdf.add_object(stream));
+        let crop = [0.0f32, 0.0, 300.0, 400.0].map(Object::from);
+        page.set("CropBox", crop.to_vec());
+        Ok(())
+    })
     .unwrap();
     derive(&mut d, &redrawn, 0, first);
     let st = d.state();
@@ -641,6 +637,7 @@ fn a_derived_copy_s_page_is_emitted_as_the_copy_has_it() {
         src: d.primary().clone(),
         inputs: &screen,
         rotate: RotatePolicy::KeepBase,
+        arts: None,
     };
     let scope = EmitScope::Pages([first].into());
     assert!(emit::emit(st, scope, EmitBase::Overlay(&over), &[], &NoProgress).is_err());

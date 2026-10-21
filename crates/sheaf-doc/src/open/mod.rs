@@ -8,13 +8,16 @@
 //! What [`finish`] reads: what its pages hold beside their content, the
 //! source's [`annots`](Source::annots) (the file's marks, the stamps'
 //! pages and the files they hold, and the other tools' comments and
-//! links), its page labels, the header/footer sheaf drew into it, its
-//! [`form`](Source::form), attachments, portfolio schema and layers, and
-//! its bookmarks ([`outline`]). All of it is read from the source alone,
-//! its [`LazyPdf`](lopdf::LazyPdf) and page table, with no eager load of
-//! the file. Nothing in it lexes a page's content: of a page it reads its
-//! dictionary and annotations, and elsewhere only the objects the facts
-//! name.
+//! links), its page labels, the header/footer, watermarks and
+//! backgrounds sheaf drew into it, its [`form`](Source::form),
+//! attachments, portfolio schema and layers, and its bookmarks
+//! ([`outline`]). All of it is read from the source alone, its
+//! [`LazyPdf`](lopdf::LazyPdf) and page table, with no eager load of the
+//! file. Nothing in it lexes a page's content: of a page it reads its
+//! dictionary and annotations, and, of a file whose catalog says sheaf
+//! drew generators on it, its content streams' dictionaries
+//! ([`Source::markers`]), and one block of an image's or a page's;
+//! elsewhere only the objects the facts name.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -25,6 +28,7 @@ use in_progress::{NoProgress, Progress};
 use crate::annot::AnnotId;
 use crate::attachments::Attachment;
 use crate::forms::{FileForm, FormFacts};
+use crate::generate::Saved;
 use crate::history::HistoryPolicy;
 use crate::labels::LabelRange;
 use crate::layers::Layer;
@@ -56,6 +60,9 @@ pub struct Facts {
     /// The header/footer sheaf drew into the file, and the pages it's on
     /// (none: all).
     pub header_footer: Option<(HeaderFooter, Option<Vec<usize>>)>,
+    /// The watermarks and backgrounds sheaf drew into the file (the
+    /// source's [`generators`](Source::generators)).
+    pub generators: Arc<[Saved]>,
     /// The form: its fields and widgets, and what sheaf shows about it
     /// (the source's [`form`](Source::form)).
     pub form: Arc<FileForm>,
@@ -174,6 +181,7 @@ pub fn finish(src: &Source, p: &dyn Progress) -> Facts {
         annots: src.annots_counting(p).clone(),
         labels: crate::labels::label_ranges(pdf),
         header_footer: src.header_footer().cloned(),
+        generators: src.generators().clone(),
         form: src.form().clone(),
         attachments: crate::attachments::attachments_in(pdf, src.page_ids()),
         collection: crate::portfolio::collection(pdf),

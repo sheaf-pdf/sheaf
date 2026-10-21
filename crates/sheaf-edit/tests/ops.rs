@@ -7,8 +7,9 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 use sheaf_edit::fixture::{blob, every_op, layer};
 use sheaf_edit::{
-    AnnotId, AnnotRef, BlobId, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Envelope, Local,
-    Margins, Op, OutlineId, PageId, PageRef, PageSel, Patch, RangeSet, Rotation, Turn,
+    AnnotId, AnnotRef, BlobId, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Envelope, FontChoice,
+    GridPos, Local, Margins, Op, OutlineId, PageId, PageRef, PageSel, Patch, RangeSet, Rotation,
+    ScopeSel, Turn, WatermarkContent, WatermarkSpec, Z,
 };
 
 fn pos(s: &str) -> RangeSet {
@@ -202,6 +203,153 @@ fn page_boxes_are_kept_cleared_or_set() {
     assert!(e.contains("unknown variant `margin`"), "{e}");
 }
 
+/// A watermark says what it draws by `type`; its font, position, angle
+/// and whether it takes the author's own are said only when they aren't
+/// the usual (Helvetica Bold, the middle, upright, not), and its image or
+/// PDF only when it isn't the one drawn now (a PDF's page 1 when none is
+/// said); misspelled, or with a field of another kind's, it's refused.
+#[test]
+fn watermarks_read_with_their_defaults() {
+    let text = json!({
+        "op": "set-watermark", "z": "over", "scope": "all",
+        "spec": {"content": {"type": "text", "text": "DRAFT", "size": 72, "color": [200, 30, 30],
+                             "opacity": 0.3}},
+    });
+    let want = Op::SetWatermark {
+        spec: WatermarkSpec {
+            content: WatermarkContent::Text {
+                text: "DRAFT".into(),
+                font: FontChoice::HelveticaBold,
+                size: 72.0,
+                color: [200, 30, 30],
+                opacity: 0.3,
+                angle: 0.0,
+            },
+            position: GridPos::Center,
+        },
+        z: Z::Over,
+        scope: ScopeSel::All,
+    };
+    assert_eq!(read::<Op>(text), Ok(want));
+    let page = json!({
+        "op": "set-watermark", "z": "under", "scope": {"pages": {"positions": "2-3"}},
+        "spec": {"content": {"type": "page", "pdf": {"with": "logo"}, "page": 1, "scale": 0.5,
+                             "opacity": 1},
+                 "position": "bottom-right"},
+    });
+    let want = Op::SetWatermark {
+        spec: WatermarkSpec {
+            content: WatermarkContent::Page {
+                pdf: Some(BlobSel::With("logo".into())),
+                page: 1,
+                scale: 0.5,
+                opacity: 1.0,
+            },
+            position: GridPos::BottomRight,
+        },
+        z: Z::Under,
+        scope: ScopeSel::Pages(PageSel::Positions(pos("2-3"))),
+    };
+    assert_eq!(read::<Op>(page), Ok(want));
+    // With no file, the image or page drawn now, as its z draws it.
+    let kept = json!({
+        "op": "set-watermark", "z": "under", "scope": "all",
+        "spec": {"content": {"type": "image", "scale": 0.25, "opacity": 0.5},
+                 "position": "center"},
+    });
+    let want = Op::SetWatermark {
+        spec: WatermarkSpec {
+            content: WatermarkContent::Image {
+                image: None,
+                scale: 0.25,
+                opacity: 0.5,
+            },
+            position: GridPos::Center,
+        },
+        z: Z::Under,
+        scope: ScopeSel::All,
+    };
+    let op = read::<Op>(kept.clone());
+    assert_eq!(op, Ok(want.clone()));
+    assert_eq!(serde_json::to_value(&want).unwrap(), kept);
+    let page = read::<Op>(json!({
+        "op": "set-watermark", "z": "under", "scope": "all",
+        "spec": {"content": {"type": "page", "scale": 0.25, "opacity": 0.5}},
+    }));
+    let kept = WatermarkContent::Page {
+        pdf: None,
+        page: 1,
+        scale: 0.25,
+        opacity: 0.5,
+    };
+    assert!(matches!(page, Ok(Op::SetWatermark { spec, .. }) if spec.content == kept));
+    let remove = Op::RemoveWatermark {
+        z: None,
+        pages: PageSel::All,
+        include_authored: false,
+    };
+    let json = json!({"op": "remove-watermark", "pages": "all"});
+    assert_eq!(serde_json::to_value(&remove).unwrap(), json);
+    assert_eq!(read::<Op>(json), Ok(remove));
+    let font =
+        |font: &str| read::<FontChoice>(json!(font)).map(|f| serde_json::to_value(f).unwrap());
+    for face in ["times-roman", "helvetica-bold-oblique", "courier"] {
+        assert_eq!(font(face), Ok(json!(face)));
+    }
+    let image = |content: Value| json!({"op": "set-watermark", "z": "over", "scope": "all", "spec": {"content": content}});
+    for (bad, why) in [
+        (
+            image(
+                json!({"type": "image", "image": {"asset": 0}, "scale": 1, "opacity": 1,
+                         "angle": 45}),
+            ),
+            "unknown field `angle`",
+        ),
+        (
+            image(json!({"type": "image", "image": {"asset": 0}, "scale": 1})),
+            "missing field `opacity`",
+        ),
+        (
+            image(
+                json!({"type": "text", "text": "A", "size": 9, "color": [0, 0, 0],
+                         "opacity": 1, "font": "arial"}),
+            ),
+            "unknown variant `arial`",
+        ),
+        (
+            image(json!({"type": "picture", "image": {"asset": 0}})),
+            "unknown variant `picture`",
+        ),
+        (
+            json!({"op": "set-watermark", "z": "behind", "scope": "all",
+                   "spec": {"content": {"type": "image", "image": {"asset": 0}, "scale": 1,
+                                        "opacity": 1}}}),
+            "unknown variant `behind`",
+        ),
+        (
+            json!({"op": "set-watermark", "z": "over", "scope": "all",
+                   "spec": {"content": {"type": "image", "image": {"asset": 0}, "scale": 1,
+                                        "opacity": 1},
+                            "position": "middle"}}),
+            "unknown variant `middle`",
+        ),
+        (
+            json!({"op": "set-watermark", "z": "over", "scope": "all",
+                   "spec": {"content": {"type": "image", "image": {"asset": 0}, "scale": 1,
+                                        "opacity": 1},
+                            "anchor": "center"}}),
+            "unknown field `anchor`",
+        ),
+        (
+            json!({"op": "remove-watermark", "pages": "all", "include_authord": true}),
+            "unknown field `include_authord`",
+        ),
+    ] {
+        let e = read::<Op>(bad.clone()).unwrap_err();
+        assert!(e.contains(why), "{bad}: {e}");
+    }
+}
+
 #[test]
 fn a_misspelled_field_is_refused() {
     let delete = json!({"op": "delete-pages", "pages": "all"});
@@ -311,7 +459,7 @@ fn envelopes_refuse_versions_they_cant_read() {
         assert!(e.contains(why), "{v}: {e}");
     }
     // A newer version's op is refused for its version, written first.
-    let newer = r#"{"v": "1.1", "ops": [{"op": "set-watermark", "pages": "all"}]}"#;
+    let newer = r#"{"v": "1.1", "ops": [{"op": "flatten-annotations", "pages": "all"}]}"#;
     let e = serde_json::from_str::<Envelope>(newer)
         .unwrap_err()
         .to_string();

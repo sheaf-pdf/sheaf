@@ -387,12 +387,12 @@ pub fn info(id: &str) -> Option<Info> {
         ),
         "workspace::AddWatermark" => (
             "watermark",
-            "Add, update or remove a watermark: text like DRAFT, or an image, across the pages in front of their content.",
+            "Add, update or remove a watermark: text like DRAFT, an image or a PDF's page, across the pages in front of their content.",
             &["draft", "confidential", "stamp", "copy", "overlay"],
         ),
         "workspace::AddBackground" => (
             "background",
-            "Add, update or remove a background: text or an image behind the pages' content.",
+            "Add, update or remove a background: text, an image or a PDF's page behind the pages' content.",
             &["letterhead", "underlay", "behind", "stationery"],
         ),
         "workspace::BookmarksFromPages" => (

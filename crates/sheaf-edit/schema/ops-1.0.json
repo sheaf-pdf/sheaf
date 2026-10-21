@@ -395,6 +395,24 @@
         }
       ]
     },
+    "FontChoice": {
+      "description": "A face text is drawn in: one of the standard 14 fonts' text faces,\nwhich every reader has, so none is embedded.",
+      "enum": [
+        "helvetica",
+        "helvetica-bold",
+        "helvetica-oblique",
+        "helvetica-bold-oblique",
+        "times-roman",
+        "times-bold",
+        "times-italic",
+        "times-bold-italic",
+        "courier",
+        "courier-bold",
+        "courier-oblique",
+        "courier-bold-oblique"
+      ],
+      "type": "string"
+    },
     "FormBring": {
       "description": "What becomes of the file's form fields.",
       "oneOf": [
@@ -404,6 +422,21 @@
           "type": "string"
         }
       ]
+    },
+    "GridPos": {
+      "description": "A cell of a 3×3 grid over the page as it shows (its visible box,\nturned as it's turned): where a watermark's middle goes.",
+      "enum": [
+        "top-left",
+        "top",
+        "top-right",
+        "left",
+        "center",
+        "right",
+        "bottom-left",
+        "bottom",
+        "bottom-right"
+      ],
+      "type": "string"
     },
     "HeaderFooterSpec": {
       "additionalProperties": false,
@@ -1986,6 +2019,63 @@
         },
         {
           "additionalProperties": false,
+          "description": "The watermark (`z` over the pages' content) or background (under\nit) `spec` says, on the pages `scope` says, in place of the one of\nthat `z` there is, and of those of its kind Acrobat or an earlier\nsheaf drew there. The author's own stay.",
+          "properties": {
+            "op": {
+              "const": "set-watermark",
+              "type": "string"
+            },
+            "scope": {
+              "$ref": "#/$defs/ScopeSel"
+            },
+            "spec": {
+              "$ref": "#/$defs/WatermarkSpec"
+            },
+            "z": {
+              "$ref": "#/$defs/Z"
+            }
+          },
+          "required": [
+            "op",
+            "spec",
+            "z",
+            "scope"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Take the watermark (`z` over), the background (under) or both (no\n`z`) off `pages`. `include_authored` takes the author's own off too:\nthose the program that made the file drew.",
+          "properties": {
+            "include_authored": {
+              "type": "boolean"
+            },
+            "op": {
+              "const": "remove-watermark",
+              "type": "string"
+            },
+            "pages": {
+              "$ref": "#/$defs/PageSel"
+            },
+            "z": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Z"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "pages"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "The header and footer, on the pages `scope` says, in place of any\nthere is.",
           "properties": {
             "op": {
@@ -2631,6 +2721,150 @@
         "y"
       ],
       "type": "object"
+    },
+    "WatermarkContent": {
+      "description": "What a watermark draws.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "`text`, `size` points tall.",
+          "properties": {
+            "angle": {
+              "default": 0.0,
+              "description": "Degrees counterclockwise, on the page as it shows.",
+              "format": "float",
+              "type": "number"
+            },
+            "color": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "font": {
+              "$ref": "#/$defs/FontChoice",
+              "default": "helvetica-bold"
+            },
+            "opacity": {
+              "description": "0–1.",
+              "format": "float",
+              "type": "number"
+            },
+            "size": {
+              "format": "float",
+              "type": "number"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text",
+            "size",
+            "color",
+            "opacity"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An image file (PNG, JPEG, TIFF, BMP, GIF or WebP), `scale` of the\npage's width wide (above 0, up to 2), its height in proportion.\nWith no `image`, the image the watermark at its z draws now, as the\ndocument has it: a file saved with one draws it again unchanged.",
+          "properties": {
+            "image": {
+              "$ref": "#/$defs/BlobSel"
+            },
+            "opacity": {
+              "description": "0–1.",
+              "format": "float",
+              "type": "number"
+            },
+            "scale": {
+              "format": "float",
+              "type": "number"
+            },
+            "type": {
+              "const": "image",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "scale",
+            "opacity"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Page `page` (1-based, 1 when none is said) of a PDF, `scale` of the\npage's width wide (above 0, up to 2), its height in proportion.\nWith no `pdf`, the page the watermark at its z draws now, as the\ndocument has it, and `page` isn't read.",
+          "properties": {
+            "opacity": {
+              "description": "0–1.",
+              "format": "float",
+              "type": "number"
+            },
+            "page": {
+              "default": 1,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pdf": {
+              "$ref": "#/$defs/BlobSel"
+            },
+            "scale": {
+              "format": "float",
+              "type": "number"
+            },
+            "type": {
+              "const": "page",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "scale",
+            "opacity"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WatermarkSpec": {
+      "additionalProperties": false,
+      "description": "A watermark: what it draws, and where on each page.",
+      "properties": {
+        "content": {
+          "$ref": "#/$defs/WatermarkContent"
+        },
+        "position": {
+          "$ref": "#/$defs/GridPos",
+          "default": "center",
+          "description": "The middle of the page when none is said."
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "type": "object"
+    },
+    "Z": {
+      "description": "Where a watermark is drawn: over the page's content (a watermark) or\nunder it (a background).",
+      "enum": [
+        "under",
+        "over"
+      ],
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

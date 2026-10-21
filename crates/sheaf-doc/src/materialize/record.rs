@@ -8,7 +8,9 @@
 //! input ([`SaveInput`]): the state it writes, and the saved side it
 //! writes after.
 //!
-//! What generators drew (`drawn`) stays empty until slices 16 and 17.
+//! What generators drew (`drawn`) stays empty until slice 17: only live
+//! tokens, which a watermark hasn't got, are drawn otherwise as pages
+//! move.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -70,7 +72,7 @@ pub struct SaveRecord {
     pub roots: Arc<RootValues>,
     pub tree: Arc<TreeShape>,
     /// What each generator drew on each page, by its layout's and recipe's
-    /// digests. Empty until slices 16 and 17.
+    /// digests. Empty until slice 17's live tokens.
     pub drawn: Arc<HashMap<(PageId, GenId), (u128, u128)>>,
     /// What save policy already did to the file (§11.8), so a later save
     /// never repeats it.
@@ -292,6 +294,7 @@ impl ObjMap {
             (ObjKey::AcroForm, b"AcroForm".as_slice()),
             (ObjKey::OutlinesRoot, b"Outlines"),
             (ObjKey::Labels, b"PageLabels"),
+            (ObjKey::Generators, b"SheafGenerators"),
         ]
         .map(|(key, name)| (key, reference(catalog.and_then(|c| c.get(name).ok()))));
         for (key, id) in roots.into_iter().chain(in_catalog) {

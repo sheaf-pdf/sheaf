@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use lopdf::{Object, dictionary};
+use sheaf_edit::FontChoice;
 use unicode_normalization::UnicodeNormalization;
 
 use super::afm::Afm;
@@ -162,6 +163,26 @@ impl Face {
         }
         face.unknown = face.codes.get(&'?').copied();
         face
+    }
+}
+
+/// The face an op chose, which is one of the twelve.
+impl From<FontChoice> for Std14 {
+    fn from(choice: FontChoice) -> Std14 {
+        match choice {
+            FontChoice::Helvetica => Std14::Helvetica,
+            FontChoice::HelveticaBold => Std14::HelveticaBold,
+            FontChoice::HelveticaOblique => Std14::HelveticaOblique,
+            FontChoice::HelveticaBoldOblique => Std14::HelveticaBoldOblique,
+            FontChoice::TimesRoman => Std14::TimesRoman,
+            FontChoice::TimesBold => Std14::TimesBold,
+            FontChoice::TimesItalic => Std14::TimesItalic,
+            FontChoice::TimesBoldItalic => Std14::TimesBoldItalic,
+            FontChoice::Courier => Std14::Courier,
+            FontChoice::CourierBold => Std14::CourierBold,
+            FontChoice::CourierOblique => Std14::CourierOblique,
+            FontChoice::CourierBoldOblique => Std14::CourierBoldOblique,
+        }
     }
 }
 

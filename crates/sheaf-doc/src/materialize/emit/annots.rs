@@ -791,7 +791,7 @@ impl Cx<'_> {
                     .map(|(bbox, matrix)| (id, bbox, matrix))
                     .ok_or_else(|| anyhow::anyhow!("a form with no box"))
             }
-            FormRef::Blob(page) => blob_form(page.bytes()).map(|(objects, bbox, matrix)| {
+            FormRef::Blob(page) => blob_form(page.bytes(), 0).map(|(objects, bbox, matrix)| {
                 let id = self.resource_of(objects);
                 (Object::Reference(id), bbox, matrix)
             }),
@@ -912,15 +912,18 @@ impl Cx<'_> {
     }
 }
 
-/// A one-page PDF's page made a form, as a resource's objects (the form
-/// first, a reference `(i, 0)` to the `i`th), with its `/BBox` and
-/// `/Matrix`.
-fn blob_form(
+/// Page `index` (from 0) of the PDF `bytes` made a form, as a resource's
+/// objects (the form first, a reference `(i, 0)` to the `i`th), with its
+/// `/BBox` and `/Matrix`: a page stamp's one page, or a watermark's page.
+pub(crate) fn blob_form(
     bytes: &[u8],
+    index: u32,
 ) -> anyhow::Result<(Vec<Object>, crate::geom::Rect, crate::geom::Affine)> {
     let src = lopdf::Document::load_mem(bytes)?;
     let mut dst = lopdf::Document::new();
-    let form = crate::stamp_lib::page_form(&src, &mut dst)?;
+    let page = (src.get_pages().get(&(index + 1)).copied())
+        .ok_or_else(|| anyhow::anyhow!("the file has no page {}", index + 1))?;
+    let form = (crate::stamp_lib::page_forms(&src, &[page], &mut dst)?).remove(0);
     let order: Vec<ObjectId> = std::iter::once(form.id)
         .chain(dst.objects.keys().copied().filter(|&id| id != form.id))
         .collect();

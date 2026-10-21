@@ -479,7 +479,7 @@ pub(crate) mod tests {
         assert_eq!(**primary.bytes(), *with_sections(&pdf, &rec));
         let origin = match primary.blob().kind() {
             BlobKind::Pdf { origin, .. } => origin.clone(),
-            BlobKind::Attachment => unreachable!("a PDF"),
+            BlobKind::Image(_) | BlobKind::Attachment => unreachable!("a PDF"),
         };
         assert_eq!(origin, Origin::Memory(MemoryKind::Recovered));
         assert_eq!(primary.geom(1).rotate, Rotation::R90);

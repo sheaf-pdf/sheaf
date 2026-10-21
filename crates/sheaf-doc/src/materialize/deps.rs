@@ -15,7 +15,7 @@
 //! | `Form` | the form's dictionary; when the files the forms come from changed, every field and widget of the other files (their fonts' renames in `/DR`), their document scripts and the catalog; when `/DA` or `/Q` changed, the other files' roots (theirs are pushed down) |
 //! | `Bookmark(b)`, `OutlineRoots` | each bookmark whose item or place in the tree (`/Parent`, `/Prev`, `/Next`, `/First`, `/Last`, `/Count`) changed, and the outline's root when its own did |
 //! | `Labels` | the page labels; the catalog when they came or went; the header and footer's pages |
-//! | `Generator(g)` | the header and footer's pages, then and now, and the catalog, which holds its settings |
+//! | `Generator(g)` | a watermark's: what the generators are (`/SheafGenerators`), the catalog when the first came or the last went, and the pages it's on then or now (only those it came onto or went from, when nothing else of it changed); the header and footer's: its pages, then and now, and the catalog, which holds its settings |
 //!
 //! And beside the path: the form's dictionary for a save transform the file
 //! hasn't had (every field, for `DropXfa`'s tooltips), and the catalog for
@@ -55,7 +55,7 @@ use super::key::{NameTree, ObjKey, Part};
 use super::plan::SaveTransform;
 use super::record::{CATALOG_OWNED, SaveInput, SavedSide};
 use crate::annot::{AnnotId, AnnotKind};
-use crate::model::{AnnotBody, AnnotRec, DocState, OutlineId, PageId};
+use crate::model::{AnnotBody, AnnotRec, DocState, Generator, OutlineId, PageId, WatermarkGen};
 use crate::prim::{Key, same};
 use crate::store::{BlobId, Src};
 
@@ -140,7 +140,15 @@ pub fn closure(
             Key::Form => form = true,
             Key::Bookmark(_) | Key::OutlineRoots => outline = true,
             Key::Labels => labels = true,
-            Key::Generator(_) => header = true,
+            Key::Generator(g) => {
+                let generator = |st: &'_ DocState| st.generators().get(&g).cloned();
+                match (generator(was), generator(now)) {
+                    (then, after) if is_watermark(&then) || is_watermark(&after) => {
+                        cx.watermark(then.as_deref(), after.as_deref());
+                    }
+                    _ => header = true,
+                }
+            }
         }
     }
     // A page the file has at the number of a primary page that another
@@ -612,6 +620,43 @@ impl<'a> Deps<'a> {
         }
     }
 
+    /// What a watermark that was `then` and is `after` changes: what the
+    /// generators are, the catalog when the first came or the last went,
+    /// and the pages it's drawn on then or now. Only those it came onto or
+    /// went from when nothing else of it changed: on the others it draws
+    /// what it drew, which only their boxes change (`Geom`).
+    fn watermark(&mut self, then: Option<&Generator>, after: Option<&Generator>) {
+        self.keys.insert(ObjKey::Generators);
+        let any = |st: &DocState| (st.generators().values()).any(|g| g.spec.watermark().is_some());
+        if any(self.was) != any(self.now) {
+            self.keys.insert(ObjKey::Catalog);
+        }
+        let (was, now) = (self.was, self.now);
+        let covers = |g: Option<&Generator>, st: &DocState, p: PageId| {
+            g.is_some_and(|g| st.def(p).is_some() && g.covers(p))
+        };
+        let drawn =
+            (then.and_then(|g| g.spec.watermark())).zip(after.and_then(|g| g.spec.watermark()));
+        let rescoped = match drawn {
+            Some((a, b)) => {
+                let a = WatermarkGen {
+                    scope: b.scope.clone(),
+                    ..WatermarkGen::clone(a)
+                };
+                a == **b
+            }
+            None => false,
+        };
+        let pages: Vec<PageId> = (now.pages())
+            .map(|(p, _, _)| p)
+            .filter(|&p| match rescoped {
+                true => covers(then, was, p) != covers(after, now, p),
+                false => covers(then, was, p) || covers(after, now, p),
+            })
+            .collect();
+        self.keys.extend(pages.into_iter().map(ObjKey::Page));
+    }
+
     /// Field `f`'s object, and what depends on it.
     fn field(&mut self, f: crate::forms::FieldId) {
         // A widget's change put its field's key in already, which this
@@ -1002,6 +1047,11 @@ impl<'a> Deps<'a> {
         }
         None
     }
+}
+
+/// Whether `g` is a watermark or background.
+fn is_watermark(g: &Option<std::sync::Arc<Generator>>) -> bool {
+    g.as_ref().is_some_and(|g| g.spec.watermark().is_some())
 }
 
 /// The widget field `f` of `st` is written as one object with, as the

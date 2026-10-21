@@ -100,7 +100,7 @@ pub fn read(path: &Path) -> Result<Vec<PageImage>> {
 }
 
 pub fn read_bytes(bytes: Vec<u8>) -> Result<Vec<PageImage>> {
-    let format = image::guess_format(&bytes).context("not an image sheaf knows")?;
+    let format = sniff(&bytes).context("not an image sheaf knows")?;
     match format {
         ImageFormat::Jpeg => Ok(vec![jpeg(bytes)?]),
         ImageFormat::Tiff => tiff_pages(&bytes),
@@ -372,17 +372,26 @@ pub fn is_image_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .and_then(ImageFormat::from_extension)
-        .is_some_and(|f| {
-            matches!(
-                f,
-                ImageFormat::Jpeg
-                    | ImageFormat::Png
-                    | ImageFormat::Tiff
-                    | ImageFormat::Bmp
-                    | ImageFormat::Gif
-                    | ImageFormat::WebP
-            )
-        })
+        .is_some_and(taken)
+}
+
+/// The type of image `bytes` are, by how they start: None when it isn't
+/// one `read` takes.
+pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
+    image::guess_format(bytes).ok().filter(|&f| taken(f))
+}
+
+/// Whether `read` takes images of type `f`.
+fn taken(f: ImageFormat) -> bool {
+    matches!(
+        f,
+        ImageFormat::Jpeg
+            | ImageFormat::Png
+            | ImageFormat::Tiff
+            | ImageFormat::Bmp
+            | ImageFormat::Gif
+            | ImageFormat::WebP
+    )
 }
 
 /// An image file as RGB, turned upright per its EXIF orientation.

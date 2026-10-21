@@ -16,6 +16,7 @@ use crate::page::{BoxSpec, DestView, Rotation, TextStyle};
 use crate::patch::Patch;
 use crate::refs::{AnnotRef, BlobSel, BookmarkRef, PageRef, PageSel, RangeSet, ScopeSel};
 use crate::text_layer::TextLayer;
+use crate::watermark::{WatermarkSpec, Z};
 
 /// An edit, as a caller states it ("delete pages 3–5"). A document lowers
 /// it into changes of its model, inside a transaction; whatever it makes
@@ -177,6 +178,25 @@ pub enum Op {
     /// Take the OCR text off `pages`: what's not saved yet and what's in
     /// the file.
     ClearOcrText { pages: PageSel },
+    /// The watermark (`z` over the pages' content) or background (under
+    /// it) `spec` says, on the pages `scope` says, in place of the one of
+    /// that `z` there is, and of those of its kind Acrobat or an earlier
+    /// sheaf drew there. The author's own stay.
+    SetWatermark {
+        spec: WatermarkSpec,
+        z: Z,
+        scope: ScopeSel,
+    },
+    /// Take the watermark (`z` over), the background (under) or both (no
+    /// `z`) off `pages`. `include_authored` takes the author's own off too:
+    /// those the program that made the file drew.
+    RemoveWatermark {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        z: Option<Z>,
+        pages: PageSel,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_authored: bool,
+    },
     /// The header and footer, on the pages `scope` says, in place of any
     /// there is.
     SetHeaderFooter {

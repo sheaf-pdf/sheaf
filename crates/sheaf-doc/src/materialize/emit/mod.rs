@@ -7,8 +7,10 @@
 //!
 //! - [`pages`]: each page's dictionary, from its base page's, read lazily;
 //!   a derived copy's page as the page it was made from ([`Shown`]).
-//! - [`content`]: what sheaf draws over a page, OCR text and the header
-//!   and footer, through the legacy installers.
+//! - [`content`]: what sheaf draws on a page: the watermarks and
+//!   backgrounds around its own content, isolated, with resources of its
+//!   own; OCR text and the header and footer through the legacy
+//!   installers.
 //! - [`tree`]: the balanced page tree a Rewrite writes, and the saved
 //!   file's tree an Append splices the pages into.
 //! - [`catalog`]: the catalog by its ownership table (§9.1), and
@@ -56,8 +58,9 @@
 //! catalog is the source's over that root, with a form of the fields with
 //! a widget on those pages, and the layers the view turns off. What the
 //! view doesn't draw isn't written: sheaf's marks unless PDFium draws
-//! them, others' comments and links unless the view shows them, the header
-//! and footer and recognized text unless it asks for them; and what it
+//! them, others' comments and links unless the view shows them, the
+//! watermarks, backgrounds, header and footer and recognized text unless it
+//! asks for them; and what it
 //! hides, or a mark being dragged, is written flagged hidden under its own
 //! key. A derived copy's page is the page the copy has: the section goes
 //! over the copy's bytes. An overlay's frame ([`EmitScope::Frame`]) is the
@@ -216,6 +219,9 @@ pub struct Overlay<'a> {
     /// The view it's drawn for.
     pub inputs: &'a ViewInputs,
     pub rotate: RotatePolicy,
+    /// Watermarks' images and pages, kept across the emissions of the
+    /// realizer that makes it, when one does.
+    pub(crate) arts: Option<&'a content::Arts>,
 }
 
 /// What a page's `/Rotate` is written from.
@@ -380,6 +386,25 @@ pub(crate) struct Cx<'a> {
     pub(crate) stamps: HashMap<FormRef, Option<StampForm>>,
     /// Each attachment's embedded file, by its blob.
     pub(crate) files: HashMap<BlobId, ObjectId>,
+    /// Each watermark's image, by its file's blob, and page, by its PDF's
+    /// blob and the page's index: None when it can't be had.
+    pub(crate) arts: HashMap<content::ArtKey, Option<crate::generate::Art>>,
+    /// The resources of pages sheaf draws on with its own, by key, and the
+    /// names each base page's resources bind, by what they are and the
+    /// names dropped from them.
+    pub(crate) page_res: HashMap<ObjKey, Dictionary>,
+    pub(crate) reserved_of: HashMap<(u128, u64), Reserved>,
+    /// The pages the generators covering them aren't drawn on, whose
+    /// content can't be read.
+    pub(crate) unread: Vec<PageId>,
+    /// The pages where others' watermarks or backgrounds that a filter or a
+    /// generator's `replaces` takes out stay, as a splice refuses them, and
+    /// how many on each.
+    pub(crate) stayed: Vec<(PageId, usize)>,
+    /// The pages where watermarks or backgrounds an older sheaf drew keep
+    /// the settings a filter takes out, as their property lists can't be
+    /// written again without them, and how many on each.
+    pub(crate) settings_kept: Vec<(PageId, usize)>,
     /// Every annotation read from a file, by the object it was read as and
     /// which copy of it it is: what a reply's `/IRT` names.
     pub(crate) by_src: HashMap<(BlobId, ObjectId, u32), AnnotId>,
@@ -419,6 +444,12 @@ impl<'a> Cx<'a> {
             form: form::Plan::default(),
             stamps: HashMap::new(),
             files: HashMap::new(),
+            arts: HashMap::new(),
+            page_res: HashMap::new(),
+            reserved_of: HashMap::new(),
+            unread: Vec::new(),
+            stayed: Vec::new(),
+            settings_kept: Vec::new(),
             by_src: HashMap::new(),
             groups: HashMap::new(),
         }
@@ -615,7 +646,7 @@ impl<'a> Cx<'a> {
 
     /// What placeholder `id` names, when it's an object of a source: the
     /// object, references followed, its source and the copy it's read as.
-    fn read(&self, id: ObjectId) -> Option<(Arc<Object>, Src, u32)> {
+    pub(crate) fn read(&self, id: ObjectId) -> Option<(Arc<Object>, Src, u32)> {
         let ObjKey::Base { blob, obj, copy } = self.syms.key(id)? else {
             return None;
         };
@@ -638,7 +669,11 @@ impl<'a> Cx<'a> {
 
     /// `obj` pushed under `key` unless it was already, or an Append's saved
     /// file has it: the placeholder.
-    fn push_once(&mut self, key: ObjKey, obj: impl FnOnce(&mut Self) -> Object) -> ObjectId {
+    pub(crate) fn push_once(
+        &mut self,
+        key: ObjKey,
+        obj: impl FnOnce(&mut Self) -> Object,
+    ) -> ObjectId {
         if self.writes(&key) && self.made.insert(key) {
             let obj = obj(self);
             self.push(key, obj);
@@ -652,7 +687,11 @@ impl<'a> Cx<'a> {
 /// names is read from its source as the copy it is, and what they add is
 /// keyed by digest, written once a file.
 impl Sink for Cx<'_> {
+    /// A page's own resources ([`ObjKey::PageRes`]) as they're written.
     fn dict(&mut self, id: ObjectId) -> Option<Dictionary> {
+        if let Some(key @ ObjKey::PageRes { .. }) = self.syms.key(id) {
+            return self.page_res.get(&key).cloned();
+        }
         let (obj, src, copy) = self.read(id)?;
         let Object::Dictionary(d) = &*obj else {
             return None;
@@ -972,6 +1011,46 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
             cx.closure.unreadable
         )));
     }
+    if !cx.unread.is_empty() {
+        let pages = crate::describe::pages_text(&cx.unread, cx.st);
+        cx.notes.push(Note(format!(
+            "No watermark or background is drawn on {pages}, whose content can't be read."
+        )));
+    }
+    if !cx.stayed.is_empty() {
+        let on: Vec<PageId> = cx.stayed.iter().map(|&(page, _)| page).collect();
+        let pages = crate::describe::pages_text(&on, cx.st);
+        let (n, stay, them) = match cx.stayed.iter().map(|&(_, n)| n).sum::<usize>() {
+            1 => ("1 watermark or background".to_string(), "stays", "it"),
+            n => (format!("{n} watermarks or backgrounds"), "stay", "them"),
+        };
+        cx.notes.push(Note(format!(
+            "{n} other programs or files drew {stay} on {pages}: taking {them} out would change \
+             what else the page draws."
+        )));
+    }
+    if !cx.settings_kept.is_empty() {
+        let on: Vec<PageId> = cx.settings_kept.iter().map(|&(page, _)| page).collect();
+        let pages = crate::describe::pages_text(&on, cx.st);
+        let (n, keep, it, is) = match cx.settings_kept.iter().map(|&(_, n)| n).sum::<usize>() {
+            1 => (
+                "1 watermark or background".to_string(),
+                "keeps",
+                "it",
+                "it's",
+            ),
+            n => (
+                format!("{n} watermarks or backgrounds"),
+                "keep",
+                "them",
+                "they're",
+            ),
+        };
+        cx.notes.push(Note(format!(
+            "{n} an older sheaf drew on {pages} {keep} the settings it kept in {it}, which \
+             can't be taken out of {it} as {is} written."
+        )));
+    }
     if cx.append.is_some() {
         reached(&mut cx.objects, &cx.syms);
     }
@@ -1048,11 +1127,19 @@ fn appended(cx: &mut Cx, order: &[PageId], p: &dyn Progress) -> Result<()> {
         cx.write_too(ObjKey::Catalog);
     }
     let labels = st.label_ranges().filter(|r| !r.is_empty());
+    // What the saved catalog holds in itself rather than by number is
+    // written anew with it: a form, an outline, page labels or the
+    // generators the map has no number for.
+    let unnumbered = |cx: &Cx, key: ObjKey| !cx.writes(&key) && record.map.get(&key).is_none();
+    let watermarked = (st.generators().values()).any(|g| g.spec.watermark().is_some());
+    if watermarked && cx.writes(&ObjKey::Catalog) && unnumbered(cx, ObjKey::Generators) {
+        cx.write_too(ObjKey::Generators);
+    }
+    // Made only when it's written: an image's or a page's digest decodes it.
+    let generators = (cx.writes(&ObjKey::Generators))
+        .then(|| crate::generate::catalog_json(st, |c| content::drawn_as(cx, c)))
+        .flatten();
     if cx.writes(&ObjKey::Catalog) {
-        // What the saved catalog holds in itself rather than by number is
-        // written anew with it: a form, an outline or page labels the map
-        // has no number for.
-        let unnumbered = |cx: &Cx, key: ObjKey| !cx.writes(&key) && record.map.get(&key).is_none();
         if form.is_none() && record.roots.acroform.is_some() && unnumbered(cx, ObjKey::AcroForm) {
             cx.write_too(ObjKey::AcroForm);
             form = Some(form::acroform(cx));
@@ -1067,6 +1154,9 @@ fn appended(cx: &mut Cx, order: &[PageId], p: &dyn Progress) -> Result<()> {
         if labels.is_some() && unnumbered(cx, ObjKey::Labels) {
             cx.write_too(ObjKey::Labels);
         }
+    }
+    if let Some(json) = generators {
+        cx.push(ObjKey::Generators, catalog::generators(json));
     }
     if let Some(ranges) = labels.filter(|_| cx.writes(&ObjKey::Labels)) {
         cx.push(

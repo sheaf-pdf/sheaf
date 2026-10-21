@@ -3,10 +3,10 @@
 //! written at. A save numbers keys through its [`SaveRecord`]'s map, so a
 //! key keeps its number from one save to the next.
 //!
-//! Only the keys slice 9's emitter writes are here; the other name trees,
-//! the generators' blocks, filtered streams and page resources come with
-//! what writes them. The legacy OCR layers and header and footer are
-//! [`ObjKey::Block`]s by their streams' digest until then.
+//! Only the keys the emitter writes are here; the other name trees,
+//! generators' forms and filtered streams come with what writes them. A
+//! watermark's block is an [`ObjKey::Block`] by its stream's digest, as the
+//! legacy OCR layers and header and footer are until slices 17 and 18.
 //!
 //! [`SaveRecord`]: super::SaveRecord
 
@@ -67,13 +67,39 @@ pub enum ObjKey {
     /// place among the resource's objects (1 the first after the resource
     /// itself): a font's descendant, descriptor and program.
     ResPart(ResId, u32),
-    /// A stream of content sheaf draws on a page, by its digest: an OCR
-    /// layer or a header and footer, in their legacy shape until slices 17
-    /// and 18. Identical ones are one object.
+    /// A stream of content sheaf draws on a page, by its digest: a
+    /// generator's block, or an OCR layer or a header and footer, in their
+    /// legacy shape until slices 17 and 18. Identical ones are one object.
     Block(u128),
     /// A name tree of the catalog's `/Names` a save builds: the document
     /// scripts of forms that came in from other files beside the primary's.
     Names(NameTree),
+    /// The catalog's `/SheafGenerators`: what the document's generators
+    /// are, which an open reads them back from.
+    Generators,
+    /// A page's resources when sheaf draws on it with its own (§11.5): its
+    /// base page's, the names sheaf draws with added (one level down in
+    /// each category it adds to) and those only removed content used
+    /// dropped, by digests of each. Pages that share all three share one.
+    /// The names' digests are 64 bits, as few sets of them meet one base,
+    /// so the key is no larger than [`ObjKey::Base`], which every map of
+    /// keys holds by the thousand.
+    PageRes {
+        /// What the base page's resources are: the object they are, or
+        /// what's written inline, of its file.
+        base: u128,
+        dropped: u64,
+        added: u64,
+    },
+    /// A stream of a page's own content with ranges a filter takes out
+    /// spliced out of it (§11.4, §11.5): by a digest of which source's
+    /// object it is (its blob and number), and one of what's left of it,
+    /// so the key is no larger than [`ObjKey::Base`]. The stream itself
+    /// stays as it was, for the pages that share it.
+    Filtered {
+        stream: u128,
+        filter: u64,
+    },
 }
 
 /// What a mark writes beside its dictionary, and another tool's comment
@@ -103,14 +129,17 @@ pub enum NameTree {
 /// An object content shares across pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Shared {
-    /// The `q` that isolates a page's own content from what's drawn over
-    /// it.
-    QOpen,
+    /// The `n` `q`s that isolate a page's own content from what sheaf
+    /// draws with it (§3.4), marked `/SheafBlock << /K /Isolate >>`.
+    QOpen(u32),
+    /// The `n` `Q`s that end them.
+    QClose(u32),
 }
 
 impl ObjKey {
     /// Whether its object is one the state derives: a root object, a page,
-    /// an annotation and what it writes beside it, a field or a bookmark.
+    /// an annotation and what it writes beside it, a field, a bookmark or
+    /// what the generators are.
     /// An Append writes such a key only when it's in scope (M10.5 §7.2);
     /// every other is a resource or a block, by its digest, or an object of
     /// a source, which a file has once.
@@ -127,19 +156,22 @@ impl ObjKey {
             | ObjKey::Field(_)
             | ObjKey::Bookmark(_)
             | ObjKey::Labels
-            | ObjKey::Names(_) => true,
+            | ObjKey::Names(_)
+            | ObjKey::Generators => true,
             ObjKey::Base { .. }
             | ObjKey::Res(_)
             | ObjKey::Shared(_)
             | ObjKey::ResPart(..)
-            | ObjKey::Block(_) => false,
+            | ObjKey::Block(_)
+            | ObjKey::PageRes { .. }
+            | ObjKey::Filtered { .. } => false,
         }
     }
 
     /// Whether it's one of the file's root objects, which the state owns
     /// wherever they're numbered: the catalog, the page tree's nodes, the
-    /// outline's root, the form, the page labels and the document
-    /// information.
+    /// outline's root, the form, the page labels, the generators and the
+    /// document information.
     pub fn is_root(&self) -> bool {
         matches!(
             self,
@@ -148,6 +180,7 @@ impl ObjKey {
                 | ObjKey::OutlinesRoot
                 | ObjKey::AcroForm
                 | ObjKey::Labels
+                | ObjKey::Generators
                 | ObjKey::Info
         )
     }
@@ -206,7 +239,14 @@ impl ObjKey {
                 out.push(12);
                 out.extend(id.0.to_be_bytes());
             }
-            ObjKey::Shared(Shared::QOpen) => out.extend([13, 0]),
+            ObjKey::Shared(shared) => {
+                let (kind, n) = match shared {
+                    Shared::QOpen(n) => (0, n),
+                    Shared::QClose(n) => (1, n),
+                };
+                out.extend([13, kind]);
+                out.extend(n.to_be_bytes());
+            }
             ObjKey::ResPart(id, part) => {
                 out.push(14);
                 out.extend(id.0.to_be_bytes());
@@ -217,6 +257,22 @@ impl ObjKey {
                 out.extend(digest.to_be_bytes());
             }
             ObjKey::Names(NameTree::JavaScript) => out.extend([16, 0]),
+            ObjKey::Generators => out.push(17),
+            ObjKey::PageRes {
+                base,
+                dropped,
+                added,
+            } => {
+                out.push(18);
+                out.extend(base.to_be_bytes());
+                out.extend(dropped.to_be_bytes());
+                out.extend(added.to_be_bytes());
+            }
+            ObjKey::Filtered { stream, filter } => {
+                out.push(19);
+                out.extend(stream.to_be_bytes());
+                out.extend(filter.to_be_bytes());
+            }
         }
         out
     }
@@ -270,11 +326,32 @@ mod tests {
             ObjKey::Bookmark(OutlineId(1)),
             ObjKey::Labels,
             ObjKey::Res(ResId(1)),
-            ObjKey::Shared(Shared::QOpen),
+            ObjKey::Shared(Shared::QOpen(1)),
+            ObjKey::Shared(Shared::QOpen(2)),
+            ObjKey::Shared(Shared::QClose(1)),
             ObjKey::ResPart(ResId(1), 1),
             ObjKey::ResPart(ResId(1), 2),
             ObjKey::Block(1),
             ObjKey::Names(NameTree::JavaScript),
+            ObjKey::Generators,
+            ObjKey::PageRes {
+                base: 1,
+                dropped: 2,
+                added: 3,
+            },
+            ObjKey::PageRes {
+                base: 1,
+                dropped: 3,
+                added: 2,
+            },
+            ObjKey::Filtered {
+                stream: 1,
+                filter: 2,
+            },
+            ObjKey::Filtered {
+                stream: 2,
+                filter: 1,
+            },
         ]
     }
 
@@ -310,7 +387,14 @@ mod tests {
         want.extend(2u64.to_be_bytes());
         want.extend([0, 0, 0, 3, 0, 4, 0, 0, 0, 5]);
         assert_eq!(base.bytes(), want);
-        assert_eq!(ObjKey::Shared(Shared::QOpen).bytes(), [13, 0]);
+        assert_eq!(
+            ObjKey::Shared(Shared::QOpen(2)).bytes(),
+            [13, 0, 0, 0, 0, 2]
+        );
+        assert_eq!(
+            ObjKey::Shared(Shared::QClose(2)).bytes(),
+            [13, 1, 0, 0, 0, 2]
+        );
         let mut want = vec![14];
         want.extend(9u128.to_be_bytes());
         want.extend([0, 0, 0, 2]);
@@ -319,6 +403,26 @@ mod tests {
         want.extend(9u128.to_be_bytes());
         assert_eq!(ObjKey::Block(9).bytes(), want);
         assert_eq!(ObjKey::Names(NameTree::JavaScript).bytes(), [16, 0]);
+        assert_eq!(ObjKey::Generators.bytes(), [17]);
+        let page_res = ObjKey::PageRes {
+            base: 1,
+            dropped: 2,
+            added: 3,
+        };
+        let mut want = vec![18];
+        want.extend(1u128.to_be_bytes());
+        want.extend(2u64.to_be_bytes());
+        want.extend(3u64.to_be_bytes());
+        assert_eq!(page_res.bytes(), want);
+        let filtered = ObjKey::Filtered {
+            stream: 1,
+            filter: 2,
+        };
+        let mut want = vec![19];
+        want.extend(1u128.to_be_bytes());
+        want.extend(2u64.to_be_bytes());
+        assert_eq!(filtered.bytes(), want);
+        assert_eq!(std::mem::size_of::<ObjKey>(), 48);
         assert_eq!(
             ObjKey::AnnotPart(AnnotId(2), Part::Popup).bytes(),
             [8, 0, 0, 0, 0, 0, 0, 0, 2, 4]

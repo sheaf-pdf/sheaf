@@ -21,6 +21,7 @@ pub mod effects;
 pub mod exchange;
 pub mod file;
 pub mod forms;
+pub mod generate;
 pub mod generated;
 pub mod geom;
 pub mod history;
@@ -47,7 +48,6 @@ pub mod stamps;
 pub mod store;
 pub mod text_layer;
 pub mod tx;
-pub mod watermark;
 
 pub use sheaf_edit::{DestView, PageSize, Rotation, tape};
 

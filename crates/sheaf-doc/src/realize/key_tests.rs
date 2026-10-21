@@ -273,6 +273,51 @@ fn pages_showing_other_pages_have_other_keys() {
     assert_ne!(key(st, p0, &screen), before[&p0]);
 }
 
+/// A page whose filters differ draws differently, a filter that takes
+/// ranges out from one that takes an older sheaf's settings out of the
+/// same ranges among them, so its key differs; the same filters again give
+/// the same key.
+#[test]
+fn each_filter_is_its_page_s_key() {
+    use crate::content::{PagOrigin, PaginationKind};
+    use crate::model::{Filter, LegacySel, MarkedSel, PageDef, StreamSel};
+    let d = doc_of(1, &[]);
+    let p0 = d.page(0).unwrap();
+    let screen = ViewInputs::screen();
+    let sel = MarkedSel::Pagination {
+        kinds: BTreeSet::from([PaginationKind::Watermark]),
+        origins: BTreeSet::from([PagOrigin::SheafLegacy]),
+    };
+    let filtered = |filter: Option<Filter>| {
+        let def = d.state().def(p0).unwrap();
+        let content = match filter {
+            Some(f) => def.content.with_filter(f),
+            None => def.content.clone(),
+        };
+        let def = PageDef::new(def.base.clone(), def.copy, content);
+        key(
+            &putting(d.state(), Key::Page(p0), Val::Page(Arc::new(def))),
+            p0,
+            &screen,
+        )
+    };
+    let filters = [
+        None,
+        Some(Filter::DropMarked(sel.clone())),
+        Some(Filter::StripLegacy(LegacySel::Marked(sel.clone()))),
+        Some(Filter::DropStreams(StreamSel::SheafGen(
+            crate::content::GenId(1),
+        ))),
+        Some(Filter::DropMarked(MarkedSel::SheafGen(
+            crate::content::GenId(1),
+        ))),
+    ];
+    let keys: BTreeSet<RenderKey> = filters.iter().cloned().map(filtered).collect();
+    assert_eq!(keys.len(), filters.len());
+    let again = Some(Filter::StripLegacy(LegacySel::Marked(sel)));
+    assert_eq!(filtered(again.clone()), filtered(again));
+}
+
 /// `st` with `key` holding `val`.
 fn putting(st: &DocState, key: Key, val: Val) -> DocState {
     let mut st = st.clone();
@@ -728,4 +773,51 @@ fn a_header_coming_onto_a_page_conflicts_with_its_render_read() {
     };
     assert_eq!(e, conflict);
     decide(&mut d, &snap, p1, &ViewInputs::content_only(), p2).unwrap();
+}
+
+/// A watermark keys the pages it's on by what it draws and where, turned
+/// as the page is; not the pages it's off, nor which its other pages are,
+/// nor where they are. Under `content_only` it draws nothing.
+#[test]
+fn a_watermark_keys_the_pages_it_is_on() {
+    use sheaf_edit::{GridPos, Z};
+    let mut d = doc_of(3, &[]);
+    let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap());
+    let screen = ViewInputs::screen();
+    let content = ViewInputs::content_only();
+    let was = |d: &Document, p| (key(d.state(), p, &screen), key(d.state(), p, &content));
+    let [k0, k1, k2] = [p0, p1, p2].map(|p| was(&d, p));
+    let set = |spec, pages: &[PageId]| fx::set_watermark(spec, Z::Over, Some(pages));
+    d.commit_ops(vec![set(fx::watermark("A"), &[p0, p1])], "Watermark")
+        .unwrap();
+    let [m0, m1, m2] = [p0, p1, p2].map(|p| was(&d, p));
+    assert!(m0.0 != k0.0 && m1.0 != k1.0);
+    assert_eq!((m0.1, m1.1), (k0.1, k1.1));
+    assert_eq!(m2, k2);
+    // It reads nothing of where a page is: a reorder changes no key, and
+    // its pages' reads don't hold the order.
+    d.commit_ops(vec![fx::move_pages(&[p2], Some(p0))], "Move")
+        .unwrap();
+    assert_eq!([p0, p1, p2].map(|p| was(&d, p)), [m0, m1, m2]);
+    let reads = render_reads(d.state(), p0, &screen);
+    assert!(!reads.contains(&Key::Order), "{reads:?}");
+    d.undo().unwrap();
+    // On a page more: the pages it was on keep their keys.
+    d.commit_ops(vec![set(fx::watermark("A"), &[p0, p1, p2])], "Widen")
+        .unwrap();
+    assert_eq!(was(&d, p0), m0);
+    assert_ne!(was(&d, p2).0, k2.0);
+    let moved = sheaf_edit::WatermarkSpec {
+        position: GridPos::TopLeft,
+        ..fx::watermark("A")
+    };
+    d.commit_ops(vec![set(moved, &[p0, p1, p2])], "Move")
+        .unwrap();
+    assert_ne!(was(&d, p0).0, m0.0);
+    // Laid out on the page as it shows: a turn changes it.
+    let before = was(&d, p1);
+    d.commit_ops(vec![fx::rotate(&[p1], Turn::Quarter)], "Turn")
+        .unwrap();
+    assert_ne!(was(&d, p1).0, before.0);
+    assert_eq!(was(&d, p1).1, before.1);
 }
