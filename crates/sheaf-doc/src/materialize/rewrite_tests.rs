@@ -2751,7 +2751,7 @@ fn header_footer_is_drawn_stored_and_strippable() {
     // Stripped, both pages come back clean.
     let bytes = derived_copy(
         &info(&Store::new(), &out),
-        &[(0, None), (1, None)],
+        &[0, 1],
         HeaderKept::No,
         &mut |pdf, d, _, at| {
             assert!(crate::stamps::strip(pdf, d, at as u32, HEADER_FOOTER)?);

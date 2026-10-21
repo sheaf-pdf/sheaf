@@ -215,8 +215,9 @@ blob, and a source parses the blob in place:
   the newest cross-reference stream that decodes is the trailer, as
   PDFium takes it.
 - **Bytes stay in memory.** PDFium opens the blob's own `Arc<[u8]>`
-  (the engine pool's base engine, `Views::base`). A derived copy (cropped, watermarked, a
-  header and footer stripped) is a memory blob, written nowhere; blank and
+  (the engine pool's base engine, `Views::base`). A derived copy
+  (watermarked, or a header and footer stripped) is a memory blob,
+  written nowhere; a crop makes none (M10.5 slice 15); blank and
   image pages, and a library stamp nothing else holds (see Page content),
   are read back from the generated cache once, into blobs.
   `LazyPdf` can also read a file by position (`FileBytes`).
@@ -388,12 +389,10 @@ not what's stored.
   needs no page geometry, and a page turned later turns its marks with
   what's printed there. GPUI can't turn text, so a free text or stamp
   whose turn isn't the pane's draws its text unturned in its turned box.
-- **A crop moves nothing.** A crop still shows the page from a derived
-  copy, until slice 15 makes it a box edit, and the copy only sets
-  `/CropBox`, the kept area as shown mapped through `from_view`; it keeps
-  the page's user space. So the flow's page rebase
-  (`Tx::set_page_base`) only re-points pages: no mark, OCR word or
-  bookmark moves.
+- **A crop moves nothing.** A crop is a box edit (`SetPageBoxes`, from
+  M10.5 slice 15; see Crop as geometry): it sets the page's crop box, the
+  kept area as shown mapped through `from_view`, in the page's own user
+  space, so no mark, OCR word or bookmark moves.
 - **`/SheafAnnot` version 2** (`annot::Payload`) is the mark's JSON in
   PageSpace with its `turn` (none when upright), `"v":2` and `"std"`, a
   staleness digest of the dictionary it was written into
@@ -874,6 +873,8 @@ pub enum Op {
     InsertPages { from: PageSource, pages: Option<RangeSet>, before: Option<PageRef>,
                   bring: Bring, locals: Vec<Local> },
     ReplacePages { pages: Vec<PageRef>, from: PageSource, with: Option<RangeSet>, bring: Bring },
+    SetPageBoxes { pages: PageSel, crop: Patch<BoxSpec>, trim: Patch<BoxSpec>,  // slice 15
+                   bleed: Patch<BoxSpec>, art: Patch<BoxSpec> },
     SetPageLabels { ranges: Option<Vec<PageLabelRange>> },
     // bookmarks
     AddBookmark { parent: Option<BookmarkRef>, at: Sibling, title: String,
@@ -999,16 +1000,18 @@ targets to sit after the preceding bookmark's pages.
   canceled op leaves the transaction as it was; inserts, replaces,
   duplicates and deletes report progress by page.
 - **Actors and caps** (§6.7). `Actor::{User, Plugin { id, version },
-  Cli, Job(Ocr | Import | Insert)}`, bound by `Document::lower_cx`, the
-  only way to make a lowering context. `Cap::Plugin` is what any plugin
-  may do (pages moved, turned, deleted or copied, labels, bookmarks,
-  sheaf's own marks); `Approval` changes or removes what the user didn't
-  make in sheaf (another tool's comment, link or widget deleted or made a
-  mark, OCR text cleared, the header set or removed); `User` brings
-  content in (pages inserted or replaced, OCR text set, a derived page
-  base, an import's names and dates). A plugin gets `Plugin` only, until
+  Cli, Job(Ocr | Trim | Import | Insert)}`, bound by
+  `Document::lower_cx`, the only way to make a lowering context.
+  `Cap::Plugin` is what any plugin may do (pages moved, turned, deleted
+  or copied, labels, bookmarks, sheaf's own marks); `Approval` changes or
+  removes what the user didn't make in sheaf (another tool's comment,
+  link or widget deleted or made a mark, OCR text cleared, the header set
+  or removed, from slice 15 a page's boxes set); `User` brings content in
+  (pages inserted or replaced, OCR text set, a derived page base, an
+  import's names and dates). A plugin gets `Plugin` only, until
   plugin API 0.4's permissions; an OCR job sets and clears OCR text and
-  nothing else.
+  nothing else, and Trim White (`Job(Trim)`, slice 15) sets page boxes
+  and nothing else.
 - **What the host owns** (§6.8). Ids and `/NM`s, a new mark's dates (one
   `HostAttrs.now` a transaction), its author (the user's name, or a
   plugin's id for its marks), the identity tokens in its text
@@ -1046,14 +1049,15 @@ targets to sit after the preceding bookmark's pages.
 - **Steps, lines and effects.** A step is `{ op: Arc<ResolvedOp>, prims,
   effects, line, cascades }`. describe reads the resolved op as it's
   lowered, its page numbers by `pos_of`, so a line costs what the op
-  names; `describe::lines` shows a run of one kind as one line ("Recognize
-  text on 7000 pages"), and the internal page base's line names its
-  flow (crop, watermark, header stripped). A line says whether its op
-  removed something (`Line.removes`), which the History panel marks with
-  a "Removes" badge. `StepEffects` is a step's `Effects` (§7.1's flags and
-  signature class) with the pages and keys it touched, judged on the step
-  alone (`ClassifyCx::of_step`), so it too costs what the op touched; a
-  save still judges its whole path (`judge`, slice 10).
+  names; `describe::lines` shows a run of one kind as one line
+  ("Recognize text on 7000 pages"), and the internal page base's line
+  names its flow (watermark, header stripped; crop's until slice 15). A
+  line says whether its op removed something (`Line.removes`), which the
+  History panel marks with a "Removes" badge. `StepEffects` is a step's
+  `Effects` (§7.1's flags and signature class) with the pages and keys
+  it touched, judged on the step alone (`ClassifyCx::of_step`), so it
+  too costs what the op touched; a save still judges its whole path
+  (`judge`, slice 10).
 - **Commits** (`Document::commit`): refused while the file opens
   (`NotReady`); a transaction made on another version lands as its
   commit says (from slice 12, below); prims coalesced per key; no
@@ -1091,10 +1095,12 @@ targets to sit after the preceding bookmark's pages.
   Result<Commit, EditError>`, from slice 12 the only way it changes the
   document but for OCR's flushes (below): a drag is `MoveMarks`, a handle,
   style or text change a `PatchMarks` naming only what changed
-  (`mark_changes`). Crop, Remove Header/Footer and the watermark show
+  (`mark_changes`). Remove Header/Footer and the watermark show
   pages of derived copies through the internal `Tx::set_page_base(pages,
-  Derive)`, no `Op` variant (until slice 17). Combine is one transaction
-  (`Actor::Job(Insert)`) on the first file's document: the first file's
+  Derive)`, no `Op` variant (until slice 17); from slice 15 a crop is
+  `SetPageBoxes` and makes no copy (Crop as geometry). Combine is one
+  transaction (`Actor::Job(Insert)`) on the first file's document: the
+  first file's
   pages left out deleted, one `InsertPages` a further file, its bookmarks
   added; it's still written and reopened, until slice 19. Plugins speak
   WIT 0.2 and 0.3 until 0.4: `api::shared::Adapter` says each edit as
@@ -1309,11 +1315,14 @@ impl DocView {
   (`plan_insert`, `plan_replace`), then land with `Relower`
   (`CommitOpts::based(v, stale, label)`); nothing opens an engine on the
   file, which the render worker opens when a page of it is first drawn
-  (from slice 13). Crop, Watermark / Background and Header & Footer
+  (from slice 13). Watermark / Background and Header & Footer
   resolve their pages to ids on the version their dialog opened on,
   make the copies off the UI thread, show them (`Tx::set_page_base` on
   `tx_at(opened)`), commit with `Validate`, and only then keep the
-  copies. The labels dialog previews its op lowered on the current
+  copies. From slice 15 Crop Pages makes no copy: margins are one
+  `SetPageBoxes` committed with `Validate` on the version its dialog
+  opened on, and Trim White a planner that re-plans on a Conflict (Crop
+  as geometry). The labels dialog previews its op lowered on the current
   version (`Tx::preview`), again at each change, and commits on the
   version it opened on with `Validate`; once the labels changed since it
   opened, which that commit would find, it says it can't apply. The
@@ -1322,8 +1331,9 @@ impl DocView {
   the page's own drawn header stripped first as the apply strips it,
   again at each change of its settings or the document, and the page
   realized from that state under the screen's inputs; a lowering's
-  picture shows only while no later lowering has begun. Crop and
-  Watermark adopt it in slices 15 and 16. Blank review's
+  picture shows only while no later lowering has begun. The Crop Pages
+  dialog previews the same way from slice 15, and Watermark adopts it in
+  slice 16. Blank review's
   delete reads each confirmed page as its search measured it
   (`Tx::read_render(p, &ViewInputs::content_only())`: what the page
   shows, from M10.5 slice 13) and lands with `Relower`, so a page whose
@@ -1364,7 +1374,8 @@ impl DocView {
 At 7,000 pages a snapshot takes about 0.2 µs (asserted under 50 µs on
 every fixture). A crop of every page but one, landed by value after the
 user deleted that page, takes 27–31 ms, against 14–15 ms on the current
-version. An insert of 10 pages lowered again after a move commits in
+version (from slice 15 one op with no copy: 15 ms and 10 ms, Crop as
+geometry). An insert of 10 pages lowered again after a move commits in
 1.5 ms. One transaction of 7,000 `SetOcrText` lowers in 36 ms and
 commits as an OCR group's version in 9.5 ms, about 4.5 ms of it pruning
 the previous run's version, which doesn't fit the budget beside it (the
@@ -1457,7 +1468,8 @@ Saves, Save As, extracted pages, Clean Copy, Export Flattened, print and
 recovery sidecars reach their bytes through `serialize/` (§11.7 of
 `todos/m10.5-edit-api.md`). lopdf's writer still writes:
 
-- the derived copies, in memory, until slices 15 to 17 delete them;
+- the derived copies, in memory, until slices 16 and 17 delete them
+  (crop's went in slice 15);
 - the comment summary and FDF files, until slice 19's exports;
 - PDFs made from images and blank pages (`images::to_pdf`,
   `generated::blank_pages`): Images to PDF and a scan without OCR, at
@@ -1694,8 +1706,8 @@ below).
   it is (`SymObject::Raw`, judged by `Cx::unchanged`: the same values,
   each placeholder naming the number the file's object refers to).
 - **Derived pages, content and the outline** (`emit::{pages, content,
-  outline}`). A derived copy's page (a crop, a header stripped, a
-  watermark) is written as the page its `derived` record (the
+  outline}`). A derived copy's page (a header stripped, a watermark; a
+  crop until slice 15) is written as the page its `derived` record (the
   document's table by blob, from M10.5 slice 11) says it was made from, through copies of copies (`emit::Shown`): that
   page's object (copy 0 of a primary page keeps its number), keys and
   annotations, with the copy's `/Contents` and `/Resources` copied in
@@ -2694,9 +2706,9 @@ print preview nor what OCR reads:
 
 | Consumer | Inputs | Draws |
 |---|---|---|
-| The page view, the thumbnails, blank review's previews, the Header & Footer preview; Find, Patterns, selection, calculator picks and text markup (slice 14) | `screen()`, with `hidden`, `dragging` and `ocg_off` the view's | everything; sheaf's marks GPUI draws over the page (`ByHost`) |
+| The page view, the thumbnails, blank review's previews, the Header & Footer and Crop Pages (slice 15) previews; Find, Patterns, selection, calculator picks and text markup (slice 14) | `screen()`, with `hidden`, `dragging` and `ocg_off` the view's | everything; sheaf's marks GPUI draws over the page (`ByHost`) |
 | Print preview | `print(markup)` | with "Comments and markups", as the screen; without, no marks and no other tools' comments (as `print_pdf` prints), the form's widgets either way |
-| OCR (`ViewPages`), blank detection and blank review's reads, plugins' recognition | `content_only()`; blank detection's text with `ocr_over` (slice 14) | the page's own content: no header, recognized text, widgets or annotations, at its shown box |
+| OCR (`ViewPages`), blank detection and blank review's reads, plugins' recognition; Trim White (slice 15), on its measuring state | `content_only()`; blank detection's text with `ocr_over` (slice 14) | the page's own content: no header, recognized text, widgets or annotations, at its shown box (Trim White's: its file's own crop box) |
 | Plugins' renders | `plugin()`: `screen()` with `marks: ByEngine`, for the render and its reads alike | as the saved file will draw it, sheaf's marks and the unsaved header included, in the file's own orientation |
 | Plugins' text (slice 14) | `plugin_text()`: `plugin()` with no marks, widgets or other tools' annotations, for the text and its reads alike | what of the page PDFium reads as text: its content, the unsaved header and recognized text; no annotation's text, which PDFium's text page never reads |
 
@@ -2855,11 +2867,11 @@ would be drawn standalone too; `realize_corpus` fails on one. From slice
 Find, Patterns, selection, plugin text, OCR's "skip pages with text"
 check and Remove Blank Pages work on such a source, and printing it
 prints sheaf's own print file from memory, as every print does (Text and
-printing). What still fails on it is the form type's query, which has no
-page to fall back to and is how the document learns of the refusal, and
-Trim White, which opens the source's bytes in an engine of its own
-(`sheaf_ops::engine_for`) until slice 15. The document's notice says its
-pages are drawn from sheaf's copy.
+printing), and from slice 15 Trim White measures its pages through the
+views too (Crop as geometry). What still fails on it is the form type's
+query, which has no page to fall back to and is how the document learns
+of the refusal. The document's notice says its pages are drawn from
+sheaf's copy.
 
 **The overlay** is an emission (`EmitScope::Pages`, `EmitBase::Overlay`)
 over the source's bytes, with that source the emission's own and no
@@ -2895,12 +2907,12 @@ the document; a visit counter in the tests holds it to that):
   outside the group is null.
 - **Copy 0 of the source's objects** keeps its own number; one unchanged
   isn't written (the base has it). Other blobs, and copies, are copied.
-- **A derived copy's page** (a crop, a watermark, a stripped header, until
-  slices 15–17) is the page as the copy has it: the overlay goes over the
-  copy's bytes, its records' widgets drawn from the records, the copy's
-  own widget entries left out, and its form only the records' fields (the
-  copy's own form copies every field of the file, which PDFium would load
-  at the group's first page).
+- **A derived copy's page** (a watermark or a stripped header, until
+  slices 16 and 17; a crop until 15) is the page as the copy has it: the
+  overlay goes over the copy's bytes, its records' widgets drawn from
+  the records, the copy's own widget entries left out, and its form only
+  the records' fields (the copy's own form copies every field of the
+  file, which PDFium would load at the group's first page).
 
 **Assembly.** Each page's delta is its overlay alone
 (`EmitScope::Pages([p])`) without the group's frame, kept by page and
@@ -2928,7 +2940,9 @@ own, unencrypted in memory, its catalog kept to `/Type`, `/Pages`,
 `/AcroForm` and `/OCProperties`, everything its pages reach copied at its
 own number but other pages and page-tree nodes, and an untouched page of
 it under a layers patch goes to its group. Crops are realized (spike C:
-no box edit on the base engine). Realizing runs in the pool's opener, on
+no box edit on the base engine): from slice 15 a cropped page is its
+source's page in its group's overlay, which writes the page's new boxes,
+and no copy. Realizing runs in the pool's opener, on
 its worker, so a group's assembly delays other renders by its time.
 
 ### The engine pool
@@ -2972,15 +2986,16 @@ that doesn't open does, and the worker serves every other.
   next request (about every 1,256 distinct pages a lone base engine draws,
   by the estimate; on the heavy 7k each reopen takes about 0.7 s, its
   form environment loading every field).
-- **The background's** requests (OCR, blank detection, plugins' text
-  and scans) use any open engine without moving the screen's order, and
-  otherwise open their own, at most 2, so a walk never closes a screen
-  engine; a screen request or a pin makes one of theirs the screen's.
-  Their group and patch engines weigh at most 32 MB. From slice 14 their
-  base engines grow into what the screen's engines leave of 96 MB, and
-  past it the heaviest over 16 MB closes, as the screen's does: held to
-  32 MB, a base engine opened again every ~380 pages (19 times in Find
-  Blank Pages over the synthetic 7k; 6 now).
+- **The background's** requests (OCR, blank detection, plugins' text and
+  scans, Trim White from slice 15) use any open engine without moving
+  the screen's order, and otherwise open their own, at most 2, so a walk
+  never closes a screen engine; a screen request or a pin makes one of
+  theirs the screen's. Their group and patch engines weigh at most 32
+  MB. From slice 14 their base engines grow into what the screen's
+  engines leave of 96 MB, and past it the heaviest over 16 MB closes, as
+  the screen's does: held to 32 MB, a base engine opened again every
+  ~380 pages (19 times in Find Blank Pages over the synthetic 7k; 6
+  now).
 - **Walks** (from slice 14) hold the engine they read their last page
   on: no count or byte rule but the base engines' closes it until the
   walk reads on another or ends. With pinned engines filling the
@@ -3069,7 +3084,9 @@ that doesn't open does, and the worker serves every other.
   (`derive::strip_stamps_of`), and renders the active pane's page under
   the screen's inputs through a realizer of its own on the document's
   pool, so its states don't evict the screen's deltas; it pins nothing,
-  and doesn't draw sheaf's marks, which GPUI draws on the page.
+  and doesn't draw sheaf's marks, which GPUI draws on the page. From
+  slice 15 the Crop Pages dialog previews the same way, through the same
+  `dialog_preview::Preview` (Crop as geometry).
 
 **Deleted:** `RenderHandle` (its thread per source, `open_bytes`, `info`,
 its searches), the old worker's `Msg`, `worker_loop`, `SearchWalk` and
@@ -3242,8 +3259,8 @@ does), runs `find`, and sends the page's hits with its position and id
 (`Found::Hits`), then how far it has got (`Found::Scanned`), and `Done`
 last, on one channel so a page's hits come before its `Scanned`. Each page
 is read where its view is: an untouched page on its source's base engine,
-an edited, inserted or duplicated one on its group's realization, a
-crop's on its derived copy (until slice 15 makes crop geometry). A walk
+an edited, inserted, duplicated or (from slice 15) cropped one on its
+group's realization (a crop's was its derived copy's until then). A walk
 keeps nothing of what it reads (a 7k walk never evicts the screen's
 selection characters), holds its state until it's done or its receiver
 is dropped (the app drops it on a new search and at close), and passes
@@ -3297,8 +3314,8 @@ selection and plugin text read its pages from their groups.
   query: over the synthetic 7k 12.3 s and 6 base engine opens, beside
   10.4 s for its old engine's `page_text` (the heavy's pages all have
   annotations, so none is read). It no longer opens an
-  engine of its own (`engine_for` remains for Trim White until slice 15);
-  the command line, which has no process pool, makes views of its own
+  engine of its own (nor, from slice 15, does Trim White: `engine_for` is
+  gone); the command line, which has no process pool, makes views of its own
   (`Views::start`).
 - **OCR's "skip pages with text"** reads each page's text length through
   `ViewPages`' `Text` under `content_only`, so a page of a refused source
@@ -3352,6 +3369,193 @@ characters with their boxes is about 1.2× PDFium's own `FPDFText_Find`
 on the same page (one engine, no pool: 11.1 s against 9.0–9.3 s for the
 synthetic's 7,000 pages, 7.5 s against 6.2 s for the heavy's), since it
 asks PDFium four things a character.
+
+## Crop as geometry (M10.5 slice 15)
+
+A crop is a box edit: it changes the page's `Geom` and nothing else, so
+nothing stored moves (Coordinates), no copy of the page is made, and an
+incremental save writes only the cropped pages' dictionaries (§5,
+proposal 27 and bugs 16 and 28 of `todos/m10.5-edit-api.md`). Crop Pages
+by margins is one op; Trim White measures each page through the views
+and commits its crops as ops; the dialog previews either through the
+realizer.
+
+```rust
+pub enum BoxSpec { Margins(Margins), Rect(Box2) }          // sheaf_edit, kebab-case
+pub struct Margins { pub top: f32, pub bottom: f32, pub left: f32, pub right: f32 }
+Op::SetPageBoxes { pages: PageSel, crop: Patch<BoxSpec>, trim: Patch<BoxSpec>,
+                   bleed: Patch<BoxSpec>, art: Patch<BoxSpec> }
+pub const MIN_SIDE: f32 = 18.0;                             // sheaf_doc::geom
+pub const PAD: f32 = 9.0;                                    // sheaf_ops::crop, the app's pad
+pub enum Urgency { Background, Preview }                    // sheaf_ops::crop
+pub fn trim_white(views: &Views, snap: &Snapshot, lower: Arc<LowerCx>, pages: &[PageId],
+                  pad: f32, urgency: Urgency, progress: &dyn Progress)
+    -> Result<Trimmed>;                                     // sheaf_ops::crop
+pub struct Trimmed { pub crops: Vec<(PageId, Box2)>, pub measured: Vec<PageId>,
+                     pub left: Vec<PageId> }
+impl Trimmed { pub fn lower(&self, tx: &mut Tx) -> Result<(), EditError>; }
+```
+
+### SetPageBoxes
+
+- **The boxes.** Each of `crop`, `trim`, `bleed` and `art` is a `Patch`:
+  `Keep` leaves the box as it is, `Clear` makes the crop the media box
+  and takes any of the others away, and `Set` gives it. Margins
+  (`BoxSpec::Margins`, the `Margins` the header and footer use too) are
+  points off each side of the box the page shows, after its `/Rotate`
+  and sheaf's turn: the kept box goes through `from_view` into PageSpace
+  and is intersected with the visible box, for rounding only. Every
+  box's margins come off the page as it showed before the op, so the
+  four fields don't depend on one another. A `BoxSpec::Rect` is a
+  PageSpace box within the media box, as the op's JSON gives it.
+- **It fails, and is never repaired** (§6.4). A negative or non-finite
+  margin, a box that isn't finite, a box off the media box by more than
+  0.01 pt (only float noise is clipped), or one under `geom::MIN_SIDE`
+  (18 pt, moved from sheaf-ops' crop.rs) on either side as its caller
+  states it fails the op as `EditError::Invalid`, naming the page's
+  position: "those margins leave nothing of page 3", "the box leaves
+  nothing of page 3", "the box isn't on page 3". A file's own crop
+  outside its media box is still read as PDFium reads it (§3.3); an op
+  doesn't get that leniency.
+- **`Geom(p)` alone.** Lowering reads each page's `Geom` (a lowering
+  read, so a validated commit conflicts when a page's boxes changed
+  since, even one the op leaves as it was) and writes it only where it
+  changes; no change, no version. A crop writes no `Page(p)`, so an OCR
+  flush, which reads what its page shows (`read_render` under
+  `content_only`, which is `Page(p)`), lands after a crop of its page
+  made during the run, and the other way round (the transitional
+  ledger's 12 → 15 row). Two crops of one page made on one version
+  conflict on `Geom(p)`.
+- **Its line** is "Crop page 3", "Crop pages 3–5", "Remove the crop from
+  page 2", or "Change the page boxes of …" for anything else, and a run
+  of crops is one ("Crop 7000 pages"). It needs `Cap::Approval`;
+  `Actor::Job(JobKind::Trim)` may submit it and nothing else.
+- **Saving.** The emitter writes a page's boxes where they differ from
+  what it inherits (§11), so an Append of a crop writes the cropped
+  pages' dictionaries and nothing else: the same `/Contents`, `/Annots`
+  and `/Parent` references, no content stream, no copy, and forms stay
+  clean. Bug 13's forced Rewrite for a crop went in slice 10, and bug
+  28's linear id lookup with `crop::plan`.
+- **Drawing.** Spike C failed (a box edit at render time on the base
+  engine), so a page whose `Geom` differs from its base page's isn't
+  untouched: it realizes in its source's group overlay, which writes its
+  new boxes over the source's own bytes. The page view, the thumbnails,
+  print preview and the text service all read it there, so a cropped
+  page's characters are its source page's, read from the group, and a
+  cropped form page keeps its widgets and shows its values with no copy
+  and no cache file.
+
+### Trim White
+
+Trim White is a resolve stage (§6.3) in sheaf-ops: `trim_white` measures
+pages of a snapshot through the views, and its `Trimmed` lowers the
+crops into a transaction made at that snapshot.
+
+- **The measuring state.** Each page is measured as its file crops it,
+  whatever crop sheaf gave it: a transaction at the snapshot
+  (`Document::tx_at`) crops each page sheaf cropped back to its base
+  page's own crop box (`Source::geom(index).crop`, a fact of the source,
+  not a read). A page whose only change is its crop is untouched there
+  and is drawn from its source's own bytes, so trimming every page of a
+  cropped 7,000-page file opens no group engine. A page whose own box is
+  under `MIN_SIDE` isn't measured.
+- **Within the file's own crop box, not the whole media box,** so what a
+  file's `/CropBox` hides (printer's marks, bleed) is never taken for
+  content. Trim White can widen a margins crop back out to the page's
+  content, but never past the file's box. §10.1 said "over the whole
+  MediaBox"; the file's box is a decision for Greg, and the whole media
+  box is one line (`geom.media` for the own box in `measuring`).
+- **The render.** Each page of that state is drawn under
+  `ViewInputs::content_only()` (its content alone: no header, recognized
+  text, widgets or annotations) at 72 dpi, turned as it shows, through
+  the views, one page at a time with `progress.check()` between: a
+  planner's at priority `u8::MAX` in the background's budget
+  (`Urgency::Background`), a dialog's preview at priority 0 in the
+  screen's (`Urgency::Preview`, §10.3). A page of a source PDFium refuses is drawn
+  from its group, so Trim White works on such a source
+  (forms/safedocs/4422502.pdf: 5 of 5 pages trimmed). Anything darker
+  than gray 235 is content; its bounds, padded (`crop::PAD`, 9 pt in the
+  app, an eighth of an inch), mapped back through the measuring state's
+  `from_view` and intersected with the own box, are the page's crop. A
+  blank page, or one with too little content to keep `MIN_SIDE`, is left
+  as it was (`Trimmed::left`), and one whose crop wouldn't change gets
+  no op.
+- **The commit.** `Trimmed::lower` records `read_render(p,
+  content_only)` for every page it measured (`Page(p)`), and `Geom(p)`
+  for each it found a crop for, since whether the page already had that
+  crop decided whether it takes an op (a page it leaves because it's
+  already trimmed conflicts with a change of its crop since, as one it
+  crops does); then one `SetPageBoxes` with a `Rect` crop a page through
+  `apply_batch`, all of them or none. The app runs Trim White as a planner
+  (`DocView::trim_white`, `run_planner("Trim White", …)`) on views of
+  its own over the process's pool, as `Actor::Job(JobKind::Trim)`, and
+  lands it in a transaction at the snapshot it measured, `Stale::Validate`
+  on that version, labelled "Crop N pages" for the pages it crops. A
+  Conflict (another crop of one of its pages since, `Geom(p)`, or a
+  change to what one shows, `Page(p)`, such as an OCR flush) measures
+  again on the document as it is, with the pages still in it, at most
+  three tries (`TRIM_ATTEMPTS`); the new planner's notice takes the
+  conflict's place. Of two overlapping trims, the second re-plans and
+  both crops hold. The notice reads "Trimmed 7 pages, 1 left as it was".
+- **A float limit.** A `Rect` carries a corner and a size, so an own box
+  whose far corner isn't its near one plus its size in `f32` comes back
+  about an ulp off: such a page is drawn from its group, with the same
+  pixels, at the cost of a group engine. Integer boxes and media boxes
+  from the origin round-trip exactly.
+
+### The app
+
+- **Margins** commit one op (`page_insert::crop_op`) on the version the
+  Crop Pages dialog opened on, with `Validate`, on the UI thread: no copy
+  is loaded, so the first crop no longer starts rayon's pool.
+- **A crop survives the derived flows.** A page's boxes are its own, not
+  its base's: `Tx::set_page_base` (Watermark / Background, Remove
+  Header/Footer, until slice 17) moves a page onto its copy keeping its
+  `Geom` whole, the copy having its base's media box, and reads it, so
+  the flow conflicts with a crop made since it was planned. The
+  watermark is placed on each page's crop as the document shows it.
+- **The dialog's preview** (§8.6) is the Header & Footer dialog's,
+  shared (`dialog_preview::Preview<K>`, keyed by the request,
+  `crop_dialog::Request::{Margins(m), Trim}`): the request lowered off
+  the UI thread in a transaction at the current version, margins as
+  `crop_op` on the previewed page and Trim as `trim_white` and
+  `Trimmed::lower` through the previewer's views, then the page drawn
+  from that state under `screen()` by the previewer's realizer, both
+  renders at priority 0 in the screen's budget, and the
+  hint saying the size the page takes ("The page below becomes 6.50 ×
+  8.00 in") or why it can't be cropped so. It follows each change of the
+  document (`Workspace::watch`), and a lowering's picture shows only
+  while no later one has begun. The textures are released when the
+  dialog closes.
+
+**Deleted:** `save::cropped_copy`, crop's derived file and the pool
+engine each one took; sheaf-ops' `crop::{plan, CropSpec, Margins,
+CroppedSource, content_margins}` and its `MIN_SIDE` (moved to
+`geom::MIN_SIDE`); `sheaf_ops::engine_for`, Trim White's own engine;
+`Derive::Crop` and crop's use of `Tx::set_page_base`; `derived_copy`'s
+crop parameter; the dialog's `CropEvent::Crop`. `tests/retired.rs`
+lists them.
+
+**Numbers** (AMD EPYC 7302P, release; the 7k gate harness):
+
+| Row | Synthetic | Heavy | Scanned |
+|---|---|---|---|
+| crop all pages, one op made on the opened version and committed by value (asserted < 200 ms) | 9.81 ms (slice 2: 445 ms, copy and all) | 9.90 ms (2,326 ms) | 9.61 ms (2,256 ms) |
+| crop all pages but the last, validated after it was deleted (asserted < 200 ms) | 15.7 ms | 15.3 ms | 14.6 ms |
+| thumbnail strip after a crop and the header (asserted ≥ 310 pages/s, ≤ 96 MB weighed and RSS added) | 446 pages/s, 80.6 MB, 30.8 MB | 372 pages/s, 80.7 MB, 71.0 MB | 167 pages/s, 80.7 MB, 81.4 MB |
+| Trim White over every page, cropped first (no gate; `trim_white_on_the_7k`): measured, then committed | 38.5 s (182 pages/s), 71.3 ms | 40.6 s (172 pages/s), 79.5 ms | 104.8 s (67 pages/s), 74.0 ms |
+| Trim White: pages cropped, engines opened, group engines opened | 7,000, 6, 0 | 7,000, 6, 0 | 7,000, 6, 0 |
+
+A crop of every page is the transaction made on the version the dialog
+opened on, the op lowered over 7,000 pages and the commit; slice 12
+measured the dialog's edit at 14–15 ms on a precomputed copy, its copy
+apart. Trim White measures every page of a cropped document from its
+source's base engine, which opens six times as the background's base
+engine grows past what the screen's engines leave (as Find Blank Pages'
+does), a page at a time on the pool's worker; the walk is timed after
+an untimed one that counts its group engines and reads each page's
+facts cold, as the app has by the time it trims. Making it faster is a
+later perf pass's.
 
 ## Non-goals of this design
 
@@ -3470,34 +3674,35 @@ put with the page's `PageDef`.
 - **Ops**: `SetOcrText` (one page's layer) and `ClearOcrText`, which put
   the pages' `PageDef`s and nothing else. Delete removes a page's layer with the
   page, Duplicate shares it (the same `ContentStack`), Replace drops it
-  (the page shows other content, under the empty stack), Move and Rotate
-  leave it alone, and Crop re-points the page's base and keeps its
-  content.
+  (the page shows other content, under the empty stack), and Move, Rotate
+  and, from M10.5 slice 15, Crop (`SetPageBoxes`, the page's `Geom`
+  alone) leave it alone.
 - **Coalesced undo.** Results arrive in flushes over minutes (every 10
   pages or 2 s), but a run is one undo step: from M10.5 slice 12 it's a
   group (`Document::begin_group(GroupKind::Ocr)`, which takes commits of
-  `Actor::Job(JobKind::Ocr)` only, which may only set and clear OCR text;
-  see One funnel and the history budget). Each flush is a transaction
-  made on the version the run began on, whose snapshot its pages are
-  drawn from (`ViewPages`, their content alone, slice 13), that reads
-  each page as OCR read it
-  (`Tx::read_render(p, &ViewInputs::content_only())`: what the page
-  shows, from M10.5 slice 13) and lands by value (`Stale::Validate`) in the
-  group: it amends the group's version when that's the current one, has
-  nothing after it, was never saved and isn't being saved (sealed, see
-  Saving), and pushes a version "… (continued)" otherwise. An amend
-  coalesces the run's prims and replaces the version with a new
-  `VersionId` under the same parent (an id names one state), and a run
-  whose flushes put back all they did leaves no version. A save or an
-  unrelated edit mid-run splits the run into fragments, which History's
-  "Undo all of …" takes back at once (`revert_group`); a flush during a
-  save lands in a version after the sealed one, which stays unsaved. A
-  page whose slot changed since (a crop, until slice 15 makes crop
-  geometry) is a Conflict: the flush is retried page by page, the other
-  pages keep their text, and the run's message counts the changed ones.
-  Undoing the run, or jumping away from it, makes its next flush
-  `GroupEnded`: the run stops ("OCR stopped: its results were undone")
-  rather than put undone results back.
+  `Actor::Job(JobKind::Ocr)` only, which may only set and clear OCR
+  text; see One funnel and the history budget). Each flush is a
+  transaction made on the version the run began on, whose snapshot its
+  pages are drawn from (`ViewPages`, their content alone, slice 13),
+  that reads each page as OCR read it (`Tx::read_render(p,
+  &ViewInputs::content_only())`: what the page shows, from M10.5 slice
+  13) and lands by value (`Stale::Validate`) in the group: it amends the
+  group's version when that's the current one, has nothing after it, was
+  never saved and isn't being saved (sealed, see Saving), and pushes a
+  version "… (continued)" otherwise. An amend coalesces the run's prims
+  and replaces the version with a new `VersionId` under the same parent
+  (an id names one state), and a run whose flushes put back all they did
+  leaves no version. A save or an unrelated edit mid-run splits the run
+  into fragments, which History's "Undo all of …" takes back at once
+  (`revert_group`); a flush during a save lands in a version after the
+  sealed one, which stays unsaved. A page whose slot changed since (its
+  base re-pointed by a watermark or a header stripped; a crop re-pointed
+  it too until slice 15 made crop geometry, which a flush lands beside)
+  is a Conflict: the flush is retried page by page, the other pages keep
+  their text, and the run's message counts the changed ones. Undoing the
+  run, or jumping away from it, makes its next flush `GroupEnded`: the
+  run stops ("OCR stopped: its results were undone") rather than put
+  undone results back.
 - **Search.** An unsaved layer is drawn into its page's realization,
   invisible, as a save writes it, so Find, Patterns, selection, plugins
   and blank detection read its words from the page as they read any text

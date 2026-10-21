@@ -805,10 +805,10 @@ impl Workspace {
     }
 
     /// Follow a document's events: each change it goes through reaches
-    /// the Page Labels and Header & Footer dialogs, while open, whose
-    /// previews follow the document; a document opened in place of another
-    /// (a recovery's) closes the dialogs opened on that one; and every
-    /// event reaches the plugins that want it.
+    /// the Page Labels, Header & Footer and Crop Pages dialogs, while open,
+    /// whose previews follow the document; a document opened in place of
+    /// another (a recovery's) closes the dialogs opened on that one; and
+    /// every event reaches the plugins that want it.
     fn watch(&mut self, doc: &Entity<DocView>, window: &mut Window, cx: &mut Context<Self>) {
         let id = doc.entity_id();
         let sub = cx.subscribe_in(doc, window, move |ws, doc, ev: &DocEvent, window, cx| {
@@ -820,18 +820,20 @@ impl Workspace {
                     labels.update(cx, |d, cx| d.follow(now, lower, cx));
                 }
                 if let Some((header_footer, _)) = &ws.header_footer {
+                    let (now, lower) = (now.clone(), lower.clone());
                     header_footer.update(cx, |d, cx| d.follow(now, lower, cx));
+                }
+                if let Some((crop, _)) = &ws.crop {
+                    crop.update(cx, |d, cx| d.follow(now, lower, cx));
                 }
             }
             if *ev == DocEvent::Opened
                 && let Some((now, _)) = doc.read(cx).lowering_now()
             {
-                ws.close_dialogs_of_another(&now, cx);
+                ws.close_dialogs_of_another(&now, window, cx);
             }
             #[cfg(feature = "plugins")]
             crate::plugins::dispatch_event(doc, ev, window, cx);
-            #[cfg(not(feature = "plugins"))]
-            let _ = window;
             if *ev == DocEvent::Closed {
                 ws.doc_subs.retain(|(d, _)| *d != id);
             }
@@ -842,16 +844,23 @@ impl Workspace {
     /// The dialogs that apply to the version they opened on closed, when
     /// that's of another document than `now`'s: one this view showed
     /// before a recovery replaced it, whose versions are counted apart.
-    fn close_dialogs_of_another(&mut self, now: &Snapshot, cx: &mut Context<Self>) {
+    /// Their previews' textures go with them.
+    fn close_dialogs_of_another(
+        &mut self,
+        now: &Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let another = |opened: &Snapshot| opened.instance != now.instance;
-        if (self.crop.as_ref()).is_some_and(|(d, _)| another(d.read(cx).opened())) {
-            self.crop = None;
+        if let Some((dialog, _)) = (self.crop).take_if(|(d, _)| another(d.read(cx).opened())) {
+            dialog.update(cx, |d, _| d.release(window));
         }
         if (self.labels.as_ref()).is_some_and(|(d, _)| another(d.read(cx).opened())) {
             self.labels = None;
         }
-        if (self.header_footer.as_ref()).is_some_and(|(d, _)| another(d.read(cx).opened())) {
-            self.header_footer = None;
+        let header_footer = &mut self.header_footer;
+        if let Some((dialog, _)) = header_footer.take_if(|(d, _)| another(d.read(cx).opened())) {
+            dialog.update(cx, |d, _| d.release(window));
         }
         if (self.watermark.as_ref()).is_some_and(|(d, _)| another(d.read(cx).opened())) {
             self.watermark = None;
@@ -1671,7 +1680,8 @@ impl Workspace {
     }
 
     fn toggle_crop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.crop.take().is_some() {
+        if let Some((dialog, _)) = self.crop.take() {
+            dialog.update(cx, |d, _| d.release(window));
             self.focus_active(window, cx);
             cx.notify();
             return;
@@ -1684,15 +1694,17 @@ impl Workspace {
         };
         let ctx = doc.read_with(cx, |d, _| {
             let (_, targets) = d.target_indexes();
+            let (opened, lower) = d.lowering_now()?;
             Some(crate::crop_dialog::CropContext {
-                opened: d.model_snapshot()?,
+                opened,
+                lower,
+                previewer: d.previewer()?,
                 current: d.current_index(),
                 selected: if targets.len() > 1 {
                     targets
                 } else {
                     Vec::new()
                 },
-                size: d.current_size(),
             })
         });
         let Some(ctx) = ctx.filter(|c| c.opened.state.page_count() > 0) else {
@@ -1703,14 +1715,23 @@ impl Workspace {
             &dialog,
             window,
             |ws, dialog, ev: &crate::crop_dialog::CropEvent, window, cx| {
+                use crate::crop_dialog::CropEvent;
                 let opened = dialog.read(cx).opened().clone();
+                dialog.update(cx, |d, _| d.release(window));
                 ws.crop = None;
                 ws.focus_active(window, cx);
-                if let crate::crop_dialog::CropEvent::Crop { pages, spec } = ev
-                    && let Some(doc) = ws.doc().cloned()
-                {
-                    let (pages, spec) = (pages.clone(), *spec);
-                    doc.update(cx, |d, cx| d.crop_pages(opened, pages, spec, cx));
+                if let Some(doc) = ws.doc().cloned() {
+                    match ev {
+                        CropEvent::Margins { pages, margins } => {
+                            let (pages, margins) = (pages.clone(), *margins);
+                            doc.update(cx, |d, cx| d.crop_pages(opened, pages, margins, cx));
+                        }
+                        CropEvent::Trim { pages } => {
+                            let pages = pages.clone();
+                            doc.update(cx, |d, cx| d.trim_white(opened, pages, cx));
+                        }
+                        CropEvent::Dismiss => {}
+                    }
                 }
                 cx.notify();
             },

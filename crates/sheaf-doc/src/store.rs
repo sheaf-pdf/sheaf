@@ -84,8 +84,8 @@ pub enum Origin {
 /// What made a blob in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryKind {
-    /// A copy sheaf made of another source's pages: cropped, watermarked,
-    /// a header and footer stripped. Gone when those are edits (slice 17).
+    /// A copy sheaf made of another source's pages: watermarked, a header
+    /// and footer stripped. Gone when those are edits (slice 17).
     Derived,
     /// A page stamp's one-page PDF, from the stamp library or made from a
     /// placed stamp's page, as one placed or pasted is.

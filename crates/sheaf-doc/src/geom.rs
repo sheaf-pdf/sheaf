@@ -7,6 +7,10 @@ use sheaf_edit::{PageSize, Rotation};
 
 use crate::annot::{Box2, Pt};
 
+/// The smallest a page's box may be left on either side, in points: a
+/// quarter inch.
+pub const MIN_SIDE: f32 = 18.0;
+
 /// A rectangle in a page's default user space: points, y up. Normalized,
 /// `x0 <= x1` and `y0 <= y1`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

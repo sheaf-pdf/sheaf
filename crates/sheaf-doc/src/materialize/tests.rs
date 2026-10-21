@@ -1226,15 +1226,18 @@ fn drawn(src: &Src, index: u32) -> Vec<u8> {
         .collect()
 }
 
-/// A derived copy of page `index` of `d`'s primary, cropped to `crop`,
-/// noted with `d`, and the page rebased onto it.
-fn crop(d: &mut Document, page: PageId, index: u32, crop: [f32; 4]) -> SourceId {
-    let bytes = crate::save::cropped_copy(d.primary(), &[(index, crop)]).unwrap();
+/// A derived copy of page `index` of `d`'s primary, as the derived flows
+/// make one, noted with `d`, and the page rebased onto it.
+fn copied(d: &mut Document, page: PageId, index: u32) -> SourceId {
+    let kept = crate::save::HeaderKept::Yes;
+    let bytes =
+        crate::save::derived_copy(d.primary(), &[index], kept, &mut |_, _, _, _| Ok(())).unwrap();
     derive(d, &bytes, index, page)
 }
 
-/// `bytes`, a derived copy of page `index` of `d`'s primary, noted with
-/// `d`, and `page` rebased onto its first page.
+/// `bytes`, a derived copy of page `index` of `d`'s primary, keeping the
+/// header its file drew, noted with `d`, and `page` rebased onto its first
+/// page.
 pub(crate) fn derive(d: &mut Document, bytes: &[u8], index: u32, page: PageId) -> SourceId {
     let kind = BlobKind::Pdf {
         password: None,
@@ -1247,16 +1250,19 @@ pub(crate) fn derive(d: &mut Document, bytes: &[u8], index: u32, page: PageId) -
     };
     d.add_derived(&copy, derived);
     let source = copy.id();
-    let why = crate::tx::Derive::Crop;
+    let why = crate::tx::Derive::Watermark {
+        behind: false,
+        unencodable: false,
+    };
     d.commit_page_base(vec![(page, copy, 0)], why, "rebase")
         .unwrap();
     source
 }
 
 /// A header and footer is drawn once on each page a Rewrite writes; opened
-/// again, the pages that draw it already aren't drawn on twice, a cropped
-/// one among them, and a page from another file is drawn on, numbered
-/// where it is.
+/// again, the pages that draw it already aren't drawn on twice, a derived
+/// copy's and a cropped one among them, and a page from another file is
+/// drawn on, numbered where it is.
 #[test]
 fn the_header_is_drawn_once_and_not_again_where_the_base_draws_it() {
     let mut d = open(&bytes(&file("A", 2, false)), None);
@@ -1270,8 +1276,16 @@ fn the_header_is_drawn_once_and_not_again_where_the_base_draws_it() {
 
     let mut d = open(&first.bytes, None);
     assert_eq!(d.state().header_footer().unwrap().texts, head.texts);
-    let first_page = d.page(0).unwrap();
-    crop(&mut d, first_page, 0, [0.0, 0.0, 400.0, 500.0]);
+    let [first_page, second] = [0, 1].map(|i| d.page(i).unwrap());
+    copied(&mut d, first_page, 0);
+    let half_inch = sheaf_edit::Margins {
+        top: 36.0,
+        bottom: 36.0,
+        left: 36.0,
+        right: 36.0,
+    };
+    d.commit_ops(vec![fx::crop(&[second], half_inch)], "crop")
+        .unwrap();
     let other = add(&d, &bytes(&file("B", 1, false)), "other.pdf");
     insert(&mut d, &other, 0);
     let again = source_of(&rewrite(&d, Profile::default()));
@@ -1395,7 +1409,8 @@ fn ocr_pages_share_one_font() {
 
 /// A page whose content a derived copy redrew is written as the page it
 /// was made from: its object, its annotations, the copy's content and the
-/// state's crop box. The copy's page isn't written.
+/// state's boxes, the page's own, not the copy's (which no derived flow
+/// changes). The copy's page isn't written.
 #[test]
 fn a_derived_page_is_written_as_its_original_object_with_derived_content() {
     let mut pdf = file("A", 2, false);
@@ -1410,11 +1425,13 @@ fn a_derived_page_is_written_as_its_original_object_with_derived_content() {
     let first = d.page(0).unwrap();
     let redrawn = crate::save::derived_copy(
         d.primary(),
-        &[(0, Some([0.0, 0.0, 300.0, 400.0]))],
+        &[0],
         crate::save::HeaderKept::Yes,
         &mut |pdf, page, _, _| {
             let stream = Stream::new(dictionary! {}, b"0 0 m 9 9 l S".to_vec());
             page.set("Contents", pdf.add_object(stream));
+            let crop = [0.0f32, 0.0, 300.0, 400.0].map(Object::from);
+            page.set("CropBox", crop.to_vec());
             Ok(())
         },
     )
@@ -1430,10 +1447,7 @@ fn a_derived_page_is_written_as_its_original_object_with_derived_content() {
         &Object::Array(vec![note.into()])
     );
     assert_eq!(drawn(&now, 0).trim_ascii(), b"0 0 m 9 9 l S");
-    let crop: Vec<f64> = (page.get(b"CropBox").unwrap().as_array().unwrap().iter())
-        .map(|v| v.as_float().unwrap())
-        .collect();
-    assert_eq!(crop, [0.0, 0.0, 300.0, 400.0]);
+    assert!(page.get(b"CropBox").is_err(), "the page's own crop box");
     assert!(holds(&drawn(&now, 1), b"(A 1)"));
 }
 

@@ -5,32 +5,32 @@
 //! Enter applies, Escape cancels.
 //!
 //! The dialog previews the page the active pane showed as it opened, as
-//! applying would draw it (M10.5 §8.6): the settings' op lowered on the
-//! document as it is now ([`draw_preview`]), off the UI thread, again at
-//! each change of the settings and each change the document goes through
-//! ([`HeaderFooterDialog::follow`]), and the page realized from the state
-//! that leaves, as the screen draws it. A lowering's picture shows only
-//! while no later one has begun ([`Preview`]).
+//! applying would draw it (M10.5 §8.6, `dialog_preview`): the settings'
+//! op lowered on the document as it is now ([`draw_preview`]), off the UI
+//! thread, again at each change of the settings and each change the
+//! document goes through ([`HeaderFooterDialog::follow`]), and the page
+//! realized from the state that leaves, as the screen draws it.
 
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use futures::channel::oneshot;
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton, ObjectFit,
-    RenderImage, Subscription, Task, Window, div, img, prelude::*, px,
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
+    Subscription, Window, div, prelude::*, px,
 };
 use sheaf_doc::stamps::{Bates, HeaderFooter, TOKENS};
 use sheaf_doc::tx::LowerCx;
 use sheaf_doc::{Derive, Document, PageId, Snapshot, ViewInputs};
 use sheaf_edit::{Op, Rotation};
-use sheaf_image::raster::{PixelFormat, Raster};
+use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
 use sheaf_render::{Budget, Job, Rendered};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
 
+use crate::dialog_preview::{Preview, drawn_width};
 use crate::jobs::Previewer;
 use crate::{DialogCancel, DialogNext, DialogPrev, DialogRun};
 
@@ -81,64 +81,6 @@ const F_DIGITS: usize = 14;
 const F_START: usize = 15;
 const FIELDS: usize = 16;
 
-/// The previewed page's height on screen, logical px, and its width at
-/// most.
-const PREVIEW_H: f32 = 220.0;
-const PREVIEW_W: f32 = 340.0;
-
-/// The dialog's preview: lowered and drawn off the UI thread, each
-/// lowering numbered, so the picture of one that a later one has begun
-/// after never shows.
-#[derive(Default)]
-struct Preview {
-    /// The newest lowering's number, and the op it lowered: settings that
-    /// make the same op aren't lowered again until the document changes.
-    generation: u64,
-    op: Option<Op>,
-    /// Its lowering and drawing: replacing it drops an older one's render
-    /// before the worker gets to it.
-    task: Option<Task<()>>,
-    /// The newest picture shown, and its size on screen; why the newest
-    /// lowering drew none.
-    picture: Option<(Arc<RenderImage>, (f32, f32))>,
-    failed: Option<String>,
-    /// Pictures let go, whose textures go at the next frame.
-    retired: Vec<Arc<RenderImage>>,
-}
-
-impl Preview {
-    /// A lowering of `op` begun: its number, or None when the newest
-    /// lowered it already and `again` isn't asked.
-    fn begin(&mut self, op: &Op, again: bool) -> Option<u64> {
-        if !again && self.op.as_ref() == Some(op) {
-            return None;
-        }
-        self.op = Some(op.clone());
-        self.generation += 1;
-        Some(self.generation)
-    }
-
-    /// Lowering `generation`'s picture, drawn at `scale` device px a
-    /// logical px, or why it drew none: taken, unless a later lowering has
-    /// begun, which makes it stale. Whether it was taken.
-    fn take(&mut self, generation: u64, drawn: anyhow::Result<Raster>, scale: f32) -> bool {
-        if generation != self.generation {
-            return false;
-        }
-        match drawn {
-            Ok(raster) => {
-                let size = (raster.width as f32 / scale, raster.height as f32 / scale);
-                let image = Arc::new(crate::docview::to_render_image(raster));
-                let old = self.picture.replace((image, size));
-                self.retired.extend(old.map(|(image, _)| image));
-                self.failed = None;
-            }
-            Err(e) => self.failed = Some(format!("{e:#}")),
-        }
-        true
-    }
-}
-
 /// The preview of `set`, the op applying the dialog's settings makes:
 /// lowered on `now` with `lower` as applying lowers it, after the
 /// previewed page's own drawn header, if its file has one, is stripped
@@ -153,10 +95,7 @@ fn draw_preview(
     set: Op,
     width: u32,
 ) -> anyhow::Result<oneshot::Receiver<anyhow::Result<Rendered>>> {
-    let page = match now.state.def(previewer.page) {
-        Some(_) => previewer.page,
-        None => now.state.page_at(0).context("the document has pages")?,
-    };
+    let page = previewer.page_in(now)?;
     let copies = sheaf_ops::derive::strip_stamps_of(&previewer.store, now, &[page], &NoProgress)?;
     let mut tx = Document::tx_at(now, lower);
     let bases: Vec<_> = copies.iter().flat_map(|c| c.bases()).collect();
@@ -183,7 +122,7 @@ pub struct HeaderFooterDialog {
     /// The field with focus, for Tab.
     at: usize,
     error: Option<String>,
-    preview: Preview,
+    preview: Preview<Op>,
     /// Device px a logical px, as the dialog opened: what the preview is
     /// drawn at.
     scale: f32,
@@ -331,8 +270,7 @@ impl HeaderFooterDialog {
             return;
         };
         let shown = self.now.geom(self.ctx.previewer.page).shown();
-        let wide = (PREVIEW_H * shown.width / shown.height.max(1.0)).min(PREVIEW_W);
-        let width = (wide * self.scale).round().max(1.0) as u32;
+        let width = drawn_width(shown, self.scale);
         let (now, lower) = (self.now.clone(), self.ctx.lower.clone());
         let previewer = self.ctx.previewer.clone();
         self.preview.task = Some(cx.spawn(async move |this, cx| {
@@ -352,10 +290,7 @@ impl HeaderFooterDialog {
 
     /// Let go of the preview's GPU textures (on close).
     pub fn release(&mut self, window: &mut Window) {
-        let shown = self.preview.picture.take().map(|(image, _)| image);
-        for image in self.preview.retired.drain(..).chain(shown) {
-            let _ = window.drop_image(image);
-        }
+        self.preview.release(window);
     }
 
     fn order(&self) -> Vec<usize> {
@@ -473,34 +408,10 @@ impl HeaderFooterDialog {
     }
 }
 
-impl HeaderFooterDialog {
-    /// The preview's picture, at its size, or a box of the page's size
-    /// saying why there's none yet.
-    fn picture(&self) -> AnyElement {
-        if let Some((image, (w, h))) = &self.preview.picture {
-            let picture = img(image.clone()).size_full().object_fit(ObjectFit::Fill);
-            return (div().w(px(*w)).h(px(*h)))
-                .border_1()
-                .border_color(theme::BORDER)
-                .child(picture)
-                .into_any_element();
-        }
-        let shown = self.now.geom(self.ctx.previewer.page).shown();
-        let w = (PREVIEW_H * shown.width / shown.height.max(1.0)).min(PREVIEW_W);
-        let said = (self.preview.failed.clone()).unwrap_or_else(|| "Drawing…".into());
-        (div().w(px(w)).h(px(PREVIEW_H)).p_2())
-            .border_1()
-            .border_color(theme::BORDER)
-            .child(dialog::subtitle(said))
-            .into_any_element()
-    }
-}
-
 impl Render for HeaderFooterDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        for image in self.preview.retired.drain(..) {
-            let _ = window.drop_image(image);
-        }
+        self.preview.drop_retired(window);
+        let picture = (self.preview).element(self.now.geom(self.ctx.previewer.page).shown());
         let slots = |base: usize| {
             div()
                 .flex()
@@ -639,7 +550,7 @@ impl Render for HeaderFooterDialog {
                         (None, Ok(p)) => dialog::message(p, false),
                         (None, Err(e)) => dialog::message(e, true),
                     })
-                    .child(row("Preview", self.picture()))
+                    .child(row("Preview", picture))
                     .child(
                         dialog::footer()
                             .child(dialog::hint("Tab moves, Enter applies"))
@@ -674,6 +585,7 @@ mod tests {
     use super::*;
     use futures::executor::block_on;
     use sheaf_doc::Actor;
+    use sheaf_image::raster::Raster;
     use sheaf_ops::views::Views;
     use sheaf_render::EnginePool;
 

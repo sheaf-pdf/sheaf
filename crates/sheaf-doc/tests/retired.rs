@@ -714,6 +714,24 @@ const RETIRED: &[(&str, u8)] = &[
     // A file opened by its path, print's last: the print job goes to GDI
     // and to CUPS from memory (§10.6), so PDFium opens only bytes.
     ("pdfium::PdfiumEngine::open", 14),
+    // Crop's derived file: a crop is a box edit of the page's `Geom`
+    // (`Op::SetPageBoxes`), so no copy is written, interned or opened, and
+    // Trim White is a resolve stage that measures through the views
+    // (`crop::trim_white`), not an engine of its own. Crop's `MIN_SIDE`
+    // moved to `geom::MIN_SIDE`, so it has no row. The dialog takes the
+    // page's size from its preview.
+    ("save::cropped_copy", 15),
+    ("crop::CroppedSource", 15),
+    ("crop::CropSpec", 15),
+    ("crop::CropSpec::Margins", 15),
+    ("crop::CropSpec::TrimWhite", 15),
+    ("crop::Margins", 15),
+    ("crop::plan", 15),
+    ("crop::content_margins", 15),
+    ("engine_for", 15),
+    ("tx::resolve::Derive::Crop", 15),
+    ("crop_dialog::CropEvent::Crop", 15),
+    ("crop_dialog::CropContext::size", 15),
 ];
 
 /// Last segments only a path matches: names the new design uses again
@@ -919,6 +937,18 @@ const QUALIFIED_ONLY: &[&str] = &[
     "chunk",
     "fold",
     "line_of",
+    // A save's plan (`materialize::plan`), split's (`split::plan`), the
+    // form rules' (`forms::rules::plan`) and the Insert and Page Labels
+    // dialogs' `plan`: not crop's.
+    "plan",
+    // The margins a crop or a header takes off a page (`sheaf_edit::Margins`,
+    // and the variants `BoxSpec::Margins`, `CropEvent::Margins` and the
+    // Crop dialog's `Request::Margins` that carry them): not sheaf-ops'
+    // own or `CropSpec`'s.
+    "Margins",
+    // describe's `Boxes::Crop`, a `SetPageBoxes` that sets the crop alone:
+    // not a derived flow's or the dialog's event.
+    "Crop",
 ];
 
 #[test]

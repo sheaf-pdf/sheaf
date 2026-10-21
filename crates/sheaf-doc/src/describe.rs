@@ -36,6 +36,7 @@ pub fn describe(op: &ResolvedOp, before: &DocState) -> String {
         R::ReplacePages {
             pages: ids, with, ..
         } => format!("Replace {} with {}", pages(ids), count(with.len(), "page")),
+        R::SetPageBoxes { pages: ids, .. } => boxes_line(boxes(op), &pages(ids)),
         R::SetPageLabels { .. } => "Change page labels".into(),
         R::AddBookmark { title, .. } => format!("Add bookmark “{title}”"),
         R::PatchBookmarks { bookmarks, patch } => {
@@ -130,11 +131,51 @@ pub fn describe(op: &ResolvedOp, before: &DocState) -> String {
     }
 }
 
+/// What a [`ResolvedOp::SetPageBoxes`] does to its pages' boxes, as its
+/// line says it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Boxes {
+    /// Sets the crop, and nothing else.
+    Crop,
+    /// Clears the crop, and nothing else.
+    Uncrop,
+    Other,
+}
+
+/// What `op` does to its pages' boxes: [`Boxes::Other`] when it's another
+/// op.
+fn boxes(op: &ResolvedOp) -> Boxes {
+    use sheaf_edit::Patch;
+    match op {
+        ResolvedOp::SetPageBoxes {
+            crop,
+            trim: Patch::Keep,
+            bleed: Patch::Keep,
+            art: Patch::Keep,
+            ..
+        } => match crop {
+            Patch::Set(_) => Boxes::Crop,
+            Patch::Clear => Boxes::Uncrop,
+            Patch::Keep => Boxes::Other,
+        },
+        _ => Boxes::Other,
+    }
+}
+
+/// What setting the boxes of `pages`, the pages it names, did, as `b`
+/// says.
+fn boxes_line(b: Boxes, pages: &str) -> String {
+    match b {
+        Boxes::Crop => format!("Crop {pages}"),
+        Boxes::Uncrop => format!("Remove the crop from {pages}"),
+        Boxes::Other => format!("Change the page boxes of {pages}"),
+    }
+}
+
 /// What a derived flow did to `pages`, the pages it names.
 fn derived(why: Derive, pages: &str) -> String {
     let layer = |behind: bool| if behind { "background" } else { "watermark" };
     match why {
-        Derive::Crop => format!("Crop {pages}"),
         Derive::Watermark { behind, .. } => format!("Add a {} to {pages}", layer(behind)),
         Derive::RemoveWatermark { behind } => format!("Remove the {} from {pages}", layer(behind)),
         Derive::StripHeaderFooter => format!("Remove the header and footer from {pages}"),
@@ -178,6 +219,11 @@ fn run_line(run: &[Step]) -> String {
         R::DuplicatePages { .. } => format!("Duplicate {}", pages()),
         R::InsertPages { .. } => format!("Insert {}", pages()),
         R::ReplacePages { .. } => format!("Replace {}", pages()),
+        R::SetPageBoxes { .. } => {
+            let first = boxes(&run[0].op);
+            let alike = run.iter().all(|s| boxes(&s.op) == first);
+            boxes_line(if alike { first } else { Boxes::Other }, &pages())
+        }
         R::ClearOcrText { .. } => format!("Remove recognized text from {}", pages()),
         R::SetOcrText { .. } => format!("Recognize text on {}", pages()),
         R::SetPageBase { why, .. } => derived(*why, &pages()),
@@ -210,6 +256,7 @@ fn page_count(op: &ResolvedOp) -> usize {
         | R::RotatePages { pages, .. }
         | R::DeletePages { pages }
         | R::DuplicatePages { pages, .. }
+        | R::SetPageBoxes { pages, .. }
         | R::ClearOcrText { pages }
         | R::RemoveHeaderFooter { pages } => pages.len(),
         R::InsertPages { pages, .. } => pages.len(),
@@ -392,7 +439,11 @@ mod tests {
             why,
         };
         let st = d.state();
-        assert_eq!(describe(&on(2, Derive::Crop), st), "Crop page 3");
+        let removed = Derive::RemoveWatermark { behind: false };
+        assert_eq!(
+            describe(&on(2, removed), st),
+            "Remove the watermark from page 3"
+        );
         assert_eq!(
             describe(&on(0, Derive::StripHeaderFooter), st),
             "Remove the header and footer from page 1"

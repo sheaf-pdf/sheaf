@@ -38,6 +38,16 @@ fn pages<const N: usize>(d: &Document) -> [PageId; N] {
     std::array::from_fn(|i| d.page(i).unwrap())
 }
 
+/// `by` points off each side of a page.
+fn all(by: f32) -> sheaf_edit::Margins {
+    sheaf_edit::Margins {
+        top: by,
+        bottom: by,
+        left: by,
+        right: by,
+    }
+}
+
 /// Recognized text of no words, told apart by `engine`.
 fn layer(engine: &str) -> Arc<TextLayer> {
     Arc::new(TextLayer {
@@ -166,39 +176,38 @@ fn a_relowered_insert_keeps_every_id_it_drew() {
     assert_eq!(d.state(), &made);
 }
 
+/// A crop is its pages' boxes alone: made on an older version, it lands
+/// beside another page's delete, and conflicts with a crop of its own page
+/// made since, naming it.
 #[test]
 fn a_crop_lands_beside_another_page_s_delete_and_conflicts_with_its_own_page_s_crop() {
     let mut d = doc_of(4, &[]);
-    let copy = crate::store::blank(d.store(), 2);
     let [p0, p1, p2, p3] = pages(&d);
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p1, copy.clone(), 0)], Derive::Crop)
-        .unwrap();
+    tx.apply(fx::crop(&[p1], all(36.0)), &NoProgress).unwrap();
     d.commit_ops(vec![fx::delete(&[p3])], "Delete page 4")
         .unwrap();
     d.commit(tx, on(v, Stale::Validate)).unwrap();
-    let st = d.state();
-    let order: Vec<PageId> = st.order().iter().copied().collect();
+    let order: Vec<PageId> = d.state().order().iter().copied().collect();
     assert_eq!(order, [p0, p1, p2]);
-    assert_eq!(st.def(p1).unwrap().base.src, copy);
+    let cropped = crate::geom::Rect::new(36.0, 36.0, 576.0, 756.0);
+    assert_eq!(d.geom(p1).crop, cropped);
 
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p0, copy.clone(), 1)], Derive::Crop)
-        .unwrap();
-    d.commit_page_base(vec![(p0, copy.clone(), 0)], Derive::Crop, "Crop page 1")
+    tx.apply(fx::crop(&[p0], all(72.0)), &NoProgress).unwrap();
+    d.commit_ops(vec![fx::crop(&[p0], all(18.0))], "Crop page 1")
         .unwrap();
     let e = refused(&mut d, |d| d.commit(tx, on(v, Stale::Validate)));
-    assert_eq!(e, conflict(Key::Page(p0), "Crop page 1"));
+    assert_eq!(e, conflict(Key::Geom(p0), "Crop page 1"));
     assert_eq!(e.to_string(), "“Crop page 1” changed the same data");
 }
 
 #[test]
 fn a_merged_step_is_said_against_the_document_it_lands_on() {
     let mut d = doc_of(3, &[]);
-    let copy = crate::store::blank(d.store(), 2);
     let [p0, _, p2] = pages(&d);
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p2, copy, 0)], Derive::Crop).unwrap();
+    tx.apply(fx::crop(&[p2], all(36.0)), &NoProgress).unwrap();
     assert_eq!(tx.preview().lines[0].text, "Crop page 3");
     d.commit_ops(vec![fx::move_pages(&[p2], Some(p0))], "Move page 3")
         .unwrap();
@@ -293,12 +302,13 @@ fn two_pages_shown_as_one_copy_of_a_page_conflict() {
     let copy = crate::store::blank(d.store(), 2);
     let [p0, p1, _] = pages(&d);
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p0, copy.clone(), 0)], Derive::Crop)
+    let strip = Derive::StripHeaderFooter;
+    tx.set_page_base(vec![(p0, copy.clone(), 0)], strip)
         .unwrap();
-    d.commit_page_base(vec![(p1, copy, 0)], Derive::Crop, "Crop page 2")
+    d.commit_page_base(vec![(p1, copy, 0)], strip, "Strip page 2")
         .unwrap();
     let e = refused(&mut d, |d| d.commit(tx, on(v, Stale::Validate)));
-    assert_eq!(e, conflict(Key::Page(p1), "Crop page 2"));
+    assert_eq!(e, conflict(Key::Page(p1), "Strip page 2"));
 }
 
 /// No op an edit since could make gives a page's annotation a name another
@@ -463,7 +473,7 @@ fn a_dialog_on_v_keeps_an_ocr_amend_of_v() {
     d.commit_ops_in_group(g, fx::ocr([(p0, layer("a"))]), "Recognize text")
         .unwrap();
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p1, copy.clone(), 0)], Derive::Crop)
+    tx.set_page_base(vec![(p1, copy.clone(), 0)], Derive::StripHeaderFooter)
         .unwrap();
     d.commit_ops_in_group(g, fx::ocr([(p2, layer("b"))]), "Recognize text")
         .unwrap();

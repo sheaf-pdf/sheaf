@@ -30,16 +30,14 @@ use lopdf::xref::XrefType;
 use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::Geom;
-use sheaf_doc::realize::{EngineKey, ViewInputs};
+use sheaf_doc::realize::{EngineKey, GroupKey, ViewInputs};
 use sheaf_doc::serialize::fixture::revision_cut_out;
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{
-    Box2, Derive, DocState, Document, OcrWord, PageChars, PageId, Query, Store, TextOpts,
-    TextService,
+    Box2, DocState, Document, OcrWord, PageChars, PageId, Query, Store, TextOpts, TextService,
 };
-use sheaf_edit::Rotation;
-use sheaf_ops::crop::{CropSpec, Margins};
+use sheaf_edit::{Margins, Rotation};
 use sheaf_ops::text::{Found, Text};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Budget, OpenError, PageIndex, Renderer};
@@ -152,13 +150,7 @@ fn crop(d: &mut Document, page: PageId) {
         bottom: 50.0,
         left: 20.0,
     };
-    let spec = CropSpec::Margins(margins);
-    let snap = d.snapshot();
-    let plan = sheaf_ops::crop::plan(d.store(), &snap, &[page], spec, &sheaf_ops::NoProgress);
-    let plan = plan.unwrap();
-    plan[0].note(d);
-    let pages = plan[0].bases().collect();
-    d.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
+    common::crop(d, &[page], margins);
 }
 
 fn word(text: &str, x: f32, y: f32, w: f32) -> OcrWord {
@@ -211,10 +203,13 @@ fn chars_come_from_each_page_s_realization() {
     assert!(matches!(engine(p3, &screen), EngineKey::Group(..)));
     assert!(matches!(engine(copy, &content), EngineKey::Group(..)));
     assert!(matches!(engine(p3, &content), EngineKey::Base(_)));
-    // The crop is a derived file's page, until slice 15.
-    let derived = st.def(p2).unwrap().base.src.id();
-    assert_ne!(derived, d.primary().id());
-    assert_eq!(engine(p2, &content), EngineKey::Base(derived));
+    // The crop is its file's page, its box changed: read from its group.
+    let primary = d.primary().id();
+    assert_eq!(st.def(p2).unwrap().base.src.id(), primary);
+    let cropped = engine(p2, &content);
+    let in_group =
+        matches!(cropped, EngineKey::Group(GroupKey { source, .. }, _) if source == primary);
+    assert!(in_group, "{cropped:?}");
     assert!(matches!(engine(turned, &screen), EngineKey::Base(_)));
 
     for (page, want) in [

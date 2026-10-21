@@ -588,8 +588,9 @@ fn top(st: &DocState, fid: crate::forms::FieldId) -> crate::forms::FieldId {
 }
 
 /// A derived copy's page, in an overlay over the copy's bytes, is the
-/// copy's page: its object, its content and its crop, where a save writes
-/// the page it was made from. Its annotations are the records', each once:
+/// copy's page: its object and its content, where a save writes the page
+/// it was made from, with the state's boxes, the page's own, not the
+/// copy's (which no derived flow changes). Its annotations are the records', each once:
 /// the copy's own widgets are copies of theirs.
 #[test]
 fn a_derived_copy_s_page_is_emitted_as_the_copy_has_it() {
@@ -597,11 +598,13 @@ fn a_derived_copy_s_page_is_emitted_as_the_copy_has_it() {
     let first = d.page(0).unwrap();
     let redrawn = crate::save::derived_copy(
         d.primary(),
-        &[(0, Some([0.0, 0.0, 300.0, 400.0]))],
+        &[0],
         crate::save::HeaderKept::Yes,
         &mut |pdf, page, _, _| {
             let stream = Stream::new(dictionary! {}, b"0 0 m 9 9 l S".to_vec());
             page.set("Contents", pdf.add_object(stream));
+            let crop = [0.0f32, 0.0, 300.0, 400.0].map(Object::from);
+            page.set("CropBox", crop.to_vec());
             Ok(())
         },
     )
@@ -628,10 +631,7 @@ fn a_derived_copy_s_page_is_emitted_as_the_copy_has_it() {
         copy: 0,
     };
     assert_eq!(named(&e, page.get(b"Contents").unwrap()), base);
-    let crop: Vec<f64> = (page.get(b"CropBox").unwrap().as_array().unwrap().iter())
-        .map(|v| v.as_float().unwrap())
-        .collect();
-    assert_eq!(crop, [0.0, 0.0, 300.0, 400.0]);
+    assert!(page.get(b"CropBox").is_err(), "the page's own crop box");
     let rewrite = rewritten(&d);
     let original = d.primary().page(0).unwrap().id;
     assert_eq!(rewrite.owned.get(&ObjKey::Page(first)), Some(&original));

@@ -1,5 +1,6 @@
 //! Edits planned off the UI thread (M10.5 §14.1), each a planner
-//! (jobs.rs):
+//! (jobs.rs), and the edits of dialogs, committed on the version they
+//! opened on:
 //! - **Inserts:** Document > Insert Pages (a PDF's, Blank Pages… and From
 //!   Images…) and Replace Pages…. Off the UI thread the file is read into
 //!   the document's store, what lowering reads of it is read, and the op
@@ -8,18 +9,26 @@
 //!   version if the document has moved on (`Stale::Relower`). Pages with no
 //!   file of their own become PDFs in the generated-file cache
 //!   (`sheaf_doc::generated`) first.
-//! - **Derived pages:** Crop Pages, Watermark / Background and Header &
-//!   Footer show pages from copies made of them off the UI thread, over
-//!   the version their dialog opened on, and commit on that version
-//!   (`Stale::Validate`): an edit since to what they changed is a conflict,
-//!   and nothing changes. The Header & Footer dialog previews its page as
-//!   it would draw (`header_footer_dialog`); Crop's and Watermark's adopt
-//!   that preview in M10.5 slices 15 and 16.
+//! - **Crop Pages** changes pages' boxes alone (M10.5 slice 15). Margins
+//!   are one op, committed on the version the dialog opened on
+//!   (`Stale::Validate`): an edit since to a page's boxes is a conflict,
+//!   and nothing changes. Trim White is a planner: it measures each page's
+//!   content as it draws through the document's views, off the UI thread
+//!   (`sheaf_ops::crop::trim_white`), and commits on the version it
+//!   measured in the same way, measuring again on the current one when
+//!   that conflicts. The dialog previews its page as either would draw it
+//!   (`crop_dialog`).
+//! - **Derived pages:** Watermark / Background and Header & Footer show
+//!   pages from copies made of them off the UI thread, over the version
+//!   their dialog opened on, and commit on that version as a crop does.
+//!   The Header & Footer dialog previews its page as it would draw
+//!   (`header_footer_dialog`); Watermark's adopts that preview in M10.5
+//!   slice 16.
+//! - **Page Labels**, from its dialog, commits on the version the dialog
+//!   opened on in the same way.
 //!
 //! None opens an engine: the render worker opens a file's when one of its
 //! pages is first drawn (M10.5 §10.3).
-//! - **Page Labels**, from its dialog, commits on the version the dialog
-//!   opened on in the same way.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -31,14 +40,16 @@ use sheaf_doc::images::PageFit;
 use sheaf_doc::labels::Style;
 use sheaf_doc::tx::LowerCx;
 use sheaf_doc::{
-    Actor, Commit, CommitOpts, Derive, DocState, Document, JobKind, PageId, Snapshot, Src, Stale,
-    Store, Tx, VersionId,
+    Actor, Commit, CommitOpts, Derive, DocState, Document, EditError, JobKind, PageId, Snapshot,
+    Src, Stale, Store, Tx, VersionId,
 };
 use sheaf_edit::{
-    BlobSel, Bring, FormBring, Op, OutlineBring, PageLabelRange, PageRef, PageSel, PageSize,
-    PageSource, RangeSet, ScopeSel,
+    BlobSel, BoxSpec, Bring, FormBring, Margins, Op, OutlineBring, PageLabelRange, PageRef,
+    PageSel, PageSize, PageSource, Patch, RangeSet, ScopeSel,
 };
+use sheaf_ops::crop::{self, Trimmed};
 use sheaf_ops::derive::DerivedSource;
+use sheaf_ops::views::Views;
 use sheaf_ops::{Progress, Tracker};
 
 use crate::docview::{DocView, State, failed};
@@ -489,15 +500,63 @@ impl DocView {
 }
 
 impl DocView {
-    /// Document > Crop Pages: pages `ids` of `opened`, the version the
-    /// dialog opened on, cropped as `spec` says. Cropped copies are made
-    /// off the UI thread, in memory, into the document's store; the pages
-    /// are then shown from them, as one step on `opened`.
+    /// Document > Crop Pages, by margins: pages `ids` of `opened`, the
+    /// version the dialog opened on, each cropped by `margins` off its
+    /// sides as it shows, as one op committed on `opened`. Margins that
+    /// leave too little of a page crop nothing, and the notice says so.
     pub(crate) fn crop_pages(
         &mut self,
         opened: Snapshot,
         ids: Vec<PageId>,
-        spec: sheaf_ops::crop::CropSpec,
+        margins: Margins,
+        cx: &mut Context<Self>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        let n = ids.len();
+        let label = crop_label(n);
+        let Some(tx) = self.user_tx_at(&opened) else {
+            return;
+        };
+        let Some(tx) = self.lower_in(tx, vec![crop_op(ids, margins)], &label, cx) else {
+            return;
+        };
+        let opts = CommitOpts::based(opened.version, Stale::Validate, label.as_str());
+        if let Ok(commit) = self.commit(tx, opts, cx) {
+            let mut notice = format!("Cropped {n} page{}", if n == 1 { "" } else { "s" });
+            if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+                notice = format!("{notice}. {told}");
+            }
+            self.set_notice(notice, cx);
+        }
+    }
+
+    /// Document > Crop Pages, Trim White: pages `ids` of `opened`, the
+    /// version the dialog opened on, each cropped down to its content with
+    /// [`crop::PAD`] to spare, as one step. They're measured off the UI
+    /// thread, as their content draws through the document's views in the
+    /// background's budget ([`crop::trim_white`]), and the crops commit on
+    /// the version they were measured in (M10.5 §8.5).
+    pub(crate) fn trim_white(
+        &mut self,
+        opened: Snapshot,
+        ids: Vec<PageId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.trim_from(opened, ids, 1, cx);
+    }
+
+    /// [`trim_white`](Self::trim_white) of pages `ids`, measured in `snap`,
+    /// on its `attempt`th try: when another edit since changed a page's
+    /// boxes or what it draws, the commit conflicts, and they're measured
+    /// again in the document as it is then, the pages still in it, up to
+    /// [`TRIM_ATTEMPTS`] tries; then the conflict's notice stays.
+    fn trim_from(
+        &mut self,
+        snap: Snapshot,
+        ids: Vec<PageId>,
+        attempt: u32,
         cx: &mut Context<Self>,
     ) {
         let State::Ready(doc) = &self.state else {
@@ -506,26 +565,79 @@ impl DocView {
         if ids.is_empty() {
             return;
         }
-        let store = doc.model.store().clone();
-        let n = ids.len();
-        let label = format!("Crop {n} page{}", if n == 1 { "" } else { "s" });
+        // A realizer of its own: the state it measures in is never the
+        // screen's.
+        let views = Views::new(doc.views.pool().clone());
+        let lower = doc.model.lower_cx(Actor::Job(JobKind::Trim));
         let work = {
-            let opened = opened.clone();
-            move |p: &Tracker| sheaf_ops::crop::plan(&store, &opened, &ids, spec, p)
-        };
-        let land = {
-            let label = label.clone();
-            move |v: &mut DocView, copies: Vec<DerivedSource>, cx: &mut Context<DocView>| {
-                let tx = v.user_tx_at(&opened)?;
-                let tx = v.show_copies(tx, &copies, Derive::Crop, &label, cx)?;
-                let opts = CommitOpts::based(opened.version, Stale::Validate, label.as_str());
-                v.commit(tx, opts, cx).ok()?;
-                v.keep_copies(&copies);
-                Some(format!("Cropped {n} page{}", if n == 1 { "" } else { "s" }))
+            let (snap, ids) = (snap.clone(), ids.clone());
+            move |p: &Tracker| {
+                let (pad, urgency) = (crop::PAD, crop::Urgency::Background);
+                crop::trim_white(&views, &snap, lower, &ids, pad, urgency, p)
             }
         };
-        self.run_planner(&label, work, |_| None, land, cx);
+        let land = move |v: &mut DocView, found: Trimmed, cx: &mut Context<DocView>| {
+            let State::Ready(doc) = &v.state else {
+                return None;
+            };
+            let label = crop_label(found.crops.len());
+            let mut tx = Document::tx_at(&snap, doc.model.lower_cx(Actor::Job(JobKind::Trim)));
+            if let Err(e) = found.lower(&mut tx) {
+                return Some(failed(&label, &e));
+            }
+            let opts = CommitOpts::based(snap.version, Stale::Validate, label.as_str());
+            match v.commit(tx, opts, cx) {
+                Ok(commit) => Some(trimmed_notice(&found, &commit)),
+                Err(EditError::Conflict { .. }) if attempt < TRIM_ATTEMPTS => {
+                    let now = v.model_snapshot()?;
+                    let ids = (ids.into_iter())
+                        .filter(|&id| now.state.def(id).is_some())
+                        .collect();
+                    v.trim_from(now, ids, attempt + 1, cx);
+                    None
+                }
+                // The commit's notice says why.
+                Err(_) => None,
+            }
+        };
+        self.run_planner("Trim White", work, |_| None, land, cx);
     }
+}
+
+/// The op cropping pages `ids` by `margins`, off each side as it shows:
+/// what the Crop Pages dialog applies, and what its preview lowers.
+pub(crate) fn crop_op(ids: Vec<PageId>, margins: Margins) -> Op {
+    Op::SetPageBoxes {
+        pages: PageSel::ids(ids),
+        crop: Patch::Set(BoxSpec::Margins(margins)),
+        trim: Patch::Keep,
+        bleed: Patch::Keep,
+        art: Patch::Keep,
+    }
+}
+
+/// How many times Trim White measures pages before a conflict stands.
+const TRIM_ATTEMPTS: u32 = 3;
+
+/// What undo calls a crop of `n` pages.
+fn crop_label(n: usize) -> String {
+    format!("Crop {n} page{}", if n == 1 { "" } else { "s" })
+}
+
+/// What the reader is told of Trim White's `found`, committed as `commit`:
+/// how many pages it cropped, and how many it left as they were.
+fn trimmed_notice(found: &Trimmed, commit: &Commit) -> String {
+    let n = found.crops.len();
+    let mut notice = format!("Trimmed {n} page{}", if n == 1 { "" } else { "s" });
+    match found.left.len() {
+        0 => {}
+        1 => notice.push_str(", 1 left as it was"),
+        left => notice.push_str(&format!(", {left} left as they were")),
+    }
+    if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+        notice = format!("{notice}. {told}");
+    }
+    notice
 }
 
 impl DocView {
@@ -679,8 +791,7 @@ impl DocView {
     /// Document > Watermark / Background: draw `wm` on pages `pages` (None:
     /// all) of `opened`, the version the dialog opened on, stripping the
     /// old one of its kind everywhere; with `wm` None, remove it. Pages
-    /// show generated copies, as cropped pages do, so what's on screen is
-    /// what's saved.
+    /// show generated copies, so what's on screen is what's saved.
     pub(crate) fn apply_watermark(
         &mut self,
         opened: Snapshot,

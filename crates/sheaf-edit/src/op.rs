@@ -12,7 +12,7 @@ use crate::header_footer::HeaderFooterSpec;
 use crate::ids::Local;
 use crate::labels::PageLabelRange;
 use crate::mark::{Anchor, Color, Imported, MarkPatch, NewMark, Style};
-use crate::page::{DestView, Rotation, TextStyle};
+use crate::page::{BoxSpec, DestView, Rotation, TextStyle};
 use crate::patch::Patch;
 use crate::refs::{AnnotRef, BlobSel, BookmarkRef, PageRef, PageSel, RangeSet, ScopeSel};
 use crate::text_layer::TextLayer;
@@ -69,6 +69,20 @@ pub enum Op {
         with: Option<RangeSet>,
         #[serde(default)]
         bring: Bring,
+    },
+    /// The boxes of `pages`: a crop hides what's outside it and moves
+    /// nothing. Cleared, the crop is the media box and the others are
+    /// gone.
+    SetPageBoxes {
+        pages: PageSel,
+        #[serde(default, skip_serializing_if = "Patch::is_keep")]
+        crop: Patch<BoxSpec>,
+        #[serde(default, skip_serializing_if = "Patch::is_keep")]
+        trim: Patch<BoxSpec>,
+        #[serde(default, skip_serializing_if = "Patch::is_keep")]
+        bleed: Patch<BoxSpec>,
+        #[serde(default, skip_serializing_if = "Patch::is_keep")]
+        art: Patch<BoxSpec>,
     },
     /// The page labels, in place of any there are; none removes them.
     SetPageLabels {

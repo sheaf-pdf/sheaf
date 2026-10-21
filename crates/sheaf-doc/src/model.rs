@@ -45,7 +45,7 @@ pub(crate) use state::visits;
 pub use state::{Builder, DocState, Invariant};
 
 /// Where a derived copy's pages come from (a copy sheaf made of another
-/// source's pages: cropped, watermarked, a header/footer stripped): its
+/// source's pages: watermarked, a header/footer stripped): its
 /// page `k` is a copy of page `pages[k]` of `from`. A save writes each as
 /// the page it was made from, with its annotations and form fields, and
 /// the copy's content (M10 bug 1). Kept beside the history, by the copy's

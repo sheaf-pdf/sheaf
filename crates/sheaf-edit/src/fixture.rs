@@ -8,11 +8,11 @@ use std::sync::Arc;
 use crate::measure::{Measured, Scale};
 use crate::tape::{self, Line, Row, Tape, TapeLook};
 use crate::{
-    Anchor, AnnotId, AnnotRef, BatesSpec, BlobId, BlobSel, BookmarkPatch, BookmarkRef, Box2, Bring,
-    Delta, DestView, FormBring, HeaderFooterSpec, Imported, LabelStyle, Local, Margins, MarkKind,
-    MarkPatch, NewMark, OcrWord, Op, OutlineBring, OutlineId, PageId, PageLabelRange, PageRef,
-    PageSel, PageSource, Patch, Pt, RangeSet, Rotation, ScopeSel, Sibling, Style, TextLayer,
-    TextStyle, Turn, Vec2,
+    Anchor, AnnotId, AnnotRef, BatesSpec, BlobId, BlobSel, BookmarkPatch, BookmarkRef, Box2,
+    BoxSpec, Bring, Delta, DestView, FormBring, HeaderFooterSpec, Imported, LabelStyle, Local,
+    Margins, MarkKind, MarkPatch, NewMark, OcrWord, Op, OutlineBring, OutlineId, PageId,
+    PageLabelRange, PageRef, PageSel, PageSource, Patch, Pt, RangeSet, Rotation, ScopeSel, Sibling,
+    Style, TextLayer, TextStyle, Turn, Vec2,
 };
 
 fn r(x: f32, y: f32, w: f32, h: f32) -> Box2 {
@@ -268,6 +268,25 @@ pub fn every_op() -> Vec<Op> {
                 form: FormBring::New,
                 outline: OutlineBring::MergeByTitle,
             },
+        },
+        Op::SetPageBoxes {
+            pages: PageSel::Positions(pos("2-3")),
+            crop: Patch::Set(BoxSpec::Margins(Margins {
+                top: 36.0,
+                bottom: 36.0,
+                left: 18.0,
+                right: 18.0,
+            })),
+            trim: Patch::Set(BoxSpec::Rect(r(18.0, 18.0, 576.0, 756.0))),
+            bleed: Patch::Clear,
+            art: Patch::Keep,
+        },
+        Op::SetPageBoxes {
+            pages: PageSel::All,
+            crop: Patch::Clear,
+            trim: Patch::Keep,
+            bleed: Patch::Keep,
+            art: Patch::Clear,
         },
         Op::SetPageLabels {
             ranges: Some(vec![

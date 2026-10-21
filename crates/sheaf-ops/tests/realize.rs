@@ -41,18 +41,17 @@ use sheaf_doc::serialize::fixture::{
     USER, encrypted, form, holds, rc4_aes_128_and_aes_256, revision_cut_out,
 };
 use sheaf_doc::tx::fixture as fx;
-use sheaf_doc::{Derive, Document, PageId, TextLayer};
-use sheaf_edit::{Rotation, Turn};
+use sheaf_doc::{Document, PageId, TextLayer};
+use sheaf_edit::{Margins, Rotation, Turn};
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_ocr::job::EngineFactory;
 use sheaf_ocr::{EngineKind, OcrConfig, OcrEvent, OcrRequest, PageSource};
-use sheaf_ops::crop::{CropSpec, Margins};
 use sheaf_ops::views::{ViewPages, Views};
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 use sheaf_render::pool::BACKGROUND_ENGINES;
 use sheaf_render::{Budget, Draw, Job, OpenError, PageIndex, Renderer};
 
-use common::{Blind, file, opened, views};
+use common::{Blind, crop, file, opened, views};
 
 /// Renders are this wide.
 const WIDTH: u32 = 512;
@@ -723,17 +722,7 @@ fn a_cropped_page_s_comments_render_once_as_saved() {
         bottom: 50.0,
         left: 20.0,
     };
-    let plan = sheaf_ops::crop::plan(
-        d.store(),
-        &d.snapshot(),
-        &[p0],
-        CropSpec::Margins(margins),
-        &sheaf_ops::NoProgress,
-    )
-    .unwrap();
-    plan[0].note(&mut d);
-    let pages = plan[0].bases().collect();
-    d.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
+    crop(&mut d, &[p0], margins);
     let views = views();
     let view = views.view(d.state(), p0, &ViewInputs::plugin()).unwrap();
     assert!(matches!(view.engine, EngineKey::Group(..)));

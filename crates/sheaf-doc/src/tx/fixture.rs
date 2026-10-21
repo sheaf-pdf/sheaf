@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use sheaf_edit::{
-    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Bring, HeaderFooterSpec, LabelStyle,
-    Margins, NewMark, Op, PageLabelRange, PageRef, PageSel, PageSource, RangeSet, ScopeSel,
-    Sibling, Turn,
+    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Box2, BoxSpec, Bring, HeaderFooterSpec,
+    LabelStyle, Margins, NewMark, Op, PageLabelRange, PageRef, PageSel, PageSource, Patch,
+    RangeSet, ScopeSel, Sibling, Turn,
 };
 
 use super::{Actor, Commit, CommitOpts, Derive, EditError, JobKind, Tx};
@@ -191,6 +191,28 @@ pub fn rotate(pages: &[PageId], by: Turn) -> Op {
     Op::RotatePages {
         pages: ids(pages),
         by,
+    }
+}
+
+/// `pages` cropped by `m`, off each side as it shows.
+pub fn crop(pages: &[PageId], m: Margins) -> Op {
+    Op::SetPageBoxes {
+        pages: ids(pages),
+        crop: Patch::Set(BoxSpec::Margins(m)),
+        trim: Patch::Keep,
+        bleed: Patch::Keep,
+        art: Patch::Keep,
+    }
+}
+
+/// `page` cropped to `to`, in PageSpace.
+pub fn crop_to(page: PageId, to: Box2) -> Op {
+    Op::SetPageBoxes {
+        pages: ids(&[page]),
+        crop: Patch::Set(BoxSpec::Rect(to)),
+        trim: Patch::Keep,
+        bleed: Patch::Keep,
+        art: Patch::Keep,
     }
 }
 

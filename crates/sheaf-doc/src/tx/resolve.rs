@@ -14,9 +14,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use sheaf_edit::{
-    AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Bring, Color, Delta, DestView, HeaderFooterSpec,
-    Imported, Local, MarkKind, MarkPatch, NewMark, Op, PageRef, PageSel, PageSource, Patch,
-    ScopeSel, Sibling, Style, TextStyle, Turn,
+    AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Color, Delta, DestView,
+    HeaderFooterSpec, Imported, Local, MarkKind, MarkPatch, NewMark, Op, PageRef, PageSel,
+    PageSource, Patch, ScopeSel, Sibling, Style, TextStyle, Turn,
 };
 
 use super::Made;
@@ -68,6 +68,13 @@ pub enum ResolvedOp {
         name: Arc<str>,
         with: Vec<u32>,
         bring: Bring,
+    },
+    SetPageBoxes {
+        pages: Vec<PageId>,
+        crop: Patch<BoxSpec>,
+        trim: Patch<BoxSpec>,
+        bleed: Patch<BoxSpec>,
+        art: Patch<BoxSpec>,
     },
     SetPageLabels {
         ranges: Option<Vec<LabelSpec>>,
@@ -143,9 +150,9 @@ pub enum ResolvedOp {
         pages: Vec<PageId>,
     },
     /// Pages shown from other source pages, each (page, source, index):
-    /// a derived flow's copies (cropped, watermarked, a header stripped),
-    /// keeping ids, turns, bookmarks, marks and OCR text, which are in
-    /// PageSpace, which a copy keeps. Internal and transitional (until
+    /// a derived flow's copies (watermarked, a header stripped), keeping
+    /// ids, turns, bookmarks, marks and OCR text, which are in PageSpace,
+    /// which a copy keeps. Internal and transitional (until
     /// slice 17 makes these edits generators and geometry): no `Op` says
     /// it, and only the host's derived flows make it
     /// ([`Tx::set_page_base`](super::Tx::set_page_base)).
@@ -183,11 +190,10 @@ pub struct BookmarkChange {
 }
 
 /// Which derived flow made a [`ResolvedOp::SetPageBase`]'s copies: what
-/// its line says it did ("Crop pages 3–5", not "Change the content of",
-/// M10.5 bug 8).
+/// its line says it did ("Add a watermark to pages 3–5", not "Change the
+/// content of", M10.5 bug 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Derive {
-    Crop,
     /// A watermark, or a background when `behind`, drawn on; its text
     /// draws characters the built-in fonts can't when `unencodable`.
     Watermark {
@@ -210,6 +216,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::DuplicatePages { .. } => "duplicate-pages",
         Op::InsertPages { .. } => "insert-pages",
         Op::ReplacePages { .. } => "replace-pages",
+        Op::SetPageBoxes { .. } => "set-page-boxes",
         Op::SetPageLabels { .. } => "set-page-labels",
         Op::AddBookmark { .. } => "add-bookmark",
         Op::PatchBookmarks { .. } => "patch-bookmarks",
@@ -241,6 +248,7 @@ impl ResolvedOp {
             R::DuplicatePages { .. } => "duplicate-pages",
             R::InsertPages { .. } => "insert-pages",
             R::ReplacePages { .. } => "replace-pages",
+            R::SetPageBoxes { .. } => "set-page-boxes",
             R::SetPageLabels { .. } => "set-page-labels",
             R::AddBookmark { .. } => "add-bookmark",
             R::PatchBookmarks { .. } => "patch-bookmarks",
@@ -356,6 +364,19 @@ impl Resolver<'_> {
                     bring: bring.clone(),
                 }
             }
+            Op::SetPageBoxes {
+                pages,
+                crop,
+                trim,
+                bleed,
+                art,
+            } => R::SetPageBoxes {
+                pages: self.pages(pages)?,
+                crop: crop.clone(),
+                trim: trim.clone(),
+                bleed: bleed.clone(),
+                art: art.clone(),
+            },
             Op::SetPageLabels { ranges } => R::SetPageLabels {
                 ranges: match ranges {
                     None => None,

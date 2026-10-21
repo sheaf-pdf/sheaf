@@ -811,9 +811,9 @@ mod tests {
     /// local and grant. Between them they reach each cascade.
     fn applying() -> Vec<sheaf_edit::Op> {
         use sheaf_edit::{
-            Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Delta, Local, MarkKind,
-            MarkPatch, NewMark, Op, PageLabelRange, PageRef, PageSel, PageSource, Patch, ScopeSel,
-            Sibling, Turn, Vec2,
+            Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Delta, Local, Margins,
+            MarkKind, MarkPatch, NewMark, Op, PageLabelRange, PageRef, PageSel, PageSource, Patch,
+            ScopeSel, Sibling, Turn, Vec2,
         };
         let pos = PageRef::Pos;
         let positions = |s: &str| PageSel::Positions(s.parse().unwrap());
@@ -933,6 +933,30 @@ mod tests {
             },
             Op::RemoveHeaderFooter {
                 pages: positions("2"),
+            },
+            Op::SetPageBoxes {
+                pages: positions("2"),
+                crop: Patch::Set(BoxSpec::Margins(Margins {
+                    top: 36.0,
+                    bottom: 36.0,
+                    left: 18.0,
+                    right: 18.0,
+                })),
+                trim: Patch::Keep,
+                bleed: Patch::Keep,
+                art: Patch::Set(BoxSpec::Rect(crate::annot::Box2 {
+                    x: 72.0,
+                    y: 72.0,
+                    w: 288.0,
+                    h: 144.0,
+                })),
+            },
+            Op::SetPageBoxes {
+                pages: positions("1"),
+                crop: Patch::Keep,
+                trim: Patch::Clear,
+                bleed: Patch::Keep,
+                art: Patch::Keep,
             },
         ];
         // The fixture's marks of every kind on the first page; a reply's

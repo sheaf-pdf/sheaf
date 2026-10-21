@@ -8,15 +8,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use im::Vector;
-use sheaf_edit::{Bring, OutlineBring, Rotation};
+use sheaf_edit::{BoxSpec, Bring, OutlineBring, Patch, Rotation};
 
 use super::error::EditError;
 use super::marks::drop_annots;
 use super::resolve::file_named;
 use super::{Lower, Made, Notice, forms, put_page_annots, splice};
-use crate::annot::{AnnotId, AnnotKind};
+use crate::annot::{AnnotId, AnnotKind, Box2};
 use crate::file::ForeignAnnot;
-use crate::geom::Geom;
+use crate::geom::{Geom, MIN_SIDE, Rect};
 use crate::labels::LabelSpec;
 use crate::model::{
     AnnotBody, AnnotRec, Bookmark, ContentStack, DocState, Foreign, FormRef, GenSpec, Generator,
@@ -59,6 +59,106 @@ pub(crate) fn rotate(lw: &mut Lower, pages: &[PageId], by: Rotation) {
             ..**geom
         };
         lw.rec.put(Key::Geom(id), Some(Val::Geom(Arc::new(geom))));
+    }
+}
+
+/// The boxes of `pages`, as `crop`, `trim`, `bleed` and `art` say: each
+/// page's `Geom` read and written, nothing else, so an OCR flush, which
+/// writes what the page shows, never conflicts with a crop (§6.3). Each
+/// box's margins come off the page as it showed before the op. A cleared
+/// crop is the media box; the others cleared are gone. A box that isn't
+/// on the page, or leaves less than [`MIN_SIDE`] of it, fails the op: it's
+/// never repaired, and only float noise is clipped (§6.4).
+pub(crate) fn set_boxes(
+    lw: &mut Lower,
+    pages: &[PageId],
+    crop: &Patch<BoxSpec>,
+    trim: &Patch<BoxSpec>,
+    bleed: &Patch<BoxSpec>,
+    art: &Patch<BoxSpec>,
+) -> Result<(), EditError> {
+    for (i, &id) in pages.iter().enumerate() {
+        lw.pages_done(i, pages.len())?;
+        lw.read(Key::Geom(id));
+        let was = **lw.rec.geom(id).expect("resolved");
+        let mut geom = was;
+        match crop {
+            Patch::Keep => {}
+            Patch::Clear => geom.crop = was.media,
+            Patch::Set(spec) => geom.crop = page_box(lw, id, &was, spec)?,
+        }
+        let others = [
+            (&mut geom.trim, trim),
+            (&mut geom.bleed, bleed),
+            (&mut geom.art, art),
+        ];
+        for (slot, patch) in others {
+            match patch {
+                Patch::Keep => {}
+                Patch::Clear => *slot = None,
+                Patch::Set(spec) => *slot = Some(page_box(lw, id, &was, spec)?),
+            }
+        }
+        if geom != was {
+            lw.rec.put(Key::Geom(id), Some(Val::Geom(Arc::new(geom))));
+        }
+    }
+    Ok(())
+}
+
+/// How far a box may stray past the media box and be float noise, in
+/// points.
+const NOISE: f32 = 0.01;
+
+/// The box `spec` says on page `id`, whose boxes are `geom`, in PageSpace.
+/// Margins come off the box the page shows, as it shows after its
+/// `/Rotate`; a rectangle must lie within the media box. Either must leave
+/// at least [`MIN_SIDE`] a side, as the caller states it.
+fn page_box(lw: &Lower, id: PageId, geom: &Geom, spec: &BoxSpec) -> Result<Rect, EditError> {
+    let page = || lw.rec.pos_of(id).expect("a page there is") + 1;
+    match *spec {
+        BoxSpec::Margins(m) => {
+            let sides = [m.top, m.bottom, m.left, m.right];
+            if !sides.iter().all(|s| s.is_finite()) {
+                return Err(lw.invalid("a margin isn't a number"));
+            }
+            if sides.iter().any(|&s| s < 0.0) {
+                return Err(lw.invalid("a margin can't be less than 0"));
+            }
+            let shown = geom.shown();
+            let kept = Box2 {
+                x: m.left,
+                y: m.top,
+                w: shown.width - m.left - m.right,
+                h: shown.height - m.top - m.bottom,
+            };
+            if kept.w < MIN_SIDE || kept.h < MIN_SIDE {
+                let why = format!("those margins leave nothing of page {}", page());
+                return Err(lw.invalid(why));
+            }
+            let b = geom.from_view().apply_box(kept);
+            let r = Rect::new(b.x, b.y, b.right(), b.bottom());
+            Ok(r.intersect(geom.visible()))
+        }
+        BoxSpec::Rect(b) => {
+            if ![b.x, b.y, b.w, b.h].iter().all(|v| v.is_finite()) {
+                return Err(lw.invalid("the box isn't a number"));
+            }
+            if b.w < MIN_SIDE || b.h < MIN_SIDE {
+                let why = format!("the box leaves nothing of page {}", page());
+                return Err(lw.invalid(why));
+            }
+            let r = Rect::new(b.x, b.y, b.right(), b.bottom());
+            let media = geom.media;
+            let within = r.x0 >= media.x0 - NOISE
+                && r.y0 >= media.y0 - NOISE
+                && r.x1 <= media.x1 + NOISE
+                && r.y1 <= media.y1 + NOISE;
+            if !within {
+                return Err(lw.invalid(format!("the box isn't on page {}", page())));
+            }
+            Ok(r.intersect(media))
+        }
     }
 }
 
@@ -276,7 +376,10 @@ pub(crate) fn set_labels(lw: &mut Lower, ranges: Option<Vec<LabelSpec>>) {
 }
 
 /// Each page shown from page `index` of `src`, its next copy, keeping what
-/// it holds and its turn, which are in PageSpace, which a copy keeps.
+/// it holds, its boxes and its turn, which are in PageSpace, which a copy
+/// keeps: it's made of the page's base with the same media box. The flow
+/// made the copy for the page's boxes as they were (a watermark is placed
+/// on its crop), so they're read.
 pub(crate) fn set_base(lw: &mut Lower, pages: &[(PageId, Src, u32)]) {
     let mut copies = NextCopy::of(&lw.rec);
     for (id, src, index) in pages {
@@ -285,12 +388,14 @@ pub(crate) fn set_base(lw: &mut Lower, pages: &[(PageId, Src, u32)]) {
             continue;
         }
         let content = def.content.clone();
-        let rotate = lw.rec.geom(*id).expect("a page's boxes").rotate;
-        let (new, geom) = copies.page(src, *index);
-        let def = PageDef::new(new.base.clone(), new.copy, content);
-        let geom = Geom { rotate, ..*geom };
+        let base = PageBase {
+            src: src.clone(),
+            index: *index,
+        };
+        let copy = copies.take(&base);
+        let def = PageDef::new(base, copy, content);
+        lw.read(Key::Geom(*id));
         lw.rec.put(Key::Page(*id), Some(Val::Page(Arc::new(def))));
-        lw.rec.put(Key::Geom(*id), Some(Val::Geom(Arc::new(geom))));
     }
 }
 

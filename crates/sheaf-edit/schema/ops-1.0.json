@@ -240,6 +240,37 @@
       ],
       "type": "object"
     },
+    "BoxSpec": {
+      "description": "One of a page's boxes, as an op sets it.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Points off each side of the box the page shows, as it shows after\nits `/Rotate`.",
+          "properties": {
+            "margins": {
+              "$ref": "#/$defs/Margins"
+            }
+          },
+          "required": [
+            "margins"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A box in PageSpace, within the page's media box.",
+          "properties": {
+            "rect": {
+              "$ref": "#/$defs/Box2"
+            }
+          },
+          "required": [
+            "rect"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Bring": {
       "additionalProperties": false,
       "description": "What comes in with inserted pages besides the pages. Other tools'\nannotations and links always come.",
@@ -406,7 +437,8 @@
           "type": "integer"
         },
         "margins": {
-          "$ref": "#/$defs/Margins"
+          "$ref": "#/$defs/Margins",
+          "description": "From the top to the header, from the bottom to the footer, and from\nthe sides to the text."
         },
         "size": {
           "description": "The text's size, in points.",
@@ -499,7 +531,7 @@
     },
     "Margins": {
       "additionalProperties": false,
-      "description": "Distances from the page's edges to the text, in points: from the top\nto the header, from the bottom to the footer, and from the sides.",
+      "description": "Distances in points from each side of a page as it shows, turned by its\n`/Rotate`: what a crop takes off, what a header and footer keep clear.",
       "properties": {
         "bottom": {
           "format": "float",
@@ -1466,6 +1498,64 @@
             "op",
             "pages",
             "from"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The boxes of `pages`: a crop hides what's outside it and moves\nnothing. Cleared, the crop is the media box and the others are\ngone.",
+          "properties": {
+            "art": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BoxSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bleed": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BoxSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "crop": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BoxSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "const": "set-page-boxes",
+              "type": "string"
+            },
+            "pages": {
+              "$ref": "#/$defs/PageSel"
+            },
+            "trim": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BoxSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "pages"
           ],
           "type": "object"
         },

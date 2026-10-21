@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::mark::Color;
+use crate::page::Margins;
 
 /// A header and footer: six slots of text, drawn on every page in scope.
 /// What `<<date>>` and `<<file>>` say is fixed when it's set, and Bates
@@ -18,22 +19,13 @@ pub struct HeaderFooterSpec {
     /// The text's size, in points.
     pub size: f32,
     pub color: Color,
+    /// From the top to the header, from the bottom to the footer, and from
+    /// the sides to the text.
     pub margins: Margins,
     /// What `<<1>>` is on the document's first page.
     pub first_number: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bates: Option<BatesSpec>,
-}
-
-/// Distances from the page's edges to the text, in points: from the top
-/// to the header, from the bottom to the footer, and from the sides.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Margins {
-    pub top: f32,
-    pub bottom: f32,
-    pub left: f32,
-    pub right: f32,
 }
 
 /// Bates numbering: `<prefix><number, zero-padded to digits><suffix>`,
