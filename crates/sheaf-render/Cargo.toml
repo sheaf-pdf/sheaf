@@ -7,7 +7,6 @@ publish = false
 
 [dependencies]
 sheaf-image.workspace = true
-sheaf-util.workspace = true
 # Rotation, PageSize and DestView.
 sheaf-edit.workspace = true
 pdfium-render.workspace = true
@@ -16,11 +15,12 @@ thiserror.workspace = true
 log.workspace = true
 image.workspace = true
 futures.workspace = true
-regex.workspace = true
 parking_lot.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
+# The tests and examples read files to open.
+sheaf-util.workspace = true
 in-progress.workspace = true
 sheaf-doc = { workspace = true, features = ["fixtures"] }
 lopdf.workspace = true

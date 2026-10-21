@@ -1,8 +1,8 @@
 //! Every corpus file PDFium opens opens as a source, and every page's
 //! size, as the source's page table reads it, is the size PDFium gives it
 //! (M10.5 slice 3): the app opens a file through its source, the layout
-//! takes its sizes from the table, and PDFium renders the pages, by index,
-//! until slice 13. Skips when there's no corpus (see
+//! takes its sizes from the table, and PDFium renders the pages by index
+//! (a base engine's or an overlay's). Skips when there's no corpus (see
 //! `sheaf_doc::forms::corpus`).
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.

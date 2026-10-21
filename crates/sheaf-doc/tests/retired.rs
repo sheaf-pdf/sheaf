@@ -581,6 +581,139 @@ const RETIRED: &[(&str, u8)] = &[
     // each on the document as it is when the call returns.
     ("runtime::DocContext::snapshot", 12),
     ("plugins::plugin_tx", 12),
+    // A thread and an engine per source, and its handle wherever a page was
+    // drawn or read: one engine pool serves every engine (§10.3), and a
+    // page is drawn from its view (`Views`). The impl of OCR's page source
+    // for the handle goes with it, as `RenderHandle` names it.
+    ("RenderHandle", 13),
+    ("DocInfo", 13),
+    ("SearchWalk", 13),
+    ("worker_loop", 13),
+    ("Msg::HideAnnots", 13),
+    ("Msg::SetHidden", 13),
+    ("job::OcrPage::source", 13),
+    ("job::OcrPage::render", 13),
+    ("render::PageRenderer::base", 13),
+    ("print_dialog::PrintContext::handles", 13),
+    ("plugins::EngineText::handle", 13),
+    ("page_insert::PlannedInsert::handle", 13),
+    ("page_insert::with_engines", 13),
+    ("page_insert::Copies", 13),
+    ("docview::Doc::handles", 13),
+    ("docview::Doc::primary", 13),
+    ("engines_on", 13),
+    // Hiding by replaying it into each engine: what a page draws is data,
+    // `ViewInputs.hidden` and `ocg_off` (§10.4), each consumer passing its
+    // own, and the layers panel's choice a patch of the catalog, not a
+    // decrypted copy written again.
+    ("Renderer::hide_annots", 13),
+    ("Renderer::set_annots_hidden", 13),
+    ("pdfium::PdfiumEngine::hide_annots", 13),
+    ("pdfium::PdfiumEngine::set_annots_hidden", 13),
+    ("docview::Doc::take_in", 13),
+    ("docview::Doc::drawn_marks", 13),
+    ("docview::Doc::foreign_hidden", 13),
+    ("docview::Doc::layers_generation", 13),
+    ("docview::drawn_marks", 13),
+    ("docview::marks_by_page", 13),
+    ("docview::hide_renamed", 13),
+    ("comments_panel::DocView::sync_foreign_visibility", 13),
+    ("layers::set_hidden", 13),
+    // The header and footer drawn by GPUI over each page: the realizer
+    // draws it into the page's overlay.
+    ("docview::header_footer_elements", 13),
+    // Images dropped on a change and tiles invalidated for the whole
+    // document: images are found by render key (§10.2), and a page keeps
+    // its last drawn until its new one lands. The pane's layout holds no
+    // source page, so a page shown from another source page lays nothing
+    // out again.
+    ("docview::Doc::drop_stale_images", 13),
+    ("docview::Doc::invalidate_tiles", 13),
+    ("docview::Doc::tiles_invalidated", 13),
+    ("docview::Doc::shown", 13),
+    ("pane::Shown::source", 13),
+    ("pane::Shown::index", 13),
+    ("pane::Shown::render", 13),
+    // The emitter's save input: it reads the state, and a save's primary
+    // and derived copies come with its base (§11.1).
+    ("materialize::emit::Cx::input", 13),
+    // What a render answered names its page and job: its request's format
+    // and priority were never read (the review of slice 13).
+    ("RenderRequest::format", 13),
+    ("RenderRequest::priority", 13),
+    // The app's own cache of a page's characters, keyed by its base
+    // engine's page or its unsaved OCR layer: a page's text comes from the
+    // text service (§10.5), read from its realization under the screen's
+    // inputs and cached by render key.
+    ("text_select::CharsKey", 14),
+    ("text_select::CharsKey::Engine", 14),
+    ("text_select::CharsKey::Layer", 14),
+    ("text_select::CACHED_PAGES", 14),
+    ("text_select::DocView::chars_key", 14),
+    ("text_select::DocView::cache_chars", 14),
+    ("docview::Doc::page_chars", 14),
+    ("pool::EnginePool::page_chars", 14),
+    ("page_chars::PageChars::from_layer", 14),
+    // Find and Patterns over the primary's base engine by source index,
+    // unsaved OCR layers searched beside it and merged in: a search walks
+    // the document's order, each page read from its view's engine
+    // (`Text::search` on `EnginePool::walk`). The new walk keeps the name
+    // `Walk`, so only the old one's fields are rows.
+    ("Matcher", 14),
+    ("SearchEvent", 14),
+    ("pool::Msg::Search", 14),
+    ("pool::EnginePool::search", 14),
+    ("pool::Walk::target", 14),
+    ("pool::Walk::matcher", 14),
+    ("pool::Worker::chunk", 14),
+    ("docview::Doc::search", 14),
+    ("docview::Doc::index_of_source_page", 14),
+    ("docview::Doc::layer_hits", 14),
+    ("docview::Doc::merge_source_hits", 14),
+    // An unsaved OCR layer's own search, text and boxes: the realizer draws
+    // the layer into its page, so its words are read as the page's. A hit
+    // is `PageChars::find`'s now, in `page_chars`.
+    ("text_layer::search", 14),
+    ("text_layer::pattern_search", 14),
+    ("text_layer::TextHit", 14),
+    ("text_layer::PageText", 14),
+    ("text_layer::page_text", 14),
+    ("text_layer::fold", 14),
+    ("text_layer::hit_from_span", 14),
+    ("text_layer::line_of", 14),
+    ("text_layer::unrotate_from_upright", 14),
+    ("text_layer::TextLayer::text", 14),
+    ("text_layer::TextLayer::boxes_in_rect", 14),
+    // PDFium's text in the displayed frame through a 16× device, and the
+    // engine's own search: characters come in PageSpace with their angles
+    // (§5), and `PageChars::find` matches them. `sheaf_render::Rect` has
+    // no row: a one-segment row matches a path's first segment, and
+    // `geom::Rect::new` is called as `Rect::new`.
+    ("SearchHit", 14),
+    ("Renderer::search_page", 14),
+    ("Renderer::pattern_search_page", 14),
+    ("Renderer::text_boxes_in_rect", 14),
+    ("pdfium::PdfiumEngine::search_page", 14),
+    ("pdfium::PdfiumEngine::pattern_search_page", 14),
+    ("pdfium::PdfiumEngine::text_boxes_in_rect", 14),
+    ("pool::EnginePool::search_page", 14),
+    ("pool::EnginePool::pattern_search_page", 14),
+    ("pool::EnginePool::text_boxes_in_rect", 14),
+    ("pool::EnginePool::page_text", 14),
+    ("pool::EnginePool::page_text_len", 14),
+    // A plugin's text from its source page's base engine, with OCR's
+    // special cases beside it: plugins read the text service under their
+    // own inputs, as the file will draw the page (§14.3).
+    ("runtime::TextSource", 14),
+    ("runtime::TextMatch", 14),
+    ("api::shared::layer_matches", 14),
+    ("api::shared::text_match_to_wit", 14),
+    ("plugins::EngineText", 14),
+    ("plugins::EngineText::hits", 14),
+    ("plugins::to_box", 14),
+    // A file opened by its path, print's last: the print job goes to GDI
+    // and to CUPS from memory (§10.6), so PDFium opens only bytes.
+    ("pdfium::PdfiumEngine::open", 14),
 ];
 
 /// Last segments only a path matches: names the new design uses again
@@ -737,6 +870,55 @@ const QUALIFIED_ONLY: &[&str] = &[
     // what anything else comes out as.
     "scripted",
     "outcome",
+    // Other handles and the handles a markup kind draws, the OCR run's job
+    // and a request's handler: not a source's render handle.
+    "handle",
+    "handles",
+    // A document's primary source (`Document::primary`), and a primary
+    // button.
+    "primary",
+    // An insert's form taken in (`tx::forms::take_in`).
+    "take_in",
+    // What every other plan and layout shows, and indices, renders and
+    // bases of every other kind: a page's index in its source, a view's
+    // in its engine, a page's base.
+    "shown",
+    "index",
+    "render",
+    "base",
+    // Every text input, and a save's input.
+    "input",
+    // A pool request's, a raster's and every other format and priority:
+    // not a render's answer's.
+    "format",
+    "priority",
+    // Every other text, hit, target and search: a word's and a field's
+    // text, Find's and the pattern panel's hits, every pool request's
+    // target, `Text::search`, the search bar (`Search`) and the plugin
+    // API's search and pattern search.
+    "text",
+    "hits",
+    "target",
+    "search",
+    "Search",
+    "pattern_search",
+    // A `TextHit` is `PageChars::find`'s now, in `page_chars`; a
+    // `TextMatch` the WIT's.
+    "TextHit",
+    "TextMatch",
+    // PDFium's text through `Renderer` (`page_text`, `page_text_len`,
+    // `page_chars`), the plugin API's `page_text` and the `page_chars`
+    // module.
+    "page_text",
+    "page_text_len",
+    "page_chars",
+    // Other enums' engines and layers (OCR's, the layers panel's), the
+    // realizer's chunks, `Iterator::fold`, and prefs.rs's `line_of`.
+    "Engine",
+    "Layer",
+    "chunk",
+    "fold",
+    "line_of",
 ];
 
 #[test]

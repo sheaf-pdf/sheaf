@@ -82,14 +82,36 @@
 //! group; in the history bench, an OCR run as the app makes one, 700 flushes of 10 pages
 //! in its group, each landed by value and amending its version, and an
 //! insert lowered again after the user moved a page, with neither a
-//! baseline nor a gate; and history kept to its budget.
-//! So far slice 1's history bench, slice 3's geometry walk, slice 4's
-//! ready, slice 5's ready on 20,000 of sheaf's marks, slice 8's mark adds,
-//! slice 9's Rewrite, slice 10's incremental save on the scanned 7k
-//! ([`INCREMENTAL_GATE_MS`]), slice 11's check of a delete on every
-//! fixture ([`CHECK_GATE`]), and slice 12's snapshot ([`SNAPSHOT_GATE`]),
+//! baseline nor a gate; and history kept to its budget. Slice 13's are
+//! the middle page with a header and recognized text realized by a fresh
+//! realizer, its section made in memory, with neither a baseline nor a
+//! gate; the same page drawn through the engine pool, realized, its group
+//! engine opened and rendered cold, each run a new edit ([`drawn`]); the
+//! screen's engines after the first page of each of 220 groups is drawn,
+//! weighed and by the RSS added; and the thumbnail strip after a crop of
+//! every page and the legacy header, every page's preview drawn through a
+//! pool of its own, two panes' groups pinned, with each group's assembly
+//! in the time. Slice 14's are Find over every page of the synthetic and
+//! the heavy through the text service, as opened and with a header on
+//! every page, with the engines its pool opened (the base engine again
+//! past its bound), with neither a baseline nor a gate, one run each; and
+//! alone in `text_walks_on_the_synthetic_and_heavy_7k`, Find Blank Pages
+//! over every page and Find with a header on every page past six pinned
+//! group engines, with the engines each opened. From
+//! slice 13 the crop and Bates' apply open no engine on
+//! the copies they make, as the app's don't (its render worker opens one
+//! when a page of a copy is first drawn), where their rows counted one
+//! each before. So far slice 1's history bench, slice 3's geometry walk,
+//! slice 4's ready, slice 5's ready on 20,000 of sheaf's marks, slice 8's
+//! mark adds, slice 9's Rewrite, slice 10's incremental save on the
+//! scanned 7k ([`INCREMENTAL_GATE_MS`]), slice 11's check of a delete on
+//! every fixture ([`CHECK_GATE`]), slice 12's snapshot ([`SNAPSHOT_GATE`]),
 //! flat pushes ([`FLAT`]) and 200 OCR versions within the history budget
-//! ([`HISTORY_BUDGET`]) assert, after their tables print.
+//! ([`HISTORY_BUDGET`]), and slice 13's realize + open + render on the
+//! synthetic and heavy ([`REALIZE_GATE_SYNTHETIC`],
+//! [`REALIZE_GATE_HEAVY`]), engines after 200 groups and the thumbnail
+//! strip's memory ([`SCREEN_BYTES`]) and its rate ([`STRIP_GATE`]) assert,
+//! after their tables print.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -97,26 +119,32 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
+use futures::executor::block_on;
 use lopdf::Object;
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
-use sheaf_doc::prim::Key;
+use sheaf_doc::realize::{EngineKey, GROUP, Realizer};
 use sheaf_doc::serialize::fixture::{USER, encrypt_dict, rc4_aes_128_and_aes_256};
 use sheaf_doc::stamps::{Bates, HeaderFooter};
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::tx::fixture::{add, delete, duplicate, insert, move_pages, ocr, rotate, set_header};
+use sheaf_doc::tx::fixture::{
+    add, delete, duplicate, header, insert, move_pages, ocr, rotate, set_header,
+};
 use sheaf_doc::{
     Actor, Annot, AnnotId, AnnotKind, Base, Box2, CommitOpts, Derive, Document, GroupKind, JobKind,
-    OcrWord, PageId, Src, Stale, Store, TextLayer,
+    OcrWord, PageId, Query, Src, Stale, Store, TextLayer, ViewInputs,
 };
 use sheaf_edit::{Anchor, Op, PageRef, Rotation, Style, Turn};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
+use sheaf_ops::blank::{self, BlankParams};
 use sheaf_ops::crop::{CropSpec, Margins};
-use sheaf_ops::derive::DerivedSource;
-use sheaf_render::PageIndex;
+use sheaf_ops::text::{Found, Text};
+use sheaf_ops::views::Views;
 use sheaf_render::pdfium::PdfiumEngine;
-use sheaf_render::{Job, RenderHandle, Renderer};
+use sheaf_render::pool::{SCREEN_BYTES, SCREEN_ENGINES};
+use sheaf_render::{Budget, EnginePool, Job, PageIndex, Renderer};
 
 /// Every fixture's pages.
 const PAGES: u32 = 7000;
@@ -137,6 +165,22 @@ const CHECK_GATE: Duration = Duration::from_millis(1);
 const SNAPSHOT_GATE: Duration = Duration::from_micros(50);
 /// Previews rendered in a row from one engine.
 const FILL: u32 = 200;
+/// The thumbnail strip's previews are this wide (the app's `PREVIEW_W`).
+const PREVIEW_W: u32 = 320;
+/// Realize + open + render of an edited page at most (slice 13), on the
+/// synthetic and on the heavy. The plan had the heavy's at 1.7× its warm
+/// base render, which no design that opens an engine for an edited page
+/// meets (slice 2 measured its scoped open and cold render alone at 2.9×);
+/// Greg accepted 25 ms in its place (2026-10-20). The row prints the ratio
+/// as information.
+const REALIZE_GATE_SYNTHETIC: Duration = Duration::from_millis(15);
+const REALIZE_GATE_HEAVY: Duration = Duration::from_millis(25);
+/// The header texts the engines gate visits every group under: 4 × 55
+/// groups, past the 200 it names.
+const VISITS: usize = 4;
+/// What the thumbnail strip fills at least, in pages a second (slice 2's
+/// rate), on the synthetic and heavy fixtures.
+const STRIP_GATE: f64 = 310.0;
 /// Set in the processes a fixture's gates run in (see [`run`]): the file
 /// each writes once its rows are done, and which rows those are.
 const OWN_PROCESS: &str = "SHEAF_GATE_FIXTURE_PROCESS";
@@ -354,6 +398,28 @@ impl Kind {
             Kind::Synthetic => Some(&SLICE8_REWRITE_SYNTHETIC),
             Kind::Heavy => Some(&SLICE8_REWRITE_HEAVY),
             Kind::Scanned => None,
+        }
+    }
+
+    /// The realize + open + render gate this harness asserts (the
+    /// synthetic's and the heavy's).
+    fn realize_gate(self) -> Option<Duration> {
+        match self {
+            Kind::Synthetic => Some(REALIZE_GATE_SYNTHETIC),
+            Kind::Heavy => Some(REALIZE_GATE_HEAVY),
+            Kind::Scanned => None,
+        }
+    }
+
+    /// Slice 2's thumbnail fill through scoped overlays, the run its
+    /// verdict came from (a header, a watermark and the crop in each
+    /// section, built by lopdf and not timed), in pages a second; the
+    /// scanned's wasn't run.
+    fn strip_pages_per_s(self) -> f64 {
+        match self {
+            Kind::Synthetic => 389.0,
+            Kind::Heavy => 318.0,
+            Kind::Scanned => f64::NAN,
         }
     }
 
@@ -592,7 +658,7 @@ fn gates(kind: Kind) {
     let (cold, _) = measure(RUNS, || {
         drop(engine.take());
         let (t, e) = timed(|| {
-            let e = PdfiumEngine::open(&path, None).unwrap();
+            let e = PdfiumEngine::open_bytes(sheaf_util::read_file(&path).unwrap(), None).unwrap();
             e.render(PageIndex(middle), page(1024), PixelFormat::Bgra)
                 .unwrap();
             e
@@ -623,13 +689,143 @@ fn gates(kind: Kind) {
         "",
     ));
 
+    // The middle page with a header and recognized text, realized as the
+    // screen's view of it opens its group (slice 13): its delta emitted
+    // alone and its group's frame, put together as a section over the file
+    // by a realizer that has seen nothing yet, its allocator made. Slice 2
+    // left about 4.4 ms of the synthetic's realize + open + render gate for
+    // it. No baseline.
+    let middle_id = doc.page(middle as usize).unwrap();
+    edit_middle(&mut doc, middle_id, 0);
+    let screen = ViewInputs::screen();
+    let (realize, _) = measure(QUICK_RUNS, || {
+        let realizer = Realizer::new();
+        timed(|| {
+            let view = realizer.view(doc.state(), middle_id, &screen).unwrap();
+            realizer.open(doc.state(), view.engine, &screen).unwrap()
+        })
+        .0
+    });
+    doc.undo().unwrap();
+    rows.push(Row::time(
+        "realize an edited page (emit + assemble), fresh",
+        realize,
+        f64::NAN,
+        "",
+    ));
+
+    // Realize + open + render (slice 13's gate), through a pool whose
+    // engines the next rows use.
+    let pool = EnginePool::new().unwrap();
+    let realized = realize_open_render(&mut doc, middle, &pool);
+    let realize_gate = kind.realize_gate();
+    let ratio = realized.as_secs_f64() / warm.as_secs_f64();
+    let gate = match realize_gate {
+        Some(gate) => format!("< {} ms, asserted; ", gate.as_millis()),
+        None => String::new(),
+    };
+    let gate = format!("{gate}{ratio:.1}× the warm render");
+    rows.push(Row::time(
+        "realize + open + render 1024 px, edited page",
+        realized,
+        f64::NAN,
+        gate,
+    ));
+
+    // Engines after visiting 200 groups (slice 13): a header on every page,
+    // so each renders from its group's overlay, then the first page of each
+    // of the 55 groups drawn as the page view draws it, under four header
+    // texts in turn: 220 group engines opened in the screen's budget, by a
+    // realizer of their own. The screen's engines are weighed after each,
+    // and the RSS the visits add is beyond the base engine, open above.
+    let views = Views::new(pool.clone());
+    let groups = PAGES.div_ceil(GROUP) as usize;
+    let mut visits_heaviest = 0;
+    let ((), visits_mem) = with_mem(|| {
+        for text in 0..VISITS {
+            let every = set_header(header(&format!("Draft {text} <<1>>")), None);
+            doc.commit_ops(vec![every], "header").unwrap();
+            for g in 0..groups {
+                let first = doc.page(g * GROUP as usize).unwrap();
+                drawn(&views, &doc, first, 1024);
+                visits_heaviest = visits_heaviest.max(pool.weighed(Budget::Screen));
+            }
+        }
+    });
+    let engines = pool.open_engines();
+    drop((views, pool));
+    for _ in 0..VISITS {
+        doc.undo().unwrap();
+    }
+    let visited = VISITS * groups;
+    rows.push(Row {
+        what: format!("engines after {visited} groups, weighed at most"),
+        now: Some(mb(visits_heaviest as u64)),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: format!("≤ {} MB, asserted", SCREEN_BYTES >> 20),
+    });
+    rows.push(Row::added(
+        &format!("engines after {visited} groups"),
+        visits_mem,
+        f64::NAN,
+        format!("≤ {} MB, asserted", SCREEN_BYTES >> 20),
+    ));
+    let groups_open = (engines.iter())
+        .filter(|e| matches!(e, EngineKey::Group(..)))
+        .count();
+    rows.push(Row {
+        what: format!("engines after {visited} groups, groups open"),
+        now: Some(groups_open as f64),
+        unit: "",
+        baseline: f64::NAN,
+        gate: format!("≤ {SCREEN_ENGINES}, asserted"),
+    });
+
+    // Find over every page through the text service (slice 14), one run
+    // each, a walk taking seconds: "Draft", on no page of the file as
+    // opened, every page read from the base engine, which opens again past
+    // its bound (§10.3); then with a header on every page, which it finds
+    // once a page, each read from its group's realization. No baseline or
+    // gate.
+    if kind != Kind::Scanned {
+        for headed in [false, true] {
+            if headed {
+                let every = set_header(header("Draft <<1>>"), None);
+                doc.commit_ops(vec![every], "header").unwrap();
+            }
+            let (took, hits, opened) = find_every_page(&doc, 0);
+            assert_eq!(hits, if headed { PAGES as usize } else { 0 });
+            let what = match headed {
+                false => "Find over every page (text service), as opened",
+                true => "Find over every page (text service), header on every page",
+            };
+            rows.push(Row::time(what, took, f64::NAN, ""));
+            rows.push(Row {
+                what: format!("{what}, rate"),
+                now: Some(f64::from(PAGES) / took.as_secs_f64()),
+                unit: "pages/s",
+                baseline: f64::NAN,
+                gate: String::new(),
+            });
+            rows.push(Row {
+                what: format!("{what}, engines opened"),
+                now: Some(opened as f64),
+                unit: "",
+                baseline: f64::NAN,
+                gate: String::new(),
+            });
+        }
+        doc.undo().unwrap();
+    }
+
     // Previews of the pages from the middle on, as the thumbnail strip
-    // renders them (320 px, the app's PREVIEW_W).
-    let engine = PdfiumEngine::open(&path, None).unwrap();
+    // renders them.
+    let engine = PdfiumEngine::open_bytes(sheaf_util::read_file(&path).unwrap(), None).unwrap();
     let (fill, ()) = timed(|| {
         for i in middle..middle + FILL {
             engine
-                .render(PageIndex(i), page(320), PixelFormat::Bgra)
+                .render(PageIndex(i), page(PREVIEW_W), PixelFormat::Bgra)
                 .unwrap();
         }
     });
@@ -645,7 +841,6 @@ fn gates(kind: Kind) {
     // An incremental save of one mark, as the app saves to the file it
     // opened (slice 10): planned, an Append onto the file in place, then
     // abandoned and the file cut back. Asserted on the scanned fixture.
-    let middle_id = doc.page(middle as usize).unwrap();
     doc.commit_ops(vec![add(middle_id, &square(0))], "mark")
         .unwrap();
     let gate = match kind {
@@ -765,8 +960,9 @@ fn gates(kind: Kind) {
     });
 
     // Crop every page by half an inch a side, as the app does: the cropped
-    // copy made in memory and interned, an engine opened on its bytes, then
-    // the edit onto it.
+    // copy made in memory and interned, then the edit onto it. From slice
+    // 13 no engine opens on the copy then: the app's render worker opens
+    // one when a page of it is first drawn.
     let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
     let half_inch = CropSpec::Margins(Margins {
         top: 36.0,
@@ -777,11 +973,10 @@ fn gates(kind: Kind) {
     let mut edits = Vec::new();
     let (crop, _) = measure(RUNS, || {
         let snap = doc.snapshot();
-        let (t, (edit, engines)) = timed(|| {
+        let (t, edit) = timed(|| {
             let plan =
                 sheaf_ops::crop::plan(doc.store(), &snap, &ids, half_inch, &NoProgress).unwrap();
-            let engines = engines_on(&plan);
-            let edit = timed(|| {
+            timed(|| {
                 let pages = (plan.iter())
                     .flat_map(|copy| {
                         copy.note(&mut doc);
@@ -790,10 +985,8 @@ fn gates(kind: Kind) {
                     .collect();
                 doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
             })
-            .0;
-            (edit, engines)
+            .0
         });
-        drop(engines);
         edits.push(edit);
         doc.undo().unwrap();
         t
@@ -847,6 +1040,83 @@ fn gates(kind: Kind) {
         "< 200 ms, slice 15",
     ));
 
+    // The thumbnail strip (slice 13's gate): every page cropped, the crop
+    // landed, and the legacy header on all of them, then every page's
+    // preview in order as the strip draws them, through a pool of its own
+    // whose two panes pin their groups (12 and 13, 26 and 27, as slice 2
+    // measured it). Each group's overlay is realized when its first page
+    // is drawn, by a realizer that has seen nothing, so its assembly is in
+    // the time. The screen's engines are weighed after each group.
+    let snap = doc.snapshot();
+    let plan = sheaf_ops::crop::plan(doc.store(), &snap, &ids, half_inch, &NoProgress).unwrap();
+    let pages = (plan.iter())
+        .flat_map(|copy| {
+            copy.note(&mut doc);
+            copy.bases()
+        })
+        .collect();
+    doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
+    drop((plan, snap));
+    let mut texts: [String; 6] = Default::default();
+    texts[1] = "Draft".into();
+    texts[4] = "Page <<1>> of <<N>>".into();
+    let legacy = HeaderFooter {
+        texts,
+        ..Default::default()
+    };
+    set_header_footer(&mut doc, &legacy);
+    let pool = EnginePool::new().unwrap();
+    let views = Views::new(pool.clone());
+    for groups in [[12, 13], [26, 27]] {
+        let shown = groups.map(|g| ids[g * GROUP as usize]);
+        let keys = (shown.iter())
+            .map(|&id| drawn(&views, &doc, id, 1024))
+            .collect();
+        pool.pin(pool.owner(), keys);
+    }
+    let mut strip_heaviest = 0;
+    let ((fill_all, ()), strip_mem) = with_mem(|| {
+        timed(|| {
+            for (i, &id) in ids.iter().enumerate() {
+                drawn(&views, &doc, id, PREVIEW_W);
+                if (i + 1) % GROUP as usize == 0 || i + 1 == ids.len() {
+                    strip_heaviest = strip_heaviest.max(pool.weighed(Budget::Screen));
+                }
+            }
+        })
+    });
+    drop((views, pool));
+    doc.undo().unwrap();
+    doc.undo().unwrap();
+    let strip_rate = f64::from(PAGES) / fill_all.as_secs_f64();
+    let gate = match kind {
+        Kind::Scanned => String::new(),
+        _ => format!("≥ {STRIP_GATE} pages/s, asserted"),
+    };
+    rows.push(Row {
+        what: format!("thumbnail strip, crop + header, {PREVIEW_W} px"),
+        now: Some(strip_rate),
+        unit: "pages/s",
+        baseline: kind.strip_pages_per_s(),
+        gate,
+    });
+    let gate = match kind {
+        Kind::Scanned => String::new(),
+        _ => format!("≤ {} MB, asserted", SCREEN_BYTES >> 20),
+    };
+    rows.push(Row {
+        what: "thumbnail strip, engines weighed at most".into(),
+        now: Some(mb(strip_heaviest as u64)),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate,
+    });
+    let gate = match kind {
+        Kind::Scanned => String::new(),
+        _ => format!("≤ {} MB, asserted", SCREEN_BYTES >> 20),
+    };
+    rows.push(Row::added("thumbnail strip", strip_mem, f64::NAN, gate));
+
     // Bates numbers on every page, as the app applies them, and the
     // Rewrite that draws them. Each apply is a first one, on the file
     // opened afresh (untimed): it classifies every page cold, where
@@ -863,16 +1133,16 @@ fn gates(kind: Kind) {
     };
     let (apply, _) = measure(RUNS, || {
         let mut fresh = sheaf_doc::open::file(&work, None).unwrap().doc;
-        let (t, engines) = timed(|| set_header_footer(&mut fresh, &bates));
-        drop((engines, fresh));
+        let (t, ()) = timed(|| set_header_footer(&mut fresh, &bates));
+        drop(fresh);
         t
     });
-    let engines = set_header_footer(&mut doc, &bates);
+    set_header_footer(&mut doc, &bates);
     let snap = doc.snapshot();
     let (drawn, _) = measure(RUNS, || {
         timed(|| sheaf_doc::save::rewrite(&snap).unwrap()).0
     });
-    drop((snap, engines, doc));
+    drop((snap, doc));
     rows.push(Row::time(
         "Bates apply, all pages",
         apply,
@@ -919,6 +1189,120 @@ fn gates(kind: Kind) {
             "the incremental save of one mark took {incremental:?}, over {INCREMENTAL_GATE_MS} ms"
         );
     }
+    if let Some(gate) = realize_gate {
+        assert!(
+            realized < gate,
+            "realize + open + render took {realized:?}, over {gate:?}"
+        );
+    }
+    assert!(
+        visits_heaviest <= SCREEN_BYTES,
+        "the screen's engines weighed {:.1} MB visiting {visited} groups",
+        mb(visits_heaviest as u64)
+    );
+    assert!(
+        groups_open <= SCREEN_ENGINES,
+        "{groups_open} group engines open after {visited} groups"
+    );
+    if let Some(mem) = visits_mem {
+        let added = mem.peak.saturating_sub(mem.start);
+        assert!(
+            added <= SCREEN_BYTES as u64,
+            "visiting {visited} groups added {:.1} MB",
+            mb(added)
+        );
+    }
+    if kind != Kind::Scanned {
+        assert!(
+            strip_rate >= STRIP_GATE,
+            "the thumbnail strip filled at {strip_rate:.0} pages/s, under {STRIP_GATE}"
+        );
+        assert!(
+            strip_heaviest <= SCREEN_BYTES,
+            "the strip's engines weighed {:.1} MB",
+            mb(strip_heaviest as u64)
+        );
+        // What the engines hold beyond the pool's estimate, as the visits'
+        // row: the strip's pool opens no base engine, every page being in a
+        // group.
+        if let Some(mem) = strip_mem {
+            let added = mem.peak.saturating_sub(mem.start);
+            assert!(
+                added <= SCREEN_BYTES as u64,
+                "the thumbnail strip added {:.1} MB",
+                mb(added)
+            );
+        }
+    }
+}
+
+/// Find for "Draft" over every page of `doc` as the app's Find walks it
+/// (slice 14): through a pool and a text of their own, in the screen's
+/// budget, under the screen's inputs, with the engines of its first
+/// `pinned` groups drawn and pinned first, as panes and the strip pin
+/// theirs. The time to its end, the matches found, and the engines
+/// the pool opened while it walked.
+fn find_every_page(doc: &Document, pinned: usize) -> (Duration, usize, usize) {
+    let pool = EnginePool::new().unwrap();
+    let views = Views::new(pool.clone());
+    let keys = (0..pinned)
+        .map(|g| drawn(&views, doc, doc.page(g * GROUP as usize).unwrap(), 1024))
+        .collect();
+    pool.pin(pool.owner(), keys);
+    let before = pool.opened();
+    let text = Text::new(views, Budget::Screen);
+    let q = Query::literal("Draft", false).unwrap();
+    let walk = text.search(doc.state(), q, &ViewInputs::screen());
+    let (took, told) = timed(|| block_on(walk.collect::<Vec<Found>>()));
+    assert!(
+        matches!(told.last(), Some(Found::Done)),
+        "Find ran to its end"
+    );
+    let hits = (told.iter())
+        .map(|found| match found {
+            Found::Hits { hits, .. } => hits.len(),
+            _ => 0,
+        })
+        .sum();
+    (took, hits, pool.opened() - before)
+}
+
+/// The middle page `middle` of `doc` with a header and recognized text,
+/// told apart by `run`.
+fn edit_middle(doc: &mut Document, middle: PageId, run: usize) {
+    let mut ops = vec![set_header(
+        header(&format!("Draft {run} <<1>>")),
+        Some(&[middle]),
+    )];
+    ops.extend(ocr([(middle, Arc::new(ocr_layer(run)))]));
+    doc.commit_ops(ops, "header").unwrap();
+}
+
+/// Realize + open + render (slice 13's gate), the median: page `middle` of
+/// `doc` edited ([`edit_middle`]) and drawn at 1024 px as the page view
+/// draws it, through `pool` with the file's base engine warm (a neighbour
+/// drawn from it first), each run a new edit, so a new group engine, and a
+/// realizer that has seen nothing: the view, the overlay's emission and
+/// assembly on the pool's worker, the group engine's open and its first
+/// render. Each edit is undone.
+fn realize_open_render(doc: &mut Document, middle: u32, pool: &EnginePool<EngineKey>) -> Duration {
+    let middle_id = doc.page(middle as usize).unwrap();
+    let neighbour = doc.page(middle as usize + 1).unwrap();
+    drawn(&Views::new(pool.clone()), doc, neighbour, 1024);
+    let mut run = 0;
+    let (realized, _) = measure(QUICK_RUNS, || {
+        run += 1;
+        edit_middle(doc, middle_id, run);
+        let views = Views::new(pool.clone());
+        let (t, engine) = timed(|| drawn(&views, doc, middle_id, 1024));
+        assert!(
+            matches!(engine, EngineKey::Group(..)),
+            "the edited page drew from {engine:?}"
+        );
+        doc.undo().unwrap();
+        t
+    });
+    realized
 }
 
 /// The incremental save of one mark and the Rewrite on [`aes_256`]'s copy
@@ -1176,23 +1560,13 @@ fn rewrites_on_the_synthetic_and_heavy_7k() {
     }
 }
 
-/// A render engine on each derived copy, as the app opens one before it
-/// takes the copy in as a source.
-fn engines_on(copies: &[DerivedSource]) -> Vec<RenderHandle> {
-    copies
-        .iter()
-        .map(|c| RenderHandle::open_bytes(c.src.bytes().clone(), None).unwrap())
-        .collect()
-}
-
 /// Header & Footer as the app applies it: every source loaded to find the
 /// pages whose file already draws one, those moved onto stripped copies,
-/// then `hf` set, in one transaction. Gives the engines opened on the
-/// copies.
-fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) -> Vec<RenderHandle> {
+/// then `hf` set, in one transaction. No engine opens on the copies (from
+/// slice 13 the app's render worker opens one when a page is drawn).
+fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) {
     let snap = doc.snapshot();
     let copies = sheaf_ops::derive::strip_stamps(doc.store(), &snap, &NoProgress).unwrap();
-    let engines = engines_on(&copies);
     let pages: Vec<_> = (copies.iter())
         .flat_map(|copy| {
             copy.note(doc);
@@ -1207,7 +1581,74 @@ fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) -> Vec<RenderHandle>
     tx.apply(set, &NoProgress).unwrap();
     doc.commit(tx, CommitOpts::labelled("Header & footer"))
         .unwrap();
-    engines
+}
+
+/// Page `id` of `doc` drawn `width` wide under the screen's inputs by
+/// `views`, in the screen's budget, as the page view and the thumbnail
+/// strip draw it, and waited for: the engine it was drawn from.
+fn drawn(views: &Views, doc: &Document, id: PageId, width: u32) -> EngineKey {
+    let (st, screen) = (doc.state(), ViewInputs::screen());
+    let view = views.view(st, id, &screen).unwrap();
+    let job = Job::Page {
+        width,
+        rotation: Rotation::R0,
+    }
+    .turned(view.job.rotation);
+    let (format, budget) = (PixelFormat::Bgra, Budget::Screen);
+    let rx = (views.draw(st, id, &view, &screen, job, format, 1, budget)).unwrap();
+    block_on(rx).expect("the render thread is gone").unwrap();
+    view.engine
+}
+
+/// Slice 14's walks over every page of the synthetic and heavy 7k, with
+/// neither a baseline nor a gate: Find Blank Pages as `sheaf
+/// remove-blanks` runs it, through a pool of its own in the background's
+/// budget, the text of every page without annotations read;
+/// and Find with a header on every page and [`SCREEN_ENGINES`] groups'
+/// engines pinned, as a split window and the strip pin theirs, so the
+/// walk's own group engine is the only one the screen's count may close.
+/// Each with the engines its pool opened.
+#[test]
+#[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
+fn text_walks_on_the_synthetic_and_heavy_7k() {
+    for kind in [Kind::Synthetic, Kind::Heavy] {
+        let path = fixture(kind);
+        let cache = path.parent().unwrap().join("cache");
+        // SAFETY: every test here sets the same value before anything reads it.
+        unsafe { std::env::set_var("SHEAF_CACHE_DIR", &cache) };
+        let mut doc = sheaf_doc::open::file(&path, None).unwrap().doc;
+        let pool = EnginePool::new().unwrap();
+        let views = Views::new(pool.clone());
+        let snap = doc.snapshot();
+        let params = BlankParams::default();
+        let (blanks, found) = timed(|| blank::find(&snap, &views, None, params, &NoProgress));
+        let found = found.unwrap().len();
+        let blanks_opened = pool.opened();
+        drop((snap, views, pool));
+        let every = set_header(header("Draft <<1>>"), None);
+        doc.commit_ops(vec![every], "header").unwrap();
+        let (find, hits, find_opened) = find_every_page(&doc, SCREEN_ENGINES);
+        assert_eq!(hits, PAGES as usize);
+        let count = |what: &str, n: usize| Row {
+            what: what.into(),
+            now: Some(n as f64),
+            unit: "",
+            baseline: f64::NAN,
+            gate: String::new(),
+        };
+        let find_what = format!("Find, header on every page, {SCREEN_ENGINES} groups pinned");
+        print_table(
+            &format!("text walks on the {} 7k (slice 14)", kind.name()),
+            "baseline",
+            &[
+                Row::time("Find Blank Pages, every page", blanks, f64::NAN, ""),
+                count("Find Blank Pages, pages found", found),
+                count("Find Blank Pages, engines opened", blanks_opened),
+                Row::time(&find_what, find, f64::NAN, ""),
+                count(&format!("{find_what}, engines opened"), find_opened),
+            ],
+        );
+    }
 }
 
 /// AddMark (slice 1's AnnotAdd) and a full reorder at 7,000 pages with
@@ -1351,7 +1792,7 @@ fn ocr_run(d: &mut Document, ids: &[PageId], layer: &Arc<TextLayer>) -> Vec<Dura
         let start = Instant::now();
         let mut tx = Document::tx_at(&base, d.lower_cx(Actor::Job(JobKind::Ocr)));
         for &page in pages {
-            tx.read(Key::Page(page));
+            tx.read_render(page, &ViewInputs::content_only());
         }
         let layers = ocr(pages.iter().map(|&page| (page, layer.clone())));
         tx.apply_batch(layers, &NoProgress).unwrap();

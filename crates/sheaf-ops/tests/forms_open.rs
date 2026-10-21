@@ -101,7 +101,7 @@ fn forms_open_into_the_model() {
     assert_eq!(on_page, [6, 4]);
     let facts = facts_of(&path);
     assert_eq!(facts.form.facts.class, FormClass::AcroForm);
-    let engine = PdfiumEngine::open(&path, None).unwrap();
+    let engine = PdfiumEngine::open_bytes(sheaf_util::read_file(&path).unwrap(), None).unwrap();
     assert_eq!(engine.form_type(), FormType::AcroForm);
 
     // PDFium tells hybrid and XFA-only forms apart as sheaf does.
@@ -124,7 +124,7 @@ fn forms_open_into_the_model() {
         let path = write(&dir, name, &mut { form });
         let facts = facts_of(&path);
         assert_eq!(facts.form.facts.class, class, "{name}");
-        let engine = PdfiumEngine::open(&path, None).unwrap();
+        let engine = PdfiumEngine::open_bytes(sheaf_util::read_file(&path).unwrap(), None).unwrap();
         assert_eq!(engine.form_type(), form_type, "{name}");
     }
 

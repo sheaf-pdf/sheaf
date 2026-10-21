@@ -53,7 +53,8 @@ fn recognize_sample(kind: EngineKind) -> (Vec<OcrWord>, u32, u32) {
     let cfg = OcrConfig::default();
     let mut engine = build_engine(kind, &cfg).unwrap_or_else(|e| panic!("{e}"));
     let path = sample_pdf();
-    let pdfium = sheaf_render::pdfium::PdfiumEngine::open(&path, None).unwrap();
+    let bytes = sheaf_util::read_file(&path).unwrap();
+    let pdfium = sheaf_render::pdfium::PdfiumEngine::open_bytes(bytes, None).unwrap();
     let raster = pdfium
         .render(
             PageIndex(0),
@@ -167,7 +168,8 @@ fn text_page() -> image::RgbImage {
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
     pdf.save(&path).unwrap();
-    let pdfium = sheaf_render::pdfium::PdfiumEngine::open(&path, None).unwrap();
+    let bytes = sheaf_util::read_file(&path).unwrap();
+    let pdfium = sheaf_render::pdfium::PdfiumEngine::open_bytes(bytes, None).unwrap();
     let raster = pdfium
         .render(
             PageIndex(0),

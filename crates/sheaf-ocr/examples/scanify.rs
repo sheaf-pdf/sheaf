@@ -5,7 +5,7 @@
 //!
 //! Usage: cargo run -p sheaf-ocr --example scanify -- in.pdf out.pdf [dpi]
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::Context;
 
@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(2);
     };
     let dpi: u32 = args.next().map(|d| d.parse()).transpose()?.unwrap_or(200);
-    let engine = PdfiumEngine::open(PathBuf::from(&input), None)?;
+    let engine = PdfiumEngine::open_bytes(sheaf_util::read_file(Path::new(&input))?, None)?;
 
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();

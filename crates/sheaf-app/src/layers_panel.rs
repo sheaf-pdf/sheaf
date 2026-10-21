@@ -1,13 +1,13 @@
 //! The Layers panel: optional content groups, shown or hidden for viewing.
-//! PDFium renders the default configuration, so a change reopens the
-//! primary file's renderer from a copy whose default configuration says
-//! what to hide. Saving never writes it.
+//! A change is a view input (M10.5 §10.4): the screen draws the primary
+//! file with the hidden layers off, through a patch of its catalog that
+//! never reaches disk (`sheaf_doc::layers::ocg_patch`). Saving never writes
+//! it.
 
 use std::collections::HashSet;
 
 use gpui::{AnyElement, Context, Window, div, prelude::*, px};
 use sheaf_doc::layers::LayerId;
-use sheaf_render::RenderHandle;
 use sheaf_ui::theme;
 
 use crate::docview::{DocView, State};
@@ -25,7 +25,7 @@ impl crate::docview::Doc {
 }
 
 impl DocView {
-    fn toggle_layer(&mut self, id: LayerId, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_layer(&mut self, id: LayerId, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -49,65 +49,19 @@ impl DocView {
         self.apply_layers(cx);
     }
 
-    /// Reopen the primary file's renderer with the hidden layers off.
-    pub(crate) fn apply_layers(&mut self, cx: &mut Context<Self>) {
+    /// Draw the primary file with the hidden layers off, from now on.
+    fn apply_layers(&mut self, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let src = doc.model.primary().clone();
-        let sid = src.id();
-        let hidden = doc.layers_hidden.clone();
-        let generation = {
-            doc.layers_generation += 1;
-            doc.layers_generation
-        };
-        doc.notice = Some("Updating layers…".into());
+        doc.layers_chosen = true;
+        doc.set_inputs();
+        doc.notice = Some(match doc.layers_hidden.len() {
+            0 => "All layers shown".into(),
+            1 => "1 layer hidden (display only; not saved)".into(),
+            n => format!("{n} layers hidden (display only; not saved)"),
+        });
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let opened = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut pdf = sheaf_doc::file::load_pdf_mem(src.bytes(), src.password())?;
-                    sheaf_doc::layers::set_hidden(&mut pdf, &hidden);
-                    let mut bytes = Vec::new();
-                    pdf.save_to(&mut bytes)?;
-                    RenderHandle::open_bytes(bytes.into(), None)
-                })
-                .await;
-            this.update(cx, |v, cx| {
-                let State::Ready(doc) = &mut v.state else {
-                    return;
-                };
-                // A newer change superseded this one.
-                if doc.layers_generation != generation || doc.model.primary().id() != sid {
-                    return;
-                }
-                match opened {
-                    Ok(handle) => {
-                        let pages = doc.drawn_marks.clone();
-                        if !pages.is_empty() {
-                            // Our own marks are drawn by sheaf, not PDFium.
-                            drop(handle.hide_annots(pages));
-                        }
-                        doc.handles.insert(sid, handle);
-                        // A new engine: hide in it what was hidden before.
-                        doc.foreign_hidden.retain(|(s, _, _)| *s != sid);
-                        doc.invalidate_tiles();
-                        let off = doc.layers_hidden.len();
-                        doc.notice = Some(match off {
-                            0 => "All layers shown".into(),
-                            1 => "1 layer hidden (display only; not saved)".into(),
-                            n => format!("{n} layers hidden (display only; not saved)"),
-                        });
-                    }
-                    Err(e) => doc.notice = Some(format!("Couldn't update layers: {e:#}")),
-                }
-                v.sync_foreign_visibility(cx);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 
     /// The Layers panel body.

@@ -26,7 +26,7 @@ pub(crate) fn doc_of(n: u32, outline: &[FlatOutlineItem]) -> Document {
 }
 
 /// `bytes` opened as a file named `name` is.
-pub(super) fn opened(bytes: Vec<u8>, name: &str) -> Document {
+pub(crate) fn opened(bytes: Vec<u8>, name: &str) -> Document {
     let store = Store::new();
     let kind = BlobKind::file(std::path::Path::new(name), None);
     let primary = store.open(bytes.into(), kind).unwrap();

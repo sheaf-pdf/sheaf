@@ -215,7 +215,7 @@ blob, and a source parses the blob in place:
   the newest cross-reference stream that decodes is the trailer, as
   PDFium takes it.
 - **Bytes stay in memory.** PDFium opens the blob's own `Arc<[u8]>`
-  (`RenderHandle::open_bytes`). A derived copy (cropped, watermarked, a
+  (the engine pool's base engine, `Views::base`). A derived copy (cropped, watermarked, a
   header and footer stripped) is a memory blob, written nowhere; blank and
   image pages, and a library stamp nothing else holds (see Page content),
   are read back from the generated cache once, into blobs.
@@ -304,7 +304,10 @@ three steps in a row):
   the same state. It gives back what the view shows beside the model:
   attachments,
   the portfolio, layers, what sheaf says about the form, and the marks
-  given new ids, whose pages the next save writes. A second call is
+  given new ids, whose pages the next save writes, and which the app
+  counts in a notice. Nothing is hidden in an engine at ready (from M10.5
+  slice 13): under the screen's inputs a page's realization leaves
+  sheaf's marks to GPUI, whatever ids they had. A second call is
   refused.
 - **Until then the document is loading.** A transaction's ops and
   `commit` return `NotReady`, making no version and drawing no ids.
@@ -459,13 +462,13 @@ not what's stored.
   way in, a mark's `turn` the frame's rotation. `page-info`'s size is the
   page as shown, sheaf's turn included, while its coordinates aren't;
   API 0.4's to-view and from-view matrices end that (slice 20).
-- **PDFium's text is still in the source page's displayed space**
-  (`page_chars`, `search_page`, `pattern_search_page` and
-  `text_boxes_in_rect`, through a device 16 times the page's size) until
-  slice 14's text service. The app maps it into PageSpace where it
-  arrives, through the source page's `from_view` (`PageChars::from_engine`,
-  `merge_source_hits`); the plugins' text source passes it on as it is,
-  since that is 0.3's frame.
+- **PDFium's text is PageSpace** (slice 14): `page_chars` gives each
+  character's loose box as PDFium has it, in the page's user space, with
+  the angle it's drawn at, and `PageChars` finds lines in the frame most
+  of the page's characters are drawn upright in, not by its `/Rotate`
+  (Text and printing). The device 16 times the page's size that mapped
+  text into the displayed space is gone; plugins' text is mapped into
+  0.3's frame at the API's edge, as marks are.
 - **The clipboard** (version 2) holds marks in the edit frame of the page
   they were copied from, each turned relative to it. A paste maps them
   through the target page's frame, so they land where they were seen and
@@ -1279,11 +1282,13 @@ impl DocView {
   the document (`Doc::follow`). `Doc.changes` counts changes, and keys
   the Comments view, the History rows and the labels cache. What's
   selected of removed pages and annotations goes, looked at only when
-  the change touched them, and the images of pages now shown from
-  another source page go. The panes lay the pages out again
-  (`Doc.layout`) only on an order, a geometry or such a page, so a
-  mark's edit lays nothing out. Then the plugin cell takes the new
-  snapshot, autosave is scheduled (not for a save or the opening), and
+  the change touched them. Images are found by what their page draws
+  (its render key, slice 13), so none is dropped: a page shows its last
+  one until its new one lands. The panes lay the pages out again
+  (`Doc.layout`) only on an order or a geometry, so a mark's edit, or a
+  page shown from another source page of its size, lays nothing out.
+  Then the plugin cell takes the new snapshot, autosave is scheduled (not
+  for a save or the opening), and
   listeners hear once: `DocEvent::Opened` when the file opened, else
   `DocEvent::Changed { change }`. Plugins hear it as `edited` ("Undo:
   …", "Redo: …", "Go to: …" or the label), never of their own edits (by
@@ -1299,22 +1304,29 @@ impl DocView {
   review's pages (`forget_planners`), and closes the dialogs opened on
   the document it replaced (`Workspace::close_dialogs_of_another`, by
   `Snapshot.instance`). Inserting a PDF's pages, blank pages or images,
-  and replacing pages, read the file into the store, open its engine
-  and lower `InsertPages` or `ReplacePages` on the snapshot off the UI
-  thread (`plan_insert`, `plan_replace`), then land with `Relower`
-  (`CommitOpts::based(v, stale, label)`), keeping the engine only once
-  committed. Crop, Watermark / Background and Header & Footer resolve
-  their pages to ids on the version their dialog opened on, make the
-  copies off the UI thread, show them (`Tx::set_page_base` on
+  and replacing pages, read the file into the store and lower
+  `InsertPages` or `ReplacePages` on the snapshot off the UI thread
+  (`plan_insert`, `plan_replace`), then land with `Relower`
+  (`CommitOpts::based(v, stale, label)`); nothing opens an engine on the
+  file, which the render worker opens when a page of it is first drawn
+  (from slice 13). Crop, Watermark / Background and Header & Footer
+  resolve their pages to ids on the version their dialog opened on,
+  make the copies off the UI thread, show them (`Tx::set_page_base` on
   `tx_at(opened)`), commit with `Validate`, and only then keep the
-  copies; their dialogs show no preview of the document until slice
-  13's rendered previews. The labels dialog previews its op lowered on
-  the current version (`Tx::preview`), again at each change, and
-  commits on the version it opened on with `Validate`; once the labels
-  changed since it opened, which that commit would find, it says it
-  can't apply. Blank review's
-  delete reads each confirmed page (`Tx::read(Key::Page(p))`, until
-  slice 13's `read_render`) and lands with `Relower`, so a page whose
+  copies. The labels dialog previews its op lowered on the current
+  version (`Tx::preview`), again at each change, and commits on the
+  version it opened on with `Validate`; once the labels changed since it
+  opened, which that commit would find, it says it can't apply. The
+  Header & Footer dialog previews its page as applying would draw it
+  (slice 13): its op lowered on the current version off the UI thread,
+  the page's own drawn header stripped first as the apply strips it,
+  again at each change of its settings or the document, and the page
+  realized from that state under the screen's inputs; a lowering's
+  picture shows only while no later lowering has begun. Crop and
+  Watermark adopt it in slices 15 and 16. Blank review's
+  delete reads each confirmed page as its search measured it
+  (`Tx::read_render(p, &ViewInputs::content_only())`: what the page
+  shows, from M10.5 slice 13) and lands with `Relower`, so a page whose
   content changed since is a Conflict, and one given a bookmark, a
   connector or a header since has the cascades applied. A comment
   import is planned off the UI thread (`Actor::Job(Import)`) and lands
@@ -1334,8 +1346,12 @@ impl DocView {
   reads record the slots it decided by (`HostState::read`,
   `CallOutput.reads`): `pages()` the order and each page's `Page` and
   `Geom`; `annotations(p)` `PageAnnots(p)` and each mark shown; the
-  outline its roots and each bookmark; text, search, words, recognition
-  and renders `Page(p)`; an update the mark it keeps parts of. When the
+  outline its roots and each bookmark; text, search, words and
+  recognition `Page(p)` (from slice 13 `render_reads` under
+  `content_only`, which is that), and a render what it drew under its
+  inputs (`render_reads`: the page, its drawn annotations and fields, the
+  form, the header, and the order when the header numbers pages); an
+  update the mark it keeps parts of. When the
   call returns, `plugins::land` begins a `GroupKind::PluginCall` group
   and commits the first batch on the base (`tx_at`, each read,
   `Relower`) and later ones at the current version in the group
@@ -1356,15 +1372,23 @@ bench gives every page one shared layer, which each step counts).
 
 ## What the viewer changes
 
-- Caches (previews, tiles, sizes) key by `PageId`, not display index, so a
-  reorder costs nothing visually.
+- Images key by what their page draws, not its display index or id:
+  tiles by `(RenderKey, Job)` and previews by `(RenderKey, Rotation)`
+  (M10.5 slice 13), so a reorder, a save or an edit to another page
+  re-renders nothing, and a duplicate shares its original's. A page whose
+  key changed shows the images of the key it was last drawn by until its
+  new one lands; nothing is invalidated by hand.
 - `Job` gains `rotation`: the page's `render_delta`, the turn on top of
-  the source page's own `/Rotate` (which PDFium applies itself), plus the
-  pane's rotate view. PDFium renders rotated bitmaps, so tiles at a
-  different rotation are just a cache miss.
-- `DocView` holds a `Document` instead of a bare `RenderHandle`; sidebar
-  thumbnails become the primary editing surface (drag to reorder,
-  multi-select, keyboard rotate/delete).
+  the page its engine has (its base page's `/Rotate`, which PDFium
+  applies itself, kept in an overlay), plus the pane's rotate view.
+  PDFium renders rotated bitmaps, so tiles at a different rotation are
+  just a cache miss.
+- `DocView` holds a `Document` and its views (the document's realizer
+  over the process's one engine pool), not a render handle a source;
+  sidebar thumbnails become the primary editing surface (drag to
+  reorder, multi-select, keyboard rotate/delete).
+- The layout holds each page's id and geometry, not where it renders
+  from, and is made again only on an order or a geometry.
 - Sizes come from the sources' page tables (`Geom`) from the first paint,
   and the outline from `DocState`, which the open reads from the source;
   the worker is never asked for either.
@@ -1443,7 +1467,7 @@ recovery sidecars reach their bytes through `serialize/` (§11.7 of
 - the stamp library's files (`stamp_lib`: a collection, a stamp's
   one-page PDF, an image stamp), the reader's own and outside the edit
   API (§15), until slice 19;
-- pictures PDFium draws from memory (a tape, the layers panel's copy).
+- pictures PDFium draws from memory (a tape).
 
 - **Objects** (`object`): a direct object as PDF syntax, and an indirect
   object's `n g obj` frame. Reals are f64 in their shortest round-trip
@@ -1895,12 +1919,12 @@ below).
   or `abandon_save` when the reader cancels or the write fails; a
   FileChanged found at the rename asks again, the version still sealed.
   A second save while one is sealed is refused ("Already saving…"), since
-  its base would be the first's file. Nothing is reopened, re-hidden or
-  re-read after a save, and no rendered image is dropped
-  (`Doc::tiles_invalidated` counts every drop). The header and footer is
-  drawn over each page whose base doesn't draw it
-  (`stamps::drawn_over`, shared with the emitter), before a save and
-  after. Autosave writes a sidecar 3 s after the last edit (at least
+  its base would be the first's file. Nothing is reopened or re-read
+  after a save, and no rendered image is dropped: images are cached by
+  render key (slice 13), which a save doesn't change. The header and
+  footer is drawn on each page whose base doesn't draw it
+  (`stamps::drawn_over`, shared with the emitter, which draws it into the
+  page's realization for the screen), before a save and after. Autosave writes a sidecar 3 s after the last edit (at least
   every 30 s), never while a save or another sidecar is in flight, and not
   again while the current version and edits are the ones the last
   sidecar holds; as a save ends, a sidecar is written on the UI thread,
@@ -2633,6 +2657,702 @@ The 7k fixtures and the planning scripts are in `bench/`
 (`bench/README.md`). The gate harness, `crates/sheaf-ops/tests/gate_7k.rs`,
 prints today's numbers on the three fixtures beside slice 2's baselines.
 
+## Rendering edited pages (M10.5 slice 13)
+
+PDFium draws the model. Each consumer says what a page should draw
+(`ViewInputs`); the realizer says where PDFium draws it from (a
+`PageView`): the source's own bytes when the page draws as its base page
+does, else its group's overlay, an append section built in memory over
+the source's bytes by the same emitter and serializer as saves; and one
+engine pool, on one thread, opens and keeps the engines. What a page
+draws is a key (`RenderKey`), which the app's images are found by, so an
+edit re-renders only what it changed and nothing is invalidated by hand.
+Nothing reaches disk (§10 of `todos/m10.5-edit-api.md`).
+
+```rust
+pub struct ViewInputs { marks: MarkDraw, generators, ocr_over, widgets, foreign: bool,
+                        hidden, dragging: Arc<im::HashSet<AnnotId>>, ocg_off: Option<Arc<OcgOverride>> }
+pub enum MarkDraw { ByHost, ByEngine, Off }
+pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<RenderKey>; // RenderKey(u128)
+pub fn render_reads(st: &DocState, page: PageId, inputs: &ViewInputs) -> Vec<Key>;
+impl Tx { pub fn read_render(&mut self, page: PageId, inputs: &ViewInputs); }
+pub enum EngineKey { Base(BlobId), Group(GroupKey, u128), SourcePatch(BlobId, u128) }
+pub struct PageView { engine: EngineKey, index: u32, key: RenderKey, job: JobXform, annots, forms: bool }
+impl Realizer {                                    // sheaf_doc::realize, one a document
+    pub fn view(&self, st, page, inputs) -> Result<PageView>;            // cheap: the UI thread's
+    pub fn open(&self, st, engine, inputs) -> Result<Realization>;       // the pool's worker's
+}
+pub struct EnginePool<K> { .. }                    // sheaf_render::pool, one a process
+pub struct Views { realizer: Arc<Realizer>, pool: EnginePool<EngineKey> } // sheaf_ops::views
+```
+
+### What each consumer draws
+
+`ViewInputs` says what's drawn beside the page's own content, and each
+consumer passes its own, so hiding a comment on screen changes neither
+print preview nor what OCR reads:
+
+| Consumer | Inputs | Draws |
+|---|---|---|
+| The page view, the thumbnails, blank review's previews, the Header & Footer preview; Find, Patterns, selection, calculator picks and text markup (slice 14) | `screen()`, with `hidden`, `dragging` and `ocg_off` the view's | everything; sheaf's marks GPUI draws over the page (`ByHost`) |
+| Print preview | `print(markup)` | with "Comments and markups", as the screen; without, no marks and no other tools' comments (as `print_pdf` prints), the form's widgets either way |
+| OCR (`ViewPages`), blank detection and blank review's reads, plugins' recognition | `content_only()`; blank detection's text with `ocr_over` (slice 14) | the page's own content: no header, recognized text, widgets or annotations, at its shown box |
+| Plugins' renders | `plugin()`: `screen()` with `marks: ByEngine`, for the render and its reads alike | as the saved file will draw it, sheaf's marks and the unsaved header included, in the file's own orientation |
+| Plugins' text (slice 14) | `plugin_text()`: `plugin()` with no marks, widgets or other tools' annotations, for the text and its reads alike | what of the page PDFium reads as text: its content, the unsaved header and recognized text; no annotation's text, which PDFium's text page never reads |
+
+`foreign` (other tools' comments and links) isn't in §10.1's list: print
+preview without markup and `content_only` draw no annotations at all,
+which no other field can say. There's no `form_draw`: every consumer
+draws widgets live, and an appearances-only render flattens a page,
+which a shared engine can't do (the corpus check renders appearances from
+an engine of its own). Whole classes are left out by the render's flags,
+not by what the overlay writes: `PageView.annots` is PDFium's
+`FPDF_ANNOT` (annotations but widgets), `forms` its `FPDF_FFLDraw` (the
+form's widgets, which PDFium draws only that way, slice 2), and a render
+with neither goes by a matrix whose placement matches the `FFLDraw`
+path's pixel for pixel, at every rotation and for tiles
+(`PdfiumEngine::render_with(page, job, format, Draw)`). Per-id hiding and
+dragging go through overlays: a hidden or dragged annotation is written
+under its own key with its hidden flag (`/F` 2), so it hides on its page
+and not on a duplicate. Under `ByHost` the overlay leaves sheaf's marks
+out, renamed ones too, so a page whose own file lists sheaf's marks in
+`/Annots` realizes as an overlay even unedited: a document sheaf saved
+with marks on many pages uses more group engines (§10.4).
+
+### Render keys
+
+`render_key` hashes what the page draws under the inputs, each record
+destructured whole (a new field is a compile error until it's fed), a
+length before what it counts and a tag before each variant:
+
+- the inputs' flags, always, whatever the page holds (they also decide
+  what's drawn of annotations no record holds), so `print(true)`'s key is
+  the screen's;
+- the page's `PageDef` digest (its base and content stack, not its copy
+  number) and its boxes without the rotation: a turn is the job's
+  (`JobXform.rotation`), so a turned page keeps its key. A page with a
+  header its file doesn't draw folds its rotation in, since the header is
+  laid out in the turned page;
+- each annotation of a kind the inputs draw, by what it's drawn from,
+  never its id or copy, so a duplicate shares its original's key: sheaf's
+  marks only under `ByEngine`; other tools' comments and links with
+  `foreign`, each link with whether it leads nowhere now (a save drops
+  it); widgets with `widgets`, with their terminal's value, and then the
+  form's `FormDoc` digest; each with its hidden and dragged flags;
+- each generator on the page: its id, its recipe and whether the page's
+  file draws it already; when it doesn't, the page's position, the page
+  count and its Bates number, as far as its tokens use them
+  (`Generator::needs()`, `CtxNeeds`);
+- the layers `ocg_off` turns off of the page's source.
+
+Digests are kept with what they digest (`PageDef::new`, `FormDoc`'s cell),
+so a key costs a lookup or two once a value has been seen, and keys are
+computed only for the pages being drawn. Position, count, Bates numbers,
+which pages the header covers and which page shows a source page come from
+tables each state builds once, when first asked (`Indexes.header`,
+`Indexes.shows`; the page map is a B-tree). So a reorder of 7,000 pages
+changes no key without a page-number header and only the covered pages'
+with "Page n of N", a mark dragged under `ByHost` changes none, and no
+`ChangeSet` drives a cache.
+
+`render_reads` is what the page draws from, as slots: under
+`content_only` exactly `Page(p)`; otherwise `Page`, `PageAnnots` when
+annotations or widgets are drawn, `Annot` for each drawn annotation not
+hidden or dragged, `Field` for each widget's terminal, `Form`,
+`Generator(g)` for every generator of the state when generators are drawn
+(one whose pages widen to take the page in draws on it), `Page(q)` for
+the page a drawn link leads to (a replace of it leaves the link leading
+nowhere), and `Order` when a generator on the page that the file doesn't
+draw numbers pages or a drawn link is on it; never `Geom`.
+`Tx::read_render(p, inputs)` notes them as the transaction's decision
+reads: an OCR flush and blank review's delete under `content_only`, a
+plugin's recognition likewise (as free functions, `render_reads`, into
+`HostState`), and a plugin's render and, from slice 14, its text under
+its own inputs. Two changes still don't conflict with such a read: a
+generator added after it, whose id no read could name, and a page that a
+link leading nowhere comes to lead to again by a replace (the link's
+target showing again without an order change); both change the key.
+
+### The realizer
+
+`Realizer::view` takes the key and asks whether the page is
+**untouched**: copy 0 of its base page at that page's own object, with
+its boxes (its turn is the job's), nothing drawn over it that the inputs
+draw (recognized text with `ocr_over`; the header with `generators`,
+where its file doesn't draw it), and, as far as the render's flags draw
+them, its base page's annotations as they are: each drawn record as read
+from its own entry, none hidden or dragged, no entry left out (a record
+deleted, sheaf's marks and their companions under `ByHost`, another
+tool's without `foreign`, a derived copy's widgets, a link that leads
+nowhere), no merged field split, each drawn widget's `/Parent`s (merged,
+its field's) as the model's field tree has them, which a file's `/Kids`
+made where its `/Parent`s say otherwise, and the form's `DA`, `Q` and
+`NeedAppearances` as the source's form has them. A field's value isn't
+counted: no save writes `/V` before M10 slice 9's fills. The predicate is
+O(the annotations on the page); `emission_is_base` (test and fixture
+builds) checks it against the page's overlay compared with the base
+modulo placement (`/Parent`, `/Type`, `/Thumb`; boxes and `/Rotate` as
+effective values; resources against the page facts; annotations' `/P`,
+`/IRT`, `/RT`, `/NM`, `/Popup`; fields' `/Kids`; the AcroForm's
+`/Fields`, `/CO` and `/SigFlags`; the catalog's `/Pages`, `/AcroForm` and
+patched `/OCProperties`), and `realize_corpus` checks the two agree on
+every page of every corpus form and the pool's sample, under each
+consumer's inputs: a disagreement fails, never an exclusion.
+
+An untouched page renders from its source's base engine
+(`EngineKey::Base`), or, when the view turns layers of a layered source
+off, the source's view patch (`SourcePatch`): its catalog alone in a
+section, `/OCProperties` showing every layer but those (`layers::
+ocg_patch`, the layers panel's choice, never saved). Any other page renders
+from its **group**: the pages over 128 consecutive base pages of one
+source (`GROUP`, slice 2's) that aren't untouched, in base order then
+copy, as one overlay (`EngineKey::Group(GroupKey { source, chunk },
+digest)`, the digest of the pages, their keys, the inputs' flags and the
+layers they turn off of the source, so a group whose pages changed is
+another engine, and a comment hidden or dragged on one group's page
+leaves every other group's engine as it was: what's hidden on a group's
+pages is in their keys). A page's `PageView.index` is its base index on a
+base engine and its place in its group on a group's. A state's groups are
+found once a state and inputs (`DocState::draws_alike` compares states in
+O(1)), the inputs known by a digest the realizer keeps for the last eight
+that hide or drag something, matched by their sets' pointers, so Hide
+Comments' set of every other tool's comment is sorted once and not at
+every view; a view is a key and the predicate, cheap enough for the UI
+thread at every frame.
+
+**A base PDFium refuses** has no base engine (Greg, 2026-10-20). The
+corpus's 4422502 is one: a later revision cut out of the file but for its
+trailer, whose `/Root` names a catalog the file hasn't got, and its
+`startxref`, which leads into the middle of the first revision's table.
+PDFium rebuilds the cross-references, takes that last trailer's `/Root`
+and fails with `FPDF_ERR_FORMAT`; sheaf's reader rebuilds them too and
+finds the catalog the file has. A file sheaf reads as sound can be one
+too: sheaf finds `%PDF-` anywhere, PDFium only in the first 1,024 bytes.
+Files PDFium opens pay nothing for this: the pool tells the source when
+an engine over its bytes (its base engine, its view patch, or a group's
+section over a sound base) fails to open with a load error
+(`OpenError::Refused`: any error of PDFium's load but a password; never a
+cancelled request or a closed engine), at that open and at each request
+told of the failure after (`Opener::on_refused`, so another document on
+the same bytes learns it too), and the source keeps it for its life
+(`Source::base_refused`). From then on no page of the source is
+on its base: every page renders from its group, untouched or not, and
+each group is a file of its own, as a damaged base's is; the group's
+digest says which, so an engine the pool remembers as failed isn't asked
+for again under its old key. A render already asked of an engine over
+the source's bytes, by a view made before anything had found them
+refused, renders from the page's view found again (`Req::fallback`, which
+`Views::draw` gives every such view), by the same job, a view's turn
+being the page's from its base page either way; such an overlay asked
+for after the refusal by a view made before it fails as refused without
+opening, so its fallback runs too. The screen, print preview, OCR,
+plugins' renders and the dialogs' previews never see the failure, and as
+a render key is what a page draws, not where from, the image that lands
+is under the key the next frame's view has, so no blank image is kept and
+nothing is asked again. A section PDFium refuses over a base it reads
+would be drawn standalone too; `realize_corpus` fails on one. From slice
+14 a page's text is read the same way (a query's fallback), so text,
+Find, Patterns, selection, plugin text, OCR's "skip pages with text"
+check and Remove Blank Pages work on such a source, and printing it
+prints sheaf's own print file from memory, as every print does (Text and
+printing). What still fails on it is the form type's query, which has no
+page to fall back to and is how the document learns of the refusal, and
+Trim White, which opens the source's bytes in an engine of its own
+(`sheaf_ops::engine_for`) until slice 15. The document's notice says its
+pages are drawn from sheaf's copy.
+
+**The overlay** is an emission (`EmitScope::Pages`, `EmitBase::Overlay`)
+over the source's bytes, with that source the emission's own and no
+derived table, its setup O(its pages) (the state's tables, not walks of
+the document; a visit counter in the tests holds it to that):
+
+- **Scoped, with its keys written out.** The group's pages hang under a
+  new root (`PagesNode(0)`) listing only them, each page's `/Parent` that
+  root and its four inheritable keys written on it, as §11.6 does for
+  pages placed under another node. The catalog is the source's, at its
+  `/Root`'s number, its `/Pages` the root, its `/AcroForm` the group's
+  form or none, its `/OCProperties` patched when the view turns layers off.
+- **The group's form** lists the fields with a widget on its pages and
+  the nodes above them: `/Fields` their roots (in field id order), each
+  node's `/Kids` only those nodes and the widgets on the group's pages,
+  so a one-root form (every XFA-made form's `form1[0]`) loads only the
+  group's fields; when the scoped `/Fields` is the file's, the form
+  dictionary is the file's and the root is rebuilt. A field whose
+  widgets span groups is in each, and `/CO` or a script sees only its
+  group's fields. An inserted file's form has its `DA` and `Q` pushed down
+  onto its roots, as a save pushes them.
+- **`RotatePolicy::KeepBase`:** each page keeps its base page's `/Rotate`
+  as its file writes it, and the render's job adds the turn
+  (`st.render_delta`), so a turned page with recognized text turns once.
+  Rewrite and Append write `/Rotate` from the model (`RotatePolicy::Model`).
+- **What it draws** is what the inputs draw, filtered as above: sheaf's
+  marks only under `ByEngine`; other tools' comments, links and the
+  annotations sheaf doesn't model only with `foreign`; widgets always
+  (the flags decide); a reply isn't threaded to what isn't drawn,
+  connectors carry no `/Dest`, recognized text only with `ocr_over`, the
+  header only with `generators`, links whose target page the document no
+  longer has are left out as a save leaves them, and a reference to a page
+  outside the group is null.
+- **Copy 0 of the source's objects** keeps its own number; one unchanged
+  isn't written (the base has it). Other blobs, and copies, are copied.
+- **A derived copy's page** (a crop, a watermark, a stripped header, until
+  slices 15–17) is the page as the copy has it: the overlay goes over the
+  copy's bytes, its records' widgets drawn from the records, the copy's
+  own widget entries left out, and its form only the records' fields (the
+  copy's own form copies every field of the file, which PDFium would load
+  at the group's first page).
+
+**Assembly.** Each page's delta is its overlay alone
+(`EmitScope::Pages([p])`) without the group's frame, kept by page and
+key, `(PageId, RenderKey)`: a delta names its page's own keys, which a
+duplicate with the same key doesn't share, while duplicates still share
+images by key. The deltas kept weigh at most 32 MB by an estimate that
+counts their objects' allocations (`DELTAS_BYTES`), the oldest let go
+first; a header page's delta is about 11 KB (11.6 KB by the estimate on
+the synthetic 7k, 14.7 KB on the heavy). The frame (`EmitScope::Frame`:
+the root, the catalog, the form) is emitted over all the group's pages
+each time, and the parts are deduplicated by key, the first claim of a
+source number winning (a key that loses its own number is numbered anew
+and its object read again from the source). Each source has one
+**allocator** for the session (`realize::alloc::Numbers`): numbers start
+past `/Size`, every cross-reference stream's own number and every number
+in use (slice 2's 5801985), the first of them the sections' own xref
+stream's; a key keeps its number in every section over that source, and
+none is reused, so the allocator grows by each key its sections ever
+wrote (a few dozen bytes each; past the numbers a file may use, opening a
+group is an error). The section is written by `serialize::append` in the
+base's cross-reference kind, **encrypted with the source's key** (spike
+A: no decrypted copy is made). A **damaged base** (`!Source::base_sound`,
+its table rebuilt; spike B) takes no section: its group is a file of its
+own, unencrypted in memory, its catalog kept to `/Type`, `/Pages`,
+`/AcroForm` and `/OCProperties`, everything its pages reach copied at its
+own number but other pages and page-tree nodes, and an untouched page of
+it under a layers patch goes to its group. Crops are realized (spike C:
+no box edit on the base engine). Realizing runs in the pool's opener, on
+its worker, so a group's assembly delays other renders by its time.
+
+### The engine pool
+
+`EnginePool<K>` (sheaf-render) is one worker thread (`sheaf-render`) for
+every engine of every document: the app makes one for the process
+(`docview::engines()`), and each document's `Views` (sheaf-ops) pairs it
+with that document's realizer. A request names its engine and how to
+open it (`Target { engine, open: Opener, budget }`): the opener gives the
+engine's segments and password (a source's bytes; the bytes and a section
+after them; or a file of its own), read through one `Read + Seek` that
+fills each read across the segments' boundary (`Segments`, slice 2) by
+`PdfiumEngine::open_segments`, with no copy; `Opener::base` or
+`overlay` says whether it's a base engine; and its probe says whether the
+source is still a document's (a `Weak<Source>`). sheaf-render doesn't
+depend on sheaf-doc, so the pool is generic over its key and knows
+nothing of the realizer. Renders (`Req`), queries (`query`, a closure
+run on an engine's page, falling back as a render does, from slice 14;
+`form_type`) and walks over a document's pages (`walk`, slice 14: four
+pages a turn between renders, each on its own engine, several at once,
+ended by dropping the receiver) keep the old worker's ways: priorities,
+and a dropped receiver's render skipped. Requests in a batch for one
+render (an engine's page by one job, drawing and format) render once and
+each is answered with the image, since in a pool of the whole process
+two documents, print preview or a plugin may ask for the same one. An
+opener, a fallback, a render, a query or a walk's page that panics (a
+malformed file) fails its own request, or page, with why, as an engine
+that doesn't open does, and the worker serves every other.
+
+- **Pinned** engines are each pane's, the thumbnail strip's and print
+  preview's visible ones (`docview::Pins`, which tells the pool only
+  when its set changes and unpins when dropped; the strip unpins while
+  the Thumbnails panel is hidden). No budget closes one.
+- **The screen's** group and patch engines are at most 6, pinned ones
+  included (two groups a pane, two panes, two for the strip), and all its
+  engines, base engines too, weigh at most 96 MB; past either the least
+  recently used unpinned engine closes. A base engine is outside the
+  count and grows with every page it loads, so once the screen's engines
+  weigh more than 96 MB with nothing unpinned left to close, the heaviest
+  base engine over 16 MB closes, pinned or not, and opens again at its
+  next request (about every 1,256 distinct pages a lone base engine draws,
+  by the estimate; on the heavy 7k each reopen takes about 0.7 s, its
+  form environment loading every field).
+- **The background's** requests (OCR, blank detection, plugins' text
+  and scans) use any open engine without moving the screen's order, and
+  otherwise open their own, at most 2, so a walk never closes a screen
+  engine; a screen request or a pin makes one of theirs the screen's.
+  Their group and patch engines weigh at most 32 MB. From slice 14 their
+  base engines grow into what the screen's engines leave of 96 MB, and
+  past it the heaviest over 16 MB closes, as the screen's does: held to
+  32 MB, a base engine opened again every ~380 pages (19 times in Find
+  Blank Pages over the synthetic 7k; 6 now).
+- **Walks** (from slice 14) hold the engine they read their last page
+  on: no count or byte rule but the base engines' closes it until the
+  walk reads on another or ends. With pinned engines filling the
+  screen's 6, Find's group engine closed after every page it read and
+  opened again for the next (6,232 opens over the headed synthetic 7k,
+  37.5 s; 49 and 12.1 s held).
+- **Weights** are an estimate, since PDFium reports none: 4 MiB an engine
+  (`OPEN_BYTES`, slice 2's scoped engines measured 0.8–3.6 MB open), 75 KiB
+  a page loaded (`PAGE_BYTES`, the scanned's 74 KB a page) and the bytes of
+  the segments only that engine holds (a section, a file of its own). The
+  heavy's base engine holds about 35 MB once its form has loaded, against
+  the 4 MB counted at its open; the 7k gates measure RSS.
+- **Liveness and failures.** An engine whose probe fails closes at the
+  worker's next turn, and an engine lives as long as its newest
+  requester's source; a process-wide pool shares a `Base(blob)` engine
+  between documents opened on the same bytes, and counts every document's
+  group engines against the 6. An engine that fails to open isn't tried
+  again while its source lives (`Unopened`, wrapping the first failure,
+  so a password error still reads as one); the sweep forgets it once the
+  source is gone. When PDFium refuses an engine's bytes, its opener is
+  told (`Opener::on_refused`), and a render that names where else its
+  page is (`Req::fallback`) renders from there (the realizer's section,
+  above).
+- **Idle,** the worker blocks on its channel; with no walk pending it
+  wakes only for a request.
+
+### The app on views
+
+- **The screen.** `Doc.views` is the document's realizer over the
+  process's pool and `Doc.inputs` the screen's inputs, made again by
+  `Doc::set_inputs` when the comment view is rebuilt, on Hide Comments
+  and Show All, when a comment drag starts or ends, on a layer toggle,
+  and in `Doc::follow`: `hidden` the comments the Comments filter hides,
+  or every other tool's comment under Hide Comments (comments only, by
+  id, never a link or one its file hides itself); `dragging` the comment
+  being adopted; `ocg_off` the primary's layers the Layers panel turns off,
+  once it has changed them (until then a layered file draws under its own
+  default configuration). Each frame finds each nearby page's `PageView`
+  once (`plan_pane`) and renders from that view (`Want`, `Doc::request`,
+  `Views::draw`). Tiles are cached by `(RenderKey, Job)` and previews by
+  `(RenderKey, Rotation)`, the job's turn the pane's and the view's
+  together, since a key leaves the turn out; a page shows the images of
+  the key it was last drawn by at that turn (`Doc.drawn`, by page and
+  turn, so two panes at two turns each keep theirs) until an image of its
+  new key lands, and eviction keeps those. The layout (`pane::Shown { id,
+  geom }`) holds no source page: it's made again only on the order or a
+  geometry, and a page shown from another source page at the same size
+  changes keys only.
+- **Hiding is data.** Nothing is hidden in an engine: the Comments filter,
+  Hide Comments, a drag and the Layers panel set inputs, and the screen's
+  pages whose keys changed re-render. The layers panel makes no decrypted
+  copy and opens no engine of its own: a hidden layer is the source's
+  patch engine.
+- **Print preview** draws each page under `print(markup)` turned as it
+  prints, its images keyed by `(RenderKey, Job)`, the shown page's engine
+  pinned while the dialog is open.
+- **OCR** reads pages through `ViewPages`: each page of the run's snapshot
+  realized under `content_only`, in the background's budget at the lowest
+  priority, turned as it shows; from slice 14 its text length is the
+  text service's (`Text`, the background's budget) under `content_only`,
+  each page read from its own view.
+  sheaf-ocr's `PageSource` takes the `OcrPage` (`text_len(&OcrPage)`,
+  `render(&OcrPage, width)`), one source a run. OCR no longer reads
+  widgets or comments as a page's content.
+- **Plugins.** A call's text is the text service's (from slice 14;
+  `DocContext.text`, until then `TextSource` by source page), and
+  `OcrSource::recognize` and `RenderSource::render` take the call's
+  snapshot and the page: a recognition through `ViewPages`, a render
+  realized under `ByEngine` inputs in the background's budget, in the
+  file's own orientation (docs/plugins.md).
+- **Text, search and opening.** Find, Patterns and text selection read
+  each page from its view through the text service (from slice 14, Text
+  and printing; slice 13 had Find read the primary's base engine, and
+  selection each page's source's). Opening, recovering and
+  inserting open no engine: `DocView::ask_form_type` asks the primary's
+  base engine for its form type at install, which is what first opens it
+  (the XFA-only bar waits for it), and a PDFium failure there becomes the
+  document's notice ("The pages can't be drawn: …") rather than a failed
+  open, or, when PDFium refused the file, that its pages are drawn from
+  sheaf's copy; a password is the model's reader's to ask for.
+  `--timing` prints the engine's open on a line of its own.
+- **The Header & Footer dialog's preview** lowers its op on the current
+  version off the UI thread (a newer lowering supersedes an older one's
+  picture, by a generation token; an op equal to the last isn't lowered
+  again), strips the previewed page's own drawn header as applying would
+  (`derive::strip_stamps_of`), and renders the active pane's page under
+  the screen's inputs through a realizer of its own on the document's
+  pool, so its states don't evict the screen's deltas; it pins nothing,
+  and doesn't draw sheaf's marks, which GPUI draws on the page.
+
+**Deleted:** `RenderHandle` (its thread per source, `open_bytes`, `info`,
+its searches), the old worker's `Msg`, `worker_loop`, `SearchWalk` and
+`DocInfo`; `Renderer::hide_annots` and `set_annots_hidden` and every
+replay of them (at ready, `Doc::take_in` after an insert, the layers
+panel's re-hide, the Comments panel's `sync_foreign_visibility`);
+docview's `drawn_marks`, `hide_renamed`, `marks_by_page` and
+`foreign_hidden`; the layers panel's decrypted in-memory re-save and new
+engine per toggle, and `layers::set_hidden`; the GPUI header and footer
+overlay (`header_footer_elements`); `drop_stale_images`,
+`invalidate_tiles`, `tiles_invalidated`, `Doc.shown` and the relayout on a
+rebase; `Doc.handles`, `Doc::primary`, `PlannedInsert.handle`,
+`with_engines`, `PrintContext.handles`; sheaf-ocr's `PageSource` for the
+handle and by source index. `tests/retired.rs` lists them.
+
+**Numbers** (AMD EPYC 7302P, release; the 7k gate harness):
+
+| Gate | Synthetic | Heavy | Scanned |
+|---|---|---|---|
+| realize an edited page (emit + assemble), a fresh realizer | 2.00 ms | 2.38 ms | 2.01 ms |
+| realize + open + render 1,024 px, an edited page (asserted < 15 ms on the synthetic, < 25 ms on the heavy) | 12.1–12.3 ms (2.3× the warm render) | 21.7–23.4 ms (4.4–4.7×) | 33.5–34.0 ms (1.5×) |
+| engines after 220 groups: weighed, RSS added (asserted ≤ 96 MB) | 28.8 MB, 37.5 MB | 28.8 MB, 62.1 MB | 28.8 MB, 51.1 MB |
+| thumbnail strip after a crop and the header on all 7,000 (asserted ≥ 310 pages/s, ≤ 96 MB weighed and RSS added) | 406–410 pages/s, 80.8 MB, 32.5 MB | 344–346 pages/s, 81.4 MB, 80 MB | 164 pages/s, 80.8 MB, 81.5 MB |
+
+The plan had the heavy's realize + open + render at most 1.7× its warm
+base render, which no design that opens an engine meets (its scoped open
+and cold render alone are 2.9×, slice 2); Greg accepted < 25 ms in its
+place (2026-10-20), asserted beside the synthetic's, the ratio printed
+as information. Making it faster waits for a later perf pass, once the
+algorithm is settled.
+
+`realize_corpus` (ignored; `cargo test -p sheaf-ops --test
+realize_corpus -- --ignored`) edits every corpus form and the pool's
+sample (the 402-file pool sample, 50 encrypted, 50 with leading junk and
+50 whose `startxref` leads nowhere): a header on three pages, a deleted
+comment and a field value where there are some. Its predicate tier checks
+the predicate against the emission on every page under each consumer's
+inputs; its pixel tier compares each edited page and an untouched one,
+appearances only at 1,024 px, with the saved Rewrite. A page passes when
+at most 16 pixels differ (`ANTI_ALIASING_PX`, Greg, 2026-10-20): slice 13
+found 1 to 9 pixels of PDFium's anti-aliasing at a picture's or a shape's
+edge on 6 or 7 of 13,289 pages, on pages whose dictionary and content
+streams are the same in both files, and which pages differ changes with
+what the process drew before (PDFium's process-wide caches). Every page
+that differs at all is printed with its count, and the class table counts
+those within the allowance apart. A base PDFium refuses is told so when
+an engine over its bytes fails to open, as the pool's openers tell it,
+and its pages are viewed again, each from its group; a section refused
+over a base PDFium reads fails instead. `SHEAF_REALIZE_ONLY`, corpus
+paths comma-separated, narrows a run to those files by hand (set but
+naming none, it fails).
+
+## Text and printing (M10.5 slice 14)
+
+A page's text is read from what it draws, as its pixels are: the text
+service reads each page's characters from the engine and page its view
+renders from, under the inputs its caller passes, so the screen, the
+file and the text agree (§10.5 of `todos/m10.5-edit-api.md`). An
+inserted file's page, a duplicate, a crop, a page with recognized text
+or a header not yet saved, and every page of a source PDFium refuses have
+the text they draw. Printing, print preview and page images come from
+bytes in memory, and nothing reaches disk (§10.6).
+
+```rust
+pub trait TextService: Send + Sync {                  // sheaf_doc, blocking
+    fn chars(&self, snap: &Snapshot, page: PageId, o: &TextOpts) -> Result<Arc<PageChars>>;
+}
+pub struct TextOpts { pub inputs: ViewInputs }
+pub enum Query { Literal { query: String, match_case: bool }, Pattern(Arc<Regex>) }
+impl PageChars { pub fn find(&self, q: &Query) -> Vec<TextHit>; pub fn text_len(&self) -> usize; }
+pub struct Text { views: Views, budget: Budget, .. } // sheaf_ops::text, impl TextService
+impl Text {
+    pub fn chars(&self, st, page, inputs) -> oneshot::Receiver<Result<Arc<PageChars>>>;
+    pub fn cached(&self, st, page, inputs) -> Option<Arc<PageChars>>; // a paint's
+    pub fn search(&self, st, q: Query, inputs) -> mpsc::UnboundedReceiver<Found>;
+}
+impl<K> EnginePool<K> {                               // sheaf_render::pool
+    pub fn query<T>(&self, target, page, fallback: Option<Fallback<K>>,
+                    f: impl FnOnce(&PdfiumEngine, PageIndex) -> Result<T>) -> oneshot::Receiver<Result<T>>;
+    pub fn walk<T: From<Walked>>(&self, count, item, work, tx: UnboundedSender<T>);
+}
+```
+
+### Characters in PageSpace
+
+`Renderer::page_chars` gives each character PDFium extracts with its
+loose box as PDFium has it, in the page's user space (PageSpace, §5), and
+the angle it's drawn at, counter-clockwise (PDFium's
+`FPDFText_GetCharAngle` is clockwise, and is turned around); a character
+PDFium generates (a space between words, a line break) has no box. The
+device 16 times the page's size that mapped text into the displayed
+frame is gone. `PageChars::from_engine` reads lines in the frame most
+of the boxed characters are drawn upright in (`upright`, the nearest
+quarter turn, the lesser on a tie, R0 with none), not by the page's
+`/Rotate`, so text that runs down the page selects a line at a time, and
+a page's characters don't depend on its `/Rotate` or crop box: the same
+for a page and its turned or cropped copy (its render key still has its
+boxes). A page whose text reads upright as it shows reads as before.
+`pdfium::frames` checks every turned or offset corpus page's character
+boxes, mapped through the page's `to_view`, against PDFium's own
+page-to-device mapping within 1/16 pt (on a plain page the frame is the
+y flip `to_view_is_pdfium_s_page_to_device_on_every_page` checks), and
+sheaf-ops' text tests check each turned or offset corpus page
+duplicated, read from its group's realization, against its source page
+(780,238 characters, none apart, asserted as a floor over the full
+corpus).
+
+`PageChars::find` matches the text as `text()` reads it: words apart by
+a space, lines by a line break. A literal's words match where the
+page's are apart by any whitespace, a line break, two spaces or a
+no-break space, as `FPDFText_Find`'s did, so a phrase wrapped onto the
+next line is found, a rect on each line. It's one regex, compiled once
+per search (`Query::literal`): the query's words escaped and joined by
+`\s+`, case-insensitive unless it matches case, and its matches don't
+overlap. A
+pattern runs over the characters as they read and keeps its capture
+groups; a match of separators alone isn't one. Each hit has a rect a
+line, in PageSpace. This replaces PDFium's `FPDFText_Find` and the OCR
+layers' search beside it, so every consumer matches the same way.
+
+### The text service
+
+`Text` (sheaf-ops) is one document's text in one budget: the app's
+`Doc.text` in the screen's, plugins' and blank detection's in the
+background's. A page's characters are read on the pool's worker by a
+query (`EnginePool::query`): its view (`Views::view`), then where that
+view reads it (`Views::locate`: the engine, the page's index there, and
+the fallback a render of it would have), then `page_chars` and
+`PageChars::from_engine` on the engine. What's read is kept by the page's
+render key, the last 64 pages (`CHARS_KEPT`, the oldest read let go
+first): a page that draws the same under the same inputs, in this state
+or another, or as a duplicate, is read once, and anything it draws
+changing changes its key, so an edit reads it again. §10.5's cache of
+untouched pages by source and index is this one, since an untouched
+page's key is its base page's. `Text::cached` is the paint's, which can't
+wait; `TextService::chars` blocks, for a thread that may wait on the pool
+(a plugin call's, blank detection's), never the worker's.
+
+A query is the pool's generic request: a closure run on the page of the
+engine, given the page it reads. It falls back as a render does: when
+PDFium refuses the engine's bytes, the fallback runs once on the worker
+and the closure reads the page of the engine it names (the page's group,
+a file of its own), so a source PDFium refuses has text, through its
+groups, even for a page viewed on its base before the refusal was known.
+A password error doesn't fall back, and a fallback that panics fails its
+query alone. The form type's query has no page and no fallback: it's how
+a document learns PDFium refused its file.
+
+What each consumer reads under (`TextOpts.inputs`, §10.4):
+
+| Consumer | Inputs | Budget |
+|---|---|---|
+| Find and Patterns, selection, calculator picks, text markup (the app's `Doc.text`) | the screen's (`Doc.inputs`) | the screen's |
+| A plugin's `page-text`, `search`, `pattern-search`, `text-boxes` and `words` | `plugin_text()`, the page's text as the saved file will draw it (§14.3) | the background's, a `Text` a call |
+| OCR's "skip pages with text" (`ViewPages::text_len`) | `content_only()` | the background's |
+| Blank detection's text | `content_only()` with `ocr_over` | the background's |
+
+PDFium extracts a page's text from its content, never from a widget's
+appearance, so no consumer reads a form field's value as text; §10.5's
+`fields` (fields' display text, M10 slice 14) has no use yet, and
+`TextOpts` names only the inputs.
+
+### Find and Patterns
+
+A search walks the document's own order on the pool's worker
+(`Text::search` over `EnginePool::walk`), four pages a turn between
+renders: at each position the walk views the page and locates it, then
+reads its characters on that page's engine (falling back as a query
+does), runs `find`, and sends the page's hits with its position and id
+(`Found::Hits`), then how far it has got (`Found::Scanned`), and `Done`
+last, on one channel so a page's hits come before its `Scanned`. Each page
+is read where its view is: an untouched page on its source's base engine,
+an edited, inserted or duplicated one on its group's realization, a
+crop's on its derived copy (until slice 15 makes crop geometry). A walk
+keeps nothing of what it reads (a 7k walk never evicts the screen's
+selection characters), holds its state until it's done or its receiver
+is dropped (the app drops it on a new search and at close), and passes
+over, logged, a page whose engine doesn't open or whose read fails or
+panics. It holds the engine it reads on, so the screen's count never
+closes a group's engine between two of its pages. The worker blocks on its channel when no walk is pending. The app
+reads under the screen's inputs, so a header not yet saved and recognized
+text are found, and hits are in PageSpace, by `PageId` and position
+(`Hit::on`).
+
+### The app's text
+
+Text selection, calculator picks and markup dragged over text go through
+`DocView::with_chars`, which answers from `Doc.text`'s cache or asks for
+the page and calls back when it's read; an answer whose page's render
+key changed while it was read (an edit in between) is read again as the
+page is now. A selection keeps the characters it was made in
+(`TextSel.chars`), and paints, copies and marks up from them, so an edit
+that changes the page's render key leaves it working: a comment on it
+hidden, or a page deleted under a "Page <<1>> of <<N>>" header (a turn
+changes the key only where a generator is laid out in the turned page;
+characters are in PageSpace). On a page with recognized text and a
+header, the text reads in draw order: the page's own, then the
+recognized words, then the header.
+
+When PDFium refuses the primary, the notice says "PDFium can't read this
+file as saved, so its pages are drawn from sheaf's copy": Find, Patterns,
+selection and plugin text read its pages from their groups.
+
+### Plugins, blank detection and OCR
+
+- **Plugins.** A call's `DocContext.text` is a `TextService`, a `Text` of
+  its own in the background's budget. Its text calls read under
+  `plugin_text()`, what of `plugin()` PDFium reads as text, and record
+  that page's `render_reads` under it (the page, every generator, and the
+  order where a page-numbering header calls for it), so an unsaved
+  header's edit conflicts with a call that read the page's text and a
+  comment's doesn't; `recognize` still reads `content_only()`. Matches go out through the
+  page's 0.3 frame (`to_frame`), a rect a plugin passes to `text-boxes`
+  coming back through its inverse. The OCR layer's own special cases
+  (searching an unsaved layer beside PDFium, `ocr_text` branches) are
+  gone: the realization draws the layer.
+- **Blank detection** (`blank::find`, Find Blank Pages and `sheaf
+  remove-blanks`) walks the wanted pages in the document's order through
+  the document's views: annotations first as before, then the page's text
+  under `content_only` with `ocr_over` (recognized text not yet saved
+  still counts, as it did; a header never does), then its pixels under
+  `content_only`, rendered at about 60 dpi by the pool in the
+  background's budget, with `progress.check` between pages. A failed text
+  read counts as no text, so the pixels decide. A page at a time, each a
+  query: over the synthetic 7k 12.3 s and 6 base engine opens, beside
+  10.4 s for its old engine's `page_text` (the heavy's pages all have
+  annotations, so none is read). It no longer opens an
+  engine of its own (`engine_for` remains for Trim White until slice 15);
+  the command line, which has no process pool, makes views of its own
+  (`Views::start`).
+- **OCR's "skip pages with text"** reads each page's text length through
+  `ViewPages`' `Text` under `content_only`, so a page of a refused source
+  is checked through its group rather than failing.
+
+### Printing and page images
+
+The print file (`save::print_pdf`) is made in memory and handed to the
+spooler from there (`sheaf_print::submit(job, Arc<[u8]>)`): CUPS runs
+`lp <options> -`, reading the job on its stdin from a thread of its own
+while `lp`'s output is read (a failed `lp` says why first; a write that
+fails after `lp` succeeded fails the job), and GDI opens the bytes with
+`PdfiumEngine::open_bytes`. That was `PdfiumEngine::open(path)`'s last
+use, and it's gone: PDFium opens only bytes. Print preview draws through
+the views (slice 13), and image export (PNG, TIFF) renders print_pdf's
+bytes on an engine of its own, already in memory before this slice; the
+only file it writes is its output's, the TIFF through a `.part` beside
+it. A child-process test runs print, print preview and both exports with
+`TMPDIR` an empty, unwritable directory and a fake `lp` reading its
+stdin. A source PDFium refuses prints: its print file is sheaf's own.
+
+**Deleted:** the app's own character cache (`CharsKey`, `chars_key`,
+`cache_chars`, `CACHED_PAGES`, `Doc.page_chars`) and
+`PageChars::from_layer`; Find on the primary's base engine
+(`Doc::search`, `index_of_source_page`, `layer_hits`,
+`merge_source_hits`, `Matcher`, `SearchEvent`, the pool's one-engine
+search); the OCR layers' own search (`text_layer::search`,
+`pattern_search` and their helpers, `TextLayer::text` and
+`boxes_in_rect`); the 16× device and the queries through it
+(`Renderer::search_page`, `pattern_search_page`, `text_boxes_in_rect`,
+`SearchHit`, `sheaf_render::Rect`) and the pool's text queries
+(`page_chars`, `page_text`, `page_text_len` and the rest, now `query`);
+plugins' `TextSource`, `TextMatch` and `EngineText`; blank detection's
+own engine; the print temp file and `PdfiumEngine::open(path)`.
+`tests/retired.rs` lists them, but for `sheaf_render::Rect`, whose name
+`geom::Rect` still has.
+
+**Numbers** (AMD EPYC 7302P, release; the 7k gate harness, one run each,
+no baseline or gate):
+
+| Find "Draft" over every page, the screen's budget and inputs | Synthetic | Heavy |
+|---|---|---|
+| as opened (no hit; every page on the base engine) | 11.4 s, 612 pages/s, 6 engines opened | 8.0 s, 874 pages/s, 6 engines opened |
+| a header on every page (7,000 hits, each page from its group) | 12.2 s, 574 pages/s, 55 engines opened | 9.1 s, 773 pages/s, 55 engines opened |
+
+As opened, the base engine opens six times: once, then again each time
+the pages it has loaded take the screen's engines past 96 MB (about every
+1,200 pages, as the pool's bound says); headed, each of the 55 groups'
+engines opens once and the base engine never. Reading a page's
+characters with their boxes is about 1.2× PDFium's own `FPDFText_Find`
+on the same page (one engine, no pool: 11.1 s against 9.0–9.3 s for the
+synthetic's 7,000 pages, 7.5 s against 6.2 s for the heavy's), since it
+asks PDFium four things a character.
+
 ## Non-goals of this design
 
 - Collaborative / concurrent editing. Single writer, single history.
@@ -2695,8 +3415,8 @@ prints today's numbers on the three fixtures beside slice 2's baselines.
   snapshot it may would leave, `untrimmable_bytes`, is over it, versions
   are pruned one at a time, weighed again after each, before snapshots
   are dropped), and a blob goes with the last record holding it (an
-  engine opened on it keeps its bytes until M10.5 slice 13's engine
-  pool closes it). A policy weighs undone sources but not `blob_bytes`,
+  engine the pool opened on it closes, and lets its bytes go, at the
+  pool's next turn: M10.5 slice 13). A policy weighs undone sources but not `blob_bytes`,
   most of which is the files the document shows, which no pruning frees
   (slice 12's plan said `step_bytes + blob_bytes`, which would have
   pruned every version of a document opened on a 500 MB scan); so a
@@ -2758,9 +3478,11 @@ put with the page's `PageDef`.
   group (`Document::begin_group(GroupKind::Ocr)`, which takes commits of
   `Actor::Job(JobKind::Ocr)` only, which may only set and clear OCR text;
   see One funnel and the history budget). Each flush is a transaction
-  made on the version the run began on, which its pages were rendered
-  from, that reads each page's slot (`Tx::read(Key::Page(p))`, until
-  slice 13's `read_render`) and lands by value (`Stale::Validate`) in the
+  made on the version the run began on, whose snapshot its pages are
+  drawn from (`ViewPages`, their content alone, slice 13), that reads
+  each page as OCR read it
+  (`Tx::read_render(p, &ViewInputs::content_only())`: what the page
+  shows, from M10.5 slice 13) and lands by value (`Stale::Validate`) in the
   group: it amends the group's version when that's the current one, has
   nothing after it, was never saved and isn't being saved (sealed, see
   Saving), and pushes a version "… (continued)" otherwise. An amend
@@ -2776,12 +3498,12 @@ put with the page's `PageDef`.
   Undoing the run, or jumping away from it, makes its next flush
   `GroupEnded`: the run stops ("OCR stopped: its results were undone")
   rather than put undone results back.
-- **Search.** PDFium can't see unsaved layers, so Find and Patterns run the
-  same literal/regex search over the pages' `OcrText` layers
-  (`text_layer::search`, `pattern_search`, until slice 14's text service)
-  and merge the hits with PDFium's, dropping PDFium's for any page that
-  has a layer. Hits are addressed by `PageId`, so inserted pages and
-  reordered pages work too.
+- **Search.** An unsaved layer is drawn into its page's realization,
+  invisible, as a save writes it, so Find, Patterns, selection, plugins
+  and blank detection read its words from the page as they read any text
+  (M10.5 slice 14's text service, under inputs with `ocr_over`; until
+  then a search of the layers merged beside PDFium's). Hits are addressed
+  by `PageId` and position, so inserted and reordered pages work too.
 
 ## Open questions
 

@@ -13,8 +13,8 @@ use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::prim::Key;
 use sheaf_doc::tx::mark_kind;
 use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Bookmark, Box2, DestView, EditError, OutlineId, PageId, Pt,
-    Snapshot, TextHit,
+    Annot, AnnotId, AnnotKind, Bookmark, Box2, DestView, EditError, OutlineId, PageChars, PageId,
+    Pt, Query, Snapshot, TextHit, TextOpts, ViewInputs,
 };
 use sheaf_edit::{
     Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Local, MarkPatch, NewMark, Op, PageSel,
@@ -25,7 +25,7 @@ use wasmtime::component::Resource;
 
 use crate::progress::Task;
 use crate::render::{MAX_DPI, MAX_LIVE_IMAGES, PIXEL_BUDGET, PageRenderer, RenderedImage};
-use crate::runtime::{DocEvent, EditBatch, Held, HostState, TextMatch};
+use crate::runtime::{DocEvent, EditBatch, Held, HostState};
 use crate::ui::{self, BuiltinPanel, ShowPanel};
 use api::types as w;
 use api::ui as wu;
@@ -107,12 +107,14 @@ pub(crate) fn to_frame(snap: &Snapshot, page: PageId) -> Affine {
     page_frame(snap, page).map_or(Affine::IDENTITY, |g| g.to_view())
 }
 
-/// An OCR layer's hits as matches in its page's frame (`to_view`).
-fn layer_matches(hits: Vec<TextHit>, to_view: Affine) -> Vec<TextMatch> {
+/// A page's matches in its frame (`to_view`).
+fn matches_to_wit(hits: Vec<TextHit>, to_view: Affine) -> Vec<w::TextMatch> {
     hits.into_iter()
-        .map(|h| TextMatch {
+        .map(|h| w::TextMatch {
             text: h.text,
-            rects: h.rects.into_iter().map(|r| to_view.apply_box(r)).collect(),
+            rects: (h.rects.into_iter())
+                .map(|r| box_to_wit(to_view.apply_box(r)))
+                .collect(),
             groups: h.groups,
         })
         .collect()
@@ -616,14 +618,6 @@ pub(crate) fn event_to_wit(host: &HostState, e: &DocEvent) -> w::DocEvent {
     }
 }
 
-pub(crate) fn text_match_to_wit(m: TextMatch) -> w::TextMatch {
-    w::TextMatch {
-        text: m.text,
-        rects: m.rects.into_iter().map(box_to_wit).collect(),
-        groups: m.groups,
-    }
-}
-
 pub(crate) fn form_from_wit(f: wu::Form) -> ui::Form {
     ui::Form {
         title: f.title,
@@ -774,15 +768,22 @@ impl api::document::Host for HostState {
     }
 }
 
+/// Page `page` of the call's base, its text as the file will draw it: an
+/// unsaved header and recognized text with it, and no annotation's or
+/// field's text, which PDFium never reads as a page's text (M10.5 §14.3;
+/// [`ViewInputs::plugin_text`]). Read: what it draws so. With the map into
+/// its frame, the API's page coordinates.
+fn drawn_text(host: &mut HostState, page: u64) -> Result<(Arc<PageChars>, Affine), String> {
+    let inputs = ViewInputs::plugin_text();
+    let (d, snap, id) = host.page_base(page, &inputs)?;
+    let chars = d.text.chars(snap, id, &TextOpts { inputs });
+    Ok((chars.map_err(|e| format!("{e:#}"))?, to_frame(snap, id)))
+}
+
 impl api::text::Host for HostState {
     fn page_text(&mut self, page: u64) -> Result<String, String> {
-        let (d, snap, id, base) = self.page_base(page)?;
-        if let Some(layer) = snap.state.ocr_text(id) {
-            return Ok(layer.text());
-        }
-        d.text
-            .page_text(base.src.id(), base.index)
-            .map_err(|e| format!("{e:#}"))
+        let (chars, _) = drawn_text(self, page)?;
+        Ok(chars.text(0, chars.len()))
     }
 
     fn pattern_search(
@@ -795,18 +796,9 @@ impl api::text::Host for HostState {
             .size_limit(1 << 20)
             .build()
             .map_err(|e| e.to_string())?;
-        let (d, snap, id, base) = self.page_base(page)?;
-        let found: Vec<TextMatch> = match snap.state.ocr_text(id) {
-            Some(layer) => layer_matches(
-                sheaf_doc::text_layer::pattern_search(layer, &re),
-                to_frame(snap, id),
-            ),
-            None => d
-                .text
-                .pattern_search(base.src.id(), base.index, &Arc::new(re))
-                .map_err(|e| format!("{e:#}"))?,
-        };
-        Ok(found.into_iter().map(text_match_to_wit).collect())
+        let (chars, to_view) = drawn_text(self, page)?;
+        let found = chars.find(&Query::Pattern(Arc::new(re)));
+        Ok(matches_to_wit(found, to_view))
     }
 
     fn search(
@@ -815,18 +807,10 @@ impl api::text::Host for HostState {
         query: String,
         match_case: bool,
     ) -> Result<Vec<api::types::TextMatch>, String> {
-        let (d, snap, id, base) = self.page_base(page)?;
-        let found: Vec<TextMatch> = match snap.state.ocr_text(id) {
-            Some(layer) => layer_matches(
-                sheaf_doc::text_layer::search(layer, &query, match_case),
-                to_frame(snap, id),
-            ),
-            None => d
-                .text
-                .search(base.src.id(), base.index, &query, match_case)
-                .map_err(|e| format!("{e:#}"))?,
-        };
-        Ok(found.into_iter().map(text_match_to_wit).collect())
+        let query = Query::literal(&query, match_case).map_err(|e| e.to_string())?;
+        let (chars, to_view) = drawn_text(self, page)?;
+        let found = chars.find(&query);
+        Ok(matches_to_wit(found, to_view))
     }
 
     fn words(
@@ -836,32 +820,16 @@ impl api::text::Host for HostState {
     ) -> Result<Vec<api::types::TextMatch>, String> {
         static WORD: std::sync::LazyLock<Arc<regex::Regex>> =
             std::sync::LazyLock::new(|| Arc::new(regex::Regex::new(r"\S+").unwrap()));
-        let (d, snap, id, base) = self.page_base(page)?;
-        let words: Vec<TextMatch> = match snap.state.ocr_text(id) {
-            Some(layer) => layer_matches(
-                sheaf_doc::text_layer::pattern_search(layer, &WORD),
-                to_frame(snap, id),
-            ),
-            None => d
-                .text
-                .pattern_search(base.src.id(), base.index, &WORD)
-                .map_err(|e| format!("{e:#}"))?,
-        };
-        let within = |m: &TextMatch| match rect {
+        let (chars, to_view) = drawn_text(self, page)?;
+        let words = matches_to_wit(chars.find(&Query::Pattern(WORD.clone())), to_view);
+        let within = |m: &w::TextMatch| match rect {
             None => true,
             Some(r) => m.rects.first().is_some_and(|b| {
                 let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
                 cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
             }),
         };
-        Ok(words
-            .into_iter()
-            .filter(within)
-            .map(|mut m| {
-                m.groups.clear();
-                text_match_to_wit(m)
-            })
-            .collect())
+        Ok(words.into_iter().filter(within).collect())
     }
 
     fn text_boxes(
@@ -869,24 +837,11 @@ impl api::text::Host for HostState {
         page: u64,
         rect: api::types::Box2,
     ) -> Result<Vec<api::types::Box2>, String> {
-        let (d, snap, id, base) = self.page_base(page)?;
-        let rect = box_from_wit(rect);
-        let boxes = match snap.state.ocr_text(id) {
-            // `rect` is in the page's frame, the layer in PageSpace.
-            Some(layer) => {
-                let to_view = to_frame(snap, id);
-                layer
-                    .boxes_in_rect(to_view.inverse().apply_box(rect))
-                    .into_iter()
-                    .map(|b| to_view.apply_box(b))
-                    .collect()
-            }
-            None => d
-                .text
-                .text_boxes(base.src.id(), base.index, rect)
-                .map_err(|e| format!("{e:#}"))?,
-        };
-        Ok(boxes.into_iter().map(box_to_wit).collect())
+        let (chars, to_view) = drawn_text(self, page)?;
+        // `rect` is in the page's frame, the characters in PageSpace.
+        let rect = to_view.inverse().apply_box(box_from_wit(rect));
+        let boxes = chars.rects_in(rect).into_iter();
+        Ok(boxes.map(|b| box_to_wit(to_view.apply_box(b))).collect())
     }
 }
 
@@ -913,13 +868,11 @@ impl api::ocr::Host for HostState {
         page: u64,
         options: api::ocr::OcrOptions,
     ) -> Result<api::ocr::TextLayer, String> {
-        let (d, snap, id, base) = self.page_base(page)?;
+        let (d, snap, id) = self.page_base(page, &ViewInputs::content_only())?;
         let ocr = d.ocr.clone().ok_or("OCR isn't available")?;
-        let geom = snap.geom(id);
-        let render = snap.render_delta(id);
         let to_view = to_frame(snap, id);
         let started = Instant::now();
-        let layer = ocr.recognize(id, base, &geom, render, options.language, options.dpi);
+        let layer = ocr.recognize(snap, id, options.language, options.dpi);
         // The engine's time isn't the plugin's.
         self.deadline += started.elapsed();
         layer
@@ -1020,20 +973,20 @@ impl api::render::Host for HostState {}
 impl api::render::HostPageRenderer for HostState {
     fn new(&mut self, page: u64) -> Resource<PageRenderer> {
         // An unknown page still gets a handle; `render` reports it. Read:
-        // what the page shows.
+        // what the page draws as the file will, sheaf's marks with it
+        // (M10.5 §14.3).
         let page = PageId(page);
-        let base = (self.base()).map(|s| Some(s.state.def(page)?.base.clone()));
-        if base.is_some() {
-            self.read([Key::Page(page)]);
-        }
-        let base = base.flatten();
-        let size = base.as_ref().map_or((0.0, 0.0), |b| {
+        let inputs = ViewInputs::plugin();
+        let reads = (self.base()).map(|s| sheaf_doc::render_reads(&s.state, page, &inputs));
+        self.read(reads.into_iter().flatten());
+        let base = (self.base()).and_then(|s| Some(&s.state.def(page)?.base));
+        let size = base.map_or((0.0, 0.0), |b| {
             let s = b.src.page_size(b.index);
             (s.width, s.height)
         });
         let r = self
             .table
-            .push(PageRenderer { page, base, size })
+            .push(PageRenderer { page, size })
             .expect("resource table full");
         self.render_handles.renderers.push(r.rep());
         r
@@ -1048,16 +1001,16 @@ impl api::render::HostPageRenderer for HostState {
         this: Resource<PageRenderer>,
         options: api::render::RenderOptions,
     ) -> Result<Resource<RenderedImage>, String> {
-        let (page, shows, (pw, ph)) = {
+        let (page, (pw, ph)) = {
             let r = self.table.get(&this).map_err(|e| e.to_string())?;
-            let shows = r.base.as_ref().map(|b| (b.src.id(), b.index));
-            (r.page, shows, r.size)
+            (r.page, r.size)
         };
-        let Some((shown, index)) = shows.filter(|_| pw > 0.0) else {
+        if pw <= 0.0 {
             return Err(format!("no page {}", page.0));
-        };
+        }
         let d = self.doc().ok_or("no document is open")?;
         let source = d.render.clone().ok_or("rendering isn't available")?;
+        let snap = self.base().ok_or("no document is open")?;
         let dpi = options.dpi.clamp(1, MAX_DPI);
         let scale = dpi as f32 / 72.0;
         let (page_w, page_h) = (
@@ -1094,7 +1047,7 @@ impl api::render::HostPageRenderer for HostState {
         }
         let started = Instant::now();
         let rgba = source
-            .render(shown, index, page_w, page_h, (x0, y0, w, h))
+            .render(snap, page, page_w, page_h, (x0, y0, w, h))
             .map_err(|e| format!("{e:#}"));
         // Rendering is the host's time, not the plugin's.
         self.deadline += started.elapsed();

@@ -11,20 +11,33 @@
 //! The rest are rendered at about 60 dpi and judged by their pixels with
 //! [`sheaf_image::blank`], which the scan pipeline also uses on cleaned
 //! photos.
+//!
+//! A page is read as it's drawn, through the document's views, with its
+//! content alone (M10.5 §10.4): an unsaved header or watermark never
+//! makes a page content. Its text is read with recognized text not yet
+//! saved, which is the page's too, and its pixels without, recognized
+//! text being invisible. An edited, inserted or duplicated page is read
+//! from its realization, and so is every page of a source PDFium refuses.
+//! The engines open in the background's budget, so a search never closes
+//! one the screen shows.
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+use futures::executor::block_on;
 use in_progress::{NoProgress, Progress};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::{Actor, CommitOpts, Document, PAGES, PageId, Snapshot};
+use sheaf_doc::realize::ViewInputs;
+use sheaf_doc::{Actor, CommitOpts, Document, PAGES, PageId, Snapshot, TextOpts, TextService};
 use sheaf_edit::{BookmarkRef, Op, PageRef, PageSel, Rotation, Sibling};
 use sheaf_image::blank::{Sensitivity, Verdict, is_blank};
 use sheaf_image::raster::PixelFormat;
-use sheaf_render::PageIndex;
-use sheaf_render::{Job, Renderer};
+use sheaf_render::{Budget, Job};
+
+use crate::text::Text;
+use crate::views::Views;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -102,9 +115,11 @@ fn text_says(text: &str) -> Says {
     Says::Content
 }
 
-/// The blank pages among `indexes` (0-based; none: every page).
+/// The blank pages among `indexes` (0-based; none: every page), in order,
+/// each read as `views` draw it.
 pub fn find(
     snap: &Snapshot,
+    views: &Views,
     indexes: Option<&[usize]>,
     params: BlankParams,
     progress: &dyn Progress,
@@ -120,71 +135,68 @@ pub fn find(
     };
     progress.set_total(Some(wanted.len() as u64), PAGES);
     let pages: Vec<_> = st.pages().collect();
-    let by_source = crate::by_source(wanted.iter().map(|&i| {
-        let (id, def, _) = pages[i];
-        (def.base.src.clone(), (i, id, def.base.index))
-    }));
+    let text = Text::new(views.clone(), Budget::Background);
+    let content = ViewInputs::content_only();
+    let read = TextOpts {
+        inputs: ViewInputs {
+            ocr_over: true,
+            ..content.clone()
+        },
+    };
     let mut out = Vec::new();
-    let mut done = 0;
-    for (src, list) in by_source {
-        let engine = crate::engine_for(&src)?;
-        for (i, id, index) in list {
-            progress.check()?;
-            done += 1;
-            progress.set(done);
-            // sheaf's marks, others' annotations, links, fields.
-            if st.annots_on(id).next().is_some() {
-                continue;
-            }
-            let has_annots = (src.page(index)).is_some_and(|page| !page.annots.is_empty());
-            if has_annots {
-                continue;
-            }
-            // Text, from the file and any unsaved OCR.
-            let mut text = engine.page_text(PageIndex(index)).unwrap_or_default();
-            if let Some(layer) = st.ocr_text(id) {
-                text.push(' ');
-                text.push_str(&layer.text());
-            }
-            match text_says(&text) {
-                Says::IntentionallyBlank => {
-                    if !params.keep_intentional {
-                        out.push(Candidate {
-                            index: i,
-                            id,
-                            ink: 0.0,
-                            reason: Reason::IntentionallyBlank,
-                        });
-                    }
-                    continue;
-                }
-                Says::Content => continue,
-                Says::Nothing => {}
-            }
-            let size = src.page_size(index);
-            let raster = engine.render(
-                PageIndex(index),
-                Job::Page {
-                    width: (size.width * 60.0 / 72.0).round().max(16.0) as u32,
-                    rotation: Rotation::R0,
-                },
-                PixelFormat::Rgba,
-            )?;
-            let gray = raster.to_gray().context("short render")?;
-            let (reason, ink) = match is_blank(&gray, params.sensitivity) {
-                Verdict::Blank { ink } => (Reason::Blank, ink),
-                Verdict::NearlyBlank { ink } => (Reason::NearlyBlank, ink),
-                Verdict::NotBlank { .. } => continue,
-            };
-            out.push(Candidate {
-                index: i,
-                id,
-                ink,
-                reason,
-            });
+    for (done, i) in wanted.into_iter().enumerate() {
+        progress.check()?;
+        progress.set(done as u64 + 1);
+        let (id, def, _) = pages[i];
+        // sheaf's marks, others' annotations, links, fields.
+        if st.annots_on(id).next().is_some() {
+            continue;
         }
+        let base = &def.base;
+        let has_annots = (base.src.page(base.index)).is_some_and(|page| !page.annots.is_empty());
+        if has_annots {
+            continue;
+        }
+        // Text, the file's and any unsaved OCR's, never a header's.
+        let says = (TextService::chars(&text, snap, id, &read))
+            .map(|chars| text_says(&chars.text(0, chars.len())))
+            .unwrap_or(Says::Nothing);
+        match says {
+            Says::IntentionallyBlank => {
+                if !params.keep_intentional {
+                    out.push(Candidate {
+                        index: i,
+                        id,
+                        ink: 0.0,
+                        reason: Reason::IntentionallyBlank,
+                    });
+                }
+                continue;
+            }
+            Says::Content => continue,
+            Says::Nothing => {}
+        }
+        let shown = snap.geom(id).shown();
+        let job = Job::Page {
+            width: (shown.width * 60.0 / 72.0).round().max(16.0) as u32,
+            rotation: Rotation::R0,
+        };
+        let (format, budget) = (PixelFormat::Rgba, Budget::Background);
+        let rx = views.render(st, id, &content, job, format, u8::MAX, budget);
+        let raster = block_on(rx).context("the render thread is gone")??.raster;
+        let gray = raster.to_gray().context("short render")?;
+        let (reason, ink) = match is_blank(&gray, params.sensitivity) {
+            Verdict::Blank { ink } => (Reason::Blank, ink),
+            Verdict::NearlyBlank { ink } => (Reason::NearlyBlank, ink),
+            Verdict::NotBlank { .. } => continue,
+        };
+        out.push(Candidate {
+            index: i,
+            id,
+            ink,
+            reason,
+        });
     }
-    out.sort_by_key(|c| c.index);
     Ok(out)
 }
 

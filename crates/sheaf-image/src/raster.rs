@@ -13,6 +13,7 @@ pub enum PixelFormat {
 }
 
 /// A rendered page or tile: tightly packed 4 bytes/pixel, row-major.
+#[derive(Clone)]
 pub struct Raster {
     pub width: u32,
     pub height: u32,

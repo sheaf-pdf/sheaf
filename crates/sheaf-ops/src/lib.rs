@@ -18,6 +18,8 @@ pub mod prefs;
 pub mod scan;
 pub mod split;
 pub mod stamps;
+pub mod text;
+pub mod views;
 
 use std::collections::BTreeMap;
 
@@ -50,7 +52,8 @@ pub(crate) fn by_source<T>(items: impl IntoIterator<Item = (Src, T)>) -> Vec<(Sr
     groups.into_values().collect()
 }
 
-/// A renderer for a source, on its blob's bytes.
+/// A renderer for a source, on its blob's bytes: Trim White's, until it
+/// reads pages through the views too (slice 15).
 pub fn engine_for(src: &Src) -> Result<PdfiumEngine> {
     PdfiumEngine::open_bytes(src.bytes().clone(), src.password())
 }

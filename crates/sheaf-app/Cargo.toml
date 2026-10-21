@@ -63,6 +63,8 @@ image = { workspace = true, features = ["ico"] }
 sheaf-doc = { workspace = true, features = ["fixtures"] }
 # The annotation ids an edit draws, seeded alike for two documents.
 fastrand = "2"
+# Files with other tools' comments and layers, built in code.
+lopdf.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"

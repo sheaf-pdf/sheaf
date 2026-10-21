@@ -19,10 +19,8 @@ pub(crate) fn set_ocr(lw: &mut Lower, page: PageId, layer: Option<Arc<TextLayer>
     if layer.is_none() && def.content.ocr_text().is_none() {
         return;
     }
-    let def = PageDef {
-        content: def.content.with_ocr_text(layer),
-        ..PageDef::clone(def)
-    };
+    let content = def.content.with_ocr_text(layer);
+    let def = PageDef::new(def.base.clone(), def.copy, content);
     lw.rec.put(Key::Page(page), Some(Val::Page(Arc::new(def))));
 }
 

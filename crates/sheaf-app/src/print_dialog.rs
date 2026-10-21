@@ -1,7 +1,10 @@
 //! File > Print (Ctrl+P): sheaf's own print dialog with a preview of each
 //! sheet, as Acrobat's is. Printers and their paper come from
 //! `sheaf_print`, read in the background when the dialog opens; the job
-//! itself is run by the document view (`DocView::print`).
+//! itself is run by the document view (`DocView::print`). The preview draws
+//! the document as the dialog opened on it, each page realized under
+//! print's own inputs (M10.5 §10.4), so what the screen hides shows here as
+//! it prints.
 //!
 //! Tab moves between rows, Left/Right change the highlighted row,
 //! Page Up/Page Down step the preview, Enter prints, Escape cancels.
@@ -9,20 +12,24 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::channel::oneshot;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton, ObjectFit,
     RenderImage, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use serde::{Deserialize, Serialize};
-use sheaf_doc::{PageId, Snapshot, SourceId};
+use sheaf_doc::realize::{PageView, RenderKey, ViewInputs};
+use sheaf_doc::{PageId, Snapshot};
+use sheaf_edit::Rotation;
 use sheaf_image::raster::PixelFormat;
+use sheaf_ops::views::Views;
 use sheaf_print::{Duplex, JobSettings, Orientation, Paper, Printer, Sizing};
-use sheaf_render::PageIndex;
-use sheaf_render::{Job, RenderHandle, RenderRequest};
+use sheaf_render::{Budget, Job, Rendered};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
 
+use crate::docview::Pins;
 use crate::{DialogCancel, DialogLeft, DialogNext, DialogPrev, DialogRight, DialogRun};
 
 pub const KEY_CONTEXT: &str = "PrintDialog";
@@ -106,7 +113,8 @@ pub struct PrintContext {
     /// The document's file name, for the print queue.
     pub title: String,
     pub snapshot: Snapshot,
-    pub handles: HashMap<SourceId, RenderHandle>,
+    /// What draws the snapshot's pages: the document's.
+    pub views: Views,
     pub current: usize,
     /// Selected pages (display indices, in order).
     pub selected: Vec<usize>,
@@ -130,6 +138,42 @@ pub struct PrintRequest {
 pub enum PrintEvent {
     Print(Box<PrintRequest>),
     Dismiss,
+}
+
+/// A preview image by what it draws: its page's render key under print's
+/// inputs, and the job its engine draws it by.
+type ImageKey = (RenderKey, Job);
+
+impl PrintContext {
+    /// Page `id` as the preview draws it, `width` device px wide, with or
+    /// without `markup`: its view under print's inputs
+    /// ([`ViewInputs::print`]), whatever the screen hides, and the job its
+    /// engine draws it by, turned as it prints. None for a page the
+    /// snapshot hasn't got.
+    pub(crate) fn preview(&self, id: PageId, width: u32, markup: bool) -> Option<(PageView, Job)> {
+        let inputs = ViewInputs::print(markup);
+        let view = self.views.view(&self.snapshot.state, id, &inputs).ok()?;
+        let rotation = view.job.rotation;
+        Some((view, Job::Page { width, rotation }))
+    }
+
+    /// That page's render, as [`preview`](Self::preview) finds it: drawn
+    /// `width` device px wide, turned as it prints, in the screen's budget,
+    /// the dialog being on screen.
+    pub(crate) fn render_preview(
+        &self,
+        id: PageId,
+        width: u32,
+        markup: bool,
+    ) -> oneshot::Receiver<anyhow::Result<Rendered>> {
+        let (st, inputs) = (&self.snapshot.state, ViewInputs::print(markup));
+        let job = Job::Page {
+            width,
+            rotation: Rotation::R0,
+        };
+        let format = PixelFormat::Bgra;
+        (self.views).render(st, id, &inputs, job, format, 0, Budget::Screen)
+    }
 }
 
 const ROW_PRINTER: usize = 0;
@@ -160,11 +204,14 @@ pub struct PrintDialog {
     markup: bool,
     /// Which of the pages to print the preview shows.
     preview: usize,
-    /// Preview images by (display index, device width).
-    images: HashMap<(usize, u32), Arc<RenderImage>>,
+    /// Preview images by what they draw.
+    images: HashMap<ImageKey, Arc<RenderImage>>,
     /// Images no longer shown, released on the next render.
     retired: Vec<Arc<RenderImage>>,
-    pending: Option<((usize, u32), Task<()>)>,
+    pending: Option<(ImageKey, Task<()>)>,
+    /// The engine the shown page renders from, which no budget closes
+    /// while the dialog is open.
+    pins: Pins,
     row: usize,
     error: Option<String>,
     _subs: Vec<Subscription>,
@@ -221,6 +268,7 @@ impl PrintDialog {
         };
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let pins = Pins::new(ctx.views.pool());
         Self {
             focus,
             printers: None,
@@ -238,6 +286,7 @@ impl PrintDialog {
             images: HashMap::new(),
             retired: Vec::new(),
             pending: None,
+            pins,
             row: ROW_PRINTER,
             error: None,
             _subs: subs,
@@ -474,36 +523,30 @@ impl PrintDialog {
         }
     }
 
-    /// Ask for the preview image of display page `index` at `width` device px.
-    fn want_image(&mut self, index: usize, width: u32, cx: &mut Context<Self>) {
-        let key = (index, width);
-        if self.images.contains_key(&key) || self.pending.as_ref().is_some_and(|(k, _)| *k == key) {
-            return;
+    /// The preview image of page `id` at `width` device px, once it's
+    /// drawn; asked for, if it isn't, and its engine pinned meanwhile.
+    fn want_image(
+        &mut self,
+        id: PageId,
+        width: u32,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<RenderImage>> {
+        let (view, job) = self.ctx.preview(id, width, self.markup)?;
+        self.pins.set([view.engine]);
+        let key = (view.key, job);
+        if let Some(image) = self.images.get(&key) {
+            return Some(image.clone());
         }
-        let snap = &self.ctx.snapshot;
-        let Some((id, def)) =
-            (snap.state.page_at(index)).and_then(|id| Some((id, snap.state.def(id)?)))
-        else {
-            return;
-        };
-        let Some(handle) = self.ctx.handles.get(&def.base.src.id()) else {
-            return;
-        };
-        let rx = handle.render(RenderRequest {
-            page: PageIndex(def.base.index),
-            job: Job::Page {
-                width,
-                rotation: snap.render_delta(id),
-            },
-            format: PixelFormat::Bgra,
-            priority: 0,
-        });
+        if self.pending.as_ref().is_some_and(|(k, _)| *k == key) {
+            return None;
+        }
+        let rx = self.ctx.render_preview(id, width, self.markup);
         let task = cx.spawn(async move |this, cx| {
             let Ok(Ok(r)) = rx.await else { return };
             this.update(cx, |d, cx| {
                 let image = Arc::new(crate::docview::to_render_image(r.raster));
                 // Keep only what's on screen.
-                let old: Vec<(usize, u32)> = d.images.keys().copied().collect();
+                let old: Vec<ImageKey> = d.images.keys().copied().collect();
                 for k in old {
                     if let Some(im) = d.images.remove(&k) {
                         d.retired.push(im);
@@ -516,6 +559,7 @@ impl PrintDialog {
             .ok();
         });
         self.pending = Some((key, task));
+        None
     }
 
     // ----- rendering ------------------------------------------------------------
@@ -796,7 +840,7 @@ impl PrintDialog {
             let s = (PREVIEW_W / p.sheet_w).min(PREVIEW_H / p.sheet_h);
             let (w, h) = (p.w * s, p.h * s);
             let dev_w = (w * window.scale_factor()).round().max(1.0) as u32;
-            self.want_image(index, dev_w, cx);
+            let image = self.want_image(id, dev_w, cx);
             let mut page = div()
                 .absolute()
                 .left(px(p.x * s))
@@ -805,8 +849,8 @@ impl PrintDialog {
                 .h(px(h))
                 .border_1()
                 .border_color(theme::BORDER);
-            if let Some(im) = self.images.get(&(index, dev_w)) {
-                page = page.child(img(im.clone()).size_full().object_fit(ObjectFit::Fill));
+            if let Some(im) = image {
+                page = page.child(img(im).size_full().object_fit(ObjectFit::Fill));
             }
             if self.markup {
                 let (to_view, k) = (geom.to_view(), w / shown.width.max(1.0));

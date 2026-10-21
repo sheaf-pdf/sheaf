@@ -23,14 +23,11 @@ const OTHER: SigClass = SigClass::OTHER;
 /// `n` blank pages, page `i` showing page `i` of `src`.
 fn state_of(src: &Src, n: u32) -> DocState {
     let pages = (0..n).map(|index| {
-        let def = PageDef {
-            base: PageBase {
-                src: src.clone(),
-                index,
-            },
-            copy: 0,
-            content: crate::model::ContentStack::empty(),
+        let base = PageBase {
+            src: src.clone(),
+            index,
         };
+        let def = PageDef::new(base, 0, crate::model::ContentStack::empty());
         (
             PageId(index.into()),
             Arc::new(def),
@@ -224,10 +221,8 @@ fn layer(words: &str) -> Arc<TextLayer> {
 /// `st`'s page `i` with `text` its recognized text, or none.
 fn with_ocr(st: &DocState, i: u64, text: Option<Arc<TextLayer>>) -> Val {
     let def = st.def(PageId(i)).unwrap();
-    Val::Page(Arc::new(PageDef {
-        content: def.content.with_ocr_text(text),
-        ..PageDef::clone(def)
-    }))
+    let content = def.content.with_ocr_text(text);
+    Val::Page(Arc::new(PageDef::new(def.base.clone(), def.copy, content)))
 }
 
 fn order(ids: &[u64]) -> Val {
@@ -571,10 +566,8 @@ fn pages_added_removed_and_rebased() {
             src: other.clone(),
             ..def.base.clone()
         };
-        Some(Val::Page(Arc::new(PageDef {
-            base,
-            ..PageDef::clone(def)
-        })))
+        let def = PageDef::new(base, def.copy, def.content.clone());
+        Some(Val::Page(Arc::new(def)))
     };
     assert_eq!(
         put(&st, page(0), rebased(0)).flags,

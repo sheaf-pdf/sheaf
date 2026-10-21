@@ -6569,6 +6569,7 @@ dependencies = [
  "im",
  "image",
  "log",
+ "lopdf",
  "regex",
  "resvg",
  "schemars",
@@ -6703,6 +6704,7 @@ dependencies = [
  "sheaf-edit",
  "sheaf-image",
  "sheaf-render",
+ "sheaf-util",
  "tesseract-rs",
  "thiserror 2.0.21",
 ]
@@ -6713,6 +6715,8 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "fastrand",
+ "flate2",
+ "futures",
  "image",
  "in-progress",
  "log",
@@ -6772,6 +6776,7 @@ dependencies = [
  "sheaf-edit",
  "sheaf-image",
  "sheaf-render",
+ "tempfile",
  "windows 0.61.3",
 ]
 
@@ -6788,7 +6793,6 @@ dependencies = [
  "lopdf",
  "parking_lot",
  "pdfium-render",
- "regex",
  "sheaf-doc",
  "sheaf-edit",
  "sheaf-image",

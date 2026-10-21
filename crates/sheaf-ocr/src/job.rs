@@ -4,22 +4,19 @@
 //! Threads are plain `std::thread`s rather than the UI's executor: a
 //! 400-page run is minutes of CPU and must not starve saves, searches or
 //! tile uploads. A coordinator thread renders one page ahead through the
-//! source's render worker (at the lowest priority, so visible tiles still
-//! win) and hands images to N workers, each owning one engine instance.
-//! Results arrive in whatever order they finish; the app batches them into
-//! the document.
+//! document's [`PageSource`] (the app's engines, at the lowest priority, so
+//! visible tiles still win) and hands images to N workers, each owning one
+//! engine instance. Results arrive in whatever order they finish; the app
+//! batches them into the document.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use sheaf_doc::geom::Geom;
-use sheaf_doc::{PageId, SourceId, TextLayer};
-use sheaf_edit::Rotation;
-use sheaf_image::raster::{PixelFormat, Raster};
-use sheaf_render::{Job, RenderHandle, RenderRequest};
+use sheaf_doc::{PageId, TextLayer};
+use sheaf_image::raster::Raster;
 
 use crate::config::OcrConfig;
 use crate::engine::{EngineError, EngineKind, OcrEngine, OcrImage, build_engine};
@@ -33,14 +30,11 @@ pub const HAS_TEXT_MIN_CHARS: usize = 20;
 #[derive(Debug, Clone, PartialEq)]
 pub struct OcrPage {
     pub id: PageId,
-    pub source: SourceId,
-    /// Index within the source file.
+    /// Its source page's index in its file, which a failure names when the
+    /// page has gone.
     pub index: u32,
     /// The page as it's rendered and recognized: its boxes and rotation.
     pub geom: Geom,
-    /// The turn `geom` adds to the source page's own `/Rotate`, which the
-    /// render takes.
-    pub render: Rotation,
 }
 
 #[derive(Debug, Clone)]
@@ -51,33 +45,13 @@ pub struct OcrRequest {
     pub config: OcrConfig,
 }
 
-/// What the job needs from an opened file. Implemented for the render
-/// worker; faked in tests.
+/// What the job needs from the document's pages: sheaf-ops' `ViewPages`
+/// draws them from the app's engines; tests fake it.
 pub trait PageSource: Send + Sync {
-    /// Real characters of text on the page (0 for image-only).
-    fn text_len(&self, page: u32) -> Result<usize>;
-    /// Render the page `width_px` wide, rotated by `rotation`.
-    fn render(&self, page: u32, width_px: u32, rotation: Rotation) -> Result<Raster>;
-}
-
-impl PageSource for RenderHandle {
-    fn text_len(&self, page: u32) -> Result<usize> {
-        futures::executor::block_on(self.page_text_len(page)).context("render worker gone")?
-    }
-
-    fn render(&self, page: u32, width_px: u32, rotation: Rotation) -> Result<Raster> {
-        let rendered = futures::executor::block_on(self.render(RenderRequest {
-            page: sheaf_render::PageIndex(page),
-            job: Job::Page {
-                width: width_px,
-                rotation,
-            },
-            format: PixelFormat::Rgba,
-            priority: u8::MAX,
-        }))
-        .context("render worker gone")??;
-        Ok(rendered.raster)
-    }
+    /// Real characters of text on `page` (0 for image-only).
+    fn text_len(&self, page: &OcrPage) -> Result<usize>;
+    /// `page` rendered `width_px` wide, as it shows (`page.geom`).
+    fn render(&self, page: &OcrPage, width_px: u32) -> Result<Raster>;
 }
 
 #[derive(Debug)]
@@ -151,21 +125,21 @@ pub fn worker_count(kind: EngineKind) -> usize {
     }
 }
 
-/// Start a job with the configured engine.
+/// Start a job with the configured engine, over the pages of `pages`.
 pub fn start(
     req: OcrRequest,
-    sources: HashMap<SourceId, Arc<dyn PageSource>>,
+    pages: Arc<dyn PageSource>,
 ) -> (JobHandle, UnboundedReceiver<OcrEvent>) {
     let kind = req.engine;
     let cfg = req.config.clone();
     let factory: EngineFactory = Arc::new(move || build_engine(kind, &cfg));
-    start_with(req, sources, factory, worker_count(kind))
+    start_with(req, pages, factory, worker_count(kind))
 }
 
 /// Start a job with an explicit engine factory and worker count.
 pub fn start_with(
     req: OcrRequest,
-    sources: HashMap<SourceId, Arc<dyn PageSource>>,
+    pages: Arc<dyn PageSource>,
     factory: EngineFactory,
     workers: usize,
 ) -> (JobHandle, UnboundedReceiver<OcrEvent>) {
@@ -174,7 +148,7 @@ pub fn start_with(
     let flag = cancel.clone();
     let spawned = std::thread::Builder::new()
         .name("sheaf-ocr".into())
-        .spawn(move || coordinate(req, sources, factory, workers.max(1), tx.clone(), flag, tx));
+        .spawn(move || coordinate(req, pages, factory, workers.max(1), tx.clone(), flag, tx));
     if let Err(e) = spawned {
         // Can't even make a thread: report it through the same channel.
         let (tx, rx) = unbounded();
@@ -192,7 +166,7 @@ struct Work {
 #[allow(clippy::too_many_arguments)]
 fn coordinate(
     req: OcrRequest,
-    sources: HashMap<SourceId, Arc<dyn PageSource>>,
+    pages: Arc<dyn PageSource>,
     factory: EngineFactory,
     workers: usize,
     tx: UnboundedSender<OcrEvent>,
@@ -264,12 +238,8 @@ fn coordinate(
                 error: e,
             });
         };
-        let Some(src) = sources.get(&page.source) else {
-            fail("source file is not open".into());
-            continue;
-        };
         if req.skip_pages_with_text {
-            match src.text_len(page.index) {
+            match pages.text_len(page) {
                 Ok(n) if n >= HAS_TEXT_MIN_CHARS => {
                     skipped += 1;
                     let _ = tx.unbounded_send(OcrEvent::Skipped { id: page.id });
@@ -285,7 +255,7 @@ fn coordinate(
         let width = (page.geom.shown().width * dpi as f32 / 72.0)
             .round()
             .max(1.0) as u32;
-        let raster = match src.render(page.index, width, page.render) {
+        let raster = match pages.render(page, width) {
             Ok(r) => r,
             Err(e) => {
                 fail(format!("rendering: {e:#}"));
@@ -364,9 +334,12 @@ fn worker(
 mod tests {
     use super::*;
     use crate::engine::{EngineInfo, InputKind, OcrWord};
+    use anyhow::Context as _;
     use futures::StreamExt;
     use sheaf_doc::Box2;
     use sheaf_doc::geom::Rect;
+    use sheaf_edit::Rotation;
+    use sheaf_image::raster::PixelFormat;
     use std::time::Duration;
 
     struct FakeSource {
@@ -375,16 +348,16 @@ mod tests {
     }
 
     impl PageSource for FakeSource {
-        fn text_len(&self, page: u32) -> Result<usize> {
+        fn text_len(&self, page: &OcrPage) -> Result<usize> {
             self.text
-                .get(page as usize)
+                .get(page.index as usize)
                 .copied()
                 .context("no such page")
         }
 
-        /// A portrait page, turned `rotation`.
-        fn render(&self, _page: u32, width_px: u32, rotation: Rotation) -> Result<Raster> {
-            let height = match rotation {
+        /// A portrait page, turned as it shows.
+        fn render(&self, page: &OcrPage, width_px: u32) -> Result<Raster> {
+            let height = match page.geom.rotate {
                 Rotation::R0 | Rotation::R180 => width_px * 792 / 612,
                 Rotation::R90 | Rotation::R270 => width_px * 612 / 792,
             };
@@ -432,10 +405,8 @@ mod tests {
     fn page(i: u32, width: f32) -> OcrPage {
         OcrPage {
             id: PageId(i as u64),
-            source: SourceId { hash: 0, len: 0 },
             index: i,
             geom: Geom::read(Some(Rect::new(0.0, 0.0, width, 792.0)), None, 0),
-            render: Rotation::R0,
         }
     }
 
@@ -454,10 +425,8 @@ mod tests {
                 ..OcrConfig::default()
             },
         };
-        let mut sources: HashMap<SourceId, Arc<dyn PageSource>> = HashMap::new();
-        sources.insert(SourceId { hash: 0, len: 0 }, Arc::new(FakeSource { text }));
         let factory: EngineFactory = Arc::new(move || Ok(Box::new(MockEngine { delay }) as _));
-        let (handle, rx) = start_with(req, sources, factory, 2);
+        let (handle, rx) = start_with(req, Arc::new(FakeSource { text }), factory, 2);
         let mut events = Vec::new();
         let mut rx = rx;
         futures::executor::block_on(async {
@@ -578,7 +547,6 @@ mod tests {
         let req = OcrRequest {
             pages: vec![OcrPage {
                 geom,
-                render: Rotation::R90,
                 ..page(0, 612.0)
             }],
             skip_pages_with_text: false,
@@ -588,17 +556,13 @@ mod tests {
                 ..OcrConfig::default()
             },
         };
-        let mut sources: HashMap<SourceId, Arc<dyn PageSource>> = HashMap::new();
-        sources.insert(
-            SourceId { hash: 0, len: 0 },
-            Arc::new(FakeSource { text: vec![0] }),
-        );
         let factory: EngineFactory = Arc::new(|| {
             Ok(Box::new(MockEngine {
                 delay: Duration::ZERO,
             }) as _)
         });
-        let (_handle, mut rx) = start_with(req, sources, factory, 1);
+        let pages = Arc::new(FakeSource { text: vec![0] });
+        let (_handle, mut rx) = start_with(req, pages, factory, 1);
         let layer = futures::executor::block_on(async {
             loop {
                 match rx.next().await {
@@ -633,7 +597,8 @@ mod tests {
             config: OcrConfig::default(),
         };
         let factory: EngineFactory = Arc::new(|| Err(EngineError::MissingData("no data".into())));
-        let (_handle, mut rx) = start_with(req, HashMap::new(), factory, 1);
+        let pages = Arc::new(FakeSource { text: vec![0] });
+        let (_handle, mut rx) = start_with(req, pages, factory, 1);
         let ev = futures::executor::block_on(rx.next()).unwrap();
         assert!(matches!(ev, OcrEvent::Aborted(m) if m == "no data"));
     }

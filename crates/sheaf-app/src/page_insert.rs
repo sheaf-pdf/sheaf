@@ -2,18 +2,22 @@
 //! (jobs.rs):
 //! - **Inserts:** Document > Insert Pages (a PDF's, Blank Pages… and From
 //!   Images…) and Replace Pages…. Off the UI thread the file is read into
-//!   the document's store, what lowering reads of it is read, the engine
-//!   is opened on it, and the op is lowered on a snapshot ([`plan_insert`],
-//!   [`plan_replace`]); on the UI thread it lands ([`DocView::land`]),
-//!   lowered again on the current version if the document has moved on
-//!   (`Stale::Relower`). Pages with no file of their own become PDFs in the
-//!   generated-file cache (`sheaf_doc::generated`) first.
+//!   the document's store, what lowering reads of it is read, and the op
+//!   is lowered on a snapshot ([`plan_insert`], [`plan_replace`]); on the
+//!   UI thread it lands ([`DocView::land`]), lowered again on the current
+//!   version if the document has moved on (`Stale::Relower`). Pages with no
+//!   file of their own become PDFs in the generated-file cache
+//!   (`sheaf_doc::generated`) first.
 //! - **Derived pages:** Crop Pages, Watermark / Background and Header &
 //!   Footer show pages from copies made of them off the UI thread, over
 //!   the version their dialog opened on, and commit on that version
 //!   (`Stale::Validate`): an edit since to what they changed is a conflict,
-//!   and nothing changes. Their dialogs show no preview of the document
-//!   until M10.5 slice 13's rendered previews.
+//!   and nothing changes. The Header & Footer dialog previews its page as
+//!   it would draw (`header_footer_dialog`); Crop's and Watermark's adopt
+//!   that preview in M10.5 slices 15 and 16.
+//!
+//! None opens an engine: the render worker opens a file's when one of its
+//! pages is first drawn (M10.5 §10.3).
 //! - **Page Labels**, from its dialog, commits on the version the dialog
 //!   opened on in the same way.
 
@@ -36,7 +40,6 @@ use sheaf_edit::{
 };
 use sheaf_ops::derive::DerivedSource;
 use sheaf_ops::{Progress, Tracker};
-use sheaf_render::RenderHandle;
 
 use crate::docview::{DocView, State, failed};
 
@@ -74,8 +77,6 @@ pub const LEGAL: PageSize = PageSize {
 pub(crate) struct PlannedInsert {
     /// The file, a source in the document's store.
     src: Src,
-    /// The engine opened on it, to draw its pages.
-    handle: RenderHandle,
     /// The op that brings them, lowered on the snapshot, holding what
     /// their marks hold until it's committed.
     tx: Tx,
@@ -98,15 +99,15 @@ impl PlannedInsert {
 
 /// Pages `pages` (None: all) of the file at `path` ready to come into the
 /// document `snap` is of: the file read into `store`, a transaction on
-/// `snap` lowering with `cx` holding what their marks hold, what lowering
-/// reads of them read, and the engine opened on the file.
+/// `snap` lowering with `cx` holding what their marks hold, and what
+/// lowering reads of them read.
 fn bring_in(
     snap: &Snapshot,
     store: &Store,
     cx: Arc<LowerCx>,
     path: &Path,
     pages: Option<Range<u32>>,
-) -> anyhow::Result<(Src, RenderHandle, Tx)> {
+) -> anyhow::Result<(Src, Tx)> {
     let (src, _) = store.read_file(path, None)?;
     let pages: Vec<u32> = pages.unwrap_or(0..src.page_count()).collect();
     let mut tx = Document::tx_at(snap, cx);
@@ -114,8 +115,7 @@ fn bring_in(
         tx.pin(blob);
     }
     tx.pin(src.blob().clone());
-    let handle = RenderHandle::open_bytes(src.bytes().clone(), None)?;
-    Ok((src, handle, tx))
+    Ok((src, tx))
 }
 
 /// Every page of the file at `path` inserted before `before` (None: at the
@@ -132,7 +132,7 @@ pub(crate) fn plan_insert(
     bookmarks: bool,
     p: &dyn Progress,
 ) -> anyhow::Result<PlannedInsert> {
-    let (src, handle, mut tx) = bring_in(snap, store, cx, path, None)?;
+    let (src, mut tx) = bring_in(snap, store, cx, path, None)?;
     let bring = Bring {
         marks: bookmarks,
         form: FormBring::New,
@@ -154,7 +154,6 @@ pub(crate) fn plan_insert(
     tx.apply(insert, p)?;
     Ok(PlannedInsert {
         src,
-        handle,
         tx,
         on: snap.version,
     })
@@ -172,7 +171,7 @@ fn plan_replace(
     p: &dyn Progress,
 ) -> anyhow::Result<PlannedInsert> {
     let with = RangeSet::from_runs(std::iter::once(range.start + 1..=range.end))?;
-    let (src, handle, mut tx) = bring_in(snap, store, cx, path, Some(range))?;
+    let (src, mut tx) = bring_in(snap, store, cx, path, Some(range))?;
     let replace = Op::ReplacePages {
         pages: pages.into_iter().map(PageRef::Id).collect(),
         from: PageSource::File {
@@ -185,7 +184,6 @@ fn plan_replace(
     tx.apply(replace, p)?;
     Ok(PlannedInsert {
         src,
-        handle,
         tx,
         on: snap.version,
     })
@@ -225,30 +223,16 @@ impl DocView {
     /// `plan` committed as one version called `label`: on the version
     /// it was planned on, its op lowered again on the current one if the
     /// document has moved on since, keeping the ids it made (§8.5). The
-    /// commit, or None when it failed, which the notice says. Only then is
-    /// the engine opened on the file kept, and PDFium stops drawing the
-    /// marks sheaf now draws.
+    /// commit, or None when it failed, which the notice says; then nothing
+    /// keeps the file it read.
     pub(crate) fn land(
         &mut self,
         plan: PlannedInsert,
         label: &str,
         cx: &mut Context<Self>,
     ) -> Option<Commit> {
-        let PlannedInsert {
-            src,
-            handle,
-            tx,
-            on,
-        } = plan;
-        let commit = self
-            .commit(tx, CommitOpts::based(on, Stale::Relower, label), cx)
-            .ok()?;
-        let State::Ready(doc) = &mut self.state else {
-            return None;
-        };
-        doc.handles.entry(src.id()).or_insert(handle);
-        doc.take_in(&src);
-        Some(commit)
+        let opts = CommitOpts::based(plan.on, Stale::Relower, label);
+        self.commit(plan.tx, opts, cx).ok()
     }
 
     /// Insert every page of `path` before `before` (None: at the end), as
@@ -436,20 +420,6 @@ pub(crate) fn ids_at(snap: &Snapshot, indexes: &[usize]) -> Vec<PageId> {
         .collect()
 }
 
-/// The copies a derived flow made, each with the engine opened on it to
-/// draw its pages.
-type Copies = Vec<(DerivedSource, RenderHandle)>;
-
-/// Each of `copies` with the engine opened on it: off the UI thread.
-fn with_engines(copies: Vec<DerivedSource>) -> anyhow::Result<Copies> {
-    (copies.into_iter())
-        .map(|c| {
-            let handle = RenderHandle::open_bytes(c.src.bytes().clone(), None)?;
-            Ok((c, handle))
-        })
-        .collect()
-}
-
 impl DocView {
     /// `tx` with each page of `copies` shown from the copy a derived flow
     /// made of it, as `why` says, for a version called `label`: None when
@@ -457,12 +427,12 @@ impl DocView {
     fn show_copies(
         &mut self,
         mut tx: Tx,
-        copies: &[(DerivedSource, RenderHandle)],
+        copies: &[DerivedSource],
         why: Derive,
         label: &str,
         cx: &mut Context<Self>,
     ) -> Option<Tx> {
-        let pages: Vec<(PageId, Src, u32)> = copies.iter().flat_map(|(c, _)| c.bases()).collect();
+        let pages: Vec<(PageId, Src, u32)> = copies.iter().flat_map(|c| c.bases()).collect();
         if !pages.is_empty()
             && let Err(e) = tx.set_page_base(pages, why)
         {
@@ -474,14 +444,13 @@ impl DocView {
 
     /// The copies a committed derived flow shows pages from: noted with
     /// the document, so a save writes their pages as the ones they were
-    /// made of, and opened to draw.
-    fn keep_copies(&mut self, copies: Copies) {
+    /// made of.
+    fn keep_copies(&mut self, copies: &[DerivedSource]) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        for (c, handle) in copies {
+        for c in copies {
             c.note(&mut doc.model);
-            doc.handles.insert(c.src.id(), handle);
         }
     }
 
@@ -542,16 +511,16 @@ impl DocView {
         let label = format!("Crop {n} page{}", if n == 1 { "" } else { "s" });
         let work = {
             let opened = opened.clone();
-            move |p: &Tracker| with_engines(sheaf_ops::crop::plan(&store, &opened, &ids, spec, p)?)
+            move |p: &Tracker| sheaf_ops::crop::plan(&store, &opened, &ids, spec, p)
         };
         let land = {
             let label = label.clone();
-            move |v: &mut DocView, copies: Copies, cx: &mut Context<DocView>| {
+            move |v: &mut DocView, copies: Vec<DerivedSource>, cx: &mut Context<DocView>| {
                 let tx = v.user_tx_at(&opened)?;
                 let tx = v.show_copies(tx, &copies, Derive::Crop, &label, cx)?;
                 let opts = CommitOpts::based(opened.version, Stale::Validate, label.as_str());
                 v.commit(tx, opts, cx).ok()?;
-                v.keep_copies(copies);
+                v.keep_copies(&copies);
                 Some(format!("Cropped {n} page{}", if n == 1 { "" } else { "s" }))
             }
         };
@@ -626,6 +595,27 @@ impl DocView {
     }
 }
 
+/// The op that sets `hf` on the pages it names of `opened`, its dialog's
+/// version (None: all of them), or with `hf` None or empty, removes the
+/// header and footer from every page `opened` has, by id, never by order.
+pub(crate) fn header_footer_op(
+    hf: Option<sheaf_doc::stamps::HeaderFooter>,
+    opened: &Snapshot,
+) -> Op {
+    match hf.filter(|hf| !hf.is_empty()) {
+        Some(hf) => Op::SetHeaderFooter {
+            spec: hf.spec(),
+            scope: match hf.pages {
+                None => ScopeSel::All,
+                Some(pages) => ScopeSel::Pages(PageSel::ids(pages)),
+            },
+        },
+        None => Op::RemoveHeaderFooter {
+            pages: PageSel::ids(opened.state.order().iter().copied()),
+        },
+    }
+}
+
 impl DocView {
     /// Document > Header & Footer: set (or with None, remove) the
     /// header/footer, from the dialog opened on `opened`. Pages whose file
@@ -648,28 +638,16 @@ impl DocView {
         };
         let work = {
             let opened = opened.clone();
-            move |p: &Tracker| with_engines(sheaf_ops::derive::strip_stamps(&store, &opened, p)?)
+            move |p: &Tracker| sheaf_ops::derive::strip_stamps(&store, &opened, p)
         };
-        let land = move |v: &mut DocView, copies: Copies, cx: &mut Context<DocView>| {
-            let set = match hf.filter(|hf| !hf.is_empty()) {
-                Some(hf) => Op::SetHeaderFooter {
-                    spec: hf.spec(),
-                    scope: match hf.pages {
-                        None => ScopeSel::All,
-                        Some(pages) => ScopeSel::Pages(PageSel::ids(pages)),
-                    },
-                },
-                // Every page it opened on, by id: never the order.
-                None => Op::RemoveHeaderFooter {
-                    pages: PageSel::ids(opened.state.order().iter().copied()),
-                },
-            };
+        let land = move |v: &mut DocView, copies: Vec<DerivedSource>, cx: &mut Context<DocView>| {
+            let set = header_footer_op(hf, &opened);
             let tx = v.user_tx_at(&opened)?;
             let tx = v.show_copies(tx, &copies, Derive::StripHeaderFooter, label, cx)?;
             let tx = v.lower_in(tx, vec![set], label, cx)?;
             let opts = CommitOpts::based(opened.version, Stale::Validate, label);
             let commit = v.commit(tx, opts, cx).ok()?;
-            v.keep_copies(copies);
+            v.keep_copies(&copies);
             let mut notice = format!("{label}: shown now, written when you save");
             if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
                 notice = format!("{notice}. {told}");
@@ -735,23 +713,21 @@ impl DocView {
             let opened = opened.clone();
             move |p: &Tracker| {
                 let wm = wm.as_ref();
-                with_engines(sheaf_ops::derive::watermark(
-                    &store, &opened, behind, wm, &scope, p,
-                )?)
+                sheaf_ops::derive::watermark(&store, &opened, behind, wm, &scope, p)
             }
         };
         let land = {
             let label = label.clone();
-            move |v: &mut DocView, copies: Copies, cx: &mut Context<DocView>| {
+            move |v: &mut DocView, copies: Vec<DerivedSource>, cx: &mut Context<DocView>| {
                 if copies.is_empty() {
                     return Some(format!("No {} to remove", what.to_lowercase()));
                 }
-                let n: usize = copies.iter().map(|(c, _)| c.pages.len()).sum();
+                let n: usize = copies.iter().map(|c| c.pages.len()).sum();
                 let tx = v.user_tx_at(&opened)?;
                 let tx = v.show_copies(tx, &copies, why, &label, cx)?;
                 let opts = CommitOpts::based(opened.version, Stale::Validate, label.as_str());
                 let commit = v.commit(tx, opts, cx).ok()?;
-                v.keep_copies(copies);
+                v.keep_copies(&copies);
                 let mut notice = format!("{label}: {n} page{}", if n == 1 { "" } else { "s" });
                 if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
                     notice = format!("{notice}. {told}");

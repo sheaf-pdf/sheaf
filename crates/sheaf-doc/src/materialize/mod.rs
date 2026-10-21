@@ -69,6 +69,8 @@ pub mod emit;
 pub mod graph;
 pub mod key;
 pub mod number;
+#[cfg(test)]
+mod overlay_tests;
 pub mod plan;
 #[cfg(test)]
 mod plan_tests;
@@ -82,7 +84,7 @@ mod saving;
 #[cfg(test)]
 mod saving_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub mod verify;
 
 use std::borrow::Cow;
@@ -250,13 +252,11 @@ fn rewrite(
 ) -> Result<Output> {
     let src = &input.primary;
     let blob = src.id();
-    let mut e = emit::emit(
-        input,
-        EmitScope::All,
-        EmitBase::Rewrite,
-        &plan.transforms,
-        p,
-    )?;
+    let base = EmitBase::Rewrite {
+        primary: src,
+        derived: &input.derived,
+    };
+    let mut e = emit::emit(&input.target, EmitScope::All, base, &plan.transforms, p)?;
     let crypt = match target.profile.encryption {
         Encryption::Keep => src.crypt().cloned(),
         Encryption::None => None,

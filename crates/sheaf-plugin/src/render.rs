@@ -3,7 +3,7 @@
 //! when the call that made it returns.
 
 use anyhow::Result;
-use sheaf_doc::{PageBase, PageId, SourceId};
+use sheaf_doc::{PageId, Snapshot};
 use wasmtime::component::Resource;
 
 use crate::runtime::HostState;
@@ -14,15 +14,16 @@ pub const PIXEL_BUDGET: u64 = 400_000_000;
 pub const MAX_LIVE_IMAGES: usize = 16;
 pub const MAX_DPI: u32 = 600;
 
-/// Renders pages for plugins. The app implements it over its render
-/// workers: `rect` is a pixel tile of the page drawn `page_w`×`page_h` in
-/// the file's own orientation; the result is RGBA, `w`×`h`.
+/// Renders pages for plugins. The app implements it over its engines:
+/// `rect` is a pixel tile of page `page` of `snap`, the call's base, drawn
+/// `page_w`×`page_h` in its file's own orientation as the file will draw
+/// it, sheaf's marks and unsaved header included (M10.5 §14.3); the result
+/// is RGBA, `w`×`h`.
 pub trait RenderSource: Send + Sync {
-    #[allow(clippy::too_many_arguments)]
     fn render(
         &self,
-        source: SourceId,
-        index: u32,
+        snap: &Snapshot,
+        page: PageId,
         page_w: u32,
         page_h: u32,
         rect: (u32, u32, u32, u32),
@@ -32,9 +33,8 @@ pub trait RenderSource: Send + Sync {
 /// A `page-renderer` handle.
 pub struct PageRenderer {
     pub(crate) page: PageId,
-    /// The source page it shows; None for a page the document hasn't got.
-    pub(crate) base: Option<PageBase>,
-    /// Points, as the file draws it.
+    /// Points, as the file draws it; (0, 0) for a page the document hasn't
+    /// got.
     pub(crate) size: (f32, f32),
 }
 

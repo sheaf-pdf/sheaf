@@ -129,7 +129,7 @@ impl Facts {
         f.ready = doc.model.is_ready();
         f.selection = !doc.selected_marks.is_empty() || doc.selected_foreign.is_some();
         f.marks = !doc.selected_marks.is_empty();
-        f.text = doc.text_sel.is_some_and(|s| !s.is_empty());
+        f.text = doc.text_sel.as_ref().is_some_and(|s| !s.is_empty());
         f.comments_shown = !doc.comments_hidden;
         f.pages = !doc.selection.is_empty();
         f.region = view.region.is_some();

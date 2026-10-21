@@ -209,12 +209,14 @@ pub fn append(
     }
     let scope = EmitScope::Keys(Arc::new(deps.keys));
     let onto = EmitBase::Saved {
+        primary: &input.primary,
+        derived: &input.derived,
         record,
         parents: &deps.parents,
         tree: deps.tree.as_ref(),
         relinked: &deps.relinked,
     };
-    let e = emit::emit(input, scope, onto, &transforms, p)?;
+    let e = emit::emit(&input.target, scope, onto, &transforms, p)?;
     // The primary's objects the section writes as the file has them: the
     // numbers they refer to are primary numbers it names, which its new
     // keys are numbered past.

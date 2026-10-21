@@ -100,3 +100,59 @@ fn appearances_only() {
     let screen = engine.render(PageIndex(0), job, PixelFormat::Rgba).unwrap();
     assert!(count(&screen, 1).1 > 100, "{:?}", count(&screen, 1));
 }
+
+/// A page that inherits boxes other than Letter's renders in them
+/// appearances only, its widget where the page view draws it: PDFium's
+/// flatten writes the page's own boxes alone, Letter for one it inherits
+/// (M10.5 slice 2's `forms/safedocs/0163162.pdf`), and the box the page
+/// showed is put back.
+#[test]
+fn an_inherited_box_survives_the_flatten() {
+    let mut form = Form::new(1);
+    red(&mut form, "drawn", 0, 4);
+    let page = form.pages[0];
+    form.dict(page).remove(b"MediaBox");
+    let parent = form
+        .dict(page)
+        .get(b"Parent")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    let rect = |r: [f32; 4]| r.map(Object::from).to_vec();
+    form.dict(parent)
+        .set("MediaBox", rect([0.0, 0.0, 419.5, 792.0]));
+    form.dict(parent)
+        .set("CropBox", rect([20.0, 100.0, 419.5, 792.0]));
+    let bytes = form.bytes();
+    let flat = render_appearances(&bytes, None, PageIndex(0), 400).unwrap();
+    let engine = PdfiumEngine::open_bytes(bytes.into(), None).unwrap();
+    let job = Job::Page {
+        width: 400,
+        rotation: Rotation::R0,
+    };
+    let live = engine.render(PageIndex(0), job, PixelFormat::Rgba).unwrap();
+    assert_eq!((flat.width, flat.height), (live.width, live.height));
+    // The red box's bounds, in pixels.
+    let reds = |r: &Raster| {
+        let mut bounds = [u32::MAX, u32::MAX, 0, 0];
+        for (i, p) in r.data.chunks(4).enumerate() {
+            if p[0] > 200 && p[1] < 60 && p[2] < 60 {
+                let (x, y) = (i as u32 % r.width, i as u32 / r.width);
+                bounds = [
+                    bounds[0].min(x),
+                    bounds[1].min(y),
+                    bounds[2].max(x),
+                    bounds[3].max(y),
+                ];
+            }
+        }
+        bounds
+    };
+    // Its edges, which the two draw a pixel apart where they blend.
+    let (flat, live) = (reds(&flat), reds(&live));
+    assert_ne!(flat[0], u32::MAX, "the widget is drawn");
+    assert!(
+        flat.iter().zip(live).all(|(a, b)| a.abs_diff(b) <= 1),
+        "{flat:?} {live:?}"
+    );
+}

@@ -17,6 +17,8 @@ sheaf-image.workspace = true
 sheaf-ocr.workspace = true
 anyhow.workspace = true
 log.workspace = true
+# Renders come back on oneshot channels (sheaf-render's engine pool).
+futures.workspace = true
 # Stamp collections are PDFs; favorites are JSON.
 lopdf.workspace = true
 serde_json.workspace = true
@@ -29,3 +31,5 @@ image = { workspace = true, features = ["jpeg"] }
 sheaf-util.workspace = true
 fastrand = "2"
 sheaf-doc = { workspace = true, features = ["fixtures"] }
+# The corpus's pool inventory is gzipped (realize_corpus's sample).
+flate2 = "1"

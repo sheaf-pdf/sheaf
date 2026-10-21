@@ -11,6 +11,10 @@
 //!   page whose file sheaf saved with it isn't drawn on twice. Bates
 //!   numbers count the pages it covers, in order.
 //!
+//! An overlay draws each only when its view asks for it, and finds where
+//! a page is, whether the header and footer is on it and its Bates number
+//! from the state's own tables, never by a walk of the pages.
+//!
 //! The page's own streams are referenced, never re-encoded. What the
 //! installers add is keyed by digest: a resource ([`ObjKey::Res`], its
 //! other objects [`ObjKey::ResPart`]) is written once a file, so every OCR
@@ -55,22 +59,38 @@ pub(crate) fn page(
     pos: usize,
     page: &mut Dictionary,
 ) {
-    if let Some(layer) = def.content.ocr_text() {
-        crate::text_layer::install(cx, page, layer);
+    let view = cx.overlay.map(|o| o.inputs);
+    if view.is_none_or(|v| v.ocr_over) {
+        if let Some(layer) = def.content.ocr_text() {
+            crate::text_layer::install(cx, page, layer);
+        }
+        if let Some(version) = needs(def) {
+            cx.needs(version);
+        }
     }
-    if let Some(version) = needs(def) {
-        cx.needs(version);
-    }
-    let input = cx.input;
-    let st = &input.target;
+    let st = cx.st;
     // A derived copy's page draws what the copy says it drew.
-    let Some(hf) = stamps::drawn_over(st, id) else {
+    let (hf, bates) = match view {
+        None => (
+            stamps::drawn_over(st, id),
+            cx.bates.get(pos).copied().flatten(),
+        ),
+        Some(v) => {
+            let hf = (st.header_footer()).filter(|hf| {
+                v.generators
+                    && st.header_covers(id)
+                    && !stamps::base_draws(&def.base.src, def.base.index, hf)
+            });
+            (hf, st.bates_of(id))
+        }
+    };
+    let Some(hf) = hf else {
         return;
     };
     let facts = stamps::PageFacts {
         index: pos,
         count: st.page_count(),
-        bates: cx.bates.get(pos).copied().flatten(),
+        bates,
     };
     let placed = hf.layout(geom.shown(), &facts);
     if !placed.is_empty() {

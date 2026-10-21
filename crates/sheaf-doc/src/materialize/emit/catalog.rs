@@ -16,6 +16,10 @@
 //! stays gone, and says `/Version`: the later of the file's and what the
 //! section needs.
 //!
+//! An overlay's ([`overlay`]) is its source's, written over it, with what
+//! the overlay changes: its pages' tree, their form, and the layers its
+//! view turns off.
+//!
 //! [`RootValues`]: crate::materialize::record::RootValues
 
 use lopdf::{Dictionary, Object};
@@ -75,7 +79,7 @@ pub(crate) fn catalog(cx: &mut Cx, order: &[PageId]) {
     if let Some(form) = super::form::acroform(cx) {
         out.set("AcroForm", form);
     }
-    let st = &cx.input.target;
+    let st = cx.st;
     if let Some(ranges) = st.label_ranges().filter(|r| !r.is_empty()) {
         cx.push(
             ObjKey::Labels,
@@ -150,7 +154,7 @@ pub(crate) fn appended(cx: &mut Cx, order: &[PageId], parts: Parts) {
     }
     out.set("Type", Object::Name(b"Catalog".to_vec()));
     out.set("Pages", cx.placeholder(parts.root));
-    let st = &cx.input.target;
+    let st = cx.st;
     let outline = match parts.outline {
         Some(outline) => outline,
         None => (!st.outline_roots().is_empty()).then(|| cx.placeholder(ObjKey::OutlinesRoot)),
@@ -174,5 +178,41 @@ pub(crate) fn appended(cx: &mut Cx, order: &[PageId], parts: Parts) {
     }
     let version: PdfVersion = cx.version.max(record.pdf_version);
     out.set("Version", Object::Name(version.to_string().into_bytes()));
+    cx.push(ObjKey::Catalog, Object::Dictionary(out));
+}
+
+/// An overlay's catalog, its source's (whose number it's claimed at), but
+/// over the overlay's page tree, its form the fields with a widget on the
+/// overlay's pages (none when there are none), and `/OCProperties` showing
+/// every layer of the source but those the view turns off, when it turns
+/// any off ([`ocg_patch`](crate::layers::ocg_patch)).
+pub(crate) fn overlay(cx: &mut Cx) {
+    let o = cx.overlay.expect("an overlay");
+    let src = cx.primary;
+    let pdf = src.pdf();
+    let source = (pdf.catalog().ok().cloned()).unwrap_or_default();
+    let scope = Scope { src, copy: 0 };
+    let layers = (o.inputs.ocg_off.as_ref())
+        .and_then(|ocg| ocg.off.get(&src.id()))
+        .and_then(|off| crate::layers::ocg_patch(src, off));
+    let mut out = Dictionary::new();
+    for (key, value) in source.iter() {
+        match key.as_slice() {
+            b"Pages" | b"AcroForm" => {}
+            b"OCProperties" if layers.is_some() => {}
+            _ => {
+                let value = cx.sym(value, &scope);
+                out.set(key.clone(), value);
+            }
+        }
+    }
+    out.set("Pages", cx.placeholder(ObjKey::PagesNode(0)));
+    if let Some(form) = super::form::acroform(cx) {
+        out.set("AcroForm", form);
+    }
+    if let Some(layers) = layers {
+        let layers = cx.sym(&layers, &scope);
+        out.set("OCProperties", layers);
+    }
     cx.push(ObjKey::Catalog, Object::Dictionary(out));
 }

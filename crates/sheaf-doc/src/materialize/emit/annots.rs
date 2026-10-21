@@ -36,6 +36,16 @@
 //! - **`/StructParent`** stays only where the page keeps its
 //!   `/StructParents` (copy 0 of a primary page): the structure tree of a
 //!   copy or of another file isn't written (proposal 24).
+//!
+//! An overlay writes what its view draws ([`Cx::draws`]): sheaf's marks
+//! only when PDFium draws them, others' comments and links (and what else
+//! of a page the records don't hold, but widgets) only when the view shows
+//! them, so a page drawn without them carries none. An annotation it hides
+//! is written under its own key, flagged hidden ([`Cx::hidden`]); a reply
+//! to one it doesn't write isn't threaded, and a connector goes nowhere.
+//!
+//! [`Cx::draws`]: super::Cx::draws
+//! [`Cx::hidden`]: super::Cx::hidden
 
 use std::collections::{HashMap, HashSet};
 
@@ -45,18 +55,18 @@ use super::{Cx, Shown};
 use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted, Held, StampForm};
 use crate::content::Res;
 use crate::file::PageAnnots;
-use crate::materialize::copy::Scope;
+use crate::materialize::copy::{self, Scope};
 use crate::materialize::key::{ObjKey, Part};
-use crate::model::{AnnotBody, Foreign, FormRef, Mark, PageId};
+use crate::model::{AnnotBody, DocState, Foreign, FormRef, Mark, PageId};
 use crate::open::FileBody;
 use crate::source::ObjRef;
+use crate::store::{BlobKind, MemoryKind, Origin, Src};
 
 /// Page `id`'s annotations, emitted: its `/Annots`, None when it has
 /// none. `shown` is what the page is written as; `tags`, whether it keeps
 /// its `/StructParents`.
 pub(crate) fn page(cx: &mut Cx, id: PageId, shown: &Shown, tags: bool) -> Option<Object> {
-    let input = cx.input;
-    let st = &input.target;
+    let st = cx.st;
     let ids: Vec<AnnotId> = (st.annot_ids_on(id).into_iter().flatten())
         .copied()
         .collect();
@@ -76,7 +86,7 @@ pub(crate) fn page(cx: &mut Cx, id: PageId, shown: &Shown, tags: bool) -> Option
     // `/Rect`.
     let mut threads = Vec::new();
     for &aid in &ids {
-        let Some(rec) = st.annot(aid) else {
+        let Some(rec) = st.annot(aid).filter(|rec| cx.draws(&rec.body)) else {
             continue;
         };
         match &rec.body {
@@ -164,8 +174,7 @@ impl Page<'_> {
     /// each the annotations the records don't hold that followed it on
     /// the page (those before every record first).
     fn list(&mut self, cx: &mut Cx, ids: &[AnnotId]) -> Vec<Object> {
-        let input = cx.input;
-        let st = &input.target;
+        let st = cx.st;
         let shown = self.shown;
         // The page's records by the entries they were read as.
         let mut by_object = HashMap::new();
@@ -234,13 +243,18 @@ impl Page<'_> {
     }
 
     /// An annotation of the page the records don't hold, as written: None
-    /// for a pop-up, which goes with what opens it.
+    /// for a pop-up, which goes with what opens it, and for what the view
+    /// doesn't draw. A derived copy's widgets are copies of its records',
+    /// which an overlay over the copy writes from the records, until slice
+    /// 17's content stack.
     fn unmodeled(&self, cx: &mut Cx, entry: &Object) -> Option<Object> {
         let shown = self.shown;
         let pdf = shown.src.pdf();
         let (_, dict) = pdf.dereference(entry).ok()?;
         let dict = dict.as_dict().ok()?;
-        if is(dict, b"Subtype", b"Popup") {
+        let widget = is(dict, b"Subtype", b"Widget");
+        let copied = widget && cx.overlay.is_some() && derived(&shown.src);
+        if is(dict, b"Subtype", b"Popup") || copied || !cx.draws_unmodeled(widget) {
             return None;
         }
         let scope = Scope {
@@ -288,8 +302,7 @@ impl Page<'_> {
     /// Another tool's comment or link `aid`, `f`: its entries in `/Annots`,
     /// and its `/Rect`.
     fn foreign(&mut self, cx: &mut Cx, aid: AnnotId, f: &Foreign) -> (Vec<Object>, Option<Object>) {
-        let input = cx.input;
-        let st = &input.target;
+        let st = cx.st;
         let shown = self.shown;
         let (src, dict) = match &f.src {
             Some(r) => match r.src.pdf().get_dictionary(r.id) {
@@ -303,8 +316,9 @@ impl Page<'_> {
         };
         let scope = Scope { src, copy: f.copy };
         // A link to a page that isn't written leads nowhere: a Rewrite's
-        // `keep_only` drops it, and an Append leaves it out as that would.
-        if cx.saved().is_some()
+        // `keep_only` drops it, and an Append or an overlay leaves it out as
+        // that would.
+        if (cx.saved().is_some() || cx.overlay.is_some())
             && f.summary.subtype == "Link"
             && leads_nowhere(src.pdf(), dict, |page| cx.closure.writes_page(page, &scope))
         {
@@ -312,10 +326,12 @@ impl Page<'_> {
         }
         let parent = (f.summary.parent.as_deref())
             .and_then(|name| st.annot_by_nm(self.id, name))
+            .filter(|&pid| cx.draws_id(pid))
             .map(ObjKey::Annot)
             .or_else(|| {
                 let irt = dict.get(b"IRT").ok()?.as_reference().ok()?;
-                cx.annot_at(src, irt, f.copy).map(ObjKey::Annot)
+                let pid = cx.annot_at(src, irt, f.copy)?;
+                cx.draws_id(pid).then_some(ObjKey::Annot(pid))
             });
         let rect = (dict.get(b"Rect").ok())
             .and_then(|r| src.pdf().dereference(r).ok())
@@ -334,6 +350,7 @@ impl Page<'_> {
             && !dict.has(b"Popup")
             && self.refs_kept(cx, dict, parent)
             && (dict.has(b"NM") || !named())
+            && !cx.hides(aid)
         {
             cx.push_raw(key, r.clone());
             return (vec![cx.placeholder(key)], rect);
@@ -361,6 +378,7 @@ impl Page<'_> {
         if !dict.has(b"NM") && named() {
             out.set("NM", Object::string_literal(name.as_str()));
         }
+        cx.hidden(aid, &mut out);
         let Some(r) = &f.src else {
             return (vec![Object::Dictionary(out)], rect);
         };
@@ -456,7 +474,9 @@ impl Page<'_> {
         parent: Option<(ObjKey, Object)>,
     ) -> (Vec<Object>, Option<Object>) {
         let key = ObjKey::Annot(aid);
-        if let Some(kept) = self.as_read(cx, aid, m, parent.as_ref().map(|(k, _)| *k)) {
+        if !cx.hides(aid)
+            && let Some(kept) = self.as_read(cx, aid, m, parent.as_ref().map(|(k, _)| *k))
+        {
             return kept;
         }
         let held = Held {
@@ -481,11 +501,15 @@ impl Page<'_> {
             main.set("IRT", cx.placeholder(parent));
             main.set("Rect", rect);
         }
+        // An overlay's goes nowhere: where it leads isn't drawn, and its
+        // group is found by a walk of the document.
         if let AnnotKind::Connector { label, .. } = &m.annot.kind
+            && cx.overlay.is_none()
             && let Some(dest) = cx.connector_dest(aid, label)
         {
             main.set("Dest", dest);
         }
+        cx.hidden(aid, &mut main);
         let rect = main.get(b"Rect").ok().cloned();
         cx.push(key, Object::Dictionary(main));
         let mut entries = vec![cx.placeholder(key)];
@@ -500,6 +524,7 @@ impl Page<'_> {
             dict.set("IRT", cx.placeholder(key));
             dict.set("RT", Object::Name(b"Group".to_vec()));
             dict.set("P", page);
+            cx.hidden(aid, &mut dict);
             let part = ObjKey::AnnotPart(aid, Part::Companion);
             cx.push(part, Object::Dictionary(dict));
             entries.push(cx.placeholder(part));
@@ -508,11 +533,9 @@ impl Page<'_> {
     }
 
     /// Mark `aid`, `m`, as the file has it, when the state holds it as it
-    /// was read and it keeps its number: its object as it is, then its
-    /// companions as they are; a reply only while it still names its
-    /// parent's number (`parent` the parent's key). Not when its `/P`
-    /// isn't its page's, it has a pop-up, or a companion is marked
-    /// `/SheafPart`, none of which the mark is written with.
+    /// was read and it keeps its number ([`mark_kept`]): its object as it
+    /// is, then its companions as they are; a reply only while it still
+    /// names its parent's number (`parent` the parent's key).
     fn as_read(
         &self,
         cx: &mut Cx,
@@ -521,58 +544,12 @@ impl Page<'_> {
         parent: Option<ObjKey>,
     ) -> Option<(Vec<Object>, Option<Object>)> {
         let r = m.src.as_ref()?;
-        let shown = self.shown;
-        if cx.owned_at(ObjKey::Annot(aid)) != Some(r.id) || r.src != shown.src {
+        if cx.owned_at(ObjKey::Annot(aid)) != Some(r.id) {
             return None;
         }
-        // Not a copy another program made, given a new id at open: its
-        // object says the id it was copied with.
-        let facts = shown.src.annots();
-        let read = (facts.on(shown.index).iter())
-            .filter(|a| !facts.fresh.contains(&(shown.index, a.slot)))
-            .find_map(|a| match (&a.body, a.object) {
-                (FileBody::Mark { annot, .. }, Some(at)) if at == r.id => Some(annot),
-                _ => None,
-            })?;
-        let stamp_kept =
-            (m.stamp.as_ref()).is_none_or(|f| matches!(f, FormRef::Base(at) if at.src == r.src));
-        if **read != m.annot || !stamp_kept {
-            return None;
-        }
-        let pdf = r.src.pdf();
-        let dict = pdf.get_dictionary(r.id).ok()?;
-        let irt = dict.get(b"IRT").ok().and_then(|o| o.as_reference().ok());
-        let threads = match (m.annot.thread_parent(), parent) {
-            (None, _) => irt.is_none(),
-            (Some(_), Some(parent)) => irt.is_some() && irt == cx.number_known(parent),
-            (Some(_), None) => false,
-        };
-        // Its `/P` the page's, and no pop-up, as the mark is written.
-        let page_at = cx.number_known(ObjKey::Page(self.id));
-        let p_kept = match dict.get(b"P") {
-            Err(_) => true,
-            Ok(&Object::Reference(p)) => page_at == Some(p),
-            Ok(_) => false,
-        };
-        if !threads || !p_kept || dict.has(b"Popup") {
-            return None;
-        }
-        // Its companions: what's grouped under it and isn't a mark itself,
-        // none marked the way sheaf no longer writes (`/SheafPart`).
-        let page = PageAnnots::new(self.base);
-        let mut companions = Vec::new();
-        for entry in self.base {
-            let read = (entry.as_reference().ok()).and_then(|at| pdf.get_dictionary(at).ok());
-            let under = read.is_some_and(|d| {
-                d.get(b"IRT").ok() == Some(&Object::Reference(r.id)) && !d.has(b"SheafAnnot")
-            });
-            if under && crate::file::is_ours(pdf, entry, &page) {
-                if read.is_some_and(|d| d.has(crate::annot::PART.as_bytes())) {
-                    return None;
-                }
-                companions.push(entry);
-            }
-        }
+        let page = cx.number_known(ObjKey::Page(self.id));
+        let parent = parent.map(|parent| cx.number_known(parent));
+        let Kept { companions, rect } = mark_kept(self.shown, self.base, m, page, parent)?;
         cx.push_raw(ObjKey::Annot(aid), r.clone());
         let scope = Scope {
             src: &r.src,
@@ -582,18 +559,93 @@ impl Page<'_> {
         for entry in companions {
             entries.push(cx.sym(entry, &scope));
         }
-        let rect = (dict.get(b"Rect").ok())
-            .and_then(|o| pdf.dereference(o).ok())
-            .map(|(_, o)| o.clone());
         Some((entries, rect))
     }
 }
 
+/// A mark kept as its file has it ([`mark_kept`]).
+pub(crate) struct Kept<'b> {
+    /// Its companions' entries in its page's `/Annots`, in order.
+    pub(crate) companions: Vec<&'b Object>,
+    /// Its `/Rect`.
+    pub(crate) rect: Option<Object>,
+}
+
+/// Mark `m` as the file `shown`'s page is of has it, on a page whose
+/// `/Annots` the file has as `base`: when the state holds it as it was
+/// read there (not a copy another program made, given a new id at open,
+/// whose object says the id it was copied with, and holding the stamp's
+/// page it was read with), with its companions: what's grouped under it
+/// and isn't a mark itself. Not when its `/P` isn't `page` (the number its
+/// page is written at), its `/IRT` doesn't name `parent` (the number its
+/// thread's parent is written at, None while that isn't written; a mark
+/// that isn't a reply names none), it has a pop-up, or a companion is
+/// marked `/SheafPart`, none of which the mark is written with. What a save
+/// and an overlay keep, and the realizer's model of them
+/// ([`untouched`](crate::realize::untouched)).
+pub(crate) fn mark_kept<'b>(
+    shown: &Shown,
+    base: &'b [Object],
+    m: &Mark,
+    page: Option<ObjectId>,
+    parent: Option<Option<ObjectId>>,
+) -> Option<Kept<'b>> {
+    let r = m.src.as_ref()?;
+    if r.src != shown.src {
+        return None;
+    }
+    let facts = shown.src.annots();
+    let read = (facts.on(shown.index).iter())
+        .filter(|a| !facts.fresh.contains(&(shown.index, a.slot)))
+        .find_map(|a| match (&a.body, a.object) {
+            (FileBody::Mark { annot, .. }, Some(at)) if at == r.id => Some(annot),
+            _ => None,
+        })?;
+    let stamp_kept =
+        (m.stamp.as_ref()).is_none_or(|f| matches!(f, FormRef::Base(at) if at.src == r.src));
+    if **read != m.annot || !stamp_kept {
+        return None;
+    }
+    let pdf = r.src.pdf();
+    let dict = pdf.get_dictionary(r.id).ok()?;
+    let irt = dict.get(b"IRT").ok().and_then(|o| o.as_reference().ok());
+    let threads = match (m.annot.thread_parent(), parent) {
+        (None, _) => irt.is_none(),
+        (Some(_), Some(parent)) => irt.is_some() && irt == parent,
+        (Some(_), None) => false,
+    };
+    let p_kept = match dict.get(b"P") {
+        Err(_) => true,
+        Ok(&Object::Reference(p)) => page == Some(p),
+        Ok(_) => false,
+    };
+    if !threads || !p_kept || dict.has(b"Popup") {
+        return None;
+    }
+    let entries = PageAnnots::new(base);
+    let mut companions = Vec::new();
+    for entry in base {
+        let read = (entry.as_reference().ok()).and_then(|at| pdf.get_dictionary(at).ok());
+        let under = read.is_some_and(|d| {
+            d.get(b"IRT").ok() == Some(&Object::Reference(r.id)) && !d.has(b"SheafAnnot")
+        });
+        if under && crate::file::is_ours(pdf, entry, &entries) {
+            if read.is_some_and(|d| d.has(crate::annot::PART.as_bytes())) {
+                return None;
+            }
+            companions.push(entry);
+        }
+    }
+    let rect = (dict.get(b"Rect").ok())
+        .and_then(|o| pdf.dereference(o).ok())
+        .map(|(_, o)| o.clone());
+    Some(Kept { companions, rect })
+}
+
 /// Whether link `dict`, of `pdf`, goes to a page that isn't written, or
-/// nowhere: its explicit destination's (its `/Dest`, or its GoTo action's
-/// `/D`) first entry is a page `written` says the save doesn't write (as
-/// the copy reading it resolves it, [`Closure::writes_page`]), or null. A
-/// named destination is the name tree's to resolve.
+/// nowhere: its destination ([`link_dest`]) is a page `written` says the
+/// save doesn't write (as the copy reading it resolves it,
+/// [`Closure::writes_page`]), or null.
 ///
 /// [`Closure::writes_page`]: crate::materialize::copy::Closure::writes_page
 pub(crate) fn leads_nowhere(
@@ -601,6 +653,19 @@ pub(crate) fn leads_nowhere(
     dict: &Dictionary,
     written: impl Fn(ObjectId) -> bool,
 ) -> bool {
+    match link_dest(pdf, dict) {
+        Some(None) => true,
+        Some(Some(page)) => !written(page),
+        None => false,
+    }
+}
+
+/// Where link `dict`, of `pdf`, goes by its explicit destination (its
+/// `/Dest`, or its GoTo action's `/D`): `Some(Some(page))` when its first
+/// entry is a page of `pdf`, `Some(None)` when it's null or there's none,
+/// and None for anything else. A named destination is the name tree's to
+/// resolve.
+fn link_dest(pdf: &lopdf::LazyPdf, dict: &Dictionary) -> Option<Option<ObjectId>> {
     let deref = |o: &Object| pdf.dereference(o).ok().map(|(_, o)| o.clone());
     let dest = match dict.get(b"Dest") {
         Ok(dest) => deref(dest),
@@ -613,15 +678,83 @@ pub(crate) fn leads_nowhere(
         dest => dest,
     };
     let Some(Object::Array(dest)) = dest else {
-        return false;
+        return None;
     };
     match dest.first() {
-        None | Some(Object::Null) => true,
-        Some(Object::Reference(page)) => {
-            crate::materialize::copy::is_page_node(pdf, *page) && !written(*page)
+        None | Some(Object::Null) => Some(None),
+        Some(Object::Reference(page)) if crate::materialize::copy::is_page_node(pdf, *page) => {
+            Some(Some(*page))
         }
-        Some(_) => false,
+        Some(_) => None,
     }
+}
+
+/// Where another tool's link `f`, on a page showing a page of `own`, leads
+/// in `st`, as an overlay over `own` finds its pages ([`copy::page_of`]).
+/// Read from its object, or for one written into its page's `/Annots`,
+/// from the entry at its place there, of those `base` gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkTo {
+    /// A page of `st`.
+    Page(PageId),
+    /// A page `st` hasn't got, or nowhere ([`leads_nowhere`]): an overlay
+    /// leaves it out, as a save does.
+    Nowhere,
+    /// Not to a page by an explicit destination, or not a link.
+    Elsewhere,
+}
+
+impl LinkTo {
+    pub(crate) fn of(
+        st: &DocState,
+        own: &Src,
+        base: impl FnOnce() -> Vec<Object>,
+        f: &Foreign,
+    ) -> LinkTo {
+        if f.summary.subtype != "Link" {
+            return LinkTo::Elsewhere;
+        }
+        let src = f.src.as_ref().map_or(own, |r| &r.src);
+        let whole = src.id() == own.id() && f.copy == 0;
+        let leads = |dict: &Dictionary| match link_dest(src.pdf(), dict) {
+            Some(Some(page)) => match copy::page_of(st, src.id(), page, !whole) {
+                Some(shown) => LinkTo::Page(shown),
+                None => LinkTo::Nowhere,
+            },
+            Some(None) => LinkTo::Nowhere,
+            None => LinkTo::Elsewhere,
+        };
+        let dict = match &f.src {
+            Some(r) => r.src.pdf().get_dictionary(r.id).ok().map(leads),
+            None => match base().get(f.summary.slot) {
+                Some(Object::Dictionary(d)) => Some(leads(d)),
+                _ => None,
+            },
+        };
+        dict.unwrap_or(LinkTo::Elsewhere)
+    }
+}
+
+/// Whether another tool's link `f` leads nowhere in `st` ([`LinkTo::of`]).
+pub(crate) fn dead_link(
+    st: &DocState,
+    own: &Src,
+    base: impl FnOnce() -> Vec<Object>,
+    f: &Foreign,
+) -> bool {
+    LinkTo::of(st, own, base, f) == LinkTo::Nowhere
+}
+
+/// Whether `src` is a derived copy of another source's pages (a crop, a
+/// header stripped, a watermark), until slice 17.
+pub(crate) fn derived(src: &Src) -> bool {
+    matches!(
+        src.blob().kind(),
+        BlobKind::Pdf {
+            origin: Origin::Memory(MemoryKind::Derived),
+            ..
+        }
+    )
 }
 
 /// Whether `dict`'s `key` is the name `name`.
@@ -753,10 +886,10 @@ impl Cx<'_> {
     /// its group in document order, wrapping, a little in from its
     /// top-left corner. None alone in its group.
     fn connector_dest(&mut self, aid: AnnotId, label: &str) -> Option<Object> {
-        let input = self.input;
+        let st = self.st;
         let members = self.groups.entry(label.to_string()).or_insert_with(|| {
             let group = crate::annot::Group::Connector(label.to_string());
-            crate::model::group_members_in(&input.target, &group)
+            crate::model::group_members_in(st, &group)
                 .into_iter()
                 .map(|(_, page, a)| (page, a))
                 .collect()

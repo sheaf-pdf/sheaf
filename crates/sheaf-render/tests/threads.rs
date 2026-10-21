@@ -1,5 +1,6 @@
-//! Documents open, size and draw from several threads at once, as the app
-//! opens each one on a render thread of its own. pdfium-render's
+//! Documents open, size and draw from several threads at once, as the
+//! app's render worker does beside the threads that open an engine of
+//! their own (a print, an export, a scan for blank pages). pdfium-render's
 //! `thread_safe` lock leaves some calls out (one of them in every load),
 //! and PDFium parsing on two threads at once leaves its parser broken for
 //! the rest of the process: most loads failed with `FormatError` (M10

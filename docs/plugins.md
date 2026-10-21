@@ -201,12 +201,18 @@ stay as you wrote them, since a plugin never learns who the user is
 
 **`text`**: `page-text`, `pattern-search(page, regex)`,
 `search(page, query, match-case)`, `text-boxes(page, rect)` and
-`words(page, rect?)` (every word with its box). Matches come
-with their boxes in page coordinates: points, top-left origin, the page as
-the file displays it (the same space annotations use). Pattern matches also
-carry their capture groups. OCR text the user hasn't saved yet counts.
-This frame is 0.3's and stays so: sheaf keeps pages' geometry in their
-unrotated user space now, and converts at the API's edge.
+`words(page, rect?)` (every word with its box). A page's text is the page
+as the file will draw it once saved: its own text, OCR text the user
+hasn't saved yet and an unsaved header or footer, but never a form
+field's value or any annotation's text. Words are apart by a space and
+lines by a newline; a `search`'s words match where the page's are apart
+by any whitespace, so a phrase wrapped onto the next line is found; it
+ignores case unless `match-case`. Matches come with their boxes in page
+coordinates: points, top-left origin, the page as the file displays it
+(the same space annotations use). Pattern matches also carry their
+capture groups. This frame is 0.3's and stays so: sheaf keeps pages'
+geometry in their unrotated user space now, and converts at the API's
+edge.
 
 **`edits`**: `submit(label, edits)` queues a batch of edits labelled `label`.
 Batches are applied in order **after your call returns**, all of a call's as
@@ -214,8 +220,11 @@ one undo step, labelled as its first is, so ids of things a batch creates
 (bookmarks, annotations) aren't known during the call. Your call sees the
 document as it is at its first read or submit, and its edits are applied to
 it as it read it: what it read is checked when they land (the pages it
-listed, a page's annotations, text or render, the outline, a mark it
-updates), and when the user has changed any of it since, none of the
+listed, a page's annotations, or what a render of it drew: the page, the
+annotations and form fields drawn, the header and, when the header numbers
+pages, their order; for its text, the same less the annotations and
+fields; the outline, a mark it updates), and
+when the user has changed any of it since, none of the
 edits are applied, and the user sees which change got in the way. Listing
 the pages reads their order, so a page inserted, moved or deleted anywhere
 since is such a change. Only changes to what the call didn't read are
@@ -252,8 +261,10 @@ plugins ship.
 
 **`render`**: read-only page images. `page-renderer(page)` draws the page
 (or a region of it, in page coordinates) at a dpi you choose (up to 600), in
-`gray8` or `rgba8`, as the file draws it, without sheaf's own unsaved
-markup. The pixels stay in sheaf: an `image` gives its size, maps pixels to
+`gray8` or `rgba8`, as the file will draw it once saved: with sheaf's own
+markup, an unsaved header or footer, and other tools' comments and form
+fields, in the file's own orientation (a page turned in sheaf isn't drawn
+turned). The pixels stay in sheaf: an `image` gives its size, maps pixels to
 page points (`to-page`), and hands over rows or tiles as you read them.
 Handles last for one call. Rendering time doesn't count against the call's
 limit, but each call may render at most 400 million pixels and keep 16
@@ -261,7 +272,9 @@ images alive at once. `plugins/duplicate-pages` uses it to fingerprint
 pages.
 
 **`ocr`**: `recognize(page, options)` runs the user's OCR engine on one page
-and returns its words with boxes. It doesn't change the document.
+and returns its words with boxes. It reads the page's own content, as
+sheaf's OCR does: no form fields, comments, markup or unsaved header are
+drawn into what it reads. It doesn't change the document.
 `page-text-layer(page)` returns the unsaved OCR layer, if any.
 
 **`storage`**: `get`, `set`, `delete`, `keys` for a key/value store kept in

@@ -34,11 +34,14 @@ mod stale;
 mod state;
 
 pub use records::{
-    AnnotBody, AnnotRec, Bookmark, ContentStack, FieldNode, FieldProps, Foreign, FormDoc, FormInst,
-    FormRef, GenId, GenSpec, Generator, Layer, Mark, PageBase, PageDef, ScriptState, Static,
-    Target, Terminal, Widget, WidgetProps, XfaState,
+    AnnotBody, AnnotRec, Bookmark, ContentStack, CtxNeeds, FieldNode, FieldProps, Foreign, FormDoc,
+    FormInst, FormRef, GenId, GenSpec, Generator, Layer, Mark, PageBase, PageDef, ScriptState,
+    Static, Target, Terminal, Widget, WidgetProps, XfaState,
 };
 pub use sheaf_edit::{OutlineId, PageId, SourceId, TextStyle};
+pub(crate) use state::RenderTables;
+#[cfg(test)]
+pub(crate) use state::visits;
 pub use state::{Builder, DocState, Invariant};
 
 /// Where a derived copy's pages come from (a copy sheaf made of another
@@ -498,11 +501,7 @@ impl Document {
                 src: primary.clone(),
                 index,
             };
-            let def = PageDef {
-                base,
-                copy: facts.repeat,
-                content: ContentStack::empty(),
-            };
+            let def = PageDef::new(base, facts.repeat, ContentStack::empty());
             (ids.page(), Arc::new(def), Arc::new(facts.geom))
         });
         let state = DocState::builder().pages(pages).build();

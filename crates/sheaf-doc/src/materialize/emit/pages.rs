@@ -10,7 +10,10 @@
 //!   state's. An Append places it in the saved file's tree, whose nodes
 //!   may hold any of them, so a page with no `/CropBox` of its own writes
 //!   its media box as one, and one whose turn the state keeps keeps its
-//!   own `/Rotate` as it says it.
+//!   own `/Rotate` as it says it. An overlay places it under a new root
+//!   that carries nothing, as a Rewrite does, but writes its base page's
+//!   own `/Rotate` ([`RotatePolicy::KeepBase`]): the render turns it by
+//!   the rest.
 //! - **`/StructParents`** stays only on copy 0 of a primary page, whose
 //!   structure tree is written; a copy and a page from another file lose
 //!   it, with a note when their file was tagged.
@@ -32,7 +35,7 @@
 use anyhow::{Context as _, Result};
 use lopdf::{Dictionary, LazyPdf, Object};
 
-use super::{Cx, Shown};
+use super::{Cx, RotatePolicy, Shown};
 use crate::geom::{Geom, Rect};
 use crate::materialize::copy::Scope;
 use crate::materialize::key::ObjKey;
@@ -150,11 +153,17 @@ pub(crate) fn page(
         out.set("CropBox", media);
     }
     // An Append keeps a turn the state left as the page's own `/Rotate`
-    // says it, however it says it (a 135 reads as 90).
-    let own =
-        (base.get(b"Rotate").ok()).filter(|_| cx.saved().is_some() && geom.rotate == was.rotate);
+    // says it, however it says it (a 135 reads as 90); an overlay keeps the
+    // base page's, whatever the state says.
+    let own = match cx.rotate() {
+        RotatePolicy::Model => (base.get(b"Rotate").ok().cloned())
+            .filter(|_| cx.saved().is_some() && geom.rotate == was.rotate),
+        RotatePolicy::KeepBase => {
+            Some(effective(pdf, base, facts, b"Rotate").unwrap_or(Object::Integer(0)))
+        }
+    };
     match own {
-        Some(rotate) => out.set("Rotate", cx.sym(rotate, &shared)),
+        Some(rotate) => out.set("Rotate", cx.sym(&rotate, &shared)),
         None => out.set("Rotate", i64::from(geom.rotate.degrees())),
     }
     let others = [

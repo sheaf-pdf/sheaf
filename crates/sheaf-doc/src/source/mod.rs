@@ -7,7 +7,8 @@
 //! What a source says about itself is a pure function of its bytes, read
 //! once: the page table when it opens; its conformance claims, what its
 //! pages hold beside their content, its form and signatures, and the
-//! header and footer sheaf drew, when first asked. Sources come from the
+//! header and footer sheaf drew, when first asked; and whether PDFium
+//! refuses the bytes, once an engine has tried them. Sources come from the
 //! [`Store`](crate::store::Store), one per distinct file.
 
 mod conformance;
@@ -21,6 +22,7 @@ mod pages;
 mod tests;
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use in_progress::{NoProgress, Progress};
@@ -59,6 +61,8 @@ pub struct Source {
     form: OnceLock<Arc<FileForm>>,
     signatures: OnceLock<Arc<Signatures>>,
     header_footer: OnceLock<Option<StoredHeaderFooter>>,
+    /// PDFium refused its bytes ([`Source::base_refused`]).
+    refused: AtomicBool,
 }
 
 /// A header and footer sheaf drew, as its file's catalog stores it, and
@@ -141,6 +145,7 @@ impl Source {
             form: OnceLock::new(),
             signatures: OnceLock::new(),
             header_footer: OnceLock::new(),
+            refused: AtomicBool::new(false),
         })
     }
 
@@ -174,6 +179,19 @@ impl Source {
     /// never appended to.
     pub fn base_sound(&self) -> bool {
         self.pdf.base_sound()
+    }
+
+    /// Whether PDFium can't read its bytes, as an engine found when it
+    /// tried them ([`Source::refuse_base`]): its pages are then all drawn
+    /// from realizations, none from its base engine (M10.5 slice 13).
+    /// False until an engine has failed, and for the source's life after.
+    pub fn base_refused(&self) -> bool {
+        self.refused.load(Ordering::Relaxed)
+    }
+
+    /// Notes that PDFium refused its bytes.
+    pub fn refuse_base(&self) {
+        self.refused.store(true, Ordering::Relaxed);
     }
 
     pub fn xref(&self) -> &XrefFacts {

@@ -481,7 +481,7 @@ impl DocView {
 
     /// The panel's rows and the rest (see `CommentView`), made again only
     /// when something they depend on changed. Also keeps what the page
-    /// hides in step: our marks here, other tools' in the engines.
+    /// hides in step: our marks here, other tools' in the screen's inputs.
     pub(crate) fn comment_view(&mut self, cx: &mut Context<Self>) -> Arc<CommentView> {
         let needle = self.comment_needle(cx);
         let reply = self
@@ -522,86 +522,9 @@ impl DocView {
         if let State::Ready(doc) = &mut self.state {
             doc.hidden_marks = view.hidden_ours.clone();
             doc.comment_view = Some((key, view.clone()));
+            doc.set_inputs();
         }
-        self.sync_foreign_visibility(cx);
         view
-    }
-
-    /// Hide on screen the other tools' comments that should be (filtered
-    /// out, deleted or made ours, or all with View > Hide Comments), and
-    /// show again the ones sheaf hid that shouldn't be any more: of each
-    /// page's file, those the page has no comment by the name of that
-    /// shows. Never touches one the file hides itself, or a link. A copy
-    /// sheaf made of a page (a crop) isn't looked at: the comments on its
-    /// page show.
-    pub(crate) fn sync_foreign_visibility(&mut self, cx: &mut Context<Self>) {
-        let State::Ready(doc) = &mut self.state else {
-            return;
-        };
-        let hidden_by_view = doc
-            .comment_view
-            .as_ref()
-            .map(|(_, v)| v.hidden_foreign.clone())
-            .unwrap_or_default();
-        let st = doc.model.state();
-        let mut want: HashSet<(sheaf_doc::SourceId, u32, usize)> = HashSet::new();
-        for (page, def, _) in st.pages() {
-            let base = &def.base;
-            if doc.model.derived().contains_key(&base.src.id()) {
-                continue;
-            }
-            let in_file = base.src.annots().foreign_on(base.index);
-            let mut in_file = in_file
-                .filter(|(_, _, f)| !f.hidden && !f.is_link())
-                .peekable();
-            if in_file.peek().is_none() {
-                continue;
-            }
-            let shown: HashSet<&str> = (st.foreign_on(page))
-                .filter(|(id, _)| !doc.comments_hidden && !hidden_by_view.contains(id))
-                .map(|(_, f)| f.summary.name.as_str())
-                .collect();
-            want.extend(
-                in_file
-                    .filter(|(_, _, f)| !shown.contains(f.name.as_str()))
-                    .map(|(_, _, f)| (base.src.id(), base.index, f.slot)),
-            );
-        }
-        let hide: Vec<_> = want.difference(&doc.foreign_hidden).copied().collect();
-        let show: Vec<_> = doc.foreign_hidden.difference(&want).copied().collect();
-        if hide.is_empty() && show.is_empty() {
-            return;
-        }
-        let mut by_source: HashMap<sheaf_doc::SourceId, HashMap<u32, Vec<(usize, bool)>>> =
-            HashMap::new();
-        for (on, set) in [(true, &hide), (false, &show)] {
-            for &(source, page, slot) in set {
-                by_source
-                    .entry(source)
-                    .or_default()
-                    .entry(page)
-                    .or_default()
-                    .push((slot, on));
-            }
-        }
-        doc.foreign_hidden = want;
-        for (source, pages) in by_source {
-            let Some(handle) = doc.handles.get(&source) else {
-                continue;
-            };
-            let rx = handle.set_annots_hidden(pages.into_iter().collect());
-            cx.spawn(async move |this, cx| {
-                let _ = rx.await;
-                this.update(cx, |v, cx| {
-                    if let State::Ready(doc) = &mut v.state {
-                        doc.invalidate_tiles();
-                    }
-                    cx.notify();
-                })
-                .ok();
-            })
-            .detach();
-        }
     }
 
     fn set_comment_filter(&mut self, f: impl FnOnce(&mut CommentFilter), cx: &mut Context<Self>) {
@@ -620,6 +543,7 @@ impl DocView {
                 ..Default::default()
             };
             doc.comments_hidden = false;
+            doc.set_inputs();
         }
         if let Some(cm) = &mut self.comments {
             cm.pages.update(cx, |t, cx| t.set_text(String::new(), cx));
@@ -636,8 +560,8 @@ impl DocView {
             } else {
                 "Comments shown".into()
             });
+            doc.set_inputs();
         }
-        self.sync_foreign_visibility(cx);
         cx.notify();
     }
 

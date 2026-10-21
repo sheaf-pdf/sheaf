@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lopdf::{Dictionary, Document as Pdf, Stream, dictionary};
-use sheaf_doc::geom::Geom;
 use sheaf_doc::materialize::How;
 use sheaf_doc::tx::fixture::{add, ocr, rotate};
 use sheaf_doc::{
     Annot, AnnotId, AnnotKind, Box2, Derive, DestView, Document, OcrWord, PageChars, PageId, Pt,
+    Query,
 };
 use sheaf_edit::{Op, PageRef, Rotation, Sibling, Turn};
 use sheaf_image::raster::{PixelFormat, content_bounds};
@@ -121,35 +121,29 @@ fn mark(kind: AnnotKind) -> Annot {
     }
 }
 
-/// PDFium's characters on the first page, boxes in its view frame.
-fn engine_chars(engine: &PdfiumEngine) -> Vec<(char, Option<Box2>)> {
-    let chars = engine.page_chars(PageIndex(0)).unwrap();
-    chars
-        .into_iter()
-        .map(|(c, r)| {
-            let r = r.map(|r| Box2 {
-                x: r.x,
-                y: r.y,
-                w: r.w,
-                h: r.h,
-            });
-            (c, r)
-        })
-        .collect()
+/// An engine on the file at `path`.
+fn engine_on(path: &Path) -> PdfiumEngine {
+    PdfiumEngine::open_bytes(sheaf_util::read_file(path).unwrap(), None).unwrap()
 }
 
-/// PDFium's glyph boxes for `word` on the first page, into PageSpace
-/// through the page's `geom`.
-fn glyphs(engine: &PdfiumEngine, geom: &Geom, word: &str) -> Vec<Box2> {
+/// PDFium's characters on the first page as [`PageChars::from_engine`]
+/// takes them: boxes in PageSpace, and the angles they're drawn at.
+fn engine_chars(engine: &PdfiumEngine) -> Vec<(char, Option<Box2>, f32)> {
+    let chars = engine.page_chars(PageIndex(0)).unwrap();
+    chars.into_iter().map(|c| (c.ch, c.rect, c.angle)).collect()
+}
+
+/// PDFium's glyph boxes for `word` on the first page, in PageSpace.
+fn glyphs(engine: &PdfiumEngine, word: &str) -> Vec<Box2> {
     let chars = engine_chars(engine);
     let n = word.chars().count();
     let at = chars
         .windows(n)
-        .position(|w| w.iter().map(|(c, _)| *c).eq(word.chars()))
+        .position(|w| w.iter().map(|(c, ..)| *c).eq(word.chars()))
         .unwrap_or_else(|| panic!("{word:?} isn't on the page"));
     chars[at..at + n]
         .iter()
-        .map(|(_, r)| geom.from_view().apply_box(r.unwrap()))
+        .map(|(_, r, _)| r.unwrap())
         .collect()
 }
 
@@ -202,7 +196,7 @@ fn margins_crop_and_marks_follow() {
     let out = dir.join("out.pdf");
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
     assert_eq!(crop_box(&out), vec![72.0, 0.0, 612.0, 720.0]);
-    let engine = PdfiumEngine::open(&out, None).unwrap();
+    let engine = engine_on(&out);
     let job = Job::Page {
         width: 540,
         rotation: Rotation::R0,
@@ -229,15 +223,15 @@ sheaf_doc::both_ways!(
 /// A highlight made over a word as the app makes one, from PDFium's glyph
 /// boxes, still covers the word once its page is cropped, turned and
 /// saved either way: reopened, its rects are as they were, and PDFium's
-/// boxes for the word on the saved page, through that page's Geom, lie
+/// boxes for the word on the saved page, in PageSpace as before, lie
 /// inside them.
 fn highlight_covers_its_glyphs(how: How) {
     let dir = scratch(&format!("highlight-{how:?}"));
     let src = text_pdf(&dir);
     let mut doc = open(&src);
     let p = doc.state().order()[0];
-    let engine = PdfiumEngine::open(&src, None).unwrap();
-    let chars = PageChars::from_engine(engine_chars(&engine), &doc.geom(p));
+    let engine = engine_on(&src);
+    let chars = PageChars::from_engine(engine_chars(&engine));
     let words = chars.words();
     let (_, (a, b), _) = words.iter().find(|(w, ..)| w == "sheaf").unwrap();
     let rects = chars.rects(*a, *b);
@@ -276,9 +270,9 @@ fn highlight_covers_its_glyphs(how: How) {
     for (k, r) in kept.iter().zip(&rects) {
         assert!(near(*k, *r, 1.0 / 16.0), "{how:?}: {k:?} was {r:?}");
     }
-    // PDFium's boxes on the saved page fall inside, to its 1/16 pt grid.
-    let engine = PdfiumEngine::open(&out, None).unwrap();
-    for g in glyphs(&engine, &geom, "sheaf") {
+    // PDFium's boxes on the saved page fall inside, within 1/16 pt.
+    let engine = engine_on(&out);
+    for g in glyphs(&engine, "sheaf") {
         assert!(
             kept.iter().any(|k| near(k.union(g), *k, 1.0 / 16.0)),
             "{how:?}: {g:?} outside {kept:?}"
@@ -344,7 +338,7 @@ fn a_bookmark_on_a_cropped_page_lands_on_the_same_content() {
     let at = saved.geom(p).to_view().apply(Pt { x: 300.0, y: 400.0 });
     // Where PDFium draws the square's top-left on the saved page.
     let size = saved.page_size(p);
-    let engine = PdfiumEngine::open(&out, None).unwrap();
+    let engine = engine_on(&out);
     let job = Job::Page {
         width: size.width.round() as u32,
         rotation: Rotation::R0,
@@ -395,23 +389,12 @@ fn a_crop_leaves_ocr_text_on_its_words() {
     assert!(Arc::ptr_eq(doc.state().ocr_text(p).unwrap(), &layer));
     let out = dir.join("out.pdf");
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
-    let saved = open(&out);
-    let geom = saved.geom(saved.state().order()[0]);
-    let engine = PdfiumEngine::open(&out, None).unwrap();
-    let hits = engine.search_page(PageIndex(0), "square", false).unwrap();
+    let engine = engine_on(&out);
+    let chars = PageChars::from_engine(engine_chars(&engine));
+    let hits = chars.find(&Query::literal("square", false).unwrap());
     assert_eq!(hits.len(), 1, "{hits:?}");
-    let hit = hits[0]
-        .rects
-        .iter()
-        .map(|r| Box2 {
-            x: r.x,
-            y: r.y,
-            w: r.w,
-            h: r.h,
-        })
-        .reduce(Box2::union)
-        .unwrap();
-    let (got, want) = (geom.from_view().apply_box(hit), layer.words[0].rect);
+    let hit = hits[0].rects.iter().copied().reduce(Box2::union).unwrap();
+    let (got, want) = (hit, layer.words[0].rect);
     let near = |a: f32, b: f32| (a - b).abs() <= 2.0;
     assert!(
         near(got.x, want.x)

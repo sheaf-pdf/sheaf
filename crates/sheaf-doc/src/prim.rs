@@ -752,14 +752,11 @@ mod tests {
     fn state() -> DocState {
         let src = crate::store::blank(&Store::new(), 3);
         let pages = (0..3).map(|index| {
-            let def = PageDef {
-                base: PageBase {
-                    src: src.clone(),
-                    index,
-                },
-                copy: 0,
-                content: ContentStack::empty(),
+            let base = PageBase {
+                src: src.clone(),
+                index,
             };
+            let def = PageDef::new(base, 0, ContentStack::empty());
             (
                 PageId(index.into()),
                 Arc::new(def),

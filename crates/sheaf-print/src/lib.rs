@@ -2,15 +2,18 @@
 //! the sheet, and handing a print-ready PDF to the spooler. See
 //! `todos/m7.md` for why sheaf draws its own dialog.
 //!
-//! - Linux and macOS: CUPS, through `lpstat`, `lpoptions` and `lp`.
+//! - Linux and macOS: CUPS, through `lpstat`, `lpoptions` and `lp`, which
+//!   reads the job on its stdin.
 //! - Windows: GDI, with PDFium rasterizing each page at the printer's
-//!   resolution.
+//!   resolution, the job opened from memory.
 //!
 //! The PDF a job prints is made by the caller (`sheaf_doc::save::print_pdf`)
-//! at the page's own size; scaling and orientation are the backend's job,
-//! done the way [`place`] says so the preview matches the paper.
+//! at the page's own size, in memory, and goes to the spooler from there:
+//! nothing is written to disk (M10.5 §10.6). Scaling and orientation are
+//! the backend's job, done the way [`place`] says so the preview matches
+//! the paper.
 
-use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -163,10 +166,9 @@ pub fn printers() -> Result<Vec<Printer>> {
     Ok(list)
 }
 
-/// Send the PDF at `pdf` to the printer. Blocks until the spooler has it;
-/// returns what it said (a CUPS request id, for one). The file may be
-/// deleted afterwards.
-pub fn submit(job: &JobSettings, pdf: &Path) -> Result<String> {
+/// Send the PDF `pdf` to the printer from memory. Blocks until the spooler
+/// has it; returns what it said (a CUPS request id, for one).
+pub fn submit(job: &JobSettings, pdf: Arc<[u8]>) -> Result<String> {
     #[cfg(unix)]
     return cups::submit(job, pdf);
     #[cfg(windows)]

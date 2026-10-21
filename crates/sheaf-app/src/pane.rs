@@ -8,10 +8,10 @@ use std::time::Instant;
 
 use gpui::ScrollHandle;
 use sheaf_doc::geom::Geom;
-use sheaf_doc::{DocState, Document, PageDef, PageId, SourceId};
+use sheaf_doc::{DocState, Document, PageId};
 use sheaf_edit::{PageSize, Rotation};
 
-use crate::docview::ScrollTo;
+use crate::docview::{Pins, ScrollTo};
 
 /// Space around the page column and between pages, in logical px.
 pub(crate) const MARGIN: f32 = 16.0;
@@ -149,8 +149,8 @@ pub(crate) struct Layout {
     pub(crate) layout: u64,
     /// Logical px per PDF point.
     pub(crate) k: f32,
-    /// Every page, with the pane's rotate view added to its rotation: what
-    /// to render and how to map between the page and the screen.
+    /// Every page, with the pane's rotate view added to its rotation: how
+    /// to map between the page and the screen.
     pub(crate) refs: Vec<Shown>,
     rects: Vec<Option<PageRect>>,
     /// Rows that have geometry, top to bottom.
@@ -176,7 +176,7 @@ impl Layout {
         let refs: Vec<Shown> = model
             .state()
             .pages()
-            .map(|(id, def, geom)| Shown::new(id, def, geom, spec.rotation))
+            .map(|(id, _, geom)| Shown::new(id, geom, spec.rotation))
             .collect();
         let sizes: Vec<PageSize> = refs.iter().map(|r| r.geom.shown()).collect();
         Self::from_sizes(spec, refs, &sizes)
@@ -348,6 +348,9 @@ pub(crate) struct Pane {
     /// Last page turn by scrolling past a spread's end, so a trackpad's
     /// stream of wheel events turns one page, not ten.
     pub(crate) last_turn: Option<Instant>,
+    /// The engines its visible pages render from, pinned in the pool from
+    /// its first frame on, and unpinned with it.
+    pub(crate) pins: Option<Pins>,
 }
 
 impl Pane {
@@ -362,6 +365,7 @@ impl Pane {
             pending_scroll: None,
             current_page: 0,
             last_turn: None,
+            pins: None,
         }
     }
 
@@ -377,6 +381,7 @@ impl Pane {
             pending_scroll: Some(ScrollTo::Page(self.current_page)),
             current_page: self.current_page,
             last_turn: None,
+            pins: None,
         }
     }
 
@@ -386,38 +391,30 @@ impl Pane {
     }
 }
 
-/// A page as a pane draws it: the source page that renders it, and its
-/// boxes turned by its rotation and the pane's rotate view.
+/// A page as a pane draws it: its boxes turned by its rotation and the
+/// pane's rotate view. What renders it is its view (M10.5 §10.1), found
+/// each frame for the pages drawn: the layout holds nothing a page shows,
+/// so only a change to the pages' order or boxes lays them out again.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Shown {
     pub(crate) id: PageId,
-    /// The source and page its render handle draws.
-    pub(crate) source: SourceId,
-    pub(crate) index: u32,
     /// Its `to_view` takes PageSpace to the page as drawn, and `shown` is
     /// the size drawn.
     pub(crate) geom: Geom,
-    /// The turn PDFium adds to the source page's own `/Rotate` to draw it
-    /// so: what a render `Job` takes.
-    pub(crate) render: Rotation,
 }
 
 impl Shown {
     /// Page `id` of `st`, turned `view` more.
     pub(crate) fn of(st: &DocState, id: PageId, view: Rotation) -> Option<Shown> {
-        Some(Shown::new(id, st.def(id)?, st.geom(id)?, view))
+        Some(Shown::new(id, st.geom(id)?, view))
     }
 
-    /// Page `id`, which shows `def` with `geom`, turned `view` more.
-    pub(crate) fn new(id: PageId, def: &PageDef, geom: &Geom, view: Rotation) -> Shown {
-        let base = &def.base;
+    /// Page `id`, with `geom`, turned `view` more.
+    pub(crate) fn new(id: PageId, geom: &Geom, view: Rotation) -> Shown {
         let rotate = geom.rotate.plus(view);
         Shown {
             id,
-            source: base.src.id(),
-            index: base.index,
             geom: Geom { rotate, ..*geom },
-            render: rotate.minus(base.src.geom(base.index).rotate),
         }
     }
 }
@@ -430,10 +427,7 @@ mod tests {
         let refs = (0..sizes.len())
             .map(|i| Shown {
                 id: PageId(i as u64),
-                source: SourceId { hash: 0, len: 0 },
-                index: i as u32,
                 geom: Geom::read(None, None, 0),
-                render: Rotation::R0,
             })
             .collect();
         let sizes: Vec<PageSize> = sizes

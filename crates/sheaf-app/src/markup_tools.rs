@@ -606,7 +606,9 @@ impl DocView {
         if let State::Ready(doc) = &mut self.state {
             doc.text_sel = None;
             doc.text_drag = None;
-            doc.adopting = None;
+            if doc.adopting.take().is_some() {
+                doc.set_inputs();
+            }
         }
         // Hit areas of a few screen pixels, whatever the zoom.
         let tolerance = 4.0 / k.max(0.01);
@@ -738,6 +740,7 @@ impl DocView {
                 doc.select_mark(None);
                 doc.selected_foreign = Some(id);
                 doc.adopting = Some(id);
+                doc.set_inputs();
                 doc.drag = Some(Drag {
                     page,
                     page_id,
@@ -913,6 +916,9 @@ impl DocView {
         };
         let Some(drag) = doc.drag.take() else { return };
         let adopting = doc.adopting.take();
+        if adopting.is_some() {
+            doc.set_inputs();
+        }
         let Some(edit) = doc.edit_geom(drag.page) else {
             return;
         };
@@ -1058,11 +1064,11 @@ impl DocView {
         }
     }
 
-    /// Mark up the text a rectangle dragged off the text covered (the
-    /// engine's, or an unsaved OCR layer's), with `rect` and the markup in
-    /// PageSpace, turned as the text reads. Where there's no text, a
-    /// highlight covers the area, turned `drawn`, as the page showed when
-    /// it was dragged; the line markups do nothing.
+    /// Mark up the text a rectangle dragged off the text covered (as the
+    /// page shows, recognized text not yet saved too), with `rect` and the
+    /// markup in PageSpace, turned as the text reads. Where there's no
+    /// text, a highlight covers the area, turned `drawn`, as the page
+    /// showed when it was dragged; the line markups do nothing.
     fn markup_from_drag(
         &mut self,
         tool: Tool,

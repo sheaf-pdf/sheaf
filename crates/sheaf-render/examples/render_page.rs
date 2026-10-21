@@ -1,10 +1,11 @@
 //! M0 spike: render pages of a PDF to PNG via PDFium and report timings.
 //!
-//!     cargo run -p sheaf-render --example render_page [input.pdf] [max_pages] [query [--re]]
+//!     cargo run -p sheaf-render --example render_page [input.pdf] [max_pages]
 //!
 //! Defaults to target/spike/synth.pdf (produced by the sheaf-doc roundtrip
 //! spike). PNGs land in target/spike/.
 
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -21,11 +22,11 @@ fn main() -> Result<()> {
         .nth(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
-    let out_dir = std::path::Path::new("target/spike");
+    let out_dir = Path::new("target/spike");
     std::fs::create_dir_all(out_dir)?;
 
     let t = Instant::now();
-    let r = PdfiumEngine::open(&input, None)?;
+    let r = PdfiumEngine::open_bytes(sheaf_util::read_file(Path::new(&input))?, None)?;
     let opened = t.elapsed();
     let t = Instant::now();
     let sizes = (0..r.page_count())
@@ -58,47 +59,6 @@ fn main() -> Result<()> {
             t.elapsed() - render,
             path.display()
         );
-    }
-
-    // Search check: `render_page <pdf> <max_pages> <query>` draws hit boxes
-    // in red on each rendered page's PNG.
-    if let Some(query) = std::env::args().nth(3) {
-        for i in 0..r.page_count().min(max_pages) {
-            let t = Instant::now();
-            let hits = match std::env::args().nth(4).as_deref() {
-                Some("--re") => r.pattern_search_page(PageIndex(i), &regex::Regex::new(&query)?)?,
-                _ => r.search_page(PageIndex(i), &query, false)?,
-            };
-            println!(
-                "  page {i}: {} hits for {query:?} in {:?}",
-                hits.len(),
-                t.elapsed()
-            );
-            let path = out_dir.join(format!("page-{i:04}.png"));
-            let mut im = image::open(&path)?.to_rgba8();
-            let k = im.width() as f32 / sizes[i as usize].width;
-            for h in &hits {
-                for r in &h.rects {
-                    let (x0, y0) = ((r.x * k) as u32, (r.y * k) as u32);
-                    let (x1, y1) = (((r.x + r.w) * k) as u32, ((r.y + r.h) * k) as u32);
-                    for x in x0..x1.min(im.width()) {
-                        for y in [y0, y1.saturating_sub(1)] {
-                            if y < im.height() {
-                                im.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
-                            }
-                        }
-                    }
-                    for y in y0..y1.min(im.height()) {
-                        for x in [x0, x1.saturating_sub(1)] {
-                            if x < im.width() {
-                                im.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
-                            }
-                        }
-                    }
-                }
-            }
-            im.save(&path)?;
-        }
     }
 
     // Tile check: page 0 at 2400px wide, the tile one step down and right.
