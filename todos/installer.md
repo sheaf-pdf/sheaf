@@ -84,8 +84,12 @@ per-user dirs crate. Small, quick to build.
 ## Decision: versioning
 
 1. **Independent version (preferred for alpha).** The installer is a stable
-   `0.1.0`. It asks the GitHub API for the latest release (or `--version`)
-   and verifies against that release's `SHA256SUMS`. `cargo install
+   `0.1.0`. It lists the repo's releases from the GitHub API, skips drafts,
+   keeps pre-releases and takes the highest semver (or `--version`), then
+   verifies against that release's `SHA256SUMS`. Not `/releases/latest`:
+   it skips pre-releases, and every `-alpha.N` release is one
+   (`release.yml`), so it would find nothing. Read releases, not bare tags;
+   the assets and checksums hang off the release. `cargo install
    sheaf-pdf` works without `@version`, and it is only republished when the
    installer changes.
 2. **Lockstep version.** Each installer release embeds the exact bundle
@@ -104,12 +108,41 @@ becomes a real concern.
   bundles and writes the file, or one `.sha256` per bundle.
 - Publishing `sheaf-pdf` stays manual (`cargo publish`). A crates.io version
   can be yanked but never deleted, and the name is permanent once taken.
+- Write down the bundle contract beside `release.yml` and `package.sh`: the
+  asset names (`sheaf-<version>-<os>-<arch>.{tar.gz,zip}`), the layout (a
+  top-level folder in the tarball, none in the Windows zip), `SHA256SUMS`,
+  and where `sheaf.desktop` and the icons sit. The installer lives in
+  another repo (below), so changes to this must be deliberate.
+- Maybe: `package.sh` writes a `bundle.toml` (layout version, binary path,
+  desktop entry and icon paths) so the installer reads the layout instead
+  of guessing it.
 
 ## Where it lives
 
-`packaging/crates-io/sheaf-pdf/` (or `crates/sheaf-pdf/`), listed in the root
-`Cargo.toml` `exclude` so it doesn't pull in the workspace's GPUI patches or
-build in CI's app job. It needs its own `.gitignore` for `/target`.
+Its own repo, e.g. `sheaf-pdf/installer`, publishing the `sheaf-pdf` crate.
+Decided 2026-10-17.
+
+Not a workspace member: it would share `workspace.package` (its version is
+independent), the root `Cargo.lock` and `[patch.crates-io]`, and it would
+build under `rust-toolchain.toml`'s pinned 1.98.0, so a break on the older
+stable toolchains users `cargo install` with would go unseen. It would also
+wait on the GPUI and Tesseract CI matrix.
+
+Not in this repo outside the workspace either:
+
+- It shares no code with sheaf. What ties them is the bundle contract above,
+  which crosses the network anyway.
+- One repo wouldn't keep them in step: users keep old installers, so any
+  installer version must handle releases from before and after it.
+- Its own tags, changelog and releases. In this repo its releases would mix
+  into sheaf's and confuse its own search for the newest sheaf release.
+- A small repo is easy to read before running something that downloads and
+  runs binaries; crates.io's `repository` link should point there.
+- `in-progress` (`sheaf-pdf/in-progress`) set the pattern.
+
+Its CI is cheap: build and clippy on its MSRV and stable, plus an end-to-end
+install and uninstall on Linux and Windows against the newest real sheaf
+release and one pinned older release.
 
 ## Audience
 
