@@ -723,7 +723,7 @@ fn realized_glyphs_lie_within_a_sixteenth_of_a_point_of_the_source_s() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| realized_glyphs(&corpus, entry));
     let compared: usize = outcomes.iter().flatten().map(|o| o.0).sum();
     eprintln!("{} files: {compared} characters compared", entries.len());

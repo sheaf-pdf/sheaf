@@ -677,7 +677,11 @@ impl Fields {
     /// takes such a field out of a file (bug 14). An edit that takes a
     /// node's last widget takes the node too (the `widget.field` cascade,
     /// M10.5 §6.5); the rule here keeps what's written to what the file
-    /// showed, whatever the state holds.
+    /// showed, whatever the state holds. Nor is a node that isn't a field
+    /// with a value (no terminal) and has no node under it written, as one
+    /// whose `/Kids` another node holds: written, it would be a typeless
+    /// terminal field of its own, and a duplicate where its name is
+    /// another's (Greg, 2026-10-22).
     ///
     /// [`showed`]: Self::showed
     fn field(&mut self, cx: &mut Cx, fid: FieldId) -> bool {
@@ -696,7 +700,7 @@ impl Fields {
             }
         }
         let shows = (node.term.as_ref()).is_some_and(|t| !t.widgets.is_empty() || t.outside > 0);
-        if kids.is_empty() && !shows && self.showed(node) {
+        if kids.is_empty() && !shows && (node.term.is_none() || self.showed(node)) {
             self.written.remove(&fid);
             self.gone.insert(fid);
             return false;

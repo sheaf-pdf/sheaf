@@ -415,7 +415,7 @@ fn the_comments_panel_lists_what_the_file_holds() {
     };
     // Each page's marks, by count, and other tools' comments, by name.
     type Page = (usize, Vec<String>);
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| {
         let doc = comments::open(&corpus.path(entry), None).ok()?;
         let mut listed: BTreeMap<usize, Page> = BTreeMap::new();

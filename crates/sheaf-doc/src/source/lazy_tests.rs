@@ -1042,7 +1042,7 @@ fn corpus_objects_read_lazily_equal_the_eager_load() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     #[derive(Default)]
     struct Counts {
         files: usize,

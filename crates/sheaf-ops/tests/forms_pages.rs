@@ -715,7 +715,7 @@ fn corpus_deleted_pages_leave_no_values() {
     };
     let dir = scratch("corpus-delete");
     let (mut tried, mut failed) = (0, Vec::new());
-    for entry in corpus.manifest().unwrap() {
+    for entry in corpus.forms().unwrap() {
         if entry.path.starts_with("forms/safedocs/") || entry.pages < 2 {
             continue;
         }

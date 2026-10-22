@@ -30,7 +30,9 @@
 //!   content can't be read counted; given a header, each page is isolated
 //!   once and keeps its text; recognized again, and then cleared, each is
 //!   a Rewrite whose file holds and draws none of the text it replaced or
-//!   cleared;
+//!   cleared; and the same over the corpus's scans (`scans/`), where a
+//!   scan holding another program's recognized text still draws all of
+//!   it after ours is added and after ours is cleared;
 //! - deleted means deleted, both ways, on every file (ignored, as it
 //!   takes about seven minutes; each slice's Verify and commit run it): a
 //!   page, a mark, a reply, a mark's text, another tool's comment or a
@@ -64,9 +66,9 @@ use sheaf_doc::content::{
     FontDecoders, PagOrigin, PageContent, PaginationKind, ResCx, TextBag, text_bag,
 };
 use sheaf_doc::effects::{Flags, judge};
-use sheaf_doc::forms::Finding;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::sigs::Verdict;
+use sheaf_doc::forms::{Finding, Report};
 use sheaf_doc::geom::Geom;
 use sheaf_doc::materialize::{
     Ask, AskAnswers, How, Note, Onto, SaveStop, Strategy, StrategyKind, Why, forced_append,
@@ -242,7 +244,7 @@ fn every_file_appends_a_mark_as_planned_and_reopens_with_it() {
         return;
     };
     let dir = scratch("marked");
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| marked(entry, &corpus, &dir));
     let (mut files, mut appended, mut asked) = (0, 0, 0);
     let mut rewritten: BTreeMap<String, Vec<&str>> = BTreeMap::new();
@@ -382,16 +384,10 @@ fn saved_cropped(
         Some(StrategyKind::Rewrite) => Cropped::Rewritten(reasons(&report.why)),
         other => return Err(format!("saved as {other:?}")),
     };
-    // What the form check finds after that it didn't before.
-    if let Ok(was) = sheaf_doc::forms::check(before, None) {
-        let now = sheaf_doc::forms::check(&after, None).map_err(|e| format!("check: {e:#}"))?;
-        let added: Vec<_> = (now.findings.iter())
-            .filter(|f| !was.findings.contains(f))
-            .collect();
-        if !added.is_empty() {
-            return Err(format!("the form check finds {added:?}"));
-        }
-    }
+    // What the form check finds after that it didn't before: nothing a
+    // save told of, as this one asks first.
+    let was = sheaf_doc::forms::check(before, None).ok();
+    nothing_found(was.as_ref(), path, |_| false)?;
     let again = opened(path).ok_or("the saved file doesn't open")?;
     let first = again.page(0).ok_or("no first page")?;
     let (shows, showed) = (again.geom(first).visible(), doc.geom(page).visible());
@@ -413,7 +409,7 @@ fn crop_appends_only_page_dicts() {
         return;
     };
     let dir = scratch("cropped");
-    let entries = common::narrowed(CROP_ONLY, corpus.manifest().unwrap(), |e| &e.path);
+    let entries = common::narrowed(CROP_ONLY, corpus.forms().unwrap(), |e| &e.path);
     let outcomes = each_entry(&entries, |entry| cropped(entry, &corpus, &dir));
     let (mut files, mut appended, mut asked, mut small) = (0, 0, 0, 0);
     let mut rewritten: BTreeMap<String, Vec<&str>> = BTreeMap::new();
@@ -561,7 +557,7 @@ fn round_trip(
     doc: &mut Document,
     path: &Path,
     how: How,
-    was: Option<&sheaf_doc::forms::Report>,
+    was: Option<&Report>,
 ) -> Result<(Option<String>, usize), String> {
     let set = set_watermark(fx_watermark(WATERMARK), Z::Over, None);
     doc.commit_ops(vec![set], "watermark")
@@ -574,16 +570,7 @@ fn round_trip(
         }),
     }
     .map_err(|stop| format!("the first save stopped: {stop}"))?;
-    let bytes = std::fs::read(path).unwrap();
-    if let Some(was) = was {
-        let now = sheaf_doc::forms::check(&bytes, None).map_err(|e| format!("check: {e:#}"))?;
-        let added: Vec<_> = (now.findings.iter())
-            .filter(|f| !was.findings.contains(f) && !told(f))
-            .collect();
-        if !added.is_empty() {
-            return Err(format!("the form check finds {added:?}"));
-        }
-    }
+    nothing_found(was, path, told)?;
     let mut again = opened(path).ok_or("the saved file doesn't open")?;
     let found = again
         .state()
@@ -629,7 +616,7 @@ fn watermark_round_trips() {
         return;
     };
     let dir = scratch("watermarked");
-    let entries = common::narrowed(WATERMARK_ONLY, corpus.manifest().unwrap(), |e| &e.path);
+    let entries = common::narrowed(WATERMARK_ONLY, corpus.forms().unwrap(), |e| &e.path);
     let outcomes = each_entry(&entries, |entry| watermarked(entry, &corpus, &dir));
     let (mut files, mut acrobat) = (0, 0);
     let mut declined: BTreeMap<String, usize> = BTreeMap::new();
@@ -793,7 +780,7 @@ fn header_trip(
     doc: &mut Document,
     path: &Path,
     how: How,
-    was: Option<&sheaf_doc::forms::Report>,
+    was: Option<&Report>,
     trip: &mut HeaderTrip,
 ) -> Result<(), String> {
     let theirs = headers_by(doc, &REPLACED);
@@ -812,16 +799,7 @@ fn header_trip(
     .map_err(|stop| format!("the first save stopped: {stop}"))?;
     trip.declined.extend(declined);
     trip.notes.extend(notes.iter().map(note_kind));
-    let bytes = std::fs::read(path).unwrap();
-    if let Some(was) = was {
-        let now = sheaf_doc::forms::check(&bytes, None).map_err(|e| format!("check: {e:#}"))?;
-        let added: Vec<_> = (now.findings.iter())
-            .filter(|f| !was.findings.contains(f) && !told(f))
-            .collect();
-        if !added.is_empty() {
-            return Err(format!("the form check finds {added:?}"));
-        }
-    }
+    nothing_found(was, path, told)?;
     let again = opened(path).ok_or("the saved file doesn't open")?;
     let found = (again.state().header_footer()).ok_or("its header and footer isn't found")?;
     if found.scope != Scope::All {
@@ -939,7 +917,7 @@ fn header_round_trips() {
         return;
     };
     let dir = scratch("headed");
-    let entries = common::narrowed(HEADER_ONLY, corpus.manifest().unwrap(), |e| &e.path);
+    let entries = common::narrowed(HEADER_ONLY, corpus.forms().unwrap(), |e| &e.path);
     let outcomes = each_entry(&entries, |entry| headed(entry, &corpus, &dir));
     let (mut files, mut theirs, mut authored) = (0, 0, 0);
     let (mut reordered, mut anyway, mut asked) = (0, 0, 0);
@@ -1011,6 +989,10 @@ const OCR_ONLY: &str = "SHEAF_OCR_ONLY";
 const OCR: &str = "SHEAFCORPUSOCR";
 const REOCR: &str = "SHEAFCORPUSREOCR";
 
+/// A scan holding another program's recognized text, as `scans/`'s
+/// manifest calls it.
+const SCAN_OCR: &str = "scan-ocr";
+
 /// What recognized text's round trip through a copy of a file came to.
 #[derive(Default)]
 struct OcrTrip {
@@ -1021,6 +1003,11 @@ struct OcrTrip {
     declined: Vec<String>,
     /// What the first recognition gave the file's pages.
     took: Took,
+    /// The words the file drew before it took any text, and the strings
+    /// in codes its fonts don't say the text of, on a scan with another
+    /// program's recognized text ([`SCAN_OCR`]): all still drawn after ours
+    /// was added and after ours was cleared.
+    theirs: usize,
 }
 
 /// What [`recognized`] gave a document's pages.
@@ -1151,16 +1138,23 @@ fn removed_and_saved(doc: &mut Document, path: &Path) -> Result<(), String> {
 }
 
 /// What the form check finds in the file at `path` that it didn't in the
-/// file it was (`was`), but what a save told of may leave ([`told`]): an
-/// error, when it finds any.
-fn nothing_found(was: Option<&sheaf_doc::forms::Report>, path: &Path) -> Result<(), String> {
+/// file it was (`was`; none to compare when its check failed), as
+/// [`Report::added_since`] tells it, but what the save may leave
+/// (`leaves`, [`told`] where it was told to): an error, when it finds any.
+/// A finding the file had, naming fewer now (widgets on no page the save
+/// dropped, a missing font fewer widgets name), isn't one.
+fn nothing_found(
+    was: Option<&Report>,
+    path: &Path,
+    leaves: fn(&Finding) -> bool,
+) -> Result<(), String> {
     let Some(was) = was else {
         return Ok(());
     };
     let bytes = std::fs::read(path).unwrap();
     let now = sheaf_doc::forms::check(&bytes, None).map_err(|e| format!("check: {e:#}"))?;
-    let added: Vec<_> = (now.findings.iter())
-        .filter(|f| !was.findings.contains(f) && !told(f))
+    let added: Vec<_> = (now.added_since(was).into_iter())
+        .filter(|f| !leaves(f))
         .collect();
     match added.is_empty() {
         true => Ok(()),
@@ -1221,29 +1215,53 @@ fn none_left(path: &Path, word: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// An error unless `now`, what a file draws, holds each word the file
+/// drew before it took any text (`theirs`), and each string drawn in codes
+/// its font doesn't say the text of (by hash), as many times.
+fn kept(theirs: &TextBag, now: &TextBag) -> Result<(), String> {
+    let missing = theirs.missing_from(now);
+    if missing == 0 {
+        return Ok(());
+    }
+    let now: BTreeMap<&str, usize> = now.words().collect();
+    let words: Vec<String> = (theirs.words())
+        .filter(|&(word, n)| now.get(word).copied().unwrap_or(0) < n)
+        .take(5)
+        .map(|(word, _)| word.to_string())
+        .collect();
+    Err(format!(
+        "{missing} of the {} words and strings the file drew are gone, among them {words:?}",
+        theirs.len()
+    ))
+}
+
 /// A copy of `entry`'s file whose every page is given recognized text,
 /// saved (an Append where the file takes one) and opened again; given a
 /// header, saved so and opened again; recognized again, saved as planned;
 /// then opened again and its text cleared, saved as planned: None when it
-/// doesn't open.
+/// doesn't open. A scan with another program's recognized text
+/// ([`SCAN_OCR`]) keeps drawing it.
 fn recognized_trip(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<OcrTrip, String>> {
     let original = std::fs::read(corpus.path(entry)).ok()?;
     let was = sheaf_doc::forms::check(&original, None).ok();
     let path = copy_of(entry, corpus, dir, "ocr-")?;
     let outcome = (|| {
         let mut doc = opened(&path)?;
-        Some(ocr_trip(&mut doc, &path, was.as_ref()))
+        let theirs = (entry.kind == SCAN_OCR).then(|| drawn_words(&doc));
+        Some(ocr_trip(&mut doc, &path, was.as_ref(), theirs.as_ref()))
     })();
     remove(&path);
     outcome
 }
 
 /// [`recognized_trip`]'s edits and saves of `doc`, opened from `path`, the
-/// file's form check `was` before.
+/// file's form check `was` before, and the words it drew then, when they
+/// must be kept (`theirs`).
 fn ocr_trip(
     doc: &mut Document,
     path: &Path,
-    was: Option<&sheaf_doc::forms::Report>,
+    was: Option<&Report>,
+    theirs: Option<&TextBag>,
 ) -> Result<OcrTrip, String> {
     let mut trip = OcrTrip::default();
     let took = recognized(doc, OCR)?;
@@ -1260,16 +1278,19 @@ fn ocr_trip(
         return Err(format!("recognized, its flags are {flags:?}"));
     }
     added_and_saved(doc, path, "text", &mut trip)?;
-    nothing_found(was, path).map_err(|e| format!("text added, {e}"))?;
+    nothing_found(was, path, told).map_err(|e| format!("text added, {e}"))?;
     let mut again = opened(path).ok_or("the saved file doesn't open")?;
     each_once(&again, &took)?;
+    if let Some(theirs) = theirs {
+        kept(theirs, &drawn_words(&again)).map_err(|e| format!("text added, {e}"))?;
+    }
     // A header over it: each page is isolated once, its text kept after
     // its own content, as it was.
     again
         .commit_ops(vec![set_header(fx_header(HEADER), None)], "header")
         .map_err(|e| format!("no header: {e}"))?;
     added_and_saved(&mut again, path, "a header", &mut trip)?;
-    nothing_found(was, path).map_err(|e| format!("a header added, {e}"))?;
+    nothing_found(was, path, told).map_err(|e| format!("a header added, {e}"))?;
     let mut headed = opened(path).ok_or("the headed file doesn't open")?;
     isolated_once(&headed, &took)?;
     each_once(&headed, &took)?;
@@ -1283,7 +1304,7 @@ fn ocr_trip(
         ));
     }
     removed_and_saved(&mut headed, path).map_err(|e| format!("recognized again, {e}"))?;
-    nothing_found(was, path).map_err(|e| format!("recognized again, {e}"))?;
+    nothing_found(was, path, told).map_err(|e| format!("recognized again, {e}"))?;
     none_left(path, OCR).map_err(|e| format!("recognized again, {e}"))?;
     let mut last = opened(path).ok_or("the file recognized again doesn't open")?;
     each_once(&last, &retook)?;
@@ -1301,8 +1322,13 @@ fn ocr_trip(
     last.commit(tx, CommitOpts::labelled("Clear recognized text"))
         .map_err(|e| format!("not cleared: {e}"))?;
     removed_and_saved(&mut last, path).map_err(|e| format!("cleared, {e}"))?;
-    nothing_found(was, path).map_err(|e| format!("cleared, {e}"))?;
+    nothing_found(was, path, told).map_err(|e| format!("cleared, {e}"))?;
     none_left(path, REOCR).map_err(|e| format!("cleared, {e}"))?;
+    if let Some(theirs) = theirs {
+        let cleared = opened(path).ok_or("the cleared file doesn't open")?;
+        kept(theirs, &drawn_words(&cleared)).map_err(|e| format!("cleared, {e}"))?;
+        trip.theirs = theirs.len();
+    }
     trip.took = took;
     Ok(trip)
 }
@@ -1325,11 +1351,33 @@ fn ocr_round_trips() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let dir = scratch("recognized");
-    let entries = common::narrowed(OCR_ONLY, corpus.manifest().unwrap(), |e| &e.path);
-    let outcomes = each_entry(&entries, |entry| recognized_trip(entry, &corpus, &dir));
+    let entries = common::narrowed(OCR_ONLY, corpus.forms().unwrap(), |e| &e.path);
+    recognized_tier(&corpus, &entries, "recognized");
+}
+
+/// [`ocr_round_trips`] over the corpus's scans (`scans/`), real scanned
+/// pages with CCITT, JBIG2 and JPX images among them; and on each holding
+/// another program's recognized text ([`SCAN_OCR`]), every word the file
+/// drew before is still drawn, as many times, after ours is added and
+/// after ours is cleared.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn ocr_round_trips_scans() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let entries = common::narrowed(OCR_ONLY, corpus.scans().unwrap(), |e| &e.path);
+    recognized_tier(&corpus, &entries, "recognized-scans");
+}
+
+/// [`recognized_trip`] over `entries`, its counts printed and its failures
+/// asserted; `name` the scratch directory's.
+fn recognized_tier(corpus: &Corpus, entries: &[Entry], name: &str) {
+    let dir = scratch(name);
+    let outcomes = each_entry(entries, |entry| recognized_trip(entry, corpus, &dir));
     let (mut files, mut saves, mut appended) = (0, 0, 0);
     let (mut untaken, mut unreadable, mut unshown) = (0, 0, 0);
+    let (mut theirs, mut words) = (0, 0);
     let (mut declined, mut failed) = (BTreeMap::new(), BTreeMap::new());
     for (entry, outcome) in entries.iter().zip(outcomes) {
         match outcome {
@@ -1341,6 +1389,8 @@ fn ocr_round_trips() {
                 unreadable += trip.took.unreadable;
                 unshown += trip.took.unshown;
                 untaken += usize::from(trip.took.words.iter().all(Option::is_none));
+                theirs += usize::from(trip.theirs > 0);
+                words += trip.theirs;
                 for why in trip.declined {
                     *declined.entry(why).or_insert(0usize) += 1;
                 }
@@ -1353,6 +1403,7 @@ fn ocr_round_trips() {
     }
     let _ = std::fs::remove_dir_all(&dir);
     let vetoes = removal::vetoes();
+    let scans = entries.iter().filter(|e| e.kind == SCAN_OCR).count();
     println!(
         "{files} of {} files recognized, given a header, recognized again and cleared, {untaken} \
          taking no text; of {saves} saves adding text or a header, {appended} appended; \
@@ -1362,6 +1413,12 @@ fn ocr_round_trips() {
         failed.len(),
         vetoes.derived,
     );
+    if scans > 0 {
+        println!(
+            "of {scans} scans with another program's recognized text, {theirs} keep all {words} \
+             words and strings they drew, with ours added and with ours cleared"
+        );
+    }
     for (why, n) in &declined {
         println!("  a Rewrite, {why}: {n}");
     }
@@ -1745,7 +1802,7 @@ fn deleted_means_deleted_both_ways() {
         return;
     };
     let dir = scratch("deleted");
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let mut failed = BTreeMap::new();
     let mut declined = [0; 6];
     for how in [How::Rewritten, How::Appended] {
@@ -1854,7 +1911,7 @@ fn the_removal_check_finds_what_a_page_delete_rewrite_took_out() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| oracle(entry, &corpus));
     let mut files = 0;
     let (mut found, mut not) = (0, Vec::new());

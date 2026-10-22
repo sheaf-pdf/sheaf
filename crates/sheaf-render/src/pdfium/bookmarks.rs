@@ -334,7 +334,7 @@ fn the_source_outline_is_pdfium_s() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| compare(&corpus, entry));
     let read: Vec<usize> = outcomes.iter().filter_map(|o| o.0).collect();
     eprintln!(

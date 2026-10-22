@@ -727,20 +727,43 @@ fn the_manifest_by_its_header() {
     assert!(parse_manifest("form\ttitle\n").is_err());
 }
 
-/// Where the corpus is: the first place with a manifest. With none, the
-/// corpus tests skip.
+/// Where the corpus is: the first of its places that's there, which
+/// must have a forms manifest. With none there, the corpus tests skip;
+/// one there without `forms/manifest.tsv`, or with only the old
+/// top-level `manifest.tsv`, is an error, not a skip. Its scans are
+/// `scans/manifest.tsv`'s rows, and a corpus without them says so.
 #[test]
 fn the_corpus_is_where_its_manifest_is() {
     let dir = std::env::temp_dir().join(format!("sheaf-corpus-{}", std::process::id()));
-    let (none, some) = (dir.join("none"), dir.join("some"));
-    std::fs::create_dir_all(&none).unwrap();
-    std::fs::create_dir_all(&some).unwrap();
-    assert!(Corpus::first_of([dir.join("missing"), none.clone()]).is_none());
-    std::fs::write(some.join("manifest.tsv"), "path\tpages\nforms/a.pdf\t1\n").unwrap();
-    let found = Corpus::first_of([none, some.clone()]).unwrap();
+    let (empty, old, some) = (dir.join("empty"), dir.join("old"), dir.join("some"));
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(some.join("forms")).unwrap();
+    let rows = "path\tpages\nforms/a.pdf\t1\n";
+    std::fs::write(old.join("manifest.tsv"), rows).unwrap();
+    std::fs::write(some.join("forms/manifest.tsv"), rows).unwrap();
+    assert!(Corpus::first_of([dir.join("missing")]).unwrap().is_none());
+    for wrong in [empty, old] {
+        let err = Corpus::first_of([wrong, some.clone()]).err().unwrap();
+        assert!(err.to_string().contains("forms/manifest.tsv"), "{err}");
+    }
+    let found = Corpus::first_of([dir.join("missing"), some.clone()])
+        .unwrap()
+        .unwrap();
     assert_eq!(found.root, some);
-    let rows = found.manifest().unwrap();
+    let rows = found.forms().unwrap();
     assert_eq!(found.path(&rows[0]), some.join("forms/a.pdf"));
+    let err = found.scans().err().unwrap();
+    assert!(format!("{err:#}").contains("scans/manifest.tsv"), "{err:#}");
+    std::fs::create_dir_all(some.join("scans")).unwrap();
+    std::fs::write(
+        some.join("scans/manifest.tsv"),
+        "path\tpages\tpassword\tkind\tdpi\nscans/s/b.pdf\t3\t\tscan-ocr\t300\n",
+    )
+    .unwrap();
+    let scans = found.scans().unwrap();
+    assert_eq!((scans[0].pages, scans[0].kind.as_str()), (3, "scan-ocr"));
+    assert_eq!(found.path(&scans[0]), some.join("scans/s/b.pdf"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

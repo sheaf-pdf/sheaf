@@ -6349,7 +6349,7 @@ mod tests {
         let Some(corpus) = sheaf_doc::forms::corpus::Corpus::or_skip() else {
             return;
         };
-        let entries = corpus.manifest().unwrap();
+        let entries = corpus.forms().unwrap();
         let outcomes = sheaf_doc::forms::corpus::each_entry(&entries, |entry| {
             opens_alike(&corpus.path(entry))
         });

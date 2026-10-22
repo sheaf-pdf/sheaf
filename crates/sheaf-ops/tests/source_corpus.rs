@@ -41,7 +41,7 @@ fn every_corpus_page_s_geom_is_pdfium_s_size() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     // The sources open on other threads, PDFium on this one: sheaf holds
     // one lock across every use of it.
     let queue = Mutex::new(entries.iter().enumerate());

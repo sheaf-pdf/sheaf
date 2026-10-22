@@ -1080,7 +1080,7 @@ fn the_open_s_facts_from_the_source_equal_the_eager_reading() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| compare(&corpus, entry));
     let count = |f: fn(&Outcome) -> bool| outcomes.iter().filter(|o| f(o)).count();
     let total = |i: usize| outcomes.iter().map(|o| o.counts[i]).sum::<usize>();

@@ -3,8 +3,9 @@
 bench.py's synthetic one.
 
 The list holds a path per line. A relative path is under the corpus:
-$SHEAF_CORPUS, else ../pdf-corpus beside the repo, the first with a
-manifest.tsv, as the tests look. Without one, it says so and exits 0.
+$SHEAF_CORPUS, else ../pdf-corpus beside the repo, the first that's
+there, as the tests look; it must have forms/manifest.tsv. Without
+either, it says so and exits 0.
 pool-sample.txt is the planning sample: 400 SafeDocs pool files of 4.2 to
 5.0 MB (up to 1,050 pages) and 2 SafeDocs forms of 370 and 466 pages, on
 which the planning run (AMD EPYC 7302P) measured a median load of 0.38 ms
@@ -29,10 +30,12 @@ SKIP = "skipped: no corpus (set SHEAF_CORPUS, or check out ../pdf-corpus)"
 
 
 def corpus():
-    """The corpus root, or None."""
+    """The corpus root, or None; exits when it's there without forms/manifest.tsv."""
     beside = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "pdf-corpus"))
     for root in (os.environ.get("SHEAF_CORPUS"), beside):
-        if root and os.path.isfile(os.path.join(root, "manifest.tsv")):
+        if root and os.path.isdir(root):
+            if not os.path.isfile(os.path.join(root, "forms", "manifest.tsv")):
+                sys.exit(f"{root} has no forms/manifest.tsv: update ../pdf-corpus, or fix SHEAF_CORPUS")
             return root
     return None
 

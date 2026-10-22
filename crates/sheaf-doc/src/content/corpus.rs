@@ -344,7 +344,7 @@ fn corpus_content_lexes_splices_and_classifies() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let started = Instant::now();
     let outcomes = each_entry(&entries, |entry| read_file(&corpus, entry));
     let took = started.elapsed();

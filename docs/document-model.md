@@ -1805,8 +1805,11 @@ below).
   node under it, on a page or a page template) isn't written, nor the
   parents it leaves with none, as `keep_only` takes such a field out of a
   file (an edit that takes a node's last widget takes the node too, by
-  the `widget.field` cascade of M10.5 slice 11); a node whose
-  `/Kids` another node's read took stays as it is. A form left with no
+  the `widget.field` cascade of M10.5 slice 11). Nor is a node whose
+  `/Kids` another node's read took, left with nothing under it: written,
+  it was a typeless terminal field of its own, and a duplicate where its
+  name was another's (0982696; Greg, 2026-10-22, reversing slice 8's
+  keeping it as the file had it). A form left with no
   fields isn't written either, unless its file had none as read (XFA
   alone). The form's
   dictionary writes the keys the state owns from `FormDoc`, which reads

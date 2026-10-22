@@ -344,7 +344,7 @@ fn the_corpus_s_signatures() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let read = crate::forms::corpus::each_entry(&entries, |entry| {
         let bytes = std::fs::read(corpus.path(entry)).ok()?;
         let kind = BlobKind::file(Path::new("form.pdf"), None);

@@ -183,13 +183,16 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
 /// (75 of them copied raw) that the unbuilt fast paths copied as they
 /// were, where the built path writes them otherwise, are written anew:
 /// fields with an empty `/Kids` (614 of 0982696's, 11 of 1210120's), and
-/// an outline root with no `/Type` in each of 121 other files.
+/// an outline root with no `/Type` in each of 121 other files. Slice 18's
+/// wrap-up moved them from 2,269,722 and 436: 0982696's 19 nodes whose
+/// `/Kids` another node holds aren't written (Greg, 2026-10-22), 3 of
+/// them written changed before.
 const IDENTITY: Baseline = Baseline {
     manifest: 4392,
     files: 4389,
-    survived: 2_269_722,
+    survived: 2_269_703,
     raw: 919_479,
-    changed: 436,
+    changed: 433,
 };
 
 struct Baseline {
@@ -205,7 +208,7 @@ fn an_identity_rewrite_keeps_every_number_and_copies_what_it_left_alone() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| identity(entry, &corpus));
     let (mut files, mut survived, mut raw, mut pruned) = (0, 0, 0, 0);
     let mut failed = BTreeMap::new();
@@ -247,7 +250,7 @@ fn the_same_document_writes_the_same_bytes_twice_and_from_two_threads() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| {
         let doc = opened(&corpus.path(entry))?;
         let first = written(&doc).ok()?.bytes;
@@ -372,7 +375,7 @@ fn every_form_writes_without_a_page_its_form_checked() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| without_the_first_page(entry, &corpus));
     let (mut files, mut unseen) = (0, 0);
     let mut failed = BTreeMap::new();
@@ -429,7 +432,7 @@ fn every_file_writes_with_its_pages_duplicated() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| {
         let mut doc = opened(&corpus.path(entry))?;
         let ids: Vec<_> = doc.state().order().iter().copied().collect();
@@ -466,7 +469,7 @@ fn every_fourth_file_s_pages_inserted_twice_into_a_form_write() {
         eprintln!("skipped: no {}", base.display());
         return;
     }
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let picked: Vec<Entry> = (entries.iter().enumerate())
         .filter(|(i, e)| i % 4 == 0 || ONCE_FAILED.contains(&e.path.as_str()))
         .map(|(_, e)| e.clone())

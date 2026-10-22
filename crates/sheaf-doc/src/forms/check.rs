@@ -168,6 +168,95 @@ impl Finding {
             Finding::Damaged(_) => "damaged field trees",
         }
     }
+
+    /// What it names: its widgets', fields' or fonts' names, each on its
+    /// own, as often as it lists them; None for what names nothing (a
+    /// damaged tree, an XFA copy, revisions, signatures).
+    pub fn items(&self) -> Vec<Option<&str>> {
+        match self {
+            Finding::Orphans(names)
+            | Finding::OffPage(names)
+            | Finding::SharedWidgets(names)
+            | Finding::WrongPage(names)
+            | Finding::NullPage(names)
+            | Finding::WrongParent(names)
+            | Finding::DuplicateNames(names)
+            | Finding::NoAppearance(names) => names.iter().map(|n| Some(n.as_str())).collect(),
+            Finding::MissingFonts(fonts) => fonts.iter().map(|(f, _)| Some(f.as_str())).collect(),
+            _ => vec![None],
+        }
+    }
+
+    /// What of it `was`'s findings of its kind don't have: the names it
+    /// lists more often than they do, and the fonts missing for more
+    /// widgets than they were; of a kind that names nothing, itself unless
+    /// `was` has it as it is. None when that's nothing.
+    fn beyond(&self, was: &Report) -> Option<Finding> {
+        let same = || (was.findings.iter()).filter(|w| w.kind() == self.kind());
+        let mut had: HashMap<&str, usize> = HashMap::new();
+        for name in same().flat_map(Finding::items).flatten() {
+            *had.entry(name).or_default() += 1;
+        }
+        let more = |names: &[String]| -> Vec<String> {
+            let mut left = had.clone();
+            (names.iter())
+                .filter(|n| match left.get_mut(n.as_str()) {
+                    Some(k) if *k > 0 => {
+                        *k -= 1;
+                        false
+                    }
+                    _ => true,
+                })
+                .cloned()
+                .collect()
+        };
+        let beyond = match self {
+            Finding::Orphans(n) => Finding::Orphans(more(n)),
+            Finding::OffPage(n) => Finding::OffPage(more(n)),
+            Finding::SharedWidgets(n) => Finding::SharedWidgets(more(n)),
+            Finding::WrongPage(n) => Finding::WrongPage(more(n)),
+            Finding::NullPage(n) => Finding::NullPage(more(n)),
+            Finding::WrongParent(n) => Finding::WrongParent(more(n)),
+            Finding::DuplicateNames(n) => Finding::DuplicateNames(more(n)),
+            Finding::NoAppearance(n) => Finding::NoAppearance(more(n)),
+            Finding::MissingFonts(fonts) => {
+                let widgets: HashMap<&str, usize> = (same())
+                    .flat_map(|w| match w {
+                        Finding::MissingFonts(f) => {
+                            f.iter().map(|(n, k)| (n.as_str(), *k)).collect()
+                        }
+                        _ => Vec::new(),
+                    })
+                    .collect();
+                Finding::MissingFonts(
+                    (fonts.iter())
+                        .filter(|(font, k)| widgets.get(font.as_str()).is_none_or(|was| k > was))
+                        .cloned()
+                        .collect(),
+                )
+            }
+            other => match was.findings.contains(other) {
+                true => return None,
+                false => return Some(other.clone()),
+            },
+        };
+        (!beyond.items().is_empty()).then_some(beyond)
+    }
+}
+
+impl Report {
+    /// Its findings that `was`, the report on the file it was saved from,
+    /// hasn't: of a kind that names widgets, fields or fonts, the names it
+    /// lists more often than `was`'s finding of the kind does, and the
+    /// fonts now missing for more widgets than they were; of any other
+    /// kind, a finding `was` hasn't as it is. A finding naming fewer of
+    /// what `was`'s did (widgets on no page a save dropped, a missing font
+    /// fewer widgets name) adds nothing.
+    pub fn added_since(&self, was: &Report) -> Vec<Finding> {
+        (self.findings.iter())
+            .filter_map(|f| f.beyond(was))
+            .collect()
+    }
 }
 
 /// Check the file in `bytes`, decrypted with `password` (or the empty
@@ -1262,6 +1351,63 @@ mod tests {
     use super::*;
     use crate::forms::corpus::{Corpus, each_entry};
 
+    /// A report finding `findings` alone.
+    fn finding(findings: Vec<Finding>) -> Report {
+        Report {
+            findings,
+            ..Report::default()
+        }
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// What a save adds to its file's findings: a name, or a widget
+    /// more of a name, that the file's finding of the kind didn't list,
+    /// and a font now missing for more widgets than it was; never what
+    /// was there, now named less.
+    #[test]
+    fn added_since_is_what_the_file_didn_t_have() {
+        let off = |n: &[&str]| finding(vec![Finding::OffPage(names(n))]);
+        assert!(off(&["a"]).added_since(&off(&["a", "b"])).is_empty());
+        assert_eq!(
+            off(&["a", "c"]).added_since(&off(&["a"])),
+            vec![Finding::OffPage(names(&["c"]))]
+        );
+        assert_eq!(
+            off(&["a", "a"]).added_since(&off(&["a"])),
+            vec![Finding::OffPage(names(&["a"]))]
+        );
+        assert_eq!(
+            off(&["a"]).added_since(&finding(vec![Finding::WrongPage(names(&["a"]))])),
+            vec![Finding::OffPage(names(&["a"]))]
+        );
+        let fonts = |f: &[(&str, usize)]| {
+            let f = f.iter().map(|&(n, k)| (n.to_string(), k)).collect();
+            finding(vec![Finding::MissingFonts(f)])
+        };
+        assert!(
+            fonts(&[("F0", 10)])
+                .added_since(&fonts(&[("F0", 14)]))
+                .is_empty()
+        );
+        assert_eq!(
+            fonts(&[("F0", 15), ("F1", 2)]).added_since(&fonts(&[("F0", 14), ("F1", 2)])),
+            vec![Finding::MissingFonts(vec![("F0".into(), 15)])]
+        );
+        assert_eq!(
+            fonts(&[("F2", 1)]).added_since(&fonts(&[("F0", 14)])),
+            vec![Finding::MissingFonts(vec![("F2".into(), 1)])]
+        );
+        let damaged = |why: &str| finding(vec![Finding::Damaged(why.into())]);
+        assert!(damaged("a loop").added_since(&damaged("a loop")).is_empty());
+        assert_eq!(
+            damaged("too deep").added_since(&damaged("a loop")),
+            vec![Finding::Damaged("too deep".into())]
+        );
+    }
+
     /// The font a `/DA` sets, as `da_font` read it through lopdf's
     /// `Content::decode` before it lexed: what it must still find.
     fn decoded_font(da: &[u8]) -> Option<Vec<u8>> {
@@ -1321,7 +1467,7 @@ mod tests {
         let Some(corpus) = Corpus::or_skip() else {
             return;
         };
-        let entries = corpus.manifest().unwrap();
+        let entries = corpus.forms().unwrap();
         let started = Instant::now();
         let outcomes = each_entry(&entries, |entry| {
             let Ok(bytes) = std::fs::read(corpus.path(entry)) else {

@@ -1,11 +1,17 @@
-//! Greg's corpus of real forms (M10 proposal 21): where it is, and its
-//! `manifest.tsv`, a row per file under `forms/`.
+//! Greg's corpus of real files (M10 proposal 21): where it is, and the
+//! manifests of the two categories the tests read, a row per file:
+//! `forms/manifest.tsv` for the forms under `forms/`, and
+//! `scans/manifest.tsv` for the scanned documents under `scans/`. Each of
+//! the corpus's categories has a manifest of its own, in its folder.
 //!
 //! Tests look in `$SHEAF_CORPUS`, then in `../pdf-corpus` beside the
 //! workspace, and skip, passing with a message, when neither is there
-//! (CI has no corpus). Nothing is assumed about what it holds. Files
-//! marked `restricted` are read in place: no copy, excerpt or rendering
-//! of them is committed.
+//! (CI has no corpus). A folder that is there without
+//! `forms/manifest.tsv` fails them instead: a corpus laid out before the
+//! manifests moved into their categories, or a wrong `$SHEAF_CORPUS`,
+//! would otherwise pass every corpus test by running none. Nothing is
+//! assumed about what it holds. Files marked `restricted` are read in
+//! place: no copy, excerpt or rendering of them is committed.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +23,14 @@ pub struct Corpus {
     pub root: PathBuf,
 }
 
-/// One row of `manifest.tsv`. Columns it lacks are left empty.
+/// The forms manifest, relative to the corpus root.
+const FORMS: &str = "forms/manifest.tsv";
+
+/// The scans manifest, relative to the corpus root.
+const SCANS: &str = "scans/manifest.tsv";
+
+/// One row of a manifest (`forms/manifest.tsv` or `scans/manifest.tsv`).
+/// Columns it lacks are left empty.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Entry {
     /// Relative to the corpus root (`forms/irs/f1040.pdf`).
@@ -25,8 +38,11 @@ pub struct Entry {
     pub form: String,
     pub title: String,
     pub pages: u32,
-    /// `acroform`, `hybrid`, `xfa-only`, or `unparsed` (pypdf couldn't
-    /// read it).
+    /// A form's `acroform`, `hybrid`, `xfa-only`, or `unparsed` (pypdf
+    /// couldn't read it); a scan's `scan` (half its pages or more covered
+    /// by an image), `scan-ocr` (with invisible text: another program's
+    /// recognized text), `scan-text` (with visible text), or `text` or
+    /// `no-text` (only looked like a scan).
     pub kind: String,
     /// Terminal AcroForm fields.
     pub fields: u32,
@@ -49,11 +65,11 @@ impl Entry {
 
 impl Corpus {
     /// `$SHEAF_CORPUS`, else `../pdf-corpus` beside the workspace: the
-    /// first that has a `manifest.tsv`.
+    /// first that's there. Panics when it has no `forms/manifest.tsv`.
     pub fn find() -> Option<Corpus> {
         let beside = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../pdf-corpus");
         let env = std::env::var_os("SHEAF_CORPUS").map(PathBuf::from);
-        Corpus::first_of(env.into_iter().chain([beside]))
+        Corpus::first_of(env.into_iter().chain([beside])).unwrap_or_else(|e| panic!("{e:#}"))
     }
 
     /// [`Corpus::find`], or a line saying the test skips.
@@ -64,24 +80,44 @@ impl Corpus {
         })
     }
 
-    /// The first of `roots` with a `manifest.tsv`.
-    pub(crate) fn first_of(roots: impl IntoIterator<Item = PathBuf>) -> Option<Corpus> {
-        roots
-            .into_iter()
-            .find(|root| root.join("manifest.tsv").is_file())
-            .map(|root| Corpus { root })
+    /// The first of `roots` that's a folder, if any, and an error when
+    /// it has no `forms/manifest.tsv`.
+    pub(crate) fn first_of(roots: impl IntoIterator<Item = PathBuf>) -> Result<Option<Corpus>> {
+        let Some(root) = roots.into_iter().find(|root| root.is_dir()) else {
+            return Ok(None);
+        };
+        if !root.join(FORMS).is_file() {
+            anyhow::bail!(
+                "{} has no {FORMS}: not a corpus, or one from before the manifests moved \
+                 into their categories (update ../pdf-corpus, or fix SHEAF_CORPUS)",
+                root.display()
+            );
+        }
+        Ok(Some(Corpus { root }))
     }
 
-    pub fn manifest(&self) -> Result<Vec<Entry>> {
-        let path = self.root.join("manifest.tsv");
+    /// `forms/manifest.tsv`'s rows: every file under `forms/`.
+    pub fn forms(&self) -> Result<Vec<Entry>> {
+        self.rows(FORMS)
+    }
+
+    /// `scans/manifest.tsv`'s rows: every file under `scans/`. An error
+    /// when the corpus has none, as one from before its scans came does.
+    pub fn scans(&self) -> Result<Vec<Entry>> {
+        self.rows(SCANS)
+    }
+
+    /// The rows of the manifest at `manifest`, relative to the root.
+    fn rows(&self, manifest: &str) -> Result<Vec<Entry>> {
+        let path = self.root.join(manifest);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
         parse_manifest(&text).with_context(|| path.display().to_string())
     }
 
-    /// The row for `path` (`forms/irs/f1040es.pdf`), if the corpus has it.
+    /// The row for `path` (`forms/irs/f1040es.pdf`), if `forms/` has it.
     pub fn entry(&self, path: &str) -> Result<Option<Entry>> {
-        Ok(self.manifest()?.into_iter().find(|e| e.path == path))
+        Ok(self.forms()?.into_iter().find(|e| e.path == path))
     }
 
     /// Where an entry's file is.
@@ -112,7 +148,7 @@ pub fn each_entry<T: Send>(entries: &[Entry], read: impl Fn(&Entry) -> T + Sync)
     outcomes.into_inner().unwrap().into_values().collect()
 }
 
-/// `manifest.tsv`'s rows, by its header's column names.
+/// A manifest's rows, by its header's column names.
 pub fn parse_manifest(text: &str) -> Result<Vec<Entry>> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let header: Vec<&str> = lines.next().context("no header")?.split('\t').collect();

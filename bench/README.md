@@ -29,8 +29,9 @@ looks for them; no PDF is committed.
 
 **The corpus.** `pool-sample.txt`'s paths are relative to the corpus root.
 `real.py` resolves a relative path against `$SHEAF_CORPUS`, else
-`../pdf-corpus` beside the repo, whichever first has a `manifest.tsv`, as
-the tests do. Without either, it says it skipped and exits 0.
+`../pdf-corpus` beside the repo, whichever is there first, as the tests
+do, and stops if it has no `forms/manifest.tsv`. Without either, it says
+it skipped and exits 0.
 
 **The gate harness,** `crates/sheaf-ops/tests/gate_7k.rs`, times today's
 geometry walk (a source's open: its cross-reference sections and page

@@ -274,7 +274,7 @@ fn save_encrypted_corpus(save: How) {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| save_encrypted(&corpus.path(entry), save));
     let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_strategy: BTreeMap<(&str, &str), usize> = BTreeMap::new();
