@@ -741,6 +741,67 @@ fn a_node_whose_kids_another_holds_goes() {
     assert_eq!(report.findings, [], "{report}");
 }
 
+/// A field's widget on a page template, which no page shows and the
+/// records don't account for (a form that spawns pages from it, as GA
+/// 500's), stays in its `/Kids` through a Rewrite, its template with it.
+#[test]
+fn a_field_s_widget_on_a_page_template_stays_its_kid() {
+    let mut f = Form::new(1);
+    let radio = f.radio("r", 0, &[row(0), row(1)], Some(0));
+    let [shown, spawned] = f.widgets_of(radio)[..] else {
+        panic!("two widgets")
+    };
+    f.set_annots(0, &[shown]);
+    let template = f.pdf.add_object(dictionary! {
+        "Type" => "Page",
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Annots" => vec![Object::Reference(spawned)],
+    });
+    f.dict(spawned).set("P", template);
+    let templates =
+        dictionary! { "Names" => vec![Object::string_literal("extra"), template.into()] };
+    let catalog = f.catalog;
+    f.dict(catalog)
+        .set("Names", dictionary! { "Templates" => templates });
+    let bytes = f.bytes();
+    let d = open(&bytes, None);
+    let out = rewrite(&d, Profile::default());
+    let pdf = lazy(&out.bytes, None);
+    let field = (pdf.ids())
+        .filter_map(|id| pdf.get_dictionary(id).ok())
+        .find(|d| {
+            d.get(b"T")
+                .and_then(Object::as_str)
+                .is_ok_and(|t| t == b"r")
+        })
+        .expect("the radio field");
+    let kids: Vec<Dictionary> = (field.get(b"Kids").unwrap().as_array().unwrap().iter())
+        .map(|k| {
+            pdf.get_dictionary(k.as_reference().unwrap())
+                .unwrap()
+                .clone()
+        })
+        .collect();
+    assert_eq!(kids.len(), 2);
+    let on_template = (kids.iter())
+        .filter(|k| {
+            k.get(b"Subtype")
+                .and_then(Object::as_name)
+                .is_ok_and(|s| s == b"Widget")
+        })
+        .filter_map(|k| {
+            pdf.get_dictionary(k.get(b"P").ok()?.as_reference().ok()?)
+                .ok()
+        })
+        .filter(|p| !p.has(b"Parent"))
+        .count();
+    assert_eq!(on_template, 1, "the template's widget is the field's kid");
+    let was = crate::forms::check(&bytes, None).unwrap();
+    let now = crate::forms::check(&out.bytes, None).unwrap();
+    assert_eq!(now.added_since(&was), []);
+    assert_eq!(now.template_widgets, 1);
+}
+
 /// A three-page form with labels (i, ii, iii), an outline of two
 /// bookmarks, and two fields that calculate, in order.
 fn owned_keys_form() -> Vec<u8> {

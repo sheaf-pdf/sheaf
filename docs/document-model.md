@@ -1800,7 +1800,11 @@ below).
   names, its widget key an alias in the record's map (`Emission::aliases`);
   a copy stays merged. One whose widget the state shows twice is written
   apart. A primary field's kids the records don't account for and no page
-  shows (widgets on page templates) stay in its `/Kids`. A field the state
+  shows stay in its `/Kids` when they're widgets (widgets on page
+  templates); any other such kid, a page or the catalog (0092321's
+  `Page2[0]` lists its catalog), isn't the field's and isn't written as
+  one (Greg, 2026-10-22: copied, it carried what the save wrote anew, a
+  removed generator's text among it). A field the state
   shows nowhere that showed as its file was read (a widget of it, or of a
   node under it, on a page or a page template) isn't written, nor the
   parents it leaves with none, as `keep_only` takes such a field out of a

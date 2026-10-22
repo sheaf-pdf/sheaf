@@ -788,3 +788,72 @@ crate::both_ways!(
     a_page_watermark_is_one_form,
     a_page_watermark_is_one_form_appended: page_form
 );
+
+/// Whether `text` is in any of `pdf`'s objects: its strings, and its
+/// streams' data decoded (an object stream's objects are read out).
+fn reads(pdf: &Pdf, text: &[u8]) -> bool {
+    fn within(o: &Object, text: &[u8]) -> bool {
+        match o {
+            Object::String(s, _) => holds(s, text),
+            Object::Array(items) => items.iter().any(|o| within(o, text)),
+            Object::Dictionary(d) => d.iter().any(|(_, o)| within(o, text)),
+            Object::Stream(s) => {
+                let data = (s.decompressed_content()).unwrap_or_else(|_| s.content.clone());
+                holds(&data, text) || s.dict.iter().any(|(_, o)| within(o, text))
+            }
+            _ => false,
+        }
+    }
+    pdf.objects.values().any(|o| within(o, text))
+}
+
+/// A field whose `/Kids` lists the file's catalog, as 0092321's
+/// `Page2[0]` does (a `WrongParent` the file has): a watermark appended,
+/// the file opened again and the watermark taken off, the Rewrite leaves
+/// none of its text, though the catalog the Append wrote, the file's now,
+/// held it in `/SheafGenerators`. No field's kid is a catalog, and the
+/// form check finds nothing the file didn't have.
+#[test]
+fn a_watermark_taken_off_isn_t_kept_by_a_field_s_stray_kid() {
+    use crate::forms::fixture::{Form, row};
+    let mut f = Form::new(1);
+    let a = f.text("a", 0, row(0));
+    let group = f.group("g", &[a]);
+    let catalog = f.catalog;
+    f.dict(group).set("Kids", vec![a.into(), catalog.into()]);
+    let bytes = f.bytes();
+    let was = crate::forms::check(&bytes, None).unwrap();
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
+    doc.commit_ops(vec![watermark("SHEAFSTRAYKID", None)], "watermark")
+        .unwrap();
+    appended_in_place(&mut doc).unwrap();
+    assert!(reads(&Pdf::load(&path).unwrap(), b"SHEAFSTRAYKID"));
+    let mut doc = crate::open::file(&path, None).unwrap().doc;
+    let page = doc.page(0).unwrap();
+    let remove = fx::remove_watermark(Some(Z::Over), &[page]);
+    doc.commit_ops(vec![remove], "remove").unwrap();
+    let answers = super::AskAnswers::default();
+    let report = super::save(&mut doc, &path, &answers, &in_progress::NoProgress).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    let out = std::fs::read(&path).unwrap();
+    let pdf = Pdf::load_mem(&out).unwrap();
+    assert!(!reads(&pdf, b"SHEAFSTRAYKID"));
+    let catalogs = |kids: &Object| {
+        (kids.as_array().into_iter().flatten())
+            .filter_map(|k| pdf.get_dictionary(k.as_reference().ok()?).ok())
+            .filter(|d| {
+                d.get(b"Type")
+                    .and_then(Object::as_name)
+                    .is_ok_and(|t| t == b"Catalog")
+            })
+            .count()
+    };
+    for o in pdf.objects.values() {
+        if let Ok(kids) = o.as_dict().and_then(|d| d.get(b"Kids")) {
+            assert_eq!(catalogs(kids), 0, "a field's kid is a catalog");
+        }
+    }
+    let now = crate::forms::check(&out, None).unwrap();
+    assert_eq!(now.added_since(&was), []);
+}

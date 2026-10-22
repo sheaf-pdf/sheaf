@@ -788,7 +788,11 @@ impl Fields {
             }
         }
         // Widgets on page templates: a kid of the primary's own instance
-        // nothing accounts for and that no page shows.
+        // nothing accounts for and that no page shows, when it's a widget.
+        // Any other such kid isn't the field's to write: a page, or the
+        // catalog, as 0092321's `Page2[0]` lists it, copied as a kid would
+        // carry what the save wrote anew, a removed generator's text in
+        // the catalog's `/SheafGenerators` among it (Greg, 2026-10-22).
         let primary = cx.primary.id();
         if copy == 0 && r.src.id() == primary && !split && self.scoped.is_none() {
             let pdf = r.src.pdf();
@@ -801,9 +805,15 @@ impl Fields {
                     .chain(form.widgets.values().flatten().map(|w| w.object))
                     .collect()
             });
+            let widget = |k: &ObjectId| {
+                (pdf.get_dictionary(*k).ok())
+                    .and_then(|d| d.get(b"Subtype").ok())
+                    .is_some_and(|s| s.as_name().is_ok_and(|s| s == b"Widget"))
+            };
             let outside: Vec<ObjectId> = (listed.into_iter().flatten())
                 .filter_map(|k| k.as_reference().ok())
                 .filter(|k| !self.accounted.contains(k) && !known.contains(k))
+                .filter(widget)
                 .collect();
             for k in outside {
                 let k = cx.sym(&Object::Reference(k), &scope);

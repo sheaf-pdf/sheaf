@@ -184,15 +184,18 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
 /// were, where the built path writes them otherwise, are written anew:
 /// fields with an empty `/Kids` (614 of 0982696's, 11 of 1210120's), and
 /// an outline root with no `/Type` in each of 121 other files. Slice 18's
-/// wrap-up moved them from 2,269,722 and 436: 0982696's 19 nodes whose
-/// `/Kids` another node holds aren't written (Greg, 2026-10-22), 3 of
-/// them written changed before.
+/// wrap-up moved them from 2,269,722, 919,479 and 436 (Greg, 2026-10-22):
+/// 0982696's 19 nodes whose `/Kids` another node holds aren't written, 3
+/// of them written changed before; and 0092321's fields no longer copy
+/// its two catalogs as kids, nor the usage rights (`/Perms`, `/UR3`)
+/// only those copies reached, which a Rewrite's own catalog drops: 15
+/// objects, 14 of them copied as they were, 1 changed.
 const IDENTITY: Baseline = Baseline {
     manifest: 4392,
     files: 4389,
-    survived: 2_269_703,
-    raw: 919_479,
-    changed: 433,
+    survived: 2_269_688,
+    raw: 919_465,
+    changed: 432,
 };
 
 struct Baseline {
