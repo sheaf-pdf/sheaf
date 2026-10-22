@@ -119,6 +119,117 @@ phase; they're triaged between phases.
   - Writing linearized files is M14's (Optimize: linearization as a
     writer option).
 
+### B4: The realizer's predicate and the emission disagree on a page that can't be read
+
+- **Found:** 2026-10-22, Claude, in PR #26's pre-merge run
+  (`realize_corpus --ignored`), during M10.5 slice 18. Greg merged #26
+  with it logged here.
+- **Where:** `crates/sheaf-doc/src/realize/untouched.rs`
+  (`untouched`); `crates/sheaf-doc/src/materialize/emit/content.rs`
+  (`stack`)
+- **Severity:** annoyance (extra work; the pixels are right)
+- **What happens:** `the_predicate_agrees_with_the_emission_on_every_page`
+  fails on `pool/safedocs/0874/0874785.pdf` page 0, under all four
+  inputs (screen, plugin, print, print without markup): "the model says
+  false, the emission true", 4 of 242,055 checks.
+  - The tier's edit puts a header ("Realized <<1>> of <<N>>", with a
+    Bates slot) and an over-watermark on the page.
+  - Page 0's content can't be read: stream 49 doesn't inflate ("invalid
+    distance too far back"). That's real damage, not a decryption bug;
+    qpdf and poppler fail on it too.
+  - The emitter can't read the page's blocks, so it writes the page as
+    its base with the Note "No … header or footer is drawn on page 1,
+    whose content can't be read." To the emitter, the page is untouched.
+  - The model never reads content. It sees generators on an unmarked
+    page and says the page changed.
+- **Expected:** the two agree. The model should call such a page
+  untouched, so it draws from the base engine.
+- **Repro:** `SHEAF_REALIZE_ONLY=pool/safedocs/0874/0874785.pdf cargo
+  test -p sheaf-ops --test realize_corpus -- --ignored
+  the_predicate_agrees_with_the_emission_on_every_page`
+- **Notes:**
+  - **Only conservative:** the page goes to its group's overlay, which
+    writes it exactly as the base, so the screen never shows a stale
+    page. The pixel tier passes on it.
+  - **Since slice 17 (`bf7baf2`):** before, the legacy header installer
+    wrapped the content without reading it, so the emission changed the
+    page too (0 of 20 at `fa14236`, 4 of 20 at `bf7baf2`). The same gap
+    has been there for a watermark alone since slice 16, hidden by the
+    header.
+  - **A proposed fix, about 60 lines in 4 files** (an investigation's;
+    it passes the narrowed predicate and pixel tiers and the sheaf-doc
+    lib):
+    - `untouched` becomes `boxes_kept && annots_kept && (!(drawn_over
+      || generated) || unread(def))`.
+    - `unread(def)` is `(no markers || filters non-empty) &&
+      !src.readable(index)`. That's exactly where `stack` decides by
+      the page's blocks.
+    - A new `Source::readable(index)` caches the answer either way,
+      because `blocks()` doesn't cache a failure.
+    - A test, `a_page_whose_content_cant_be_read_is_untouched_under_a_header`,
+      builds an unclosed string beside a readable page and expects
+      `[true, false]`.
+  - **Its cost, for a decision:** the predicate would read a page's
+    content, once per source page, on the UI thread (`view()`, and
+    `find()` over up to 128 pages of a group the first time it's seen
+    after a header is added). It's the same read the worker's delta does
+    and they share the cache, so the total work doesn't change, but some
+    of it moves to the UI thread. No fix keeps the predicate free of
+    content reads and the tier strict: generator commits read no content
+    (the Bates gate depends on it), and drawing over unreadable content
+    isn't safe.
+  - Render keys still include the generators for such a page: extra
+    re-renders, never wrong pixels.
+
+### B5: A file whose signatures were broken still asks about them on a reorder
+
+- **Found:** 2026-10-22, M10.5 slice 17's corpus tier (pre-existing)
+- **Where:** `forms::sigs::sig_impact` (`crates/sheaf-doc/src/forms/sigs.rs:187`)
+- **Severity:** annoyance
+- **What happens:** a file rewritten with `break_signatures` (the user
+  already agreed to break them) still gets the signature ask when its
+  pages are reordered. `sig_impact` judges by `/V` and the permissions,
+  not by whether the signed bytes still verify. This is 25 of the
+  62-file sample's 100 reorder Appends.
+- **Expected:** a signature whose digest no longer matches its bytes
+  doesn't ask again.
+- **Repro:** append_corpus's header tier (slice 17) on a signed form
+  after a forced Rewrite, then reorder.
+- **Notes:** probably needs the digest check pyHanko does
+  (`../pdf-corpus/signatures/` has files changed after signing and
+  digest mismatches to test against; see F9).
+
+### B6: sheaf-app's clippy fails without default features
+
+- **Found:** 2026-10-22, M10.5 slice 18 (pre-existing)
+- **Where:** `crates/sheaf-app/src/contrib.rs:158`,
+  `Contributions::add_panel`
+- **Severity:** annoyance (build)
+- **What happens:** `cargo clippy -p sheaf-app --all-targets
+  --no-default-features -- -D warnings` fails: `add_panel` is dead
+  without the `plugins` feature.
+- **Expected:** clean, or the configuration isn't supported.
+- **Repro:** the command above.
+- **Notes:** no CI configuration builds it. Gate the fn on the feature,
+  or decide the no-plugins build isn't supported and say so.
+
+### B7: Clear OCR text silently does nothing on a damaged old layer
+
+- **Found:** 2026-10-22, M10.5 slice 18
+- **Where:** `ClearOcrText`'s lowering (`crates/sheaf-doc/src/tx/`), the
+  legacy `/SheafOcrLayer` selector (`StreamSel::SheafOcr`)
+- **Severity:** annoyance
+- **What happens:** an older sheaf's OCR layer is a `q` plus a
+  `/SheafOcrLayer` stream. If another tool lost the `q` (no pair, no
+  block), a Clear adds no filter: it changes nothing and says nothing.
+- **Expected:** a Note that the old layer stays, as other kept artifacts
+  get ("… stays on page 3: taking it out would change what else the
+  page draws").
+- **Repro:** a page whose only legacy OCR stream has no leading `q`;
+  ClearOcrText; save.
+- **Notes:** taking it out without the `q` isn't safe (`3 Tr` would
+  leak), so keeping it is right; only the silence is wrong.
+
 ## Features
 
 ### F1: Basic calculator
@@ -353,6 +464,39 @@ phase; they're triaged between phases.
   - **Overlay or always shown:** follow the platform's auto-hide setting.
   - **Later, maybe:** marks on the track for search hits, bookmarks or
     comments, like an editor's overview ruler.
+
+### F8: A command to remove recognized text
+
+- **Found:** 2026-10-22, M10.5 slice 18
+- **What:** an app command (and a CLI form) that runs `ClearOcrText`
+  on the selected pages or all pages, with the usual Notes.
+- **Why:** slice 18 made saved OCR layers removable (bug 14), but only
+  tests, the API and fuzz call `ClearOcrText`. A user who wants a bad
+  OCR layer gone can only re-OCR over it.
+- **Overlap:** the OCR dialog (`crates/sheaf-app/src/ocr_*`); M10.5
+  slice 19's `sheaf edit` takes any op as JSON, so the CLI form may come
+  free.
+- **Notes:** small: a command and a confirmation. The op, its Notes
+  and the Rewrite it plans exist.
+
+### F9: Test against pdf-corpus's signatures/ and conformance/ collections
+
+- **Found:** 2026-10-22, Greg, during M10.5 slice 18
+- **What:** corpus tiers over `../pdf-corpus/signatures/` (531 files,
+  checked with pyHanko: `intact`, `valid`, changed after signing,
+  digest mismatches, several subfilters) and `conformance/` (3,524:
+  PDF/A, PDF/UA and PDF/X claims, some damaged). Slice 18 added
+  `Corpus::scans()` and tiers over `scans/`; these two aren't read yet.
+- **Why:**
+  - `signatures/`: Append must keep signatures that hold, and the
+    signature asks must be right (B5). Today's signed-file tests use
+    the 322 `/DocMDP` forms.
+  - `conformance/`: the PDF/A save Note (M10.5 slice 16), PDF/A
+    convert and validate (M14), accessibility (M14).
+- **Overlap:** M10.5 slice 19's exports and signature asks; M12
+  (digital signatures); M14.
+- **Notes:** each needs a `Corpus::` reader for its manifest, like
+  `scans()`, and a tier with its own `SHEAF_…_ONLY` narrowing.
 
 ## Closed
 
