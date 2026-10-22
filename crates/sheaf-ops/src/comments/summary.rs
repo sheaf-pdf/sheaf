@@ -513,7 +513,7 @@ impl Writer {
                 GRAY,
                 &number,
             );
-            let (ops, needs) = sheet.finish(&Reserved::default(), &[]);
+            let (ops, needs) = sheet.finish(&Reserved::default());
             let mut content = Stream::new(dictionary! {}, ops);
             let _ = content.compress();
             let content = self.pdf.add_object(content);

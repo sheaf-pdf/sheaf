@@ -8520,9 +8520,8 @@ mod tests {
                     assert_eq!(text(copy), "page 4");
                     assert_eq!(text(p[1]), "page 1");
                     // In the order the page draws them: its own text, the
-                    // header over it, then the recognized words, which the
-                    // legacy installer draws last until slice 18.
-                    assert_eq!(text(p[5]), "page 5\nDraft\nTotal 42");
+                    // recognized words over it, then the header.
+                    assert_eq!(text(p[5]), "page 5\nTotal 42\nDraft");
                     ran.store(true, Ordering::Relaxed);
                     cx.update(|cx| cx.quit());
                 })

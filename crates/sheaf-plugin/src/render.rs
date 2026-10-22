@@ -17,8 +17,9 @@ pub const MAX_DPI: u32 = 600;
 /// Renders pages for plugins. The app implements it over its engines:
 /// `rect` is a pixel tile of page `page` of `snap`, the call's base, drawn
 /// `page_w`×`page_h` in its file's own orientation as the file will draw
-/// it, sheaf's marks and unsaved header included (M10.5 §14.3); the result
-/// is RGBA, `w`×`h`.
+/// it, sheaf's marks and the header, footer, watermarks and backgrounds it
+/// draws, saved or not, included (M10.5 §14.3); the result is RGBA,
+/// `w`×`h`.
 pub trait RenderSource: Send + Sync {
     fn render(
         &self,

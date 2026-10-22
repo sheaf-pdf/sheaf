@@ -48,13 +48,17 @@ fn all(by: f32) -> sheaf_edit::Margins {
     }
 }
 
-/// Recognized text of no words, told apart by `engine`.
-fn layer(engine: &str) -> Arc<TextLayer> {
+/// Recognized text of one word, `text`.
+fn layer(text: &str) -> Arc<TextLayer> {
     Arc::new(TextLayer {
-        words: Vec::new(),
-        lines: Vec::new(),
+        words: vec![crate::text_layer::OcrWord {
+            text: text.into(),
+            rect: rect(40.0),
+            confidence: 0.9,
+        }],
+        lines: std::iter::once(0..1).collect(),
         upright: Rotation::R0,
-        engine: engine.into(),
+        engine: "test".into(),
     })
 }
 

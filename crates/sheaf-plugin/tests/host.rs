@@ -981,10 +981,7 @@ fn ocr_runs_on_the_host_and_isnt_charged_to_the_plugin() {
     let mut c = ctx(&d);
     c.doc.as_mut().unwrap().ocr = Some(Arc::new(FakeOcr));
     let err = run(&p, "ocr", None, c).unwrap_err();
-    assert_eq!(
-        err,
-        PluginError::Failed("page0 by fake-deu stored=false".into())
-    );
+    assert_eq!(err, PluginError::Failed("page0 by fake-deu".into()));
     // Without an OCR source, it says so.
     let err = run(&p, "ocr", None, ctx(&d)).unwrap_err();
     assert_eq!(err, PluginError::Failed("OCR isn't available".into()));
@@ -1622,6 +1619,37 @@ fn a_plugin_built_for_02_still_loads_and_runs() {
     commit(&mut d, &out.batches[0]).unwrap();
     assert_eq!(top_level(&d).len(), 2);
     assert!(answer(&p, "settings", None).starts_with('{'));
+}
+
+/// API 0.2's `page-text-layer` answers none, a page with recognized text
+/// too: that text is the page's content, which `text` reads (M10.5 slice
+/// 18). Its `recognize` runs on the host as 0.3's does.
+#[test]
+fn api_02_s_page_text_layer_answers_none() {
+    let p = load_v02("v02-ocr");
+    let mut d = doc(1);
+    let page = d.page(0).unwrap();
+    let word = sheaf_doc::OcrWord {
+        text: "Total".into(),
+        rect: sheaf_doc::Box2 {
+            x: 10.0,
+            y: 10.0,
+            w: 40.0,
+            h: 10.0,
+        },
+        confidence: 0.9,
+    };
+    let layer = sheaf_doc::text_layer::from_engine(vec![word], &d.geom(page), "test");
+    d.commit_ops(fixture::ocr([(page, Arc::new(layer))]), "Recognize text")
+        .unwrap();
+    assert!(d.state().ocr_text(page).is_some());
+    let mut c = ctx(&d);
+    c.doc.as_mut().unwrap().ocr = Some(Arc::new(FakeOcr));
+    let err = run(&p, "ocr", None, c).unwrap_err();
+    assert_eq!(
+        err,
+        PluginError::Failed("page0 by fake-deu stored=false".into())
+    );
 }
 
 #[test]

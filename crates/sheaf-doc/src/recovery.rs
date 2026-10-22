@@ -671,7 +671,7 @@ pub(crate) mod tests {
             .as_array()
             .unwrap()
             .clone();
-        assert_eq!(contents.len(), 3);
+        assert_eq!(contents.len(), 4, "isolated, then the block");
         let text = String::from_utf8_lossy(&recovered.get_page_content(pages[&2])).into_owned();
         assert!(
             text.contains("3 Tr") && text.contains("<00480065006C006C006F>"),

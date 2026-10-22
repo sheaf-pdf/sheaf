@@ -27,6 +27,12 @@
 //! again and the header removed. pdf.js reads each slot once, inside an
 //! `/Artifact` of its own, numbered as the file has its pages.
 //!
+//! From slice 18 so does a page given recognized text and a header,
+//! written either way, then opened again and its text cleared, a Rewrite:
+//! pdf.js reads the page's own text, then the recognized words, inside
+//! their block's `/ShOCR`, then the header; and, cleared, no recognized
+//! word.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`. A test
 //! whose tools are missing says so and passes. Run with
@@ -45,7 +51,7 @@ use sheaf_doc::serialize::fixture::{
     rc4_aes_128_and_aes_256, written,
 };
 use sheaf_doc::tx::fixture::{
-    add, delete, delete_named, header, move_pages, ocr, patch_bookmark, remove_header,
+    add, clear_ocr, delete, delete_named, header, move_pages, ocr, patch_bookmark, remove_header,
     remove_watermark, rotate, set_header, set_watermark, watermark,
 };
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DestView, OcrWord, PageId, Snapshot};
@@ -1047,6 +1053,77 @@ fn header_blocks_read(how: How) {
                 let read = marked_read(pdfjs, &script, &path, number, &format!("{what}, {how:?}"));
                 assert_eq!(read, want, "pdf.js, {what}, {how:?}, page {number}");
             }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+sheaf_doc::both_ways!(
+    #[ignore = "needs qpdf, or node and pdf.js"]
+    an_ocr_block_reads_in_pdfjs,
+    an_ocr_block_reads_in_pdfjs_appended: ocr_block_reads
+);
+
+/// A page saying "Page 1" given recognized text, two words on a line, and
+/// a header over it, written `how`; then saved `how`, opened again and its
+/// text cleared, saved as planned, a Rewrite: each file passes `qpdf
+/// --check`, and pdf.js reads the page's own text, then the recognized
+/// words, inside the block's `/ShOCR`, then the header, inside its
+/// `/Artifact`; and, cleared, no recognized word.
+fn ocr_block_reads(how: How) {
+    let (qpdf, pdfjs) = (qpdf(), pdfjs());
+    if qpdf.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch(&format!("interop-ocr-{how:?}"));
+    let script = dir.join("marked.mjs");
+    std::fs::write(&script, PDFJS_MARKED).unwrap();
+    let base = common::write(&dir, "ocr.pdf", &mut Form::new(1));
+    let mut doc = common::open(&base);
+    let page = doc.page(0).unwrap();
+    let words = [("Recognized", 72.0), ("words", 200.0)].map(|(text, x)| OcrWord {
+        text: text.into(),
+        rect: Box2 {
+            x,
+            y: 300.0,
+            w: 110.0,
+            h: 18.0,
+        },
+        confidence: 1.0,
+    });
+    let layer = sheaf_doc::text_layer::from_engine(words.to_vec(), &doc.geom(page), "test");
+    let mut ops = ocr([(page, Arc::new(layer))]);
+    ops.push(set_header(header("CONFIDENTIAL"), None));
+    doc.commit_ops(ops, "Recognize text").unwrap();
+    let set = how.write(&doc);
+    how.save(&mut doc, &base);
+    let mut doc = common::open(&base);
+    let page = doc.page(0).unwrap();
+    doc.commit_ops(vec![clear_ocr(&[page])], "Clear").unwrap();
+    let (strategy, cleared) = common::planned(&mut doc, &base);
+    assert_eq!(strategy, StrategyKind::Rewrite, "{how:?}: cleared");
+    let header = "begin Artifact\ntext \"CONFIDENTIAL\"\nend";
+    let outputs = [
+        (
+            "set",
+            set,
+            format!(
+                "text \"Page 1\"\nbegin ShOCR\ntext \"Recognized\"\ntext \"words\"\nend\n{header}"
+            ),
+        ),
+        ("cleared", cleared, format!("text \"Page 1\"\n{header}")),
+    ];
+    for (what, bytes, want) in outputs {
+        let path = dir.join(format!("ocr-{what}-{how:?}.pdf"));
+        std::fs::write(&path, &bytes).unwrap();
+        if let Some(qpdf) = &qpdf {
+            run(Command::new(qpdf).arg("--check").arg(&path))
+                .unwrap_or_else(|e| panic!("qpdf --check, {what}, {how:?}: {e}"));
+            println!("qpdf --check, {what}, {how:?}: passes");
+        }
+        if let Some(pdfjs) = &pdfjs {
+            let read = marked_read(pdfjs, &script, &path, 1, &format!("{what}, {how:?}"));
+            assert_eq!(read, want, "pdf.js, {what}, {how:?}");
         }
     }
     let _ = std::fs::remove_dir_all(&dir);

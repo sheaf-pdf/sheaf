@@ -300,8 +300,7 @@ impl<'f> ContentWriter<'f> {
         self.op(&[], "q");
     }
 
-    /// `Q`. One with no `q` of this writer's before it closes one written
-    /// before the content: the legacy shapes' isolating `q`.
+    /// `Q`: text draws in the font its `q` saved again.
     pub fn restore(&mut self) {
         if let Some(font) = self.saved.pop() {
             self.font = font;
@@ -526,34 +525,23 @@ impl<'f> ContentWriter<'f> {
         self.op(&[], "EMC");
     }
 
-    /// The content, and the resources it draws with, named: `given` names
-    /// a resource by its id (the legacy `/SheafOcr`); any
-    /// other is `/Sh` and its digest's first six base32 characters, the
-    /// next name up where `reserved`, a name given, or one made before
-    /// has it.
-    pub fn finish(self, reserved: &Reserved, given: &[(ResId, &str)]) -> (Vec<u8>, ResourceNeeds) {
-        self.named(reserved, given)
+    /// The content, and the resources it draws with, named: each `/Sh`
+    /// and its digest's first six base32 characters, the next name up
+    /// where `reserved`, or one made before, has it.
+    pub fn finish(self, reserved: &Reserved) -> (Vec<u8>, ResourceNeeds) {
+        self.named(reserved)
     }
 
     /// The content as [`finish`](Self::finish) gives it, the writer kept:
     /// what's written once can be named for each page it goes on.
-    pub fn named(&self, reserved: &Reserved, given: &[(ResId, &str)]) -> (Vec<u8>, ResourceNeeds) {
-        let given_name = |id: ResId| {
-            let (_, name) = given.iter().find(|(given, _)| *given == id)?;
-            Some(name.as_bytes().to_vec())
-        };
-        let mut taken: BTreeSet<_> = self
-            .needs
-            .iter()
-            .filter_map(|(kind, res)| Some((*kind, given_name(res.id)?)))
-            .collect();
+    pub fn named(&self, reserved: &Reserved) -> (Vec<u8>, ResourceNeeds) {
+        let mut taken = BTreeSet::new();
         let needs: Vec<Need> = self
             .needs
             .iter()
             .map(|(kind, res)| {
                 let (kind, res) = (*kind, res.clone());
-                let name =
-                    given_name(res.id).unwrap_or_else(|| fresh(kind, res.id, reserved, &taken));
+                let name = fresh(kind, res.id, reserved, &taken);
                 taken.insert((kind, name.clone()));
                 Need { kind, name, res }
             })

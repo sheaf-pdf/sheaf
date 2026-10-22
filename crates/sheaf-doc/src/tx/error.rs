@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::caps::Cap;
+use crate::content::ContentError;
 use crate::model::VersionId;
 use crate::prim::Key;
 
@@ -22,6 +23,16 @@ pub enum EditError {
     /// A name it gives fits more than one thing.
     #[error("{op}: {what} names more than one")]
     Ambiguous { op: &'static str, what: String },
+    /// A page's content it needs can't be read, or can't be changed as it
+    /// asks without changing what else the page draws (§13): the page's
+    /// place in the document, from 0, and why, which names it as the
+    /// reader counts ([`ContentError`]).
+    #[error("{op}: {why}")]
+    Content {
+        op: &'static str,
+        page: u32,
+        why: String,
+    },
     /// The actor may not make this change.
     #[error("{0}")]
     Refused(Cap),
@@ -81,6 +92,16 @@ impl EditError {
         EditError::Invalid {
             op,
             why: why.to_string(),
+        }
+    }
+
+    /// A [`Content`](EditError::Content) error: `err`, which names a page
+    /// of its source, about the page at place `page` of the document.
+    pub(crate) fn content(op: &'static str, page: u32, err: ContentError) -> EditError {
+        EditError::Content {
+            op,
+            page,
+            why: err.on_page(page).to_string(),
         }
     }
 }

@@ -5,12 +5,11 @@ Status: API `sheaf:plugin@0.3.0` (0.2 still served), 2026-10-15. Design notes li
 
 A sheaf plugin is a WebAssembly component plus a manifest. It can add
 commands to the menus, the command palette and the keymap; read the open
-document's pages, bookmarks, markup and text (including OCR text that hasn't
-been saved yet); change the document through the same edits sheaf itself
-uses, each call's one undo step; ask the user questions with forms; list
-things in its own dock panel; react to document events; keep a little data;
-and, if the user allows it, read or write files in named folders or use the
-network.
+document's pages, bookmarks, markup and text (including recognized text);
+change the document through the same edits sheaf itself uses, each call's
+one undo step; ask the user questions with forms; list things in its own
+dock panel; react to document events; keep a little data; and, if the user
+allows it, read or write files in named folders or use the network.
 
 It runs sandboxed, so one `.wasm` file works on every platform sheaf runs on.
 A crash, a hang or runaway memory unloads the plugin and leaves the app
@@ -202,17 +201,16 @@ stay as you wrote them, since a plugin never learns who the user is
 **`text`**: `page-text`, `pattern-search(page, regex)`,
 `search(page, query, match-case)`, `text-boxes(page, rect)` and
 `words(page, rect?)` (every word with its box). A page's text is the page
-as the file will draw it once saved: its own text, OCR text the user
-hasn't saved yet and an unsaved header or footer, but never a form
-field's value or any annotation's text. Words are apart by a space and
-lines by a newline; a `search`'s words match where the page's are apart
-by any whitespace, so a phrase wrapped onto the next line is found; it
-ignores case unless `match-case`. Matches come with their boxes in page
-coordinates: points, top-left origin, the page as the file displays it
-(the same space annotations use). Pattern matches also carry their
-capture groups. This frame is 0.3's and stays so: sheaf keeps pages'
-geometry in their unrotated user space now, and converts at the API's
-edge.
+as the file will draw it now: its own text, recognized (OCR) text and a
+header or footer, saved or not, but never a form field's value or any
+annotation's text. Words are apart by a space and lines by a newline; a
+`search`'s words match where the page's are apart by any whitespace, so a
+phrase wrapped onto the next line is found; it ignores case unless
+`match-case`. Matches come with their boxes in page coordinates: points,
+top-left origin, the page as the file displays it (the same space
+annotations use). Pattern matches also carry their capture groups. This
+frame is 0.3's and stays so: sheaf keeps pages' geometry in their
+unrotated user space now, and converts at the API's edge.
 
 **`edits`**: `submit(label, edits)` queues a batch of edits labelled `label`.
 Batches are applied in order **after your call returns**, all of a call's as
@@ -261,8 +259,8 @@ plugins ship.
 
 **`render`**: read-only page images. `page-renderer(page)` draws the page
 (or a region of it, in page coordinates) at a dpi you choose (up to 600), in
-`gray8` or `rgba8`, as the file will draw it once saved: with sheaf's own
-markup, an unsaved header or footer, and other tools' comments and form
+`gray8` or `rgba8`, as the file will draw it now: with sheaf's own markup,
+a header or footer saved or not, and other tools' comments and form
 fields, in the file's own orientation (a page turned in sheaf isn't drawn
 turned). The pixels stay in sheaf: an `image` gives its size, maps pixels to
 page points (`to-page`), and hands over rows or tiles as you read them.
@@ -273,9 +271,11 @@ pages.
 
 **`ocr`**: `recognize(page, options)` runs the user's OCR engine on one page
 and returns its words with boxes. It reads the page's own content, as
-sheaf's OCR does: no form fields, comments, markup or unsaved header are
-drawn into what it reads. It doesn't change the document.
-`page-text-layer(page)` returns the unsaved OCR layer, if any.
+sheaf's OCR does: no form fields, comments, markup, or header, footer,
+watermark or background sheaf draws, saved or not, are drawn into what
+it reads. It doesn't change the document. Text a page
+has been recognized with, saved or not, is the page's content: read it
+with `text`. (In 0.2, `page-text-layer(page)` answers none.)
 
 **`storage`**: `get`, `set`, `delete`, `keys` for a key/value store kept in
 `<config>/plugin-data/<id>/store.json` (4 MiB per plugin), and `settings()`,
@@ -366,7 +366,8 @@ backward compatible, so it's a minor bump while 0.x. sheaf still serves
 0.2: a 0.2 plugin links to the 0.2 world, sees only the kinds 0.2 had (a
 newer mark isn't in `annotations`), and an update it makes keeps the
 fields it can't see. Rebuild against SDK 0.3 and set `api = "^0.3"` to
-get the rest.
+get the rest. Before its release, 0.3 lost `ocr.page-text-layer`:
+recognized text is the page's content, which `text` reads.
 
 
 The WIT package `sheaf:plugin` follows semver, and the SDK crate's version

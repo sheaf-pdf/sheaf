@@ -1,6 +1,7 @@
-//! What sheaf draws on pages, lowered: recognized text over a page, and
-//! the watermark, the background and the header and footer, each drawn by
-//! a generator (M10.5 §3.4–3.5).
+//! What sheaf draws on pages, lowered: recognized text over a page, in
+//! place of what sheaf wrote in its file, and the watermark, the
+//! background and the header and footer, each drawn by a generator (M10.5
+//! §3.4–3.5).
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
@@ -9,28 +10,105 @@ use sheaf_edit::{GridPos, HeaderFooterSpec, Z};
 
 use super::{EditError, Lower, Notice, OthersFound};
 use crate::content::{
-    self, BlockAt, Font, GenId, PagOrigin, PageContent, Pagination, PaginationKind, ResCx,
-    SheafBlock, SpanAcross, Std14,
+    self, BlockAt, ContentError, Font, GenId, PagOrigin, PageContent, Pagination, PaginationKind,
+    ResCx, SheafBlock, SpanAcross, Std14,
 };
 use crate::generate::{self, header};
 use crate::model::{
-    DocState, Filter, Frozen, GenSpec, Generator, MarkedSel, PageDef, PageId, Scope, StreamSel,
-    WatermarkContent, WatermarkGen,
+    DocState, Filter, Frozen, GenSpec, Generator, Layer, MarkedSel, PageDef, PageId, Scope, Static,
+    StreamSel, WatermarkContent, WatermarkGen,
 };
 use crate::prim::{Key, Val};
 use crate::store::Src;
 use crate::text_layer::TextLayer;
 
 /// Page `page`'s recognized text: `layer`, in place of any it has, or
-/// none.
-pub(crate) fn set_ocr(lw: &mut Lower, page: PageId, layer: Option<Arc<TextLayer>>) {
-    let def = lw.rec.def(page).expect("resolved");
-    if layer.is_none() && def.content.ocr_text().is_none() {
-        return;
+/// none when it has no words ([`put_ocr`]).
+pub(crate) fn set_ocr(
+    lw: &mut Lower,
+    page: PageId,
+    layer: &Arc<TextLayer>,
+) -> Result<(), EditError> {
+    put_ocr(lw, page, (!layer.is_empty()).then(|| layer.clone()))
+}
+
+/// Page `page`'s recognized text taken off, its stack's and its file's
+/// ([`put_ocr`]).
+pub(crate) fn clear_ocr(lw: &mut Lower, page: PageId) -> Result<(), EditError> {
+    put_ocr(lw, page, None)
+}
+
+/// Page `page`'s recognized text: `text` in place of what it has, or none.
+/// A layer it replaces on the page's stack, saved or not, keeps its
+/// block's id, and a new one draws one; what its file holds is filtered
+/// out ([`saved_ocr`]). Nothing is put when that leaves the page as it is.
+fn put_ocr(lw: &mut Lower, page: PageId, text: Option<Arc<TextLayer>>) -> Result<(), EditError> {
+    lw.read(Key::Page(page));
+    let def = lw.rec.def(page).expect("resolved").clone();
+    let filters = saved_ocr(lw, page, &def)?;
+    let kept = def.content.ocr_layer().map(|l| l.id);
+    let layer = text.map(|text| Layer {
+        id: kept.unwrap_or_else(|| lw.block_id()),
+        body: Static::OcrText(text),
+    });
+    let mut content = def.content.with_ocr(layer);
+    if !filters.is_empty() {
+        content = content.with_filters(filters);
     }
-    let content = def.content.with_ocr_text(layer);
+    if content == def.content {
+        return Ok(());
+    }
     let def = PageDef::new(def.base.clone(), def.copy, content);
     lw.rec.put(Key::Page(page), Some(Val::Page(Arc::new(def))));
+    Ok(())
+}
+
+/// The filters that take the recognized text sheaf wrote in the file of
+/// page `page`, shown as `def`, out of it (§3.4): its OCR blocks, each a
+/// stream of its own, and the layer an older sheaf wrote, with its `q`
+/// ([`StreamSel::SheafOcr`]); and the blocks another tool merged into a
+/// stream ([`MarkedSel::SheafOcr`]), once a splice is shown to take them
+/// out as a save cuts them. None when it holds none. Read from the page's
+/// blocks, a fact of its source read once; a page whose content can't be
+/// read, or whose merged blocks a splice refuses, is
+/// [`EditError::Content`].
+fn saved_ocr(lw: &Lower, page: PageId, def: &PageDef) -> Result<Vec<Filter>, EditError> {
+    let (src, index) = (&def.base.src, def.base.index);
+    let blocks = src.blocks(index).map_err(|e| lw.content(e, page))?;
+    let ocr = (blocks.sheaf.iter()).filter(|b| matches!(b.block, SheafBlock::Ocr(_)));
+    let streams = ocr.clone().any(|b| matches!(b.at, BlockAt::Stream(_)));
+    let merged: Vec<SpanAcross> = ocr
+        .filter_map(|b| match b.at {
+            BlockAt::Marked(span) => Some(span),
+            BlockAt::Stream(_) => None,
+        })
+        .collect();
+    let mut filters = Vec::new();
+    if streams || blocks.legacy_ocr.is_some() {
+        filters.push(Filter::DropStreams(StreamSel::SheafOcr));
+    }
+    if !merged.is_empty() {
+        cut_together(src, index, &merged).map_err(|e| lw.content(e, page))?;
+        filters.push(Filter::DropMarked(MarkedSel::SheafOcr));
+    }
+    Ok(filters)
+}
+
+/// Nothing when a save can cut `spans`, ranges of page `index` of `src`,
+/// out of its content as [`content::splice_each`] cuts them, each a range
+/// of its own: all of them only when a splice takes them together. Else
+/// why not.
+fn cut_together(src: &Src, index: u32, spans: &[SpanAcross]) -> Result<(), ContentError> {
+    let (Some(facts), lim) = (src.page(index), src.limits()) else {
+        return Ok(());
+    };
+    let read = |fault| ContentError::Read { page: index, fault };
+    let content = PageContent::read(src.pdf(), &facts.contents, lim).map_err(read)?;
+    let res = ResCx::read(src.pdf(), facts.resources.as_deref());
+    match content::splice(content.concat(), &res, lim, spans) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(ContentError::Unsafe { page: index, error }),
+    }
 }
 
 /// The watermark (`z` over) or background (under) drawing `content` at
@@ -134,7 +212,7 @@ fn remove_generated(
         let (filters, on) = found_on(&lw.rec, page, kinds, include_authored);
         found = found.plus(on);
         let def = lw.rec.def(page).expect("resolved");
-        let content = (filters.into_iter()).fold(def.content.clone(), |c, f| c.with_filter(f));
+        let content = def.content.with_filters(filters);
         if content != def.content {
             let def = PageDef::new(def.base.clone(), def.copy, content);
             lw.rec.put(Key::Page(page), Some(Val::Page(Arc::new(def))));

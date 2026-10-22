@@ -1,5 +1,6 @@
 // API 0.3's marks: every kind and field there is. And `storage`, which
-// adds the plugin's preferences.
+// adds the plugin's preferences, and `ocr`, whose recognized text is the
+// page's content, read through `text`.
 
 /// A mark as API 0.3 shows it: all of it.
 pub(crate) fn annot_to_wit(a: &Annot) -> Option<w::Annot> {
@@ -299,5 +300,15 @@ impl api::storage::Host for HostState {
             .map(|c| c.preferences.clone())
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| "{}".into())
+    }
+}
+
+impl api::ocr::Host for HostState {
+    fn recognize(
+        &mut self,
+        page: u64,
+        options: api::ocr::OcrOptions,
+    ) -> Result<api::ocr::TextLayer, String> {
+        recognized(self, page, options)
     }
 }

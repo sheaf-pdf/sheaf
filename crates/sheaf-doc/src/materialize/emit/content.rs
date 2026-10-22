@@ -1,78 +1,87 @@
 //! What sheaf draws on a page (M10.5 §11.4).
 //!
-//! - **The generators on the page**, laid out on it ([`generate::layout`])
-//!   and assembled around its own content: `/Contents [under… QOpen^open
-//!   base′… QClose^close over…]`, a background under it, and over it a
-//!   watermark, then the header and footer ([`generators_on`]'s order).
-//!   Each block is a stream of its own marked `/SheafBlock << /K /Gen /G
-//!   (g…) /L <…> /R <…> /N (…) >>`, its generator, its layout's digest, its
-//!   recipe's and, on a page the header numbers, its Bates number;
-//!   identical blocks are one object ([`ObjKey::Block`]), so a watermark on
-//!   7,000 pages alike is one. A header's tokens read the page as the
-//!   document being written has it: its place there, the page count and
-//!   its label, and its Bates number, fixed when it was set (§3.5). A page
-//!   with nothing to draw for one gets an empty block, so its scope and
-//!   numbers can be read back. The page's own content is isolated by `q`s
-//!   and `Q`s, shared marked streams ([`Shared::QOpen`],
-//!   [`Shared::QClose`]) counted by its balance (§3.4): `open = 1 + d` and
-//!   `close = 1 + d + net`, `d = max(0, −min_prefix)`, so no `Q` of its
-//!   undoes theirs, and nothing it leaves set reaches what's drawn over it.
-//!   Its streams are referenced, never re-encoded. A page whose content
-//!   can't be read gets none, said once in a note, and the save goes on.
-//!   The page's resources are a new dictionary ([`ObjKey::PageRes`]): its
-//!   base page's, the categories it adds to copied one level down, the
-//!   names it draws with added clear of the names they bind; pages that
-//!   share base resources and additions share one. A page the legacy OCR
-//!   installer draws on after has them as a dictionary of its own, which
-//!   the installer copies and adds to. A save notes each generator's block
-//!   on the pages it writes, for its record (`SaveRecord::drawn`), and the
-//!   saved file's block there that a generator lays out otherwise now from
-//!   the same recipe as one the save may unlink, once every page it was on
+//! - **The generators on the page and its recognized text**, laid out on
+//!   it ([`generate::layout`], `text_layer::block`) and assembled around
+//!   its own content: `/Contents [under… QOpen^open base′… QClose^close
+//!   text over…]`, a background under it, and over it the recognized text,
+//!   then a watermark, then the header and footer ([`generators_on`]'s
+//!   order), so the page's own text reads first, then the recognized
+//!   words, then the header. Each block is a stream of its own marked
+//!   `/SheafBlock`. A generator's says `<< /K /Gen /G (g…) /L <…> /R <…>
+//!   /N (…) >>`, its generator, its layout's digest, its recipe's and, on
+//!   a page the header numbers, its Bates number; identical blocks are one
+//!   object ([`ObjKey::Block`]), so a watermark on 7,000 pages alike is
+//!   one. A header's tokens read the page as the document being written
+//!   has it: its place there, the page count and its label, and its Bates
+//!   number, fixed when it was set (§3.5). A page with nothing to draw for
+//!   one gets an empty block, so its scope and numbers can be read back.
+//!   The recognized text's says `<< /K /Ocr /B (b…) >>`, its layer's id;
+//!   it's invisible text in a `q` of its own, marked `/ShOCR` with a list
+//!   that names its block, in one glyphless font a file. The page's own
+//!   content is isolated by `q`s and `Q`s, shared marked streams
+//!   ([`Shared::QOpen`], [`Shared::QClose`]) counted by its balance
+//!   (§3.4): `open = 1 + d` and `close = 1 + d + net`, `d =
+//!   max(0, −min_prefix)`, so no `Q` of its undoes theirs, and nothing it
+//!   leaves set reaches what's drawn over it. Its streams are referenced,
+//!   never re-encoded. A page whose content can't be read gets none of
+//!   them, said once in a note, and the save goes on. The page's resources
+//!   are a new dictionary ([`ObjKey::PageRes`]): its base page's, the
+//!   categories it adds to copied one level down, the names it draws with
+//!   added clear of the names they bind; pages that share base resources
+//!   and additions share one. A save notes each generator's block on the
+//!   pages it writes, for its record (`SaveRecord::drawn`), and the saved
+//!   file's block there that a generator lays out otherwise now from the
+//!   same recipe as one the save may unlink, once every page it was on
 //!   draws it again or is gone: a live redraw (§11.9's allowed drops), a
 //!   page number drawn where its page is now.
 //! - **base′**, the page's own content as a save writes it, when its file
-//!   holds sheaf's blocks (by its streams' markers, [`Source::markers`]) or
-//!   a filter changes it. The blocks of the document's generators
+//!   holds sheaf's blocks (by its streams' markers, [`Source::markers`];
+//!   in a file whose catalog doesn't say so, as one saved with recognized
+//!   text alone, by the page's blocks, read when something is drawn on it)
+//!   or a filter changes it. The blocks of the document's generators
 //!   ([`DocState::backs`]) are set aside, so one gone or changed leaves no
 //!   trace and nesting never grows; another file's are kept, with the
 //!   streams that isolate them, until a filter takes them out; isolating
-//!   streams are otherwise set aside too, and so is an OCR layer sheaf
-//!   wrote before M10.5 that a new one replaces. A block laid out alike
-//!   again (its `/L`) from the same recipe (its `/R`, which says its Bates
-//!   number too) is the file's stream, and a stream of the file's that
-//!   isolates as many as base′ needs is used again; a page whose blocks are
-//!   all laid out alike, in place around its isolated content, is written
-//!   as it is ([`intact`], which the realizer asks too). A header's layout
-//!   is digested once for every version of the document that lays its page
-//!   out alike, whoever asks ([`header_digest`]). A filter's ranges
-//!   are spliced out of the streams they're in, each a copy of its own
-//!   ([`ObjKey::Filtered`]), so a stream pages share stays whole on the
-//!   others: another file's blocks merged into a stream, and others'
-//!   pagination artifacts, as a Remove selects them and as the generators
-//!   drawn on a page replace those of their kinds ([`replacing`]), every
-//!   tool's but the author's (§11.4): an Acrobat header, or one an older
-//!   sheaf drew, under a header set now. One a splice refuses stays,
+//!   streams are otherwise set aside too. The recognized text's blocks the
+//!   file holds are static content drawn over the page's: kept as they
+//!   are, in their order, after its isolated content, before the
+//!   generators drawn over it, and the page's content is isolated from
+//!   them even with nothing else drawn. A block laid out alike again (its
+//!   `/L`) from the same recipe (its `/R`, which says its Bates number too)
+//!   is the file's stream, and a stream of the file's that isolates as many
+//!   as base′ needs is used again; a page whose blocks are all laid out
+//!   alike, in place around its isolated content and the recognized text
+//!   after it, is written as it is ([`intact`], which the realizer asks
+//!   too). A header's layout is digested once for every version of the
+//!   document that lays its page out alike, whoever asks
+//!   ([`header_digest`]). A filter's ranges are spliced out of the streams
+//!   they're in, each a copy of its own ([`ObjKey::Filtered`]), so a
+//!   stream pages share stays whole on the others: another file's blocks
+//!   merged into a stream, and others' pagination artifacts, as a Remove
+//!   selects them and as the generators drawn on a page replace those of
+//!   their kinds ([`replacing`]), every tool's but the author's (§11.4):
+//!   an Acrobat header, or one an older sheaf drew, under a header set
+//!   now. One a splice refuses stays,
 //!   counted in a note; another file's block of a kind replaced, a stream
-//!   of its own, is left out whole. A range kept whose property list a
-//!   filter takes what an older sheaf kept in it out of (Clean Copy's
-//!   [`Filter::StripLegacy`]) has the list written again without it, in the
-//!   same copy; one that can't be keeps it, counted in a note. What's left
-//!   is counted again, and the names only what's set aside or cut used are
-//!   dropped from the page's resources (one level down), so the form an
-//!   Acrobat watermark draws is no longer the page's, but those a block
-//!   drawn anew binds to the same resource.
-//! - **OCR text**, through `text_layer::install`: `/Contents` becomes `[q,
-//!   …, layer]`, the layer's streams marked `/SheafOcrLayer` and its text
-//!   in `/SheafOcr`. A layer the page's content holds already (a re-OCR
-//!   over a saved one) is taken out first, so the page has one. It goes
-//!   over the rest, the generators' blocks too, in its legacy shape until
-//!   slice 18: the state it sets (its text invisible) isn't isolated, so
-//!   nothing can come after it.
+//!   of its own, is left out whole. The recognized text the file holds
+//!   that a re-OCR or a Clear takes out goes the same way, found by the
+//!   page's blocks: its blocks, streams of their own, are left out, and
+//!   so is the layer an older sheaf wrote with the `q` before the page's
+//!   content that its first `Q` ends, both or neither; one merged into
+//!   another stream is cut out of it. A layer's stream without its `q`,
+//!   or a cut a splice refuses, stays, counted in a note. A range kept
+//!   whose property list a filter takes what an older sheaf kept in it out
+//!   of (Clean Copy's [`Filter::StripLegacy`]) has the list written again
+//!   without it, in the same copy; one that can't be keeps it, counted in
+//!   a note. What's left is counted again, and the names only what's set
+//!   aside or cut used are dropped from the page's resources (one level
+//!   down), so the form an Acrobat watermark draws is no longer the
+//!   page's, but those a block drawn anew binds to the same resource.
 //!
-//! An overlay draws the OCR text only when its view asks for it, and the
-//! generators as a save draws them when it asks for those, finding where
-//! a page is and its label from the state's own tables, never by a walk
-//! of the pages.
+//! An overlay draws the recognized text only when its view asks for it,
+//! and the generators as a save draws them when it asks for those, finding
+//! where a page is and its label from the state's own tables, never by a
+//! walk of the pages.
 //!
 //! What's drawn adds resources keyed by digest: a resource
 //! ([`ObjKey::Res`], its other objects [`ObjKey::ResPart`]) is written once
@@ -98,9 +107,9 @@ use lopdf::{Dictionary, Object, ObjectId, Stream, StringFormat, dictionary};
 use super::{Cx, PdfVersion};
 use crate::content::sink::{self, Sink as _};
 use crate::content::{
-    self, Balance, BlockAt, ContentError, GenId, Marker, NameSet, PagOrigin, PageBlocks,
-    PageContent, Pagination, PaginationKind, Pos, Res, ResBody, ResCx, ResId, ResKind, Reserved,
-    ResourceNeeds, SheafBlock, SpanAcross,
+    self, Balance, BlockAt, BlockId, Concat, GenId, LEGACY_OCR, Marker, NameSet, PagOrigin,
+    PageBlocks, PageContent, Pagination, PaginationKind, Pos, Res, ResBody, ResCx, ResId, ResKind,
+    Reserved, ResourceNeeds, SheafBlock, SpanAcross,
 };
 use crate::generate::{self, Art};
 use crate::geom::Geom;
@@ -113,6 +122,7 @@ use crate::model::{
 };
 use crate::source::ObjRef;
 use crate::store::{BlobId, Src};
+use crate::text_layer::TextLayer;
 
 /// The PDF version what sheaf draws over a page showing `def` needs, the
 /// generators' aside: its OCR text's fonts.
@@ -153,6 +163,9 @@ pub(crate) fn generators_on(st: &DocState, id: PageId) -> Vec<&Arc<Generator>> {
     on
 }
 
+/// Recognized text drawn on a page, and its layer's id.
+type Text<'a> = (&'a TextLayer, BlockId);
+
 /// What sheaf draws over page `id`, which shows `def` with `geom` at
 /// place `pos`, drawn into `page`, its dictionary as emitted.
 pub(crate) fn page(
@@ -166,15 +179,10 @@ pub(crate) fn page(
     let view = cx.overlay.map(|o| o.inputs);
     let ocr = view.is_none_or(|v| v.ocr_over);
     let draws = view.is_none_or(|v| v.generators);
-    stack(cx, (id, pos), def, geom, ocr, draws, page);
-    if ocr {
-        if let Some(layer) = def.content.ocr_text() {
-            crate::text_layer::install(cx, page, layer);
-        }
-        if let Some(version) = needs(def) {
-            cx.needs(version);
-        }
-    }
+    let text = (def.content.ocr_layer().filter(|_| ocr))
+        .and_then(|layer| Some((&**layer.body.ocr_text()?, layer.id)))
+        .filter(|(text, _)| !text.is_empty());
+    stack(cx, (id, pos), def, geom, (text, draws), page);
     // The page's own resources, when it still names them.
     if let Ok(&Object::Reference(r)) = page.get(b"Resources")
         && let Some(key @ ObjKey::PageRes { .. }) = cx.syms.key(r)
@@ -187,23 +195,23 @@ pub(crate) fn page(
 
 /// Page `id`'s own content as a save writes it, which shows `def` with
 /// `geom` at place `pos`, and the generators on it (`draws`: when the view
-/// draws them) around it, isolated by its balance, drawn into `page`, with
-/// its resources a [`ObjKey::PageRes`] when they change (see the module's
-/// doc); `ocr` when its recognized text is drawn too. As it is when its
-/// file holds no block of sheaf's and nothing covers it, or when the
-/// blocks it holds are what's drawn there now ([`intact`]) and no OCR layer
-/// of its own goes. Others' artifacts of the kinds the generators drawn on
-/// it replace are taken out ([`replacing`]); those a splice refuses stay,
-/// counted in a note. A page whose content can't be read is drawn as it
-/// is, and gets no generator, said once in a note. A save notes the block
-/// of each generator on it, kept or drawn anew ([`drew`]).
+/// draws them) and its recognized `text` (when it's drawn) around it,
+/// isolated by its balance, drawn into `page`, with its resources a
+/// [`ObjKey::PageRes`] when they change (see the module's doc). As it is
+/// when its file holds no block of sheaf's and nothing covers it, or when
+/// no text goes on it and the blocks it holds are what's drawn there now
+/// ([`intact`], which knows nothing of text drawn anew). Others' artifacts
+/// of the kinds the generators drawn on it replace are taken out
+/// ([`replacing`]); those a splice refuses stay, counted in a note. A page
+/// whose content can't be read is drawn as it is, and gets no generator
+/// and no text, said once in a note. A save notes the block of each
+/// generator on it, kept or drawn anew ([`drew`]).
 fn stack(
     cx: &mut Cx,
     (id, pos): (PageId, usize),
     def: &PageDef,
     geom: &Geom,
-    ocr: bool,
-    draws: bool,
+    (text, draws): (Option<Text>, bool),
     page: &mut Dictionary,
 ) {
     let on = match draws {
@@ -213,14 +221,9 @@ fn stack(
     let (src, index) = (def.base.src.clone(), def.base.index);
     let marks = src.markers(index);
     let filters = &def.content.filters;
-    if on.is_empty() && marks.is_empty() && filters.is_empty() {
+    if on.is_empty() && text.is_none() && marks.is_empty() && filters.is_empty() {
         return;
     }
-    // An OCR layer sheaf wrote before, which the new one replaces, isn't
-    // the page's own content; the new one's installer copies the page's
-    // resources.
-    let text = ocr && def.content.ocr_text().is_some();
-    let replaced = text && crate::text_layer::has_layer(cx, page);
     let st = cx.st;
     let contents = src.page(index).map_or(&[][..], |f| &f.contents);
     // What each generator reads of the page, and its layout here, as
@@ -235,7 +238,7 @@ fn stack(
         laid.push((g.id, digest));
         Some(digest)
     };
-    if filters.is_empty() && !replaced && intact(st, id, &marks, contents, &on, &mut digest) {
+    if filters.is_empty() && text.is_none() && intact(st, id, &marks, contents, &on, &mut digest) {
         if cx.overlay.is_none() {
             // Its blocks as `intact` found them, those under its content
             // first.
@@ -252,27 +255,31 @@ fn stack(
         return;
     }
     let replacing = replacing(&on, &src, index);
+    let at = (id, &src, index);
     let written = match (marks.is_empty() && filters.is_empty(), replacing) {
-        (true, None) => {
-            let at = (id, &src, index);
-            wrapped(cx, at, &ctxs, &on, (replaced, text), page).then_some(Stayed::default())
-        }
+        // A file whose catalog doesn't say it holds sheaf's blocks may all
+        // the same, as one saved with recognized text alone does: its
+        // blocks say so, and it's rebuilt, so nesting doesn't grow.
+        (true, None) => match src.blocks(index) {
+            Ok(blocks)
+                if !blocks.isolation.is_empty()
+                    || (blocks.sheaf.iter()).any(|b| matches!(b.at, BlockAt::Stream(_))) =>
+            {
+                rebuilt(cx, at, &[], (&ctxs, &laid), (&on, text), page)
+            }
+            Ok(blocks) => {
+                wrapped(cx, at, blocks.balance, &ctxs, (&on, text), page);
+                Some(Stayed::default())
+            }
+            Err(_) => None,
+        },
         (_, replacing) => {
             let filters: Vec<Filter> = filters.iter().cloned().chain(replacing).collect();
-            let at = (id, &src, index);
-            rebuilt(
-                cx,
-                at,
-                &filters,
-                (&ctxs, &laid),
-                &on,
-                (replaced, text),
-                page,
-            )
+            rebuilt(cx, at, &filters, (&ctxs, &laid), (&on, text), page)
         }
     };
     let Some(stayed) = written else {
-        match on.is_empty() {
+        match on.is_empty() && text.is_none() {
             true => log::warn!(
                 "page {}'s content can't be read: it's kept as it is",
                 index + 1
@@ -284,20 +291,29 @@ fn stack(
     if stayed.ranges > 0 {
         cx.stayed.push((id, stayed.ranges));
     }
+    if stayed.text > 0 {
+        cx.text_stayed.push(id);
+    }
     if stayed.settings > 0 {
         cx.settings_kept.push((id, stayed.settings));
     }
     if !on.is_empty() {
         cx.needs(PdfVersion::ARTIFACTS);
     }
+    if text.is_some() {
+        cx.needs(PdfVersion::CID_FONTS);
+    }
 }
 
-/// What stays of what a page's filters select: the ranges a splice
-/// refuses to take out, and the property lists of an older sheaf's that
-/// can't be written again without what it kept in them.
+/// What stays of what a page's filters select: others' ranges a splice
+/// refuses to take out; the recognized text sheaf wrote that can't be,
+/// a cut a splice refuses or a layer's stream without the `q` its first
+/// `Q` ends; and the property lists of an older sheaf's that can't be
+/// written again without what it kept in them.
 #[derive(Default)]
 struct Stayed {
     ranges: usize,
+    text: usize,
     settings: usize,
 }
 
@@ -325,11 +341,14 @@ fn replacing(on: &[&Arc<Generator>], src: &Src, index: u32) -> Option<Filter> {
 /// [`generators_on`]'s order) laid out alike there: none of the blocks it
 /// holds is another file's; it holds the block of each that's laid out
 /// alike, whose digest `digest` gives (None when it can't tell), from the
-/// recipe each draws from there now, in that order, those under its content first and those over it last, and
-/// between them the streams that isolate the rest, which is all its own;
-/// or with none on it, it holds no block of the document's, and no
-/// isolation but around another file's blocks. What the emitter writes as
-/// the page has it, and what the realizer renders from its base page.
+/// recipe each draws from there now, in that order, those under its
+/// content first and those over it last, and between them the streams that
+/// isolate the rest, which is all its own, then the blocks of recognized
+/// text it holds, if any (§11.4's `[gen-under… QOpen inner… QClose ocr…
+/// gen-over…]`); or with none on it, it holds no block of the document's,
+/// and no isolation but around another file's blocks or before the
+/// recognized text it holds. What the emitter writes as the page has it,
+/// and what the realizer renders from its base page.
 pub(crate) fn intact(
     st: &DocState,
     page: PageId,
@@ -344,7 +363,8 @@ pub(crate) fn intact(
         let backed =
             (marks.iter()).any(|(_, m)| matches!(m, Marker::Gen { id, .. } if st.backs(*id, page)));
         let isolates = (marks.iter()).any(|(_, m)| *m == Marker::Isolate);
-        return !backed && (!isolates || unbacked);
+        let text = (marks.iter()).any(|(_, m)| matches!(m, Marker::Ocr(_)));
+        return !backed && (!isolates || unbacked || text);
     }
     if unbacked {
         return false;
@@ -355,11 +375,18 @@ pub(crate) fn intact(
         .take_while(|g| g.z == sheaf_edit::Z::Under)
         .count();
     let over = on.len() - under;
-    let Some(inner) = contents.len().checked_sub(under + over + 2) else {
+    if contents.len() < under + over + 2 {
+        return false;
+    }
+    let (blocks_under, rest) = contents.split_at(under);
+    let (middle, blocks_over) = rest.split_at(rest.len() - over);
+    // The recognized text after the isolated content.
+    let text = (middle.iter().rev())
+        .take_while(|&&s| matches!(mark(s), Some(Marker::Ocr(_))))
+        .count();
+    let Some(inner) = (middle.len() - text).checked_sub(2) else {
         return false;
     };
-    let (blocks_under, rest) = contents.split_at(under);
-    let (middle, blocks_over) = rest.split_at(inner + 2);
     // A block of `g` laid out alike, from the recipe it draws from here
     // now: one that says another keeps what the record and an open read of
     // it (its recipe, its Bates number) from what's drawn.
@@ -465,32 +492,20 @@ fn digest_of(cx: &mut Cx, (id, g): (PageId, &Generator), ctx: &PageCtx) -> u128 
     generate::layout_digest(g, ctx, art.as_ref())
 }
 
-/// The generators `on` page `id`, page `index` of `src`, drawn into `page`
-/// around its own content, each on the page `ctxs` says, which holds none
-/// of sheaf's blocks and no filter changes: its streams referenced as they
-/// are, counted by its blocks' balance, or but for an OCR layer sheaf
-/// wrote before that a new one `replaced`, counted again without it; its
-/// resources its own when OCR `text` is drawn after. False when its content
-/// can't be read.
+/// The generators `on` page `id`, page `index` of `src`, and its
+/// recognized `text`, drawn into `page` around its own content, each
+/// generator on the page `ctxs` says, which holds none of sheaf's blocks
+/// and no filter changes: its streams referenced as they are, counted by
+/// their `balance`.
 fn wrapped(
     cx: &mut Cx,
     (id, src, index): (PageId, &Src, u32),
+    balance: Balance,
     ctxs: &[PageCtx],
-    on: &[&Arc<Generator>],
-    (replaced, text): (bool, bool),
+    (on, text): (&[&Arc<Generator>], Option<Text>),
     page: &mut Dictionary,
-) -> bool {
-    if replaced {
-        crate::text_layer::strip(cx, page);
-    }
+) {
     let base = sink::content_entries(cx, page);
-    let balance = match replaced {
-        false => src.blocks(index).map(|blocks| blocks.balance),
-        true => fresh_balance(cx, src, index, &base),
-    };
-    let Ok(balance) = balance else {
-        return false;
-    };
     let mut reserved = reserved(cx, src, index, page, &NameSet::default());
     let mut needs = ResourceNeeds::default();
     let (mut under, mut over) = (Vec::new(), Vec::new());
@@ -506,41 +521,42 @@ fn wrapped(
     contents.push(isolation(cx, Shared::QOpen(open)));
     contents.extend(base);
     contents.push(isolation(cx, Shared::QClose(close)));
+    contents.extend(text.map(|text| recognized(cx, text, &mut reserved, &mut needs)));
     contents.extend(over);
     page.set("Contents", Object::Array(contents));
-    page_res(cx, (src, index, text), page, &NameSet::default(), &needs);
-    true
+    page_res(cx, (src, index), page, &NameSet::default(), &needs);
 }
 
 /// Page `id`'s own content, page `index` of `src`, whose streams sheaf
 /// marked, or which `filters` change, rebuilt into `page` with the
-/// generators `on` it around what's left (§11.4): each stream's marker
-/// read from its dictionary, whatever the file's catalog says, and one
-/// that says it isolates content but holds more than `q`s or `Q`s the
-/// page's own content; the blocks of the document's generators set aside,
-/// those laid out alike again from the same recipe kept as they are;
-/// another file's blocks kept but where a filter takes them out, and the
-/// streams that isolate them with them, else set aside too; an OCR layer
-/// sheaf wrote before that a new one `replaced` set aside; a stream a
-/// filter's ranges come out of written as a copy ([`ObjKey::Filtered`]),
-/// each range cut where a splice takes it ([`content::splice_each`]), and
-/// each range kept whose list loses what an older sheaf kept in it written
-/// so ([`content::without_keys`]). What's left is counted again, and the
+/// generators `on` it and its recognized `text` around what's left
+/// (§11.4): each stream's marker read from its dictionary, whatever the
+/// file's catalog says, and one that says it isolates content but holds
+/// more than `q`s or `Q`s the page's own content; the blocks of the
+/// document's generators set aside, those laid out alike again from the
+/// same recipe kept as they are; another file's blocks kept but where a
+/// filter takes them out, and the streams that isolate them with them,
+/// else set aside too; the recognized text sheaf wrote that a filter
+/// takes out set aside, found by the page's blocks, the layer an older
+/// sheaf wrote with its `q` or not at all; the blocks of recognized text
+/// it leaves kept as they are after the isolated content, in their order,
+/// before `text`, and the names they draw with kept; a stream a filter's
+/// ranges come out of written as a copy ([`ObjKey::Filtered`]), each range
+/// cut where a splice takes it ([`content::splice_each`]), and each range
+/// kept whose list loses what an older sheaf kept in it written so
+/// ([`content::without_keys`]). What's left is counted again, and the
 /// names only what's set aside or cut used are dropped from the page's
-/// resources, which a block drawn anew may name again, its own when OCR
-/// `text` is drawn after. A stream the file has that isolates as many as
-/// now is referenced as it is. What of what the filters select stays, as a
-/// splice or a rewrite refuses it; None when its content can't be read.
-/// Each of `on` is laid out on the page `ctxs` says; `laid` is what of
-/// their layouts is digested already.
-#[allow(clippy::too_many_arguments)]
+/// resources, which a block drawn anew may name again. A stream the file
+/// has that isolates as many as now is referenced as it is. What of what
+/// the filters select stays, as a splice or a rewrite refuses it; None
+/// when its content can't be read. Each of `on` is laid out on the page
+/// `ctxs` says; `laid` is what of their layouts is digested already.
 fn rebuilt(
     cx: &mut Cx,
     (id, src, index): (PageId, &Src, u32),
     filters: &[Filter],
     (ctxs, laid): (&[PageCtx], &[(GenId, u128)]),
-    on: &[&Arc<Generator>],
-    (replaced, text): (bool, bool),
+    (on, text): (&[&Arc<Generator>], Option<Text>),
     page: &mut Dictionary,
 ) -> Option<Stayed> {
     let st = cx.st;
@@ -575,6 +591,29 @@ fn rebuilt(
     let ids = content.ids();
     let dicts = content.dicts();
     let concat = content.concat();
+    // The streams of recognized text sheaf wrote that the filters leave
+    // out: its blocks, and the layer an older sheaf wrote with its `q`. A
+    // layer's stream without one stays, its first `Q` the page's own then.
+    let drops_text = filters.contains(&Filter::DropStreams(StreamSel::SheafOcr));
+    let texts: Vec<ObjectId> = (blocks.as_deref().filter(|_| drops_text))
+        .map(|blocks| {
+            (blocks.sheaf.iter())
+                .filter_map(|b| match (b.block, b.at) {
+                    (SheafBlock::Ocr(_), BlockAt::Stream(stream)) => Some(stream),
+                    _ => None,
+                })
+                .chain(blocks.legacy_ocr.iter().flat_map(|l| [l.q, l.layer]))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut text_stayed = (0..ids.len())
+        .filter(|&i| {
+            drops_text
+                && dicts[i].has(LEGACY_OCR)
+                && !texts.contains(&ids[i])
+                && concat.stream(i).trim_ascii() != b"q"
+        })
+        .count();
     let marked: Vec<Option<Marker>> = (0..ids.len())
         .map(|i| match Marker::of(&dicts[i]) {
             Some(Marker::Isolate) if content::isolates(concat.stream(i)).is_none() => None,
@@ -590,6 +629,7 @@ fn rebuilt(
         .map(|i| {
             let theirs = matches!(mark(i), Some(Marker::Gen { id, .. }) if !backs(id));
             filtered(&dicts[i])
+                || texts.contains(&ids[i])
                 || (theirs && others.iter().any(|p| p.span.start.stream as usize == i))
         })
         .collect();
@@ -615,40 +655,51 @@ fn rebuilt(
     let foreign = (0..ids.len())
         .any(|i| !dropped[i] && matches!(mark(i), Some(Marker::Gen { id, .. }) if !backs(id)));
     let reused = |i: usize| kept_block.contains(&Some(i));
+    // The recognized text the file holds that no filter leaves out, in its
+    // order: kept as it is, after the page's isolated content.
+    let saved_text: Vec<usize> = (0..ids.len())
+        .filter(|&i| !dropped[i] && matches!(mark(i), Some(Marker::Ocr(_))))
+        .collect();
     let aside: Vec<bool> = (0..ids.len())
         .map(|i| {
             dropped[i]
-                || (replaced && dicts[i].has(crate::text_layer::MARKER.as_bytes()))
                 || match mark(i) {
                     Some(Marker::Gen { id, .. }) => backs(id) && !reused(i),
                     Some(Marker::Isolate) => !foreign,
-                    None => false,
+                    Some(Marker::Ocr(_)) | None => false,
                 }
         })
         .collect();
     // The ranges the filters take out of streams kept, each the cuts that
-    // take one out: a generator's merged into a stream, and the artifacts
-    // they select but in a block of sheaf's of its own, set aside, left out
-    // or laid out alike. One a splice refuses stays, counted.
-    let mut groups: Vec<Vec<SpanAcross>> = Vec::new();
-    let mut stayed = 0;
-    for f in filters {
-        let Filter::DropMarked(MarkedSel::SheafGen(g)) = f else {
-            continue;
-        };
+    // take one out: sheaf's recognized text merged into a stream, first,
+    // then a generator's, and the artifacts they select but in a block of
+    // sheaf's of its own, set aside, left out or laid out alike. One a
+    // splice refuses stays, counted.
+    let merged = |block: &dyn Fn(SheafBlock) -> bool| {
         let found = blocks.iter().flat_map(|b| b.sheaf.iter());
-        groups.extend(found.filter_map(|b| match (b.block, b.at) {
-            (SheafBlock::Gen(id), BlockAt::Marked(span))
-                if id == *g && !aside[span.start.stream as usize] =>
-            {
-                Some(vec![span])
-            }
-            _ => None,
-        }));
+        found
+            .filter_map(|b| match b.at {
+                BlockAt::Marked(span) if block(b.block) && !aside[span.start.stream as usize] => {
+                    Some(vec![span])
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut groups: Vec<Vec<SpanAcross>> = Vec::new();
+    if filters.contains(&Filter::DropMarked(MarkedSel::SheafOcr)) {
+        groups.extend(merged(&|b| matches!(b, SheafBlock::Ocr(_))));
     }
+    let texts_cut = groups.len();
+    for f in filters {
+        if let Filter::DropMarked(MarkedSel::SheafGen(g)) = f {
+            groups.extend(merged(&|b| b == SheafBlock::Gen(*g)));
+        }
+    }
+    let mut stayed = 0;
     for p in &others {
         let i = p.span.start.stream as usize;
-        if aside[i] || matches!(mark(i), Some(Marker::Gen { .. })) {
+        if aside[i] || matches!(mark(i), Some(Marker::Gen { .. } | Marker::Ocr(_))) {
             continue;
         }
         match p.cuts(concat, &res, lim) {
@@ -658,7 +709,9 @@ fn rebuilt(
         }
     }
     let spliced = content::splice_each(concat, &res, lim, &groups);
-    stayed += spliced.taken.iter().filter(|t| !**t).count();
+    let refused = |taken: &[bool]| taken.iter().filter(|t| !**t).count();
+    text_stayed += refused(&spliced.taken[..texts_cut]);
+    stayed += refused(&spliced.taken[texts_cut..]);
     let cuts: Vec<SpanAcross> = (groups.iter().zip(&spliced.taken))
         .filter(|(_, taken)| **taken)
         .flat_map(|(cuts, _)| cuts.iter().copied())
@@ -687,13 +740,27 @@ fn rebuilt(
             end: at(concat.stream(i).len()),
         }
     };
-    let mut out_of: Vec<SpanAcross> = (0..ids.len()).filter(|&i| aside[i]).map(whole).collect();
+    // What's left of base′ is counted without the recognized text kept,
+    // which is drawn after it, but the names that text draws with stay
+    // the page's.
+    let moved = |i: usize| saved_text.contains(&i);
+    let mut out_of: Vec<SpanAcross> = (0..ids.len())
+        .filter(|&i| aside[i] || moved(i))
+        .map(whole)
+        .collect();
     out_of.extend(&cuts);
-    let kept = content::kept(concat, &res, lim, &out_of).ok()?;
+    let mut kept = content::kept(concat, &res, lim, &out_of).ok()?;
+    if !saved_text.is_empty() {
+        let streams: Vec<&[u8]> = saved_text.iter().map(|&i| concat.stream(i)).collect();
+        let drawn = content::names_used(&Concat::new(&streams), &res, lim, &[]).ok()?;
+        for (kind, name) in drawn.iter() {
+            kept.dropped.remove(kind, name);
+        }
+    }
     let scope = Scope { src, copy: 0 };
     let entry = |cx: &mut Cx, i: usize| cx.sym(&Object::Reference(ids[i]), &scope);
     let mut base = Vec::new();
-    for i in (0..ids.len()).filter(|&i| !aside[i] && !reused(i)) {
+    for i in (0..ids.len()).filter(|&i| !aside[i] && !reused(i) && !moved(i)) {
         let copy = spliced.as_ref().and_then(|streams| match &streams[i] {
             Cow::Owned(bytes) => Some(bytes.clone()),
             Cow::Borrowed(_) => None,
@@ -705,7 +772,7 @@ fn rebuilt(
     }
     let mut reserved = reserved(cx, src, index, page, &kept.dropped);
     let mut needs = ResourceNeeds::default();
-    let contents = match on.is_empty() {
+    let contents = match on.is_empty() && text.is_none() && saved_text.is_empty() {
         true => base,
         false => {
             let (mut under, mut over) = (Vec::new(), Vec::new());
@@ -738,6 +805,10 @@ fn rebuilt(
             contents.extend(base);
             let q = theirs(cx, b'Q', close).unwrap_or_else(|| isolation(cx, Shared::QClose(close)));
             contents.push(q);
+            for &i in &saved_text {
+                contents.push(entry(cx, i));
+            }
+            contents.extend(text.map(|text| recognized(cx, text, &mut reserved, &mut needs)));
             contents.extend(over);
             contents
         }
@@ -756,9 +827,10 @@ fn rebuilt(
             false => added.0.push(need),
         }
     }
-    page_res(cx, (src, index, text), page, &dropped, &added);
+    page_res(cx, (src, index), page, &dropped, &added);
     Some(Stayed {
         ranges: stayed,
+        text: text_stayed,
         settings,
     })
 }
@@ -778,6 +850,12 @@ fn older_ranges(filters: &[Filter], blocks: Option<&PageBlocks>) -> Vec<SpanAcro
             MarkedSel::SheafGen(g) => (blocks.sheaf.iter())
                 .filter_map(|b| match (b.block, b.at) {
                     (SheafBlock::Gen(id), BlockAt::Marked(span)) if id == *g => Some(span),
+                    _ => None,
+                })
+                .collect(),
+            MarkedSel::SheafOcr => (blocks.sheaf.iter())
+                .filter_map(|b| match (b.block, b.at) {
+                    (SheafBlock::Ocr(_), BlockAt::Marked(span)) => Some(span),
                     _ => None,
                 })
                 .collect(),
@@ -829,7 +907,8 @@ fn isolated(balance: Balance) -> (u32, u32) {
 
 /// Generator `g` laid out on page `id`, as `ctx` says it is, its names
 /// clear of `reserved` and kept there, what it draws with added to
-/// `needs`: its block, written once a file.
+/// `needs`: its block, marked `<< /K /Gen /G (g…) /L <…> /R <…> >>` and,
+/// on a page the header numbers, `/N (…)`, written once a file.
 fn drawn(
     cx: &mut Cx,
     (id, g): (PageId, &Generator),
@@ -847,12 +926,19 @@ fn drawn(
         (cx.st.laid()).put((g.id, recipe, reads), drawn.layout_digest);
     }
     reserved.take(&drawn.res);
-    for need in &drawn.res.0 {
-        if !(needs.0.iter()).any(|n| n.kind == need.kind && n.name == need.name) {
-            needs.0.push(need.clone());
-        }
+    add_needs(needs, drawn.res.clone());
+    let mut marker = dictionary! {
+        "K" => "Gen",
+        "G" => Object::String(g.id.to_string().into_bytes(), StringFormat::Literal),
+        "L" => digest_string(drawn.layout_digest),
+        "R" => digest_string(recipe),
+    };
+    // Its Bates number, in decimal, which an open reads the numbers back
+    // from.
+    if let Some(n) = ctx.bates {
+        marker.set("N", Object::string_literal(n.to_string()));
     }
-    let (block, key) = block(cx, g.id.to_string(), &drawn, recipe, ctx.bates);
+    let (block, key) = block(cx, marker, drawn.ops.to_vec());
     let layout = drawn.layout_digest;
     drew(
         cx,
@@ -864,6 +950,15 @@ fn drawn(
         },
     );
     block
+}
+
+/// `res` added to `needs`, each but a name it has already.
+fn add_needs(needs: &mut ResourceNeeds, res: ResourceNeeds) {
+    for need in res.0 {
+        if !(needs.0.iter()).any(|n| n.kind == need.kind && n.name == need.name) {
+            needs.0.push(need);
+        }
+    }
 }
 
 /// Notes generator `g`'s block on page `id` that the page's content, page
@@ -946,12 +1041,11 @@ fn reserved(cx: &mut Cx, src: &Src, index: u32, page: &Dictionary, dropped: &Nam
 /// `page`'s resources, page `index` of `src`'s, with the names `dropped`
 /// taken out of their categories and those `needs` adds bound: a
 /// dictionary of the page's own ([`ObjKey::PageRes`]), shared by the pages
-/// whose base resources, dropped names and added names are the same, or
-/// written into the page when OCR `text`'s installer copies them after.
+/// whose base resources, dropped names and added names are the same.
 /// Nothing when it's neither.
 fn page_res(
     cx: &mut Cx,
-    (src, index, text): (&Src, u32, bool),
+    (src, index): (&Src, u32),
     page: &mut Dictionary,
     dropped: &NameSet,
     needs: &ResourceNeeds,
@@ -985,10 +1079,7 @@ fn page_res(
         sink::bind(cx, needs, &mut resources);
         cx.page_res.insert(key, resources);
     }
-    let resources = match text {
-        true => Object::Dictionary(cx.page_res[&key].clone()),
-        false => cx.placeholder(key),
-    };
+    let resources = cx.placeholder(key);
     page.set("Resources", resources);
 }
 
@@ -1013,29 +1104,6 @@ fn filtered_copy(cx: &mut Cx, blob: BlobId, obj: ObjectId, bytes: Vec<u8>) -> Ob
 /// them in an `i32`, so it's one.
 fn count(n: u64) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
-}
-
-/// The balance of `entries`, page `index` of `src`'s content but what
-/// [`wrapped`] took out: read again, as the page's blocks counted all of
-/// it.
-fn fresh_balance(
-    cx: &Cx,
-    src: &crate::store::Src,
-    index: u32,
-    entries: &[Object],
-) -> Result<Balance, ContentError> {
-    let ids: Vec<ObjectId> = (entries.iter())
-        .filter_map(|e| match cx.syms.key(e.as_reference().ok()?)? {
-            ObjKey::Base { obj, .. } => Some(obj),
-            _ => None,
-        })
-        .collect();
-    let lim = src.limits();
-    let read = |fault| ContentError::Read { page: index, fault };
-    let content = PageContent::read(src.pdf(), &ids, lim).map_err(read)?;
-    let resources = src.page(index).and_then(|f| f.resources.clone());
-    let res = ResCx::read(src.pdf(), resources.as_deref());
-    crate::content::balance(content.concat(), &res, lim).map_err(|e| read(content.fault(e)))
 }
 
 /// What a page's resources are, as `blob`'s file writes them (`res`, or
@@ -1092,30 +1160,10 @@ fn names_digest(bytes: &[u8]) -> u64 {
     sheaf_util::checksum(bytes) as u64
 }
 
-/// `drawn`, generator `id`'s block (`id` as blocks name it), its recipe's
-/// digest `recipe`, on a page whose Bates number is `number` (`/N`, in
-/// decimal, which an open reads the numbers back from), as a stream of its
-/// own, once a file: where it is, and its key.
-fn block(
-    cx: &mut Cx,
-    id: String,
-    drawn: &generate::Drawn,
-    recipe: u128,
-    number: Option<u64>,
-) -> (Object, ObjKey) {
-    let mut marker = dictionary! {
-        "K" => "Gen",
-        "G" => Object::String(id.into_bytes(), StringFormat::Literal),
-        "L" => digest_string(drawn.layout_digest),
-        "R" => digest_string(recipe),
-    };
-    if let Some(n) = number {
-        marker.set("N", Object::string_literal(n.to_string()));
-    }
-    let stream = Object::Stream(Stream::new(
-        dictionary! { "SheafBlock" => marker },
-        drawn.ops.to_vec(),
-    ));
+/// A block of sheaf's drawing `ops`, marked `/SheafBlock` with `marker`,
+/// as a stream of its own, once a file: where it is, and its key.
+fn block(cx: &mut Cx, marker: Dictionary, ops: Vec<u8>) -> (Object, ObjKey) {
+    let stream = Object::Stream(Stream::new(dictionary! { "SheafBlock" => marker }, ops));
     let key = ObjKey::Block(ResId::of(std::slice::from_ref(&stream)).0);
     let id = cx.push_once(key, |_| {
         let mut stream = stream;
@@ -1125,6 +1173,23 @@ fn block(
         stream
     });
     (Object::Reference(id), key)
+}
+
+/// Recognized text `text`, its layer `id`'s, drawn on a page, its names
+/// clear of `reserved` and kept there, what it draws with added to
+/// `needs`: its block, marked `<< /K /Ocr /B (b…) >>`, written once a
+/// file.
+fn recognized(
+    cx: &mut Cx,
+    (text, id): Text,
+    reserved: &mut Reserved,
+    needs: &mut ResourceNeeds,
+) -> Object {
+    let (ops, res) = crate::text_layer::block(text, id, reserved);
+    reserved.take(&res);
+    add_needs(needs, res);
+    let marker = dictionary! { "K" => "Ocr", "B" => Object::string_literal(id.to_string()) };
+    block(cx, marker, ops).0
 }
 
 /// A digest as a block writes it: a string of its 16 bytes, big-endian.

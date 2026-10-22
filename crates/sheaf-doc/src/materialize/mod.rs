@@ -72,6 +72,8 @@ pub(crate) mod header_tests;
 pub mod key;
 pub mod number;
 #[cfg(test)]
+pub(crate) mod ocr_tests;
+#[cfg(test)]
 pub(crate) mod others_tests;
 #[cfg(test)]
 mod overlay_tests;

@@ -100,7 +100,7 @@ const CAP_HEIGHT: f32 = 0.72;
 /// resources bind already. Empty where it draws nothing.
 pub fn layout(g: &Generator, ctx: &PageCtx, art: Option<&Art>, reserved: &Reserved) -> Drawn {
     let drawn = write(g, ctx, art, |out| {
-        let (ops, res) = out.named(reserved, &[]);
+        let (ops, res) = out.named(reserved);
         Drawn {
             ops: ops.into(),
             res,
@@ -120,7 +120,7 @@ pub fn layout_digest(g: &Generator, ctx: &PageCtx, art: Option<&Art>) -> u128 {
 /// resources bound anything, so the names are the resources' own, and
 /// their ids.
 fn digest(out: &ContentWriter) -> u128 {
-    let (mut bytes, needs) = out.named(&Reserved::default(), &[]);
+    let (mut bytes, needs) = out.named(&Reserved::default());
     for need in &needs.0 {
         bytes.extend(need.res.id.0.to_be_bytes());
     }

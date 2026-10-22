@@ -681,9 +681,9 @@ mod tests {
     use super::*;
     use crate::annot::Annot;
     use crate::history::FixedCount;
+    use crate::materialize::ocr_tests::{HELLO_HEX, fonts_of, is_glyphless, set_layer};
     use crate::materialize::rewrite_tests::{
-        HELLO_HEX, annots_read, fonts_of, make_pdf, open, read_outline, read_pages, set_layer,
-        tempdir,
+        annots_read, make_pdf, open, read_outline, read_pages, tempdir,
     };
     use crate::model::FlatOutlineItem;
     use crate::tx::fixture as fx;
@@ -1276,7 +1276,11 @@ mod tests {
         let all = String::from_utf8_lossy(&pdf.get_page_content(page)).into_owned();
         assert!(all.contains(HELLO_HEX), "{all}");
         assert!(all.contains("/SheafFlat1 Do"), "{all}");
-        assert!(fonts_of(&pdf, page).has(b"SheafOcr"));
+        assert!(
+            fonts_of(&pdf, page)
+                .iter()
+                .any(|(_, f)| is_glyphless(&pdf, f))
+        );
 
         let out = dir.join("clean.pdf");
         export_clean_copy(&snap, &out).unwrap();

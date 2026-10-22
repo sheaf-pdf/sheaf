@@ -859,6 +859,29 @@ const RETIRED: &[(&str, u8)] = &[
     ("file::not_ours", 17),
     ("page_insert::DocView::show_copies", 17),
     ("page_insert::DocView::keep_copies", 17),
+    // OCR as content: recognized text is a layer with a block id, drawn as
+    // a `/SheafBlock` block of its own after the page's isolated content
+    // (`text_layer::block`), its font and list under `/Sh…` names, and a
+    // saved one is taken out by the stack's filters. The legacy installer
+    // (`/SheafOcrLayer`, `/SheafOcr`), the emitter's balance around it, and
+    // the sink's methods only it used are gone.
+    ("model::ContentStack::with_ocr_text", 18),
+    ("model::records::ContentStack::with_ocr_text", 18),
+    ("text_layer::install", 18),
+    ("text_layer::strip", 18),
+    ("text_layer::has_layer", 18),
+    ("text_layer::layer_entries", 18),
+    ("text_layer::to_content", 18),
+    ("text_layer::MARKER", 18),
+    ("text_layer::FONT_NAME", 18),
+    ("materialize::emit::content::fresh_balance", 18),
+    ("content::sink::Sink::add", 18),
+    ("content::sink::Sink::stream_dict", 18),
+    // The plugin API's OCR override, the layer a page's stack holds:
+    // recognized text is the page's content, saved or not, which `text`
+    // reads. API 0.3 has none; 0.2's (`api::v02`) answers none until 0.2
+    // goes (slice 20).
+    ("api::shared::HostState::page_text_layer", 18),
 ];
 
 /// Last segments only a path matches: names the new design uses again
@@ -1083,9 +1106,9 @@ const QUALIFIED_ONLY: &[&str] = &[
     "RemoveWatermark",
     "watermark",
     // A mark of sheaf's (`model::Mark`), where a note's mark is anchored
-    // (`sheaf_edit::Anchor`), the OCR layer's and the header's installers
-    // (`text_layer::install` until slice 18, `stamps::install` until 17),
-    // and every other read: not the old watermark module's.
+    // (`sheaf_edit::Anchor`), the plugin tests' installer and the prompts'
+    // (`sheaf_ui::prompts::install`), and every other read: not the old
+    // watermark module's, nor the header's or the OCR layer's installers.
     "Mark",
     "Anchor",
     "install",
@@ -1094,14 +1117,14 @@ const QUALIFIED_ONLY: &[&str] = &[
     "current",
     // The isolation the emitter shares between pages (`content::Shared`),
     // a placed image or page (`ImageRef::Placed`, `PageForm::Placed`), a
-    // source's page facts (`source::PageFacts`), the OCR layer's content
-    // (`text_layer::to_content`, until slice 18), and every other strip,
-    // stripped page, stored entry and base that draws a page
-    // (`/SheafGenerators`' `stored`, a render key's `base_draws`).
+    // source's page facts (`source::PageFacts`), and every other strip,
+    // stripped page, stored entry and base that draws a page (a test's
+    // `strip`, `/SheafGenerators`' `stored`, a render key's
+    // `base_draws`). Nothing else is named `to_content`, so the header's
+    // and the OCR layer's are matched bare.
     "Shared",
     "Placed",
     "PageFacts",
-    "to_content",
     "strip",
     "stripped",
     "stored",
@@ -1127,6 +1150,10 @@ const QUALIFIED_ONLY: &[&str] = &[
     "Loaded",
     "from_pdf",
     "reserve",
+    // Every other add: the fixtures' `tx::fixture::add` of a mark, a
+    // builder's, a set's: not the sink's object added for the OCR layer's
+    // installer.
+    "add",
 ];
 
 #[test]

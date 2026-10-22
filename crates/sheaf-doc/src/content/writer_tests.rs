@@ -9,7 +9,7 @@ use crate::geom::{Affine, Rect};
 
 /// The text of what `w` wrote, with no resources reserved or given.
 fn written(w: ContentWriter) -> (String, ResourceNeeds) {
-    let (bytes, needs) = w.finish(&Reserved::default(), &[]);
+    let (bytes, needs) = w.finish(&Reserved::default());
     (String::from_utf8(bytes).unwrap(), needs)
 }
 
@@ -111,7 +111,7 @@ fn text_is_written_in_its_font() {
     w.restore();
     // The font `q` saved is back.
     w.text("é");
-    let (bytes, needs) = w.finish(&Reserved::default(), &[]);
+    let (bytes, needs) = w.finish(&Reserved::default());
     let [helvetica, glyphless] = &needs.0[..] else {
         panic!("{needs:?}")
     };
@@ -164,7 +164,7 @@ fn marked_content_names_its_list() {
 }
 
 /// Names come from the digest, bumped past what the resources bind to
-/// something else, and are given where the caller gives them.
+/// something else.
 #[test]
 fn names_are_bound_at_the_end() {
     let draw = |w: &mut ContentWriter| {
@@ -210,7 +210,7 @@ fn names_are_bound_at_the_end() {
     ] {
         let mut w = ContentWriter::new();
         draw(&mut w);
-        let (_, needs) = w.finish(&taken(bound.clone()), &[]);
+        let (_, needs) = w.finish(&taken(bound.clone()));
         let want = if bumped {
             next(&header.name)
         } else {
@@ -226,23 +226,22 @@ fn names_are_bound_at_the_end() {
     .into();
     let mut w = ContentWriter::new();
     draw(&mut w);
-    let (_, needs) = w.finish(&Reserved::read(&pdf, Some(&fonts)), &[]);
+    let (_, needs) = w.finish(&Reserved::read(&pdf, Some(&fonts)));
     assert_eq!(needs.0[0].name, header.name);
 
-    // Given names are used as given, and a name given is never made.
+    // A name reserved is never made: the header's and the next one up,
+    // both bound to something else, make it the one after.
+    let resources: Object = dictionary! {
+        "Properties" => dictionary! {
+            header.name.clone() => list("Other"),
+            next(&header.name) => list("Another"),
+        },
+    }
+    .into();
     let mut w = ContentWriter::new();
     draw(&mut w);
-    let ids = [header.res.id, footer.res.id];
-    let given = [(ids[1], std::str::from_utf8(&header.name).unwrap())];
-    let (_, needs) = w.finish(&Reserved::default(), &given);
-    assert_eq!(needs.0[1].name, header.name);
-    assert_eq!(needs.0[0].name, next(&header.name));
-    let given = [(ids[0], "SheafOcr")];
-    let mut w = ContentWriter::new();
-    draw(&mut w);
-    let (bytes, needs) = w.finish(&Reserved::default(), &given);
-    assert_eq!(needs.0[0].name, b"SheafOcr");
-    assert!(bytes.starts_with(b"/Artifact /SheafOcr BDC\n"));
+    let (_, needs) = w.finish(&Reserved::read(&pdf, Some(&resources)));
+    assert_eq!(needs.0[0].name, next(&next(&header.name)));
 }
 
 /// A resource drawn again is one need, where it was first drawn; a form
@@ -364,7 +363,7 @@ fn identical_calls_give_identical_bytes() {
         w.end_text();
         w.restore();
         w.end_marked();
-        w.finish(&Reserved::default(), &[])
+        w.finish(&Reserved::default())
     }
     let first = draw();
     assert_eq!(draw(), first);

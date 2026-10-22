@@ -301,7 +301,10 @@ impl Source {
     /// Whether its pages may hold sheaf's blocks and the streams that
     /// isolate them (§11.4): its catalog says what sheaf's generators are
     /// (`/SheafGenerators`). The markers of a file without them aren't
-    /// read, so the pages of every other file are written as they were.
+    /// read, so the pages of every other file are written as they were. A
+    /// file sheaf saved with recognized text alone has none: a page of it
+    /// that something is drawn on finds its blocks by reading them
+    /// ([`blocks`](Self::blocks)).
     pub fn marked(&self) -> bool {
         *self
             .marked
@@ -310,9 +313,10 @@ impl Source {
 
     /// The streams of page `index`'s `/Contents` that sheaf marked, by
     /// their dictionaries alone, read once, never decompressed: its
-    /// generators' blocks and the streams that isolate the page's own
-    /// content. None on a page of a file that isn't [`marked`](Self::marked),
-    /// or past the last page; a stream that can't be read is none.
+    /// generators' blocks, its recognized text's, and the streams that
+    /// isolate the page's own content. None on a page of a file that isn't
+    /// [`marked`](Self::marked), or past the last page; a stream that
+    /// can't be read is none.
     pub fn markers(&self, index: u32) -> Markers {
         static NONE: LazyLock<Markers> = LazyLock::new(|| Arc::from([]));
         let (Some(slot), Some(page)) = (self.markers.get(index as usize), self.page(index)) else {

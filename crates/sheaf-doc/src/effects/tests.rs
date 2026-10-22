@@ -7,7 +7,7 @@ use sheaf_edit::{FontChoice, GridPos};
 
 use super::*;
 use crate::annot::{Box2, Pt};
-use crate::content::ResId;
+use crate::content::{BlockId, ResId};
 use crate::file::ForeignAnnot;
 use crate::forms::FieldKind;
 use crate::forms::field::Mk;
@@ -271,10 +271,21 @@ fn layer(words: &str) -> Arc<TextLayer> {
     ))
 }
 
-/// `st`'s page `i` with `text` its recognized text, or none.
+/// `st`'s page `i` with `text` its recognized text, block `b1`'s, or
+/// none.
 fn with_ocr(st: &DocState, i: u64, text: Option<Arc<TextLayer>>) -> Val {
+    with_layer(st, i, text.map(|text| (BlockId(1), text)))
+}
+
+/// `st`'s page `i` with `layer` its recognized text, a block's id and its
+/// text, or none.
+fn with_layer(st: &DocState, i: u64, layer: Option<(BlockId, Arc<TextLayer>)>) -> Val {
     let def = st.def(PageId(i)).unwrap();
-    let content = def.content.with_ocr_text(text);
+    let layer = layer.map(|(id, text)| Layer {
+        id,
+        body: Static::OcrText(text),
+    });
+    let content = def.content.with_ocr(layer);
     Val::Page(Arc::new(PageDef::new(def.base.clone(), def.copy, content)))
 }
 
@@ -661,6 +672,53 @@ fn recognized_text() {
         ],
     );
     assert_eq!(p.flags, Flags::CONTENT);
+    // The same text in another block is another layer.
+    let other = with_layer(&st, 0, Some((BlockId(2), layer("first"))));
+    let p = path(&st, &[(page, Some(other))]);
+    assert_eq!(p.flags, removes);
+}
+
+/// The recognized text sheaf wrote in the file, taken out by a filter, in
+/// streams of its own or merged into another's: replaced text, once a
+/// page, whether a layer replaces it or not; the filter taken off again,
+/// it's put back, and nothing's gone.
+#[test]
+fn saved_recognized_text_filtered() {
+    let st = blank(1);
+    let page = Key::Page(PageId(0));
+    let removes = Flags::CONTENT | Flags::REMOVES | Flags::REPLACES_TEXT;
+    let streams = Filter::DropStreams(StreamSel::SheafOcr);
+    let merged = Filter::DropMarked(MarkedSel::SheafOcr);
+    for filter in [&streams, &merged] {
+        assert!(filter.drops_ocr());
+        let p = path(&st, &[(page, Some(with_filter(&st, 0, filter.clone())))]);
+        assert_eq!(p.flags, removes, "{filter:?}");
+        assert_eq!(removed(&p), [(RemovedKind::OcrLayers, 1)]);
+        assert_eq!(p.sig, OTHER);
+    }
+    let both = holding(st.clone(), &[(page, with_filter(&st, 0, streams))]);
+    let both = holding(both.clone(), &[(page, with_filter(&both, 0, merged))]);
+    let both = holding(
+        both.clone(),
+        &[(page, with_ocr(&both, 0, Some(layer("new"))))],
+    );
+    let p = path(&st, &[(page, both.get(&page))]);
+    assert_eq!(p.flags, removes);
+    assert_eq!(removed(&p), [(RemovedKind::OcrLayers, 1)]);
+    let p = path(&both, &[(page, st.get(&page))]);
+    assert_eq!(p.flags, removes, "the layer goes");
+    assert_eq!(removed(&p), [(RemovedKind::OcrLayers, 1)]);
+    let filtered = holding(
+        st.clone(),
+        &[(
+            page,
+            with_filter(&st, 0, Filter::DropStreams(StreamSel::SheafOcr)),
+        )],
+    );
+    let p = path(&filtered, &[(page, st.get(&page))]);
+    assert_eq!(p.flags, Flags::CONTENT);
+    assert!(removed(&p).is_empty());
+    assert!(!Filter::DropStreams(StreamSel::SheafGen(GenId(5))).drops_ocr());
 }
 
 /// A filter added takes what it filters out of the page: removed; taken
@@ -1183,11 +1241,14 @@ fn samples(st: &DocState) -> Vec<(Key, Vec<Option<Val>>)> {
                 Some(with_ocr(st, 0, None)),
                 Some(with_ocr(st, 0, Some(layer("a")))),
                 Some(with_ocr(st, 0, Some(layer("b")))),
+                Some(with_layer(st, 0, Some((BlockId(2), layer("b"))))),
                 Some(with_filter(
                     st,
                     0,
                     Filter::DropStreams(StreamSel::SheafGen(GenId(5))),
                 )),
+                Some(with_filter(st, 0, Filter::DropStreams(StreamSel::SheafOcr))),
+                Some(with_filter(st, 0, Filter::DropMarked(MarkedSel::SheafOcr))),
                 Some(with_filter(
                     st,
                     0,

@@ -21,8 +21,8 @@
 //!   [`FontRes`], a font as a page resource named by its [`ResId`].
 //! - [`ContentWriter`]: content written, its resources ([`Res`]) named at
 //!   the end, and [`ResObjects`], which writes them for the old writers.
-//! - [`sink`]: where the legacy installers draw, the old writers' lopdf
-//!   document or the emitter.
+//! - [`sink`]: where content's resources are written, the old writers'
+//!   lopdf document or the emitter.
 
 mod balance;
 mod blocks;
@@ -50,8 +50,8 @@ mod writer_tests;
 
 pub use balance::{Balance, balance};
 pub use blocks::{
-    BlockAt, BlockId, ContentError, DrawnForms, GenId, LegacyOcr, Marker, PagOrigin, PageBlocks,
-    Pagination, PaginationKind, SheafBlock, SheafBlockRef, isolates,
+    BlockAt, BlockId, ContentError, DrawnForms, GenId, LEGACY_OCR, LegacyOcr, Marker, PagOrigin,
+    PageBlocks, Pagination, PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{Font, FontRes, Glyphless, Std14, Unencoded, wrap_with};
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};

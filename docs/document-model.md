@@ -588,7 +588,8 @@ goes (the plan's lint ledger).
   Who drew an artifact (`PagOrigin`):
   - **`Sheaf`:** it's in a `/SheafBlock` stream or its list has
     `/SheafGen` (watermarks and backgrounds from slice 16, the header and
-    footer from slice 17; OCR text writes them from slice 18);
+    footer from slice 17; from slice 18 the recognized text's blocks are
+    `/SheafBlock` streams too, but no artifacts);
   - **`SheafLegacy`:** sheaf before M10.5: `/SheafStamp` or
     `/SheafSettings` in its list, drawn in the `/SheafHF` font, or in a
     `/SheafOcrLayer` stream;
@@ -632,10 +633,11 @@ goes (the plan's lint ledger).
   finished: `/Sh` and six base32 characters of the digest, the next name
   up where the resources already bind it to something else, and the
   same name again where they bind it to the same thing, so a header
-  written again keeps its list's name. The legacy name `/SheafOcr`
-  (until slice 18) is given, and never made for anything else; `/SheafHF`
+  written again keeps its list's name. No name is given: `/SheafHF`
   went with the legacy header in slice 17, and is read only to tell an
-  older sheaf's artifacts. The emitter writes a content's resources by digest,
+  older sheaf's artifacts, and `/SheafOcr` with the legacy OCR layer in
+  slice 18, whose stream `/SheafOcrLayer` tells it. The emitter writes a
+  content's resources by digest,
   one object a resource a file; `content::ResObjects` writes them into a
   lopdf document (exchange's Comments.pdf, the comment summary's pages),
   one object a resource a document.
@@ -1371,9 +1373,10 @@ impl DocView {
   comments onto (its `Geom` and `PageAnnots`) and each comment it
   updates, so two imports of one file planned together don't both add
   its comments: the second is a Conflict.
-- **OCR** is a group (see Text layers): flushes made on the run's first
-  version, deciding by each page as it was rendered, landed with
-  `Validate`.
+- **OCR** is a group (see Text layers): flushes made on the version
+  their round began on (the run's first; from slice 18, a later round's
+  for pages read again), deciding by each page as it was rendered,
+  landed with `Validate`.
 - **Plugins** (§14.3; WIT 0.2 and 0.3 until 0.4). Each document has a
   cell (`Doc.plugin_cell`, an `ArcSwap<Snapshot>`) that `on_change`
   stores the new snapshot in. A call loads its base from it at its first
@@ -1741,14 +1744,13 @@ below).
   (a header stripped; a crop until slice 15, a watermark until 16) was
   written as the page it was made from with the copy's `/Contents` and
   `/Resources`. The generators on a page (watermarks and backgrounds from
-  slice 16, the header and footer from 17) are drawn as blocks around
-  its isolated content (Watermarks and backgrounds as generators); its
-  OCR layer goes through the legacy installer, with the emitter as its
-  `content::sink::Sink` (a lopdf document's is `sink::Lopdf`, the
-  document and its `ResObjects`): `text_layer::install` (`[q, base…,
-  layer]`, `/SheafOcrLayer`, `/SheafOcr`), which first takes out a layer
-  the page holds already (`text_layer::has_layer`), so a re-OCR leaves
-  one, until slice 18. Until slice 17 the header and footer went through
+  slice 16, the header and footer from 17) and, from slice 18, its
+  recognized text are drawn as blocks around its isolated content
+  (Watermarks and backgrounds as generators; OCR as content). Until slice
+  18 the OCR layer went through the legacy installer, with the emitter as
+  its `content::sink::Sink`: `text_layer::install` (`[q, base…, layer]`,
+  `/SheafOcrLayer`, `/SheafOcr`), which first took out a layer the page
+  held already; until slice 17 the header and footer went through
   `stamps::install` too, its Bates numbers counted at each Rewrite. The
   page's own
   streams are referenced, never re-encoded; a resource is one object a
@@ -2042,8 +2044,10 @@ about 21 ms, its fsyncs included.
   classes of change a signature may allow (`SigClass`: `FILL`, `ANNOT`,
   `OTHER`). It is total over the keys: a value a slot can't hold counts
   as every flag. A page's source page is removed only when no target page
-  shows it, an OCR layer only when no target page shows that layer; a
-  field rename, and a tooltip, items, scripts or a default value
+  shows it, an OCR layer only when no target page shows that layer (from
+  slice 18 also when a filter takes out the recognized text the page's
+  file holds, a re-OCR's or a Clear's, counted once a page with the layer
+  it replaces); a field rename, and a tooltip, items, scripts or a default value
   replaced, are replaced text; another tool's comment is compared with
   the mark its summary reads it as. `judge(saved, target, keys)` judges a
   save's path once per key: its flags and classes, what it removed by
@@ -2248,8 +2252,9 @@ about 21 ms, its fsyncs included.
   or node only as a node's kid, the catalog never). Derived objects are
   judged on their record inputs: a sheaf mark's objects on what the mark
   says (contents, author, name, its kind's text, tape rows, its file or
-  stamp by hash), a page's blocks on its OCR words and header text, a
-  resource as its user's. From slice 17 a generator's old block that
+  stamp by hash), a page's blocks on its OCR words and header text (an
+  OCR block the opened file holds, from slice 18, is one of its own
+  objects, judged on its words decoded), a resource as its user's. From slice 17 a generator's old block that
   the section leaves, drawn again from the same recipe (a live redraw),
   is an allowed drop (`Emission::allowed_drops`; Headers, footers and
   Bates as generators): per page, as a block is content-addressed and
@@ -2753,9 +2758,9 @@ print preview nor what OCR reads:
 |---|---|---|
 | The page view, the thumbnails, blank review's previews, the Header & Footer, Crop Pages (slice 15) and Watermark / Background (slice 16) previews; Find, Patterns, selection, calculator picks and text markup (slice 14) | `screen()`, with `hidden`, `dragging` and `ocg_off` the view's | everything; sheaf's marks GPUI draws over the page (`ByHost`) |
 | Print preview | `print(markup)` | with "Comments and markups", as the screen; without, no marks and no other tools' comments (as `print_pdf` prints), the form's widgets either way |
-| OCR (`ViewPages`), blank detection and blank review's reads, plugins' recognition; Trim White (slice 15), on its measuring state | `content_only()`; blank detection's text with `ocr_over` (slice 14) | the page's own content: no header, watermark, background (slice 16: nor the blocks of the document's own that the file holds), recognized text, widgets or annotations, at its shown box (Trim White's: its file's own crop box) |
-| Plugins' renders | `plugin()`: `screen()` with `marks: ByEngine`, for the render and its reads alike | as the saved file will draw it, sheaf's marks and the unsaved header, watermarks and backgrounds included, in the file's own orientation |
-| Plugins' text (slice 14) | `plugin_text()`: `plugin()` with no marks, widgets or other tools' annotations, for the text and its reads alike | what of the page PDFium reads as text: its content, the unsaved header and recognized text; no annotation's text, which PDFium's text page never reads |
+| OCR (`ViewPages`), blank detection and blank review's reads, plugins' recognition; Trim White (slice 15), on its measuring state | `content_only()`; blank detection's text with `ocr_over` (slice 14), and OCR's "skip pages with text" check's (slice 18) | the page's own content: no header, watermark, background (slice 16: nor the blocks of the document's own that the file holds), recognized text on its stack (slice 18: the blocks of recognized text the file holds are the page's content, and stay unless a filter takes them out), widgets or annotations, at its shown box (Trim White's: its file's own crop box) |
+| Plugins' renders | `plugin()`: `screen()` with `marks: ByEngine`, for the render and its reads alike | as the saved file will draw it, sheaf's marks and the header, watermarks and backgrounds, saved or not, included, in the file's own orientation |
+| Plugins' text (slice 14) | `plugin_text()`: `plugin()` with no marks, widgets or other tools' annotations, for the text and its reads alike | what of the page PDFium reads as text: its content, and the header and recognized text, saved or not; no annotation's text, which PDFium's text page never reads |
 
 `foreign` (other tools' comments and links) isn't in §10.1's list: print
 preview without markup and `content_only` draw no annotations at all,
@@ -3106,7 +3111,9 @@ that doesn't open does, and the worker serves every other.
   realized under `content_only`, in the background's budget at the lowest
   priority, turned as it shows; from slice 14 its text length is the
   text service's (`Text`, the background's budget) under `content_only`,
-  each page read from its own view.
+  each page read from its own view. From slice 18 a later round of the
+  run reads the pages that changed during the one before from the
+  current version's snapshot (Text layers (OCR)).
   sheaf-ocr's `PageSource` takes the `OcrPage` (`text_len(&OcrPage)`,
   `render(&OcrPage, width)`), one source a run. OCR no longer reads
   widgets or comments as a page's content.
@@ -3290,7 +3297,7 @@ What each consumer reads under (`TextOpts.inputs`, §10.4):
 |---|---|---|
 | Find and Patterns, selection, calculator picks, text markup (the app's `Doc.text`) | the screen's (`Doc.inputs`) | the screen's |
 | A plugin's `page-text`, `search`, `pattern-search`, `text-boxes` and `words` | `plugin_text()`, the page's text as the saved file will draw it (§14.3) | the background's, a `Text` a call |
-| OCR's "skip pages with text" (`ViewPages::text_len`) | `content_only()` | the background's |
+| OCR's "skip pages with text" (`ViewPages::text_len`) | `content_only()` with `ocr_over` (slice 18) | the background's |
 | Blank detection's text | `content_only()` with `ocr_over` | the background's |
 
 PDFium extracts a page's text from its content, never from a widget's
@@ -3333,10 +3340,10 @@ hidden, or a page deleted under a "Page <<1>> of <<N>>" header (a turn
 changes the key only where a generator is laid out in the turned page;
 characters are in PageSpace). On a page with recognized text and a
 header, the text reads in draw order: the page's own, then the
-recognized words, then the header; from slice 17, whose header is a
-generator block, the page's own, the header, then the recognized words,
-until slice 18 makes the OCR layer a block of its own that goes before
-the generators drawn over the page (§11.4).
+recognized words, then the header (§11.4). In slice 17, whose header was
+a generator block while the OCR layer was still the legacy installer's,
+the header read before the recognized words; slice 18 made the layer a
+block of its own, drawn before the generators over the page.
 
 When PDFium refuses the primary, the notice says "PDFium can't read this
 file as saved, so its pages are drawn from sheaf's copy": Find, Patterns,
@@ -3354,12 +3361,15 @@ selection and plugin text read its pages from their groups.
   page's 0.3 frame (`to_frame`), a rect a plugin passes to `text-boxes`
   coming back through its inverse. The OCR layer's own special cases
   (searching an unsaved layer beside PDFium, `ocr_text` branches) are
-  gone: the realization draws the layer.
+  gone: the realization draws the layer. From slice 18 API 0.3 has no
+  `ocr.page-text-layer` either: recognized text, saved or not, is the
+  page's content, which `text` reads as the file will draw it now; 0.2's
+  answers none until 0.2 goes (slice 20).
 - **Blank detection** (`blank::find`, Find Blank Pages and `sheaf
   remove-blanks`) walks the wanted pages in the document's order through
   the document's views: annotations first as before, then the page's text
-  under `content_only` with `ocr_over` (recognized text not yet saved
-  still counts, as it did; a header never does), then its pixels under
+  under `content_only` with `ocr_over` (recognized text counts, saved or
+  not, as it did; a header never does), then its pixels under
   `content_only`, rendered at about 60 dpi by the pool in the
   background's budget, with `progress.check` between pages. A failed text
   read counts as no text, so the pixels decide. A page at a time, each a
@@ -3371,7 +3381,11 @@ selection and plugin text read its pages from their groups.
   (`Views::start`).
 - **OCR's "skip pages with text"** reads each page's text length through
   `ViewPages`' `Text` under `content_only`, so a page of a refused source
-  is checked through its group rather than failing.
+  is checked through its group rather than failing. From slice 18 it reads
+  with `ocr_over`, as blank detection does: the blocks of recognized text
+  a file holds are the page's content, so text recognized in this session
+  counts too, and a page recognized before is skipped whether its text is
+  saved or not.
 
 ### Printing and page images
 
@@ -3803,7 +3817,10 @@ whether a page is intact, and counts such a page as changed.
   until slice 17, a derived copy) is `marked()`, and only then are each
   page's stream markers read (`Source::markers(i)`): each `/Contents`
   stream's dictionary, never decompressed, once a stream. The corpus has
-  none, so its files take the paths they took before.
+  none, so its files take the paths they took before. From slice 18 the
+  markers include the recognized text's blocks (`Marker::Ocr`); a file
+  saved with recognized text alone isn't `marked()`, and a page of it
+  that something is drawn on is told by its blocks (OCR as content).
 - **Recognition** (`Source::generators()`, `generate::read`): each
   `/SheafGenerators` entry alone, one that can't be read whole passed
   over with a log line (a version it doesn't know, a bad id, values the
@@ -4063,7 +4080,8 @@ while its page tokens count the pages written.
 - **Order.** The generators on a page go background, the page's
   content, watermark, header (`generators_on`), one order the emitter,
   `intact`, recognition and the realizer share, so a reopened page
-  tests intact.
+  tests intact; from slice 18 the recognized text's block goes between
+  the page's content and the watermark (OCR as content).
 - **Replacing others' headers** is the watermark's rule (Others'
   watermarks): Acrobat's, an older sheaf's and another file's headers
   and footers go from the pages the header covers, the author's stay.
@@ -4231,6 +4249,200 @@ harness lists them (`ACCEPTED_MISSES`) and asserts them only with
 `SHEAF_GATE_PROPOSAL_8`. A lead window that realizes a group's visible
 pages first (option A) is to revisit.
 
+## OCR as content (M10.5 slice 18)
+
+Recognized text is page content drawn as a block of its own: a layer on
+the page's stack, with a block id, written as a `/SheafBlock` stream
+after the page's isolated content and before the generators drawn over
+it, and found again in a reopened file by that stream's marker. A layer
+a file holds is like any other, saved or not: a re-OCR or Clear takes it
+out, an older sheaf's too, and the save says so (§3.4, §6.1, §6.4, §7.1,
+§11.4, §11.9, §13, proposal 26 and bug 14 of `todos/m10.5-edit-api.md`).
+The legacy installer went with it: `text_layer::install`, `strip` and
+`has_layer`, `[q, base…, layer]` with `/SheafOcrLayer` and `/SheafOcr`,
+and the emitter's special cases for it.
+
+```rust
+pub struct Layer { pub id: BlockId, pub body: Static }            // sheaf_doc::model
+pub enum StreamSel { SheafGen(GenId), SheafOcr }
+pub enum MarkedSel { SheafGen, Pagination { kinds, origins }, SheafOcr }
+impl ContentStack { pub fn ocr_layer(&self) -> Option<&Layer>;
+                    pub fn with_ocr(&self, layer: Option<Layer>) -> Arc<ContentStack>;
+                    pub fn with_filters(&self, f: impl IntoIterator<Item = Filter>) -> Arc<ContentStack>; }
+impl Filter { pub fn drops_ocr(&self) -> bool }
+pub enum Marker { Gen { id, layout, recipe, number }, Ocr(BlockId), Isolate }   // sheaf_doc::content
+impl BlockId { pub(crate) fn draw(rng: &mut fastrand::Rng,     // random in [1, 2^53), `b…` as hex
+                                 taken: impl Fn(BlockId) -> bool) -> BlockId }
+EditError::Content { op: &'static str, page: u32, why: String }      // sheaf_doc::tx
+pub(crate) fn block(layer: &TextLayer, id: BlockId, reserved: &Reserved)  // text_layer
+    -> (Vec<u8>, ResourceNeeds);
+```
+
+There's no `BlockKind`: the body's variant says what a layer is, and the
+flattened kind comes with `FlattenAnnotations` (slice 19).
+
+### The ops
+
+- **`SetOcrText`** puts the layer on the page's stack in place of the
+  one there, keeping its id (the replaced layer's, saved or not), else
+  drawing one (`Lower::block_id`: a pinned id first, so a relowered
+  transaction draws the ids it drew, else random in [1, 2^53)). A
+  duplicate shares the stack, and with it the id. A layer with no words
+  means none, and nothing is put when the page is as it was.
+- **`ClearOcrText`** takes the stack's layer off, back to the shared
+  empty stack when nothing else is on it, and reports progress a page at
+  a time.
+- **What the file holds.** Both read the page's blocks (`Source::blocks`,
+  a fact of its source read once; `saved_ocr`) and add the filters that
+  take the recognized text sheaf wrote in its file out: `DropStreams(
+  StreamSel::SheafOcr)` for an OCR block that's a stream of its own or an
+  older sheaf's layer with its `q` (`PageBlocks::legacy_ocr`, both or
+  neither, so what's left balances as it did), and `DropMarked(
+  MarkedSel::SheafOcr)` for blocks another tool merged into a stream,
+  once a splice is shown to take them together. Both record a read of
+  the page's `Page(p)`, so a flush that changes nothing still conflicts
+  with a change to the page under `Validate`.
+- **`EditError::Content { op, page, why }`** (§6.4): a page whose content
+  can't be read, or whose merged block a splice refuses, fails the op,
+  naming it, the page's position and why (`ContentError::on_page`). Where
+  the legacy installer drew without lexing, Set on such a page now
+  fails; the app's OCR run counts the page as failed and goes on.
+- **Effects** (§7.1). A layer set where the saved state had none is
+  `CONTENT`, so it appends; one the saved state had, replaced or gone
+  where no page shows it, is `REMOVES | REPLACES_TEXT`
+  (`RemovedKind::OcrLayers`), as before. From this slice so is a
+  `SheafOcr` filter added, counted once a page with that layer, so a
+  re-OCR or a Clear over a layer the file holds plans a Rewrite
+  (`ReplacesText`) with the old words gone, where it went through the
+  removal check's veto before. History marks such a step as removing.
+
+### Drawn on save and on screen
+
+- **The block.** `text_layer::block` writes `/ShOCR /Sh… BDC q BT 3 Tr …
+  ET Q EMC`: invisible text in the glyphless font, each word fitted to
+  its box in the layer's upright frame, in a `q` of its own so its text
+  mode reaches nothing drawn after it, marked with a property list `<<
+  /SheafOcrBlock (b…) >>` that names its block. The font and the list
+  take `/Sh…` names clear of the page's (`Reserved`). The emitter
+  (`recognized`) writes it as a stream marked `/SheafBlock << /K /Ocr /B
+  (b…) >>`, keyed by its digest (`ObjKey::Block`), its resources in the
+  page's own (`ObjKey::PageRes`); the glyphless font is one object a
+  file (`ObjKey::Res`). Each block names its own list, so pages don't
+  share their resources dictionaries as they do under a watermark.
+- **Order** (§11.4): `[under… QOpen base′… QClose text over…]`. A page
+  with OCR and a header reads its own text, the recognized words, then
+  the header, as before slice 17. A page with recognized text is
+  isolated as a generator's is, and needs PDF 1.2 (`CID_FONTS`). One whose
+  content can't be read is drawn as it is, without the text or the
+  generators, said once in a Note ("No recognized text, watermark,
+  background, header or footer is drawn on page 3, whose content can't be
+  read.").
+- **Taken out.** `rebuilt` acts on the filters: OCR blocks that are
+  streams of their own and an older sheaf's `q` and layer are left out of
+  `/Contents`; merged OCR ranges are cut out of their streams
+  (`splice_each`, a copy of each stream, `ObjKey::Filtered`), and the
+  names only they used are dropped from the page's resources. A legacy
+  layer whose `q` is gone stays (its `Q` would unbalance the page), as
+  does a cut a splice refuses, said in a Note ("Recognized text sheaf
+  wrote earlier stays on page 3: taking it out would change what else
+  the page draws."). What's left is counted again, so the isolation
+  matches.
+- **On screen** a view draws the stack's layer when its inputs ask for
+  it (`ocr_over`: every consumer's but `content_only`'s, which blank
+  detection's text read turns on), through the same emission;
+  `content_only` draws the page as its file has it, the blocks the file
+  holds included unless a filter takes them out.
+
+### Found again after reopen
+
+- **`Marker::Ocr(BlockId)`.** `Source::markers` reads a page's OCR blocks
+  by their stream's dictionary, as it reads a generator's. An older
+  sheaf's layer and a flattened block are none: the page's content.
+- **The static-over slot.** A saved OCR block no filter drops stays where
+  sheaf wrote it: `[gen-under… QOpen inner… QClose ocr… gen-over…]`.
+  `intact` peels the OCR blocks off before it checks the isolation, so a
+  reopened page with recognized text and a header is written as it is;
+  with no generator on the page it's intact when no block a generator
+  backs is there and the page has no isolation, an unbacked block or
+  saved text. `rebuilt` keeps the blocks by reference, in file order,
+  after the new `QClose` and before the model's new block and the
+  generators over the page, leaves them out of base′'s balance while
+  keeping the names they draw with (one `content::names_used` pass over
+  those streams alone), and isolates the page even with nothing else
+  drawn, reusing the file's isolating streams when they isolate as many.
+  So nesting never grows: five cycles of a header changed over a saved
+  block on an unbalanced base keep `q`, the base, `Q Q`, the block, then
+  the header.
+- **Files saved with OCR alone.** `Source::markers` stays gated on the
+  catalog's `/SheafGenerators`, so a file sheaf saved with recognized
+  text and no generator shows no markers to `intact`, `untouched` and
+  the render key: the base engine draws such a page, which is right, as
+  nothing is drawn over it. A page something is drawn on reads its
+  blocks anyway (`stack`'s unmarked case, the read `wrapped` made), and
+  when they list sheaf's isolation or a stream-level block the page goes
+  to `rebuilt`, which reads the markers from what it decodes, rather than
+  wrapping the old isolation again.
+- **The removal check** (§11.9) judges a saved OCR block of the opened
+  file as one of its own objects, on its words decoded; a block drawn in
+  the session is derived, judged on its layer's words.
+
+### The OCR run
+
+A flush lands by value on the version its round began on (`land`): the
+batch first, then page by page on a Conflict or `EditError::Content`. A
+page that changed since its round began (a `ReplacePages`; a crop or a
+turn doesn't, as neither writes `Page(p)`) keeps no text from it and is
+queued (`Requeue`): when the round finishes, not stopped or undone, the
+pages queued that are still in the document start a new job over the
+current version's snapshot, in the run's group, with a new task (the
+engine is loaded again). A page is read again twice at most
+(`REQUEUES`); past that, gone before its round, or left when the run
+stops, it's counted as changed. A page whose content can't be read is
+counted as failed; the rest land. A dropped result isn't counted as
+recognized (`Tally.dropped`), so a page read again counts once, as its
+last read went, and a page never read again only as changed. The
+message says ", 2 read again after a change". Undo still stops the run,
+and starts no round. The run's bookkeeping (`Tally`: its counts, its
+flushes, and whether a finished round is followed by another or the
+run ends, with what message) is apart from the view and its jobs, so
+tests drive it with a job's events and a document; the view only
+starts each round's job and follows the commits.
+
+### The plugin API
+
+API 0.3 has no `ocr.page-text-layer`: recognized text, saved or not, is
+the page's content, which `text` reads as the file will draw it now.
+0.2's, which the frozen 0.2 fixture imports, answers none until 0.2 goes
+(slice 20): `impl ocr::Host` is in `api::v02` and `api::v03`, their
+`recognize` one helper (`api::shared::recognized`). 0.3.0 lost the
+function without a version bump: it's unreleased, and no plugin in the
+repository imports it.
+
+**Deleted:** `text_layer::{install, strip, has_layer, layer_entries,
+to_content, MARKER, FONT_NAME}`; `ContentStack::with_ocr_text` (now
+`with_ocr`); `emit::content::fresh_balance`, the emitter's `replaced`
+layer and `page_res`' inline resources; `ContentWriter::finish` and
+`named`'s given names; `content::sink::Sink::{add, stream_dict}` (the
+sink stays for the marks' appearance forms and the emitter's resources);
+the plugin host's 0.3 `page_text_layer`. `tests/retired.rs` lists them.
+
+**Numbers** (AMD EPYC 7302P, release; the 7k gate harness):
+
+| Row | Synthetic | Heavy | Scanned |
+|---|---|---|---|
+| recognized text set on every page (300 words each), one transaction on the file opened afresh, each page's blocks read cold | 197 ms | 268 ms | 141 ms |
+| the Append that writes it, planned and written, and its section | 9.96 s, 17.5 MB | 9.97 s, 17.4 MB | 10.06 s, 17.6 MB |
+| its census: fonts added (asserted 1), blocks (asserted one a page), property lists added | 1, 7,000, 7,000 | 1, 7,000, 7,000 | 1, 7,000, 7,000 |
+| realize + open + render an edited page, a header and recognized text on it (asserted < 15 and < 25 ms) | 12.0 ms (slice 17: 12.0) | 22.7 ms (21.2–21.8) | 32.2 ms (31.8) |
+
+The Append takes what slice 17's did (9.4–9.8 s in the same probe):
+writing each page's operators (0.8 ms for 300 words) and deflating them
+(0.5 ms). Its section is larger because the gate gives every page the
+same words, which slice 17 wrote as one object, where each layer has its
+own block, list and resources now; recognized text differs page by page,
+so a real run writes a stream a page either way. Every other gate holds
+where slice 17 left it, proposal 8's accepted misses included.
+
 ## Non-goals of this design
 
 - Collaborative / concurrent editing. Single writer, single history.
@@ -4331,33 +4543,41 @@ Added in M5. An OCR run produces, per page, a `TextLayer`: words with boxes
 in PageSpace (M10.5 slice 5; see Coordinates), like marks, the frame the
 text reads upright in (`upright`, the page's absolute rotation when it was
 recognized) and the engine's name. It is page content (M10.5 slice 8):
-an `OcrText` layer on the page's `ContentStack`, `DocState::ocr_text(page)`,
-put with the page's `PageDef`.
+an `OcrText` layer on the page's `ContentStack`, from slice 18 with its
+block's id (`Layer { id, body }`), `DocState::ocr_text(page)`, put with
+the page's `PageDef`.
 
-- **A save writes it, and it stays.** A save writes every layer
-  into its page as an invisible text layer (text render mode 3 in
-  `content::Glyphless`, Tesseract's glyphless font embedded, each UTF-16
-  code unit of a word a CID and the text read back through its
-  ToUnicode, written by `ContentWriter` under the legacy name
-  `/SheafOcr`; `/Contents` turned into `[q, original…, layer]`, the `q`
-  and the layer marked `/SheafOcrLayer`, until slice 18's blocks). A save
-  is an output (slice 9), so the layer stays in the page's content, the page
-  still showing the file it opened, and the next save writes it again,
-  in place of one its base already holds. The model never reads layers
-  back from a file: in a file opened again, PDFium owns the text.
+- **A save writes it as a block of its own** (M10.5 slice 18; OCR as
+  content): invisible text (text render mode 3 in `content::Glyphless`,
+  Tesseract's glyphless font embedded once a file, each UTF-16 code unit
+  of a word a CID and the text read back through its ToUnicode), a
+  stream marked `/SheafBlock << /K /Ocr /B (b…) >>` after the page's
+  isolated content and before the generators drawn over it, its range
+  `/ShOCR` with a list naming the block, its font and list under `/Sh…`
+  names. A save is an output (slice 9), so the layer stays on the stack,
+  the page still showing the file it opened, and the next save writes it
+  again in place of what the file holds. A file opened again holds the
+  block as the page's own content, kept in its place by its marker; a
+  re-OCR or a Clear takes it out (the stack's `SheafOcr` filters), and an
+  older sheaf's `/SheafOcrLayer` with its `q`, so a layer in a file is
+  like any other, saved or not. The model reads no layer back from a
+  file: its words are the page's text, as PDFium reads it.
 - **Ops**: `SetOcrText` (one page's layer) and `ClearOcrText`, which put
-  the pages' `PageDef`s and nothing else. Delete removes a page's layer with the
-  page, Duplicate shares it (the same `ContentStack`), Replace drops it
-  (the page shows other content, under the empty stack), and Move, Rotate
-  and, from M10.5 slice 15, Crop (`SetPageBoxes`, the page's `Geom`
-  alone) leave it alone.
+  the pages' `PageDef`s and nothing else, each reading the page's blocks
+  for the text its file holds (a page whose content can't be read is
+  `EditError::Content`). Delete removes a page's layer with the
+  page, Duplicate shares it (the same `ContentStack`, its id too),
+  Replace drops it (the page shows other content, under the empty
+  stack), and Move, Rotate and, from M10.5 slice 15, Crop
+  (`SetPageBoxes`, the page's `Geom` alone) leave it alone.
 - **Coalesced undo.** Results arrive in flushes over minutes (every 10
   pages or 2 s), but a run is one undo step: from M10.5 slice 12 it's a
   group (`Document::begin_group(GroupKind::Ocr)`, which takes commits of
   `Actor::Job(JobKind::Ocr)` only, which may only set and clear OCR
   text; see One funnel and the history budget). Each flush is a
-  transaction made on the version the run began on, whose snapshot its
-  pages are drawn from (`ViewPages`, their content alone, slice 13),
+  transaction made on the version its round began on (the run's first
+  version, or a later round's, below), whose snapshot its pages are
+  drawn from (`ViewPages`, their content alone, slice 13),
   that reads each page as OCR read it (`Tx::read_render(p,
   &ViewInputs::content_only())`: what the page shows, from M10.5 slice
   13) and lands by value (`Stale::Validate`) in the group: it amends the
@@ -4369,21 +4589,29 @@ put with the page's `PageDef`.
   leaves no version. A save or an unrelated edit mid-run splits the run
   into fragments, which History's "Undo all of …" takes back at once
   (`revert_group`); a flush during a save lands in a version after the
-  sealed one, which stays unsaved. A page whose slot changed since (its
-  base re-pointed by a header stripped; a watermark and a crop re-pointed
-  it too until slices 16 and 15 made them a generator and geometry,
-  which a flush lands beside)
+  sealed one, which stays unsaved. A page whose slot changed since (a
+  ReplacePages, or another change that writes `Page(p)`; a header strip,
+  a watermark and a crop re-pointed its base too until slices 17, 16 and
+  15 made them generators and geometry, which a flush lands beside)
   is a Conflict: the flush is retried page by page, the other pages keep
-  their text, and the run's message counts the changed ones. Undoing the
+  their text, and from slice 18 the changed page is read again, as it
+  shows then, in a round of the run that begins when the running one
+  ends, in the run's group: a new job over the pages changed since,
+  still in the document, made on the current version (twice at most a
+  page; after that, and for one gone or a run stopped first, the run's
+  message counts it as changed). A page whose content can't be read
+  (`EditError::Content`, slice 18) takes no text: the page-by-page retry
+  counts it as failed, and the rest land. Undoing the
   run, or jumping away from it, makes its next flush `GroupEnded`: the
   run stops ("OCR stopped: its results were undone") rather than put
   undone results back.
-- **Search.** An unsaved layer is drawn into its page's realization,
+- **Search.** The stack's layer is drawn into its page's realization,
   invisible, as a save writes it, so Find, Patterns, selection, plugins
   and blank detection read its words from the page as they read any text
   (M10.5 slice 14's text service, under inputs with `ocr_over`; until
-  then a search of the layers merged beside PDFium's). Hits are addressed
-  by `PageId` and position, so inserted and reordered pages work too.
+  then a search of the layers merged beside PDFium's), between the page's
+  own text and a header (slice 18). Hits are addressed by `PageId` and
+  position, so inserted and reordered pages work too.
 
 ## Open questions
 

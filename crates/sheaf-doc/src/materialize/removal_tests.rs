@@ -519,8 +519,8 @@ fn the_veto_on_a_certified_file_asks_and_never_rewrites() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// How many of the streams of the page of the file at `path` are marked
-/// as an OCR layer's: its `q` and its text, for one layer.
+/// How many of the streams of the page of the file at `path` are an OCR
+/// layer's block.
 fn marked_in(path: &Path) -> usize {
     let pdf = Pdf::load(path).unwrap();
     let page = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
@@ -531,17 +531,20 @@ fn marked_in(path: &Path) -> usize {
     };
     (entries.iter())
         .filter(|e| {
-            (pdf.dereference(e).ok())
-                .is_some_and(|(_, o)| o.as_stream().is_ok_and(|s| s.dict.has(b"SheafOcrLayer")))
+            (pdf.dereference(e).ok()).is_some_and(|(_, o)| {
+                (o.as_stream()).is_ok_and(|s| super::ocr_tests::ocr_block(&s.dict).is_some())
+            })
         })
         .count()
 }
 
-/// A re-OCR over a layer saved in an earlier session: drawing the new
-/// layer takes the file's out of the page's content, and the removal check
-/// finds its words in what that unlinks, so the save is a Rewrite, with
-/// one layer. Over a layer saved in this session, the same, judged on
-/// the words the page's block was drawn from.
+/// A re-OCR over a layer saved in an earlier session, forced to append:
+/// drawing the new layer takes the file's out of the page's content, and
+/// the removal check finds its words in what that unlinks, so the save is
+/// a Rewrite, with one layer. Over a layer saved in this session, the
+/// same, judged on the words the page's block was drawn from. Planned,
+/// either is a Rewrite from the start: the old words are replaced text
+/// (kept::tests' `re_ocr_reopened`).
 #[test]
 fn a_re_ocr_over_a_saved_layer_is_a_rewrite() {
     let dir = scratch();
@@ -550,13 +553,13 @@ fn a_re_ocr_over_a_saved_layer_is_a_rewrite() {
     let ocr = |text: &str| fx::ocr([(page, layer(text))]);
     doc.commit_ops(ocr("first"), "ocr").unwrap();
     save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
-    assert_eq!(marked_in(&path), 2);
+    assert_eq!(marked_in(&path), 1);
     // This session: the page's block.
     doc.commit_ops(ocr("second"), "ocr").unwrap();
     let (strategy, _) = forced(&mut doc, &AskAnswers::default()).unwrap();
     let key = vetoed(&strategy);
     assert!(matches!(key, Some(ObjKey::Block(_))), "{strategy:?}");
-    assert_eq!(marked_in(&path), 2);
+    assert_eq!(marked_in(&path), 1);
 
     // An earlier session: the file's own streams.
     let mut doc = crate::open::file(&path, None).unwrap().doc;
@@ -574,7 +577,7 @@ fn a_re_ocr_over_a_saved_layer_is_a_rewrite() {
             ..before
         }
     );
-    assert_eq!(marked_in(&path), 2);
+    assert_eq!(marked_in(&path), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

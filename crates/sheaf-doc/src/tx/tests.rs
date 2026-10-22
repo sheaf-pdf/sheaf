@@ -101,11 +101,15 @@ pub(super) fn note(contents: &str) -> NewMark {
     )
 }
 
-/// Recognized text of no words.
+/// Recognized text of one word.
 fn layer() -> Arc<crate::text_layer::TextLayer> {
     Arc::new(crate::text_layer::TextLayer {
-        words: Vec::new(),
-        lines: Vec::new(),
+        words: vec![crate::text_layer::OcrWord {
+            text: "word".into(),
+            rect: rect(40.0),
+            confidence: 0.9,
+        }],
+        lines: std::iter::once(0..1).collect(),
         upright: Rotation::R0,
         engine: "test".into(),
     })

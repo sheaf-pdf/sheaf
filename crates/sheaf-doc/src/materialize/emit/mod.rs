@@ -7,9 +7,9 @@
 //!
 //! - [`pages`]: each page's dictionary, from its base page's, read lazily
 //!   ([`Shown`]).
-//! - [`content`]: what sheaf draws on a page: the generators around its
-//!   own content, isolated, with resources of its own; OCR text through
-//!   the legacy installer.
+//! - [`content`]: what sheaf draws on a page: the generators and its
+//!   recognized text around its own content, isolated, with resources of
+//!   its own.
 //! - [`tree`]: the balanced page tree a Rewrite writes, and the saved
 //!   file's tree an Append splices the pages into.
 //! - [`catalog`]: the catalog by its ownership table (§9.1), and
@@ -89,7 +89,7 @@ use super::plan::{Note, SaveTransform};
 use super::record::{DrawnBlocks, SaveRecord};
 use crate::annot::{Annot, AnnotId, StampForm};
 use crate::content::sink::{self, Sink};
-use crate::content::{GenId, Res, ResBody, ResId, Reserved};
+use crate::content::{GenId, Res, ResBody, Reserved};
 use crate::forms::field::annot_flags;
 use crate::model::{AnnotBody, DocState, FormRef, PageId};
 use crate::realize::{MarkDraw, ViewInputs};
@@ -436,13 +436,17 @@ pub(crate) struct Cx<'a> {
     /// names dropped from them.
     pub(crate) page_res: HashMap<ObjKey, Dictionary>,
     pub(crate) reserved_of: HashMap<(u128, u64), Reserved>,
-    /// The pages the generators covering them aren't drawn on, whose
-    /// content can't be read.
+    /// The pages the generators covering them and their recognized text
+    /// aren't drawn on, whose content can't be read.
     pub(crate) unread: Vec<PageId>,
     /// The pages where others' pagination artifacts that a filter or a
     /// generator's `replaces` takes out stay, as a splice refuses them, and
     /// how many on each.
     pub(crate) stayed: Vec<(PageId, usize)>,
+    /// The pages where recognized text sheaf wrote that a filter takes out
+    /// stays, as a splice refuses it or a legacy layer's stream has lost
+    /// its `q`.
+    pub(crate) text_stayed: Vec<PageId>,
     /// The pages where watermarks or backgrounds an older sheaf drew keep
     /// the settings a filter takes out, as their property lists can't be
     /// written again without them, and how many on each.
@@ -501,6 +505,7 @@ impl<'a> Cx<'a> {
             reserved_of: HashMap::new(),
             unread: Vec::new(),
             stayed: Vec::new(),
+            text_stayed: Vec::new(),
             settings_kept: Vec::new(),
             by_src: HashMap::new(),
             groups: HashMap::new(),
@@ -717,12 +722,6 @@ impl<'a> Cx<'a> {
         None
     }
 
-    /// `d`, read from `src` as `copy` of it, its references placeholders.
-    fn sym_dict(&mut self, d: &Dictionary, src: &Src, copy: u32, stream: bool) -> Dictionary {
-        let scope = Scope { src, copy };
-        self.closure.sym_dict(&mut self.syms, d, &scope, stream)
-    }
-
     /// `obj` pushed under `key` unless it was already, or an Append's saved
     /// file has it: the placeholder.
     pub(crate) fn push_once(
@@ -738,10 +737,10 @@ impl<'a> Cx<'a> {
     }
 }
 
-/// The emitter is what the legacy installers draw through: a page
-/// dictionary it builds refers to objects by placeholder, so what one
-/// names is read from its source as the copy it is, and what they add is
-/// keyed by digest, written once a file.
+/// The emitter is where what it draws writes its resources: a dictionary
+/// it builds refers to objects by placeholder, so what one names is read
+/// from its source as the copy it is, and a resource is keyed by digest,
+/// written once a file.
 impl Sink for Cx<'_> {
     /// A page's own resources ([`ObjKey::PageRes`]) as they're written.
     fn dict(&mut self, id: ObjectId) -> Option<Dictionary> {
@@ -752,15 +751,8 @@ impl Sink for Cx<'_> {
         let Object::Dictionary(d) = &*obj else {
             return None;
         };
-        Some(self.sym_dict(d, &src, copy, false))
-    }
-
-    fn stream_dict(&mut self, id: ObjectId) -> Option<Dictionary> {
-        let (obj, src, copy) = self.read(id)?;
-        let Object::Stream(s) = &*obj else {
-            return None;
-        };
-        Some(self.sym_dict(&s.dict, &src, copy, true))
+        let scope = Scope { src: &src, copy };
+        Some(self.closure.sym_dict(&mut self.syms, d, &scope, false))
     }
 
     fn array(&mut self, id: ObjectId) -> Option<Vec<Object>> {
@@ -770,11 +762,6 @@ impl Sink for Cx<'_> {
         };
         let scope = Scope { src: &src, copy };
         Some(items.iter().map(|o| self.sym(o, &scope)).collect())
-    }
-
-    fn add(&mut self, obj: Object) -> ObjectId {
-        let key = ObjKey::Block(ResId::of(std::slice::from_ref(&obj)).0);
-        self.push_once(key, |_| obj)
     }
 
     fn resource(&mut self, res: &Res) -> ObjectId {
@@ -1017,8 +1004,8 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
     if !cx.unread.is_empty() {
         let pages = crate::describe::pages_text(&cx.unread, cx.st);
         cx.notes.push(Note(format!(
-            "No watermark, background, header or footer is drawn on {pages}, whose content \
-             can't be read."
+            "No recognized text, watermark, background, header or footer is drawn on {pages}, \
+             whose content can't be read."
         )));
     }
     if !cx.stayed.is_empty() {
@@ -1038,6 +1025,13 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
         };
         cx.notes.push(Note(format!(
             "{n} other programs or files drew {stay} on {pages}: taking {them} out would change \
+             what else the page draws."
+        )));
+    }
+    if !cx.text_stayed.is_empty() {
+        let pages = crate::describe::pages_text(&cx.text_stayed, cx.st);
+        cx.notes.push(Note(format!(
+            "Recognized text sheaf wrote earlier stays on {pages}: taking it out would change \
              what else the page draws."
         )));
     }

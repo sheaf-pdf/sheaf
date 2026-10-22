@@ -704,7 +704,8 @@ impl DocState {
         })
     }
 
-    /// Page `id`'s recognized text, which no file holds yet.
+    /// Page `id`'s recognized text: the layer its stack draws, saved or
+    /// not. Text a file held when it opened is the page's own content.
     pub fn ocr_text(&self, id: PageId) -> Option<&Arc<TextLayer>> {
         self.def(id)?.content.ocr_text()
     }

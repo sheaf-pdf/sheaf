@@ -581,7 +581,8 @@ fn order(a: &Vector<PageId>, b: &Vector<PageId>) -> Effects {
 /// A page added, removed or showing something else. Its source page is
 /// removed when no page shows it now, and a layer it had when no page
 /// shows that either: recognized text so removed or replaced is replaced
-/// text.
+/// text, as is what a filter takes of the recognized text sheaf wrote in
+/// its file.
 fn page(
     a: Option<&Arc<PageDef>>,
     b: Option<&Arc<PageDef>>,
@@ -618,7 +619,7 @@ fn page(
         flags |= Flags::CONTENT;
     }
     let added = || has.iter().filter(|f| !had.contains(f));
-    if added().any(|f| !matches!(f, Filter::StripLegacy(_))) {
+    if added().any(|f| !f.drops_ocr() && !matches!(f, Filter::StripLegacy(_))) {
         flags |= Flags::REMOVES;
         found.removed(RemovedKind::Filtered, 1);
     }
@@ -626,15 +627,19 @@ fn page(
         flags |= Flags::REMOVES;
         found.removed(RemovedKind::OlderSettings, 1);
     }
+    // The page's recognized text, its stack's or its file's, replaced or
+    // gone: once a page.
+    let mut ocr = added().any(Filter::drops_ocr);
     let shown = |l: &Layer| match &l.body {
         Static::OcrText(text) => cx.shown().ocr.contains(&addr(text)),
     };
     for l in was.iter().filter(|l| !now.contains(l) && !shown(l)) {
         flags |= Flags::REMOVES;
-        if l.body.ocr_text().is_some() {
-            flags |= Flags::REPLACES_TEXT;
-            found.removed(RemovedKind::OcrLayers, 1);
-        }
+        ocr |= l.body.ocr_text().is_some();
+    }
+    if ocr {
+        flags |= Flags::REMOVES | Flags::REPLACES_TEXT;
+        found.removed(RemovedKind::OcrLayers, 1);
     }
     Effects::of(flags, SigClass::OTHER)
 }

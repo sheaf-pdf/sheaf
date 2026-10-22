@@ -86,7 +86,8 @@ impl PagOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GenId(pub u64);
 
-/// A layer's id, as sheaf writes it in a block: `(b<hex>)`.
+/// A layer's id: random in [1, 2^53), as a generator's is. sheaf writes it
+/// in a block as `(b<hex>)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(pub u64);
 
@@ -116,6 +117,23 @@ impl fmt::Display for GenId {
 impl BlockId {
     pub fn parse(s: &[u8]) -> Option<BlockId> {
         hex_id(s, b'b').map(BlockId)
+    }
+
+    /// One drawn from `rng` that `taken` says isn't taken.
+    pub(crate) fn draw(rng: &mut fastrand::Rng, taken: impl Fn(BlockId) -> bool) -> BlockId {
+        loop {
+            let id = BlockId(rng.u64(1..1 << 53));
+            if !taken(id) {
+                return id;
+            }
+        }
+    }
+}
+
+/// As a block names it: `b` and its hex, which [`BlockId::parse`] reads.
+impl fmt::Display for BlockId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "b{:x}", self.0)
     }
 }
 
@@ -154,9 +172,13 @@ pub struct SheafBlockRef {
     pub at: BlockAt,
 }
 
+/// The marker on each stream of the OCR layer sheaf wrote before M10.5
+/// ([`LegacyOcr`]), read and never written.
+pub const LEGACY_OCR: &[u8] = b"SheafOcrLayer";
+
 /// The OCR layer sheaf wrote before M10.5: a stream of `q` before the
 /// page's content, and the layer after it, which starts with `Q`. Both are
-/// marked `/SheafOcrLayer`.
+/// marked `/SheafOcrLayer` ([`LEGACY_OCR`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LegacyOcr {
     pub q: ObjectId,
@@ -449,7 +471,7 @@ enum StreamMark {
 
 impl StreamMark {
     fn of(dict: &Dictionary) -> StreamMark {
-        if dict.has(b"SheafOcrLayer") {
+        if dict.has(LEGACY_OCR) {
             return StreamMark::OcrLayer;
         }
         let Ok(Object::Dictionary(block)) = dict.get(b"SheafBlock") else {
@@ -476,9 +498,12 @@ impl StreamMark {
 /// What sheaf marked a `/Contents` stream as, by its dictionary alone
 /// (§11.4): a generator's block, with the digests of its layout (`/L`) and
 /// of what it was drawn from (`/R`), each None when it isn't 16 bytes, and
-/// the page's Bates number (`/N`, decimal digits), when it has one; or a
-/// stream that isolates the page's own content. What a source reads of a
-/// page's streams without decompressing them ([`Source::markers`]).
+/// the page's Bates number (`/N`, decimal digits), when it has one; an OCR
+/// layer's block, by its layer's id (`/B`); or a stream that isolates the
+/// page's own content. What a source reads of a page's streams without
+/// decompressing them ([`Source::markers`]). The layer an older sheaf
+/// wrote, and a block of placements flattened, are none: the page's own
+/// content.
 ///
 /// [`Source::markers`]: crate::source::Source::markers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -489,6 +514,7 @@ pub enum Marker {
         recipe: Option<u128>,
         number: Option<u64>,
     },
+    Ocr(BlockId),
     Isolate,
 }
 
@@ -510,10 +536,11 @@ impl Marker {
                     number,
                 })
             }
+            StreamMark::Block(SheafBlock::Ocr(id)) => Some(Marker::Ocr(id)),
             StreamMark::Isolate => Some(Marker::Isolate),
-            StreamMark::Plain
-            | StreamMark::Block(SheafBlock::Ocr(_) | SheafBlock::Flat(_))
-            | StreamMark::OcrLayer => None,
+            StreamMark::Plain | StreamMark::Block(SheafBlock::Flat(_)) | StreamMark::OcrLayer => {
+                None
+            }
         }
     }
 }

@@ -9,10 +9,7 @@ use std::sync::Arc;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 
 use super::*;
-use crate::annot::Box2;
-use crate::geom::Geom;
 use crate::source::Limits;
-use crate::text_layer::OcrWord;
 
 const LIM: &Limits = &Limits::DEFAULT;
 
@@ -618,6 +615,26 @@ fn sheafs_blocks_are_found_by_their_markers() {
         ]
     );
     assert_eq!(&*blocks.isolation, &[ids[0], ids[2]]);
+    // A stream's dictionary alone says what it is, but a block of
+    // placements flattened, which is the page's own content.
+    let marker = |id: ObjectId| Marker::of(&pdf.get_object(id).unwrap().as_stream().unwrap().dict);
+    let header = Marker::Gen {
+        id: GenId(0x1f),
+        layout: None,
+        recipe: None,
+        number: None,
+    };
+    assert_eq!(
+        ids.iter().map(|&id| marker(id)).collect::<Vec<_>>(),
+        [
+            Some(Marker::Isolate),
+            None,
+            Some(Marker::Isolate),
+            Some(header),
+            Some(Marker::Ocr(BlockId(0x2b))),
+            None,
+        ]
+    );
     assert_eq!(
         blocks.balance,
         Balance {
@@ -632,32 +649,43 @@ fn sheafs_blocks_are_found_by_their_markers() {
     assert_eq!(BlockId::parse(b"bFF"), Some(BlockId(255)));
 }
 
+/// A block's id as sheaf writes it reads back as itself, the largest it
+/// draws too; one drawn is in [1, 2^53) and none `taken` says is taken.
+#[test]
+fn a_block_id_round_trips() {
+    let mut rng = fastrand::Rng::with_seed(7);
+    let first = BlockId::draw(&mut rng, |_| false);
+    let mut rng = fastrand::Rng::with_seed(7);
+    let other = BlockId::draw(&mut rng, |id| id == first);
+    assert_ne!(other, first);
+    for id in [
+        BlockId(1),
+        BlockId(0x2a),
+        BlockId((1 << 53) - 1),
+        first,
+        other,
+    ] {
+        assert!((1..1 << 53).contains(&id.0), "{id}");
+        assert_eq!(BlockId::parse(id.to_string().as_bytes()), Some(id));
+    }
+    assert_eq!(BlockId(0x2a).to_string(), "b2a");
+}
+
 #[test]
 fn sheafs_own_from_before_are_legacy() {
-    // A header as an older sheaf drew it, and an OCR layer.
-    let mut pdf = Pdf::with_version("1.7");
-    let body = pdf.add_object(Stream::new(dictionary! {}, b"0 0 9 9 re f".to_vec()));
-    let mut page = dictionary! { "Contents" => body };
-    crate::generate::fixture::legacy_header(&mut pdf, &mut page);
-    let geom = Geom::read(None, None, 0);
-    let mut res = crate::content::ResObjects::default();
-    let mut sink = crate::content::sink::Lopdf {
-        pdf: &mut pdf,
-        res: &mut res,
+    // A header as an older sheaf drew it, inside an OCR layer it wrote
+    // after (`text_layer::fixture::legacy_page`'s).
+    let mut pdf = crate::text_layer::fixture::legacy_page();
+    let id = pdf.get_pages()[&1];
+    let mut page = pdf.get_dictionary(id).unwrap().clone();
+    let [q, body, layer] = contents(&page)[..] else {
+        panic!("the legacy page draws three streams")
     };
-    let words = vec![OcrWord {
-        text: "word".into(),
-        rect: Box2 {
-            x: 72.0,
-            y: 100.0,
-            w: 40.0,
-            h: 10.0,
-        },
-        confidence: 0.9,
-    }];
-    let layer = crate::text_layer::from_engine(words, &geom, "test");
-    crate::text_layer::install(&mut sink, &mut page, &layer);
-    let ids = contents(&page);
+    page.set("Contents", body);
+    crate::generate::fixture::legacy_header(&mut pdf, &mut page);
+    let mut ids = vec![q];
+    ids.extend(contents(&page));
+    ids.push(layer);
     let resources = page.get(b"Resources").ok();
     let blocks = PageBlocks::read(&pdf, &ids, resources, LIM, &DrawnForms::default()).unwrap();
     assert_eq!(
@@ -674,7 +702,14 @@ fn sheafs_own_from_before_are_legacy() {
             layer: streams[4]
         })
     );
-    assert_eq!(blocks.balance, Balance::default());
+    // The body's own `q`, which it leaves open.
+    assert_eq!(
+        blocks.balance,
+        Balance {
+            net: 1,
+            min_prefix: 0
+        }
+    );
     // `/SheafHF` alone marks it, too.
     let mut pdf = Pdf::with_version("1.7");
     let (blocks, _) = blocks_of(

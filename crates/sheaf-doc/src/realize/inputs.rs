@@ -106,10 +106,11 @@ impl ViewInputs {
 
     /// The page's own content alone, as OCR, blank detection and Trim
     /// White read it: no generators, recognized text, widgets or
-    /// annotations, so an unsaved header is never read as the page's. What
-    /// it draws is what the page shows ([`Key::Page`](crate::prim::Key::Page))
-    /// alone, within the box it shows; Trim White measures each page in a
-    /// state of its own, cropped as its file crops it.
+    /// annotations, so a header or footer sheaf draws, saved or not, is
+    /// never read as the page's. What it draws is what the page shows
+    /// ([`Key::Page`](crate::prim::Key::Page)) alone, within the box it
+    /// shows; Trim White measures each page in a state of its own, cropped
+    /// as its file crops it.
     pub fn content_only() -> ViewInputs {
         ViewInputs {
             marks: MarkDraw::Off,

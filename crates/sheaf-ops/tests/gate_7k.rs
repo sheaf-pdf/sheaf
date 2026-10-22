@@ -124,10 +124,18 @@
 //! and the move undone and one page deleted, a page drawn, in the session
 //! and on the file opened again, each draw realized, opened and drawn at
 //! 1024 px in a group none drew before ([`LiveRow`]). From slice 17 Bates'
-//! apply is one op, which makes no copy and reads no page's content. So
-//! far slice 1's history bench, slice 3's geometry walk, slice 4's ready,
-//! slice 5's ready on 20,000 of sheaf's marks, slice 8's mark adds, slice
-//! 9's Rewrite, slice 10's incremental save on the scanned 7k
+//! apply is one op, which makes no copy and reads no page's content. Slice
+//! 18's are recognized text set on every page in one transaction on the
+//! file opened afresh, its lowering reading each page's blocks cold, and
+//! the Append that writes it as the app saves, with the section it writes
+//! and the census of the file it leaves: one glyphless font, and one block
+//! of recognized text a page, each its own; in the history bench, the
+//! first of the 7,000 `SetOcrText` lowered, every blank page's blocks read
+//! cold. From slice 18 the realize gate's edited page draws its recognized
+//! text as a block of its own after its isolated content, before the
+//! header. So far slice 1's history bench, slice 3's geometry walk, slice
+//! 4's ready, slice 5's ready on 20,000 of sheaf's marks, slice 8's mark
+//! adds, slice 9's Rewrite, slice 10's incremental save on the scanned 7k
 //! ([`INCREMENTAL_GATE_MS`]), slice 11's check of a
 //! delete on every fixture ([`CHECK_GATE`]), slice 12's snapshot
 //! ([`SNAPSHOT_GATE`]), flat pushes ([`FLAT`]) and 200 OCR versions within
@@ -141,8 +149,9 @@
 //! Bates apply on every fixture ([`BATES_GATE`]) with its Rewrite's one
 //! font, and on every fixture the live-token reorder's Append within
 //! [`REORDER_GATE`] and its section within [`REORDER_SECTION_MB`], and
-//! each page drawn within the realize gate ([`LiveRows`]), assert, after
-//! their tables print; but the rows that miss, Greg's accepted misses
+//! each page drawn within the realize gate ([`LiveRows`]), and slice 18's
+//! census of recognized text on every page, on every fixture, assert,
+//! after their tables print; but the rows that miss, Greg's accepted misses
 //! ([`ACCEPTED_MISSES`]), only when [`PROPOSAL_8`] is set.
 
 use std::collections::{HashMap, HashSet};
@@ -155,6 +164,7 @@ use futures::StreamExt;
 use futures::executor::block_on;
 use in_progress::{Level, Progress, Unit};
 use lopdf::{Dictionary, Object, ObjectId};
+use sheaf_doc::content::Marker;
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
 use sheaf_doc::realize::{EngineKey, GROUP, Realizer};
@@ -1356,6 +1366,64 @@ fn gates(kind: Kind) {
         gate: "1, asserted".into(),
     });
 
+    // Recognized text on every page, as an OCR run's layers land (slice
+    // 18): set on every page in one transaction, on the file opened afresh
+    // (untimed), so the lowering reads each page's blocks cold to find the
+    // text it holds; then the Append that writes it as the app saves, the
+    // section it writes, and the census of the file it leaves: one
+    // glyphless font, and one block of recognized text a page. No
+    // baseline.
+    let layer = Arc::new(ocr_layer(0));
+    let (recognized, _) = measure(RUNS, || {
+        let mut fresh = sheaf_doc::open::file(&work, None).unwrap().doc;
+        let ops = every_page_recognized(&fresh, &layer);
+        let (t, ()) = timed(|| {
+            fresh.commit_ops(ops, "OCR").unwrap();
+        });
+        drop(fresh);
+        t
+    });
+    let mut recognizing = sheaf_doc::open::file(&work, None).unwrap().doc;
+    let ops = every_page_recognized(&recognizing, &layer);
+    recognizing.commit_ops(ops, "OCR").unwrap();
+    let mut ocr_section = 0;
+    let (ocr_append, ocr_mem) = measure(RUNS, || {
+        let (t, n) = planned_section(&mut recognizing, &work);
+        ocr_section = n;
+        t
+    });
+    let (_, _, appended) =
+        planned_save(&mut recognizing, &work, |file| std::fs::read(file).unwrap());
+    let ocr_census = Census::of(recognizing.primary(), appended);
+    drop((recognizing, layer));
+    let what = "recognized text, all pages";
+    rows.push(Row::time(
+        &format!("{what}, one Tx (blocks read cold)"),
+        recognized,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row::time(
+        &format!("{what}, Append"),
+        ocr_append,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row::added(
+        &format!("{what}, Append"),
+        ocr_mem,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row {
+        what: format!("{what}, the section"),
+        now: Some(mb(ocr_section)),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: String::new(),
+    });
+    rows.extend(ocr_census.ocr_rows());
+
     // Proposal 8's verdict (slice 17), live page numbers kept (Greg,
     // 2026-10-22): "Page <<1>> of <<N>>" set on every page, a page drawn
     // before any save (the first everyday trigger); saved to the work
@@ -1533,6 +1601,7 @@ fn gates(kind: Kind) {
         1,
         "the fonts the Bates numbers' Rewrite added"
     );
+    ocr_census.assert_ocr();
     let section = section.max(reopened_section);
     assert!(
         mb(section) <= REORDER_SECTION_MB,
@@ -1779,6 +1848,17 @@ fn planned_and_put_back(doc: &mut Document, work: &Path) -> Duration {
 /// [`planned_and_put_back`], and the bytes the Append wrote after the
 /// file.
 fn planned_section(doc: &mut Document, work: &Path) -> (Duration, u64) {
+    let (t, section, ()) = planned_save(doc, work, |_| ());
+    (t, section)
+}
+
+/// [`planned_section`], and what `look` makes of the file as the save
+/// left it, before it's cut back.
+fn planned_save<T>(
+    doc: &mut Document,
+    work: &Path,
+    look: impl FnOnce(&Path) -> T,
+) -> (Duration, u64, T) {
     use sheaf_doc::materialize::{Onto, Strategy, plan, write_file};
     let meta = std::fs::metadata(work).unwrap();
     let (len, mtime) = (meta.len(), meta.modified().unwrap());
@@ -1795,11 +1875,12 @@ fn planned_section(doc: &mut Document, work: &Path) -> (Duration, u64) {
     assert_eq!(written.strategy, Strategy::Append { onto: Onto::Saved });
     doc.abandon_save(v);
     let section = std::fs::metadata(work).unwrap().len() - len;
+    let looked = look(work);
     let file = std::fs::File::options().write(true).open(work).unwrap();
     file.set_len(len).unwrap();
     file.set_modified(mtime).unwrap();
     file.sync_all().unwrap();
-    (t, section)
+    (t, section, looked)
 }
 
 /// How long the section of that save takes to make in memory, every check
@@ -2074,12 +2155,14 @@ fn image_background(image: &Blob) -> Op {
     set_watermark(spec, Z::Under, None)
 }
 
-/// What a Rewrite's pages draw with that their file's didn't, page by
-/// page (slice 16's census, and slice 17's of Bates numbers): the objects
-/// their resources name under names the file's pages' resources don't
-/// have, by kind, and the resources dictionaries the pages have, beside
-/// how many the file's had (by the object, or the dictionary written
-/// inline).
+/// What a save's pages draw with that their file's didn't, page by page
+/// (slice 16's census, slice 17's of Bates numbers and slice 18's of
+/// recognized text): the objects their resources name under names the
+/// file's pages' resources don't have, by kind, and the resources
+/// dictionaries the pages have, beside how many the file's had (by the
+/// object, or the dictionary written inline); and the blocks of
+/// recognized text they draw (`/SheafBlock << /K /Ocr … >>`), with how
+/// many pages draw other than one.
 struct Census {
     images: HashSet<ObjectId>,
     forms: HashSet<ObjectId>,
@@ -2088,11 +2171,13 @@ struct Census {
     properties: HashSet<ObjectId>,
     page_res: HashSet<ObjectId>,
     base_res: HashSet<String>,
+    ocr: HashSet<ObjectId>,
+    ocr_not_one: usize,
 }
 
 impl Census {
-    /// Of `written`, a Rewrite of a document of `file`'s pages in order,
-    /// a generator drawing on every one.
+    /// Of `written`, a file of `file`'s pages in order (a Rewrite, or an
+    /// Append onto it), sheaf drawing on every one.
     fn of(file: &Src, written: Vec<u8>) -> Census {
         let store = Store::new();
         let kind = BlobKind::file(Path::new("census.pdf"), None);
@@ -2107,6 +2192,8 @@ impl Census {
             properties: HashSet::new(),
             page_res: HashSet::new(),
             base_res: HashSet::new(),
+            ocr: HashSet::new(),
+            ocr_not_one: 0,
         };
         let dict = |src: &Src, o: &Object| -> Option<Dictionary> {
             Some(src.pdf().dereference(o).ok()?.1.as_dict().ok()?.clone())
@@ -2121,6 +2208,15 @@ impl Census {
                 panic!("a page a generator draws on has resources of its own");
             };
             census.page_res.insert(*at);
+            let recognized: Vec<ObjectId> = (now.contents.iter().copied())
+                .filter(|&id| {
+                    (out.pdf().get(id).ok())
+                        .and_then(|o| Marker::of(&o.as_stream().ok()?.dict))
+                        .is_some_and(|m| matches!(m, Marker::Ocr(_)))
+                })
+                .collect();
+            census.ocr_not_one += usize::from(recognized.len() != 1);
+            census.ocr.extend(recognized);
             let base = base.and_then(|o| dict(file, o)).unwrap_or_default();
             let res = out.pdf().get_dictionary(*at).unwrap().clone();
             for category in [b"XObject".as_slice(), b"Font", b"ExtGState", b"Properties"] {
@@ -2200,6 +2296,50 @@ impl Census {
             "a resources dictionary for each the file's pages had"
         );
     }
+
+    /// Its rows for recognized text on every page: the font it adds, its
+    /// blocks, and the property lists that name them.
+    fn ocr_rows(&self) -> Vec<Row> {
+        let count = |what: &str, n: usize, gate: String| Row {
+            what: format!("recognized text, census: {what}"),
+            now: Some(n as f64),
+            unit: "",
+            baseline: f64::NAN,
+            gate,
+        };
+        vec![
+            count("fonts added", self.fonts.len(), "1, asserted".into()),
+            count(
+                "blocks",
+                self.ocr.len(),
+                format!("{PAGES}, one a page, asserted"),
+            ),
+            count(
+                "pages drawing other than one",
+                self.ocr_not_one,
+                "0, asserted".into(),
+            ),
+            count("property lists added", self.properties.len(), String::new()),
+        ]
+    }
+
+    /// One font added to the file, the glyphless font every block draws
+    /// with, and one block of recognized text on every page, each its own.
+    fn assert_ocr(&self) {
+        assert_eq!(self.fonts.len(), 1, "the fonts recognized text added");
+        assert_eq!(
+            self.ocr_not_one, 0,
+            "pages drawing other than one block of recognized text"
+        );
+        assert_eq!(self.ocr.len(), PAGES as usize, "blocks of recognized text");
+    }
+}
+
+/// `layer` on every page of `doc`, one `SetOcrText` a page, as an OCR
+/// run's flushes set it.
+fn every_page_recognized(doc: &Document, layer: &Arc<TextLayer>) -> Vec<Op> {
+    let ids = doc.state().order().iter();
+    ocr(ids.map(|&id| (id, layer.clone())))
 }
 
 /// Page `id` of `doc` drawn `width` wide under the screen's inputs by
@@ -2321,8 +2461,9 @@ fn text_walks_on_the_synthetic_and_heavy_7k() {
 /// (M10.5 slice 1). Beside them, with neither a baseline nor a gate, one
 /// transaction of 7,000 ops of one kind, an OCR run's layer set on every
 /// page, lowered and then committed as an OCR group's version, which
-/// History shows as one line (slice 11); an OCR run as the app makes one
-/// ([`ocr_run`]): 700 flushes, each amending the group's version, the
+/// History shows as one line (slice 11), each page's blocks read as it's
+/// lowered, the first run's cold (slice 18); an OCR run as the app makes
+/// one ([`ocr_run`]): 700 flushes, each amending the group's version, the
 /// last ones joining a version of thousands of steps; and an insert of 10
 /// pages made on a version, then lowered again on the current one after
 /// the user moved a page (slice 12).
@@ -2403,6 +2544,7 @@ fn history_at_7k_pages_and_20k_marks() {
         d.undo().unwrap();
     }
     let (add, reorder) = (median(adds), median(reorders));
+    let lowered_cold = lowered[0];
     print_table(
         "history: 7,000 pages, 20,000 marks",
         "slice 2",
@@ -2417,6 +2559,12 @@ fn history_at_7k_pages_and_20k_marks() {
             Row::time(
                 "7,000 SetOcrText in one Tx, lowered",
                 median(lowered),
+                f64::NAN,
+                "",
+            ),
+            Row::time(
+                "  the first, each page's blocks read cold",
+                lowered_cold,
                 f64::NAN,
                 "",
             ),

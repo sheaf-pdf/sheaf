@@ -396,7 +396,8 @@ impl<'a> Walk<'a> {
         // A block of sheaf's the file held when it opened is judged as the
         // block it is, on what's drawn over its page, for a generator the
         // saved state backs; a stream that isolates content says nothing,
-        // when it holds only that.
+        // when it holds only that; recognized text's is the file's own, its
+        // words read as any stream's are.
         if let ObjKey::Base { .. } = key
             && let Ok(stream) = obj.as_stream()
             && let Some(marker) = Marker::of(&stream.dict)
@@ -413,7 +414,7 @@ impl<'a> Walk<'a> {
                     self.blocks.insert(item.id.0, key);
                     return;
                 }
-                (Marker::Gen { .. }, _) => {}
+                (Marker::Gen { .. } | Marker::Ocr(_), _) => {}
             }
         }
         match (key, item.page) {

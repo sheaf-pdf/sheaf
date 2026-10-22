@@ -1,6 +1,7 @@
 // API 0.2's marks: the kinds and fields it had. A mark of a newer kind
 // isn't shown to a 0.2 plugin (M9 decision 12), and one it updates keeps
-// what 0.2 can't say (`Adapter::update`).
+// what 0.2 can't say (`Adapter::update`). And `ocr`, whose
+// `page-text-layer` answers none.
 
 /// A mark as API 0.2 shows it; None for kinds 0.2 doesn't have, which
 /// plugins don't see until 0.3 (M9 decision 12).
@@ -152,5 +153,21 @@ impl api::storage::Host for HostState {
 
     fn settings(&mut self) -> String {
         self.storage.settings()
+    }
+}
+
+impl api::ocr::Host for HostState {
+    fn recognize(
+        &mut self,
+        page: u64,
+        options: api::ocr::OcrOptions,
+    ) -> Result<api::ocr::TextLayer, String> {
+        recognized(self, page, options)
+    }
+
+    /// None. Recognized text is the page's content, saved or not, and
+    /// `text` reads it (M10.5 slice 18); 0.2 goes in slice 20.
+    fn page_text_layer(&mut self, _page: u64) -> Option<api::ocr::TextLayer> {
+        None
     }
 }

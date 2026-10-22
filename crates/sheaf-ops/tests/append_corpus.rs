@@ -23,6 +23,14 @@
 //!   the numbers drawn again and the Bates numbers going with their
 //!   pages, the removal check finding nothing; taken off, it's a Rewrite
 //!   whose file holds and draws none of its text;
+//! - recognized text's round trip (M10.5 slice 18; ignored, as a corpus
+//!   tier): every file's pages given recognized text, a word a page, which
+//!   takes nothing out, appended where the file takes it, keep their form
+//!   check's findings and open with each word drawn once, a page whose
+//!   content can't be read counted; given a header, each page is isolated
+//!   once and keeps its text; recognized again, and then cleared, each is
+//!   a Rewrite whose file holds and draws none of the text it replaced or
+//!   cleared;
 //! - deleted means deleted, both ways, on every file (ignored, as it
 //!   takes about seven minutes; each slice's Verify and commit run it): a
 //!   page, a mark, a reply, a mark's text, another tool's comment or a
@@ -59,17 +67,22 @@ use sheaf_doc::effects::{Flags, judge};
 use sheaf_doc::forms::Finding;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::sigs::Verdict;
+use sheaf_doc::geom::Geom;
 use sheaf_doc::materialize::{
     Ask, AskAnswers, How, Note, Onto, SaveStop, Strategy, StrategyKind, Why, forced_append,
     materialize, plan, removal, save, save_rewritten, write_file,
 };
 use sheaf_doc::model::Scope;
+use sheaf_doc::text_layer::from_engine;
 use sheaf_doc::tx::fixture::{
-    add, bookmark, crop, delete, delete_annots, delete_bookmark, header as fx_header, move_pages,
-    remove_header, remove_watermark, set_header, set_watermark, update, watermark as fx_watermark,
+    add, bookmark, clear_ocr, crop, delete, delete_annots, delete_bookmark, header as fx_header,
+    move_pages, remove_header, remove_watermark, set_header, set_watermark, update,
+    watermark as fx_watermark,
 };
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, PageId, Pt};
-use sheaf_edit::{BatesSpec, HeaderFooterSpec, Margins, Rotation, Z};
+use sheaf_doc::{
+    Actor, Annot, AnnotId, AnnotKind, Box2, CommitOpts, Document, EditError, OcrWord, PageId, Pt,
+};
+use sheaf_edit::{BatesSpec, HeaderFooterSpec, Margins, Op, PageRef, Rotation, Z};
 
 mod common;
 
@@ -834,12 +847,7 @@ fn header_trip(
         traded.rotate_right(1);
         last.commit_ops(vec![move_pages(&[end], Some(first))], "reorder")
             .map_err(|e| format!("not reordered: {e}"))?;
-        let v = last.current_version();
-        let input = last.save_input(v).map_err(|e| format!("{e:#}"))?;
-        let flags = (input.saved.as_ref())
-            .map(|saved| judge(&saved.state, &input.target, &input.path_keys).flags);
-        drop(input);
-        last.abandon_save(v);
+        let flags = saved_flags(&mut last)?;
         if !flags.is_some_and(|f| f.contains(Flags::LIVE_REDRAW)) {
             return Err(format!("reordered, its flags are {flags:?}"));
         }
@@ -988,6 +996,379 @@ fn header_round_trips() {
     }
     assert!(failed.is_empty());
     assert!(left.is_empty(), "{left:?}");
+    assert_eq!(vetoes.derived, 0, "a derived object's text was found gone");
+}
+
+// ----- Recognized text's round trip -----------------------------------------
+
+/// Corpus paths, comma-separated, to run [`ocr_round_trips`] on alone
+/// (`SHEAF_OCR_ONLY=forms/irs/f1040.pdf,…`): for looking at a few files by
+/// hand. Unset, it takes every file.
+const OCR_ONLY: &str = "SHEAF_OCR_ONLY";
+
+/// The word recognized on each page, the page's number after it, and the
+/// word recognized there again.
+const OCR: &str = "SHEAFCORPUSOCR";
+const REOCR: &str = "SHEAFCORPUSREOCR";
+
+/// What recognized text's round trip through a copy of a file came to.
+#[derive(Default)]
+struct OcrTrip {
+    /// The saves that added text or a header, each an Append where the
+    /// file takes one: those that appended, and why each other was a
+    /// Rewrite, after what it added.
+    appended: usize,
+    declined: Vec<String>,
+    /// What the first recognition gave the file's pages.
+    took: Took,
+}
+
+/// What [`recognized`] gave a document's pages.
+#[derive(Default)]
+struct Took {
+    /// The word each page took, in order: none where the page shows
+    /// nothing, or its content can't be read.
+    words: Vec<Option<String>>,
+    /// Pages whose content can't be read, which took no text
+    /// (`EditError::Content`), and pages that show nothing to read it on.
+    unreadable: usize,
+    unshown: usize,
+}
+
+impl Took {
+    /// Which pages took text, in order.
+    fn pages(&self) -> Vec<bool> {
+        self.words.iter().map(Option::is_some).collect()
+    }
+}
+
+/// `text` as an engine reads it on a page shown as `geom` shows it: one
+/// word, in the view frame's points, across the page a quarter of the way
+/// down.
+fn word_on(geom: &Geom, text: &str) -> OcrWord {
+    let shown = geom.shown();
+    OcrWord {
+        text: text.into(),
+        rect: Box2 {
+            x: shown.width * 0.1,
+            y: shown.height * 0.25,
+            w: shown.width * 0.6,
+            h: shown.height * 0.02,
+        },
+        confidence: 1.0,
+    }
+}
+
+/// `doc`'s pages each given recognized text, one word ([`word_on`]):
+/// `word` and the page's number from 1, in one version. A page whose
+/// content can't be read (`EditError::Content`) is left as it was.
+fn recognized(doc: &mut Document, word: &str) -> Result<Took, String> {
+    let snap = doc.snapshot();
+    let mut tx = Document::tx_at(&snap, doc.lower_cx(Actor::User));
+    let mut took = Took::default();
+    for (n, &page) in (1..).zip(snap.state.order()) {
+        let geom = snap.geom(page);
+        let said = format!("{word}{n}");
+        let layer = from_engine(vec![word_on(&geom, &said)], &geom, "corpus");
+        if layer.words.is_empty() {
+            took.unshown += 1;
+            took.words.push(None);
+            continue;
+        }
+        let set = Op::SetOcrText {
+            page: PageRef::Id(page),
+            layer: Arc::new(layer),
+        };
+        match tx.apply(set, &NoProgress) {
+            Ok(_) => took.words.push(Some(said)),
+            Err(EditError::Content { .. }) => {
+                took.unreadable += 1;
+                took.words.push(None);
+            }
+            Err(e) => return Err(format!("page {n} not recognized: {e}")),
+        }
+    }
+    doc.commit(tx, CommitOpts::labelled("Recognize text"))
+        .map_err(|e| format!("not recognized: {e}"))?;
+    Ok(took)
+}
+
+/// What a save of `doc`'s current version would judge it does to the
+/// version saved (§7.1): None when none is. The version is left unsealed.
+fn saved_flags(doc: &mut Document) -> Result<Option<Flags>, String> {
+    let v = doc.current_version();
+    let input = doc.save_input(v).map_err(|e| format!("{e:#}"))?;
+    let flags = (input.saved.as_ref())
+        .map(|saved| judge(&saved.state, &input.target, &input.path_keys).flags);
+    drop(input);
+    doc.abandon_save(v);
+    Ok(flags)
+}
+
+/// `doc` appended to `path`, its file, having taken `what`, text or a
+/// header, as "Append anyway" appends ([`appended_or_not`]). Counted in
+/// `trip`: an Append, which keeps the file's bytes first, or why it was a
+/// Rewrite.
+fn added_and_saved(
+    doc: &mut Document,
+    path: &Path,
+    what: &str,
+    trip: &mut OcrTrip,
+) -> Result<(), String> {
+    let before = std::fs::read(path).unwrap();
+    let (strategy, _) = appended_or_not(doc, path)
+        .map_err(|stop| format!("{what} added, the save stopped: {stop}"))?;
+    match strategy {
+        Strategy::Rewrite { why } => {
+            trip.declined
+                .push(format!("{what} added, for {}", reasons(&why)));
+        }
+        _ if !std::fs::read(path).unwrap().starts_with(&before) => {
+            return Err(format!(
+                "{what} added, an Append that doesn't keep the file's bytes first"
+            ));
+        }
+        _ => trip.appended += 1,
+    }
+    Ok(())
+}
+
+/// `doc` saved to `path`, its file, as planned, having lost text: a
+/// Rewrite for the text it replaces, signatures and an XFA part's values
+/// given up when it asks, as the other tiers' removals are saved.
+fn removed_and_saved(doc: &mut Document, path: &Path) -> Result<(), String> {
+    let answers = AskAnswers {
+        break_signatures: true,
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    let report = save(doc, path, &answers, &NoProgress).map_err(|e| format!("{e}"))?;
+    let replaces = (report.why.iter()).any(|w| matches!(w, Why::ReplacesText(_)));
+    match report.strategy {
+        Some(StrategyKind::Rewrite) if replaces => Ok(()),
+        other => Err(format!("saved as {other:?} for {}", reasons(&report.why))),
+    }
+}
+
+/// What the form check finds in the file at `path` that it didn't in the
+/// file it was (`was`), but what a save told of may leave ([`told`]): an
+/// error, when it finds any.
+fn nothing_found(was: Option<&sheaf_doc::forms::Report>, path: &Path) -> Result<(), String> {
+    let Some(was) = was else {
+        return Ok(());
+    };
+    let bytes = std::fs::read(path).unwrap();
+    let now = sheaf_doc::forms::check(&bytes, None).map_err(|e| format!("check: {e:#}"))?;
+    let added: Vec<_> = (now.findings.iter())
+        .filter(|f| !was.findings.contains(f) && !told(f))
+        .collect();
+    match added.is_empty() {
+        true => Ok(()),
+        false => Err(format!("the form check finds {added:?}")),
+    }
+}
+
+/// An error unless `doc`'s file draws each word its pages `took` once
+/// ([`drawn_words`]).
+fn each_once(doc: &Document, took: &Took) -> Result<(), String> {
+    let words = drawn_words(doc);
+    for (n, word) in (1..).zip(&took.words) {
+        let Some(word) = word else {
+            continue;
+        };
+        match times(&words, word) {
+            1 => {}
+            t => return Err(format!("page {n}'s {word} is drawn {t} times")),
+        }
+    }
+    Ok(())
+}
+
+/// An error unless each of `doc`'s pages is isolated once: one stream of
+/// `q`s before its own content and one of `Q`s after, sheaf's
+/// `/SheafBlock << /K /Isolate >>`. A page whose content can't be read
+/// isn't, and took no text (`took`).
+fn isolated_once(doc: &Document, took: &Took) -> Result<(), String> {
+    let src = doc.primary();
+    for (i, word) in (0..src.page_count()).zip(&took.words) {
+        match src.blocks(i) {
+            Ok(blocks) if blocks.isolation.len() == 2 => {}
+            Ok(blocks) => {
+                return Err(format!(
+                    "page {} is isolated by {} streams",
+                    i + 1,
+                    blocks.isolation.len()
+                ));
+            }
+            Err(_) if word.is_none() => {}
+            Err(e) => return Err(format!("page {}, which took text: {e}", i + 1)),
+        }
+    }
+    Ok(())
+}
+
+/// An error when a word with `word` in it, as the pages' recognized text
+/// says it, can be read in the file at `path` ([`readable`]) or is drawn
+/// there.
+fn none_left(path: &Path, word: &str) -> Result<(), String> {
+    if readable(&std::fs::read(path).unwrap(), &written_as(word)) {
+        return Err(format!("{word} can still be read"));
+    }
+    let doc = opened(path).ok_or("the saved file doesn't open")?;
+    if (drawn_words(&doc).words()).any(|(w, _)| w.contains(word)) {
+        return Err(format!("{word} is still drawn"));
+    }
+    Ok(())
+}
+
+/// A copy of `entry`'s file whose every page is given recognized text,
+/// saved (an Append where the file takes one) and opened again; given a
+/// header, saved so and opened again; recognized again, saved as planned;
+/// then opened again and its text cleared, saved as planned: None when it
+/// doesn't open.
+fn recognized_trip(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<OcrTrip, String>> {
+    let original = std::fs::read(corpus.path(entry)).ok()?;
+    let was = sheaf_doc::forms::check(&original, None).ok();
+    let path = copy_of(entry, corpus, dir, "ocr-")?;
+    let outcome = (|| {
+        let mut doc = opened(&path)?;
+        Some(ocr_trip(&mut doc, &path, was.as_ref()))
+    })();
+    remove(&path);
+    outcome
+}
+
+/// [`recognized_trip`]'s edits and saves of `doc`, opened from `path`, the
+/// file's form check `was` before.
+fn ocr_trip(
+    doc: &mut Document,
+    path: &Path,
+    was: Option<&sheaf_doc::forms::Report>,
+) -> Result<OcrTrip, String> {
+    let mut trip = OcrTrip::default();
+    let took = recognized(doc, OCR)?;
+    if took.words.iter().all(Option::is_none) {
+        trip.took = took;
+        return Ok(trip);
+    }
+    // Text where the pages hold none adds content and takes nothing out.
+    let flags = saved_flags(doc)?;
+    let adds = flags.is_some_and(|f| {
+        f.contains(Flags::CONTENT) && !f.intersects(Flags::REMOVES | Flags::REPLACES_TEXT)
+    });
+    if !adds {
+        return Err(format!("recognized, its flags are {flags:?}"));
+    }
+    added_and_saved(doc, path, "text", &mut trip)?;
+    nothing_found(was, path).map_err(|e| format!("text added, {e}"))?;
+    let mut again = opened(path).ok_or("the saved file doesn't open")?;
+    each_once(&again, &took)?;
+    // A header over it: each page is isolated once, its text kept after
+    // its own content, as it was.
+    again
+        .commit_ops(vec![set_header(fx_header(HEADER), None)], "header")
+        .map_err(|e| format!("no header: {e}"))?;
+    added_and_saved(&mut again, path, "a header", &mut trip)?;
+    nothing_found(was, path).map_err(|e| format!("a header added, {e}"))?;
+    let mut headed = opened(path).ok_or("the headed file doesn't open")?;
+    isolated_once(&headed, &took)?;
+    each_once(&headed, &took)?;
+    // Recognized again: the text the file holds is replaced.
+    let retook = recognized(&mut headed, REOCR)?;
+    if retook.pages() != took.pages() {
+        return Err(format!(
+            "recognized again, {} pages took text, from {}",
+            retook.words.iter().flatten().count(),
+            took.words.iter().flatten().count()
+        ));
+    }
+    removed_and_saved(&mut headed, path).map_err(|e| format!("recognized again, {e}"))?;
+    nothing_found(was, path).map_err(|e| format!("recognized again, {e}"))?;
+    none_left(path, OCR).map_err(|e| format!("recognized again, {e}"))?;
+    let mut last = opened(path).ok_or("the file recognized again doesn't open")?;
+    each_once(&last, &retook)?;
+    // Cleared: a page that took no text, as its content can't be read,
+    // can't be cleared either.
+    let snap = last.snapshot();
+    let mut tx = Document::tx_at(&snap, last.lower_cx(Actor::User));
+    for ((n, &page), word) in (1..).zip(snap.state.order()).zip(&retook.words) {
+        match tx.apply(clear_ocr(&[page]), &NoProgress) {
+            Ok(_) => {}
+            Err(EditError::Content { .. }) if word.is_none() => {}
+            Err(e) => return Err(format!("page {n} not cleared: {e}")),
+        }
+    }
+    last.commit(tx, CommitOpts::labelled("Clear recognized text"))
+        .map_err(|e| format!("not cleared: {e}"))?;
+    removed_and_saved(&mut last, path).map_err(|e| format!("cleared, {e}"))?;
+    nothing_found(was, path).map_err(|e| format!("cleared, {e}"))?;
+    none_left(path, REOCR).map_err(|e| format!("cleared, {e}"))?;
+    trip.took = took;
+    Ok(trip)
+}
+
+/// Every file's pages given recognized text, one word a page, appended and
+/// opened again; given a header, appended; recognized again; and then
+/// cleared (slice 18): the text adds and takes nothing out; each page's
+/// word is drawn once, where it took one, a page whose content can't be
+/// read counted and left as it was; the header isolates each page once,
+/// its text kept after its own content; recognized again, the save is a
+/// Rewrite for the text it replaces, and the first words can't be read in
+/// the file or drawn; cleared, a Rewrite too, and so for the second; after
+/// each save the form check finds nothing the file didn't have before;
+/// and the removal check never finds a derived object's text gone. The
+/// saves that add are counted: those that appended, and why the others
+/// were Rewrites.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn ocr_round_trips() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let dir = scratch("recognized");
+    let entries = common::narrowed(OCR_ONLY, corpus.manifest().unwrap(), |e| &e.path);
+    let outcomes = each_entry(&entries, |entry| recognized_trip(entry, &corpus, &dir));
+    let (mut files, mut saves, mut appended) = (0, 0, 0);
+    let (mut untaken, mut unreadable, mut unshown) = (0, 0, 0);
+    let (mut declined, mut failed) = (BTreeMap::new(), BTreeMap::new());
+    for (entry, outcome) in entries.iter().zip(outcomes) {
+        match outcome {
+            None => {}
+            Some(Ok(trip)) => {
+                files += 1;
+                saves += trip.appended + trip.declined.len();
+                appended += trip.appended;
+                unreadable += trip.took.unreadable;
+                unshown += trip.took.unshown;
+                untaken += usize::from(trip.took.words.iter().all(Option::is_none));
+                for why in trip.declined {
+                    *declined.entry(why).or_insert(0usize) += 1;
+                }
+            }
+            Some(Err(e)) => {
+                files += 1;
+                failed.insert(entry.path.clone(), e);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let vetoes = removal::vetoes();
+    println!(
+        "{files} of {} files recognized, given a header, recognized again and cleared, {untaken} \
+         taking no text; of {saves} saves adding text or a header, {appended} appended; \
+         {unreadable} pages whose content can't be read and {unshown} that show nothing took \
+         none; {} failed; removal check vetoes: {} derived",
+        entries.len(),
+        failed.len(),
+        vetoes.derived,
+    );
+    for (why, n) in &declined {
+        println!("  a Rewrite, {why}: {n}");
+    }
+    for (path, why) in &failed {
+        println!("{path}: {why}");
+    }
+    assert!(failed.is_empty());
     assert_eq!(vetoes.derived, 0, "a derived object's text was found gone");
 }
 

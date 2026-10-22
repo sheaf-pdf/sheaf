@@ -378,18 +378,18 @@ fn isolation_is_counted_from_the_base_s_balance() {
     }
 }
 
-/// A page with an OCR layer sheaf wrote before M10.5, given new text and a
-/// watermark: the old layer is the installer's to take out, so the
-/// isolation counts the page's own streams alone, which the new layer
-/// wraps with the watermark. Both ways.
+/// A page with an OCR layer sheaf wrote before M10.5
+/// (`text_layer::fixture::legacy_page`), given new text and a watermark:
+/// the old layer is set aside with its `q`, so the isolation counts the
+/// page's own content alone, which leaves a `q` open, and the new layer's
+/// block goes after it, before the watermark's. Both ways.
 fn legacy_ocr(how: How) {
     let dir = scratch();
-    let (path, mut doc) = opened(&dir, "a.pdf", &text_file(1));
-    let page = doc.page(0).unwrap();
-    doc.commit_ops(fx::ocr([(page, layer("before"))]), "ocr")
+    let mut bytes = Vec::new();
+    crate::text_layer::fixture::legacy_page()
+        .save_to(&mut bytes)
         .unwrap();
-    save_rewritten(&mut doc, &path).unwrap();
-    let mut doc = crate::open::file(&path, None).unwrap().doc;
+    let (_, mut doc) = opened(&dir, "a.pdf", &bytes);
     let page = doc.page(0).unwrap();
     let mut ops = fx::ocr([(page, layer("after"))]);
     ops.push(watermark("DRAFT", None));
@@ -398,24 +398,26 @@ fn legacy_ocr(how: How) {
     let pdf = Pdf::load_mem(&bytes).unwrap();
     let page = pages(&pdf)[0];
     let ids = contents(&pdf, page);
-    let ocr_layer = |id: ObjectId| stream(&pdf, id).0.has(b"SheafOcrLayer");
-    let layered: Vec<bool> = ids.iter().map(|&id| ocr_layer(id)).collect();
-    assert_eq!(layered, [true, false, false, false, false, true], "{how:?}");
+    let old_layer = |id: ObjectId| {
+        let marker = crate::text_layer::fixture::LEGACY_MARKER;
+        stream(&pdf, id).0.has(marker)
+    };
+    assert!(!ids.iter().any(|&id| old_layer(id)), "{how:?}");
     let kinds: Vec<Option<Vec<u8>>> = (ids.iter())
         .map(|&id| marker(&pdf, id).map(|(k, _)| k))
         .collect();
     let isolate = Some(b"Isolate".to_vec());
     let want = [
-        None,
         isolate.clone(),
         None,
         isolate,
+        Some(b"Ocr".to_vec()),
         Some(b"Gen".to_vec()),
-        None,
     ];
     assert_eq!(kinds, want, "{how:?}");
-    assert_eq!(stream(&pdf, ids[1]).1, b"q\n");
-    assert_eq!(stream(&pdf, ids[3]).1, b"Q\n");
+    assert_eq!(stream(&pdf, ids[0]).1, b"q\n");
+    assert_eq!(stream(&pdf, ids[1]).1, crate::text_layer::fixture::BASE);
+    assert_eq!(stream(&pdf, ids[2]).1, b"Q\nQ\n");
     assert_eq!(balance(&pdf, page), Balance::default(), "{how:?}");
 }
 
@@ -553,8 +555,8 @@ fn a_page_that_cant_be_read_is_saved_without_its_watermark() {
             .unwrap();
         let report = how.save(&mut doc, &path);
         let notes: Vec<String> = report.notes.iter().map(|n| n.to_string()).collect();
-        let note = "No watermark, background, header or footer is drawn on page 2, whose \
-                    content can't be read.";
+        let note = "No recognized text, watermark, background, header or footer is drawn on \
+                    page 2, whose content can't be read.";
         assert!(notes.iter().any(|n| n == note), "{how:?}: {notes:?}");
         let pdf = Pdf::load(&path).unwrap();
         let [first, second] = pages(&pdf)[..] else {

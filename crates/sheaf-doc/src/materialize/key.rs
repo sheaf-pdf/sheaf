@@ -5,8 +5,8 @@
 //!
 //! Only the keys the emitter writes are here; the other name trees,
 //! generators' forms and filtered streams come with what writes them. A
-//! watermark's block is an [`ObjKey::Block`] by its stream's digest, as the
-//! legacy OCR layers and header and footer are until slices 17 and 18.
+//! generator's block and a layer of recognized text's are each an
+//! [`ObjKey::Block`] by its stream's digest.
 //!
 //! [`SaveRecord`]: super::SaveRecord
 
@@ -65,9 +65,9 @@ pub enum ObjKey {
     /// place among the resource's objects (1 the first after the resource
     /// itself): a font's descendant, descriptor and program.
     ResPart(ResId, u32),
-    /// A stream of content sheaf draws on a page, by its digest: a
-    /// generator's block, or an OCR layer, in its legacy shape until slice
-    /// 18. Identical ones are one object.
+    /// A block sheaf draws on a page, a stream of its own, by its digest:
+    /// a generator's, or a layer of recognized text's. Identical ones are
+    /// one object.
     Block(u128),
     /// A name tree of the catalog's `/Names` a save builds: the document
     /// scripts of forms that came in from other files beside the primary's.

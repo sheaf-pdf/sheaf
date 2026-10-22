@@ -41,6 +41,7 @@ use sheaf_edit::{BlobSel, Local, Op};
 
 use crate::annot::AnnotId;
 use crate::change::ChangeSet;
+use crate::content::{BlockId, ContentError};
 use crate::effects::StepEffects;
 use crate::forms::FieldId;
 use crate::labels::LabelSpec;
@@ -70,6 +71,8 @@ mod boxes_tests;
 mod cascade_tests;
 #[cfg(test)]
 mod header_tests;
+#[cfg(test)]
+mod ocr_tests;
 #[cfg(test)]
 mod stale_tests;
 #[cfg(test)]
@@ -358,6 +361,7 @@ pub(crate) struct Drawn {
     fields: Vec<FieldId>,
     annots: Vec<AnnotId>,
     generators: Vec<GenId>,
+    blocks: Vec<BlockId>,
 }
 
 impl Drawn {
@@ -368,6 +372,7 @@ impl Drawn {
         self.fields.reverse();
         self.annots.reverse();
         self.generators.reverse();
+        self.blocks.reverse();
         self
     }
 }
@@ -951,6 +956,20 @@ impl<'a> Lower<'a> {
         id
     }
 
+    /// A new layer's block id: the one pinned next, else a random one.
+    /// Not checked against the document's: nothing indexes them, and with
+    /// 53 random bits two never meet, as two files' never do (§4); a
+    /// layer's text is taken out by its kind, never by its id.
+    pub(crate) fn block_id(&mut self) -> BlockId {
+        let pinned = self.pins.blocks.pop();
+        let id = pinned.unwrap_or_else(|| {
+            let drawn = &self.drawn.blocks;
+            BlockId::draw(&mut fastrand::Rng::new(), |id| drawn.contains(&id))
+        });
+        self.drawn.blocks.push(id);
+        id
+    }
+
     /// A lowering read of `key`.
     pub(crate) fn read(&mut self, key: Key) {
         self.reads.insert(key);
@@ -971,6 +990,13 @@ impl<'a> Lower<'a> {
 
     pub(crate) fn invalid(&self, why: impl std::fmt::Display) -> EditError {
         EditError::invalid(self.op, why)
+    }
+
+    /// [`EditError::Content`] for `err`, about page `page`'s source page:
+    /// named as the page it is here.
+    pub(crate) fn content(&self, err: ContentError, page: PageId) -> EditError {
+        let pos = self.rec.pos_of(page).expect("a page of the document's");
+        EditError::content(self.op, pos as u32, err)
     }
 }
 
@@ -1081,13 +1107,11 @@ fn lower_op(lw: &mut Lower, op: &mut ResolvedOp) -> Result<(), EditError> {
             Ok(())
         }
         R::AdoptAnnotations { annots } => marks::adopt(lw, annots),
-        R::SetOcrText { page, layer } => {
-            content::set_ocr(lw, *page, Some(layer.clone()));
-            Ok(())
-        }
+        R::SetOcrText { page, layer } => content::set_ocr(lw, *page, layer),
         R::ClearOcrText { pages } => {
-            for &page in pages.iter() {
-                content::set_ocr(lw, page, None);
+            for (i, &page) in pages.iter().enumerate() {
+                lw.pages_done(i, pages.len())?;
+                content::clear_ocr(lw, page)?;
             }
             Ok(())
         }

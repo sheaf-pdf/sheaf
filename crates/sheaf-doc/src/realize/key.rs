@@ -326,8 +326,9 @@ impl<'a> Drawn<'a> {
         let mut on = Vec::new();
         let base = &def.base;
         // Whether the blocks of the document's generators the base holds are
-        // the generators on the page (`content::intact`), and which those
-        // blocks are, which are set aside when they aren't.
+        // the generators on the page, in place around its isolated content
+        // and the recognized text it holds (`content::intact`), and which
+        // those blocks are, which are set aside when they aren't.
         let marks = base.src.markers(base.index);
         let on_page = match inputs.generators {
             true => content::generators_on(st, page),
@@ -607,9 +608,11 @@ impl Feed for ContentStack {
     }
 }
 
+/// Its id too, which its block names.
 impl Feed for Layer {
     fn feed(&self, sum: &mut Sum) {
-        let Layer { body } = self;
+        let Layer { id, body } = self;
+        sum.feed(&id.0);
         match body {
             Static::OcrText(text) => sum.feed(&0u8).feed(text),
         };
@@ -993,18 +996,20 @@ impl Feed for Filter {
         match self {
             Filter::DropMarked(sel) => sum.feed(sel),
             Filter::DropStreams(StreamSel::SheafGen(g)) => sum.feed(&1u8).feed(&g.0),
+            Filter::DropStreams(StreamSel::SheafOcr) => sum.feed(&4u8),
             Filter::StripLegacy(LegacySel::Marked(sel)) => sum.feed(&3u8).feed(sel),
         };
     }
 }
 
-/// Fed as its [`Filter::DropMarked`]'s, 0 and 2 the tags they share with
-/// [`Filter::DropStreams`]' 1 and [`Filter::StripLegacy`]'s 3.
+/// Fed as its [`Filter::DropMarked`]'s, 0, 2 and 5 the tags they share
+/// with [`Filter::DropStreams`]' 1 and 4 and [`Filter::StripLegacy`]'s 3.
 impl Feed for MarkedSel {
     fn feed(&self, sum: &mut Sum) {
         match self {
             MarkedSel::SheafGen(g) => sum.feed(&0u8).feed(&g.0),
             MarkedSel::Pagination { kinds, origins } => sum.feed(&2u8).feed(kinds).feed(origins),
+            MarkedSel::SheafOcr => sum.feed(&5u8),
         };
     }
 }

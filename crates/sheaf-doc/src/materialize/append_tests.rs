@@ -579,7 +579,7 @@ fn a_version_bump_writes_the_catalog_with_its_version() {
     let contents = page.get(b"Contents").unwrap().as_array().unwrap();
     let layered = (contents.iter()).any(|c| {
         let stream = pdf.get_object(c.as_reference().unwrap()).unwrap();
-        stream.as_stream().unwrap().dict.has(b"SheafOcrLayer")
+        super::ocr_tests::ocr_block(&stream.as_stream().unwrap().dict).is_some()
     });
     assert!(layered);
 }

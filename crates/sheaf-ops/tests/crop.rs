@@ -25,8 +25,8 @@ use sheaf_doc::tx::fixture::{
     add, crop_to, header, ocr, rotate, set_header, set_watermark, watermark,
 };
 use sheaf_doc::{
-    Actor, Annot, AnnotId, AnnotKind, Box2, Commit, CommitOpts, DestView, Document, EditError,
-    JobKind, OcrWord, PageChars, PageId, Pt, Query, Snapshot, Stale,
+    Actor, Annot, AnnotId, AnnotKind, Base, Box2, Commit, CommitOpts, DestView, Document,
+    EditError, GroupKind, JobKind, OcrWord, PageChars, PageId, Pt, Query, Snapshot, Stale,
 };
 use sheaf_edit::{Margins, Op, PageRef, PageSel, Patch, Rotation, Sibling, Turn, Z};
 use sheaf_image::raster::{PixelFormat, content_bounds};
@@ -804,6 +804,78 @@ fn ocr_text_stays(how: How) {
             && near(got.bottom(), want.bottom()),
         "{how:?}: found at {got:?}, recognized at {want:?}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+sheaf_doc::both_ways!(
+    ocr_words_land_after_a_rotate_during_the_run,
+    ocr_words_land_after_a_rotate_during_the_run_appended: words_land_turned
+);
+
+/// Words recognized on the version an OCR run began on land on its page
+/// turned a quarter since: the run's flush, made on that version in the
+/// run's group and deciding by the page's content as the run read it,
+/// doesn't conflict with the turn, and PDFium finds each word saved `how`
+/// on the box it was recognized on, in PageSpace.
+fn words_land_turned(how: How) {
+    let dir = scratch(&format!("ocr-turned-{how:?}"));
+    let src = pdf(&dir);
+    let mut doc = open(&src);
+    let p = doc.state().order()[0];
+    let group = doc.begin_group(GroupKind::Ocr);
+    let snap = doc.snapshot();
+    // Along the square's top and below it, as the page showed upright.
+    let word = |text: &str, x: f32, y: f32| OcrWord {
+        text: text.into(),
+        rect: Box2 {
+            x,
+            y,
+            w: 100.0,
+            h: 20.0,
+        },
+        confidence: 1.0,
+    };
+    let words = vec![word("square", 300.0, 392.0), word("beneath", 300.0, 500.0)];
+    let layer = Arc::new(sheaf_doc::text_layer::from_engine(
+        words,
+        &doc.geom(p),
+        "test",
+    ));
+    doc.commit_ops(vec![rotate(&[p], Turn::Quarter)], "Rotate")
+        .unwrap();
+    let mut tx = Document::tx_at(&snap, doc.lower_cx(Actor::Job(JobKind::Ocr)));
+    tx.read_render(p, &ViewInputs::content_only());
+    tx.apply_batch(ocr([(p, layer.clone())]), &NoProgress)
+        .unwrap();
+    let opts = CommitOpts {
+        base: Base::At(snap.version),
+        stale: Stale::Validate,
+        group: Some(group),
+        ..CommitOpts::labelled("Recognize text")
+    };
+    doc.commit(tx, opts).unwrap();
+    doc.end_group(group);
+    assert_eq!(doc.geom(p).rotate, Rotation::R90);
+    assert!(Arc::ptr_eq(doc.state().ocr_text(p).unwrap(), &layer));
+    let out = dir.join("out.pdf");
+    std::fs::write(&out, how.write(&doc)).unwrap();
+    let engine = engine_on(&out);
+    let chars = PageChars::from_engine(engine_chars(&engine));
+    let near = |a: f32, b: f32| (a - b).abs() <= 2.0;
+    for word in &layer.words {
+        let hits = chars.find(&Query::literal(&word.text, false).unwrap());
+        assert_eq!(hits.len(), 1, "{how:?}: {}: {hits:?}", word.text);
+        let got = hits[0].rects.iter().copied().reduce(Box2::union).unwrap();
+        let want = word.rect;
+        assert!(
+            near(got.x, want.x)
+                && near(got.y, want.y)
+                && near(got.right(), want.right())
+                && near(got.bottom(), want.bottom()),
+            "{how:?}: {} found at {got:?}, recognized at {want:?}",
+            word.text
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

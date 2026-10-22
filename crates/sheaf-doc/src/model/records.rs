@@ -11,13 +11,15 @@
 //! sheaf draws on pages from one definition.
 //!
 //! A stack holds what something makes today: recognized text over the
-//! page, and filters that take others' watermarks and backgrounds out of
-//! its own content (Remove Watermark's): blocks of sheaf's no generator of
-//! the document's backs, and the pagination artifacts Acrobat, an older
-//! sheaf or, asked to, the author drew; and one that takes the settings an
-//! older sheaf kept out of its watermarks (Clean Copy's). Other filters,
-//! layers under it, a layer's id and kind, and placed forms come with the
-//! features that make them (slices 17–19). A generator is a header and
+//! page, a block of its own named by its id; filters that take others'
+//! watermarks and backgrounds out of its own content (Remove Watermark's):
+//! blocks of sheaf's no generator of the document's backs, and the
+//! pagination artifacts Acrobat, an older sheaf or, asked to, the author
+//! drew; filters that take the recognized text sheaf wrote in its file out
+//! (a re-OCR's and Clear's); and one that takes the settings an older
+//! sheaf kept out of its watermarks (Clean Copy's). Other filters, layers
+//! under it, a layer's kind and placed forms come with the features that
+//! make them (slice 19). A generator is a header and
 //! footer or a watermark or background, with its z, its scope, what it
 //! fixed when it was set (the date, the file and Bates numbers) and the
 //! kinds of others' artifacts it replaces. A form instance is one per
@@ -33,7 +35,7 @@ use im::Vector;
 use sheaf_edit::{Color, DestView, FontChoice, GridPos, HeaderFooterSpec, Z};
 
 use crate::annot::{Annot, AnnotId};
-use crate::content::{PagOrigin, PaginationKind, ResId};
+use crate::content::{BlockId, PagOrigin, PaginationKind, ResId};
 use crate::file::ForeignAnnot;
 use crate::forms::field::{Action, Border, Choice, Mk, Trigger};
 use crate::forms::{FieldId, FieldKind, Value};
@@ -146,8 +148,9 @@ pub struct ContentStack {
 /// What a save takes out of a page's own content (M10.5 §3.4): sheaf's
 /// blocks that no generator of the document's backs, which another file
 /// drew, or which another tool merged into a stream of its own; others'
-/// pagination artifacts, by kind and by who drew them; and the private
-/// data an older sheaf kept in what it drew.
+/// pagination artifacts, by kind and by who drew them; the recognized text
+/// sheaf wrote in the file; and the private data an older sheaf kept in
+/// what it drew.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Filter {
     /// Marked ranges, spliced out of the streams they're in (§13): each
@@ -163,6 +166,18 @@ pub enum Filter {
     /// can't be written so keeps them, said in a note. Clean Copy's
     /// (`save::export_clean_copy`).
     StripLegacy(LegacySel),
+}
+
+impl Filter {
+    /// Whether it takes out the recognized text sheaf wrote in the file
+    /// ([`StreamSel::SheafOcr`], [`MarkedSel::SheafOcr`]): replaced text,
+    /// where the others take out what's drawn (§7.1).
+    pub fn drops_ocr(&self) -> bool {
+        matches!(
+            self,
+            Filter::DropStreams(StreamSel::SheafOcr) | Filter::DropMarked(MarkedSel::SheafOcr)
+        )
+    }
 }
 
 /// What an older sheaf kept in a watermark's property list: its settings,
@@ -195,6 +210,13 @@ pub enum MarkedSel {
         kinds: BTreeSet<PaginationKind>,
         origins: BTreeSet<PagOrigin>,
     },
+    /// sheaf's OCR blocks merged into another stream: the ranges whose
+    /// property list has `/SheafOcrBlock`, whatever block it names. An op
+    /// puts it only once a splice is shown to take them out, and fails
+    /// where one refuses ([`EditError::Content`]).
+    ///
+    /// [`EditError::Content`]: crate::tx::EditError::Content
+    SheafOcr,
 }
 
 /// The streams a [`Filter::DropStreams`] leaves out.
@@ -202,11 +224,24 @@ pub enum MarkedSel {
 pub enum StreamSel {
     /// A generator's blocks: the streams whose `/SheafBlock` names it.
     SheafGen(GenId),
+    /// sheaf's recognized text in the file: its OCR blocks, each a stream
+    /// marked `/SheafBlock << /K /Ocr >>`, whatever block it names; and
+    /// the layer an older sheaf wrote, the `/SheafOcrLayer` stream after
+    /// the page's content with the `q` stream before it that its leading
+    /// `Q` ends, both or neither, as [`PageBlocks::legacy_ocr`] pairs
+    /// them, so what's left balances as it did.
+    ///
+    /// [`PageBlocks::legacy_ocr`]: crate::content::PageBlocks::legacy_ocr
+    SheafOcr,
 }
 
-/// One thing drawn over a page.
+/// One thing drawn over a page: a block of its own in the file (§11.4).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layer {
+    /// Its block's (`/SheafBlock << /B (b…) >>`): drawn when it's made,
+    /// kept by one that replaces it on the stack, saved or not, and shared
+    /// by a duplicate.
+    pub id: BlockId,
     pub body: Static,
 }
 
@@ -245,14 +280,17 @@ impl ContentStack {
         self.over.iter().find_map(|l| l.body.ocr_text())
     }
 
-    /// The stack with `text` as its recognized text, in place of what it
+    /// The layer of its recognized text, if it has some.
+    pub fn ocr_layer(&self) -> Option<&Layer> {
+        self.over.iter().find(|l| l.body.ocr_text().is_some())
+    }
+
+    /// The stack with `layer` as its recognized text, in place of what it
     /// had, or with none: the empty one when that leaves nothing.
-    pub fn with_ocr_text(&self, text: Option<Arc<TextLayer>>) -> Arc<ContentStack> {
+    pub fn with_ocr(&self, layer: Option<Layer>) -> Arc<ContentStack> {
         let mut over = self.over.clone();
         over.retain(|l| l.body.ocr_text().is_none());
-        over.extend(text.map(|text| Layer {
-            body: Static::OcrText(text),
-        }));
+        over.extend(layer);
         ContentStack {
             filters: self.filters.clone(),
             over,
@@ -262,12 +300,20 @@ impl ContentStack {
 
     /// The stack with `filter` after its filters, unless it has it.
     pub fn with_filter(&self, filter: Filter) -> Arc<ContentStack> {
-        let mut filters = self.filters.clone();
-        if !filters.contains(&filter) {
-            filters.push_back(filter);
+        self.with_filters([filter])
+    }
+
+    /// The stack with each of `filters` after its filters, in order, but
+    /// those it has.
+    pub fn with_filters(&self, filters: impl IntoIterator<Item = Filter>) -> Arc<ContentStack> {
+        let mut with = self.filters.clone();
+        for filter in filters {
+            if !with.contains(&filter) {
+                with.push_back(filter);
+            }
         }
         ContentStack {
-            filters,
+            filters: with,
             over: self.over.clone(),
         }
         .shared()

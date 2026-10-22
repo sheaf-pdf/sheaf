@@ -45,7 +45,7 @@ use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{Document, PageId, TextLayer};
 use sheaf_edit::{BlobSel, GridPos, Margins, Rotation, Turn, WatermarkContent, WatermarkSpec, Z};
 use sheaf_image::raster::{PixelFormat, Raster};
-use sheaf_ocr::job::EngineFactory;
+use sheaf_ocr::job::{EngineFactory, HAS_TEXT_MIN_CHARS};
 use sheaf_ocr::{EngineKind, OcrConfig, OcrEvent, OcrRequest, PageSource};
 use sheaf_ops::views::{ViewPages, Views};
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
@@ -868,9 +868,11 @@ fn renamed_marks_are_left_out_under_by_host() {
 /// page turned a quarter, with an unsaved header and a mark, and its
 /// duplicate, draw as the file's page does turned, without either or the
 /// page's other tool's comment, the copy from its group's engine; and their
-/// text is the file's page's.
+/// text is the file's page's. A run that skips pages with text reads both:
+/// the header, long enough to count as text, isn't read.
 #[test]
 fn ocr_reads_a_turned_page_as_it_shows_its_content_alone() {
+    const HEADER: &str = "Draft, for the board's review";
     let mut f = Form::new(1);
     let square = their_square(&mut f.pdf, "theirs", 200);
     f.set_annots(0, &[square]);
@@ -878,7 +880,7 @@ fn ocr_reads_a_turned_page_as_it_shows_its_content_alone() {
     let mut d = opened(bytes.clone(), "turned.pdf", None);
     let p0 = d.page(0).unwrap();
     let ops = vec![
-        fx::set_header(fx::header("Draft"), Some(&[p0])),
+        fx::set_header(fx::header(HEADER), Some(&[p0])),
         fx::add(p0, &every_mark_kind()[3]),
         fx::rotate(&[p0], Turn::Quarter),
         fx::duplicate(&[p0]),
@@ -908,6 +910,92 @@ fn ocr_reads_a_turned_page_as_it_shows_its_content_alone() {
         assert_eq!(differing(&pages.render(&page, WIDTH).unwrap(), &theirs), 0);
         assert_eq!(pages.text_len(&page).unwrap(), len);
     }
+    assert!(len < HAS_TEXT_MIN_CHARS && HEADER.len() >= HAS_TEXT_MIN_CHARS);
+    let req = OcrRequest {
+        pages: [p0, copy].map(|p| pages.page(p).unwrap()).into(),
+        skip_pages_with_text: true,
+        engine: EngineKind::Tesseract,
+        config: OcrConfig {
+            dpi: 150,
+            ..OcrConfig::default()
+        },
+    };
+    let factory: EngineFactory = Arc::new(|| Ok(Box::new(Blind) as _));
+    let (_job, rx) = sheaf_ocr::job::start_with(req, Arc::new(pages), factory, 1);
+    let events: Vec<OcrEvent> = block_on(rx.collect());
+    let both_read = matches!(
+        events.last(),
+        Some(OcrEvent::Finished {
+            done: 2,
+            skipped: 0,
+            failed: 0,
+            cancelled: false
+        })
+    );
+    assert!(both_read, "{events:?}");
+}
+
+/// A page's own recognized text counts as text whether it's saved or not
+/// ([`ViewPages`]): a run that skips pages with text skips a page whose
+/// text was recognized before, in this session and on the file saved and
+/// opened again, which read the same.
+#[test]
+fn ocr_skips_a_page_recognized_before_saved_or_not() {
+    const TEXT: &str = "Recognized_before_and_long_enough";
+    let mut d = opened(file(1, XrefType::CrossReferenceTable), "a.pdf", None);
+    let p0 = d.page(0).unwrap();
+    let views = views();
+    let before = ViewPages::new(views.clone(), d.snapshot());
+    let len = before.text_len(&before.page(p0).unwrap()).unwrap();
+    assert!(len < HAS_TEXT_MIN_CHARS && TEXT.len() >= HAS_TEXT_MIN_CHARS);
+    let word = sheaf_doc::OcrWord {
+        text: TEXT.into(),
+        rect: sheaf_doc::Box2 {
+            x: 72.0,
+            y: 72.0,
+            w: 300.0,
+            h: 20.0,
+        },
+        confidence: 0.9,
+    };
+    let layer = Arc::new(TextLayer {
+        words: vec![word],
+        lines: std::iter::once(0..1).collect(),
+        upright: Rotation::R0,
+        engine: "ocr".into(),
+    });
+    d.commit_ops(fx::ocr([(p0, layer)]), "OCR").unwrap();
+    let reopened = opened(saved(&d), "a.pdf", None);
+    let mut lens = Vec::new();
+    for d in [&d, &reopened] {
+        let p0 = d.page(0).unwrap();
+        let pages = ViewPages::new(views.clone(), d.snapshot());
+        lens.push(pages.text_len(&pages.page(p0).unwrap()).unwrap());
+        let req = OcrRequest {
+            pages: vec![pages.page(p0).unwrap()],
+            skip_pages_with_text: true,
+            engine: EngineKind::Tesseract,
+            config: OcrConfig {
+                dpi: 150,
+                ..OcrConfig::default()
+            },
+        };
+        let factory: EngineFactory = Arc::new(|| Ok(Box::new(Blind) as _));
+        let (_job, rx) = sheaf_ocr::job::start_with(req, Arc::new(pages), factory, 1);
+        let events: Vec<OcrEvent> = block_on(rx.collect());
+        let skipped = matches!(
+            events.last(),
+            Some(OcrEvent::Finished {
+                done: 0,
+                skipped: 1,
+                failed: 0,
+                cancelled: false
+            })
+        );
+        assert!(skipped, "{events:?}");
+    }
+    assert!(lens[0] >= len + TEXT.len(), "{lens:?}");
+    assert_eq!(lens[0], lens[1], "read the same, saved or not");
 }
 
 /// OCR in the background closes none of the screen's engines (M10.5

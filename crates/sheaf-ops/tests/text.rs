@@ -12,9 +12,11 @@
 //! document's order and hits each where it draws, a refused source's
 //! through its groups. A plugin reads each page as the file will draw it,
 //! recognized text and a header not yet saved with it, but no field's
-//! value. Over the corpus's turned or offset pages, a duplicate's
-//! characters, read from its group's realization, are its source page's
-//! within 1/16 pt.
+//! value. Recognized text sheaf saved over a page whose content leaves
+//! its graphics state changed stays on its words under a header set
+//! later, on the screen and saved (slice 18). Over the corpus's turned or
+//! offset pages, a duplicate's characters, read from its group's
+//! realization, are its source page's within 1/16 pt.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself; the
 //! corpus test skips without the corpus.
@@ -30,9 +32,11 @@ use lopdf::xref::XrefType;
 use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::Geom;
+use sheaf_doc::materialize::How;
 use sheaf_doc::realize::{EngineKey, GroupKey, ViewInputs};
 use sheaf_doc::serialize::fixture::revision_cut_out;
 use sheaf_doc::store::BlobKind;
+use sheaf_doc::text_layer::fixture as saved;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{
     Box2, DocState, Document, OcrWord, PageChars, PageId, Query, Store, TextOpts, TextService,
@@ -42,7 +46,7 @@ use sheaf_ops::text::{Found, Text};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Budget, OpenError, PageIndex, Renderer};
 
-use common::{file, opened, ready, views};
+use common::{file, opened, ready, views, written};
 
 /// A Letter page the file turns 90°, its crop box off the origin, with
 /// "Inserted upright" drawn up it: upright as the page shows.
@@ -344,15 +348,13 @@ fn literal(query: &str) -> Query {
 
 /// A search walks the document's pages in its order, each read from its
 /// own realization (§10.5): Find hits an untouched page, an inserted
-/// file's page turned 90°, a duplicate, a crop with a header not yet
-/// saved and a page with recognized text, each at its position, its
-/// matches on its visible box; a pattern finds the numbers on every page,
-/// recognized ones among them; and the header, the recognized words, and
-/// a phrase running from the page's own line onto theirs, are found on
-/// their pages under the screen's inputs, and not with the page's content
-/// alone. (A header on the recognized page reads between the two until
-/// slice 18 draws recognized text before the generators.) A source PDFium
-/// refuses is searched through its groups.
+/// file's page turned 90°, a duplicate, a crop and a page with recognized
+/// text and a header not yet saved, each at its position, its matches on
+/// its visible box; a pattern finds the numbers on every page, recognized
+/// ones among them; and the header and the recognized words, and a phrase
+/// running from the page's own line onto theirs, are found on their page
+/// under the screen's inputs, and not with the page's content alone. A
+/// source PDFium refuses is searched through its groups.
 #[test]
 fn a_search_walks_the_document_s_order() {
     let mut d = opened(file(4, XrefType::CrossReferenceTable), "a.pdf", None);
@@ -370,7 +372,7 @@ fn a_search_walks_the_document_s_order() {
     ];
     let layer = sheaf_doc::text_layer::from_engine(seen, &d.geom(p3), "test");
     let mut ops = fx::ocr([(p3, Arc::new(layer))]);
-    ops.push(fx::set_header(fx::header("Draft"), Some(&[p2])));
+    ops.push(fx::set_header(fx::header("Draft"), Some(&[p3])));
     d.commit_ops(ops, "OCR").unwrap();
     crop(&mut d, p2);
     let st = d.state().clone();
@@ -400,13 +402,13 @@ fn a_search_walks_the_document_s_order() {
     assert_eq!(sorted, want);
     // A phrase from the page's own line onto the recognized words' finds
     // them across the line break.
-    for (q, page, word) in [
-        ("draft", p2, "Draft"),
-        ("total", p3, "Total"),
-        ("3 TOTAL", p3, "3\nTotal"),
+    for (q, word) in [
+        ("draft", "Draft"),
+        ("total", "Total"),
+        ("3 TOTAL", "3\nTotal"),
     ] {
         let found = searched(&text, &st, literal(q), &screen);
-        assert_eq!(found, [(at(page), page, vec![word.to_string()])]);
+        assert_eq!(found, [(at(p3), p3, vec![word.to_string()])]);
         assert_eq!(searched(&text, &st, literal(q), &content), []);
     }
     let alone = searched(&text, &st, numbers, &content);
@@ -593,6 +595,49 @@ fn plugin_text_leaves_field_values_out() {
         let inked = (y0..y1)
             .any(|y| (x0..x1).any(|x| raster.data[((y * raster.width + x) * 4) as usize] < 128));
         assert!(inked, "{page:?}: the field's value isn't drawn");
+    }
+}
+
+sheaf_doc::both_ways!(
+    a_saved_block_over_an_unbalanced_base_stays_in_place,
+    a_saved_block_over_an_unbalanced_base_stays_in_place_appended: block_in_place
+);
+
+/// Recognized text sheaf saved over a page whose own content leaves a `q`
+/// open, moved by a `cm` (`text_layer::fixture::block_page`), with a
+/// header set over it: each word of the text and of the page's own is
+/// where PDFium found it before, within 1/16 pt, as the screen reads the
+/// page before it's saved and as PDFium reads it saved `how`, with the
+/// header's word beside them.
+fn block_in_place(how: How) {
+    let mut bytes = Vec::new();
+    saved::block_page().save_to(&mut bytes).unwrap();
+    let boxes = |chars: &PageChars| -> Vec<(String, Box2)> {
+        (chars.words().into_iter())
+            .map(|(word, _, at)| (word, at))
+            .collect()
+    };
+    let was = boxes(&pdfium_s(&bytes, 0));
+    let said: Vec<&str> = was.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(said, ["Body", "text", "Saved", "words"]);
+    let mut d = opened(bytes, "block.pdf", None);
+    let p0 = d.page(0).unwrap();
+    let header = fx::set_header(fx::header("Draft"), None);
+    d.commit_ops(vec![header], "Header").unwrap();
+    let text = Text::new(views(), Budget::Screen);
+    let screen = boxes(&read(&text, &d, p0, &ViewInputs::screen()));
+    let saved = boxes(&pdfium_s(&written(&d, how), 0));
+    for (read, now) in [("the screen", screen), ("saved", saved)] {
+        for (word, at) in &was {
+            let found = now.iter().find(|(w, _)| w == word);
+            let (_, now_at) = found.unwrap_or_else(|| panic!("{how:?}, {read}: no {word}"));
+            assert!(
+                near(*now_at, *at),
+                "{how:?}, {read}: {word} at {now_at:?}, was {at:?}"
+            );
+        }
+        let draft = now.iter().filter(|(w, _)| w == "Draft").count();
+        assert_eq!((now.len(), draft), (5, 1), "{how:?}, {read}: {now:?}");
     }
 }
 

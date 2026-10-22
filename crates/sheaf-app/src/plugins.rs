@@ -916,9 +916,10 @@ impl sheaf_plugin::OcrSource for EngineOcr {
 }
 
 /// Page images for plugins, from the pages' realizations as the file will
-/// draw them, sheaf's marks and the unsaved header included (M10.5 §14.3),
-/// in the pool's background budget at the lowest priority (behind
-/// on-screen tiles).
+/// draw them, sheaf's marks and the header, footer, watermarks and
+/// backgrounds it draws, saved or not, included (M10.5 §14.3), in the
+/// pool's background budget at the lowest priority (behind on-screen
+/// tiles).
 struct EngineRender(Views);
 
 impl sheaf_plugin::render::RenderSource for EngineRender {

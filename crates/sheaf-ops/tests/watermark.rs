@@ -1,11 +1,11 @@
 //! Watermarks as PDFium draws them from a saved file (M10.5 slice 16),
 //! saved both ways: text in its face's encoding, upright on a turned page,
 //! over a page whose content leaves its graphics state changed, over an
-//! OCR layer sheaf wrote before, and on a form's pages. Acrobat's
-//! watermark replaced by one of the document's, or taken off, leaves the
-//! rest of the page as it drew, and corpus files with others' watermarks
-//! keep the author's. A clean copy of an older sheaf's watermark draws it
-//! as it was, without the settings it kept.
+//! OCR layer sheaf wrote before (an older sheaf's too), and on a form's
+//! pages. Acrobat's watermark replaced by one of the document's, or taken
+//! off, leaves the rest of the page as it drew, and corpus files with
+//! others' watermarks keep the author's. A clean copy of an older sheaf's
+//! watermark draws it as it was, without the settings it kept.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
@@ -22,6 +22,7 @@ use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::content::{PagOrigin, PaginationKind};
 use sheaf_doc::generate::fixture as older;
 use sheaf_doc::materialize::How;
+use sheaf_doc::text_layer::fixture as saved;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{OcrWord, TextLayer};
 use sheaf_edit::{FontChoice, GridPos, Turn, WatermarkContent, WatermarkSpec, Z};
@@ -203,9 +204,12 @@ fn layer(text: &str) -> std::sync::Arc<TextLayer> {
     ))
 }
 
-/// A page with an OCR layer sheaf wrote before, given new text and a
-/// watermark, draws as the page with the watermark alone: the old layer
-/// goes, and nothing of either layer shows. Both ways.
+/// A page with an OCR layer sheaf wrote before, in an earlier save or in
+/// an older sheaf's shape (`text_layer::fixture::legacy_page`, whose own
+/// content leaves a `q` open), given new text and a watermark, draws as
+/// the page with the watermark alone: the old layer goes, the legacy one
+/// with the `q` before the page's content, and nothing of either layer
+/// shows; PDFium reads the new words and not the old. Both ways.
 #[test]
 fn a_watermark_over_an_old_ocr_layer_draws_as_over_the_page() {
     let dir = scratch("watermark-ocr");
@@ -216,20 +220,30 @@ fn a_watermark_over_an_old_ocr_layer_draws_as_over_the_page() {
     doc.commit_ops(fx::ocr([(page, layer("before"))]), "ocr")
         .unwrap();
     How::Rewritten.save(&mut doc, &path);
-    let plain = pages_pdf(&dir, "plain.pdf", &[body]);
-    let mut plain = open(&plain);
-    plain
-        .commit_ops(vec![opaque("DRAFT")], "watermark")
-        .unwrap();
-    for how in [How::Rewritten, How::Appended] {
-        let mut doc = open(&path);
-        let page = doc.page(0).unwrap();
-        let mut ops = fx::ocr([(page, layer("after"))]);
-        ops.push(opaque("DRAFT"));
-        doc.commit_ops(ops, "ocr and watermark").unwrap();
-        let got = drawn(written(&doc, how));
-        let want = drawn(written(&plain, how));
-        assert!(got.data == want.data, "{how:?}");
+    let legacy = dir.join("legacy.pdf");
+    saved::legacy_page().save(&legacy).unwrap();
+    for (old, body, was) in [(&path, body, "before"), (&legacy, saved::BASE, "Saved")] {
+        let plain = pages_pdf(&dir, "plain.pdf", &[body]);
+        let mut plain = open(&plain);
+        plain
+            .commit_ops(vec![opaque("DRAFT")], "watermark")
+            .unwrap();
+        for how in [How::Rewritten, How::Appended] {
+            let mut doc = open(old);
+            let page = doc.page(0).unwrap();
+            let mut ops = fx::ocr([(page, layer("after"))]);
+            ops.push(opaque("DRAFT"));
+            doc.commit_ops(ops, "ocr and watermark").unwrap();
+            let bytes = written(&doc, how);
+            let read: String = chars(bytes.clone()).into_iter().map(|c| c.0).collect();
+            assert!(
+                read.contains("after") && !read.contains(was),
+                "{how:?}: {read}"
+            );
+            let got = drawn(bytes);
+            let want = drawn(written(&plain, how));
+            assert!(got.data == want.data, "{was} {how:?}");
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

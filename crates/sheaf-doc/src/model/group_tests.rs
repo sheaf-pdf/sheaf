@@ -167,6 +167,24 @@ fn an_ocr_flush_lands_after_a_crop_of_its_page() {
     assert_eq!(d.geom(p0), cropped, "the crop holds");
 }
 
+/// A turn of a page during an OCR run doesn't conflict with the run's
+/// flush either: the text, recognized on the page upright, lands as it
+/// was recognized, its words in PageSpace, and the turn holds.
+#[test]
+fn an_ocr_flush_lands_after_a_turn_of_its_page() {
+    let mut d = doc();
+    let p0 = id_at(&d, 0);
+    let run = start(&mut d);
+    d.commit_ops(vec![fx::rotate(&[p0], Turn::Quarter)], "Rotate page 1")
+        .unwrap();
+    let turned = d.geom(p0);
+    assert_eq!(turned.rotate, Rotation::R90);
+    flush(&mut d, &run, &[(p0, "a")]).unwrap();
+    assert_eq!(recognized(&d), [p0]);
+    assert_eq!(**d.state().ocr_text(p0).unwrap(), *tl("a"));
+    assert_eq!(d.geom(p0), turned, "the turn holds");
+}
+
 /// A plugin call's versions around the user's edit, rolled back after the
 /// call failed: one version, the plugin's, takes back its edits alone,
 /// and its versions stay in the history.

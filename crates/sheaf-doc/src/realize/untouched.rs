@@ -12,16 +12,16 @@
 //! it as it is ([`content::intact`]: the blocks of the document's
 //! generators its file holds, by their streams' markers, the generators
 //! on it laid out alike there, which with `generators` must hold one for
-//! each, and without hold none), and, as
-//! far as the render's flags draw them ([`ViewInputs::draws_annots`] the
-//! annotations, `widgets` the form's widgets), the annotations of its base
-//! page as they are: each drawn record as read from its own entry there,
-//! none hidden or dragged, no entry left out (a record deleted, or a kind
-//! the inputs leave to the screen, as sheaf's marks under
-//! [`MarkDraw::ByHost`]), each widget's `/Parent`s as the model's field
-//! tree has them, and the form's own keys the overlay writes from the
-//! document's as its file has them. A field's value isn't one of them: no
-//! save writes it before M10 slice 9's fills.
+//! each, and without hold none, and the recognized text it holds, if any,
+//! after its isolated content), and, as far as the render's flags draw
+//! them ([`ViewInputs::draws_annots`] the annotations, `widgets` the
+//! form's widgets), the annotations of its base page as they are: each
+//! drawn record as read from its own entry there, none hidden or dragged,
+//! no entry left out (a record deleted, or a kind the inputs leave to the
+//! screen, as sheaf's marks under [`MarkDraw::ByHost`]), each widget's
+//! `/Parent`s as the model's field tree has them, and the form's own keys
+//! the overlay writes from the document's as its file has them. A field's
+//! value isn't one of them: no save writes it before M10 slice 9's fills.
 
 use std::collections::HashSet;
 
@@ -72,8 +72,9 @@ pub fn untouched(st: &DocState, page: PageId, inputs: &ViewInputs) -> bool {
 
 /// Whether a generator draws on page `page`, showing `def` with `geom`,
 /// under `inputs`, or the blocks of one its base page `facts` holds are
-/// set aside: the generators on it aren't the blocks its file holds
-/// ([`content::intact`]).
+/// set aside: the generators on it aren't the blocks its file holds, or
+/// what its file holds isn't in place around its isolated content
+/// ([`content::intact`]), the recognized text it holds after it.
 fn generated(
     st: &DocState,
     page: PageId,

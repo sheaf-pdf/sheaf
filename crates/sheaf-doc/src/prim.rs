@@ -658,7 +658,7 @@ impl HeapSize for MarkedSel {
             MarkedSel::Pagination { kinds, origins } => {
                 kinds.len() * size_of::<PaginationKind>() + origins.len() * size_of::<PagOrigin>()
             }
-            MarkedSel::SheafGen(_) => 0,
+            MarkedSel::SheafGen(_) | MarkedSel::SheafOcr => 0,
         }
     }
 }

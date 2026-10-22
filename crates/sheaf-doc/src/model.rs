@@ -5776,10 +5776,12 @@ mod tests {
         let file = saved(&mut d);
         assert_eq!(layer_texts(&d).len(), 1);
         assert!(!d.is_dirty());
-        assert!(crate::serialize::fixture::holds(
-            file.bytes(),
-            b"/SheafOcrLayer"
-        ));
+        let pdf = lopdf::Document::load_mem(file.bytes()).unwrap();
+        let block = |o: &lopdf::Object| {
+            let stream = o.as_stream().ok();
+            stream.and_then(|s| crate::materialize::ocr_tests::ocr_block(&s.dict))
+        };
+        assert_eq!(pdf.objects.values().filter_map(block).count(), 1);
         d.undo().unwrap();
         assert!(layer_texts(&d).is_empty(), "pre-OCR version");
         d.redo().unwrap();
