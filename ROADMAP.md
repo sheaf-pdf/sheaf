@@ -429,6 +429,23 @@ Builds on M11's content interpreter.
   report.
 - Optimize / reduce file size: image downsampling and recompression, font
   subsetting, object streams, removing unused objects.
+- Fast Web View (linearization): page 1's objects first, a linearization
+  dictionary and hint tables, so a viewer reading byte ranges over a
+  network shows page 1 before the rest arrives.
+  - **A writer option, beside object streams,** used by a full rewrite to
+    a new file: a "Fast Web View" choice in Save As and in Optimize, and
+    `--linearize` on `sheaf edit -o`.
+  - **Not an edit and not a transform plugin.** Any later byte change,
+    an incremental save included, voids it, so it can't live in the
+    document. sheaf's own writer already has the object graph and each
+    page's objects. A bytes-in, bytes-out plugin would have to parse and
+    write the whole file again.
+  - **No "keep it linearized" preference:** that would make every save of
+    such a file a full rewrite, which breaks signatures and gives up the
+    incremental save.
+  - **Signed files** get the usual ask, since a rewrite breaks their
+    signatures.
+  - **Checked** with `qpdf --check-linearization`.
 - PDF/A convert and validate ❓.
 - Accessibility: tags tree, reading order, alt text, accessibility checker ❓.
 - Preflight-lite (font embedding, color spaces, transparency checks) ❓.
@@ -566,6 +583,7 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | Certificate encryption ❓ | M12 follow-up |
 | Compare documents | M14 |
 | Optimize / reduce file size | M14 |
+| Fast Web View (linearize on save) | M14 |
 | Preflight / accessibility checker ❓ | M14 |
 | Batch actions / scripting | M15 |
 
