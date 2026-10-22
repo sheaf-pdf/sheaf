@@ -18,6 +18,7 @@ use crate::effects::StepEffects;
 use crate::forms::{FieldId, FileForm};
 use crate::geom::Geom;
 use crate::history::{HistoryPolicy, HistoryStats, MAX_VERSIONS};
+use crate::materialize::record::drawn_of;
 use crate::materialize::{Came, Profile, SaveInput, SaveNote, SaveRecord, SaveTarget, SavedSide};
 use crate::open::{Facts, FileAnnot, FileBody, ViewFacts};
 use crate::prim::{HeapSize, Key, Prim, Val, same};
@@ -35,30 +36,16 @@ mod state;
 
 pub use records::{
     AnnotBody, AnnotRec, Bookmark, ContentStack, CtxNeeds, FieldNode, FieldProps, Filter, Foreign,
-    FormDoc, FormInst, FormRef, GenId, GenSpec, Generator, ImageRef, LEGACY_KEYS, Layer, LegacySel,
-    Mark, MarkedSel, PageBase, PageDef, PageForm, Placed, Scope, ScriptState, Static, StreamSel,
-    Target, Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps, XfaState,
+    FormDoc, FormInst, FormRef, Frozen, GenId, GenSpec, Generator, ImageRef, LEGACY_KEYS, Layer,
+    LegacySel, Mark, MarkedSel, PageBase, PageCtx, PageDef, PageForm, Placed, Scope, ScriptState,
+    Static, StreamSel, Target, Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps,
+    XfaState,
 };
 pub use sheaf_edit::{OutlineId, PageId, SourceId, TextStyle};
-pub(crate) use state::RenderTables;
 #[cfg(test)]
 pub(crate) use state::visits;
 pub use state::{Builder, DocState, Invariant};
-
-/// Where a derived copy's pages come from (a copy sheaf made of another
-/// source's pages, a header/footer stripped): its page `k` is a copy of
-/// page `pages[k]` of `from`. A save writes each as the page it was made
-/// from, with its annotations and form fields, and the copy's content (M10
-/// bug 1). Kept beside the history, by the copy's blob
-/// ([`Document::add_derived`]), until slice 17 makes it an edit.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Derived {
-    pub from: Src,
-    pub pages: Vec<u32>,
-}
-
-/// The derived copies a document knows, by their blobs.
-pub type DerivedCopies = HashMap<BlobId, Derived>;
+pub(crate) use state::{LaidKey, RenderTables};
 
 /// A bookmark as read from a file: pre-order with depth.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,8 +179,8 @@ struct Version {
     /// ([`keys_of`]). What a save's path and the change of an undo, a redo
     /// or a jump take from it, without walking its prims.
     keys: Arc<BTreeSet<Key>>,
-    /// The sources its steps bring pages of (inserted files, derived
-    /// copies), by blob, noted once as it's made: what pruning it may free
+    /// The sources its steps bring pages of (inserted files), by blob,
+    /// noted once as it's made: what pruning it may free
     /// ([`Document::undone_source_bytes`]). The first version holds those
     /// of the versions pruned before it too.
     blobs: HashSet<BlobId>,
@@ -273,8 +260,6 @@ pub struct Snapshot {
     pub primary: Src,
     /// The primary's name ([`Document::name`]).
     pub name: Arc<str>,
-    /// The derived copies ([`Document::add_derived`]).
-    pub derived: Arc<DerivedCopies>,
     /// The document's file ([`Document::file`]), which an export never
     /// replaces.
     pub file: Option<Arc<Path>>,
@@ -415,9 +400,6 @@ pub struct Document {
     /// [`name`](Self::name)).
     primary: Src,
     name: Arc<str>,
-    /// The derived copies its edits show pages of, outside undo; shared
-    /// with its snapshots.
-    derived: Arc<DerivedCopies>,
     versions: HashMap<VersionId, Version>,
     /// What they hold, as the policy weighs it.
     held: Held,
@@ -524,7 +506,6 @@ impl Document {
             store,
             primary,
             name,
-            derived: Arc::default(),
             versions: HashMap::new(),
             held: Held::default(),
             root: VersionId(0),
@@ -597,7 +578,11 @@ impl Document {
 
     /// The opened version's state: its pages, and what `facts` say about
     /// them, each page index mapped to its page once: what the primary
-    /// file holds. Gives back what the state doesn't hold.
+    /// file holds. Its record, when it has one, says what the generators
+    /// found drew on its pages ([`drawn_of`]). Gives back what the state
+    /// doesn't hold.
+    ///
+    /// [`drawn_of`]: crate::materialize::record::drawn_of
     fn opened(&mut self, facts: Facts) -> (DocState, ViewFacts) {
         let loading = self.state().clone();
         let by_index: Vec<PageId> = loading.order().iter().copied().collect();
@@ -633,26 +618,23 @@ impl Document {
             .labels
             .map(|ranges| crate::labels::to_specs(&ranges, &by_index).into())
             .filter(|specs: &Arc<[_]>| !specs.is_empty());
-        // The watermarks and backgrounds sheaf drew, each the generator its
-        // blocks name, on the pages that hold them.
-        let watermarks: Vec<Arc<Generator>> = (facts.generators.iter())
+        // The generators sheaf drew, each the generator its blocks name, on
+        // the pages that hold them, a header's Bates numbers its blocks'.
+        let generators: Vec<Arc<Generator>> = (facts.generators.iter())
             .filter_map(|saved| saved.generator(&src, |i| at(i as usize)))
             .map(Arc::new)
             .collect();
-        let opened: Vec<GenId> = watermarks.iter().map(|g| g.id).collect();
-        // The header/footer sheaf drew, as the generator that draws it, its
-        // id drawn from the file's hash, so the same bytes open the same.
+        let opened: Vec<GenId> = generators.iter().map(|g| g.id).collect();
+        let root = self.versions.get_mut(&self.root);
+        if let Some(record) = root.and_then(|v| v.record.as_mut()) {
+            let drawn = drawn_of(&facts.generators, src.id(), |i| at(i as usize));
+            Arc::make_mut(record).drawn = Arc::new(drawn);
+        }
+        // The form: its nodes as the file numbers them, and its widgets,
+        // their ids drawn from the file's hash, so the same bytes open the
+        // same, none another annotation's.
         let hash = src.id().hash;
         let mut rng = fastrand::Rng::with_seed(hash as u64 ^ (hash >> 64) as u64);
-        let header = facts.header_footer.map(|(mut hf, scope)| {
-            hf.pages = scope.map(|ix| ix.into_iter().filter_map(at).collect());
-            Arc::new(Generator {
-                id: GenId::draw(&mut rng, |id| opened.contains(&id)),
-                spec: GenSpec::HeaderFooter(Arc::new(hf)),
-            })
-        });
-        // The form: its nodes as the file numbers them, and its widgets,
-        // their ids drawn on from the same rng, none another annotation's.
         let form = &facts.form;
         let inst = FormInst {
             src: src.id(),
@@ -712,7 +694,7 @@ impl Document {
             .outline(roots_outline, bookmarks)
             .annots(annots)
             .labels(labels)
-            .generators(header.into_iter().chain(watermarks))
+            .generators(generators)
             .opened_generators(src.id(), opened)
             .form(fields, Arc::new(form_doc))
             .build();
@@ -742,27 +724,6 @@ impl Document {
     /// into.
     pub fn store(&self) -> &Arc<Store> {
         &self.store
-    }
-
-    /// The derived copies the document's edits show pages of, by their
-    /// blobs ([`add_derived`](Self::add_derived)).
-    pub fn derived(&self) -> &DerivedCopies {
-        &self.derived
-    }
-
-    /// Note that `copy`'s pages are copies of `from`'s, as `derived` says:
-    /// the derive flows' copies, which a save writes as the pages they
-    /// were made from. Outside undo, as interning is; a copy no blob holds
-    /// any longer is forgotten.
-    pub fn add_derived(&mut self, copy: &Src, derived: Derived) {
-        let derived_copies = Arc::make_mut(&mut self.derived);
-        derived_copies.retain(|id, _| self.store.get(*id).is_some());
-        // A copy's bytes name what it's a copy of (`save::derived_copy`).
-        let was = derived_copies.insert(copy.id(), derived.clone());
-        debug_assert!(
-            was.is_none_or(|was| (was.from.id(), &was.pages) == (derived.from.id(), &derived.pages)),
-            "one blob, copies of two pages"
-        );
     }
 
     /// Where page stamp `stem`'s page is, as an edit that brings a mark
@@ -799,7 +760,6 @@ impl Document {
             state: self.state().clone(),
             primary: self.primary.clone(),
             name: self.name.clone(),
-            derived: self.derived.clone(),
             file: self.file().map(|(path, _)| path.clone()),
         }
     }
@@ -907,8 +867,14 @@ impl Document {
                 window: 0,
             };
             let path: Arc<Path> = Path::new(&*self.name).into();
-            let record = Arc::new(SaveRecord::opened(s, &self.primary, path, stamp));
-            input.saved = Some(SavedSide { state, record });
+            let record = SaveRecord {
+                drawn: Arc::new(self.drawn_at_open(&state)),
+                ..SaveRecord::opened(s, &self.primary, path, stamp)
+            };
+            input.saved = Some(SavedSide {
+                state,
+                record: Arc::new(record),
+            });
             input.path_keys = self.path_keys(s, v);
         }
         input
@@ -922,10 +888,27 @@ impl Document {
         let s = self.saved_at().context("nothing saved is kept")?;
         std::fs::write(path, &**self.primary.bytes())?;
         let stamp = FileStamp::read(path)?;
-        let record = SaveRecord::opened(s, &self.primary, path.into(), stamp);
-        let version = (self.versions.get_mut(&s)).context("the saved version is no longer kept")?;
+        let version = (self.versions.get(&s)).context("the saved version is no longer kept")?;
+        let drawn =
+            (version.state.as_ref()).map_or_else(Default::default, |st| self.drawn_at_open(st));
+        let record = SaveRecord {
+            drawn: Arc::new(drawn),
+            ..SaveRecord::opened(s, &self.primary, path.into(), stamp)
+        };
+        let version = self.versions.get_mut(&s).expect("found above");
         version.record = Some(Arc::new(record));
         Ok(())
+    }
+
+    /// What the generators the primary's open finds drew on the pages of
+    /// `st`, the state it opened as: each page showing its page of that
+    /// index ([`drawn_of`]).
+    ///
+    /// [`drawn_of`]: crate::materialize::record::drawn_of
+    #[cfg(any(test, feature = "fixtures"))]
+    fn drawn_at_open(&self, st: &DocState) -> crate::materialize::record::DrawnBlocks {
+        let src = &self.primary;
+        drawn_of(src.generators(), src.id(), |i| st.page_at(i as usize))
     }
 
     /// Version `v`'s save input, from its state, which it keeps, and the
@@ -963,7 +946,6 @@ impl Document {
             target: (self.versions[&v].state.clone())
                 .expect("a version being saved keeps its state"),
             primary: self.primary.clone(),
-            derived: self.derived.clone(),
             saved,
             path_keys,
         }
@@ -2359,7 +2341,7 @@ fn keys_of(steps: &[Step]) -> Arc<BTreeSet<Key>> {
 
 /// The sources `steps` bring pages of, by blob: what a page they put
 /// shows when it showed another source before, or nothing (an insert's
-/// file, a derived copy).
+/// file).
 fn brought(steps: &[Step]) -> HashSet<BlobId> {
     let src = |val: &Option<Val>| match val {
         Some(Val::Page(def)) => Some(def.base.src.id()),
@@ -2759,8 +2741,8 @@ mod tests {
     use std::path::PathBuf;
 
     use sheaf_edit::{
-        AnnotRef, BookmarkPatch, BookmarkRef, LabelStyle, Local, Op, PageRef, PageSel, Patch,
-        Sibling, Turn,
+        AnnotRef, BookmarkPatch, BookmarkRef, HeaderFooterSpec, LabelStyle, Local, Op, PageRef,
+        PageSel, Patch, Sibling, Turn,
     };
 
     use super::*;
@@ -3168,14 +3150,15 @@ mod tests {
             Some(Val::Generator(Arc::new(g)))
         };
         let on_no_page = {
-            let hf = crate::stamps::HeaderFooter {
-                pages: Some(vec![p1, PageId(99)]),
-                ..crate::stamps::HeaderFooter::clone(st.header_footer().unwrap())
-            };
             let g = Generator {
-                spec: GenSpec::HeaderFooter(Arc::new(hf)),
+                scope: Scope::Pages([p1, PageId(99)].into_iter().collect()),
                 ..Generator::clone(&generator)
             };
+            Some(Val::Generator(Arc::new(g)))
+        };
+        let numbering_another = {
+            let mut g = Generator::clone(&generator);
+            g.frozen.bates = Some(Arc::new(im::OrdMap::unit(p0, 7)));
             Some(Val::Generator(Arc::new(g)))
         };
         let starting_nowhere = Some(Val::Labels(
@@ -3354,6 +3337,11 @@ mod tests {
                 Key::Generator(generator.id),
                 on_no_page,
                 "is on PageId(99), which isn't a page",
+            ),
+            (
+                Key::Generator(generator.id),
+                numbering_another,
+                &format!("numbers {p0:?}, which it isn't on"),
             ),
             (
                 Key::Labels,
@@ -4795,9 +4783,9 @@ mod tests {
     }
 
     /// The header/footer sheaf drew opens as the generator that draws it,
-    /// on the pages it's on. Set again, it's the same generator, its id
-    /// kept, and a Rewrite draws it and writes its settings (M10.5 slice
-    /// 8's legacy generator).
+    /// on the pages it's on (`/SheafGenerators`, and its blocks). Set
+    /// again, it's the same generator, its id kept; a Rewrite draws it as
+    /// its blocks, which an open of the file finds again, as they are.
     #[test]
     fn the_header_footer_is_a_generator() {
         use crate::content::{PagOrigin, PaginationKind};
@@ -4818,30 +4806,24 @@ mod tests {
         let only = |d: &Document| {
             let gens: Vec<Arc<Generator>> = d.state().generators().values().cloned().collect();
             assert_eq!(gens.len(), 1);
-            (gens[0].id, gens[0].spec.header_footer().unwrap().clone())
+            gens[0].clone()
         };
-        let (id, hf) = only(&d);
-        assert_eq!(
-            (hf.texts[0].as_str(), &hf.pages),
-            ("Draft", &Some(vec![pages[2]]))
-        );
-        // The file draws it on its page: the screen draws nothing over it.
-        assert!(crate::stamps::drawn_over(d.state(), pages[2]).is_none());
+        let g = only(&d);
+        let (id, hf) = (g.id, g.spec.header_footer().unwrap().clone());
+        let on = Scope::Pages(im::OrdSet::unit(pages[2]));
+        assert_eq!((hf.texts[0].as_str(), &g.scope), ("Draft", &on));
+        assert_eq!(id, GenId(crate::generate::fixture::SHEAF_HEADER_ID));
         for text in ["Final", "Final, again"] {
-            let mut spec = hf.spec();
+            let mut spec = HeaderFooterSpec::clone(&hf);
             spec.texts[0] = text.into();
-            let set = fx::set_header(spec, hf.pages.as_deref());
+            let set = fx::set_header(spec, Some(&[pages[2]]));
             d.commit_ops(vec![set], "Header & footer").unwrap();
             assert_eq!(keys_put(&d), [Key::Generator(id)]);
-            assert_eq!(only(&d).0, id, "{text}");
+            assert_eq!(only(&d).id, id, "{text}");
         }
-        assert!(crate::stamps::drawn_over(d.state(), pages[2]).is_some());
-        let saved = crate::forms::fixture::source(crate::save::rewrite(&d.snapshot()).unwrap());
-        let (written, scope) = crate::stamps::from_catalog(saved.pdf()).unwrap();
-        assert_eq!(
-            (written.texts[0].as_str(), scope),
-            ("Final, again", Some(vec![2]))
-        );
+        let saved = saved(&mut d);
+        let catalog = saved.pdf().catalog().unwrap();
+        assert!(!catalog.has(b"SheafHeaderFooter"));
         let drawn: Vec<Vec<(PaginationKind, PagOrigin)>> = (0..3)
             .map(|i| {
                 let blocks = saved.blocks(i).unwrap();
@@ -4852,14 +4834,42 @@ mod tests {
                     .collect()
             })
             .collect();
-        let header = (PaginationKind::Header, PagOrigin::SheafLegacy);
+        let header = (PaginationKind::Header, PagOrigin::Sheaf);
         assert_eq!(drawn, [vec![], vec![], vec![header]]);
+        // Opened, it's found again on its page, drawn there as the file
+        // draws it.
+        let mut again = crate::open::start(
+            d.store().clone(),
+            saved.clone(),
+            "saved.pdf".into(),
+            None,
+            Box::new(FixedCount(10)),
+        );
+        again
+            .ready(crate::open::finish(&saved, &in_progress::NoProgress))
+            .unwrap();
+        let reopened: Vec<PageId> = again.state().order().iter().copied().collect();
+        let g = only(&again);
+        let texts = &g.spec.header_footer().unwrap().texts;
+        let on = Scope::Pages(im::OrdSet::unit(reopened[2]));
+        assert_eq!(
+            (g.id, texts[0].as_str(), &g.scope),
+            (id, "Final, again", &on)
+        );
+        let screen = crate::realize::ViewInputs::screen();
+        assert!(crate::realize::untouched(
+            again.state(),
+            reopened[2],
+            &screen
+        ));
         let remove = Op::RemoveHeaderFooter {
             pages: PageSel::All,
+            include_authored: false,
         };
-        d.commit_ops(vec![remove], "Remove header & footer")
+        again
+            .commit_ops(vec![remove], "Remove header & footer")
             .unwrap();
-        assert!(d.state().generators().is_empty());
+        assert!(again.state().generators().is_empty());
     }
 
     #[test]
@@ -5217,6 +5227,7 @@ mod tests {
             fx::set_header(fx::header("Draft"), None),
             Op::RemoveHeaderFooter {
                 pages: PageSel::All,
+                include_authored: false,
             },
         ];
         d.commit_ops(header, "header").unwrap();

@@ -759,6 +759,106 @@ const RETIRED: &[(&str, u8)] = &[
     ("workspace::Workspace::open_watermark", 16),
     ("watermark_dialog::WatermarkContext::behind", 16),
     ("watermark_dialog::WatermarkContext::current", 16),
+    // The header and footer as a legacy installer with a catalog record of
+    // its own: it is a generator (`GenSpec::HeaderFooter`), set and taken
+    // off by ops, its Bates numbers fixed at apply (`Frozen`) and kept in
+    // its blocks' `/N`, drawn at emit as `/SheafBlock` blocks and found
+    // again from `/SheafGenerators`, so nothing writes or reads
+    // `/SheafHeaderFooter`, counts Bates numbers at each save, or strips a
+    // header by hand. Its tokens and lines moved to `generate::header`
+    // (`TOKENS`, `Line` for `Placed`), and `Generator`'s `z`, `scope` and
+    // `replaces` are its fields now, so they have no row; nor has
+    // `GenSpec::same_place`, which is `Generator::same_place`.
+    ("stamps::HeaderFooter", 17),
+    ("stamps::Bates", 17),
+    ("stamps::TOKENS", 17),
+    ("stamps::PageFacts", 17),
+    ("stamps::Placed", 17),
+    ("stamps::Shared", 17),
+    ("stamps::FONT", 17),
+    ("stamps::FONT_NAME", 17),
+    ("stamps::to_content", 17),
+    ("stamps::install", 17),
+    ("stamps::drawn_over", 17),
+    ("stamps::base_draws", 17),
+    ("stamps::HEADER_FOOTER", 17),
+    ("stamps::stripped", 17),
+    ("stamps::strip", 17),
+    ("stamps::CATALOG_KEY", 17),
+    ("stamps::to_catalog", 17),
+    ("stamps::stored", 17),
+    ("stamps::from_catalog", 17),
+    ("source::Source::header_footer", 17),
+    ("source::StoredHeaderFooter", 17),
+    ("open::Facts::header_footer", 17),
+    ("model::state::DocState::header_covers", 17),
+    ("model::state::DocState::bates_of", 17),
+    ("model::state::DocState::header_pages", 17),
+    ("model::state::DocState::number_header_pages", 17),
+    ("model::state::Indexes::header", 17),
+    ("model::records::REPLACES_NONE", 17),
+    ("model::records::CtxNeeds::any", 17),
+    ("materialize::emit::Cx::bates", 17),
+    ("materialize::emit::content::header_footer", 17),
+    ("materialize::removal::watermarks_say", 17),
+    ("materialize::deps::is_watermark", 17),
+    ("materialize::deps::Deps::watermark", 17),
+    ("materialize::plan::Why::LegacyHeaderFooter", 17),
+    ("tx::content::narrow_watermarks", 17),
+    ("header_footer_dialog::today", 17),
+    ("header_footer_dialog::HeaderFooterContext::current", 17),
+    ("header_footer_dialog::HeaderFooterContext::file", 17),
+    ("header_footer_dialog::HeaderFooterContext::scope", 17),
+    ("page_insert::header_footer_op", 17),
+    ("page_insert::watermark_notice", 17),
+    ("page_insert::DocView::indexes_of", 17),
+    ("workspace::Workspace::open_header_footer", 17),
+    // Derived sources: no flow makes a copy of a page any more, so there's
+    // no copy to record, keep in the store, show in place of its page,
+    // emit as the page it was made from, or rebase a page onto. The Remove
+    // Header/Footer flow that made the last of them is an op
+    // (`RemoveHeaderFooter`, by origin). `tx::Entry` is a struct of its
+    // old `Op` variant's fields now.
+    ("derive", 17),
+    ("derive::DerivedSource", 17),
+    ("derive::DerivedSource::note", 17),
+    ("derive::DerivedSource::bases", 17),
+    ("derive::copy_of", 17),
+    ("derive::has_header", 17),
+    ("derive::strip_stamps", 17),
+    ("derive::strip_stamps_of", 17),
+    ("by_source", 17),
+    ("save::derived_copy", 17),
+    ("save::copy_form", 17),
+    ("model::Derived", 17),
+    ("model::DerivedCopies", 17),
+    ("model::Document::derived", 17),
+    ("model::Document::add_derived", 17),
+    ("model::Snapshot::derived", 17),
+    ("materialize::record::SaveInput::derived", 17),
+    ("store::MemoryKind::Derived", 17),
+    ("tx::resolve::Derive", 17),
+    ("tx::resolve::Derive::StripHeaderFooter", 17),
+    ("tx::resolve::ResolvedOp::SetPageBase", 17),
+    ("tx::Tx::set_page_base", 17),
+    ("tx::Entry::Base", 17),
+    ("tx::Entry::Op", 17),
+    ("tx::pages::set_base", 17),
+    ("tx::fixture::commit_page_base", 17),
+    ("describe::derived", 17),
+    ("materialize::emit::EmitBase::Rewrite::derived", 17),
+    ("materialize::emit::EmitBase::Saved::derived", 17),
+    ("materialize::emit::Shown::content", 17),
+    ("materialize::emit::origin", 17),
+    ("materialize::emit::annots::derived", 17),
+    ("materialize::graph::Loaded", 17),
+    ("materialize::graph::Loaded::from_pdf", 17),
+    ("materialize::copy::INHERITED", 17),
+    ("materialize::copy::inherited_attrs", 17),
+    ("materialize::copy::reserve", 17),
+    ("file::not_ours", 17),
+    ("page_insert::DocView::show_copies", 17),
+    ("page_insert::DocView::keep_copies", 17),
 ];
 
 /// Last segments only a path matches: names the new design uses again
@@ -904,10 +1004,9 @@ const QUALIFIED_ONLY: &[&str] = &[
     "apply",
     "apply_batch",
     // A plugin form's own submit and a print job's, Rec's touched keys and
-    // a form's, the tests' page rebases, and anything's version.
+    // a form's, and anything's version.
     "submit",
     "touched",
-    "rebase",
     "version",
     // Every other snapshot: the document's, a dialog's, a tracker's.
     "snapshot",
@@ -993,6 +1092,41 @@ const QUALIFIED_ONLY: &[&str] = &[
     "read",
     // Every other current thing: a theme's, a list's, the instance's.
     "current",
+    // The isolation the emitter shares between pages (`content::Shared`),
+    // a placed image or page (`ImageRef::Placed`, `PageForm::Placed`), a
+    // source's page facts (`source::PageFacts`), the OCR layer's content
+    // (`text_layer::to_content`, until slice 18), and every other strip,
+    // stripped page, stored entry and base that draws a page
+    // (`/SheafGenerators`' `stored`, a render key's `base_draws`).
+    "Shared",
+    "Placed",
+    "PageFacts",
+    "to_content",
+    "strip",
+    "stripped",
+    "stored",
+    "base_draws",
+    // Every other header, file, scope, content, check for anything and
+    // Bates spec: a fixture's header, the dialogs' and ops' files and
+    // scopes, a page's content, `Iterator::any`, `HeaderFooterSpec::bates`.
+    "header",
+    "file",
+    "scope",
+    "content",
+    "any",
+    "bates",
+    // What else is derived (the removal check's `Found::derived` and
+    // `Vetoes::derived`), a note of every other kind, the bases pages
+    // show, a page's `Base` and every `Op`, the app's toolbar `Loaded`, the
+    // exchange's `from_pdf` and `Vec::reserve`.
+    "derived",
+    "note",
+    "bases",
+    "Base",
+    "Op",
+    "Loaded",
+    "from_pdf",
+    "reserve",
 ];
 
 #[test]

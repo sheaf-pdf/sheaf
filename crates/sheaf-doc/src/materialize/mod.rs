@@ -67,6 +67,8 @@ pub mod copy;
 pub mod deps;
 pub mod emit;
 pub mod graph;
+#[cfg(test)]
+pub(crate) mod header_tests;
 pub mod key;
 pub mod number;
 #[cfg(test)]
@@ -135,6 +137,12 @@ pub struct Output {
     /// For an Append's section, what its checks found that its plan didn't
     /// judge: nothing for a whole file.
     pub unjudged: append::Unjudged,
+    /// The saved file's blocks it unlinks as live redraws, which the
+    /// removal check lets go ([`Emission::allowed_drops`]): what it judges
+    /// a Rewrite with too, as a test oracle.
+    ///
+    /// [`Emission::allowed_drops`]: emit::Emission::allowed_drops
+    pub allowed_drops: emit::AllowedDrops,
 }
 
 /// `plan`'s file of `input`, written as `target` says, `p` counting the
@@ -260,9 +268,11 @@ fn rewrite(
     let blob = src.id();
     let base = EmitBase::Rewrite {
         primary: src,
-        derived: &input.derived,
+        drawn: input.saved.as_ref().map(|s| &*s.record.drawn),
     };
     let mut e = emit::emit(&input.target, EmitScope::All, base, &plan.transforms, p)?;
+    let drawn = std::mem::take(&mut e.drawn);
+    let allowed_drops = std::mem::take(&mut e.allowed_drops);
     let crypt = match target.profile.encryption {
         Encryption::Keep => src.crypt().cloned(),
         Encryption::None => None,
@@ -443,6 +453,7 @@ fn rewrite(
             ..RootValues::of(&graph.pdf)
         }),
         tree: Arc::new(written_tree(&graph.pdf)),
+        drawn: Arc::new(drawn),
         transforms: plan.transforms.as_slice().into(),
     };
     Ok(Output {
@@ -451,6 +462,7 @@ fn rewrite(
         record,
         notes,
         unjudged: append::Unjudged::default(),
+        allowed_drops,
     })
 }
 

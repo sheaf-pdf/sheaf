@@ -634,25 +634,17 @@ fn sheafs_blocks_are_found_by_their_markers() {
 
 #[test]
 fn sheafs_own_from_before_are_legacy() {
-    // A header as save drew it, and an OCR layer.
+    // A header as an older sheaf drew it, and an OCR layer.
     let mut pdf = Pdf::with_version("1.7");
     let body = pdf.add_object(Stream::new(dictionary! {}, b"0 0 9 9 re f".to_vec()));
     let mut page = dictionary! { "Contents" => body };
-    let placed = [crate::stamps::Placed {
-        header: true,
-        text: "Head".into(),
-        x: 72.0,
-        baseline: 750.0,
-        size: 9.0,
-        width: 20.0,
-    }];
+    crate::generate::fixture::legacy_header(&mut pdf, &mut page);
     let geom = Geom::read(None, None, 0);
     let mut res = crate::content::ResObjects::default();
     let mut sink = crate::content::sink::Lopdf {
         pdf: &mut pdf,
         res: &mut res,
     };
-    crate::stamps::install(&mut sink, &mut page, &placed, [0; 3], &geom);
     let words = vec![OcrWord {
         text: "word".into(),
         rect: Box2 {

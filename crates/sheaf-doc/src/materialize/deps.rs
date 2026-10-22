@@ -6,7 +6,7 @@
 //!
 //! | A path key | changes the objects of |
 //! |---|---|
-//! | `Order` | the page tree's nodes it changed, and the pages put under another node ([`tree::spliced`]); the page labels, and the catalog when there are none now or were none; every connector (its `/Dest` is the next in order); each page the header and footer draws on (its numbers count the pages), and the catalog when it's on some pages (their places); a link to a source page another page, or none, is written as now, and its page |
+//! | `Order` | the page tree's nodes it changed, and the pages put under another node ([`tree::spliced`]); the page labels, and the catalog when there are none now or were none; every connector (its `/Dest` is the next in order); each page a generator whose tokens read where a page is (a header's page number, count or label) lays out otherwise than its block in the saved file (`SaveRecord::drawn`); a link to a source page another page, or none, is written as now, and its page |
 //! | `Page(p)` | `p`'s dictionary; when its base page or copy changed, its annotations (they're copied as its), each bookmark to it (it may be written at another number) and each link to a source page another page, or none, is written as now |
 //! | `Geom(p)` | `p`'s dictionary; every connector of each group with one on `p` (a group's order is how its connectors show on their pages) |
 //! | `PageAnnots(p)` | `p`'s dictionary |
@@ -14,8 +14,8 @@
 //! | `Field(f)` | `f`'s dictionary, its widgets, every node above it (a node left with no widgets isn't written, nor the parents it empties); the form's dictionary when `f` came, went, moved or shows other widgets (its `/Fields` and `/CO` list what's written); the pages its widgets are on when one was its object and isn't, or the other way round |
 //! | `Form` | the form's dictionary; when the files the forms come from changed, every field and widget of the other files (their fonts' renames in `/DR`), their document scripts and the catalog; when `/DA` or `/Q` changed, the other files' roots (theirs are pushed down) |
 //! | `Bookmark(b)`, `OutlineRoots` | each bookmark whose item or place in the tree (`/Parent`, `/Prev`, `/Next`, `/First`, `/Last`, `/Count`) changed, and the outline's root when its own did |
-//! | `Labels` | the page labels; the catalog when they came or went; the header and footer's pages |
-//! | `Generator(g)` | a watermark's: what the generators are (`/SheafGenerators`), the catalog when the first came or the last went, and the pages it's on then or now (only those it came onto or went from, when nothing else of it changed); the header and footer's: its pages, then and now, and the catalog, which holds its settings |
+//! | `Labels` | the page labels; the catalog when they came or went; each page a generator whose tokens read a page's label lays out otherwise than its block in the saved file |
+//! | `Generator(g)` | what the generators are (`/SheafGenerators`), the catalog when the first came or the last went, and the pages it's on then or now (only those it came onto or went from, or whose Bates number it changed, when nothing else of it changed) |
 //!
 //! And beside the path: the form's dictionary for a save transform the file
 //! hasn't had (every field, for `DropXfa`'s tooltips), and the catalog for
@@ -53,9 +53,10 @@ use super::copy;
 use super::emit::{self, annots, tree};
 use super::key::{NameTree, ObjKey, Part};
 use super::plan::SaveTransform;
-use super::record::{CATALOG_OWNED, SaveInput, SavedSide};
+use super::record::{CATALOG_OWNED, DrawnBlocks, SaveInput, SavedSide};
 use crate::annot::{AnnotId, AnnotKind};
-use crate::model::{AnnotBody, AnnotRec, DocState, Generator, OutlineId, PageId, WatermarkGen};
+use crate::content::GenId;
+use crate::model::{AnnotBody, AnnotRec, CtxNeeds, DocState, Frozen, Generator, OutlineId, PageId};
 use crate::prim::{Key, same};
 use crate::store::{BlobId, Src};
 
@@ -111,8 +112,7 @@ pub fn closure(
     };
     let changed =
         (input.path_keys.iter()).filter(|key| !same(was.get(key).as_ref(), now.get(key).as_ref()));
-    let (mut order, mut form, mut outline, mut labels, mut header) =
-        (false, false, false, false, false);
+    let (mut order, mut form, mut outline, mut labels) = (false, false, false, false);
     // Pages that show another page, or another copy, than they did.
     let mut rebased = BTreeSet::new();
     for key in changed {
@@ -142,12 +142,7 @@ pub fn closure(
             Key::Labels => labels = true,
             Key::Generator(g) => {
                 let generator = |st: &'_ DocState| st.generators().get(&g).cloned();
-                match (generator(was), generator(now)) {
-                    (then, after) if is_watermark(&then) || is_watermark(&after) => {
-                        cx.watermark(then.as_deref(), after.as_deref());
-                    }
-                    _ => header = true,
-                }
+                cx.generator(generator(was).as_deref(), generator(now).as_deref());
             }
         }
     }
@@ -157,7 +152,7 @@ pub fn closure(
     // is written at one of its own: what names it by number is written
     // again, as for a page that shows another page.
     let primary = input.primary.id();
-    let shown = emit::shown(now, &input.derived);
+    let shown = emit::shown(now);
     let owned: HashMap<PageId, ObjectId> =
         emit::owned_pages(now.order().iter().copied(), &shown, primary)
             .into_iter()
@@ -196,20 +191,8 @@ pub fn closure(
         cx.links(input, &renumbered);
     }
     cx.retargeted(&rebased);
-    // The catalog holds the header and footer's settings, its pages by
-    // their places.
-    let placed = order && now.header_footer().is_some_and(|hf| hf.pages.is_some());
-    if header || placed {
-        cx.keys.insert(ObjKey::Catalog);
-    }
-    if header || ((order || labels) && now.header_footer().is_some()) {
-        for st in [was, now] {
-            for (id, _, _) in st.pages() {
-                if crate::stamps::drawn_over(st, id).is_some() {
-                    cx.keys.insert(ObjKey::Page(id));
-                }
-            }
-        }
+    if order || labels {
+        cx.live(order, labels, &record.drawn);
     }
     if form {
         cx.form(input);
@@ -620,41 +603,84 @@ impl<'a> Deps<'a> {
         }
     }
 
-    /// What a watermark that was `then` and is `after` changes: what the
+    /// What a generator that was `then` and is `after` changes: what the
     /// generators are, the catalog when the first came or the last went,
     /// and the pages it's drawn on then or now. Only those it came onto or
-    /// went from when nothing else of it changed: on the others it draws
-    /// what it drew, which only their boxes change (`Geom`).
-    fn watermark(&mut self, then: Option<&Generator>, after: Option<&Generator>) {
+    /// went from, or whose Bates number it changed, when nothing else of it
+    /// changed: on the others it draws what it drew, which only their boxes
+    /// (`Geom`) and, for live tokens, their places and labels change
+    /// ([`live`](Self::live)).
+    fn generator(&mut self, then: Option<&Generator>, after: Option<&Generator>) {
         self.keys.insert(ObjKey::Generators);
-        let any = |st: &DocState| (st.generators().values()).any(|g| g.spec.watermark().is_some());
-        if any(self.was) != any(self.now) {
+        if self.was.generators().is_empty() != self.now.generators().is_empty() {
             self.keys.insert(ObjKey::Catalog);
         }
         let (was, now) = (self.was, self.now);
         let covers = |g: Option<&Generator>, st: &DocState, p: PageId| {
             g.is_some_and(|g| st.def(p).is_some() && g.covers(p))
         };
-        let drawn =
-            (then.and_then(|g| g.spec.watermark())).zip(after.and_then(|g| g.spec.watermark()));
-        let rescoped = match drawn {
+        let rescoped = match then.zip(after) {
             Some((a, b)) => {
-                let a = WatermarkGen {
-                    scope: b.scope.clone(),
-                    ..WatermarkGen::clone(a)
+                let frozen = Frozen {
+                    bates: b.frozen.bates.clone(),
+                    ..a.frozen.clone()
                 };
-                a == **b
+                let a = Generator {
+                    scope: b.scope.clone(),
+                    frozen,
+                    ..Generator::clone(a)
+                };
+                a == *b
             }
             None => false,
         };
+        let number = |g: Option<&Generator>, p: PageId| g.and_then(|g| g.frozen.bates_number(p));
         let pages: Vec<PageId> = (now.pages())
             .map(|(p, _, _)| p)
             .filter(|&p| match rescoped {
-                true => covers(then, was, p) != covers(after, now, p),
+                true => {
+                    covers(then, was, p) != covers(after, now, p)
+                        || number(then, p) != number(after, p)
+                }
                 false => covers(then, was, p) || covers(after, now, p),
             })
             .collect();
         self.keys.extend(pages.into_iter().map(ObjKey::Page));
+    }
+
+    /// When the order (`order`) or the labels (`labels`) changed, the
+    /// pages a generator whose tokens read what changed (its place, the
+    /// count or its label, or its label alone) lays out otherwise now than
+    /// its block there in the saved file is, as `drawn` says it, or than
+    /// none: its live tokens drawn again (§7.2). Pages alike in what its
+    /// layout reads of them ([`layout_reads`]) are laid out once.
+    ///
+    /// [`layout_reads`]: crate::realize::layout_reads
+    fn live(&mut self, order: bool, labels: bool, drawn: &DrawnBlocks) {
+        let now = self.now;
+        let reads = |needs: CtxNeeds| (order && needs.order()) || (labels && needs.label);
+        let live: Vec<(&Generator, CtxNeeds)> = (now.generators().values())
+            .map(|g| (&**g, g.needs()))
+            .filter(|&(_, needs)| reads(needs))
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        let mut laid: HashMap<(GenId, u128), Option<u128>> = HashMap::new();
+        for (pos, (p, _, geom)) in now.pages().enumerate() {
+            let changed = (live.iter())
+                .filter(|(g, _)| g.covers(p))
+                .any(|&(g, needs)| {
+                    let ctx = crate::generate::page_ctx(now, g, p, pos, geom);
+                    let reads = crate::realize::layout_reads(needs, &ctx);
+                    let layout = *(laid.entry((g.id, reads)))
+                        .or_insert_with(|| emit::content::laid_digest(now, g, p, &ctx));
+                    layout.is_none() || drawn.get(&(p, g.id)).map(|b| b.layout) != layout
+                });
+            if changed {
+                self.keys.insert(ObjKey::Page(p));
+            }
+        }
     }
 
     /// Field `f`'s object, and what depends on it.
@@ -801,8 +827,8 @@ impl<'a> Deps<'a> {
     /// file has (a link's action, a destination of its own) may name one
     /// too: they're copied again.
     fn links(&mut self, input: &SaveInput, renumbered: &BTreeSet<PageId>) {
-        let shown = emit::shown(self.now, &input.derived);
-        let then = emit::written_pages(self.was, &emit::shown(self.was, &input.derived));
+        let shown = emit::shown(self.now);
+        let then = emit::written_pages(self.was, &emit::shown(self.was));
         let now = emit::written_pages(self.now, &shown);
         let gone: HashSet<(BlobId, ObjectId)> = (then.iter().chain(&now))
             .filter(|&(at, page)| {
@@ -1047,11 +1073,6 @@ impl<'a> Deps<'a> {
         }
         None
     }
-}
-
-/// Whether `g` is a watermark or background.
-fn is_watermark(g: &Option<std::sync::Arc<Generator>>) -> bool {
-    g.as_ref().is_some_and(|g| g.spec.watermark().is_some())
 }
 
 /// The widget field `f` of `st` is written as one object with, as the

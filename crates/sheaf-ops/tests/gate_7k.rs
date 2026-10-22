@@ -56,17 +56,17 @@
 //! every page's content classified cold (`Source::blocks`), with neither a
 //! baseline nor a gate, and a Rewrite of 20,000 of sheaf's marks, some of
 //! them text, beside the writer from before marks were drawn through the
-//! content toolkit, with no gate; from slice 6 Bates' apply classifies
-//! every page, cold, to find an old header to strip. Slice 7's are the
-//! incremental save of one mark and the Rewrite again on an AES-256 copy
-//! of the synthetic and heavy fixtures, made by lopdf beside them, with
-//! neither a baseline nor a gate. Slice 8's is 1,000 mark adds on the
-//! heavy 7k, whose annotations and widgets are records from then on,
-//! beside slice 1's AnnotAdd and the same adds on blank pages, so an add
-//! that scans the records shows. Slice 9's are the Rewrite by
-//! `materialize`, from its plan and with its post-conditions, in a process
-//! of its own on the synthetic and heavy fixtures, beside slice 8's
-//! writer's numbers ([`WriterBaseline`], taken from that slice's build,
+//! content toolkit, with no gate; from slice 6 until slice 17, which made
+//! it one op, Bates' apply classified every page, cold, to find an old
+//! header to strip. Slice 7's are the incremental save of one mark and the
+//! Rewrite again on an AES-256 copy of the synthetic and heavy fixtures,
+//! made by lopdf beside them, with neither a baseline nor a gate. Slice 8's
+//! is 1,000 mark adds on the heavy 7k, whose annotations and widgets are
+//! records from then on, beside slice 1's AnnotAdd and the same adds on
+//! blank pages, so an add that scans the records shows. Slice 9's are the
+//! Rewrite by `materialize`, from its plan and with its post-conditions, in
+//! a process of its own on the synthetic and heavy fixtures, beside slice
+//! 8's writer's numbers ([`WriterBaseline`], taken from that slice's build,
 //! since slice 9 deleted the writer), and alone in
 //! `rewrites_on_the_synthetic_and_heavy_7k`; and, with neither a baseline
 //! nor a gate, the opened file's record (part of ready, timed apart), and
@@ -90,7 +90,7 @@
 //! engine opened and rendered cold, each run a new edit ([`drawn`]); the
 //! screen's engines after the first page of each of 220 groups is drawn,
 //! weighed and by the RSS added; and the thumbnail strip after a crop of
-//! every page and the legacy header, every page's preview drawn through a
+//! every page and a header, every page's preview drawn through a
 //! pool of its own, two panes' groups pinned, with each group's assembly
 //! in the time. Slice 14's are Find over every page of the synthetic and
 //! the heavy through the text service, as opened and with a header on
@@ -115,23 +115,35 @@
 //! baseline nor a gate, and the census of that Rewrite's pages
 //! ([`Census`]); and from slice 16 the thumbnail strip draws a watermark on
 //! every page beside the crop and the header, as the gate table's row
-//! says. From slice 13 Bates' apply opens no engine on the copies it
-//! makes, as the app's doesn't (its render worker opens one when a page of
-//! a copy is first drawn), where its row counted one before. So far slice
-//! 1's history bench, slice 3's geometry walk, slice 4's ready,
+//! says. Slice 17's are the census of the Rewrite that draws Bates
+//! numbers on every page, and proposal 8's verdict, live page numbers
+//! kept: "Page n of N" set on every page and a page drawn, then saved to
+//! the work copy and every page moved by one move: the Append that writes
+//! it as the app saves (a live redraw) and the section it writes, in the
+//! session that saved it and on the file opened again, a moved page drawn,
+//! and the move undone and one page deleted, a page drawn, in the session
+//! and on the file opened again, each draw realized, opened and drawn at
+//! 1024 px in a group none drew before ([`LiveRow`]). From slice 17 Bates'
+//! apply is one op, which makes no copy and reads no page's content. So
+//! far slice 1's history bench, slice 3's geometry walk, slice 4's ready,
 //! slice 5's ready on 20,000 of sheaf's marks, slice 8's mark adds, slice
 //! 9's Rewrite, slice 10's incremental save on the scanned 7k
-//! ([`INCREMENTAL_GATE_MS`]), slice 11's check of a delete on every fixture
-//! ([`CHECK_GATE`]), slice 12's snapshot ([`SNAPSHOT_GATE`]), flat pushes
-//! ([`FLAT`]) and 200 OCR versions within the history budget
-//! ([`HISTORY_BUDGET`]), and slice 13's realize + open + render on the
-//! synthetic and heavy ([`REALIZE_GATE_SYNTHETIC`],
+//! ([`INCREMENTAL_GATE_MS`]), slice 11's check of a
+//! delete on every fixture ([`CHECK_GATE`]), slice 12's snapshot
+//! ([`SNAPSHOT_GATE`]), flat pushes ([`FLAT`]) and 200 OCR versions within
+//! the history budget ([`HISTORY_BUDGET`]), and slice 13's realize + open +
+//! render on the synthetic and heavy ([`REALIZE_GATE_SYNTHETIC`],
 //! [`REALIZE_GATE_HEAVY`]), engines after 200 groups and the thumbnail
 //! strip's memory ([`SCREEN_BYTES`]) and its rate ([`STRIP_GATE`]), and
 //! slice 15's crop of every page, as made and validated after a delete, on
 //! every fixture ([`CROP_GATE`]), and slice 16's census of a watermark and
-//! an image background on every page, on every fixture, assert, after
-//! their tables print.
+//! an image background on every page, on every fixture, and slice 17's
+//! Bates apply on every fixture ([`BATES_GATE`]) with its Rewrite's one
+//! font, and on every fixture the live-token reorder's Append within
+//! [`REORDER_GATE`] and its section within [`REORDER_SECTION_MB`], and
+//! each page drawn within the realize gate ([`LiveRows`]), assert, after
+//! their tables print; but the rows that miss, Greg's accepted misses
+//! ([`ACCEPTED_MISSES`]), only when [`PROPOSAL_8`] is set.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -147,19 +159,18 @@ use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materia
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
 use sheaf_doc::realize::{EngineKey, GROUP, Realizer};
 use sheaf_doc::serialize::fixture::{USER, encrypt_dict, rc4_aes_128_and_aes_256};
-use sheaf_doc::stamps::{Bates, HeaderFooter};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::{
     add, crop, delete, duplicate, header, insert, move_pages, ocr, rotate, set_header,
     set_watermark, watermark,
 };
 use sheaf_doc::{
-    Actor, Annot, AnnotId, AnnotKind, Base, Blob, Box2, CommitOpts, Derive, Document, GroupKind,
-    JobKind, OcrWord, PageId, Query, Snapshot, Src, Stale, Store, TextLayer, ViewInputs,
+    Actor, Annot, AnnotId, AnnotKind, Base, Blob, Box2, CommitOpts, Document, GroupKind, JobKind,
+    OcrWord, PageId, Query, Snapshot, Src, Stale, Store, TextLayer, ViewInputs,
 };
 use sheaf_edit::{
-    Anchor, BlobSel, GridPos, Margins, Op, PageRef, Rotation, Style, Turn, WatermarkContent,
-    WatermarkSpec, Z,
+    Anchor, BatesSpec, BlobSel, GridPos, HeaderFooterSpec, Margins, Op, PageRef, Rotation, Style,
+    Turn, WatermarkContent, WatermarkSpec, Z,
 };
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
@@ -209,6 +220,132 @@ const STRIP_GATE: f64 = 310.0;
 /// A crop of every page, made and committed as the Crop Pages dialog
 /// commits it, at most (slice 15), on every fixture.
 const CROP_GATE: Duration = Duration::from_millis(200);
+/// Bates numbers applied to every page, one op on the file opened afresh,
+/// at most (slice 17), on every fixture.
+const BATES_GATE: Duration = Duration::from_millis(50);
+/// Proposal 8's gate (slice 17): after a save, a reorder of every page of
+/// the heavy 7k under "Page n of N" appends at most this many megabytes,
+/// planned and written in at most [`REORDER_GATE`].
+const REORDER_SECTION_MB: f64 = 8.0;
+const REORDER_GATE: Duration = Duration::from_secs(1);
+/// Set to assert the rows of proposal 8's gate and the everyday triggers
+/// of a live redraw that miss ([`ACCEPTED_MISSES`]). Greg kept page
+/// numbers live and accepted the misses (2026-10-22): the first page
+/// drawn of a group none drew before realizes every page of it, each laid
+/// out anew (on the heavy 12–20 ms of emission, 2 ms of assembly, 8–12 ms
+/// of PDFium's open and 9–11 ms of its cold render), which a lead
+/// window of a few pages (option A) would cut; and on the file opened
+/// again the reorder's Append classifies and rebuilds every page's content
+/// cold. Option A is to revisit.
+const PROPOSAL_8: &str = "SHEAF_GATE_PROPOSAL_8";
+/// What a missed row's gate says.
+const ACCEPTED: &str = "accepted miss (Greg, 2026-10-22); option A, a lead window, to revisit";
+
+/// Proposal 8's rows and the everyday triggers of a live redraw (slice
+/// 17's follow-up): a page drawn after "Page n of N" is set on every page,
+/// unsaved; the Append of every page moved after a save, and a moved page
+/// drawn; a page drawn after one is deleted after the save; and on the
+/// file opened again, the same move's Append, and a page drawn after one
+/// is deleted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LiveRow {
+    SetDrawn,
+    Reorder,
+    MovedDrawn,
+    DeletedDrawn,
+    ReopenedReorder,
+    ReopenedDeletedDrawn,
+}
+
+/// The [`LiveRow`]s that miss their gates, measured on a quiet machine
+/// after slice 17's follow-up (a header laid out once a page for every
+/// version, deltas without the frame): every draw on the synthetic and
+/// the heavy (19–27 ms against 15, 32–42 ms against 25), and the Append
+/// on the file opened again (0.89–1.11 s on the synthetic, either side of
+/// 1 s, and 1.57 s on the heavy); asserted only when [`PROPOSAL_8`] is
+/// set. The scanned has no realize gate, and its Appends pass (the one on
+/// the file opened again in 0.89–0.97 s).
+const ACCEPTED_MISSES: &[(Kind, LiveRow)] = &[
+    (Kind::Synthetic, LiveRow::SetDrawn),
+    (Kind::Synthetic, LiveRow::MovedDrawn),
+    (Kind::Synthetic, LiveRow::DeletedDrawn),
+    (Kind::Synthetic, LiveRow::ReopenedReorder),
+    (Kind::Synthetic, LiveRow::ReopenedDeletedDrawn),
+    (Kind::Heavy, LiveRow::SetDrawn),
+    (Kind::Heavy, LiveRow::MovedDrawn),
+    (Kind::Heavy, LiveRow::DeletedDrawn),
+    (Kind::Heavy, LiveRow::ReopenedReorder),
+    (Kind::Heavy, LiveRow::ReopenedDeletedDrawn),
+];
+
+/// The gates of `kind`'s [`LiveRow`]s: a page drawn within the fixture's
+/// realize gate (none on the scanned), an Append within [`REORDER_GATE`],
+/// each asserted, but the [`ACCEPTED_MISSES`] only when [`PROPOSAL_8`] is
+/// set.
+#[derive(Clone, Copy)]
+struct LiveRows {
+    kind: Kind,
+}
+
+impl LiveRows {
+    fn of(kind: Kind) -> LiveRows {
+        LiveRows { kind }
+    }
+
+    /// Whether `row` misses on this fixture, Greg's accepted miss.
+    fn missed(self, row: LiveRow) -> bool {
+        ACCEPTED_MISSES.contains(&(self.kind, row))
+    }
+
+    /// The gate a draw's row says.
+    fn draw(self, row: LiveRow) -> String {
+        match self.kind.realize_gate() {
+            None => String::new(),
+            Some(gate) => self.says(row, format!("< {} ms", gate.as_millis())),
+        }
+    }
+
+    /// The gate an Append's row says.
+    fn append(self, row: LiveRow) -> String {
+        self.says(row, format!("≤ {} s", REORDER_GATE.as_secs()))
+    }
+
+    fn says(self, row: LiveRow, gate: String) -> String {
+        match self.missed(row) {
+            true => format!("{gate}, {ACCEPTED}, asserted with {PROPOSAL_8}"),
+            false => format!("{gate}, asserted"),
+        }
+    }
+
+    /// Whether `row` is asserted in this run.
+    fn asserted(self, row: LiveRow) -> bool {
+        !self.missed(row) || std::env::var_os(PROPOSAL_8).is_some()
+    }
+
+    /// `row`, a page drawn in `took`, within the fixture's realize gate.
+    fn assert_draw(self, row: LiveRow, took: Duration) {
+        if let Some(gate) = self.kind.realize_gate()
+            && self.asserted(row)
+        {
+            assert!(
+                took < gate,
+                "{row:?}: a page took {took:?} to draw, over {gate:?}"
+            );
+        }
+    }
+
+    /// `row`, an Append planned and written in `took`, within
+    /// [`REORDER_GATE`].
+    fn assert_append(self, row: LiveRow, took: Duration) {
+        if self.asserted(row) {
+            assert!(
+                took <= REORDER_GATE,
+                "{row:?}: the Append of every page moved under \"Page n of N\" took {took:?}, \
+                 over {REORDER_GATE:?}"
+            );
+        }
+    }
+}
 /// The crop the crop rows make of every page: half an inch a side.
 const HALF_INCH: Margins = Margins {
     top: 36.0,
@@ -1106,26 +1243,22 @@ fn gates(kind: Kind) {
     ));
 
     // The thumbnail strip (slice 13's gate): every page cropped, a
-    // watermark on every page (slice 16) and the legacy header on all of
-    // them, then every page's preview in order as the strip draws them,
-    // through a pool of its own whose two panes pin their groups (12 and
-    // 13, 26 and 27, as slice 2 measured it). Each group's overlay is
-    // realized when its first page is drawn, by a realizer that has seen
-    // nothing, so its assembly is in the time. The screen's engines are
-    // weighed after each group.
+    // watermark on every page (slice 16) and a header on all of them, its
+    // blocks laid out on each (slice 17), then every page's preview in
+    // order as the strip draws them, through a pool of its own whose two
+    // panes pin their groups (12 and 13, 26 and 27, as slice 2 measured
+    // it). Each group's overlay is realized when its first page is drawn,
+    // by a realizer that has seen nothing, so its assembly is in the time.
+    // The screen's engines are weighed after each group.
     let snap = doc.snapshot();
     cropped(&mut doc, &snap, &ids, half_inch);
     drop(snap);
     doc.commit_ops(vec![every_watermark()], "Watermark")
         .unwrap();
-    let mut texts: [String; 6] = Default::default();
-    texts[1] = "Draft".into();
-    texts[4] = "Page <<1>> of <<N>>".into();
-    let legacy = HeaderFooter {
-        texts,
-        ..Default::default()
-    };
-    set_header_footer(&mut doc, &legacy);
+    let mut paged = header("");
+    paged.texts[1] = "Draft".into();
+    paged.texts[4] = "Page <<1>> of <<N>>".into();
+    set_header_footer(&mut doc, &paged);
     let pool = EnginePool::new().unwrap();
     let views = Views::new(pool.clone());
     for groups in [[12, 13], [26, 27]] {
@@ -1181,18 +1314,13 @@ fn gates(kind: Kind) {
 
     // Bates numbers on every page, as the app applies them, and the
     // Rewrite that draws them. Each apply is a first one, on the file
-    // opened afresh (untimed): it classifies every page cold, where
-    // another on the same document would find their blocks known.
-    let mut texts: [String; 6] = Default::default();
-    texts[5] = "<<bates>>".into();
-    let bates = HeaderFooter {
-        texts,
-        bates: Some(Bates {
-            prefix: "GATE".into(),
-            ..Default::default()
-        }),
+    // opened afresh (untimed).
+    let mut bates = header("");
+    bates.texts[5] = "<<bates>>".into();
+    bates.bates = Some(BatesSpec {
+        prefix: "GATE".into(),
         ..Default::default()
-    };
+    });
     let (apply, _) = measure(RUNS, || {
         let mut fresh = sheaf_doc::open::file(&work, None).unwrap().doc;
         let (t, ()) = timed(|| set_header_footer(&mut fresh, &bates));
@@ -1204,18 +1332,156 @@ fn gates(kind: Kind) {
     let (drawn, _) = measure(RUNS, || {
         timed(|| sheaf_doc::save::rewrite(&snap).unwrap()).0
     });
+    // What that Rewrite's pages name that the file's didn't: the header's
+    // one font, which every page's block shares.
+    let bates_census = Census::of(doc.primary(), sheaf_doc::save::rewrite(&snap).unwrap());
     drop((snap, doc));
     rows.push(Row::time(
         "Bates apply, all pages",
         apply,
         base.bates_apply_ms,
-        "< 50 ms, slice 17",
+        format!("< {} ms, asserted", BATES_GATE.as_millis()),
     ));
     rows.push(Row::time(
         "Bates, the Rewrite that draws it",
         drawn,
         base.bates_rewrite_ms,
         "",
+    ));
+    rows.push(Row {
+        what: "Bates, census: fonts added".into(),
+        now: Some(bates_census.fonts.len() as f64),
+        unit: "",
+        baseline: f64::NAN,
+        gate: "1, asserted".into(),
+    });
+
+    // Proposal 8's verdict (slice 17), live page numbers kept (Greg,
+    // 2026-10-22): "Page <<1>> of <<N>>" set on every page, a page drawn
+    // before any save (the first everyday trigger); saved to the work
+    // copy, then the first half of the pages moved after the second by one
+    // move (which keeps them in document order, so no one move reverses
+    // them), which lays every page's number out again: the Append that
+    // writes it as the app saves (planned, a live redraw, and written),
+    // the section it writes, and a moved page drawn; and the move undone
+    // and the first page deleted (the second trigger), a page drawn. Each
+    // draw is at 1024 px through the engine pool, each run in a group none
+    // drew before (`first_drawn`). In the session that saved it, the
+    // blocks the move draws are numbered in the file already (another
+    // page's before), so the section is the pages and the tree; the same
+    // move on the file opened afresh, whose record knows its blocks only as
+    // the file's objects, writes every block anew, and its delete is drawn
+    // too.
+    let mut live = sheaf_doc::open::file(&work, None).unwrap().doc;
+    let mut paged = header("");
+    paged.texts[4] = "Page <<1>> of <<N>>".into();
+    set_header_footer(&mut live, &paged);
+    let set_drawn = first_drawn(&live);
+    sheaf_doc::materialize::save(&mut live, &work, &AskAnswers::default(), &NoProgress).unwrap();
+    let half: Vec<PageId> = (live.state().order().iter())
+        .take(PAGES as usize / 2)
+        .copied()
+        .collect();
+    live.commit_ops(vec![move_pages(&half, None)], "Move")
+        .unwrap();
+    let mut section = 0;
+    let (reorder, reorder_mem) = measure(RUNS, || {
+        let (t, n) = planned_section(&mut live, &work);
+        section = n;
+        t
+    });
+    let moved = first_drawn(&live);
+    live.undo().unwrap();
+    let first = live.state().order()[0];
+    live.commit_ops(vec![delete(&[first])], "Delete").unwrap();
+    let deleted = first_drawn(&live);
+    drop(live);
+    let mut reopened = sheaf_doc::open::file(&work, None).unwrap().doc;
+    let half: Vec<PageId> = (reopened.state().order().iter())
+        .take(PAGES as usize / 2)
+        .copied()
+        .collect();
+    reopened
+        .commit_ops(vec![move_pages(&half, None)], "Move")
+        .unwrap();
+    let mut reopened_section = 0;
+    let (reopened_reorder, reopened_mem) = measure(RUNS, || {
+        let (t, n) = planned_section(&mut reopened, &work);
+        reopened_section = n;
+        t
+    });
+    reopened.undo().unwrap();
+    let first = reopened.state().order()[0];
+    reopened
+        .commit_ops(vec![delete(&[first])], "Delete")
+        .unwrap();
+    let reopened_deleted = first_drawn(&reopened);
+    drop(reopened);
+    let what = "\"Page n of N\" on all pages";
+    let moved_what = format!("{what}, all moved after a save");
+    let opened_what = format!("{moved_what}, the file opened again");
+    let live_rows = LiveRows::of(kind);
+    rows.push(Row::time(
+        &format!("{what}, set, unsaved: a page drawn 1024 px"),
+        set_drawn,
+        f64::NAN,
+        live_rows.draw(LiveRow::SetDrawn),
+    ));
+    rows.push(Row::time(
+        &format!("{moved_what}, Append"),
+        reorder,
+        f64::NAN,
+        live_rows.append(LiveRow::Reorder),
+    ));
+    rows.push(Row::added(
+        &format!("{moved_what}, Append"),
+        reorder_mem,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row {
+        what: format!("{moved_what}, the section"),
+        now: Some(mb(section)),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: format!("≤ {REORDER_SECTION_MB} MB, asserted"),
+    });
+    rows.push(Row::time(
+        &format!("{moved_what}: a moved page drawn 1024 px"),
+        moved,
+        f64::NAN,
+        live_rows.draw(LiveRow::MovedDrawn),
+    ));
+    rows.push(Row::time(
+        &format!("{what}, one deleted after a save: a page drawn 1024 px"),
+        deleted,
+        f64::NAN,
+        live_rows.draw(LiveRow::DeletedDrawn),
+    ));
+    rows.push(Row::time(
+        &format!("{opened_what}, Append"),
+        reopened_reorder,
+        f64::NAN,
+        live_rows.append(LiveRow::ReopenedReorder),
+    ));
+    rows.push(Row::added(
+        &format!("{opened_what}, Append"),
+        reopened_mem,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row {
+        what: format!("{opened_what}, the section"),
+        now: Some(mb(reopened_section)),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: format!("≤ {REORDER_SECTION_MB} MB, asserted"),
+    });
+    rows.push(Row::time(
+        &format!("{what}, one deleted, the file opened again: a page drawn 1024 px"),
+        reopened_deleted,
+        f64::NAN,
+        live_rows.draw(LiveRow::ReopenedDeletedDrawn),
     ));
 
     std::fs::remove_file(&work).unwrap();
@@ -1258,6 +1524,27 @@ fn gates(kind: Kind) {
         );
     }
     census.assert();
+    assert!(
+        apply < BATES_GATE,
+        "Bates numbers on every page took {apply:?}, over {BATES_GATE:?}"
+    );
+    assert_eq!(
+        bates_census.fonts.len(),
+        1,
+        "the fonts the Bates numbers' Rewrite added"
+    );
+    let section = section.max(reopened_section);
+    assert!(
+        mb(section) <= REORDER_SECTION_MB,
+        "the Append of every page moved under \"Page n of N\" wrote {:.2} MB",
+        mb(section)
+    );
+    live_rows.assert_append(LiveRow::Reorder, reorder);
+    live_rows.assert_append(LiveRow::ReopenedReorder, reopened_reorder);
+    live_rows.assert_draw(LiveRow::SetDrawn, set_drawn);
+    live_rows.assert_draw(LiveRow::MovedDrawn, moved);
+    live_rows.assert_draw(LiveRow::DeletedDrawn, deleted);
+    live_rows.assert_draw(LiveRow::ReopenedDeletedDrawn, reopened_deleted);
     assert!(
         all < CROP_GATE,
         "a crop of every page took {all:?}, over {CROP_GATE:?}"
@@ -1376,6 +1663,31 @@ fn realize_open_render(doc: &mut Document, middle: u32, pool: &EnginePool<Engine
     realized
 }
 
+/// A page of `doc`, whose every page a live header numbers, drawn at 1024
+/// px as the page view draws it, through a pool of its own once a first
+/// page was: the median, each run a page in a group none drew before, by a
+/// realizer that has seen nothing, so its group is realized (every page of
+/// it laid out anew: set, moved or renumbered), its engine opened and the
+/// page rendered cold (proposal 8's draw, and the everyday triggers').
+fn first_drawn(doc: &Document) -> Duration {
+    let pool = EnginePool::new().unwrap();
+    let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
+    drawn(&Views::new(pool.clone()), doc, ids[0], 1024);
+    let mut run = 0;
+    let (t, _) = measure(QUICK_RUNS, || {
+        run += 1;
+        let page = ids[run * 7 * GROUP as usize];
+        let views = Views::new(pool.clone());
+        let (t, engine) = timed(|| drawn(&views, doc, page, 1024));
+        assert!(
+            matches!(engine, EngineKey::Group(..)),
+            "the page drew from {engine:?}"
+        );
+        t
+    });
+    t
+}
+
 /// The incremental save of one mark and the Rewrite on [`aes_256`]'s copy
 /// of the `kind` fixture, opened with its password, so every object they
 /// write is encrypted, an AES IV a keyed hash of the object's key (slices
@@ -1461,6 +1773,12 @@ fn incremental_rows(
 /// abandoned, and the file cut back to what it was, its time too, so its
 /// record's stamp holds again.
 fn planned_and_put_back(doc: &mut Document, work: &Path) -> Duration {
+    planned_section(doc, work).0
+}
+
+/// [`planned_and_put_back`], and the bytes the Append wrote after the
+/// file.
+fn planned_section(doc: &mut Document, work: &Path) -> (Duration, u64) {
     use sheaf_doc::materialize::{Onto, Strategy, plan, write_file};
     let meta = std::fs::metadata(work).unwrap();
     let (len, mtime) = (meta.len(), meta.modified().unwrap());
@@ -1476,11 +1794,12 @@ fn planned_and_put_back(doc: &mut Document, work: &Path) -> Duration {
     assert!(written.wrote, "the save wrote nothing");
     assert_eq!(written.strategy, Strategy::Append { onto: Onto::Saved });
     doc.abandon_save(v);
+    let section = std::fs::metadata(work).unwrap().len() - len;
     let file = std::fs::File::options().write(true).open(work).unwrap();
     file.set_len(len).unwrap();
     file.set_modified(mtime).unwrap();
     file.sync_all().unwrap();
-    t
+    (t, section)
 }
 
 /// How long the section of that save takes to make in memory, every check
@@ -1717,27 +2036,12 @@ fn cropped(doc: &mut Document, opened: &Snapshot, pages: &[PageId], m: Margins) 
     doc.commit(tx, opts).unwrap();
 }
 
-/// Header & Footer as the app applies it: every source loaded to find the
-/// pages whose file already draws one, those moved onto stripped copies,
-/// then `hf` set, in one transaction. No engine opens on the copies (from
-/// slice 13 the app's render worker opens one when a page is drawn).
-fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) {
-    let snap = doc.snapshot();
-    let copies = sheaf_ops::derive::strip_stamps(doc.store(), &snap, &NoProgress).unwrap();
-    let pages: Vec<_> = (copies.iter())
-        .flat_map(|copy| {
-            copy.note(doc);
-            copy.bases()
-        })
-        .collect();
-    let mut tx = doc.tx(Actor::User);
-    if !pages.is_empty() {
-        tx.set_page_base(pages, Derive::StripHeaderFooter).unwrap();
-    }
-    let set = set_header(hf.spec(), hf.pages.as_deref());
-    tx.apply(set, &NoProgress).unwrap();
-    doc.commit(tx, CommitOpts::labelled("Header & footer"))
-        .unwrap();
+/// Header & Footer as the app applies it: `spec` set on every page, one
+/// op, which reads no page's content (from slice 17 the headers others
+/// drew are replaced as a save writes or a view draws the pages).
+fn set_header_footer(doc: &mut Document, spec: &HeaderFooterSpec) {
+    let set = set_header(spec.clone(), None);
+    doc.commit_ops(vec![set], "Header & footer").unwrap();
 }
 
 /// A text watermark over every page, as the Watermark dialog sets one.
@@ -1771,10 +2075,11 @@ fn image_background(image: &Blob) -> Op {
 }
 
 /// What a Rewrite's pages draw with that their file's didn't, page by
-/// page (slice 16's census): the objects their resources name under names
-/// the file's pages' resources don't have, by kind, and the resources
-/// dictionaries the pages have, beside how many the file's had (by the
-/// object, or the dictionary written inline).
+/// page (slice 16's census, and slice 17's of Bates numbers): the objects
+/// their resources name under names the file's pages' resources don't
+/// have, by kind, and the resources dictionaries the pages have, beside
+/// how many the file's had (by the object, or the dictionary written
+/// inline).
 struct Census {
     images: HashSet<ObjectId>,
     forms: HashSet<ObjectId>,
@@ -1787,7 +2092,7 @@ struct Census {
 
 impl Census {
     /// Of `written`, a Rewrite of a document of `file`'s pages in order,
-    /// a watermark and an image background on every one.
+    /// a generator drawing on every one.
     fn of(file: &Src, written: Vec<u8>) -> Census {
         let store = Store::new();
         let kind = BlobKind::file(Path::new("census.pdf"), None);
@@ -1813,7 +2118,7 @@ impl Census {
                 inline => format!("{inline:?}"),
             });
             let Some(Object::Reference(at)) = now.resources.as_deref() else {
-                panic!("a watermarked page's resources are its own object");
+                panic!("a page a generator draws on has resources of its own");
             };
             census.page_res.insert(*at);
             let base = base.and_then(|o| dict(file, o)).unwrap_or_default();

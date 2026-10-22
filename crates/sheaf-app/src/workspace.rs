@@ -1528,6 +1528,7 @@ impl Workspace {
                 opened,
                 lower,
                 previewer: d.previewer()?,
+                selected: d.selected_indexes(),
             })
         });
         let Some(ctx) = ctx else {
@@ -1564,9 +1565,21 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Header & Footer… (or Bates Numbering…, which starts with Bates on).
-    fn open_header_footer(&mut self, bates: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.header_footer.is_some() || self.still_opening(cx) {
+    /// Header & Footer… (`bates` false) or Bates Numbering… (true): the
+    /// dialog, which starts from the document's header and footer, a new
+    /// one numbered for Bates Numbering…; again, it closes. The other's
+    /// open, it closes and this one opens.
+    fn toggle_header_footer(&mut self, bates: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((dialog, _)) = self.header_footer.take() {
+            let again = dialog.read(cx).bates() == bates;
+            dialog.update(cx, |d, _| d.release(window));
+            self.focus_active(window, cx);
+            cx.notify();
+            if again {
+                return;
+            }
+        }
+        if self.still_opening(cx) {
             return;
         }
         let Some(doc) = self.doc().cloned() else {
@@ -1574,24 +1587,12 @@ impl Workspace {
         };
         let ctx = doc.read_with(cx, |d, _| {
             let (opened, lower) = d.lowering_now()?;
-            let current = (opened.state.header_footer()).map(|hf| (**hf).clone());
-            let scope = current
-                .as_ref()
-                .and_then(|h| h.pages.as_ref())
-                .map(|ids| crate::insert_dialog::ranges_text(&d.indexes_of(ids)))
-                .unwrap_or_default();
             Some(crate::header_footer_dialog::HeaderFooterContext {
-                current,
                 opened,
                 lower,
                 previewer: d.previewer()?,
-                file: d
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                scope,
                 bates,
+                selected: d.selected_indexes(),
             })
         });
         let Some(ctx) = ctx else {
@@ -1610,15 +1611,14 @@ impl Workspace {
                 ws.focus_active(window, cx);
                 if let Some(doc) = ws.doc().cloned() {
                     match ev {
-                        HeaderFooterEvent::Apply(hf, pages) => {
-                            let hf = sheaf_doc::stamps::HeaderFooter {
-                                pages: pages.clone(),
-                                ..(**hf).clone()
-                            };
-                            doc.update(cx, |d, cx| d.set_header_footer(opened, Some(hf), cx));
+                        HeaderFooterEvent::Apply(set) => {
+                            let set = (**set).clone();
+                            doc.update(cx, |d, cx| d.set_header_footer(opened, set, cx));
                         }
-                        HeaderFooterEvent::Remove => {
-                            doc.update(cx, |d, cx| d.set_header_footer(opened, None, cx));
+                        &HeaderFooterEvent::Remove { include_authored } => {
+                            doc.update(cx, |d, cx| {
+                                d.remove_header_footer(opened, include_authored, cx)
+                            });
                         }
                         HeaderFooterEvent::Dismiss => {}
                     }
@@ -1700,18 +1700,13 @@ impl Workspace {
             return;
         };
         let ctx = doc.read_with(cx, |d, _| {
-            let (_, targets) = d.target_indexes();
             let (opened, lower) = d.lowering_now()?;
             Some(crate::crop_dialog::CropContext {
                 opened,
                 lower,
                 previewer: d.previewer()?,
                 current: d.current_index(),
-                selected: if targets.len() > 1 {
-                    targets
-                } else {
-                    Vec::new()
-                },
+                selected: d.selected_indexes(),
             })
         });
         let Some(ctx) = ctx.filter(|c| c.opened.state.page_count() > 0) else {
@@ -2904,10 +2899,10 @@ impl Render for Workspace {
                 cx.listener(|ws, _: &crate::PageLabels, window, cx| ws.toggle_labels(window, cx)),
             )
             .on_action(cx.listener(|ws, _: &crate::HeaderFooter, window, cx| {
-                ws.open_header_footer(false, window, cx)
+                ws.toggle_header_footer(false, window, cx)
             }))
             .on_action(cx.listener(|ws, _: &crate::BatesNumbering, window, cx| {
-                ws.open_header_footer(true, window, cx)
+                ws.toggle_header_footer(true, window, cx)
             }))
             .on_action(cx.listener(|ws, _: &crate::AddWatermark, window, cx| {
                 ws.toggle_watermark(Z::Over, window, cx)

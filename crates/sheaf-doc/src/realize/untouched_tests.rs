@@ -16,8 +16,9 @@ use super::fixture::{every_input, hiding, layer, their_comment};
 use super::*;
 use crate::forms::Value;
 use crate::forms::fixture::Form;
+use crate::materialize::header_tests::ACROBAT_HEADER;
 use crate::materialize::others_tests::{ACROBAT, BODY, acrobat_file};
-use crate::materialize::tests::{add, bytes, derive, file, insert, open};
+use crate::materialize::tests::{add, bytes, file, insert, open};
 use crate::model::history_tests::{with_ours, with_theirs};
 use crate::model::{FieldNode, Terminal};
 use crate::prim::{Key, Prim, Val};
@@ -25,16 +26,47 @@ use crate::tx::fixture as fx;
 use crate::tx::tests::opened;
 
 /// Whether each page of `st` is untouched under `inputs`, in order,
-/// asserting that an overlay of it alone says the same.
+/// asserting that an overlay of it alone says the same, and that its delta
+/// writes what that overlay writes of it ([`delta_alike`]).
 fn verdicts(st: &DocState, inputs: &ViewInputs, case: &str) -> Vec<bool> {
     (st.order().iter())
         .map(|&p| {
             let model = untouched(st, p, inputs);
             let emitted = emission_is_base(st, p, inputs).unwrap();
             assert_eq!(model, emitted, "{case}: {p:?} under {inputs:?}");
+            delta_alike(st, p, inputs, case);
             model
         })
         .collect()
+}
+
+/// Page `page`'s delta ([`EmitScope::Delta`]) writes what the overlay of
+/// it alone ([`EmitScope::Pages`]) writes of it without the frame, as the
+/// realizer's deltas did before they skipped the frame: every object the
+/// page reaches alike, at the same numbers, and nothing the page doesn't
+/// reach that the overlay didn't write.
+fn delta_alike(st: &DocState, page: PageId, inputs: &ViewInputs, case: &str) {
+    let src = st.def(page).unwrap().base.src.clone();
+    let overlay = Overlay {
+        src,
+        inputs,
+        rotate: RotatePolicy::KeepBase,
+        arts: None,
+    };
+    let part = |scope| {
+        let e = emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress).unwrap();
+        Part::page(e, page).unwrap().reached(page)
+    };
+    let (whole, whole_unreached) = part(EmitScope::Pages([page].into()));
+    let (delta, delta_unreached) = part(EmitScope::Delta(page));
+    assert_eq!(delta, whole, "{case}: {page:?}'s delta under {inputs:?}");
+    assert!(
+        delta_unreached.is_subset(&whole_unreached),
+        "{case}: {page:?}'s delta under {inputs:?} writes {:?}",
+        delta_unreached
+            .difference(&whole_unreached)
+            .collect::<Vec<_>>()
+    );
 }
 
 /// [`verdicts`] under every consumer's inputs: the screen's.
@@ -51,13 +83,6 @@ fn theirs() -> Form {
     f
 }
 
-/// `d`'s page `page`, its primary's page `index`, shown from a derived
-/// copy of it, its boxes as they were, as the derived flows make one.
-fn copied(d: &mut crate::Document, index: u32, page: PageId) {
-    let copy = crate::save::derived_copy(d.primary(), &[index], &mut |_, _, _| Ok(())).unwrap();
-    derive(d, &copy, index, page);
-}
-
 /// Every case the predicate decides agrees with the emission, under every
 /// consumer's inputs: a file as opened, its forms and other tools'
 /// comments drawn as they are; pages that inherit their boxes and
@@ -66,8 +91,9 @@ fn copied(d: &mut crate::Document, index: u32, page: PageId) {
 /// deleted; a field's value, which no save writes yet; a header; recognized
 /// text; a duplicate; a turned page, which the job turns; a watermark and a
 /// background, which OCR's inputs don't draw, and the same found again in
-/// the file, then moved and removed; a derived copy's page; a
-/// crop; fields whose `/Parent` isn't the parent whose `/Kids` lists them;
+/// the file, then moved and removed; a header of page numbers found again,
+/// then its pages moved, and one replacing Acrobat's; a crop; fields
+/// whose `/Parent` isn't the parent whose `/Kids` lists them;
 /// a link to a page deleted.
 #[test]
 fn the_predicate_agrees_with_the_emission_in_every_case() {
@@ -174,16 +200,31 @@ fn the_predicate_agrees_with_the_emission_in_every_case() {
     assert_eq!(agree(d.state(), "acrobat's removed"), [false, false]);
     let ocr = verdicts(d.state(), &ViewInputs::content_only(), "acrobat's removed");
     assert_eq!(ocr, [true, false]);
-    // A derived copy: the page is the copy's, its bytes its own, but for
-    // the widgets its records draw from the page it was made from.
-    let mut d = open(&bytes(&file("A", 2, false)), None);
-    let p1 = d.page(1).unwrap();
-    copied(&mut d, 1, p1);
-    assert_eq!(agree(d.state(), "copy"), all(2));
-    let mut d = opened(theirs().bytes(), "form.pdf");
-    let p1 = d.page(1).unwrap();
-    copied(&mut d, 1, p1);
-    assert_eq!(agree(d.state(), "copy of widgets"), [true, false, true]);
+    // A header of page numbers, saved and found again: drawn as the file
+    // draws it where it reads as it did, and anew where a move changed
+    // where its pages are; Acrobat's header replaced under one.
+    let mut d = open(&bytes(&file("A", 3, false)), None);
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let numbers = fx::set_header(fx::header("Page <<1>> of <<N>>"), Some(&[p0, p1]));
+    d.commit_ops(vec![numbers], "Header").unwrap();
+    assert_eq!(agree(d.state(), "numbered"), [false, false, true]);
+    let saved = crate::materialize::How::Rewritten.write(&d);
+    let mut d = opened(saved, "numbered.pdf");
+    assert_eq!(agree(d.state(), "numbered, found"), all(3));
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "numbered, found");
+    assert_eq!(ocr, [false, false, true]);
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    d.commit_ops(vec![fx::move_pages(&[p1], Some(p0))], "Move")
+        .unwrap();
+    assert_eq!(agree(d.state(), "numbered, moved"), [false, false, true]);
+    let streams: [&[&[u8]]; 2] = [&[BODY, ACROBAT_HEADER], &[other, ACROBAT_HEADER]];
+    let mut d = opened(acrobat_file(&streams), "acrobat.pdf");
+    let p0 = d.page(0).unwrap();
+    let mine = fx::set_header(fx::header("Mine"), Some(&[p0]));
+    d.commit_ops(vec![mine], "Header").unwrap();
+    assert_eq!(agree(d.state(), "acrobat's header replaced"), [false, true]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "acrobat's header");
+    assert_eq!(ocr, all(2));
     // A crop: the page's box isn't its base page's, which no job draws
     // (spike C failed), under every consumer's inputs.
     let to = crate::Box2 {

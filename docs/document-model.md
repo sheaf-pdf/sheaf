@@ -28,7 +28,7 @@ Store                the document's bytes, named by their content: one Blob for
 
 Blob                 { id: BlobId { hash, len },   // compared byte for byte too
                        bytes: Arc<[u8]>,           // shared with PDFium
-                       kind: Pdf { password, origin: File(path) | Memory(Derived) } }
+                       kind: Pdf { password, origin: File(path) | Memory(Library | Recovered) } }
 
 Src = Arc<Source>    a Blob parsed lazily (lopdf's LazyPdf), under one Limits,
                      with the facts read from it once: the page table (each
@@ -94,17 +94,18 @@ Bookmark             { title: Arc<str>, target: Option<Page { page, view } | Kep
 LabelSpec            { start: PageId, style, prefix, first }
                      a page-label range, anchored to the page it starts at.
 
-Generator            { id: GenId, spec: GenSpec }
-                     what sheaf draws on pages from one definition: the
-                     header and footer (GenSpec::HeaderFooter, until M10.5
-                     slice 17), read at open from /SheafHeaderFooter, with its
-                     own page scope and its Bates numbers counted at each
-                     Rewrite, as before; and from slice 16 a watermark or a
-                     background (GenSpec::Watermark: its content, position,
-                     z, Scope and the kinds it replaces), laid out on each
-                     page it covers when a save or a view draws the page,
-                     found again at open from /SheafGenerators (Watermarks
-                     and backgrounds as generators).
+Generator            { id: GenId, spec: GenSpec, z: Z, scope: Scope,
+                       frozen: Frozen, replaces: BTreeSet<PaginationKind> }
+                     what sheaf draws on pages from one definition: a
+                     watermark or a background (GenSpec::Watermark, M10.5
+                     slice 16) and the header and footer
+                     (GenSpec::HeaderFooter, slice 17: its live page tokens
+                     read where each page is, its date, file and Bates
+                     numbers fixed when it was set, in Frozen), laid out on
+                     each page it covers when a save or a view draws the
+                     page, found again at open from /SheafGenerators
+                     (Watermarks and backgrounds as generators; Headers,
+                     footers and Bates as generators).
 
 DocState             { order: im::Vector<PageId>,
                        pages: im::HashMap<PageId, Arc<PageDef>>,
@@ -136,8 +137,6 @@ DocState             { order: im::Vector<PageId>,
 
 Document             { store: Arc<Store>,
                        primary: Src, name: Arc<str>,  // the file it opened on
-                       derived: Arc<DerivedCopies>,   // derived copies' origins,
-                                                      // outside undo (until slice 17)
                        versions: HashMap<VersionId, Version>,  // a tree (see Undo/redo)
                        cursor: VersionId,            // which version is current
                        saved: Option<VersionId> }    // which version is on disk, its
@@ -146,7 +145,7 @@ Document             { store: Arc<Store>,
                                                      // sections pending)
 
 Snapshot             { version: VersionId, state: DocState, primary: Src, name,
-                       derived, file: Option<Arc<Path>> }  // the document's file
+                       file: Option<Arc<Path>> }  // the document's file
                      what exports, print and plugins read, taken from the
                      current version; an export never replaces `file`.
                      Nothing is computed when it's taken: no dirty flags
@@ -222,11 +221,10 @@ blob, and a source parses the blob in place:
   the newest cross-reference stream that decodes is the trailer, as
   PDFium takes it.
 - **Bytes stay in memory.** PDFium opens the blob's own `Arc<[u8]>`
-  (the engine pool's base engine, `Views::base`). A derived copy (a
-  header and footer stripped, until slice 17) is a memory blob, written
-  nowhere; a crop makes none (M10.5 slice 15), nor a watermark (slice
-  16); blank and
-  image pages, and a library stamp nothing else holds (see Page content),
+  (the engine pool's base engine, `Views::base`). No edit makes a copy
+  of a page's file: not a crop (M10.5 slice 15), a watermark (slice 16)
+  or a header and footer (slice 17, which deleted derived copies); blank
+  and image pages, and a library stamp nothing else holds (see Page content),
   are read back from the generated cache once, into blobs.
   `LazyPdf` can also read a file by position (`FileBytes`).
 - **The open reads every fact from the source** (M10.5 slice 4; see
@@ -274,10 +272,12 @@ three steps in a row):
   open with the same ids), the form (`Source::form`, also read once a
   source: every node of the field tree with the object it was read as, each
   terminal's widgets by page, and those no page lists, a page template's),
-  the page labels, the header and footer sheaf drew (its settings in
-  `/SheafHeaderFooter`, read as written: no page's content is lexed to find
-  it), attachments, the portfolio schema, layers, and the outline with its
-  colors, styles and closed state (`/C`, `/F`, a negative `/Count`), each
+  the page labels, the generators sheaf drew (`/SheafGenerators`, read
+  as written, the pages each is on from its blocks' stream markers; from
+  slice 17 the header and footer too, and an older sheaf's
+  `/SheafHeaderFooter` is read no more), attachments, the portfolio
+  schema, layers, and the outline with its colors, styles and closed
+  state (`/C`, `/F`, a negative `/Count`), each
   item with its object and whether it holds an action or destination sheaf
   doesn't model (`kept`). Of a page it reads the dictionary and the
   annotations, never its content (`Source::blocks` reads that when an op
@@ -362,8 +362,8 @@ not what's stored.
   and `apply_axes` maps an `/XYZ` point whose missing coordinate stays
   missing. A page's boxes as a file has them are read as `Geom::read`
   reads them, through the page table (`Source::geom`), or for a page of
-  an eager document (a stamp collection's, a derived copy's) from its
-  dictionary and what it inherits; no other conversion is left.
+  an eager document (a stamp collection's) from its dictionary and what
+  it inherits; no other conversion is left.
 - **Rotation is absolute.** A page's `Geom.rotate` (`DocState::geom`) is
   the `/Rotate` a save writes: a page starts with its source page's, and a
   save keeps it. `Document::geom(page)` is the page's `Geom`: its source
@@ -587,8 +587,8 @@ goes (the plan's lint ledger).
   cap, or met once that's spent, counts as having an artifact inside.
   Who drew an artifact (`PagOrigin`):
   - **`Sheaf`:** it's in a `/SheafBlock` stream or its list has
-    `/SheafGen` (watermarks and backgrounds from slice 16; the header and
-    footer and OCR text write them from slices 17 and 18);
+    `/SheafGen` (watermarks and backgrounds from slice 16, the header and
+    footer from slice 17; OCR text writes them from slice 18);
   - **`SheafLegacy`:** sheaf before M10.5: `/SheafStamp` or
     `/SheafSettings` in its list, drawn in the `/SheafHF` font, or in a
     `/SheafOcrLayer` stream;
@@ -606,23 +606,19 @@ goes (the plan's lint ledger).
   and `BT` inside its range), and 2,443 of the authors' 6,837: theirs
   set color and fonts at the top level of a text object, or nest `q`
   and marked content across each other.
-- **Removing the header and footer** (`stamps::strip`, until slice 17's
-  generators) splices the page's streams, writes each it changed as a
-  new object and rewrites `/Contents`, so a stream another page shares is
-  never changed under it. It removes the asked-for kinds that sheaf or
-  Acrobat drew and leaves an author's own (proposal 31,
-  `stamps::stripped`); removing those too is slice 17's
-  `include_authored`. Acrobat opens the first artifact on a page with
-  the `Q` that ends the `q` it put before the page's content: that run
-  of `Q`s stays (`Pagination::cuts`), the artifact's start and the rest
-  of it cut either side, as sheaf's own header keeps its `Q` outside its
-  range. The pages to strip are the ones whose blocks have such
-  artifacts (`derive::strip_stamps`), so a source with none is never
-  loaded, and the scan that decompressed every page to look is gone.
-  From slice 16 a watermark or background takes others' of its kind out
-  as a save writes the page, by filters on the page's content stack, and
-  Remove Watermark by origin, `include_authored` taking the author's too
-  (Watermarks and backgrounds as generators).
+- **Removing others' artifacts** splices the page's streams, writes
+  each it changed as a new object and rewrites `/Contents`, so a stream
+  another page shares is never changed under it. Acrobat opens the first
+  artifact on a page with the `Q` that ends the `q` it put before the
+  page's content: that run of `Q`s stays (`Pagination::cuts`), the
+  artifact's start and the rest of it cut either side. Until slice 17 a
+  header and footer was stripped into a derived copy of the page
+  (`stamps::strip`); from slice 16 a watermark or background, and from
+  17 the header and footer, takes others' of its kinds out as a save
+  writes the page, by filters on the page's content stack, and Remove
+  Watermark and Remove Header/Footer take them by origin,
+  `include_authored` taking the author's too (Watermarks and backgrounds
+  as generators; Headers, footers and Bates as generators).
 - **`ContentWriter`** writes content the same bytes for the same calls,
   on any thread: `q`/`Q` and `cm`, gray, RGB and CMYK colors, graphics
   states (`/ExtGState` with opacity and blend mode), line styles, paths
@@ -636,9 +632,10 @@ goes (the plan's lint ledger).
   finished: `/Sh` and six base32 characters of the digest, the next name
   up where the resources already bind it to something else, and the
   same name again where they bind it to the same thing, so a header
-  written again keeps its list's name. The legacy names, `/SheafHF`
-  (until slice 17) and `/SheafOcr` (until 18), are given, and never made
-  for anything else. The emitter writes a content's resources by digest,
+  written again keeps its list's name. The legacy name `/SheafOcr`
+  (until slice 18) is given, and never made for anything else; `/SheafHF`
+  went with the legacy header in slice 17, and is read only to tell an
+  older sheaf's artifacts. The emitter writes a content's resources by digest,
   one object a resource a file; `content::ResObjects` writes them into a
   lopdf document (exchange's Comments.pdf, the comment summary's pages),
   one object a resource a document.
@@ -714,8 +711,9 @@ they draw) reads, lexes into tokens that tile it, splices back to each
 stream's own bytes read apart, balances as lopdf's decoder counts it, is
 classified, and has each pagination artifact spliced out, in about 8 s
 in the test profile; classifying every page of the 7k fixtures, cold,
-takes 141 ms (synthetic), 203 ms (heavy) and 77 ms (scanned), which is
-most of what a first Bates apply costs there.
+takes 141 ms (synthetic), 203 ms (heavy) and 77 ms (scanned), which was
+most of what a first Bates apply cost there until slice 17 made it one
+op that reads no page's content (under 1 ms).
 
 ## Undo/redo: snapshots, not inverse commands
 
@@ -908,8 +906,8 @@ pub enum Op {
     ClearOcrText { pages: PageSel },
     SetWatermark { spec: WatermarkSpec, z: Z, scope: ScopeSel },       // slice 16
     RemoveWatermark { z: Option<Z>, pages: PageSel, include_authored: bool },
-    SetHeaderFooter { spec: HeaderFooterSpec, scope: ScopeSel },
-    RemoveHeaderFooter { pages: PageSel },
+    SetHeaderFooter { spec: HeaderFooterSpec, scope: ScopeSel },        // slice 17
+    RemoveHeaderFooter { pages: PageSel, include_authored: bool },
 }
 
 impl Document {
@@ -1023,8 +1021,8 @@ targets to sit after the preceding bookmark's pages.
   link or widget deleted or made a mark, OCR text cleared, the header set
   or removed, from slice 15 a page's boxes set, from slice 16 a watermark
   or background set or removed); `User` brings content in
-  (pages inserted or replaced, OCR text set, a derived page base, an
-  import's names and dates). A plugin gets `Plugin` only, until
+  (pages inserted or replaced, OCR text set, an import's names and
+  dates). A plugin gets `Plugin` only, until
   plugin API 0.4's permissions; an OCR job sets and clears OCR text and
   nothing else, and Trim White (`Job(Trim)`, slice 15) sets page boxes
   and nothing else.
@@ -1051,7 +1049,9 @@ targets to sit after the preceding bookmark's pages.
   save would have dropped them; the bookmarks to it, their kids moving
   up; a label range starting there moves to its range's next page, or
   goes; and the page leaves the header's pages, the header going when
-  none is left. `Commit.cascades` counts each rule's work.
+  none is left, and its Bates number goes with it (from slice 17, under
+  any scope; a number is never given again). `Commit.cascades` counts
+  each rule's work.
 - **Fail, never repair** (§6.4). `EditError::{NotFound, Invalid,
   Ambiguous, Refused(Cap), NotReady, Cancelled, Mismatch { version },
   Internal}`, each naming the op as Op JSON does. `check_invariants`
@@ -1102,22 +1102,21 @@ targets to sit after the preceding bookmark's pages.
   page's duplicate among them. An insert's marks, links and outline come
   from its source's facts as `Bring` says (`marks`, `form: New`,
   `outline: None | MergeByTitle`), partners and reply names remapped.
-  A derived copy's origin is in a table by blob (`Document::derived`,
-  until slice 17), which `Snapshot` and `SaveInput` carry; the copy's
-  catalog names its source blob and pages (`/SheafCopyOf`), so copies of
-  different pages, however alike, are different blobs. Each version
-  notes once the blobs its steps bring, so `undone_source_bytes` walks no
-  step.
+  Each version notes once the blobs its steps bring, so
+  `undone_source_bytes` walks no step. (Until slice 17 a derived copy's
+  origin was in a table by blob, `Document::derived`, outside undo; no
+  edit makes a copy now.)
 - **Callers.** The app commits through `DocView::commit(tx, opts) ->
   Result<Commit, EditError>`, from slice 12 the only way it changes the
   document but for OCR's flushes (below): a drag is `MoveMarks`, a handle,
   style or text change a `PatchMarks` naming only what changed
-  (`mark_changes`). Remove Header/Footer shows pages of derived copies
-  through the internal `Tx::set_page_base(pages, Derive)`, no `Op`
-  variant (until slice 17); from slice 15 a crop is `SetPageBoxes` and
-  makes no copy (Crop as geometry), and from slice 16 a watermark or
-  background is `SetWatermark`, drawn by a generator (Watermarks and
-  backgrounds as generators). Combine is one
+  (`mark_changes`). From slice 15 a crop is `SetPageBoxes` and makes no
+  copy (Crop as geometry), from slice 16 a watermark or background is
+  `SetWatermark`, and from slice 17 a header and footer `SetHeaderFooter`
+  and its removal `RemoveHeaderFooter`, each drawn by a generator
+  (Watermarks and backgrounds as generators; Headers, footers and Bates
+  as generators): the internal page rebase the derived flows used,
+  `Tx::set_page_base`, is gone. Combine is one
   transaction (`Actor::Job(Insert)`) on the first file's document: the
   first file's
   pages left out deleted, one `InsertPages` a further file, its bookmarks
@@ -1212,8 +1211,9 @@ impl DocView {
     check looks for anything the cascades, the uniqueness rules or the
     references would still change or break: one round of every cascade
     rule over what the merge wrote (`cascade::unsettled`); one generator
-    per kind and place (`GenSpec::same_place`; a header and footer has
-    no z, so a document has one), a source page's copy shown once,
+    per kind and place (`Generator::same_place`: a watermark's z, and
+    the header and footer, which is always over, one a document), a
+    source page's copy shown once,
     `/NM`s per page and full names over the written fields
     (`DocState::unique_after`); and every page a written slot names
     still there (`resolves_after`: a mark's, a bookmark's, a label
@@ -1334,27 +1334,32 @@ impl DocView {
   (`plan_insert`, `plan_replace`), then land with `Relower`
   (`CommitOpts::based(v, stale, label)`); nothing opens an engine on the
   file, which the render worker opens when a page of it is first drawn
-  (from slice 13). Header & Footer resolves its pages to ids on the
-  version its dialog opened on, makes the copies off the UI thread,
-  shows them (`Tx::set_page_base` on `tx_at(opened)`), commits with
-  `Validate`, and only then keeps the copies (until slice 17). From
-  slice 15 Crop Pages makes no copy: margins are one `SetPageBoxes`
-  committed with `Validate` on the version its dialog opened on, and
-  Trim White a planner that re-plans on a Conflict (Crop as geometry).
-  From slice 16 Watermark / Background is one `SetWatermark` committed
-  so too, and its Remove a planner (Watermarks and backgrounds as
-  generators). The labels dialog previews its op lowered on the current
-  version (`Tx::preview`), again at each change, and commits on the
-  version it opened on with `Validate`; once the labels changed since it
-  opened, which that commit would find, it says it can't apply. The
-  Header & Footer dialog previews its page as applying would draw it
-  (slice 13): its op lowered on the current version off the UI thread,
-  the page's own drawn header stripped first as the apply strips it,
-  again at each change of its settings or the document, and the page
-  realized from that state under the screen's inputs; a lowering's
-  picture shows only while no later lowering has begun. The Crop Pages
-  (slice 15) and Watermark / Background (slice 16) dialogs preview the
-  same way. Blank review's
+  (from slice 13). From slice 15 Crop Pages makes no copy: margins are
+  one `SetPageBoxes` committed with `Validate` on the version its dialog
+  opened on, and Trim White a planner that re-plans on a Conflict (Crop
+  as geometry). From slice 16 Watermark / Background is one
+  `SetWatermark` committed so too, and its Remove a planner (Watermarks
+  and backgrounds as generators); from slice 17 Header & Footer is one
+  `SetHeaderFooter` committed so too, its pages ids of the version its
+  dialog opened on, and its Remove a planner of the same kind
+  (`DocView::plan_removal`), the notice each one's line ("No change to
+  the header and footer", "No header or footer to remove"). Both
+  dialogs start from the model's generator (`Start::at`) and show, once
+  counted off the UI thread as they open, what others drew of their
+  kinds on the selected pages, or all of them, which applying replaces
+  and Remove takes off (`generator_dialog::Count`, from
+  `tx::others_on`; proposal 31). The labels dialog previews its op
+  lowered on the current version (`Tx::preview`), again at each change,
+  and commits on the version it opened on with `Validate`; once the
+  labels changed since it opened, which that commit would find, it says
+  it can't apply. The Header & Footer dialog previews its page as
+  applying would draw it (slice 13): its op lowered on the current
+  version off the UI thread (from slice 17 that op alone, the header set
+  again replacing the one drawn there), again at each change of its
+  settings or the document, and the page realized from that state under
+  the screen's inputs; a lowering's picture shows only while no later
+  lowering has begun. The Crop Pages (slice 15) and Watermark /
+  Background (slice 16) dialogs preview the same way. Blank review's
   delete reads each confirmed page as its search measured it
   (`Tx::read_render(p, &ViewInputs::content_only())`: what the page
   shows, from M10.5 slice 13) and lands with `Relower`, so a page whose
@@ -1381,7 +1386,8 @@ impl DocView {
   recognition `Page(p)` (from slice 13 `render_reads` under
   `content_only`, which is that), and a render what it drew under its
   inputs (`render_reads`: the page, its drawn annotations and fields, the
-  form, the header, and the order when the header numbers pages); an
+  form, the generators on it, and the order or the labels when their
+  live tokens read them); an
   update the mark it keeps parts of. When the
   call returns, `plugins::land` begins a `GroupKind::PluginCall` group
   and commits the first batch on the base (`tx_at`, each read,
@@ -1477,8 +1483,9 @@ stamp's page is written once a file, as a form drawn under such a name
 (`/SheafStamp` is only read), and an attachment's file once. Both come
 from what the marks hold (a form a source's mark draws, a library
 stamp's page and an attached file from their blobs), not this machine's
-cache. The header and footer's marked content names its property list
-in the page's `/Properties`.
+cache. A generator's marked content names its property list in the
+page's `/Properties` (the header and footer's from slice 17, as a
+`/SheafBlock`).
 
 A save is an output (M10.5 slice 9, below): the document doesn't change,
 nothing is reopened or read back, and what the screen shows stays.
@@ -1489,8 +1496,8 @@ Saves, Save As, extracted pages, Clean Copy, Export Flattened, print and
 recovery sidecars reach their bytes through `serialize/` (§11.7 of
 `todos/m10.5-edit-api.md`). lopdf's writer still writes:
 
-- the derived copies, in memory, until slice 17 deletes them (crop's
-  went in slice 15, the watermark's in 16);
+- the derived copies, in memory, until slice 17 deleted them (crop's
+  went in slice 15, the watermark's in 16, the header's last);
 - the comment summary and FDF files, until slice 19's exports;
 - PDFs made from images and blank pages (`images::to_pdf`,
   `generated::blank_pages`): Images to PDF and a scan without OCR, at
@@ -1637,8 +1644,7 @@ below).
   the change) until slice 19's `Session::save`. `save_appended` and
   `save_rewritten` are the both-ways tests' halves.
 - **Sealing.** `Document::save_input(v)` gives what a save writes from (a
-  `SaveInput`: the version's state, the primary, the derived copies'
-  table (see Ops and transactions), and the saved
+  `SaveInput`: the version's state, the primary, and the saved
   version's state and record when there is one) and seals `v`: an OCR
   flush or a typing commit during the save makes a version after it, which
   stays dirty, and pruning keeps it. `record_save(rec)` makes the version
@@ -1706,8 +1712,9 @@ below).
   on copy 0 of a primary page, with a note when a copied page's file was
   tagged, and `/Thumb` goes when sheaf draws over the page. The catalog is
   written by its ownership table: owned keys from the state (`/Pages`,
-  `/PageLabels` from the `LabelSpec`s, the header's settings; no
-  `/Version`, which the header gives), every other key the primary's,
+  `/PageLabels` from the `LabelSpec`s, `/SheafGenerators` from the
+  generators; no `/Version`, which the header gives), every other key
+  the primary's,
   which `keep_only` prunes. Copies go by key (`copy::Closure`): each
   object a copy reaches is copied once, and a reference to a page goes
   to that page's copy, else its lowest copy written, else null (bug 14).
@@ -1726,25 +1733,23 @@ below).
   emitted (`emit::claim`), and one nothing changed is the file's object as
   it is (`SymObject::Raw`, judged by `Cx::unchanged`: the same values,
   each placeholder naming the number the file's object refers to).
-- **Derived pages, content and the outline** (`emit::{pages, content,
-  outline}`). A derived copy's page (a header stripped, until slice 17;
-  a crop until slice 15, a watermark until 16) is written as the page
-  its `derived` record (the
-  document's table by blob, from M10.5 slice 11) says it was made from, through copies of copies (`emit::Shown`): that
-  page's object (copy 0 of a primary page keeps its number), keys and
-  annotations, with the copy's `/Contents` and `/Resources` copied in
-  and the state's boxes, until slice 17's content stack. What sheaf draws
-  over a page goes through the legacy installers with the emitter as their
+- **Pages, content and the outline** (`emit::{pages, content,
+  outline}`). A page is written as its base page is (`emit::Shown`: its
+  source, index and copy), that page's object (copy 0 of a primary page
+  keeps its number), keys and annotations, with the state's boxes and
+  what sheaf draws around it; until slice 17 a derived copy's page
+  (a header stripped; a crop until slice 15, a watermark until 16) was
+  written as the page it was made from with the copy's `/Contents` and
+  `/Resources`. The generators on a page (watermarks and backgrounds from
+  slice 16, the header and footer from 17) are drawn as blocks around
+  its isolated content (Watermarks and backgrounds as generators); its
+  OCR layer goes through the legacy installer, with the emitter as its
   `content::sink::Sink` (a lopdf document's is `sink::Lopdf`, the
-  document and its `ResObjects`): an OCR layer through `text_layer::install`
-  (`[q, base…, layer]`, `/SheafOcrLayer`, `/SheafOcr`), which first takes
-  out a layer the page holds already (`text_layer::has_layer`), so a
-  re-OCR leaves one; the header and footer through `stamps::install`,
-  Bates numbers counted, on each page it covers whose base doesn't draw it
-  already (`stamps::base_draws`: its file's catalog says sheaf drew these
-  settings on that page; `Source::header_footer` reads it once; a
-  derived copy said what it kept, `save::HeaderKept`, until slice 16
-  deleted the watermark's copies, the only ones that kept it). The
+  document and its `ResObjects`): `text_layer::install` (`[q, base…,
+  layer]`, `/SheafOcrLayer`, `/SheafOcr`), which first takes out a layer
+  the page holds already (`text_layer::has_layer`), so a re-OCR leaves
+  one, until slice 18. Until slice 17 the header and footer went through
+  `stamps::install` too, its Bates numbers counted at each Rewrite. The
   page's own
   streams are referenced, never re-encoded; a resource is one object a
   file (`ObjKey::Res`, its other objects `ObjKey::ResPart`), so every OCR
@@ -1929,8 +1934,10 @@ below).
   showed only on pages left out goes, with the parents it leaves with no
   fields, and the form's roots and calculation order follow; a connector
   whose other end is left out has no partner; a label range starts at
-  the first page of its range kept; and the header/footer is on the pages
-  kept of its own. Clean Copy, and print without markup, filter sheaf's marks and
+  the first page of its range kept; and a generator is on the pages
+  kept of its own, the header's Bates numbers the binder's while its
+  live tokens count the pages written (slice 17). Clean Copy, and print
+  without markup, filter sheaf's marks and
   other tools' comments out of the target, keeping links and widgets, and
   strip what the records don't hold in a post-pass on the checked graph
   (`materialize_then`'s `PostPass`); Export Flattened, and print with
@@ -1957,10 +1964,11 @@ below).
   A second save while one is sealed is refused ("Already saving…"), since
   its base would be the first's file. Nothing is reopened or re-read
   after a save, and no rendered image is dropped: images are cached by
-  render key (slice 13), which a save doesn't change. The header and
-  footer is drawn on each page whose base doesn't draw it
-  (`stamps::drawn_over`, shared with the emitter, which draws it into the
-  page's realization for the screen), before a save and after. Autosave writes a sidecar 3 s after the last edit (at least
+  render key (slice 13), which a save doesn't change. A generator is
+  drawn on each page whose base doesn't hold its block as drawn now
+  (`content::intact`, shared by the emitter, `untouched` and the render
+  key), before a save and after (from slice 17 the header and footer
+  too). Autosave writes a sidecar 3 s after the last edit (at least
   every 30 s), never while a save or another sidecar is in flight, and not
   again while the current version and edits are the ones the last
   sidecar holds; as a save ends, a sidecar is written on the UI thread,
@@ -2001,9 +2009,9 @@ below).
   renamed mark anew (`FileAnnots::fresh`) and the app hides it by its
   old name from the view's facts; `SourceInfo.stamp`; `WriteCx`'s trust
   of the file's own stems; and `serialize::append::Base::of`. What
-  lived on moved: derived copies leave sheaf's marks out with the
-  emitter's filter (`file::not_ours`, over `file::is_ours`) and read
-  their pages' boxes as `Geom::read` does, stamp collections read theirs
+  lived on moved: derived copies (until slice 17) left sheaf's marks out
+  with the emitter's filter and read their pages' boxes as `Geom::read`
+  does, stamp collections read theirs
   from what each page inherits, `file::annots_in` takes each page's turn
   from the page table (`Source::geom`), and tests write marks onto a
   fixture page through `annot::emission` (`forms::fixture::write_marks`)
@@ -2069,10 +2077,11 @@ about 21 ms, its fsyncs included.
   `NoSaveRecord`; a file another program changed, `FileChanged` with its
   ask; **Unchanged** when nothing else was found, the target is the saved
   file, the path changed nothing by value and no recovered tail is
-  pending, before `BaseUnsound` and `LegacyHeaderFooter`; then
-  `BaseUnsound` (`SaveRecord::takes_updates`: a rebuilt cross-reference
-  table, an unsound base or a Full restore), `LegacyHeaderFooter`,
-  `RecoveredRemovals`, strict removal's `Removes` and `ReplacesText` (by
+  pending, before `BaseUnsound`; then `BaseUnsound`
+  (`SaveRecord::takes_updates`: a rebuilt cross-reference table, an
+  unsound base or a Full restore), `RecoveredRemovals` (until slice 17
+  a header and footer forced a Rewrite here, `LegacyHeaderFooter`),
+  strict removal's `Removes` and `ReplacesText` (by
   `RemovedKind::is_text`: OCR layers and the header are text), and
   `TransformNeedsRewrite` (dropping an XFA part whose datasets hold values
   the path replaced); otherwise `Append { onto }`. `Why` has a reader's
@@ -2139,8 +2148,9 @@ about 21 ms, its fsyncs included.
   replies and connector group; a field's widgets, every node over it, and
   the form's dictionary when the node came, went, moved or shows other
   widgets; the pages of a widget that stops or starts being its field's
-  object; the outline by place; labels; the catalog for the header's
-  pages, labels that came or went, a transform the file hasn't had
+  object; the outline by place; labels; the catalog for
+  `/SheafGenerators` and labels that came or went, a transform the file
+  hasn't had
   (`DropUr3`'s `/Perms`; the form's dictionary and every field for
   `DropXfa`'s tooltips) or an XFA copy policy keeps again; and the
   spliced tree's changed nodes and moved pages. A page the file has at
@@ -2239,7 +2249,17 @@ about 21 ms, its fsyncs included.
   judged on their record inputs: a sheaf mark's objects on what the mark
   says (contents, author, name, its kind's text, tape rows, its file or
   stamp by hash), a page's blocks on its OCR words and header text, a
-  resource as its user's. Other objects are judged as a `TextBag`:
+  resource as its user's. From slice 17 a generator's old block that
+  the section leaves, drawn again from the same recipe (a live redraw),
+  is an allowed drop (`Emission::allowed_drops`; Headers, footers and
+  Bates as generators): per page, as a block is content-addressed and
+  pages laid out alike share one. A page that draws a generator again
+  from its block's recipe isn't judged on what that block drew there;
+  the block itself goes unjudged only when every page it was on draws
+  it again or is gone, and is otherwise judged on each page that held
+  it. A block is kept as it is only when it's laid out alike (`/L`) from
+  the same recipe (`/R`, which says its Bates number too), so the record
+  and an open read what's drawn. Other objects are judged as a `TextBag`:
   strings, what content draws through its fonts (pages with inherited
   resources, forms, tiling patterns, Type 3 glyphs), scripts, rich text,
   XFA and XMP as words, images and embedded files by hash; their bag must
@@ -2314,9 +2334,10 @@ about 21 ms, its fsyncs included.
   (`fill`, `annot`, `other`, `other` too when they write the catalog or
   the form's dictionary) and `field:` with each field's name. It is
   `full`, the whole document, when there's no record, the record can't
-  take an update (a Full restore's too), the legacy header is on, or the
-  section is refused or fails to be made (logged), so a fault in the
-  Append never leaves a document without one. A restored document opens from the file's bytes on
+  take an update (a Full restore's too), or the section is refused or
+  fails to be made (logged), so a fault in the Append never leaves a
+  document without one; until slice 17 a header and footer made it
+  `full` too. A restored document opens from the file's bytes on
   disk with the sections after them, read as one, its record the file's
   with them pending (`SaveRecord::restored`,
   `PendingTail { bytes, flags: TailFlags }`; `Came::Restored`); its sidecar is its pending tail plus
@@ -2775,20 +2796,25 @@ length before what it counts and a tag before each variant:
   `foreign`, each link with whether it leads nowhere now (a save drops
   it); widgets with `widgets`, with their terminal's value, and then the
   form's `FormDoc` digest; each with its hidden and dragged flags;
-- each generator on the page: its id, its recipe and whether the page's
-  file draws it already; when it doesn't, the page's position, the page
-  count and its Bates number, as far as its tokens use them
-  (`Generator::needs()`, `CtxNeeds`);
+- each generator on the page: its id, its recipe digest
+  (`recipe_digest(g, page)`: its spec, z, `replaces` and, for the header
+  and footer, its date, file and this page's Bates number) and whether
+  the page's file holds its block as drawn now; and the page's position,
+  the page count and its label, as far as its tokens read them
+  (`Generator::needs()`, `CtxNeeds`; from slice 17 `render_reads` adds
+  `Order` or `Labels` for them, whether or not the page is intact);
 - the layers `ocg_off` turns off of the page's source.
 
 Digests are kept with what they digest (`PageDef::new`, `FormDoc`'s cell),
 so a key costs a lookup or two once a value has been seen, and keys are
-computed only for the pages being drawn. Position, count, Bates numbers,
-which pages the header covers and which page shows a source page come from
-tables each state builds once, when first asked (`Indexes.header`,
-`Indexes.shows`; the page map is a B-tree). So a reorder of 7,000 pages
-changes no key without a page-number header and only the covered pages'
-with "Page n of N", a mark dragged under `ByHost` changes none, and no
+computed only for the pages being drawn. Position, labels and which
+page shows a source page come from tables each state builds once, when
+first asked (`Indexes.labels`, `Indexes.shows`; the page map is a
+B-tree), and Bates numbers are the generator's own, fixed at apply
+(slice 17; until then `Indexes.header` counted them). So a reorder of
+7,000 pages changes no key without a page-number header (none with Bates
+numbers alone) and with "Page n of N" only the keys of the covered pages
+whose place it changed, a mark dragged under `ByHost` changes none, and no
 `ChangeSet` drives a cache.
 
 `render_reads` is what the page draws from, as slots: under
@@ -2814,13 +2840,14 @@ target showing again without an order change); both change the key.
 `Realizer::view` takes the key and asks whether the page is
 **untouched**: copy 0 of its base page at that page's own object, with
 its boxes (its turn is the job's), nothing drawn over it that the inputs
-draw (recognized text with `ocr_over`; the header with `generators`,
-where its file doesn't draw it), and, as far as the render's flags draw
+draw (recognized text with `ocr_over`; a generator with `generators`,
+where its file doesn't hold its block as drawn now), and, as far as the
+render's flags draw
 them, its base page's annotations as they are: each drawn record as read
 from its own entry, none hidden or dragged, no entry left out (a record
 deleted, sheaf's marks and their companions under `ByHost`, another
-tool's without `foreign`, a derived copy's widgets, a link that leads
-nowhere), no merged field split, each drawn widget's `/Parent`s (merged,
+tool's without `foreign`, a link that leads nowhere), no merged field
+split, each drawn widget's `/Parent`s (merged,
 its field's) as the model's field tree has them, which a file's `/Kids`
 made where its `/Parent`s say otherwise, and the form's `DA`, `Q` and
 `NeedAppearances` as the source's form has them. A field's value isn't
@@ -2898,8 +2925,8 @@ of the refusal. The document's notice says its pages are drawn from
 sheaf's copy.
 
 **The overlay** is an emission (`EmitScope::Pages`, `EmitBase::Overlay`)
-over the source's bytes, with that source the emission's own and no
-derived table, its setup O(its pages) (the state's tables, not walks of
+over the source's bytes, with that source the emission's own, its
+setup O(its pages) (the state's tables, not walks of
 the document; a visit counter in the tests holds it to that):
 
 - **Scoped, with its keys written out.** The group's pages hang under a
@@ -2932,15 +2959,13 @@ the document; a visit counter in the tests holds it to that):
   outside the group is null.
 - **Copy 0 of the source's objects** keeps its own number; one unchanged
   isn't written (the base has it). Other blobs, and copies, are copied.
-- **A derived copy's page** (a stripped header, until slice 17; a crop
-  until 15, a watermark until 16) is the page as the copy has it: the
-  overlay goes over the copy's bytes, its records' widgets drawn from
-  the records, the copy's own widget entries left out, and its form only
-  the records' fields (the copy's own form copies every field of the
-  file, which PDFium would load at the group's first page).
+- **Derived copies' pages** (a stripped header, until slice 17; a crop
+  until 15, a watermark until 16) were drawn as the copy had them, over
+  the copy's bytes; no edit makes a copy now.
 
-**Assembly.** Each page's delta is its overlay alone
-(`EmitScope::Pages([p])`) without the group's frame, kept by page and
+**Assembly.** Each page's delta is its overlay alone without the
+group's frame (`EmitScope::Delta(p)`, which builds no root, catalog or
+form for `Part::page` to drop; from slice 17's follow-up), kept by page and
 key, `(PageId, RenderKey)`: a delta names its page's own keys, which a
 duplicate with the same key doesn't share, while duplicates still share
 images by key. The deltas kept weigh at most 32 MB by an estimate that
@@ -3105,12 +3130,11 @@ that doesn't open does, and the worker serves every other.
 - **The Header & Footer dialog's preview** lowers its op on the current
   version off the UI thread (a newer lowering supersedes an older one's
   picture, by a generation token; an op equal to the last isn't lowered
-  again), strips the previewed page's own drawn header as applying would
-  (`derive::strip_stamps_of`), and renders the active pane's page under
-  the screen's inputs through a realizer of its own on the document's
-  pool, so its states don't evict the screen's deltas; it pins nothing,
-  and doesn't draw sheaf's marks, which GPUI draws on the page. From
-  slice 15 the Crop Pages dialog previews the same way, through the same
+  again), and renders the active pane's page under the screen's inputs
+  through a realizer of its own on the document's pool, so its states
+  don't evict the screen's deltas; it pins nothing, and doesn't draw
+  sheaf's marks, which GPUI draws on the page. From slice 15 the Crop
+  Pages dialog previews the same way, through the same
   `dialog_preview::Preview` (Crop as geometry).
 
 **Deleted:** `RenderHandle` (its thread per source, `open_bytes`, `info`,
@@ -3309,7 +3333,10 @@ hidden, or a page deleted under a "Page <<1>> of <<N>>" header (a turn
 changes the key only where a generator is laid out in the turned page;
 characters are in PageSpace). On a page with recognized text and a
 header, the text reads in draw order: the page's own, then the
-recognized words, then the header.
+recognized words, then the header; from slice 17, whose header is a
+generator block, the page's own, the header, then the recognized words,
+until slice 18 makes the OCR layer a block of its own that goes before
+the generators drawn over the page (§11.4).
 
 When PDFium refuses the primary, the notice says "PDFium can't read this
 file as saved, so its pages are drawn from sheaf's copy": Find, Patterns,
@@ -3533,14 +3560,13 @@ crops into a transaction made at that snapshot.
 - **Margins** commit one op (`page_insert::crop_op`) on the version the
   Crop Pages dialog opened on, with `Validate`, on the UI thread: no copy
   is loaded, so the first crop no longer starts rayon's pool.
-- **A crop survives the derived flows.** A page's boxes are its own, not
-  its base's: `Tx::set_page_base` (Remove Header/Footer, until slice 17;
-  Watermark / Background until 16) moves a page onto its copy keeping its
-  `Geom` whole, the copy having its base's media box, and reads it, so
-  the flow conflicts with a crop made since it was planned. From slice
-  16 a watermark is a generator, laid out at emit on each page's crop as
-  the document shows it then, so one set before a later crop lands and
-  is centred on the new crop.
+- **A crop survives the generators.** A page's boxes are its own, not
+  its base's. Until slice 17 the derived flows' `Tx::set_page_base`
+  (Remove Header/Footer; Watermark / Background until 16) moved a page
+  onto its copy keeping its `Geom` whole. From slice 16 a watermark, and
+  from 17 the header and footer, is a generator, laid out at emit on each
+  page's crop as the document shows it then, so one set before a later
+  crop lands and is centred, or placed, on the new crop.
 - **The dialog's preview** (§8.6) is the Header & Footer dialog's,
   shared (`dialog_preview::Preview<K>`, keyed by the request,
   `crop_dialog::Request::{Margins(m), Trim}`): the request lowered off
@@ -3626,11 +3652,13 @@ impl Generator { pub fn covers(&self, page: PageId) -> bool; pub fn z(&self) -> 
                  pub fn scope(&self) -> Cow<'_, Scope>; pub fn replaces(&self) -> &BTreeSet<PaginationKind>; }
 ```
 
-`Generator` is still `{ id, spec }`: a watermark carries its own z,
-scope and `replaces` in its record, and `covers`, `z`, `scope` and
-`replaces` read them as §3.5's fields would be (the header's are made
-from `HeaderFooter.pages`, `Over` and none) until slice 17 moves them
-onto `Generator` for both. `GenId` is one type, `content::blocks::GenId`
+In slice 16 `Generator` was still `{ id, spec }`: a watermark carried
+its own z, scope and `replaces` in its record, and `covers`, `z`,
+`scope` and `replaces` read them as §3.5's fields would be (the
+header's made from `HeaderFooter.pages`, `Over` and none). Slice 17
+moved them onto `Generator` as fields, with `frozen`, for both kinds;
+`WatermarkGen` keeps only its content and position. `GenId` is one type,
+`content::blocks::GenId`
 (`g<hex>`), which `model` re-exports.
 
 ### The ops
@@ -3771,8 +3799,8 @@ whether a page is intact, and counts such a page as changed.
 
 ### Found again after reopen
 
-- **Markers.** A source whose catalog has `/SheafGenerators` (or a
-  derived copy, until slice 17) is `marked()`, and only then are each
+- **Markers.** A source whose catalog has `/SheafGenerators` (and,
+  until slice 17, a derived copy) is `marked()`, and only then are each
   page's stream markers read (`Source::markers(i)`): each `/Contents`
   stream's dictionary, never decompressed, once a stream. The corpus has
   none, so its files take the paths they took before.
@@ -3795,9 +3823,9 @@ whether a page is intact, and counts such a page as changed.
   `PageForm::Placed`). At ready they're in the state, their ids and the
   file's in `DocState.opened_generators`.
 - **Backed blocks** (`DocState::backs(g, page)`: a generator of the
-  state that covers the page; or, on a page of the opened file (or of a
-  derived copy, until slice 17), a generator of the state or one the
-  opened file had) are set aside from the page's own content (base′)
+  state that covers the page; or, on a page of the opened file (and,
+  until slice 17, of a derived copy), a generator of the state or one
+  the opened file had) are set aside from the page's own content (base′)
   whenever it's written, so a watermark changed, removed by either op, a
   cascade, an extract, a Clean Copy or a print leaves no block, and
   nesting never grows (five cycles of save, reopen and watermark keep the
@@ -3890,7 +3918,7 @@ all of `watermark.rs` (`Watermark`, `Mark`, `Anchor`, `FONT`,
 `/SheafWM*` names); `Derive::Watermark` and `RemoveWatermark` with
 `set_base`'s Unencodable arm; `save::HeaderKept` and `derived_copy`'s
 `header` and geometry parameters; `stamps::WATERMARK` and `BACKGROUND`
-(`stamps::strip` is the header and footer's alone until slice 17); the
+(`stamps::strip` stayed the header and footer's alone until slice 17); the
 app's `apply_watermark`, `open_watermark` and the dialog's `behind` and
 `current`. `tests/retired.rs` lists them.
 
@@ -3907,6 +3935,301 @@ app's `apply_watermark`, `open_watermark` and the dialog's `behind` and
 The strip draws a watermark on every page now, which costs it about
 0.2 ms a page on the heavy; the census counts what the written pages'
 resources bind that the file's didn't, page by page.
+
+## Headers, footers and Bates as generators (M10.5 slice 17)
+
+The header and footer is a generator too (`GenSpec::HeaderFooter`): one
+record, drawn as `/SheafBlock` blocks on each page it covers when a save
+writes the page or a view draws it, found again from `/SheafGenerators`
+when the file opens. Its page tokens are live, read from the document as
+it's written, and its Bates numbers, date and file are fixed when it's
+set (§3.5, §6.5, §7.1–7.2, §9.1, §11.3–11.4, §11.9, proposals 8 and 31
+and bugs 16, 24, 28 and 29 of `todos/m10.5-edit-api.md`). The legacy
+header went with it: `stamps::install`, its catalog record
+`/SheafHeaderFooter`, Bates numbers counted at each Rewrite, the
+`LegacyHeaderFooter` Rewrite and the Full sidecar; and so did derived
+sources, whose last maker was Remove Header/Footer's strip.
+
+```rust
+pub struct HeaderFooterSpec {                                 // sheaf_edit
+    pub texts: [String; 6],          // header left, center, right; footer left, center, right
+    #[serde(default = "legacy_face")] pub font: FontChoice,   // Helvetica when it says none
+    pub size: f32, pub color: Color, pub margins: Margins,
+    pub first_number: u32, pub bates: Option<BatesSpec>,
+}
+pub struct BatesSpec { pub prefix: String, pub suffix: String, pub digits: u8, pub start: u64 }
+Op::SetHeaderFooter { spec: HeaderFooterSpec, scope: ScopeSel }
+Op::RemoveHeaderFooter { pages: PageSel, include_authored: bool }
+
+pub struct Generator { pub id: GenId, pub spec: GenSpec, pub z: Z,   // sheaf_doc::model
+                       pub scope: Scope, pub frozen: Frozen,
+                       pub replaces: BTreeSet<PaginationKind> }
+pub enum GenSpec { HeaderFooter(Arc<HeaderFooterSpec>), Watermark(Arc<WatermarkGen>) }
+pub struct WatermarkGen { pub content: WatermarkContent, pub position: GridPos }
+pub struct Frozen { pub date: Arc<str>, pub file: Arc<str>,
+                    pub bates: Option<Arc<im::OrdMap<PageId, u64>>> }
+pub struct CtxNeeds { pub index: bool, pub count: bool, pub label: bool, pub bates: bool }
+pub struct PageCtx { pub geom: Geom, pub position: u32, pub count: u32,
+                     pub label: Arc<str>, pub bates: Option<u64> }
+impl Generator { pub fn needs(&self) -> CtxNeeds; pub fn kinds(&self) -> BTreeSet<PaginationKind>;
+                 pub fn covers(&self, page: PageId) -> bool;
+                 pub(crate) fn same_place(&self, other: &Generator) -> bool; }
+pub struct DrawnBlock { pub layout: u128, pub recipe: u128, pub key: ObjKey }   // materialize::record
+pub type DrawnBlocks = HashMap<(PageId, GenId), DrawnBlock>;                   // SaveRecord.drawn
+pub fn others_on(st: &DocState, kinds: &BTreeSet<PaginationKind>,             // sheaf_doc::tx
+                 pages: &[PageId], include_authored: bool) -> OthersFound;
+```
+
+Slice 16's z, scope and `replaces` moved from `WatermarkGen` onto
+`Generator` as fields, with `frozen`, so both kinds read them alike;
+`WatermarkGen` keeps its content and position (§3.5's `WatermarkSpec` is
+`sheaf_edit::WatermarkSpec`'s name).
+
+### Tokens, live and frozen
+
+`generate::header` holds the six tokens (`TOKENS`) and the layout.
+`<<1>>` (the page's place, from `first_number`), `<<N>>` (the count) and
+`<<label>>` (its page label, or its number with no labels) are live: they
+read where the page is as the document is written, so a reorder, an
+extract or a print says what each page is. `<<date>>`, `<<file>>` and
+`<<bates>>` are fixed when the header is set (`Frozen`): a new one's date
+and file are the host's now and the document's name, kept by every later
+set; its Bates numbers count the pages it covers in order from the
+spec's `start`, keyed by `PageId`, so a reorder never renumbers them, a
+page added later has none, and setting it again is how to renumber.
+`needs()` says what the tokens read (`CtxNeeds`), and `generate::page_ctx`
+builds a page's `PageCtx` reading only that (a label only for
+`<<label>>`, through `DocState::label_of`, cached by state). A deleted page
+takes its number with it under any scope (`on_pages_left`, which clones
+the map and removes the entries, so the rest is shared), and the
+cascade puts the generator back when only numbers went; a duplicate's
+copy gets none (`join_scope`); and `save::subset` (extract, print)
+keeps the kept pages' numbers, so an extract says the binder's numbers
+while its page tokens count the pages written.
+
+### The ops
+
+- **`SetHeaderFooter`** puts the header in place of the one there,
+  keeping its `GenId`, date and file; z is `Over` and `replaces`
+  `{Header, Footer}` (`header::kinds()`). It reads no page's content and
+  no `Geom`, and the order only when it numbers pages. Empty texts take
+  it off; a spec `header::unfit` refuses (every slot blank, a size not
+  above 0, a margin that isn't a number) or an empty `Pages` scope is
+  `EditError::Invalid`. Text its face can't draw, and a page label under
+  `<<label>>` it can't (`label_unencodable`, which reads the pages only
+  when a range's prefix can't be drawn), is drawn `?` and told
+  (`Notice::Unencodable`); `SetPageLabels` says it too when it makes a
+  label unencodable there. The same settings set again make no version.
+- **`RemoveHeaderFooter`** is Remove Watermark's lowering for the kinds
+  `{Header, Footer}`: one `remove_generated` serves both. It narrows the
+  generators drawing those kinds to the pages left (`narrowed`, reading
+  `Order` when it narrows an `All` scope), then reads each page's blocks
+  a page at a time, with progress and a way to cancel (`pages_done`,
+  §6.3), and adds the filters `found_on` gives: `DropStreams` or
+  `DropMarked(SheafGen)` for another file's blocks, and a `Pagination`
+  filter for Acrobat's and an older sheaf's ranges, the author's too
+  with `include_authored`, each only where a splice takes it out.
+  `OthersFound` counts them by who drew them, and what's left (the
+  author's, refused, inside forms, unreadable); what the page's filters
+  take out already isn't counted again. Its line: "Remove the header and
+  footer from pages 1–3 (2 made in Acrobat; 1 the author's left in
+  place)", a run's counts summed.
+- **`tx::others_on`** is the same count, nothing changed: it narrows a
+  clone of the state as the op would, then counts `found_on` over the
+  pages. It reads blocks, so it's for off the UI thread; the dialogs'
+  counts are it (below).
+- **Invariants.** At most one header; a `Pages` scope is non-empty and
+  names pages that are there; every Bates key is a page it covers;
+  `resolves_after` names the pages it numbers.
+- **Effects** (§7.1). Other text, `first_number`, the Bates spec, date
+  or file, another Bates number on a page still in the document, or a
+  page left that's still there: `REMOVES | REPLACES_TEXT`
+  (`RemovedKind::HeaderFooter`). Font, size, colour, margins or more
+  pages: `CONTENT`, so it can append. A filter, or a header newly drawn
+  on a saved page holding others' headers, is `CONTENT | REMOVES`, as a
+  watermark's is.
+
+### Drawn on save and on screen
+
+- **Blocks.** Each slot that isn't blank is its own `/Artifact /Sh… BDC
+  q BT … ET Q EMC`, its list `<< /Type /Pagination /Subtype /Header (or
+  /Footer) /SheafGen (g…) >>`, set in `Std14::from(spec.font)` from the
+  page's shown frame, so it's upright at every turn and on the page's
+  crop. A page with nothing to draw gets an empty block, so its scope
+  reads back. The block's `/SheafBlock` says `/N (n)`, decimal, when the
+  page has a Bates number. `/L` is the layout's digest; `/R` the recipe's
+  (`recipe_digest(g, page)`: the spec, z, `replaces`, and the page's own
+  fixed values, never the whole map).
+- **Order.** The generators on a page go background, the page's
+  content, watermark, header (`generators_on`), one order the emitter,
+  `intact`, recognition and the realizer share, so a reopened page
+  tests intact.
+- **Replacing others' headers** is the watermark's rule (Others'
+  watermarks): Acrobat's, an older sheaf's and another file's headers
+  and footers go from the pages the header covers, the author's stay.
+  A page whose content can't be read gets no header, said once in a
+  Note, as watermarks do.
+- **`/SheafGenerators`** has a `header-footer` kind: the spec with its
+  font, and `frozen` `{date, file}`; the Bates numbers are the blocks'
+  `/N`. A watermark's entry is what slice 16 wrote, byte for byte.
+  `/SheafHeaderFooter` is written no more and stays catalog-owned
+  (`CATALOG_OWNED`), so a save drops an older sheaf's; `/SheafHF` and
+  `/SheafStamp` are only read, to tell an older sheaf's artifacts. A
+  header needs PDF 1.4, as a watermark does (`needs_after`).
+- **On screen** a view draws the header through the same emission
+  (`ViewInputs.generators`). A page's render key holds each generator's
+  id, recipe and whether its file holds its block as drawn now, and only
+  the `PageCtx` fields its tokens read (`layout_reads`); `render_reads`
+  adds `Order` for `<<1>>`, `<<N>>` or `<<label>>` and `Labels` for
+  `<<label>>`, whether or not the page is intact. So a reorder changes
+  the keys of pages whose number changed, and no key under Bates numbers
+  alone.
+
+### Found again after reopen
+
+Recognition reads the `header-footer` entry as it reads a watermark's,
+and passes over one sheaf wouldn't write (z not `Over`, `replaces` not
+`{Header, Footer}`, no `frozen`, a spec `unfit` refuses, a second header).
+`generate::Saved` holds each block's `/N`, and `Saved::generator` rebuilds
+`Frozen.bates` keyed by the new session's `PageId`s, so the numbers
+survive a save, a reopen and a reorder after. A page whose block another
+tool merged into its content has no `/N` to read (`Saved::unnumbered`):
+its number is lost, recognition logs it, and a save says so ("The Bates
+numbers on pages 2, 3 can't be read: another program merged the header
+into the page. …"). An older sheaf's catalog header isn't read: its
+artifacts are `SheafLegacy` by their `/SheafHF` font or `/SheafStamp`
+list, which Set replaces and Remove counts and takes, but nothing
+prefills from its settings.
+
+### Live redraws (proposal 8)
+
+- **`SaveRecord.drawn`** (§9.1) says, for each generator's block on each
+  page of the saved file, its `/L`, its `/R` and its key as the removal
+  check finds it (`DrawnBlock`): the record map's `ObjKey::Block`, or
+  `ObjKey::Base { blob, obj, copy: 0 }` for a block in the opened file.
+  An open fills it from what recognition read of the markers
+  (`record::drawn_of`, through `Document::opened`), so an unmarked file is
+  never walked; a Rewrite's record is what its emission drew
+  (`Emission.drawn`); an Append's is the record before, less the pages it
+  wrote and the pages gone, plus what it drew. Kept blocks are noted
+  with their own markers.
+- **`LIVE_REDRAW`** (§7.1): an `Order` change sets it when a generator's
+  tokens read the place, the count or the label, and a `Labels` change
+  when one reads the label. It's never a Rewrite reason.
+- **The closure** (§7.2, `deps::live`): on an `Order` or `Labels` change,
+  the pages a live generator lays out otherwise now than `drawn` says its
+  block there is (by layout digest), or that have none, are written;
+  pages alike in what the layout reads (`realize::layout_reads`) are laid
+  out once. A reorder of two pages under "Page n of N" writes those two
+  pages and the tree node.
+- **A header is laid out once a page** for every version of the
+  document that lays it out alike (slice 17's follow-up): its layout
+  digest is kept by the states, one memo for all versions derived from
+  an open (`DocState::laid`), keyed by the generator, its recipe on the
+  page (`recipe_digest`, its spec and what it fixed for the page) and
+  what its tokens read of the page (`layout_reads`), which is all its
+  layout reads. `untouched`, `render_key`, the closure, `intact` and
+  `rebuilt` ask it, and a block drawn adds its digest. A watermark's
+  isn't kept: its art is read from the file it's written to. Past 32,768
+  digests it starts again; debug builds lay each one kept out again and
+  assert they agree.
+- **Allowed drops** (§11.9). When the emitter draws a block where the
+  saved file's block of that generator is another object drawn from the
+  recipe it draws from now (a renumbered page, or one laid out again for
+  its boxes), the old block's key goes into `Emission::allowed_drops`, and
+  the removal check lets it go; on a page whose other blocks are judged,
+  that generator's old words are left out of the comparison. A text
+  change is another recipe, so it vetoes and plans a Rewrite
+  (`ReplacesText`) with the old words gone; a margins change appends. A
+  Rewrite's own drops reach its oracle (`removal::of_rewrite`).
+- **Recovery.** A header no longer makes a sidecar Full: an unsaved
+  header's sidecar is an Append section, and a live redraw's (save,
+  reorder, sidecar, restore, save) appends with nothing removed.
+
+### The app
+
+The Header & Footer… and Bates Numbering… dialog builds
+`Op::SetHeaderFooter` itself and previews that op alone, lowered on the
+current version off the UI thread: the header set again replaces the one
+drawn there, so no strip is needed and the preview is what applying
+draws. It starts from the model's header (`Start::at`), which after a
+reopen is the recognized one: texts, font (family and style chips,
+shared with the Watermark dialog in `generator_dialog`), size, colour,
+margins, the pages as text, and Bates. Apply commits on the version it
+opened on with `Validate` ("Header & footer"; "No change to the header
+and footer" when nothing changed); Remove is a planner
+(`DocView::plan_removal`, shared with Remove Watermark) with "the
+author's own too" for `include_authored` ("Remove header & footer";
+"No header or footer to remove"). A planner stopped part way says it
+stopped (`sheaf_ops::was_cancelled` knows `EditError::Cancelled`).
+Choosing either menu item again closes the dialog; the other one swaps
+it.
+
+**Counts** (proposal 31, D61). Both dialogs show what others drew of
+their kinds on the selection (more than one page selected) or on every
+page: `generator_dialog::Count`, counted once as the dialog opens, off
+the UI thread, by `others_on` without and with the author's own, and
+dropped if it isn't of the version the dialog opened on. "On all pages:
+1 made in Acrobat will be replaced; 2 the author's stay (Remove can take
+1 of them)", "Counting…" until it lands, or "On all pages: no header or
+footer others drew".
+
+### Derived sources, gone
+
+No flow makes a copy of a page now, so the side record and everything
+that served it went: `model::Derived`, `DerivedCopies`,
+`Document::derived` and `add_derived`, `Snapshot` and `SaveInput`'s
+`derived`; `MemoryKind::Derived` (`Source::marked` reads the catalog
+alone, `DocState::backs` names the opened file's generators only);
+`save::derived_copy` and `copy_form`, with `graph::Loaded`,
+`copy::inherited_attrs`, `INHERITED` and `reserve` and `file::not_ours`;
+`ResolvedOp::SetPageBase`, `tx::Derive`, `Tx::set_page_base` and
+`tx::Entry`'s base variant (`Entry` is the struct `{ op, drawn,
+positional }`); the emitter's and the realizer's derived pages
+(`Shown` is `{ src, index, copy }`); sheaf-ops' `derive.rs`; and the
+app's derived flows (`show_copies`, `keep_copies`). Tests that used a
+page rebase as a content change use `ReplacePages`, which writes
+`Page(p)` as it did. A form keeps its fields, widgets, values and
+appearances through Set and Remove on Acrobat's header, both ways
+(`forms_pages`).
+
+**Deleted:** all of `stamps.rs` (`HeaderFooter`, `install`,
+`to_content`, `to_catalog`, `from_catalog`, `stored`, `CATALOG_KEY`,
+`drawn_over`, `base_draws`, `strip`, `stripped`, `HEADER_FOOTER`, `FONT`,
+`FONT_NAME`, `PageFacts`, `Placed`, `Shared`, `Bates`; `TOKENS` and
+`Placed` moved to `generate::header` as `TOKENS` and `Line`);
+`Source::header_footer`, `StoredHeaderFooter` and
+`open::Facts::header_footer`; `DocState::{header_covers, bates_of,
+header_pages, number_header_pages}` and `Indexes::header`; `Cx::bates`
+and `emit::content::header_footer`; `Why::LegacyHeaderFooter` and
+`plan::sidecar`'s Full rule; `REPLACES_NONE` and `CtxNeeds::any`; the
+derived sources above; and the app's `header_footer_op`,
+`open_header_footer`, `watermark_notice` and the dialog's `today`,
+`current`, `file` and `scope`. `tests/retired.rs` lists them.
+
+**Numbers** (AMD EPYC 7302P, release; the 7k gate harness, after slice
+17's follow-up):
+
+| Row | Synthetic | Heavy | Scanned |
+|---|---|---|---|
+| Bates numbers on every page, one op on the file opened afresh (asserted < 50 ms) | 0.62 ms (slice 2: 114 ms, a copy of every page) | 0.64 ms (270 ms) | 0.63 ms (428 ms) |
+| the Rewrite that draws them, and the fonts it adds (asserted 1) | 419 ms, 1 | 949 ms, 1 | 921 ms, 1 |
+| "Page n of N" on every page, saved, every page moved: the Append, planned and written (asserted ≤ 1 s), its section (asserted ≤ 8 MB) | 469 ms, 1.36 MB | 655 ms, 1.47 MB | 469 ms, 1.37 MB |
+| the same move on the file opened again: the Append (≤ 1 s, asserted on the scanned), its section (asserted ≤ 8 MB) | 0.89–1.07 s, 3.31 MB | 1.57 s, 3.33 MB | 0.94 s, 3.32 MB |
+| a page drawn at 1024 px, its group not drawn before: the header just set, every page moved, one deleted, one deleted on the file opened again (the realize gate 15 and 25 ms) | 22.3, 18.8, 19.3, 27.3 ms | 36.7, 33.9, 31.8, 41.8 ms | 33.6, 32.4, 31.0, 41.0 ms |
+| thumbnail strip after a crop, a watermark and a "Page n of N" header (asserted ≥ 310 pages/s) | 420 pages/s | 346 pages/s | 163 pages/s |
+
+Proposal 8's verdict is live page numbers (Greg, 2026-10-22). The
+Append holds its gate in the session that saved the header, and on the
+scanned opened again. The first page drawn of a group every page of
+which is laid out anew (a header just set, a reorder, a delete under
+"Page n of N") realizes all 128 of them before PDFium opens the group,
+so it misses the realize gate on the synthetic and heavy; and on a file
+opened again the reorder's Append classifies and rebuilds every page's
+content cold, 1.57 s on the heavy. Greg accepted those misses: the 7k
+harness lists them (`ACCEPTED_MISSES`) and asserts them only with
+`SHEAF_GATE_PROPOSAL_8`. A lead window that realizes a group's visible
+pages first (option A) is to revisit.
 
 ## Non-goals of this design
 

@@ -17,7 +17,7 @@ use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::FixedCount;
 use crate::materialize::{self, AskAnswers, Came, How, StrategyKind, Why};
 use crate::model::{Document, FlatOutlineItem, Mark, PageId};
-use crate::save::{derived_copy, rewrite, rewrite_to_path, text_string};
+use crate::save::{rewrite, rewrite_to_path, text_string};
 use crate::serialize::crypt::Crypt;
 use crate::store::{BlobKind, Src, Store};
 use crate::tx::fixture as fx;
@@ -151,23 +151,20 @@ pub(crate) fn read_pages(bytes: &[u8]) -> Vec<(String, i64)> {
                 .unwrap()
                 .to_string();
             // Attributes may live on the page or be inherited; both are valid.
-            let resolved = crate::materialize::copy::inherited_attrs(&pdf, id);
-            let dict = pdf.get_dictionary(id).unwrap();
-            let has = |k: &[u8]| dict.has(k) || resolved.iter().any(|(kk, _)| kk == k);
-            let rot = dict
-                .get(b"Rotate")
-                .ok()
-                .cloned()
-                .or_else(|| {
-                    resolved
-                        .iter()
-                        .find(|(k, _)| k == b"Rotate")
-                        .map(|(_, v)| v.clone())
-                })
-                .and_then(|o| o.as_i64().ok())
-                .unwrap_or(0);
-            assert!(has(b"Resources"), "page lost its resources");
-            assert!(has(b"MediaBox"), "page lost its media box");
+            let inherited = |key: &[u8]| {
+                let mut at = id;
+                for _ in 0..64 {
+                    let dict = pdf.get_dictionary(at).ok()?;
+                    if let Ok(v) = dict.get(key) {
+                        return Some(v.clone());
+                    }
+                    at = dict.get(b"Parent").and_then(Object::as_reference).ok()?;
+                }
+                None
+            };
+            let rot = (inherited(b"Rotate").and_then(|o| o.as_i64().ok())).unwrap_or(0);
+            assert!(inherited(b"Resources").is_some(), "page lost its resources");
+            assert!(inherited(b"MediaBox").is_some(), "page lost its media box");
             (mark, rot)
         })
         .collect()
@@ -2687,13 +2684,14 @@ fn encrypted_source_saves(how: How) {
     assert_eq!(items[0].1, "Top");
 }
 
-/// A header/footer is drawn into page content as pagination
-/// artifacts on save, its settings kept in the catalog; a derived copy
-/// can strip it again.
+/// A header/footer is drawn into page content as its generator's blocks
+/// on save, pagination artifacts of sheaf's own, what it is said in the
+/// catalog's `/SheafGenerators` and nothing in `/SheafHeaderFooter`; an
+/// open finds it again (taking it off is `header_tests`' and
+/// `others_tests`').
 #[test]
-fn header_footer_is_drawn_stored_and_strippable() {
+fn header_footer_is_drawn_and_found_again() {
     use crate::content::{PagOrigin, PaginationKind};
-    use crate::stamps::HEADER_FOOTER;
     let dir = tempdir();
     let a = make_pdf(&dir, "hf.pdf", "H", 2, &[]);
     let mut model = open(&a, &[], crate::history::default_policy());
@@ -2709,7 +2707,7 @@ fn header_footer_is_drawn_stored_and_strippable() {
     let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
     for (i, &p) in pages.iter().enumerate() {
         let dict = pdf.get_dictionary(p).unwrap();
-        // A footer of sheaf's before M10.5.
+        // A footer of sheaf's.
         let blocks = src.blocks(i as u32).unwrap();
         let found: Vec<_> = blocks
             .pagination
@@ -2718,7 +2716,7 @@ fn header_footer_is_drawn_stored_and_strippable() {
             .collect();
         assert_eq!(
             found,
-            [(PaginationKind::Footer, PagOrigin::SheafLegacy)],
+            [(PaginationKind::Footer, PagOrigin::Sheaf)],
             "page {i}"
         );
         let all: Vec<u8> = dict
@@ -2740,27 +2738,15 @@ fn header_footer_is_drawn_stored_and_strippable() {
         let want = format!("(Page {} of 2)", i + 1);
         assert!(String::from_utf8_lossy(&all).contains(&want), "page {i}");
     }
-    let (stored, scope) = crate::stamps::from_catalog(&pdf).unwrap();
-    assert_eq!(stored.texts, footer.texts);
-    assert_eq!(scope, None);
+    assert!(!pdf.catalog().unwrap().has(b"SheafHeaderFooter"));
     // Read from a source, as it opens: the same.
-    assert_eq!(
-        crate::stamps::from_catalog(src.pdf()),
-        Some((stored, scope))
-    );
-    // Stripped, both pages come back clean.
-    let bytes = derived_copy(&info(&Store::new(), &out), &[0, 1], &mut |pdf, d, at| {
-        assert!(crate::stamps::strip(pdf, d, at as u32)?);
-        Ok(())
-    })
-    .unwrap();
-    let clean = crate::forms::fixture::source(bytes);
-    for i in 0..clean.page_count() {
-        let blocks = clean.blocks(i).unwrap();
-        assert!(!blocks.has(HEADER_FOOTER), "page {i}");
-        // The page's own content is left, and its balance.
-        assert_eq!(blocks.balance, Default::default());
-    }
+    let [saved] = &src.generators()[..] else {
+        panic!("one generator")
+    };
+    let page = |i: u32| Some(crate::model::PageId(u64::from(i)));
+    let g = saved.generator(&src, page).unwrap();
+    assert_eq!(g.spec.header_footer().unwrap().texts, footer.texts);
+    assert_eq!(g.scope, crate::model::Scope::All);
 }
 
 crate::both_ways!(

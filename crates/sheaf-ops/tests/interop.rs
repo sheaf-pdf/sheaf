@@ -20,6 +20,13 @@
 //! --check`, and pdf.js loads it and reads each of sheaf's text once,
 //! inside its `/Artifact`, and nothing of Acrobat's.
 //!
+//! From slice 17 so do two pages with Acrobat's header, given a header and
+//! footer of sheaf's with page and Bates numbers, which replaces it,
+//! written either way; then their pages traded after a save, an Append
+//! that numbers them again, each keeping its Bates number; then opened
+//! again and the header removed. pdf.js reads each slot once, inside an
+//! `/Artifact` of its own, numbered as the file has its pages.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`. A test
 //! whose tools are missing says so and passes. Run with
@@ -32,17 +39,19 @@ use std::sync::Arc;
 
 use lopdf::{Dictionary, Object, dictionary};
 use sheaf_doc::forms::fixture::{Form, outline_tree};
-use sheaf_doc::materialize::How;
+use sheaf_doc::materialize::{How, StrategyKind};
 use sheaf_doc::serialize::fixture::{
     PREFIX, USER, attachment_only, edited, encrypted, form, object_streams_encrypted,
     rc4_aes_128_and_aes_256, written,
 };
 use sheaf_doc::tx::fixture::{
-    add, delete, delete_named, move_pages, ocr, patch_bookmark, remove_watermark, rotate,
-    set_watermark, watermark,
+    add, delete, delete_named, header, move_pages, ocr, patch_bookmark, remove_header,
+    remove_watermark, rotate, set_header, set_watermark, watermark,
 };
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DestView, OcrWord, PageId, Snapshot};
-use sheaf_edit::{BookmarkPatch, GridPos, Margins, Op, PageRef, Rotation, Sibling, Turn, Z};
+use sheaf_edit::{
+    BatesSpec, BookmarkPatch, GridPos, Margins, Op, PageRef, Rotation, Sibling, Turn, Z,
+};
 
 mod common;
 use common::scratch;
@@ -806,19 +815,19 @@ fn read_as_stored(said: &str, stored: &Stored, how: How) {
     }
 }
 
-/// What pdf.js reads of the first page's text: where each marked content
-/// begins, by its tag, and ends, and each text item's string between; then
-/// how many operators the page draws with, its fonts, graphics states and
-/// images loaded.
+/// What pdf.js reads of a page's text, the first's unless a third
+/// argument numbers another: where each marked content begins, by its tag,
+/// and ends, and each text item's string between; then how many operators
+/// the page draws with, its fonts, graphics states and images loaded.
 const PDFJS_MARKED: &str = r#"
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const [lib, file] = process.argv.slice(2);
+const [lib, file, number = "1"] = process.argv.slice(2);
 const pdfjs = await import(pathToFileURL(lib).href);
 const data = new Uint8Array(readFileSync(file));
 const doc = await pdfjs.getDocument({ data, verbosity: 0 }).promise;
-const page = await doc.getPage(1);
+const page = await doc.getPage(Number(number));
 const content = await page.getTextContent({ includeMarkedContent: true });
 for (const item of content.items) {
   if (item.type === "beginMarkedContent" || item.type === "beginMarkedContentProps") {
@@ -925,16 +934,119 @@ fn watermark_blocks_read(how: How) {
             println!("qpdf --check, {what}, {how:?}: passes");
         }
         if let Some(pdfjs) = &pdfjs {
-            let said = run(Command::new("node").arg(&script).arg(pdfjs).arg(&path)).unwrap();
-            println!("pdf.js, {what}, {how:?}:\n{said}");
-            let (read, operators) = said.trim_end().rsplit_once('\n').unwrap();
+            let read = marked_read(pdfjs, &script, &path, 1, &format!("{what}, {how:?}"));
             assert_eq!(read, want, "pdf.js, {what}, {how:?}");
-            let operators: usize = operators
-                .strip_prefix("operators ")
-                .unwrap()
-                .parse()
-                .unwrap();
-            assert!(operators > 0, "pdf.js, {what}, {how:?}: {said}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What pdf.js reads of page `number` of the file at `path`, by
+/// [`PDFJS_MARKED`] at `script`: its lines but the last, which must say
+/// the page loads some operators. `what` names the file to print.
+fn marked_read(pdfjs: &Path, script: &Path, path: &Path, number: usize, what: &str) -> String {
+    let mut node = Command::new("node");
+    node.arg(script)
+        .arg(pdfjs)
+        .arg(path)
+        .arg(number.to_string());
+    let said = run(&mut node).unwrap();
+    println!("pdf.js, {what}, page {number}:\n{said}");
+    let (read, operators) = said.trim_end().rsplit_once('\n').unwrap();
+    let operators: usize = operators
+        .strip_prefix("operators ")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(operators > 0, "pdf.js, {what}, page {number}: {said}");
+    read.to_string()
+}
+
+sheaf_doc::both_ways!(
+    #[ignore = "needs qpdf, or node and pdf.js"]
+    a_header_s_blocks_read_in_pdfjs,
+    a_header_s_blocks_read_in_pdfjs_appended: header_blocks_read
+);
+
+/// Two pages with Acrobat's header given a header and footer of sheaf's,
+/// which replaces it: "CONFIDENTIAL" at the header's left, "Page <<1>> of
+/// <<N>>" at the footer's center and Bates numbers at its right, written
+/// `how`; then saved `how` and its pages traded, saved as planned, an
+/// Append that draws the page numbers again (§3.5's live redraw), each page
+/// keeping its Bates number; then opened again and the header and footer
+/// removed, written `how`: each file passes `qpdf --check`, and pdf.js
+/// loads each page and reads its own text, then each of sheaf's slots
+/// once, inside an `/Artifact` of its own, the page's place in the
+/// document as it's written and the Bates number it was given, and
+/// nothing of Acrobat's.
+fn header_blocks_read(how: How) {
+    let (qpdf, pdfjs) = (qpdf(), pdfjs());
+    if qpdf.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch(&format!("interop-header-{how:?}"));
+    let script = dir.join("marked.mjs");
+    std::fs::write(&script, PDFJS_MARKED).unwrap();
+    let base = common::write(&dir, "header.pdf", &mut common::acrobat_headed_form());
+    let acrobat = std::fs::read(&base).unwrap();
+    let mut doc = common::open(&base);
+    let mut spec = header("CONFIDENTIAL");
+    spec.texts[4] = "Page <<1>> of <<N>>".into();
+    spec.texts[5] = "<<bates>>".into();
+    spec.bates = Some(BatesSpec {
+        prefix: "SHF".into(),
+        suffix: String::new(),
+        digits: 4,
+        start: 1,
+    });
+    doc.commit_ops(vec![set_header(spec, None)], "Header & footer")
+        .unwrap();
+    let set = how.write(&doc);
+    how.save(&mut doc, &base);
+    let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
+    doc.commit_ops(vec![move_pages(&[pages[1]], Some(pages[0]))], "Move")
+        .unwrap();
+    let (strategy, traded) = common::planned(&mut doc, &base);
+    assert_eq!(strategy, StrategyKind::Append, "{how:?}: the live redraw");
+    let mut doc = common::open(&base);
+    let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
+    doc.commit_ops(vec![remove_header(&pages)], "Remove")
+        .unwrap();
+    // Page `body` of the file as made, the `at`th now: its own text, then
+    // sheaf's slots.
+    let ours = |body: usize, at: usize| {
+        format!(
+            "text \"Page {body}\"\n\
+             begin Artifact\ntext \"CONFIDENTIAL\"\nend\n\
+             begin Artifact\ntext \"Page {at} of 2\"\nend\n\
+             begin Artifact\ntext \"SHF000{body}\"\nend"
+        )
+    };
+    let theirs =
+        |body: usize| format!("text \"Page {body}\"\nbegin Artifact\ntext \"ACROBATHEADER\"\nend");
+    let outputs = [
+        ("acrobat", acrobat, [theirs(1), theirs(2)]),
+        ("set", set, [ours(1, 1), ours(2, 2)]),
+        ("traded", traded, [ours(2, 1), ours(1, 2)]),
+        (
+            "removed",
+            how.write(&doc),
+            ["text \"Page 2\"".into(), "text \"Page 1\"".into()],
+        ),
+    ];
+    for (what, bytes, want) in outputs {
+        let path = dir.join(format!("header-{what}-{how:?}.pdf"));
+        std::fs::write(&path, &bytes).unwrap();
+        if let Some(qpdf) = &qpdf {
+            run(Command::new(qpdf).arg("--check").arg(&path))
+                .unwrap_or_else(|e| panic!("qpdf --check, {what}, {how:?}: {e}"));
+            println!("qpdf --check, {what}, {how:?}: passes");
+        }
+        if let Some(pdfjs) = &pdfjs {
+            for (number, want) in (1..).zip(want) {
+                let read = marked_read(pdfjs, &script, &path, number, &format!("{what}, {how:?}"));
+                assert_eq!(read, want, "pdf.js, {what}, {how:?}, page {number}");
+            }
         }
     }
     let _ = std::fs::remove_dir_all(&dir);

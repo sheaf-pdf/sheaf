@@ -160,21 +160,14 @@ pub enum ResolvedOp {
     /// `scope` None: every page, those added later too.
     SetHeaderFooter {
         spec: HeaderFooterSpec,
-        scope: Option<Vec<PageId>>,
+        scope: Option<im::OrdSet<PageId>>,
     },
+    /// `others` is what its lowering found of others' on its pages, none
+    /// before.
     RemoveHeaderFooter {
         pages: Vec<PageId>,
-    },
-    /// Pages shown from other source pages, each (page, source, index):
-    /// a derived flow's copies (watermarked, a header stripped), keeping
-    /// ids, turns, bookmarks, marks and OCR text, which are in PageSpace,
-    /// which a copy keeps. Internal and transitional (until
-    /// slice 17 makes these edits generators and geometry): no `Op` says
-    /// it, and only the host's derived flows make it
-    /// ([`Tx::set_page_base`](super::Tx::set_page_base)).
-    SetPageBase {
-        pages: Vec<(PageId, Src, u32)>,
-        why: Derive,
+        include_authored: bool,
+        others: OthersFound,
     },
     /// A group's versions taken back, the group called `label`: what
     /// History's "Undo all of …" makes, and a failed call's rollback. No
@@ -187,10 +180,12 @@ pub enum ResolvedOp {
     },
 }
 
-/// What a [`ResolvedOp::RemoveWatermark`] found of others' watermarks and
-/// backgrounds on its pages, as its lowering counted them (§6.5, D61), each
+/// What a [`ResolvedOp::RemoveWatermark`] or a
+/// [`ResolvedOp::RemoveHeaderFooter`] found of others' artifacts of its
+/// kinds on its pages, as its lowering counted them (§6.5, D61), each
 /// artifact once: those it takes out, by who drew them, and those it
-/// leaves in place. What its line says.
+/// leaves in place. What its line says, and what a dialog shows
+/// ([`others_on`](super::others_on)).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OthersFound {
     /// Taken out: Acrobat's; sheaf's in another file, which no generator
@@ -245,16 +240,6 @@ pub struct BookmarkChange {
     pub style: Option<TextStyle>,
 }
 
-/// Which derived flow made a [`ResolvedOp::SetPageBase`]'s copies: what
-/// its line says it did ("Remove the header and footer from pages 3–5",
-/// not "Change the content of", M10.5 bug 8). It goes with derived copies
-/// in slice 17.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Derive {
-    /// The header and footer the file drew, stripped from it.
-    StripHeaderFooter,
-}
-
 /// What an op is called in Op JSON, and in its errors.
 pub fn op_name(op: &Op) -> &'static str {
     match op {
@@ -287,8 +272,7 @@ pub fn op_name(op: &Op) -> &'static str {
 }
 
 impl ResolvedOp {
-    /// What it's called in Op JSON; the internal page rebase as
-    /// `set-page-base`, and a group's revert as `revert`.
+    /// What it's called in Op JSON, and a group's revert as `revert`.
     pub fn name(&self) -> &'static str {
         use ResolvedOp as R;
         match self {
@@ -316,7 +300,6 @@ impl ResolvedOp {
             R::RemoveWatermark { .. } => "remove-watermark",
             R::SetHeaderFooter { .. } => "set-header-footer",
             R::RemoveHeaderFooter { .. } => "remove-header-footer",
-            R::SetPageBase { .. } => "set-page-base",
             R::Revert { .. } => "revert",
         }
     }
@@ -660,11 +643,16 @@ impl Resolver<'_> {
                 spec: spec.clone(),
                 scope: match scope {
                     ScopeSel::All => None,
-                    ScopeSel::Pages(pages) => Some(self.pages(pages)?),
+                    ScopeSel::Pages(pages) => Some(self.pages(pages)?.into_iter().collect()),
                 },
             },
-            Op::RemoveHeaderFooter { pages } => R::RemoveHeaderFooter {
+            Op::RemoveHeaderFooter {
+                pages,
+                include_authored,
+            } => R::RemoveHeaderFooter {
                 pages: self.pages(pages)?,
+                include_authored: *include_authored,
+                others: OthersFound::default(),
             },
             _ => return Err(EditError::internal(format!("{op:?} has no lowering"))),
         })

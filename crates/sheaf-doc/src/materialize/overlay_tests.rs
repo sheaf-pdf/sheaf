@@ -1,20 +1,20 @@
 //! Overlays (M10.5 §10.1, slice 13): some pages of a state written as a
 //! section over their source's own bytes, for a view's inputs. What the
 //! emission holds: where its pages hang and what they inherit, the turn
-//! they keep, what each view draws and hides, a duplicate's and a derived
-//! copy's pages, the form and the layers, and that its setup visits only
-//! its pages. The realizer numbers, assembles and renders them.
+//! they keep, what each view draws and hides, a duplicate's pages, the
+//! form and the layers, and that its setup visits only its pages. The
+//! realizer numbers, assembles and renders them.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Object, ObjectId, Stream, dictionary};
+use lopdf::{Dictionary, Object, ObjectId, dictionary};
 use sheaf_edit::{Rotation, Turn};
 
 use super::emit::{self, Emission, EmitBase, EmitScope, Overlay, RotatePolicy, SymObject};
 use super::key::{ObjKey, Part};
-use super::tests::{add, bytes, derive, file, insert, open};
+use super::tests::{add, bytes, file, insert, open};
 use crate::annot::AnnotId;
 use crate::forms::fixture::{Form, every_kind_in, note};
 use crate::model::history_tests::{with_ours, with_theirs};
@@ -65,7 +65,7 @@ fn rewritten(d: &Document) -> Emission {
     let snap = d.snapshot();
     let base = EmitBase::Rewrite {
         primary: &snap.primary,
-        derived: &snap.derived,
+        drawn: None,
     };
     emit::emit(&snap.state, EmitScope::All, base, &[], &NoProgress).unwrap()
 }
@@ -586,89 +586,6 @@ fn top(st: &DocState, fid: crate::forms::FieldId) -> crate::forms::FieldId {
         at = up;
     }
     at
-}
-
-/// A derived copy's page, in an overlay over the copy's bytes, is the
-/// copy's page: its object and its content, where a save writes the page
-/// it was made from, with the state's boxes, the page's own, not the
-/// copy's (which no derived flow changes). Its annotations are the records', each once:
-/// the copy's own widgets are copies of theirs.
-#[test]
-fn a_derived_copy_s_page_is_emitted_as_the_copy_has_it() {
-    let mut d = opened(theirs(2).bytes(), "form.pdf");
-    let first = d.page(0).unwrap();
-    let redrawn = crate::save::derived_copy(d.primary(), &[0], &mut |pdf, page, _| {
-        let stream = Stream::new(dictionary! {}, b"0 0 m 9 9 l S".to_vec());
-        page.set("Contents", pdf.add_object(stream));
-        let crop = [0.0f32, 0.0, 300.0, 400.0].map(Object::from);
-        page.set("CropBox", crop.to_vec());
-        Ok(())
-    })
-    .unwrap();
-    derive(&mut d, &redrawn, 0, first);
-    let st = d.state();
-    let copy = st.def(first).unwrap().base.src.clone();
-    assert_ne!(copy.id(), d.primary().id());
-    let e = emitted(
-        st,
-        &copy,
-        &[first],
-        &ViewInputs::plugin(),
-        RotatePolicy::KeepBase,
-    );
-    let at = copy.page(0).unwrap().id;
-    assert_eq!(e.owned.get(&ObjKey::Page(first)), Some(&at));
-    let page = built(&e, ObjKey::Page(first));
-    let read = copy.pdf().get_dictionary(at).unwrap();
-    let contents = read.get(b"Contents").unwrap().as_reference().unwrap();
-    let base = ObjKey::Base {
-        blob: copy.id(),
-        obj: contents,
-        copy: 0,
-    };
-    assert_eq!(named(&e, page.get(b"Contents").unwrap()), base);
-    assert!(page.get(b"CropBox").is_err(), "the page's own crop box");
-    let rewrite = rewritten(&d);
-    let original = d.primary().page(0).unwrap().id;
-    assert_eq!(rewrite.owned.get(&ObjKey::Page(first)), Some(&original));
-    // Its page is the copy's: no overlay over the original has it.
-    let screen = ViewInputs::screen();
-    let over = Overlay {
-        src: d.primary().clone(),
-        inputs: &screen,
-        rotate: RotatePolicy::KeepBase,
-        arts: None,
-    };
-    let scope = EmitScope::Pages([first].into());
-    assert!(emit::emit(st, scope, EmitBase::Overlay(&over), &[], &NoProgress).is_err());
-    // Each record once, nothing besides.
-    let mut kinds = kinds(&e, st, first);
-    kinds.sort();
-    let mut want: Vec<&str> = (st.annots_on(first))
-        .map(|(_, r)| match &r.body {
-            AnnotBody::Mark(_) => "mark",
-            AnnotBody::Foreign(_) => "theirs",
-            AnnotBody::Widget(_) => "widget",
-        })
-        .collect();
-    want.sort();
-    assert_eq!(kinds, want);
-    // Its form is the records': the roots of the fields with a widget on
-    // the page, none of the copy's own copies of them, which PDFium would
-    // load every one of.
-    let tops: BTreeSet<ObjKey> = (st.widgets_on(first))
-        .map(|(_, w)| ObjKey::Field(top(st, w.field)))
-        .collect();
-    assert!(!tops.is_empty());
-    let catalog = built(&e, ObjKey::Catalog);
-    assert_eq!(
-        named(&e, catalog.get(b"AcroForm").unwrap()),
-        ObjKey::AcroForm
-    );
-    let form = built(&e, ObjKey::AcroForm);
-    let fields = form.get(b"Fields").unwrap().as_array().unwrap();
-    let fields: BTreeSet<ObjKey> = fields.iter().map(|f| named(&e, f)).collect();
-    assert_eq!(fields, tops);
 }
 
 /// A text field `name` with a widget on each of `pages` of `f`.

@@ -3,7 +3,7 @@
 //! same means nothing. `judge` over a path, what it found removed, the
 //! fields it touched and the slots that changed.
 
-use sheaf_edit::GridPos;
+use sheaf_edit::{FontChoice, GridPos};
 
 use super::*;
 use crate::annot::{Box2, Pt};
@@ -13,12 +13,11 @@ use crate::forms::FieldKind;
 use crate::forms::field::Mk;
 use crate::labels::Style;
 use crate::model::{
-    FieldProps, Filter, FormDoc, FormInst, GenId, GenSpec, ImageRef, LegacySel, Mark, MarkedSel,
-    OutlineId, PageBase, Placed, Scope, SourceId, StreamSel, Target, TextStyle, WatermarkGen,
-    WidgetProps,
+    FieldProps, Filter, FormDoc, FormInst, Frozen, GenId, GenSpec, ImageRef, LegacySel, Mark,
+    MarkedSel, OutlineId, PageBase, Placed, Scope, SourceId, StreamSel, Target, TextStyle,
+    WatermarkGen, WidgetProps,
 };
 use crate::source::ObjRef;
-use crate::stamps::HeaderFooter;
 use crate::store::{Src, Store};
 use crate::tape::{Line, Op, Row, Tape};
 use crate::text_layer::{OcrWord, TextLayer};
@@ -202,26 +201,27 @@ fn labels(prefixes: &[&str]) -> Val {
 }
 
 fn header(t: &str) -> Val {
-    let mut hf = HeaderFooter::default();
-    hf.texts[0] = t.into();
+    let spec = crate::tx::fixture::header(t);
     Val::Generator(Arc::new(Generator {
         id: GenId(1),
-        spec: GenSpec::HeaderFooter(Arc::new(hf)),
+        spec: GenSpec::HeaderFooter(Arc::new(spec)),
+        z: Z::Over,
+        scope: Scope::All,
+        frozen: Frozen::default(),
+        replaces: BTreeSet::from([PaginationKind::Header, PaginationKind::Footer]),
     }))
 }
 
 /// A watermark at `z` drawing `content` at `position` on `scope`.
 fn watermark(content: WatermarkContent, position: GridPos, z: Z, scope: Scope) -> Val {
-    let wm = WatermarkGen {
-        content,
-        position,
-        z,
-        scope,
-        replaces: BTreeSet::from([WatermarkGen::kind_at(z)]),
-    };
+    let wm = WatermarkGen { content, position };
     Val::Generator(Arc::new(Generator {
         id: GenId(1),
         spec: GenSpec::Watermark(Arc::new(wm)),
+        z,
+        scope,
+        frozen: Frozen::default(),
+        replaces: BTreeSet::from([WatermarkGen::kind_at(z)]),
     }))
 }
 
@@ -814,8 +814,8 @@ fn the_form_bookmarks_labels_and_generators() {
         put(&st, l, None).flags,
         Flags::LABELS | Flags::REPLACES_TEXT
     );
-    // The legacy header: added is drawn; changed or gone, its text with
-    // it.
+    // The header: added is drawn; its text changed, or gone, its text
+    // with it.
     let g = Key::Generator(GenId(1));
     let e = put(&st, g, Some(header("Draft")));
     assert_eq!((e.flags, e.sig), (Flags::CONTENT, OTHER));
@@ -830,6 +830,156 @@ fn the_form_bookmarks_labels_and_generators() {
         put(&st, g, None).flags,
         Flags::REMOVES | Flags::REPLACES_TEXT
     );
+}
+
+/// A header and footer (§7.1): added, it's drawn; laid out otherwise (its
+/// face, size, color, margins) or on more pages, drawn again, which an
+/// Append writes. Drawing other text (its slots, its first page number,
+/// its Bates numbering, what its date or file or a page's Bates number
+/// says) replaces its text; so does leaving a page that's still a page,
+/// and going. A page that goes with its number isn't what it removes.
+#[test]
+fn headers_and_footers() {
+    let src = crate::store::blank(&Store::new(), 3);
+    let st = state_of(&src, 3);
+    let g = Key::Generator(GenId(1));
+    let hf = |spec: &sheaf_edit::HeaderFooterSpec, scope: Scope, numbers: &[(u64, u64)]| {
+        let numbers = numbers.iter().map(|&(p, n)| (PageId(p), n)).collect();
+        Val::Generator(Arc::new(Generator {
+            id: GenId(1),
+            spec: GenSpec::HeaderFooter(Arc::new(spec.clone())),
+            z: Z::Over,
+            scope,
+            frozen: Frozen {
+                date: "2026-10-21".into(),
+                file: "a.pdf".into(),
+                bates: Some(Arc::new(numbers)),
+            },
+            replaces: BTreeSet::from([PaginationKind::Header, PaginationKind::Footer]),
+        }))
+    };
+    let spec = sheaf_edit::HeaderFooterSpec {
+        bates: Some(sheaf_edit::BatesSpec::default()),
+        ..crate::tx::fixture::header("Page <<1>> <<bates>>")
+    };
+    let numbered = [(0, 1), (1, 2)];
+    let e = put(&st, g, Some(hf(&spec, on(&[0, 1]), &numbered)));
+    assert_eq!((e.flags, e.sig), (Flags::CONTENT, OTHER));
+    let st = holding(st, &[(g, hf(&spec, on(&[0, 1]), &numbered))]);
+    let with = |change: fn(&mut sheaf_edit::HeaderFooterSpec)| {
+        let mut spec = spec.clone();
+        change(&mut spec);
+        spec
+    };
+    for laid_out in [
+        hf(
+            &with(|s| s.font = FontChoice::TimesRoman),
+            on(&[0, 1]),
+            &numbered,
+        ),
+        hf(&with(|s| s.size = 14.0), on(&[0, 1]), &numbered),
+        hf(&with(|s| s.color = [200, 0, 0]), on(&[0, 1]), &numbered),
+        hf(&with(|s| s.margins.top = 20.0), on(&[0, 1]), &numbered),
+        hf(&spec, Scope::All, &numbered),
+    ] {
+        let p = path(&st, &[(g, Some(laid_out))]);
+        assert_eq!((p.flags, p.sig), (Flags::CONTENT, OTHER));
+        assert!(removed(&p).is_empty());
+    }
+    let text = Flags::REMOVES | Flags::REPLACES_TEXT;
+    let generator = |frozen: Frozen| {
+        let Some(Val::Generator(g)) = st.get(&g) else {
+            panic!("a header")
+        };
+        Val::Generator(Arc::new(Generator {
+            frozen,
+            ..Generator::clone(&g)
+        }))
+    };
+    let dated = generator(Frozen {
+        date: "2027-01-01".into(),
+        ..header_of(&st).frozen.clone()
+    });
+    let filed = generator(Frozen {
+        file: "b.pdf".into(),
+        ..header_of(&st).frozen.clone()
+    });
+    for unsaid in [
+        hf(
+            &with(|s| s.texts[0] = "Page <<1>>".into()),
+            on(&[0, 1]),
+            &numbered,
+        ),
+        hf(&with(|s| s.first_number = 5), on(&[0, 1]), &numbered),
+        hf(
+            &with(|s| s.bates.as_mut().unwrap().digits = 8),
+            on(&[0, 1]),
+            &numbered,
+        ),
+        hf(&spec, on(&[0, 1]), &[(0, 1), (1, 3)]),
+        hf(&spec, on(&[0]), &[(0, 1)]),
+        dated,
+        filed,
+    ] {
+        let p = path(&st, &[(g, Some(unsaid))]);
+        assert_eq!(p.flags, Flags::CONTENT | text);
+        assert_eq!(removed(&p), [(RemovedKind::HeaderFooter, 1)]);
+    }
+    let p = path(&st, &[(g, None)]);
+    let gone = (p.flags, removed(&p));
+    assert_eq!(gone, (text, vec![(RemovedKind::HeaderFooter, 1)]));
+    // A page gone with its number isn't what it removes.
+    let p = path(
+        &st,
+        &[
+            (Key::Order, Some(order(&[0, 2]))),
+            (Key::Page(PageId(1)), None),
+            (g, Some(hf(&spec, on(&[0]), &[(0, 1)]))),
+        ],
+    );
+    assert!(
+        !removed(&p)
+            .iter()
+            .any(|(k, _)| *k == RemovedKind::HeaderFooter)
+    );
+}
+
+/// A reorder or a label change under a header whose tokens read where a
+/// page is (its place, the count, its label) or its label draws them again
+/// (`LIVE_REDRAW`, §7.1), which removes nothing; under one that reads
+/// neither it draws nothing again. A step judges a reorder alike.
+#[test]
+fn live_tokens_are_drawn_again() {
+    let src = crate::store::blank(&Store::new(), 3);
+    let st = state_of(&src, 3);
+    let g = Key::Generator(GenId(1));
+    let live = |yes: bool| match yes {
+        true => Flags::LIVE_REDRAW,
+        false => Flags::empty(),
+    };
+    for (text, reordered, relabelled) in [
+        ("Page <<1>>", true, false),
+        ("of <<N>>", true, false),
+        ("<<label>>", true, true),
+        ("Draft <<date>>", false, false),
+    ] {
+        let st = holding(st.clone(), &[(g, header(text))]);
+        let reorder = [(Key::Order, Some(order(&[1, 0, 2])))];
+        let p = path(&st, &reorder);
+        assert_eq!(p.flags, Flags::PAGE_ORDER | live(reordered), "{text}");
+        let after = putting(&st, &reorder);
+        let (before, now) = (st.get(&Key::Order), after.get(&Key::Order));
+        let cx = ClassifyCx::of_step(&st, &after);
+        let step = classify(&Key::Order, before.as_ref(), now.as_ref(), &cx);
+        assert_eq!(step.flags, Flags::PAGE_ORDER | live(reordered), "{text}");
+        let p = path(&st, &[(Key::Labels, Some(labels(&["A-"])))]);
+        assert_eq!(p.flags, Flags::LABELS | live(relabelled), "{text}");
+    }
+}
+
+/// The header and footer `st` holds.
+fn header_of(st: &DocState) -> &Generator {
+    st.header_footer().expect("a header and footer")
 }
 
 /// A watermark (§7.1): added, it's drawn; laid out otherwise (where, how
@@ -928,6 +1078,43 @@ fn a_watermark_replacing_others_takes_them_off() {
     let saved = holding(st, &[(g, over(Center, on(&[0])))]);
     let p = path(&saved, &[(g, Some(over(TopLeft, Scope::All)))]);
     assert_eq!((p.flags, removed(&p)), (Flags::CONTENT, vec![]));
+}
+
+/// A header and footer replacing others' (§7.1's `replaces` row): on a
+/// page of the saved file whose base page holds Acrobat's header, it takes
+/// that off; on one with none it's drawn, and a step reads no page's
+/// blocks. Taking it off the page by a filter, as RemoveHeaderFooter does,
+/// removes too.
+#[test]
+fn a_header_replacing_others_takes_them_off() {
+    use crate::materialize::header_tests::ACROBAT_HEADER;
+    use crate::materialize::others_tests::{BODY, acrobat_file};
+    let file = acrobat_file(&[&[BODY, ACROBAT_HEADER], &[BODY]]);
+    let kind = crate::store::BlobKind::file(std::path::Path::new("acrobat.pdf"), None);
+    let src = Store::new().open(file.into(), kind).unwrap();
+    let st = state_of(&src, 2);
+    let g = Key::Generator(GenId(1));
+    let p = path(&st, &[(g, Some(header("Mine")))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
+    let target = putting(&st, &[(g, Some(header("Mine")))]);
+    let prims = [Prim {
+        key: g,
+        before: None,
+        after: target.get(&g),
+    }];
+    assert_eq!(
+        StepEffects::of(&st, &target, &prims).effects.flags,
+        Flags::CONTENT
+    );
+    let page = Key::Page(PageId(0));
+    let acrobat_s = Filter::DropMarked(MarkedSel::Pagination {
+        kinds: crate::generate::header::kinds(),
+        origins: BTreeSet::from([crate::content::PagOrigin::Acrobat]),
+    });
+    let p = path(&st, &[(page, Some(with_filter(&st, 0, acrobat_s)))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
 }
 
 /// A value a slot can't hold is judged as everything.

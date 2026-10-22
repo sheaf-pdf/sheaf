@@ -1,8 +1,9 @@
 //! The realizer over real files (M10.5 slice 13): over every form of the
 //! corpus and a sample of its pool, each file edited (a header on its
-//! first, middle and last page, from slice 16 a watermark there too, which
-//! replaces others' watermarks on them, another tool's comment deleted and
-//! a field's value set where it has them, nothing turned). Two tiers:
+//! first, middle and last page, from slice 17 with live page numbers and
+//! Bates numbers, and from slice 16 a watermark there too, each replacing
+//! others' of its kind on them; another tool's comment deleted and a
+//! field's value set where it has them; nothing turned). Two tiers:
 //!
 //! - **The predicate:** on every page, under each consumer's inputs (the
 //!   screen's, a plugin's, print preview's with and without markup, and
@@ -55,7 +56,7 @@ use sheaf_doc::realize::{EngineKey, PageView, Realizer, ViewInputs, emission_is_
 use sheaf_doc::serialize::crypt::Crypt;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{DocState, Document, PageId};
-use sheaf_edit::Z;
+use sheaf_edit::{BatesSpec, Z};
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 use sheaf_render::{OpenError, PageIndex};
 
@@ -382,7 +383,15 @@ fn edit_and_check(d: &mut Document, tier: Tier, out: &mut Outcome) -> anyhow::Re
     let order: Vec<PageId> = d.state().order().iter().copied().collect();
     let mut covered: Vec<PageId> = [0, n / 2, n - 1].map(|i| order[i]).to_vec();
     covered.dedup();
-    let header = fx::set_header(fx::header("Realized <<1>> of <<n>>"), Some(&covered));
+    let mut spec = fx::header("Realized <<1>> of <<N>>");
+    spec.texts[5] = "<<bates>>".into();
+    spec.bates = Some(BatesSpec {
+        prefix: "R".into(),
+        suffix: String::new(),
+        digits: 4,
+        start: 1,
+    });
+    let header = fx::set_header(spec, Some(&covered));
     let watermark = fx::set_watermark(fx::watermark("REALIZED"), Z::Over, Some(&covered));
     d.commit_ops(vec![header, watermark], "Header and watermark")?;
     let mut edited: BTreeSet<PageId> = covered.iter().copied().collect();

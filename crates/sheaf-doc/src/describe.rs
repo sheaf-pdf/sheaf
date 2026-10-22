@@ -10,7 +10,7 @@ use sheaf_edit::{MarkKind, Z};
 
 use crate::effects::Flags;
 use crate::model::{AnnotBody, DocState, PageId, Step};
-use crate::tx::{Derive, OthersFound, ResolvedOp};
+use crate::tx::{OthersFound, ResolvedOp};
 
 /// A line of the History panel: what some steps did, and whether they
 /// removed content that was there (its badge).
@@ -141,10 +141,11 @@ pub fn describe(op: &ResolvedOp, before: &DocState) -> String {
             format!("Remove the {} from {}{found}", drawn_as(*z), pages(ids))
         }
         R::SetHeaderFooter { .. } => "Set the header and footer".into(),
-        R::RemoveHeaderFooter { .. } => "Remove the header and footer".into(),
-        R::SetPageBase { pages: list, why } => {
-            let ids: Vec<PageId> = list.iter().map(|&(id, ..)| id).collect();
-            derived(*why, &pages(&ids))
+        R::RemoveHeaderFooter {
+            pages: ids, others, ..
+        } => {
+            let found = others_found(others);
+            format!("Remove the header and footer from {}{found}", pages(ids))
         }
         R::Revert { label } => format!("Undo all of {label}"),
     }
@@ -200,9 +201,9 @@ fn drawn_as(z: Option<Z>) -> &'static str {
     }
 }
 
-/// What a watermark's removal found of others' (§6.5, D61), as its line
-/// says it after the pages: " (2 made in Acrobat; 12 the author's left in
-/// place)", or nothing when it found none.
+/// What a removal of a watermark or a header and footer found of others'
+/// (§6.5, D61), as its line says it after the pages: " (2 made in Acrobat;
+/// 12 the author's left in place)", or nothing when it found none.
 fn others_found(o: &OthersFound) -> String {
     let OthersFound {
         acrobat,
@@ -268,13 +269,6 @@ fn one_z(run: &[Step]) -> bool {
     run.iter().all(|s| z(&s.op) == z(&run[0].op))
 }
 
-/// What a derived flow did to `pages`, the pages it names.
-fn derived(why: Derive, pages: &str) -> String {
-    match why {
-        Derive::StripHeaderFooter => format!("Remove the header and footer from {pages}"),
-    }
-}
-
 /// `steps`' lines, a run of steps of one kind as one: what the History
 /// panel and a commit say they did.
 pub fn lines(steps: &[Step]) -> Vec<Line> {
@@ -319,7 +313,6 @@ fn run_line(run: &[Step]) -> String {
         }
         R::ClearOcrText { .. } => format!("Remove recognized text from {}", pages()),
         R::SetOcrText { .. } => format!("Recognize text on {}", pages()),
-        R::SetPageBase { why, .. } => derived(*why, &pages()),
         R::AddBookmark { .. } => format!("Add {}", count(n, "bookmark")),
         R::PatchBookmarks { .. } => format!("Change {}", count(sum(target_count), "bookmark")),
         R::MoveBookmarks { .. } => format!("Move {}", count(sum(target_count), "bookmark")),
@@ -333,9 +326,7 @@ fn run_line(run: &[Step]) -> String {
             format!("Make {} editable", count(sum(target_count), "comment"))
         }
         // Each replaces the one before: the last says what's there.
-        R::SetPageLabels { .. } | R::SetHeaderFooter { .. } | R::RemoveHeaderFooter { .. } => {
-            run[n - 1].line.clone()
-        }
+        R::SetPageLabels { .. } | R::SetHeaderFooter { .. } => run[n - 1].line.clone(),
         // Likewise each of a z; of more than one, they're both changed.
         R::SetWatermark { .. } if one_z(run) => run[n - 1].line.clone(),
         R::SetWatermark { .. } => format!("Change the {}", drawn_as(None)),
@@ -347,6 +338,14 @@ fn run_line(run: &[Step]) -> String {
             });
             let found = others_found(&others);
             format!("Remove the {} from {}{found}", drawn_as(z), pages())
+        }
+        R::RemoveHeaderFooter { .. } => {
+            let others = (run.iter()).fold(OthersFound::default(), |sum, s| match &*s.op {
+                R::RemoveHeaderFooter { others, .. } => sum.plus(*others),
+                _ => sum,
+            });
+            let found = others_found(&others);
+            format!("Remove the header and footer from {}{found}", pages())
         }
         // A version's only step.
         R::Revert { .. } => run[0].line.clone(),
@@ -364,10 +363,9 @@ fn page_count(op: &ResolvedOp) -> usize {
         | R::SetPageBoxes { pages, .. }
         | R::ClearOcrText { pages }
         | R::RemoveWatermark { pages, .. }
-        | R::RemoveHeaderFooter { pages } => pages.len(),
+        | R::RemoveHeaderFooter { pages, .. } => pages.len(),
         R::InsertPages { pages, .. } => pages.len(),
         R::ReplacePages { with, .. } => with.len(),
-        R::SetPageBase { pages, .. } => pages.len(),
         R::SetOcrText { .. } => 1,
         _ => 0,
     }
@@ -532,22 +530,5 @@ mod tests {
             by: Turn::Quarter,
         };
         assert_eq!(describe(&rotate, st), "Rotate page 1 90°");
-    }
-
-    /// A derived flow's line names it (M10.5 bug 8), not "change the
-    /// content".
-    #[test]
-    fn a_page_base_line_names_its_flow() {
-        let d = doc_of(6, &[]);
-        let id = |i: usize| d.page(i).unwrap();
-        let on = |i: usize, why| ResolvedOp::SetPageBase {
-            pages: vec![(id(i), d.primary().clone(), i as u32)],
-            why,
-        };
-        let st = d.state();
-        assert_eq!(
-            describe(&on(0, Derive::StripHeaderFooter), st),
-            "Remove the header and footer from page 1"
-        );
     }
 }

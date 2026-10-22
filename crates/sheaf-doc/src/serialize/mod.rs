@@ -2,8 +2,8 @@
 //! Clean Copy, Export Flattened, print and recovery sidecars reach their
 //! bytes through here. lopdf's writer still writes the rest, each until a
 //! later slice moves it (`docs/document-model.md`, "One writer"): the
-//! derived copies, the comment summary and FDF files, PDFs made from
-//! images and blank pages, and the stamp library's files.
+//! comment summary and FDF files, PDFs made from images and blank pages,
+//! and the stamp library's files.
 //!
 //! - [`object`]: an object as PDF syntax, and an indirect object's
 //!   `n g obj` frame. Reals are written at f64, a NaN or an infinity

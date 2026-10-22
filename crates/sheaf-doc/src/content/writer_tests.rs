@@ -237,12 +237,12 @@ fn names_are_bound_at_the_end() {
     let (_, needs) = w.finish(&Reserved::default(), &given);
     assert_eq!(needs.0[1].name, header.name);
     assert_eq!(needs.0[0].name, next(&header.name));
-    let given = [(ids[0], "SheafHF")];
+    let given = [(ids[0], "SheafOcr")];
     let mut w = ContentWriter::new();
     draw(&mut w);
     let (bytes, needs) = w.finish(&Reserved::default(), &given);
-    assert_eq!(needs.0[0].name, b"SheafHF");
-    assert!(bytes.starts_with(b"/Artifact /SheafHF BDC\n"));
+    assert_eq!(needs.0[0].name, b"SheafOcr");
+    assert!(bytes.starts_with(b"/Artifact /SheafOcr BDC\n"));
 }
 
 /// A resource drawn again is one need, where it was first drawn; a form

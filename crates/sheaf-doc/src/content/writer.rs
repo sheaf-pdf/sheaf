@@ -527,7 +527,7 @@ impl<'f> ContentWriter<'f> {
     }
 
     /// The content, and the resources it draws with, named: `given` names
-    /// a resource by its id (the legacy `/SheafHF` and `/SheafOcr`); any
+    /// a resource by its id (the legacy `/SheafOcr`); any
     /// other is `/Sh` and its digest's first six base32 characters, the
     /// next name up where `reserved`, a name given, or one made before
     /// has it.

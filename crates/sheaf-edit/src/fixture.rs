@@ -495,6 +495,7 @@ pub fn every_op() -> Vec<Op> {
                     "Page <<1>> of <<N>>".into(),
                     "<<bates>>".into(),
                 ],
+                font: FontChoice::Helvetica,
                 size: 10.0,
                 color: [20, 20, 20],
                 margins: Margins {
@@ -513,7 +514,15 @@ pub fn every_op() -> Vec<Op> {
         },
         Op::SetHeaderFooter {
             spec: HeaderFooterSpec {
-                texts: Default::default(),
+                texts: [
+                    "<<label>>".into(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ],
+                font: FontChoice::TimesRoman,
                 size: 9.0,
                 color: [0, 0, 0],
                 margins: Margins {
@@ -529,6 +538,7 @@ pub fn every_op() -> Vec<Op> {
         },
         Op::RemoveHeaderFooter {
             pages: PageSel::All,
+            include_authored: true,
         },
     ];
     ops.extend(kinds().into_iter().map(|kind| Op::AddMark {

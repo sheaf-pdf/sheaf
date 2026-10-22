@@ -14,6 +14,7 @@ use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dict
 use sheaf_edit::{Rotation, Turn};
 
 use super::append;
+use super::emit::AllowedDrops;
 use super::key::ObjKey;
 use super::plan::{
     AppendAnyway, Ask, AskAnswers, Note, Onto, SaveStop, Strategy, Why, forced_append,
@@ -719,7 +720,7 @@ fn check_of(
         saved,
         target: &input.target,
         primary,
-        allowed: &[],
+        allowed: &AllowedDrops::default(),
         said: &BTreeSet::new(),
         lim: &Limits::DEFAULT,
     })
@@ -846,4 +847,82 @@ fn a_re_subset_font_with_the_same_text_passes() {
     let changed = [(subset("GHIJKL+Arial"), Some(other), "<00070009>")];
     assert!(checked(&path, &doc, page, &changed).is_some());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A header's block a section unlinks, which the header lays out otherwise
+/// now from the same recipe, its page moved (a live redraw), may go when
+/// the section's emission allows it, or isn't judged on the page that
+/// draws it again: else it's judged on what the header said there, and the
+/// page number it drew gone is a misclassification. The opened file's
+/// record says the block, at its own number.
+#[test]
+fn an_allowed_live_redraw_s_old_block_may_go() {
+    let dir = scratch();
+    let (_, mut doc) = opened(&dir, "a.pdf", &text_file(2));
+    let set = fx::set_header(fx::header("Page <<1>> of <<N>>"), None);
+    doc.commit_ops(vec![set], "header").unwrap();
+    let (path, mut doc) = opened(&dir, "b.pdf", &super::How::Rewritten.write(&doc));
+    let [first, second] = [0, 1].map(|i| doc.page(i).unwrap());
+    let reorder = fx::move_pages(&[second], Some(first));
+    doc.commit_ops(vec![reorder], "reorder").unwrap();
+    let src = doc.primary().clone();
+    let facts = src.page(0).unwrap();
+    let markers = src.markers(0);
+    let block = (markers.iter())
+        .find(|(_, m)| matches!(m, crate::content::Marker::Gen { .. }))
+        .expect("the header's block")
+        .0;
+    let key = ObjKey::Base {
+        blob: src.id(),
+        obj: block,
+        copy: 0,
+    };
+    let input = doc.recovery_input();
+    let saved = input.saved.as_ref().unwrap();
+    let g = doc.state().header_footer().unwrap().id;
+    assert_eq!(saved.record.drawn[&(first, g)].key, key);
+    // The first page's dictionary written over without the block.
+    let old = LazyPdf::open(
+        Arc::<[u8]>::from(std::fs::read(&path).unwrap()),
+        None,
+        &Limits::DEFAULT.reader,
+    )
+    .unwrap();
+    let mut dict = old.get_dictionary(facts.id).unwrap().clone();
+    let left: Vec<Object> = (facts.contents.iter())
+        .filter(|&&c| c != block)
+        .map(|&c| Object::Reference(c))
+        .collect();
+    dict.set("Contents", left);
+    let objects = BTreeMap::from([(facts.id, (ObjKey::Page(first), dict.into()))]);
+    let catalog = saved.record.map.keys[&ObjKey::Catalog];
+    let check = |allowed: &AllowedDrops| {
+        removal::check(&Section {
+            old: &old,
+            objects: &objects,
+            trailer: &[catalog],
+            saved,
+            target: &input.target,
+            primary: src.id(),
+            allowed,
+            said: &BTreeSet::new(),
+            lim: &Limits::DEFAULT,
+        })
+    };
+    let misclassified = Found {
+        key,
+        derived: true,
+        said: false,
+    };
+    assert_eq!(check(&AllowedDrops::default()), Some(misclassified));
+    let keys = AllowedDrops {
+        keys: vec![key],
+        ..AllowedDrops::default()
+    };
+    assert_eq!(check(&keys), None);
+    let redrawn = AllowedDrops {
+        redrawn: [(first, g)].into(),
+        ..AllowedDrops::default()
+    };
+    assert_eq!(check(&redrawn), None);
 }

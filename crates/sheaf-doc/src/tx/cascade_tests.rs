@@ -13,7 +13,7 @@ use sheaf_edit::{
 use super::fixture as fx;
 use super::tests::{commit, doc_of, flat, new_mark, note, opened, rect, style, titles};
 use super::*;
-use crate::model::Document;
+use crate::model::{Document, Scope};
 use crate::prim::Rec;
 
 /// `op` lowered by the user into `d`'s state with only the cascades
@@ -290,7 +290,7 @@ fn a_deleted_page_leaves_the_header_s_pages() {
     let c = commit(&mut d, Actor::User, vec![op]).unwrap();
     assert_eq!(c.cascades, [cascade(Rule::PageGenerators, 1)]);
     let hf = d.state().header_footer().unwrap();
-    assert_eq!(hf.pages.as_deref(), Some(&[third][..]));
+    assert_eq!(hf.scope, Scope::Pages(im::OrdSet::unit(third)));
     let c = commit(&mut d, Actor::User, vec![delete(&[2])]).unwrap();
     assert_eq!(c.cascades, [cascade(Rule::PageGenerators, 1)]);
     assert!(d.state().generators().is_empty());
@@ -630,7 +630,8 @@ fn a_duplicate_s_threads_and_pairs_are_its_own() {
     assert_eq!(partner(annot(&c, 4)), Some(annot(&c, 5)));
     // The first page is the header's, and so is its copy; the second isn't.
     let hf = st.header_footer().unwrap();
-    assert_eq!(hf.pages.as_deref(), Some(&[first, first2, third][..]));
+    let on = Scope::Pages([first, first2, third].into_iter().collect());
+    assert_eq!(hf.scope, on);
     assert_eq!(st.check_invariants(), Ok(()));
     // The other tool's reply on the copy, made a mark, is in the copy's
     // thread: its own, not the one the file says.

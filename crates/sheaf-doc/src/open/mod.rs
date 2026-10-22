@@ -36,7 +36,6 @@ use crate::materialize::Came;
 use crate::model::{FlatOutlineItem, PageId};
 use crate::portfolio::Collection;
 use crate::serialize::append::Torn;
-use crate::stamps::HeaderFooter;
 use crate::{Document, PAGES, Source, Src, Store};
 
 pub(crate) mod annots;
@@ -57,11 +56,9 @@ pub struct Facts {
     pub annots: Arc<FileAnnots>,
     /// The file's `/PageLabels` ranges.
     pub labels: Option<Vec<LabelRange>>,
-    /// The header/footer sheaf drew into the file, and the pages it's on
-    /// (none: all).
-    pub header_footer: Option<(HeaderFooter, Option<Vec<usize>>)>,
-    /// The watermarks and backgrounds sheaf drew into the file (the
-    /// source's [`generators`](Source::generators)).
+    /// The generators sheaf drew into the file: its watermarks, background
+    /// and header and footer (the source's
+    /// [`generators`](Source::generators)).
     pub generators: Arc<[Saved]>,
     /// The form: its fields and widgets, and what sheaf shows about it
     /// (the source's [`form`](Source::form)).
@@ -180,7 +177,6 @@ pub fn finish(src: &Source, p: &dyn Progress) -> Facts {
     Facts {
         annots: src.annots_counting(p).clone(),
         labels: crate::labels::label_ranges(pdf),
-        header_footer: src.header_footer().cloned(),
         generators: src.generators().clone(),
         form: src.form().clone(),
         attachments: crate::attachments::attachments_in(pdf, src.page_ids()),

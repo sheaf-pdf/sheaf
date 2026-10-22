@@ -751,7 +751,7 @@ pub struct DocView {
     /// A background job in progress: Export Pages, Split (see jobs.rs).
     pub(crate) job: Option<crate::jobs::Job>,
     /// The planners in progress, oldest first: inserts, Trim Whites,
-    /// watermarks' removals, headers and footers, comment imports, the
+    /// watermarks' and headers and footers' removals, comment imports, the
     /// blank-page search (see jobs.rs).
     pub(crate) planners: Vec<std::rc::Rc<crate::jobs::Job>>,
     /// Blank pages found, waiting for review (see blank_review.rs).
@@ -6564,10 +6564,10 @@ mod tests {
     /// door ([`DocView::commit`]), an added mark leaves the layout count
     /// and the pane's layout as they were, while the change count moves,
     /// so the Comments panel's view is made again, with the mark. A turned
-    /// page lays the pages out anew. A page shown from a copy of the same
-    /// size (a stripped header's), whose boxes didn't change, lays nothing
-    /// out: a layout holds no source page, and the page's render key
-    /// changes, so it's drawn again.
+    /// page lays the pages out anew. A page whose content changed (words
+    /// recognized on it), whose boxes didn't, lays nothing out: a layout
+    /// holds no page's content, and the page's render key changes, so it's
+    /// drawn again.
     #[test]
     #[cfg(target_os = "linux")]
     fn a_mark_edit_lays_nothing_out() {
@@ -6615,7 +6615,7 @@ mod tests {
                     let doc = shown(view);
                     assert_eq!((doc.layout, doc.changes), (layout + 1, changes + 2));
                     assert!(doc.panes[0].layout.is_none());
-                    // The second page, shown from a blank copy of it.
+                    // The second page, its words recognized.
                     lay_out(doc);
                     let page = doc.page_id(1).unwrap();
                     let key = |doc: &Doc| {
@@ -6623,11 +6623,9 @@ mod tests {
                         view.unwrap().key
                     };
                     let was = key(doc);
-                    let copy = sheaf_doc::store::blank(doc.model.store(), 1);
-                    let mut tx = doc.model.tx(Actor::User);
-                    let why = sheaf_doc::Derive::StripHeaderFooter;
-                    tx.set_page_base(vec![(page, copy, 0)], why).unwrap();
-                    let c = view.commit(tx, CommitOpts::labelled("Strip"), cx);
+                    let words = recognized(doc, page);
+                    let tx = view.lower(words, "Recognize", cx).unwrap();
+                    let c = view.commit(tx, CommitOpts::labelled("Recognize"), cx);
                     let change = c.unwrap().change;
                     assert!(change.geometry.is_empty() && change.content.contains(&page));
                     let doc = shown(view);
@@ -6895,6 +6893,25 @@ mod tests {
         doc.model.state().order().iter().copied().collect()
     }
 
+    /// The op that gives page `page` of `doc` a word recognized on it: a
+    /// change to what the page draws, its boxes as they were.
+    #[cfg(target_os = "linux")]
+    fn recognized(doc: &Doc, page: PageId) -> Vec<Op> {
+        let word = sheaf_doc::OcrWord {
+            text: "Total".into(),
+            rect: Box2 {
+                x: 72.0,
+                y: 600.0,
+                w: 50.0,
+                h: 14.0,
+            },
+            confidence: 0.9,
+        };
+        let geom = doc.model.geom(page);
+        let layer = sheaf_doc::text_layer::from_engine(vec![word], &geom, "test");
+        sheaf_doc::tx::fixture::ocr([(page, Arc::new(layer))])
+    }
+
     /// An insert planned before a page that's deleted before it lands
     /// says why, and changes nothing (M10.5 §8.5): lowered again on the
     /// current version, its anchor names no page, so the version and the
@@ -7037,9 +7054,10 @@ mod tests {
 
     /// Blank review deletes the pages it shows checked on the version its
     /// search measured (M10.5 §8.5): one moved since is deleted all the
-    /// same, the delete lowered again over the move; one shown from another
-    /// source page since, not the page the search measured, is a conflict,
-    /// which the notice says, and nothing changes.
+    /// same, the delete lowered again over the move; one changed since
+    /// (words recognized on it, in the page's slot the search's read names),
+    /// not the page the search measured, is a conflict, which the notice
+    /// says, and nothing changes.
     #[test]
     #[cfg(target_os = "linux")]
     fn blank_review_deletes_what_its_search_measured() {
@@ -7081,18 +7099,17 @@ mod tests {
                     let doc = shown(view);
                     assert_eq!(order(doc), [b, d]);
                     assert_eq!(doc.model.undo_label(), Some("Delete 2 blank pages"));
-                    let copy = sheaf_doc::store::blank(doc.model.store(), 1);
-                    let mut tx = doc.model.tx(Actor::User);
-                    let why = sheaf_doc::Derive::StripHeaderFooter;
-                    tx.set_page_base(vec![(b, copy, 0)], why).unwrap();
-                    view.commit(tx, CommitOpts::labelled("Strip"), cx).unwrap();
+                    let words = recognized(doc, b);
+                    let tx = view.lower(words, "Recognize", cx).unwrap();
+                    view.commit(tx, CommitOpts::labelled("Recognize"), cx)
+                        .unwrap();
                     let was = shown(view).model.current_version();
                     view.blank_review = Some(review(&[b]));
                     view.delete_reviewed(cx);
                     let doc = shown(view);
                     assert_eq!((doc.model.current_version(), order(doc)), (was, vec![b, d]));
                     let notice = doc.notice.as_deref().unwrap_or_default();
-                    let conflict = "Delete 1 blank page failed: “Strip” changed the same data";
+                    let conflict = "Delete 1 blank page failed: “Recognize” changed the same data";
                     assert_eq!(notice, conflict);
                 });
                 ran.store(true, Ordering::Relaxed);
@@ -7167,6 +7184,16 @@ mod tests {
         assert!(ran.load(Ordering::Relaxed));
     }
 
+    /// The page each page of `doc` shows: a page shown from a copy made of
+    /// it would show another.
+    #[cfg(target_os = "linux")]
+    fn bases(doc: &Doc) -> Vec<sheaf_doc::PageBase> {
+        let st = doc.model.state();
+        (st.order().iter())
+            .map(|&p| st.def(p).unwrap().base.clone())
+            .collect()
+    }
+
     /// A watermark set from its dialog is one op committed on the version
     /// the dialog opened on (M10.5 slice 16): one undo step called
     /// "Watermark", or "Background", the notice its line, with text the
@@ -7186,6 +7213,7 @@ mod tests {
             move |cx| {
                 let view = view_of(model, &path, cx);
                 view.update(cx, |view, cx| {
+                    let was = bases(shown(view));
                     let opened = view.model_snapshot().unwrap();
                     let set = set_watermark(watermark("DRAFT"), Z::Over, None);
                     view.set_watermark(opened, set, None, cx);
@@ -7194,7 +7222,7 @@ mod tests {
                     let said = doc.notice.as_deref();
                     assert_eq!(said, Some("Add a watermark to all pages"));
                     assert!(doc.model.state().watermark(Z::Over).is_some());
-                    assert!(doc.model.derived().is_empty(), "no copy");
+                    assert_eq!(bases(doc), was, "no copy");
                     let opened = view.model_snapshot().unwrap();
                     let page = opened.state.page_at(1).unwrap();
                     let set = set_watermark(watermark("機密"), Z::Under, Some(&[page]));
@@ -7302,6 +7330,170 @@ mod tests {
                             let said = doc.notice.as_deref();
                             assert_eq!(said, Some("No background to remove"));
                             assert_eq!(doc.model.undo_label(), Some("Remove watermark"));
+                        })
+                    });
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// A header and footer set from its dialog is one op committed on the
+    /// version the dialog opened on (M10.5 slice 17): one undo step called
+    /// "Header & footer", the notice its line, with text the built-in fonts
+    /// can't draw said; the pages draw it with no copy made of them, and an
+    /// undo puts back the one before. Set again as it is, it says so.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_header_is_one_undo_step() {
+        use sheaf_doc::tx::fixture::{header, set_header};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(2);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    let was = bases(shown(view));
+                    let opened = view.model_snapshot().unwrap();
+                    let set = set_header(header("Page <<1>> of <<N>>"), None);
+                    view.set_header_footer(opened, set, cx);
+                    let doc = shown(view);
+                    assert_eq!(doc.model.undo_label(), Some("Header & footer"));
+                    let said = doc.notice.as_deref();
+                    assert_eq!(said, Some("Set the header and footer"));
+                    let first = doc.model.state().header_footer().cloned();
+                    assert!(first.is_some());
+                    assert_eq!(bases(doc), was, "no copy");
+                    let opened = view.model_snapshot().unwrap();
+                    let page = opened.state.page_at(1).unwrap();
+                    let set = set_header(header("機密"), Some(&[page]));
+                    view.set_header_footer(opened, set, cx);
+                    let doc = shown(view);
+                    assert_eq!(doc.model.undo_label(), Some("Header & footer"));
+                    let said = doc.notice.as_deref().unwrap_or_default();
+                    let unencodable = "Set the header and footer. Some characters can't be \
+                        drawn in the built-in fonts and show as “?” in the file; the text \
+                        itself is kept";
+                    assert_eq!(said, unencodable);
+                    view.undo(cx);
+                    let doc = shown(view);
+                    assert_eq!(doc.model.state().header_footer().cloned(), first);
+                    let now = doc.model.current_version();
+                    let opened = view.model_snapshot().unwrap();
+                    let set = set_header(header("Page <<1>> of <<N>>"), None);
+                    view.set_header_footer(opened, set, cx);
+                    let doc = shown(view);
+                    assert_eq!(doc.model.current_version(), now);
+                    let said = doc.notice.as_deref();
+                    assert_eq!(said, Some("No change to the header and footer"));
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// Remove Header & Footer is a planner (M10.5 §6.5, D61), as Remove
+    /// Watermark is: it lands once its lowering has read the pages' content
+    /// off the UI thread, as one undo step on the version its dialog opened
+    /// on, taking the document's header and footer off and leaving the
+    /// author's running head, which its notice counts; asked to, it takes
+    /// that too; and with nothing of sheaf's or others' left to take off,
+    /// it says so.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn remove_header_footer_is_planned_and_counts_the_author_s() {
+        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::tx::fixture::{header, set_header};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Two Letter pages, the first with a running head of the author's,
+        // in a `q` of its own.
+        let mut pdf = Pdf::with_version("1.7");
+        let root = pdf.new_object_id();
+        let font = pdf.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let drawn: [&[u8]; 2] = [
+            b"/Artifact <</Type /Pagination /Subtype /Header>> BDC \
+              q BT /F1 9 Tf 72 760 Td (Chapter One) Tj ET Q EMC",
+            b"0 g 300 300 10 10 re f",
+        ];
+        let kids: Vec<Object> = (drawn.into_iter())
+            .map(|content| {
+                let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
+                let page =
+                    dictionary! { "Type" => "Page", "Parent" => root, "Contents" => content };
+                pdf.add_object(page).into()
+            })
+            .collect();
+        let pages = dictionary! {
+            "Type" => "Pages", "Kids" => kids, "Count" => 2,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+        };
+        pdf.objects.insert(root, Object::Dictionary(pages));
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => root });
+        pdf.trailer.set("Root", catalog);
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("authored.pdf");
+        pdf.save(&path).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |v, cx| {
+                    let opened = v.model_snapshot().unwrap();
+                    let set = set_header(header("Page <<1>>"), None);
+                    v.set_header_footer(opened, set, cx);
+                    let opened = v.model_snapshot().unwrap();
+                    v.remove_header_footer(opened, false, cx);
+                    assert_eq!(v.planners.len(), 1, "a planner");
+                    let st = shown(v).model.state();
+                    assert!(st.header_footer().is_some(), "not landed yet");
+                });
+                cx.spawn(async move |cx| {
+                    planned(&view, cx).await;
+                    cx.update(|cx| {
+                        view.update(cx, |v, cx| {
+                            let doc = shown(v);
+                            let said = "Remove the header and footer from pages 1, 2 \
+                                (1 the author's left in place)";
+                            assert_eq!(doc.notice.as_deref(), Some(said));
+                            let label = Some("Remove header & footer");
+                            assert_eq!(doc.model.undo_label(), label);
+                            assert!(doc.model.state().header_footer().is_none());
+                            let opened = v.model_snapshot().unwrap();
+                            v.remove_header_footer(opened, true, cx);
+                        })
+                    });
+                    planned(&view, cx).await;
+                    cx.update(|cx| {
+                        view.update(cx, |v, cx| {
+                            let doc = shown(v);
+                            let said = "Remove the header and footer from pages 1, 2 \
+                                (1 the author's)";
+                            assert_eq!(doc.notice.as_deref(), Some(said));
+                            let opened = v.model_snapshot().unwrap();
+                            v.remove_header_footer(opened, true, cx);
+                        })
+                    });
+                    planned(&view, cx).await;
+                    cx.update(|cx| {
+                        view.update(cx, |v, _| {
+                            let doc = shown(v);
+                            let said = doc.notice.as_deref();
+                            assert_eq!(said, Some("No header or footer to remove"));
+                            let label = Some("Remove header & footer");
+                            assert_eq!(doc.model.undo_label(), label);
                         })
                     });
                     ran.store(true, Ordering::Relaxed);
@@ -8328,8 +8520,9 @@ mod tests {
                     assert_eq!(text(copy), "page 4");
                     assert_eq!(text(p[1]), "page 1");
                     // In the order the page draws them: its own text, the
-                    // recognized words over it, then the header.
-                    assert_eq!(text(p[5]), "page 5\nTotal 42\nDraft");
+                    // header over it, then the recognized words, which the
+                    // legacy installer draws last until slice 18.
+                    assert_eq!(text(p[5]), "page 5\nDraft\nTotal 42");
                     ran.store(true, Ordering::Relaxed);
                     cx.update(|cx| cx.quit());
                 })

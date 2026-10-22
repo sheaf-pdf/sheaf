@@ -9,16 +9,15 @@ use sheaf_edit::{GridPos, HeaderFooterSpec, Z};
 
 use super::{EditError, Lower, Notice, OthersFound};
 use crate::content::{
-    self, BlockAt, Font, PagOrigin, PageContent, Pagination, PaginationKind, ResCx, SheafBlock,
-    SpanAcross, Std14,
+    self, BlockAt, Font, GenId, PagOrigin, PageContent, Pagination, PaginationKind, ResCx,
+    SheafBlock, SpanAcross, Std14,
 };
-use crate::generate;
+use crate::generate::{self, header};
 use crate::model::{
-    Filter, GenId, GenSpec, Generator, MarkedSel, PageDef, PageId, Scope, StreamSel,
+    DocState, Filter, Frozen, GenSpec, Generator, MarkedSel, PageDef, PageId, Scope, StreamSel,
     WatermarkContent, WatermarkGen,
 };
 use crate::prim::{Key, Val};
-use crate::stamps::HeaderFooter;
 use crate::store::Src;
 use crate::text_layer::TextLayer;
 
@@ -65,12 +64,15 @@ pub(crate) fn set_watermark(
     let wm = WatermarkGen {
         content: content.clone(),
         position,
+    };
+    let g = Arc::new(Generator {
+        id,
+        spec: GenSpec::Watermark(Arc::new(wm)),
         z,
         scope,
+        frozen: Frozen::default(),
         replaces: BTreeSet::from([WatermarkGen::kind_at(z)]),
-    };
-    let spec = GenSpec::Watermark(Arc::new(wm));
-    let g = Arc::new(Generator { id, spec });
+    });
     lw.rec.put(Key::Generator(id), Some(Val::Generator(g)));
     Ok(())
 }
@@ -84,109 +86,191 @@ fn drawable(lw: &Lower, content: &WatermarkContent) -> Result<(), EditError> {
 }
 
 /// The watermark (`z` over), the background (under) or both (`z` None)
-/// taken off `pages`: each narrowed to the pages it's left on, or gone when
-/// that's none; as it is when it's on none of them. One on every page is
-/// left on the others there are now, which reads the order. Its blocks
-/// the pages' files hold go with it ([`DocState::backs`]); others of its
-/// kind there are filtered out (§6.5), which reads each page's blocks:
-/// another file's blocks, those another tool merged into a stream of its
-/// own, and the artifacts Acrobat and sheaf before M10.5 drew, and with
-/// `include_authored` the author's own, each where a splice takes it out.
-/// What it found of others', counted ([`OthersFound`]): one a splice
-/// refuses, an author's it isn't asked to take, one inside a form and a
-/// page that can't be read are left as they are, never failing it.
-///
-/// [`DocState::backs`]: crate::model::DocState::backs
+/// taken off `pages`, with those of their kinds others drew there
+/// ([`remove_generated`]).
 pub(crate) fn remove_watermark(
     lw: &mut Lower,
     z: Option<Z>,
     pages: &[PageId],
     include_authored: bool,
-) -> OthersFound {
-    narrow_watermarks(lw, z, pages);
-    let kinds: BTreeSet<PaginationKind> = match z {
+) -> Result<OthersFound, EditError> {
+    let kinds = match z {
         Some(z) => BTreeSet::from([WatermarkGen::kind_at(z)]),
         None => BTreeSet::from([PaginationKind::Watermark, PaginationKind::Background]),
     };
+    remove_generated(lw, &kinds, pages, include_authored)
+}
+
+/// The header and footer taken off `pages`, with the headers and footers
+/// others drew there ([`remove_generated`]).
+pub(crate) fn remove_header_footer(
+    lw: &mut Lower,
+    pages: &[PageId],
+    include_authored: bool,
+) -> Result<OthersFound, EditError> {
+    remove_generated(lw, &header::kinds(), pages, include_authored)
+}
+
+/// The generators drawing pagination artifacts of `kinds` taken off
+/// `pages` ([`narrow`]), and the artifacts of those kinds others drew there
+/// (§6.5), each page's read as [`others_on`] reads it, one rule: their
+/// blocks the pages' files hold go with them ([`DocState::backs`]), and
+/// others' are filtered out where a splice takes them out. What it found of
+/// others', counted. Each page's blocks are read, a page at a time, with
+/// progress and a way to cancel (§6.3).
+///
+/// [`DocState::backs`]: crate::model::DocState::backs
+fn remove_generated(
+    lw: &mut Lower,
+    kinds: &BTreeSet<PaginationKind>,
+    pages: &[PageId],
+    include_authored: bool,
+) -> Result<OthersFound, EditError> {
+    narrow(lw, kinds, pages);
     let mut found = OthersFound::default();
-    for &page in pages {
+    for (i, &page) in pages.iter().enumerate() {
+        lw.pages_done(i, pages.len())?;
         lw.read(Key::Page(page));
-        let def = lw.rec.def(page).expect("resolved").clone();
-        let (src, index) = (&def.base.src, def.base.index);
-        let Ok(blocks) = src.blocks(index) else {
-            found.unreadable += 1;
-            continue;
-        };
-        found.in_forms += usize::from(blocks.nested_in_forms);
-        let mut content = def.content.clone();
-        // Each range to cut, with who drew it: None for a block of the
-        // document's own generators, which isn't counted.
-        let mut ranges: Vec<(Option<PagOrigin>, &Pagination)> = Vec::new();
-        for b in blocks.sheaf.iter() {
-            let SheafBlock::Gen(g) = b.block else {
-                continue;
-            };
-            if !blocks.kind_of(g).is_some_and(|k| kinds.contains(&k)) {
-                continue;
-            }
-            let backed = lw.rec.backs(g, page);
-            match b.at {
-                BlockAt::Stream(_) if backed => {}
-                BlockAt::Stream(_) => {
-                    content = content.with_filter(Filter::DropStreams(StreamSel::SheafGen(g)));
-                    found.other_files += 1;
-                }
-                BlockAt::Marked(span) => {
-                    content = content.with_filter(Filter::DropMarked(MarkedSel::SheafGen(g)));
-                    let merged = blocks.pagination.iter().find(|p| p.span == span);
-                    let origin = (!backed).then_some(PagOrigin::Sheaf);
-                    ranges.extend(merged.map(|p| (origin, p)));
-                }
-            }
-        }
-        for p in blocks.pagination.iter().filter(|p| kinds.contains(&p.kind)) {
-            match p.origin {
-                PagOrigin::Sheaf => {}
-                PagOrigin::Authored if !include_authored => found.authored_left += 1,
-                origin => ranges.push((Some(origin), p)),
-            }
-        }
-        let taken = cut_alone(src, index, &ranges);
-        let mut origins = BTreeSet::new();
-        for (&(origin, _), taken) in ranges.iter().zip(taken) {
-            let Some(origin) = origin else {
-                continue;
-            };
-            let count = match (origin, taken) {
-                (PagOrigin::Acrobat, true) => &mut found.acrobat,
-                (PagOrigin::Sheaf, true) => &mut found.other_files,
-                (PagOrigin::SheafLegacy, true) => &mut found.older_sheaf,
-                (PagOrigin::Authored, true) => &mut found.authored,
-                (PagOrigin::Authored, false) => &mut found.authored_left,
-                (_, false) => &mut found.refused,
-            };
-            *count += 1;
-            if taken && origin != PagOrigin::Sheaf {
-                origins.insert(origin);
-            }
-        }
-        if !origins.is_empty() {
-            let kinds = kinds.clone();
-            content =
-                content.with_filter(Filter::DropMarked(MarkedSel::Pagination { kinds, origins }));
-        }
+        let (filters, on) = found_on(&lw.rec, page, kinds, include_authored);
+        found = found.plus(on);
+        let def = lw.rec.def(page).expect("resolved");
+        let content = (filters.into_iter()).fold(def.content.clone(), |c, f| c.with_filter(f));
         if content != def.content {
             let def = PageDef::new(def.base.clone(), def.copy, content);
             lw.rec.put(Key::Page(page), Some(Val::Page(Arc::new(def))));
         }
     }
-    found
+    Ok(found)
+}
+
+/// What taking the artifacts of `kinds` off `pages` of `st` would find of
+/// others' there (§6.5, D61): what [`remove_generated`] counts, read as it
+/// reads it, with the generators drawing them taken off those pages first,
+/// and nothing changed. What a dialog says Remove would take and Set would
+/// replace (proposal 31). It reads each page's blocks, so it's for off the
+/// UI thread. A page `st` hasn't got isn't counted.
+pub fn others_on(
+    st: &DocState,
+    kinds: &BTreeSet<PaginationKind>,
+    pages: &[PageId],
+    include_authored: bool,
+) -> OthersFound {
+    let mut st = st.clone();
+    for (id, g) in narrowed(&st, kinds, pages).left {
+        (st.set(&Key::Generator(id), g.map(Val::Generator)))
+            .expect("a generator's slot holds a generator");
+    }
+    (pages.iter())
+        .filter(|&&p| st.def(p).is_some())
+        .map(|&p| found_on(&st, p, kinds, include_authored).1)
+        .fold(OthersFound::default(), OthersFound::plus)
+}
+
+/// What taking the artifacts of `kinds` off page `page` of `st`, whose
+/// generators drawing them are off it now, finds (§6.5): the filters that
+/// take out those others drew, and what it found of others', counted
+/// ([`OthersFound`]). Taken: another file's blocks, those another tool
+/// merged into a stream of its own, and the artifacts Acrobat and sheaf
+/// before M10.5 drew, and with `include_authored` the author's own, each
+/// where a splice takes it out. One a splice refuses, an author's it isn't
+/// asked to take, one inside a form and a page that can't be read are left
+/// as they are; one the page's filters take out already isn't counted.
+fn found_on(
+    st: &DocState,
+    page: PageId,
+    kinds: &BTreeSet<PaginationKind>,
+    include_authored: bool,
+) -> (Vec<Filter>, OthersFound) {
+    let mut found = OthersFound::default();
+    let mut filters = Vec::new();
+    let def = st.def(page).expect("a page of the state's");
+    let (src, index) = (&def.base.src, def.base.index);
+    let Ok(blocks) = src.blocks(index) else {
+        found.unreadable += 1;
+        return (filters, found);
+    };
+    found.in_forms += usize::from(blocks.nested_in_forms);
+    let had = |f: &Filter| def.content.filters.contains(f);
+    // Each range to cut, with who drew it, None for a block of the
+    // document's own generators, which isn't counted; and whether the
+    // page's filters take it out already.
+    let mut ranges: Vec<(Option<PagOrigin>, &Pagination, bool)> = Vec::new();
+    for b in blocks.sheaf.iter() {
+        let SheafBlock::Gen(g) = b.block else {
+            continue;
+        };
+        if !blocks.kind_of(g).is_some_and(|k| kinds.contains(&k)) {
+            continue;
+        }
+        let backed = st.backs(g, page);
+        match b.at {
+            BlockAt::Stream(_) if backed => {}
+            BlockAt::Stream(_) => {
+                let drop = Filter::DropStreams(StreamSel::SheafGen(g));
+                found.other_files += usize::from(!had(&drop));
+                filters.push(drop);
+            }
+            BlockAt::Marked(span) => {
+                let drop = Filter::DropMarked(MarkedSel::SheafGen(g));
+                let merged = blocks.pagination.iter().find(|p| p.span == span);
+                let origin = (!backed).then_some(PagOrigin::Sheaf);
+                ranges.extend(merged.map(|p| (origin, p, had(&drop))));
+                filters.push(drop);
+            }
+        }
+    }
+    let filtered = |p: &Pagination| {
+        (def.content.filters.iter()).any(|f| match f {
+            Filter::DropMarked(MarkedSel::Pagination { kinds, origins }) => {
+                p.selected_by(kinds, origins)
+            }
+            _ => false,
+        })
+    };
+    // An author's it isn't asked to take is cut with the rest only when
+    // the page's filters take it already, to tell whether it's out.
+    for p in blocks.pagination.iter().filter(|p| kinds.contains(&p.kind)) {
+        let asked = include_authored || p.origin != PagOrigin::Authored;
+        match p.origin {
+            PagOrigin::Sheaf => {}
+            origin if asked || filtered(p) => ranges.push((Some(origin), p, filtered(p))),
+            _ => found.authored_left += 1,
+        }
+    }
+    let taken = cut_alone(src, index, &ranges);
+    let mut origins = BTreeSet::new();
+    for (&(origin, _, gone), taken) in ranges.iter().zip(taken) {
+        let Some(origin) = origin else {
+            continue;
+        };
+        // Out already.
+        if gone && taken {
+            continue;
+        }
+        let count = match (origin, taken) {
+            (PagOrigin::Acrobat, true) => &mut found.acrobat,
+            (PagOrigin::Sheaf, true) => &mut found.other_files,
+            (PagOrigin::SheafLegacy, true) => &mut found.older_sheaf,
+            (PagOrigin::Authored, true) => &mut found.authored,
+            (PagOrigin::Authored, false) => &mut found.authored_left,
+            (_, false) => &mut found.refused,
+        };
+        *count += 1;
+        if taken && origin != PagOrigin::Sheaf {
+            origins.insert(origin);
+        }
+    }
+    if !origins.is_empty() {
+        let kinds = kinds.clone();
+        filters.push(Filter::DropMarked(MarkedSel::Pagination { kinds, origins }));
+    }
+    (filters, found)
 }
 
 /// Which of `ranges`, pagination artifacts of page `index` of `src`, a
 /// save can take out, as it cuts them ([`content::splice_each`]): none
 /// when the page's content can't be read.
-fn cut_alone<T>(src: &Src, index: u32, ranges: &[(T, &Pagination)]) -> Vec<bool> {
+fn cut_alone<T, U>(src: &Src, index: u32, ranges: &[(T, &Pagination, U)]) -> Vec<bool> {
     let none = || vec![false; ranges.len()];
     if ranges.is_empty() {
         return Vec::new();
@@ -200,7 +284,7 @@ fn cut_alone<T>(src: &Src, index: u32, ranges: &[(T, &Pagination)]) -> Vec<bool>
     let res = ResCx::read(src.pdf(), facts.resources.as_deref());
     let concat = content.concat();
     let cuts: Vec<Option<Vec<SpanAcross>>> = (ranges.iter())
-        .map(|(_, p)| p.cuts(concat, &res, lim).ok())
+        .map(|(_, p, _)| p.cuts(concat, &res, lim).ok())
         .collect();
     let groups: Vec<Vec<SpanAcross>> = cuts.iter().flatten().cloned().collect();
     let mut taken = (content::splice_each(concat, &res, lim, &groups).taken).into_iter();
@@ -209,122 +293,144 @@ fn cut_alone<T>(src: &Src, index: u32, ranges: &[(T, &Pagination)]) -> Vec<bool>
         .collect()
 }
 
-/// [`remove_watermark`]'s generators, narrowed or gone.
-fn narrow_watermarks(lw: &mut Lower, z: Option<Z>, pages: &[PageId]) {
-    let drawn: Vec<(GenId, Arc<WatermarkGen>)> = (lw.rec.generators().values())
-        .filter_map(|g| Some((g.id, g.spec.watermark()?.clone())))
-        .filter(|(_, wm)| z.is_none_or(|z| wm.z == z))
-        .collect();
-    for (id, wm) in drawn {
-        let left = match &wm.scope {
-            Scope::Pages(on) => {
-                let mut left = on.clone();
-                for p in pages {
-                    left.remove(p);
-                }
-                if left.len() == on.len() {
-                    continue;
-                }
-                left
-            }
+/// The generators drawing pagination artifacts of `kinds` taken off
+/// `pages` ([`narrowed`]).
+fn narrow(lw: &mut Lower, kinds: &BTreeSet<PaginationKind>, pages: &[PageId]) {
+    let narrowed = narrowed(&lw.rec, kinds, pages);
+    if narrowed.ordered {
+        lw.read(Key::Order);
+    }
+    for (id, g) in narrowed.left {
+        lw.rec.put(Key::Generator(id), g.map(Val::Generator));
+    }
+}
+
+/// Generators taken off pages ([`narrowed`]).
+struct Narrowed {
+    /// Each one it changed, as it's left: None when it's gone.
+    left: Vec<(GenId, Option<Arc<Generator>>)>,
+    /// Whether one was on every page, which reads the order.
+    ordered: bool,
+}
+
+/// The generators of `st` drawing pagination artifacts of `kinds`, each as
+/// it's left once taken off `pages`: narrowed to the pages it's left on, or
+/// gone when that's none; one on none of them isn't changed. One on every
+/// page is left on the others there are now. The Bates numbers of the
+/// pages it's taken off go with them, never to be given again.
+fn narrowed(st: &DocState, kinds: &BTreeSet<PaginationKind>, pages: &[PageId]) -> Narrowed {
+    let picked = (st.generators().values()).filter(|g| !g.kinds().is_disjoint(kinds));
+    let gone: HashSet<PageId> = pages.iter().copied().collect();
+    let (mut left, mut ordered) = (Vec::new(), false);
+    for g in picked {
+        let g = match &g.scope {
             Scope::All if pages.is_empty() => continue,
             Scope::All => {
-                lw.read(Key::Order);
-                let gone: HashSet<PageId> = pages.iter().copied().collect();
-                (lw.rec.order().iter().copied())
-                    .filter(|p| !gone.contains(p))
-                    .collect()
+                ordered = true;
+                let every = Scope::Pages(st.order().iter().copied().collect());
+                Arc::new(Generator {
+                    scope: every,
+                    ..Generator::clone(g)
+                })
             }
+            Scope::Pages(_) => g.clone(),
         };
-        if left.is_empty() {
-            lw.rec.put(Key::Generator(id), None);
-            continue;
+        let (on, went) = g.on_pages_left(|p| !gone.contains(&p));
+        if went > 0 {
+            left.push((g.id, on));
         }
-        let wm = WatermarkGen {
-            scope: Scope::Pages(left),
-            ..WatermarkGen::clone(&wm)
-        };
-        let spec = GenSpec::Watermark(Arc::new(wm));
-        let g = Arc::new(Generator { id, spec });
-        lw.rec.put(Key::Generator(id), Some(Val::Generator(g)));
     }
+    Narrowed { left, ordered }
 }
 
 /// The header and footer `spec` says, on the pages of `scope` (every page,
 /// those added later too, when None), in place of the one there is, whose
-/// generator it keeps. Its `<<date>>` and `<<file>>` are fixed when it's
-/// added: now and the document's name, or the one's it replaces. With no
-/// text, there's none.
+/// generator, date and file it keeps; a new one's `<<date>>` and `<<file>>`
+/// say now and the document's name (§3.5). Its Bates numbers count the
+/// pages it covers in order from the spec's start, which reads the order,
+/// fixed now: setting it again is how to renumber. Numbers that would run
+/// past `u64::MAX` are refused. It replaces the headers
+/// and footers others drew on its pages as a save writes them (§6.5).
+/// With no text, there's none. Text its face can't draw, a page label
+/// included, is said ([`Notice::Unencodable`]).
 pub(crate) fn set_header_footer(
     lw: &mut Lower,
     spec: &HeaderFooterSpec,
-    scope: Option<Vec<PageId>>,
-) {
-    let drawn =
-        (lw.rec.generators().values()).find_map(|g| Some((g.id, g.spec.header_footer()?.clone())));
-    let host = &lw.cx.host;
-    let (date, file) = match &drawn {
-        Some((_, was)) if !was.date.is_empty() => (was.date.clone(), was.file.clone()),
-        _ => (host.date.to_string(), host.file.to_string()),
-    };
-    let hf = HeaderFooter {
-        texts: spec.texts.clone(),
-        font_size: spec.size,
-        color: spec.color,
-        top: spec.margins.top,
-        bottom: spec.margins.bottom,
-        left: spec.margins.left,
-        right: spec.margins.right,
-        first_page_number: spec.first_number,
-        pages: scope,
-        date,
-        file,
-        bates: spec.bates.clone(),
-    };
-    if hf.is_empty() {
-        if let Some((id, _)) = drawn {
-            lw.rec.put(Key::Generator(id), None);
+    scope: Option<&im::OrdSet<PageId>>,
+) -> Result<(), EditError> {
+    let was = lw.rec.header_footer().cloned();
+    if header::is_empty(spec) {
+        if let Some(was) = was {
+            lw.rec.put(Key::Generator(was.id), None);
         }
-        return;
+        return Ok(());
     }
-    if hf.unencodable() {
+    if let Some(why) = header::unfit(spec) {
+        return Err(lw.invalid(why));
+    }
+    let scope = match scope {
+        None => Scope::All,
+        Some(pages) if pages.is_empty() => {
+            return Err(lw.invalid("the header and footer is on no page"));
+        }
+        Some(pages) => Scope::Pages(pages.clone()),
+    };
+    let host = &lw.cx.host;
+    let (date, file) = match &was {
+        Some(was) if !was.frozen.date.is_empty() => {
+            (was.frozen.date.clone(), was.frozen.file.clone())
+        }
+        _ => (host.date.clone(), host.file.clone()),
+    };
+    let bates = match &spec.bates {
+        Some(b) => {
+            lw.read(Key::Order);
+            let on = lw.rec.order().iter().copied().filter(|&p| scope.covers(p));
+            match header::numbered(on, b.start) {
+                Some(numbers) => Some(numbers),
+                None => {
+                    return Err(lw.invalid(format!(
+                        "Bates numbers from {} run past the largest there is",
+                        b.start
+                    )));
+                }
+            }
+        }
+        None => None,
+    };
+    let id = was.map_or_else(|| lw.gen_id(), |was| was.id);
+    let g = Generator {
+        id,
+        spec: GenSpec::HeaderFooter(Arc::new(spec.clone())),
+        z: Z::Over,
+        scope,
+        frozen: Frozen { date, file, bates },
+        replaces: header::kinds(),
+    };
+    let face = Std14::from(spec.font);
+    if header::unencodable(spec, &g.frozen, &face) || label_unencodable(&lw.rec, &g) {
         lw.notices.push(Notice::Unencodable);
     }
-    let id = drawn.map_or_else(|| lw.gen_id(), |(id, _)| id);
-    let spec = GenSpec::HeaderFooter(Arc::new(hf));
-    let g = Arc::new(Generator { id, spec });
-    lw.rec.put(Key::Generator(id), Some(Val::Generator(g)));
+    lw.rec
+        .put(Key::Generator(id), Some(Val::Generator(Arc::new(g))));
+    Ok(())
 }
 
-/// The header and footer taken off `pages`: the generator narrowed to the
-/// pages it's left on, or gone when that's none; as it is when it's on
-/// none of them.
-pub(crate) fn remove_header_footer(lw: &mut Lower, pages: &[PageId]) {
-    let drawn =
-        (lw.rec.generators().values()).find_map(|g| Some((g.id, g.spec.header_footer()?.clone())));
-    let Some((id, hf)) = drawn else {
-        return;
+/// Whether header and footer `g` draws, on a page of `st` it covers, a
+/// label its face can't draw all of (`<<label>>`). A label's number is
+/// digits or letters, which every face has, so only a range's prefix can
+/// make one: the pages are read only when one does.
+pub(crate) fn label_unencodable(st: &DocState, g: &Generator) -> bool {
+    let Some(spec) = g.spec.header_footer() else {
+        return false;
     };
-    let on: Vec<PageId> = match &hf.pages {
-        Some(scope) => scope.clone(),
-        None => lw.rec.order().iter().copied().collect(),
-    };
-    let gone: HashSet<PageId> = pages.iter().copied().collect();
-    let left: Vec<PageId> = on.iter().copied().filter(|p| !gone.contains(p)).collect();
-    if left.len() == on.len() {
-        return;
+    let face = Std14::from(spec.font);
+    let mut prefixes = st.labels().into_iter().flat_map(|l| l.iter());
+    if !prefixes.any(|l| header::label_unencodable(spec, &l.prefix, &face)) {
+        return false;
     }
-    if left.is_empty() {
-        lw.rec.put(Key::Generator(id), None);
-        return;
-    }
-    let hf = HeaderFooter {
-        pages: Some(left),
-        ..HeaderFooter::clone(&hf)
-    };
-    let g = Arc::new(Generator {
-        id,
-        spec: GenSpec::HeaderFooter(Arc::new(hf)),
-    });
-    lw.rec.put(Key::Generator(id), Some(Val::Generator(g)));
+    (st.order().iter().filter(|&&p| g.covers(p))).any(|&p| {
+        st.label_of(p)
+            .is_some_and(|l| header::label_unencodable(spec, &l, &face))
+    })
 }

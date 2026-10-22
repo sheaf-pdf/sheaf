@@ -147,13 +147,13 @@ fn found(how: How) {
     for z in [Z::Over, Z::Under] {
         let (a, b) = (was.watermark(z).unwrap(), now.watermark(z).unwrap());
         assert_eq!(a.id, b.id, "{how:?}");
-        let (a, b) = (a.spec.watermark().unwrap(), b.spec.watermark().unwrap());
-        let said = |w: &crate::model::WatermarkGen| {
-            (w.content.clone(), w.position, w.z, w.replaces.clone())
+        let said = |g: &crate::model::Generator| {
+            let w = g.spec.watermark().unwrap();
+            (w.content.clone(), w.position, g.z, g.replaces.clone())
         };
         assert_eq!(said(a), said(b), "{how:?}");
     }
-    let scope = |z| now.watermark(z).unwrap().scope().into_owned();
+    let scope = |z| now.watermark(z).unwrap().scope.clone();
     assert_eq!(scope(Z::Over), Scope::All);
     let second = again.page(1).unwrap();
     assert_eq!(scope(Z::Under), Scope::Pages(im::OrdSet::unit(second)));
@@ -509,7 +509,7 @@ fn an_empty_block_keeps_its_page_in_scope() {
     assert_eq!(saved[0].pages, Some(vec![0, 2]));
     let on: im::OrdSet<PageId> = [0, 2].map(|i| again.page(i).unwrap()).into_iter().collect();
     let wm = again.state().watermark(Z::Over).unwrap();
-    assert_eq!(wm.scope().into_owned(), Scope::Pages(on));
+    assert_eq!(wm.scope, Scope::Pages(on));
     let pdf = Pdf::load_mem(&How::Rewritten.write(&again)).unwrap();
     assert_eq!(blocks(&pdf), vec![vec![id], vec![], vec![id]]);
     assert!(drawn(&pdf, pages(&pdf)[2]).contains("(DRAFT)"));
@@ -792,7 +792,8 @@ fn what_sheaf_wouldn_t_write_isn_t_found() {
         pdf.save_to(&mut out).unwrap();
         let (_, again) = opened(&dir, "b.pdf", &out);
         let mut zs: Vec<Z> = (again.state().generators().values())
-            .filter_map(|g| Some(g.spec.watermark()?.z))
+            .filter(|g| g.spec.watermark().is_some())
+            .map(|g| g.z)
             .collect();
         zs.sort();
         zs
@@ -880,7 +881,7 @@ fn a_page_another_tool_added_has_no_watermark() {
     let (_, again) = opened(&dir, "b.pdf", &bytes);
     let on: im::OrdSet<PageId> = [0, 1].map(|i| again.page(i).unwrap()).into_iter().collect();
     let wm = again.state().watermark(Z::Over).unwrap();
-    assert_eq!((wm.id, wm.scope().into_owned()), (id, Scope::Pages(on)));
+    assert_eq!((wm.id, wm.scope.clone()), (id, Scope::Pages(on)));
     let added = again.page(2).unwrap();
     let st = again.state();
     assert!(crate::realize::untouched(st, added, &ViewInputs::screen()));
@@ -922,10 +923,7 @@ fn merged_on_some(how: How) {
     assert_eq!(again.primary().generators()[0].pages, Some(vec![0, 1]));
     let on: im::OrdSet<PageId> = [0, 1].map(|i| again.page(i).unwrap()).into_iter().collect();
     let wm = again.state().watermark(Z::Over).unwrap();
-    assert_eq!(
-        (wm.id, wm.scope().into_owned()),
-        (id, Scope::Pages(on.clone()))
-    );
+    assert_eq!((wm.id, wm.scope.clone()), (id, Scope::Pages(on.clone())));
     let on: Vec<PageId> = on.into_iter().collect();
     again
         .commit_ops(vec![watermark("FINAL", Some(&on))], "watermark")

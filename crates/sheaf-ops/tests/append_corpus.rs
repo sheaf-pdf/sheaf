@@ -15,6 +15,14 @@
 //!   its form check's findings, opens with the watermark found on every
 //!   page, Acrobat's own replaced but where a splice refuses one, and
 //!   taken off is a Rewrite whose file holds and draws none of its text;
+//! - a header and footer's round trip (M10.5 slice 17; ignored, as a
+//!   corpus tier): every file given page and Bates numbers on every page,
+//!   saved each way, keeps its form check's findings, opens with the
+//!   header found on every page and each its Bates number, Acrobat's
+//!   replaced and the author's own left; its pages reordered, it appends,
+//!   the numbers drawn again and the Bates numbers going with their
+//!   pages, the removal check finding nothing; taken off, it's a Rewrite
+//!   whose file holds and draws none of its text;
 //! - deleted means deleted, both ways, on every file (ignored, as it
 //!   takes about seven minutes; each slice's Verify and commit run it): a
 //!   page, a mark, a reply, a mark's text, another tool's comment or a
@@ -47,20 +55,21 @@ use lopdf::{Document as Pdf, Object, ObjectId};
 use sheaf_doc::content::{
     FontDecoders, PagOrigin, PageContent, PaginationKind, ResCx, TextBag, text_bag,
 };
+use sheaf_doc::effects::{Flags, judge};
 use sheaf_doc::forms::Finding;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::sigs::Verdict;
 use sheaf_doc::materialize::{
-    Ask, AskAnswers, How, Onto, SaveStop, Strategy, StrategyKind, Why, forced_append, materialize,
-    plan, removal, save, save_rewritten, write_file,
+    Ask, AskAnswers, How, Note, Onto, SaveStop, Strategy, StrategyKind, Why, forced_append,
+    materialize, plan, removal, save, save_rewritten, write_file,
 };
 use sheaf_doc::model::Scope;
 use sheaf_doc::tx::fixture::{
-    add, bookmark, crop, delete, delete_annots, delete_bookmark, remove_watermark, set_watermark,
-    update, watermark as fx_watermark,
+    add, bookmark, crop, delete, delete_annots, delete_bookmark, header as fx_header, move_pages,
+    remove_header, remove_watermark, set_header, set_watermark, update, watermark as fx_watermark,
 };
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, PageId, Pt};
-use sheaf_edit::{Margins, Rotation, Z};
+use sheaf_edit::{BatesSpec, HeaderFooterSpec, Margins, Rotation, Z};
 
 mod common;
 
@@ -546,7 +555,7 @@ fn round_trip(
         .map_err(|e| format!("no watermark: {e}"))?;
     let declined = match how {
         How::Rewritten => save_rewritten(doc, path).map(|_| None),
-        How::Appended => appended_or_not(doc, path).map(|strategy| match strategy {
+        How::Appended => appended_or_not(doc, path).map(|(strategy, _)| match strategy {
             Strategy::Rewrite { why } => Some(reasons(&why)),
             _ => None,
         }),
@@ -567,8 +576,8 @@ fn round_trip(
         .state()
         .watermark(Z::Over)
         .ok_or("its watermark isn't found")?;
-    if *found.scope() != Scope::All {
-        return Err(format!("found on {:?}, not every page", found.scope()));
+    if found.scope != Scope::All {
+        return Err(format!("found on {:?}, not every page", found.scope));
     }
     let left = artifacts(&again, PaginationKind::Watermark, PagOrigin::Acrobat);
     let pages: Vec<PageId> = again.state().order().iter().copied().collect();
@@ -653,6 +662,333 @@ fn watermark_round_trips() {
         left.iter().all(|(&path, &n)| path == refused && n == 2),
         "{left:?}"
     );
+}
+
+// ----- A header and footer's round trip -------------------------------------
+
+/// Corpus paths, comma-separated, to run [`header_round_trips`] on alone
+/// (`SHEAF_HEADER_ONLY=forms/irs/f1040.pdf,…`): for looking at a few files
+/// by hand. Unset, it takes every file.
+const HEADER_ONLY: &str = "SHEAF_HEADER_ONLY";
+
+/// The text at the left of the header every file takes, and its Bates
+/// numbers' prefix.
+const HEADER: &str = "SHEAF-CORPUS-HEADER";
+const BATES: &str = "SHEAFBATES";
+
+/// The others whose headers and footers a header and footer of sheaf's
+/// replaces: Acrobat and an older sheaf (§11.4). A corpus file has none
+/// of sheaf's own.
+const REPLACED: [PagOrigin; 2] = [PagOrigin::Acrobat, PagOrigin::SheafLegacy];
+
+/// The header and footer every file takes: [`HEADER`] at the header's
+/// left, "Page <<1>> of <<N>>" at the footer's center, and its Bates
+/// number, six digits after [`BATES`] from 1, at its right.
+fn corpus_header() -> HeaderFooterSpec {
+    let mut spec = fx_header(HEADER);
+    spec.texts[4] = "Page <<1>> of <<N>>".into();
+    spec.texts[5] = "<<bates>>".into();
+    spec.bates = Some(BatesSpec {
+        prefix: BATES.into(),
+        suffix: String::new(),
+        digits: 6,
+        start: 1,
+    });
+    spec
+}
+
+/// What a header and footer's round trips through a copy of a file came
+/// to, each way's together.
+#[derive(Default)]
+struct HeaderTrip {
+    /// Why the first save was a Rewrite where it was asked to append: the
+    /// file can't take an Append.
+    declined: Vec<String>,
+    /// Others' headers and footers on its pages ([`REPLACED`]'s), and
+    /// those left once the first save replaced them.
+    theirs: usize,
+    theirs_left: usize,
+    /// The author's own headers and footers, which stay.
+    authored: usize,
+    /// Reorders saved, each an Append; of them, those appended anyway, as
+    /// the file's signatures don't allow it; and those whose save asked
+    /// about the signatures with no Append to offer, which aren't saved. A
+    /// file of one page isn't reordered.
+    reordered: usize,
+    anyway: usize,
+    asked: usize,
+    /// What each save told the reader, by kind ([`note_kind`]).
+    notes: Vec<String>,
+}
+
+/// The headers and footers `doc`'s file draws by any of `origins`, page by
+/// page, counted.
+fn headers_by(doc: &Document, origins: &[PagOrigin]) -> usize {
+    let kinds = [PaginationKind::Header, PaginationKind::Footer];
+    (kinds.iter())
+        .flat_map(|&kind| origins.iter().map(move |&origin| (kind, origin)))
+        .map(|(kind, origin)| artifacts(doc, kind, origin))
+        .sum()
+}
+
+/// The Bates numbers `doc`'s header and footer gives its pages, in order.
+fn bates_numbers(doc: &Document) -> Result<Vec<Option<u64>>, String> {
+    let st = doc.state();
+    let g = (st.header_footer()).ok_or("its header and footer isn't found")?;
+    Ok((st.order().iter())
+        .map(|&p| g.frozen.bates_number(p))
+        .collect())
+}
+
+/// What kind of thing `note` tells: its words up to the pages it names,
+/// numbers as `n`.
+fn note_kind(note: &Note) -> String {
+    let text = &note.0;
+    let end = [text.find(" on "), text.find(':')]
+        .into_iter()
+        .flatten()
+        .min();
+    let words = &text[..end.unwrap_or(text.len())];
+    words.replace(|c: char| c.is_ascii_digit(), "n")
+}
+
+/// A copy of `entry`'s file given [`corpus_header`] on every page, saved
+/// each way (an Append where the file takes one), then opened again, its
+/// pages reordered and saved as planned, and opened again and the header
+/// and footer taken off, saved as planned: None when it doesn't open.
+fn headed(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<HeaderTrip, String>> {
+    let original = std::fs::read(corpus.path(entry)).ok()?;
+    let was = sheaf_doc::forms::check(&original, None).ok();
+    let mut trip = HeaderTrip::default();
+    for how in [How::Rewritten, How::Appended] {
+        let path = copy_of(entry, corpus, dir, &format!("hf-{how:?}-"))?;
+        let outcome = (|| {
+            let mut doc = opened(&path)?;
+            Some(header_trip(&mut doc, &path, how, was.as_ref(), &mut trip))
+        })();
+        remove(&path);
+        if let Err(e) = outcome? {
+            return Some(Err(format!("{how:?}: {e}")));
+        }
+    }
+    Some(Ok(trip))
+}
+
+/// [`headed`]'s saves of `doc`, opened from `path`, the first `how`, the
+/// file's form check `was` before, counted in `trip`.
+fn header_trip(
+    doc: &mut Document,
+    path: &Path,
+    how: How,
+    was: Option<&sheaf_doc::forms::Report>,
+    trip: &mut HeaderTrip,
+) -> Result<(), String> {
+    let theirs = headers_by(doc, &REPLACED);
+    let authored = headers_by(doc, &[PagOrigin::Authored]);
+    let set = set_header(corpus_header(), None);
+    doc.commit_ops(vec![set], "header")
+        .map_err(|e| format!("no header and footer: {e}"))?;
+    let numbers = bates_numbers(doc)?;
+    let (declined, notes) = match how {
+        How::Rewritten => save_rewritten(doc, path).map(|report| (None, report.notes)),
+        How::Appended => appended_or_not(doc, path).map(|(strategy, notes)| match strategy {
+            Strategy::Rewrite { why } => (Some(reasons(&why)), notes),
+            _ => (None, notes),
+        }),
+    }
+    .map_err(|stop| format!("the first save stopped: {stop}"))?;
+    trip.declined.extend(declined);
+    trip.notes.extend(notes.iter().map(note_kind));
+    let bytes = std::fs::read(path).unwrap();
+    if let Some(was) = was {
+        let now = sheaf_doc::forms::check(&bytes, None).map_err(|e| format!("check: {e:#}"))?;
+        let added: Vec<_> = (now.findings.iter())
+            .filter(|f| !was.findings.contains(f) && !told(f))
+            .collect();
+        if !added.is_empty() {
+            return Err(format!("the form check finds {added:?}"));
+        }
+    }
+    let again = opened(path).ok_or("the saved file doesn't open")?;
+    let found = (again.state().header_footer()).ok_or("its header and footer isn't found")?;
+    if found.scope != Scope::All {
+        return Err(format!("found on {:?}, not every page", found.scope));
+    }
+    let reread = bates_numbers(&again)?;
+    if reread != numbers {
+        return Err(format!(
+            "its Bates numbers read back {reread:?}, not {numbers:?}"
+        ));
+    }
+    trip.theirs += theirs;
+    trip.theirs_left += headers_by(&again, &REPLACED);
+    trip.authored += authored;
+    let authored_now = headers_by(&again, &[PagOrigin::Authored]);
+    if authored_now != authored {
+        return Err(format!("the author's own {authored_now}, from {authored}"));
+    }
+    let order: Vec<PageId> = again.state().order().iter().copied().collect();
+    let mut last = again;
+    if let [first, .., end] = order[..] {
+        let mut traded = numbers.clone();
+        traded.rotate_right(1);
+        last.commit_ops(vec![move_pages(&[end], Some(first))], "reorder")
+            .map_err(|e| format!("not reordered: {e}"))?;
+        let v = last.current_version();
+        let input = last.save_input(v).map_err(|e| format!("{e:#}"))?;
+        let flags = (input.saved.as_ref())
+            .map(|saved| judge(&saved.state, &input.target, &input.path_keys).flags);
+        drop(input);
+        last.abandon_save(v);
+        if !flags.is_some_and(|f| f.contains(Flags::LIVE_REDRAW)) {
+            return Err(format!("reordered, its flags are {flags:?}"));
+        }
+        let mut answers = AskAnswers {
+            drop_xfa_values: true,
+            ..Default::default()
+        };
+        let mut saved = save(&mut last, path, &answers, &NoProgress);
+        let anyway = matches!(
+            saved,
+            Err(SaveStop::Ask(Ask::Signatures {
+                append_anyway: Some(_),
+                ..
+            }))
+        );
+        if anyway {
+            // Appended anyway, as the reader may: the removal check still
+            // stops it on whatever it finds (`Mode::Anyway`).
+            answers.append_anyway = true;
+            saved = save(&mut last, path, &answers, &NoProgress);
+        }
+        match saved {
+            Ok(report) if report.strategy == Some(StrategyKind::Append) => {
+                trip.reordered += 1;
+                trip.anyway += usize::from(anyway);
+                trip.notes.extend(report.notes.iter().map(note_kind));
+                last = opened(path).ok_or("the reordered file doesn't open")?;
+                let reread = bates_numbers(&last)?;
+                if reread != traded {
+                    return Err(format!(
+                        "reordered, its Bates numbers read back {reread:?}, not {traded:?}"
+                    ));
+                }
+            }
+            Ok(report) => {
+                return Err(format!(
+                    "reordered, saved as {:?} for {}",
+                    report.strategy,
+                    reasons(&report.why)
+                ));
+            }
+            Err(SaveStop::Ask(Ask::Signatures { .. })) => trip.asked += 1,
+            Err(stop) => return Err(format!("reordered, the save stopped: {stop}")),
+        }
+    }
+    let pages: Vec<PageId> = last.state().order().iter().copied().collect();
+    last.commit_ops(vec![remove_header(&pages)], "remove")
+        .map_err(|e| format!("not removed: {e}"))?;
+    let answers = AskAnswers {
+        break_signatures: true,
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    let report = save(&mut last, path, &answers, &NoProgress).map_err(|e| format!("{e}"))?;
+    trip.notes.extend(report.notes.iter().map(note_kind));
+    if report.strategy != Some(StrategyKind::Rewrite) {
+        return Err(format!("removed, saved as {:?}", report.strategy));
+    }
+    let bytes = std::fs::read(path).unwrap();
+    for text in [HEADER, BATES] {
+        if readable(&bytes, &written_as(text)) {
+            return Err(format!("removed, {text} can still be read"));
+        }
+    }
+    let reopened = opened(path).ok_or("the file it was removed from doesn't open")?;
+    let words = drawn_words(&reopened);
+    if (words.words()).any(|(w, _)| w.contains(HEADER) || w.contains(BATES)) {
+        return Err("removed, its text is still drawn".into());
+    }
+    Ok(())
+}
+
+/// Every file given a header and footer with page and Bates numbers on
+/// every page, saved each way, opened again and its pages reordered, then
+/// the header and footer taken off (slice 17): the form check finds
+/// nothing the file didn't have before; the header is found again, on
+/// every page, each its Bates number; others' headers and footers are
+/// replaced, every one, as every one the corpus has can be spliced out
+/// (`content::corpus`), and the author's own stay; the reorder, a live
+/// redraw, appends, anyway where the file's signatures don't allow it,
+/// the Bates numbers going with their pages; taken off, the save is a
+/// Rewrite, and its text can't be read in the file or drawn; and the
+/// removal check never finds a derived object's text gone. The notes the
+/// saves gave are counted by kind.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn header_round_trips() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let dir = scratch("headed");
+    let entries = common::narrowed(HEADER_ONLY, corpus.manifest().unwrap(), |e| &e.path);
+    let outcomes = each_entry(&entries, |entry| headed(entry, &corpus, &dir));
+    let (mut files, mut theirs, mut authored) = (0, 0, 0);
+    let (mut reordered, mut anyway, mut asked) = (0, 0, 0);
+    let (mut declined, mut notes) = (BTreeMap::new(), BTreeMap::new());
+    let (mut left, mut failed) = (BTreeMap::new(), BTreeMap::new());
+    for (entry, outcome) in entries.iter().zip(outcomes) {
+        match outcome {
+            None => {}
+            Some(Ok(trip)) => {
+                files += 1;
+                theirs += trip.theirs;
+                authored += trip.authored;
+                reordered += trip.reordered;
+                anyway += trip.anyway;
+                asked += trip.asked;
+                for why in trip.declined {
+                    *declined.entry(why).or_insert(0usize) += 1;
+                }
+                for kind in trip.notes {
+                    *notes.entry(kind).or_insert(0usize) += 1;
+                }
+                if trip.theirs_left > 0 {
+                    left.insert(entry.path.as_str(), trip.theirs_left);
+                }
+            }
+            Some(Err(e)) => {
+                files += 1;
+                failed.insert(entry.path.clone(), e);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let vetoes = removal::vetoes();
+    println!(
+        "{files} of {} files given a header and footer both ways, found again and removed; \
+         {reordered} reorders appended, {anyway} of them anyway over their signatures, {asked} \
+         asked about their signatures with no Append to offer; of Acrobat's and an older \
+         sheaf's headers and footers on their pages, {theirs} each way's together, {} left \
+         ({left:?}); the author's own {authored}, all left; {} failed; removal check vetoes: {} \
+         derived",
+        entries.len(),
+        left.values().sum::<usize>(),
+        failed.len(),
+        vetoes.derived,
+    );
+    for (why, n) in &declined {
+        println!("  appended as a Rewrite for {why}: {n}");
+    }
+    for (kind, n) in &notes {
+        println!("  noted {n} times: {kind}");
+    }
+    for (path, why) in &failed {
+        println!("{path}: {why}");
+    }
+    assert!(failed.is_empty());
+    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(vetoes.derived, 0, "a derived object's text was found gone");
 }
 
 // ----- Deleted means deleted, both ways --------------------------------------
@@ -850,8 +1186,8 @@ fn own_objects(pdf: &Pdf, at: ObjectId) -> Vec<ObjectId> {
 /// `doc` appended to its file at `path`, as "Append anyway" appends
 /// (whatever its signatures allow, what it removes reported): a Rewrite
 /// instead when the section can't follow the file, as any save makes it.
-/// How it wrote.
-fn appended_or_not(doc: &mut Document, path: &Path) -> Result<Strategy, SaveStop> {
+/// How it wrote, and what the reader is told of it.
+fn appended_or_not(doc: &mut Document, path: &Path) -> Result<(Strategy, Vec<Note>), SaveStop> {
     let v = doc.current_version();
     let input = doc
         .save_input(v)
@@ -867,9 +1203,9 @@ fn appended_or_not(doc: &mut Document, path: &Path) -> Result<Strategy, SaveStop
     };
     match write_file(&input, &plan, doc.save_target(path), &answers, &NoProgress) {
         Ok(written) => {
-            let strategy = written.strategy.clone();
+            let said = (written.strategy.clone(), written.notes.clone());
             (written.record_in(doc)).map_err(|e| SaveStop::Failed(format!("{e:#}")))?;
-            Ok(strategy)
+            Ok(said)
         }
         Err(stop) => {
             doc.abandon_save(v);
@@ -928,7 +1264,7 @@ fn saved_then_deleted(
     }
     let first = match how {
         How::Rewritten => save_rewritten(doc, path).map(|_| None),
-        How::Appended => appended_or_not(doc, path).map(Some),
+        How::Appended => appended_or_not(doc, path).map(|(strategy, _)| Some(strategy)),
     };
     match first {
         Ok(None | Some(Strategy::Append { .. })) => {}

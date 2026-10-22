@@ -54,7 +54,7 @@ use sheaf_util::Checksum;
 
 pub use inputs::{MarkDraw, OcgOverride, ViewInputs};
 pub use key::{RenderKey, render_key, render_reads};
-pub(crate) use key::{form_digest, page_digest, recipe_digest};
+pub(crate) use key::{form_digest, layout_reads, page_digest, recipe_digest};
 #[cfg(any(test, feature = "fixtures"))]
 pub use untouched::emission_is_base;
 pub use untouched::untouched;
@@ -406,7 +406,7 @@ impl Realizer {
     }
 
     /// Page `page`'s delta, which draws as `key` says: kept, or emitted
-    /// alone over `src`.
+    /// alone over `src` without the frame ([`EmitScope::Delta`]).
     fn delta(
         &self,
         st: &DocState,
@@ -428,7 +428,7 @@ impl Realizer {
             rotate: RotatePolicy::KeepBase,
             arts: Some(&self.arts),
         };
-        let scope = EmitScope::Pages([page].into());
+        let scope = EmitScope::Delta(page);
         let e = emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress)?;
         let part = Arc::new(Part::page(e, page)?);
         let weight = part.weight();

@@ -1,8 +1,8 @@
-//! Where the legacy installers draw (M10.5 slice 9): a [`Sink`] reads what
+//! Where the legacy installer draws (M10.5 slice 9): a [`Sink`] reads what
 //! a page dictionary names and takes what an installer adds, so
-//! `text_layer::install` and `stamps::install` serve both the lopdf
-//! document an old writer builds ([`Lopdf`]) and the emitter, whose page
-//! dictionaries refer to objects by key.
+//! `text_layer::install` serves both the lopdf document an old writer
+//! builds ([`Lopdf`]) and the emitter, whose page dictionaries refer to
+//! objects by key.
 //!
 //! A page dictionary and what a sink reads for it are in one space: an
 //! old writer's object numbers, or the emitter's placeholders.

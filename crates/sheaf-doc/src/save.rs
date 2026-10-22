@@ -15,7 +15,7 @@
 //! A file written to a path replaces it durably ([`durable::write`]). An
 //! export never replaces the document's file ([`Snapshot::file`]).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -26,15 +26,12 @@ use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, diction
 use crate::annot::{AnnotId, AnnotKind};
 use crate::content::{PagOrigin, PaginationKind};
 use crate::forms::FieldId;
-use crate::materialize::copy::{self, copy_page_dict, remap};
-use crate::materialize::graph::{self, Loaded};
 use crate::materialize::{self, Encryption, Numbering, PostPass, Profile, SaveInput, SaveTarget};
 use crate::model::{
     AnnotBody, Bookmark, DocState, FieldNode, Filter, FormDoc, LegacySel, Mark, MarkedSel,
     OutlineId, PageDef, PageId, Snapshot, Target, Terminal,
 };
 use crate::serialize::durable;
-use crate::store::Src;
 
 /// Serialize a snapshot as a complete new PDF: what a save writes, the
 /// primary's encryption and object numbers kept.
@@ -188,9 +185,9 @@ pub fn extract_bytes(model: &Snapshot, ids: &[PageId]) -> Result<Vec<u8>> {
 /// pages left out goes, as `keep_only` takes such fields out of a file
 /// (bug 14), with the parents left with no kids; a connector whose other
 /// end is left out has no partner; a label range starts at the first page
-/// of its range kept; and the header/footer is on the pages kept of its
-/// own.
-fn subset(st: &DocState, ids: &[PageId], outline: bool) -> Option<DocState> {
+/// of its range kept; and a generator is on the pages kept of its own,
+/// with their Bates numbers.
+pub(crate) fn subset(st: &DocState, ids: &[PageId], outline: bool) -> Option<DocState> {
     let keep: HashSet<PageId> = ids.iter().copied().collect();
     let pages: Vec<_> = (st.pages())
         .filter(|(id, _, _)| keep.contains(id))
@@ -602,149 +599,6 @@ fn normal_appearance(pdf: &Pdf, annot: &Dictionary) -> Option<ObjectId> {
         .map(|s| s.to_vec())
         .or_else(|| states.iter().next().map(|(k, _)| k.clone()))?;
     states.get(&state).ok()?.as_reference().ok()
-}
-
-/// Pages `pages` of `src` (by index) as a new PDF, each passed to `fix`
-/// (with the new PDF, the page's dictionary and its position in `pages`)
-/// to change its content. sheaf's
-/// own marks are left out, since the model keeps them; other annotations,
-/// links and fields come along, and the form the fields are in, so the
-/// page shows them (see [`copy_form`]). A save writes the page it was
-/// made from instead, with the copy's content
-/// ([`Document::add_derived`]), which knows the copy by its blob: its
-/// catalog's `/SheafCopyOf` names `src`'s blob and the pages, so copies of
-/// different pages are different blobs.
-pub fn derived_copy(
-    src: &Src,
-    pages: &[u32],
-    fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, usize) -> Result<()>,
-) -> Result<Vec<u8>> {
-    let from = graph::eager(src).context("loading the source")?;
-    let loaded = Loaded::from_pdf(&from)?;
-    let mut pdf = Pdf::with_version("1.7");
-    let pages_id = pdf.new_object_id();
-    let mut map: HashMap<ObjectId, ObjectId> = HashMap::new();
-    let mut kids: Vec<Object> = Vec::with_capacity(pages.len());
-    copy::reserve(
-        pages
-            .iter()
-            .filter_map(|&index| loaded.pages.get(index as usize).copied()),
-        &mut pdf,
-        &mut map,
-    );
-    let mut filled = HashSet::new();
-    for (position, &index) in pages.iter().enumerate() {
-        let page = *loaded
-            .pages
-            .get(index as usize)
-            .with_context(|| format!("no page {index} in the source"))?;
-        let mut dict = copy_page_dict(&from, page, &mut pdf, &mut map)?;
-        let id = if filled.insert(page) {
-            map[&page]
-        } else {
-            pdf.new_object_id()
-        };
-        for (k, v) in loaded.inherited.get(&page).into_iter().flatten() {
-            if !dict.has(k) {
-                let v = remap(&from, v, &mut pdf, &mut map)?;
-                dict.set(k.clone(), v);
-            }
-        }
-        // sheaf's marks stay out: the records hold them.
-        let annots = (dict.get(b"Annots").ok())
-            .and_then(|a| pdf.dereference(a).ok())
-            .and_then(|(_, o)| o.as_array().ok())
-            .map(|list| crate::file::not_ours(&pdf, list));
-        match annots {
-            Some(list) if !list.is_empty() => dict.set("Annots", list),
-            Some(_) => {
-                dict.remove(b"Annots");
-            }
-            None => {}
-        }
-        fix(&mut pdf, &mut dict, position)?;
-        dict.set("Parent", pages_id);
-        dict.set("Type", Object::Name(b"Page".to_vec()));
-        pdf.objects.insert(id, Object::Dictionary(dict));
-        kids.push(id.into());
-    }
-    let count = kids.len() as i64;
-    let kept: HashSet<ObjectId> = kids.iter().filter_map(|k| k.as_reference().ok()).collect();
-    pdf.objects.insert(
-        pages_id,
-        Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count }),
-    );
-    // What it's a copy of: the document knows a copy by its blob, so
-    // copies of different pages differ however alike the pages are.
-    let indexes: Vec<Object> = pages.iter().map(|&i| i64::from(i).into()).collect();
-    let mut catalog = dictionary! {
-        "Type" => "Catalog",
-        "Pages" => pages_id,
-        "SheafCopyOf" => dictionary! {
-            "Blob" => Object::string_literal(src.id().stem()),
-            "Pages" => indexes,
-        },
-    };
-    if let Some(form) = copy_form(&from, &mut pdf, &mut map)? {
-        catalog.set("AcroForm", pdf.add_object(form));
-    }
-    let catalog = pdf.add_object(catalog);
-    pdf.trailer.set("Root", catalog);
-    // Links to pages that weren't copied lead nowhere, and widgets there
-    // leave their fields: they go, and so does what only they reached.
-    crate::kept::keep_only(&mut pdf, &kept);
-    pdf.prune_objects();
-    let mut out = Vec::new();
-    pdf.save_to(&mut out)?;
-    Ok(out)
-}
-
-/// The form of `from`, as far as the pages copied into `pdf` reach it
-/// (their widgets' fields, copied with them through `map`): the roots
-/// among `/Fields` and `/CO` that were copied, and `/DR`, `/DA`, `/Q` and
-/// `NeedAppearances`. PDFium draws widgets only in a document with a form
-/// (M10 bug 1). None when no field was copied. The XFA copy, usage rights
-/// and `/SigFlags` describe the whole file, so they stay behind.
-fn copy_form(
-    from: &Pdf,
-    pdf: &mut Pdf,
-    map: &mut HashMap<ObjectId, ObjectId>,
-) -> Result<Option<Dictionary>> {
-    let Some(form) = from
-        .catalog()
-        .ok()
-        .and_then(|c| c.get(b"AcroForm").ok())
-        .and_then(|f| from.dereference(f).ok())
-        .and_then(|(_, f)| f.as_dict().ok())
-    else {
-        return Ok(None);
-    };
-    let copied = |key: &[u8]| -> Vec<Object> {
-        form.get(key)
-            .ok()
-            .and_then(|a| from.dereference(a).ok())
-            .and_then(|(_, a)| a.as_array().ok())
-            .into_iter()
-            .flatten()
-            .filter_map(|f| map.get(&f.as_reference().ok()?).copied())
-            .map(Object::Reference)
-            .collect()
-    };
-    let fields = copied(b"Fields");
-    if fields.is_empty() {
-        return Ok(None);
-    }
-    let co = copied(b"CO");
-    let mut out = dictionary! { "Fields" => fields };
-    if !co.is_empty() {
-        out.set("CO", co);
-    }
-    for key in [b"DR".as_slice(), b"DA", b"Q", b"NeedAppearances"] {
-        if let Ok(v) = form.get(key) {
-            out.set(key.to_vec(), remap(from, v, pdf, map)?);
-        }
-    }
-    Ok(Some(out))
 }
 
 /// Whether `path` names `model`'s document's file ([`Snapshot::file`]),

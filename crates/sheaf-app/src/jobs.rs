@@ -3,7 +3,7 @@
 //! - **Jobs** write files (Export Pages, Split Document), one at a time
 //!   ([`DocView::run_job`]).
 //! - **Planners** plan an edit off the UI thread, over a snapshot (an
-//!   insert, Trim White, a watermark's removal, a header and footer, a
+//!   insert, Trim White, a watermark's or a header and footer's removal, a
 //!   comment import, the blank-page search), and land it on the UI thread,
 //!   committed with the snapshot's version as its base
 //!   ([`DocView::run_planner`]). Any number run at once, beside a job and

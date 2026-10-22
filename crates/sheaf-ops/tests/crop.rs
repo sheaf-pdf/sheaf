@@ -15,15 +15,18 @@ use std::sync::Arc;
 
 use common::open;
 use lopdf::{Dictionary, Document as Pdf, Stream, dictionary};
+use sheaf_doc::content::{PagOrigin, PaginationKind};
 use sheaf_doc::geom::Rect;
 use sheaf_doc::materialize::{How, StrategyKind};
 use sheaf_doc::prim::Key;
 use sheaf_doc::realize::{EngineKey, ViewInputs};
 use sheaf_doc::serialize::fixture::revision_cut_out;
-use sheaf_doc::tx::fixture::{add, crop_to, ocr, rotate, set_watermark, watermark};
+use sheaf_doc::tx::fixture::{
+    add, crop_to, header, ocr, rotate, set_header, set_watermark, watermark,
+};
 use sheaf_doc::{
-    Actor, Annot, AnnotId, AnnotKind, Box2, Commit, CommitOpts, Derive, DestView, Document,
-    EditError, JobKind, OcrWord, PageChars, PageId, Pt, Query, Snapshot, Stale,
+    Actor, Annot, AnnotId, AnnotKind, Box2, Commit, CommitOpts, DestView, Document, EditError,
+    JobKind, OcrWord, PageChars, PageId, Pt, Query, Snapshot, Stale,
 };
 use sheaf_edit::{Margins, Op, PageRef, PageSel, Patch, Rotation, Sibling, Turn, Z};
 use sheaf_image::raster::{PixelFormat, content_bounds};
@@ -805,24 +808,24 @@ fn ocr_text_stays(how: How) {
 }
 
 sheaf_doc::both_ways!(
-    a_derived_flow_keeps_the_crop,
-    a_derived_flow_keeps_the_crop_appended: derived_keeps_crop
+    generators_keep_the_crop,
+    generators_keep_the_crop_appended: generators_keep_crop
 );
 
 /// A page keeps its boxes, which are the page's, not its base's, through
-/// a watermark and a derived flow: cropped pages, one watermarked and the
-/// other's sheaf header stripped onto a copy, are cropped as they are,
-/// saved `how` with that `/CropBox`, and the mark sits in the middle of
-/// the crop. A watermark set on a version before a crop made since lands,
-/// and sits in the middle of that crop: it's laid out on each page's own
-/// boxes as a save writes it, and reads none when it's set (the copy a
-/// derived flow drew one on was laid out by the boxes it was planned on,
-/// so a crop since conflicted).
-fn derived_keeps_crop(how: How) {
-    let dir = scratch(&format!("derived-{how:?}"));
-    let header =
-        b"/Artifact <</Type /Pagination /Subtype /Header /SheafStamp true>> BDC (h) Tj EMC";
-    let headed = [SQUARE, b"\n", header].concat();
+/// the generators drawn on it: cropped pages, a watermark on the first and
+/// a header over both, which replaces the one an older sheaf drew on the
+/// second, are cropped as they are and show their file's pages, saved
+/// `how` with that `/CropBox`, the mark in the middle of the crop and the
+/// header in its top left corner, inside the margins. A watermark set on a
+/// version before a crop made since lands, and sits in the middle of that
+/// crop: it's laid out on each page's own boxes as a save writes it, and
+/// reads none when it's set. Cropped again, the mark and the header are
+/// laid out on the new crop.
+fn generators_keep_crop(how: How) {
+    let dir = scratch(&format!("generators-{how:?}"));
+    let older = b"/Artifact <</Type /Pagination /Subtype /Header /SheafStamp true>> BDC (h) Tj EMC";
+    let headed = [SQUARE, b"\n", older].concat();
     let file = file_of(vec![(letter(), SQUARE), (letter(), &headed)]);
     let mut doc = open(&on_disk(&dir, "two.pdf", file));
     let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
@@ -837,20 +840,14 @@ fn derived_keeps_crop(how: How) {
     let cropped = shown(&doc);
     let opts = CommitOpts::based(snap.version, Stale::Validate, "Watermark");
     doc.commit(tx, opts).unwrap();
-    let snap = doc.snapshot();
-    let stripped = sheaf_ops::derive::strip_stamps(doc.store(), &snap, &NoProgress).unwrap();
-    assert_eq!(stripped.len(), 1, "the header is stripped");
-    for d in stripped {
-        d.note(&mut doc);
-        doc.commit_page_base(d.bases().collect(), Derive::StripHeaderFooter, "Strip")
-            .unwrap();
+    (doc.commit_ops(vec![set_header(header("HEAD"), None)], "Header")).unwrap();
+    for &p in &pages {
+        let base = &doc.state().def(p).unwrap().base;
+        assert_eq!(base.src, *doc.primary(), "no copy is made");
     }
-    let base = |p: PageId| doc.state().def(p).unwrap().base.src.clone();
-    assert_eq!(base(pages[0]), *doc.primary(), "no copy is watermarked");
-    assert_ne!(base(pages[1]), *doc.primary());
     assert_eq!(shown(&doc), cropped, "the boxes are the page's");
-    // Saved, each page has its crop, and the mark is in the middle of the
-    // first's.
+    // Saved, each page has its crop, only the document's header, and the
+    // mark in the middle of the first's, the header in its corner.
     let saved = |doc: &Document, name: &str| {
         let out = dir.join(name);
         std::fs::write(&out, how.write(doc)).unwrap();
@@ -868,7 +865,26 @@ fn derived_keeps_crop(how: How) {
             "{how:?}: {off:?} off the crop's middle"
         );
     };
+    let in_the_corner = |out: &Path, c: Rect| {
+        let drawn = glyphs(&engine_on(out), "HEAD");
+        let drawn = (drawn.into_iter()).reduce(Box2::union).unwrap();
+        let off = (drawn.x - (c.x0 + 72.0), drawn.y + drawn.h - (c.y1 - 36.0));
+        assert!(
+            off.0.abs() <= 3.0 && off.1.abs() <= 3.0,
+            "{how:?}: {off:?} off the crop's corner, inside its margins"
+        );
+    };
     let out = saved(&doc, "out.pdf");
+    let written = sheaf_doc::forms::fixture::source(std::fs::read(&out).unwrap());
+    let (mark, head) = (PaginationKind::Watermark, PaginationKind::Header);
+    for (n, want) in [vec![mark, head], vec![head]].into_iter().enumerate() {
+        let blocks = written.blocks(n as u32).unwrap();
+        let found: Vec<_> = (blocks.pagination.iter())
+            .map(|p| (p.kind, p.origin))
+            .collect();
+        let want: Vec<_> = want.into_iter().map(|k| (k, PagOrigin::Sheaf)).collect();
+        assert_eq!(found, want, "{how:?}: page {n}");
+    }
     let file = Pdf::load(&out).unwrap();
     for (n, (_, id)) in file.get_pages().into_iter().enumerate() {
         let crop = file.get_dictionary(id).unwrap().get(b"CropBox").unwrap();
@@ -880,11 +896,15 @@ fn derived_keeps_crop(how: How) {
         assert_eq!(crop, want, "{how:?}: page {n}");
     }
     in_the_middle(&out, cropped[0].crop);
-    // Cropped again, the mark moves to the middle of the new crop.
+    in_the_corner(&out, cropped[0].crop);
+    // Cropped again, the mark moves to the middle of the new crop, and the
+    // header to its corner.
     common::crop(&mut doc, &pages[..1], UNEVEN);
     let again = doc.geom(pages[0]).crop;
     assert_ne!(again, cropped[0].crop);
-    in_the_middle(&saved(&doc, "again.pdf"), again);
+    let out = saved(&doc, "again.pdf");
+    in_the_middle(&out, again);
+    in_the_corner(&out, again);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -929,7 +949,6 @@ fn pages_alike_cropped_apart_stay_apart() {
         let page = doc.state().order()[i];
         common::crop(&mut doc, &[page], UNEVEN);
     }
-    assert!(doc.derived().is_empty(), "no copies");
     let primary = doc.primary().clone();
     for &p in doc.state().order().iter().take(2) {
         assert_eq!(doc.state().def(p).unwrap().base.src, primary);

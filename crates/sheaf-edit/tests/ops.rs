@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use sheaf_edit::fixture::{blob, every_op, layer};
 use sheaf_edit::{
     AnnotId, AnnotRef, BlobId, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Envelope, FontChoice,
-    GridPos, Local, Margins, Op, OutlineId, PageId, PageRef, PageSel, Patch, RangeSet, Rotation,
-    ScopeSel, Turn, WatermarkContent, WatermarkSpec, Z,
+    GridPos, HeaderFooterSpec, Local, Margins, Op, OutlineId, PageId, PageRef, PageSel, Patch,
+    RangeSet, Rotation, ScopeSel, Turn, WatermarkContent, WatermarkSpec, Z,
 };
 
 fn pos(s: &str) -> RangeSet {
@@ -348,6 +348,26 @@ fn watermarks_read_with_their_defaults() {
         let e = read::<Op>(bad.clone()).unwrap_err();
         assert!(e.contains(why), "{bad}: {e}");
     }
+}
+
+/// A header and footer that says no font is drawn in Helvetica, the face
+/// headers were drawn in before there was a choice; one that says its face
+/// is read in it.
+#[test]
+fn a_header_reads_in_helvetica_unless_it_says() {
+    let spec = |font: Option<&str>| {
+        let mut spec = json!({
+            "texts": ["Page <<label>>", "", "", "", "", ""], "size": 10, "color": [0, 0, 0],
+            "margins": {"top": 36, "bottom": 36, "left": 72, "right": 72}, "first_number": 1,
+        });
+        if let Some(font) = font {
+            spec["font"] = json!(font);
+        }
+        read::<HeaderFooterSpec>(spec).map(|spec| spec.font)
+    };
+    assert_eq!(spec(None), Ok(FontChoice::Helvetica));
+    assert_eq!(spec(Some("times-roman")), Ok(FontChoice::TimesRoman));
+    assert!(spec(Some("arial")).is_err());
 }
 
 #[test]

@@ -40,8 +40,7 @@ use crate::materialize::emit::catalog::GENERATORS;
 use crate::model::FlatOutlineItem;
 use crate::open::FileAnnots;
 use crate::serialize::crypt::Crypt;
-use crate::stamps::HeaderFooter;
-use crate::store::{Blob, BlobCollision, BlobId, BlobKind, MemoryKind, Origin, Src};
+use crate::store::{Blob, BlobCollision, BlobId, Src};
 
 pub use conformance::{Conformance, PdfA};
 pub use limits::{ContentLimits, FormLimits, Limits, PageTreeLimits};
@@ -71,14 +70,9 @@ pub struct Source {
     outline: OnceLock<Arc<[FlatOutlineItem]>>,
     form: OnceLock<Arc<FileForm>>,
     signatures: OnceLock<Arc<Signatures>>,
-    header_footer: OnceLock<Option<StoredHeaderFooter>>,
     /// PDFium refused its bytes ([`Source::base_refused`]).
     refused: AtomicBool,
 }
-
-/// A header and footer sheaf drew, as its file's catalog stores it, and
-/// the indexes of the pages it's on (None: every page).
-pub type StoredHeaderFooter = (HeaderFooter, Option<Vec<usize>>);
 
 /// The streams of a page's `/Contents` sheaf marked, in order, by object
 /// ([`Source::markers`]).
@@ -163,7 +157,6 @@ impl Source {
             outline: OnceLock::new(),
             form: OnceLock::new(),
             signatures: OnceLock::new(),
-            header_footer: OnceLock::new(),
             refused: AtomicBool::new(false),
         })
     }
@@ -307,21 +300,12 @@ impl Source {
 
     /// Whether its pages may hold sheaf's blocks and the streams that
     /// isolate them (§11.4): its catalog says what sheaf's generators are
-    /// (`/SheafGenerators`), or it's a copy sheaf made of another file's
-    /// pages (`Derived`, until slice 17), which keeps their streams but not
-    /// the catalog. The markers of a file with neither aren't read, so the
-    /// pages of every other file are written as they were.
+    /// (`/SheafGenerators`). The markers of a file without them aren't
+    /// read, so the pages of every other file are written as they were.
     pub fn marked(&self) -> bool {
-        *self.marked.get_or_init(|| {
-            let derived = matches!(
-                self.blob.kind(),
-                BlobKind::Pdf {
-                    origin: Origin::Memory(MemoryKind::Derived),
-                    ..
-                }
-            );
-            derived || (self.pdf.catalog()).is_ok_and(|c| c.has(GENERATORS.as_bytes()))
-        })
+        *self
+            .marked
+            .get_or_init(|| (self.pdf.catalog()).is_ok_and(|c| c.has(GENERATORS.as_bytes())))
     }
 
     /// The streams of page `index`'s `/Contents` that sheaf marked, by
@@ -350,10 +334,10 @@ impl Source {
         .clone()
     }
 
-    /// The watermarks and backgrounds its catalog and blocks say sheaf drew
-    /// on it (§3.5, [`crate::generate::read`]), read once; none for a file
-    /// that isn't [`marked`](Self::marked). Each that can't be read whole
-    /// is passed over, with a log line.
+    /// The generators its catalog and blocks say sheaf drew on it (§3.5,
+    /// [`crate::generate::read`]), read once; none for a file that isn't
+    /// [`marked`](Self::marked). Each that can't be read whole is passed
+    /// over, with a log line.
     pub fn generators(&self) -> &Arc<[Saved]> {
         (self.generators).get_or_init(|| crate::generate::read(self).into())
     }
@@ -392,14 +376,6 @@ impl Source {
     /// rights, read once (see [`crate::forms::sigs`]).
     pub fn signatures(&self) -> &Arc<Signatures> {
         (self.signatures).get_or_init(|| Arc::new(crate::forms::sigs::read(self)))
-    }
-
-    /// The header and footer its catalog says sheaf drew on its pages
-    /// ([`crate::stamps::from_catalog`]), read once.
-    pub fn header_footer(&self) -> Option<&StoredHeaderFooter> {
-        (self.header_footer)
-            .get_or_init(|| crate::stamps::from_catalog(&self.pdf))
-            .as_ref()
     }
 
     /// What its XMP metadata claims it conforms to: PDF/A and PDF/UA.

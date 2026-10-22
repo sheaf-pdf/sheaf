@@ -8,12 +8,11 @@
 //! A page is untouched under some inputs when it's copy 0 of its base
 //! page, at the page's own object, with its boxes (its turn is the job's),
 //! no filter on its content, nothing drawn over it that the inputs draw
-//! (recognized text with `ocr_over`; with `generators`, the header and
-//! footer where its file doesn't draw it already), its own content as the
-//! emitter keeps it as it is ([`content::intact`]: the blocks of the
-//! document's generators its file holds, by their streams' markers, the
-//! watermarks and backgrounds on it laid out alike there, which with
-//! `generators` must hold one for each, and without hold none), and, as
+//! (recognized text with `ocr_over`), its own content as the emitter keeps
+//! it as it is ([`content::intact`]: the blocks of the document's
+//! generators its file holds, by their streams' markers, the generators
+//! on it laid out alike there, which with `generators` must hold one for
+//! each, and without hold none), and, as
 //! far as the render's flags draw them ([`ViewInputs::draws_annots`] the
 //! annotations, `widgets` the form's widgets), the annotations of its base
 //! page as they are: each drawn record as read from its own entry there,
@@ -34,11 +33,10 @@ use crate::file::{PageAnnots, is_ours};
 use crate::forms::FieldId;
 use crate::geom::Geom;
 use crate::materialize::emit::Shown;
-use crate::materialize::emit::annots::{dead_link, derived, mark_kept};
+use crate::materialize::emit::annots::{dead_link, mark_kept};
 use crate::materialize::emit::content;
 use crate::model::{AnnotBody, DocState, FormInst, PageDef, PageId, Static, Widget};
 use crate::source::{ObjRef, PageFacts};
-use crate::stamps;
 use crate::store::Src;
 
 /// Whether page `page` of `st` draws under `inputs` as its base page does
@@ -74,10 +72,8 @@ pub fn untouched(st: &DocState, page: PageId, inputs: &ViewInputs) -> bool {
 
 /// Whether a generator draws on page `page`, showing `def` with `geom`,
 /// under `inputs`, or the blocks of one its base page `facts` holds are
-/// set aside: the watermarks and backgrounds on it aren't the blocks its
-/// file holds ([`content::intact`]), or the header and footer covers the
-/// page, its file doesn't draw it already, and a text of it isn't blank
-/// there.
+/// set aside: the generators on it aren't the blocks its file holds
+/// ([`content::intact`]).
 fn generated(
     st: &DocState,
     page: PageId,
@@ -91,28 +87,10 @@ fn generated(
         false => Vec::new(),
     };
     let marks = def.base.src.markers(def.base.index);
-    if !(on.is_empty() && marks.is_empty())
+    !(on.is_empty() && marks.is_empty())
         && !content::intact(st, page, &marks, &facts.contents, &on, |g| {
-            content::model_layout_digest(g, geom)
+            content::model_layout_digest(st, g, page, geom)
         })
-    {
-        return true;
-    }
-    if !inputs.generators {
-        return false;
-    }
-    let Some(hf) = st.header_footer() else {
-        return false;
-    };
-    if !st.header_covers(page) || stamps::base_draws(&def.base.src, def.base.index, hf) {
-        return false;
-    }
-    let facts = stamps::PageFacts {
-        index: st.pos_of(page).unwrap_or(0),
-        count: st.page_count(),
-        bates: st.bates_of(page),
-    };
-    hf.draws(&facts)
 }
 
 /// Whether page `page`'s annotations, its base page `facts` of `def`'s
@@ -134,7 +112,6 @@ fn annots_kept(
         src: src.clone(),
         index: def.base.index,
         copy: 0,
-        content: None,
     };
     let objects: HashSet<ObjectId> = base.iter().filter_map(|e| e.as_reference().ok()).collect();
     let listed = |id: ObjectId| objects.contains(&id);
@@ -284,13 +261,9 @@ fn annots_kept(
         if of_record || modeled_slots.contains(&slot) || is_ours(pdf, entry, &entries) {
             return false;
         }
-        // One the records don't hold, kept as the page has it but a derived
-        // copy's widget, and another tool's when the view shows them.
-        let overlaid = match widget {
-            true => !derived(src),
-            false => inputs.foreign,
-        };
-        if !overlaid {
+        // One the records don't hold, kept as the page has it: a widget,
+        // and another tool's when the view shows them.
+        if !widget && !inputs.foreign {
             return false;
         }
     }

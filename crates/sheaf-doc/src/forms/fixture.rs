@@ -20,8 +20,7 @@ use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat,
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
-use crate::model::{FormRef, Mark, PageId};
-use crate::stamps::HeaderFooter;
+use crate::model::{FormRef, Mark};
 use crate::store::{Blob, BlobKind, Src, Store, blob_id};
 
 /// A rectangle in page space: left, bottom, right, top.
@@ -707,8 +706,9 @@ pub fn every_kind_in(pages: usize) -> Form {
 
 /// A file that says one of each thing the opened version holds, on three
 /// pages: a field on the first, a mark on the second, roman page labels,
-/// a header/footer on the third alone, and a closed bookmark to the first
-/// with one under it to the third.
+/// a header/footer sheaf drew on the third alone
+/// ([`crate::generate::fixture::sheaf_header`]), and a closed bookmark to
+/// the first with one under it to the third.
 pub fn every_fact() -> Form {
     let mut f = Form::new(3);
     f.text("name", 0, row(0));
@@ -720,16 +720,13 @@ pub fn every_fact() -> Form {
         "PageLabels",
         dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => "r" }.into()] },
     );
-    let mut texts: [String; 6] = Default::default();
-    texts[0] = "Draft".into();
-    let hf = HeaderFooter {
-        texts,
-        pages: Some(vec![PageId(2)]),
-        ..Default::default()
-    };
-    let scope = crate::stamps::to_catalog(&hf, &[PageId(0), PageId(1), PageId(2)]);
-    f.dict(catalog).set(crate::stamps::CATALOG_KEY, scope);
     let pages = f.pages.clone();
+    let mut third = f.dict(pages[2]).clone();
+    crate::generate::fixture::sheaf_header(&mut f.pdf, &mut third);
+    *f.dict(pages[2]) = third;
+    let json = crate::generate::fixture::SHEAF_HEADER_JSON;
+    f.dict(catalog)
+        .set("SheafGenerators", Object::string_literal(json));
     let item = |title: &str, page: ObjectId| {
         dictionary! {
             "Title" => Object::string_literal(title),

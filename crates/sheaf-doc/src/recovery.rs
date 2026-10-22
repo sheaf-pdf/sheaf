@@ -23,9 +23,8 @@
 //!   own, against the same base (chained).
 //! - **Full** is the whole document, the current version written as a
 //!   save writes it, when no section can follow the base: its record says
-//!   nothing of it (a Full sidecar's restore), it can't take an update,
-//!   the objects a section refers to aren't all in it, or the legacy
-//!   header and footer is drawn (until slice 17).
+//!   nothing of it (a Full sidecar's restore), it can't take an update, or
+//!   the objects a section refers to aren't all in it.
 //! - **Flags** say what an Append sidecar's sections do, for the save that
 //!   writes them: `removes`, when they remove or replace text the base has
 //!   (by the path's effects, a transform that would need a Rewrite, or the
@@ -837,11 +836,53 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The header and footer is drawn by a Rewrite until slice 17, so the
-    /// sidecar of a document with an unsaved one is Full: the whole
-    /// document, encrypted as the file is, the header's text nowhere in it
-    /// in the clear. It restores with a record that says nothing of the
-    /// file, so its first save is a Rewrite.
+    /// An unsaved header and footer is sections after the file, as any
+    /// edit is: encrypted as the file is, the header's text nowhere in them
+    /// in the clear. They restore with the header, and the first save
+    /// appends them, then its own, after the file.
+    #[test]
+    fn an_unsaved_header_s_sidecar_appends() {
+        use crate::serialize::fixture::{USER, encrypted, form};
+
+        let dir = scratch();
+        let plain = form();
+        let [(_, state), ..] = crate::serialize::fixture::rc4_aes_128_and_aes_256(&plain);
+        let [table, _] = encrypted(&plain, &state, |_| {});
+        let pdf = dir.join("header.pdf");
+        std::fs::write(&pdf, &table).unwrap();
+        let mut model = crate::open::file(&pdf, Some(USER)).unwrap().doc;
+        let set = fx::set_header(fx::header("HEADERSECRET <<1>>"), None);
+        model.commit_ops(vec![set], "header").unwrap();
+        sidecar_of(&model);
+        assert_eq!(kind_of(&pdf), "append");
+        let sidecar = std::fs::read(sidecar_path(&pdf)).unwrap();
+        assert!(!holds(&sidecar, b"HEADERSECRET"));
+        let rec = find(&pdf).unwrap();
+        assert!(!rec.pending.flags.removes);
+        let mut recovered = restored(&pdf, &rec, Some(USER));
+        let texts = |doc: &Document| {
+            let hf = doc.state().header_footer().expect("a header and footer");
+            hf.spec.header_footer().unwrap().texts[0].clone()
+        };
+        assert_eq!(texts(&recovered), "HEADERSECRET <<1>>");
+        let planned = plan(&recovered.recovery_input(), &recovered.save_target(&pdf));
+        assert_eq!(planned.strategy, Strategy::Append { onto: Onto::Saved });
+        let report = save(&mut recovered, &pdf, &AskAnswers::default(), &NoProgress).unwrap();
+        assert_eq!(report.strategy, Some(StrategyKind::Append));
+        let written = std::fs::read(&pdf).unwrap();
+        assert!(written.starts_with(&table));
+        assert!(written[table.len()..].starts_with(&rec.bytes));
+        let reopened = crate::open::file(&pdf, Some(USER)).unwrap().doc;
+        assert_eq!(texts(&reopened), "HEADERSECRET <<1>>");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Full sidecar of an encrypted file, written when no section can
+    /// follow the file (here its record says it can't take an update), is
+    /// the whole document encrypted as the file is: neither a header's text
+    /// nor the form's value is in it in the clear. It restores with a
+    /// record that says nothing of the file, so its first save is a
+    /// Rewrite, and its own sidecar is Full too, against the same file.
     #[test]
     fn an_encrypted_file_s_full_sidecar_holds_no_plaintext() {
         use crate::serialize::fixture::{USER, VALUE, encrypted, form};
@@ -855,7 +896,15 @@ pub(crate) mod tests {
         let mut model = crate::open::file(&pdf, Some(USER)).unwrap().doc;
         let set = fx::set_header(fx::header("HEADERSECRET <<1>>"), None);
         model.commit_ops(vec![set], "header").unwrap();
-        sidecar_of(&model);
+        let mut input = model.recovery_input();
+        let saved = input.saved.as_mut().unwrap();
+        let record = SaveRecord {
+            sound: false,
+            ..SaveRecord::clone(&saved.record)
+        };
+        saved.record = Arc::new(record);
+        let (file, base) = model.file().map(|(f, s)| (f.clone(), *s)).unwrap();
+        write(&input, &file, &base, &NoProgress).unwrap();
         assert_eq!(kind_of(&pdf), "full");
         let sidecar = std::fs::read(sidecar_path(&pdf)).unwrap();
         for text in [b"HEADERSECRET".as_slice(), VALUE.as_bytes()] {
@@ -867,16 +916,59 @@ pub(crate) mod tests {
         assert!(recovered.is_dirty());
         assert!(!recovered.saved_record().unwrap().knows_file());
         let hf = recovered.state().header_footer().unwrap();
-        assert_eq!(hf.texts[0], "HEADERSECRET <<1>>");
+        assert_eq!(
+            hf.spec.header_footer().unwrap().texts[0],
+            "HEADERSECRET <<1>>"
+        );
         let planned = plan(&recovered.recovery_input(), &recovered.save_target(&pdf));
-        let why = vec![Why::NoSaveRecord, Why::LegacyHeaderFooter];
+        let why = vec![Why::NoSaveRecord];
         assert_eq!(planned.strategy, Strategy::Rewrite { why });
-        // Its own sidecar is Full too, against the same file.
         sidecar_of(&recovered);
         assert_eq!(kind_of(&pdf), "full");
         let again = restored(&pdf, &find(&pdf).unwrap(), Some(USER));
         let hf = again.state().header_footer().unwrap();
-        assert_eq!(hf.texts[0], "HEADERSECRET <<1>>");
+        assert_eq!(
+            hf.spec.header_footer().unwrap().texts[0],
+            "HEADERSECRET <<1>>"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A header that numbers the pages, saved, and the pages reordered: the
+    /// sidecar's section draws the numbers on the pages that moved again,
+    /// their old blocks let go as a live redraw, so it removes nothing.
+    /// Restored, the first save appends it, and the file reopens with each
+    /// page numbered where it is now.
+    #[test]
+    fn a_live_redraw_s_sidecar_appends() {
+        let dir = scratch();
+        let pdf = dir.join("doc.pdf");
+        two_page_pdf(&pdf);
+        let mut model = crate::open::file(&pdf, None).unwrap().doc;
+        turn(&mut model, 0);
+        let set = fx::set_header(fx::header("Page <<1>> of <<N>>"), None);
+        model.commit_ops(vec![set], "header").unwrap();
+        let report = save(&mut model, &pdf, &AskAnswers::default(), &NoProgress).unwrap();
+        assert_eq!(report.strategy, Some(StrategyKind::Append));
+        let [first, second] = [0, 1].map(|i| model.page(i).unwrap());
+        let reorder = fx::move_pages(&[second], Some(first));
+        model.commit_ops(vec![reorder], "reorder").unwrap();
+        sidecar_of(&model);
+        assert_eq!(kind_of(&pdf), "append");
+        let rec = find(&pdf).unwrap();
+        assert!(!rec.pending.flags.removes);
+        let mut recovered = restored(&pdf, &rec, None);
+        let report = save(&mut recovered, &pdf, &AskAnswers::default(), &NoProgress).unwrap();
+        assert_eq!(report.strategy, Some(StrategyKind::Append));
+        assert_eq!(report.why, []);
+        let reopened = crate::open::file(&pdf, None).unwrap().doc;
+        let turned = reopened.page(1).unwrap();
+        assert_eq!(reopened.geom(turned).rotate, Rotation::R90);
+        let file = Pdf::load(&pdf).unwrap();
+        for (n, &page) in (1..).zip(file.get_pages().values()) {
+            let text = String::from_utf8_lossy(&file.get_page_content(page)).into_owned();
+            assert!(text.contains(&format!("(Page {n} of 2) Tj")), "{text}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

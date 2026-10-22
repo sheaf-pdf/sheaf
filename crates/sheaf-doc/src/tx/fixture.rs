@@ -12,7 +12,7 @@ use sheaf_edit::{
     PageSource, Patch, RangeSet, ScopeSel, Sibling, Turn, WatermarkContent, WatermarkSpec, Z,
 };
 
-use super::{Actor, Commit, CommitOpts, Derive, EditError, JobKind, Tx};
+use super::{Actor, Commit, CommitOpts, EditError, JobKind, Tx};
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::labels::LabelSpec;
 use crate::model::{Document, GroupId, GroupKind, OutlineId, PageId};
@@ -50,20 +50,6 @@ impl Document {
             ..CommitOpts::labelled(label)
         };
         self.commit(tx, opts)
-    }
-
-    /// Each of `pages` shown from page `index` of `src`, a copy a derived
-    /// flow made as `why` says ([`Tx::set_page_base`]), as a version of the
-    /// user's labelled `label`.
-    pub fn commit_page_base(
-        &mut self,
-        pages: Vec<(PageId, Src, u32)>,
-        why: Derive,
-        label: &str,
-    ) -> Result<Commit, EditError> {
-        let mut tx = self.tx(Actor::User);
-        tx.set_page_base(pages, why)?;
-        self.commit(tx, CommitOpts::labelled(label))
     }
 
     /// `ops` lowered in a transaction of the user's, what the pages they
@@ -314,6 +300,7 @@ pub fn header(text: &str) -> HeaderFooterSpec {
     texts[0] = text.into();
     HeaderFooterSpec {
         texts,
+        font: FontChoice::Helvetica,
         size: 10.0,
         color: [0, 0, 0],
         margins: Margins {
@@ -335,6 +322,15 @@ pub fn set_header(spec: HeaderFooterSpec, pages: Option<&[PageId]>) -> Op {
             None => ScopeSel::All,
             Some(pages) => ScopeSel::Pages(ids(pages)),
         },
+    }
+}
+
+/// The header and footer taken off `pages`, with the headers and footers
+/// others but the author drew there.
+pub fn remove_header(pages: &[PageId]) -> Op {
+    Op::RemoveHeaderFooter {
+        pages: ids(pages),
+        include_authored: false,
     }
 }
 

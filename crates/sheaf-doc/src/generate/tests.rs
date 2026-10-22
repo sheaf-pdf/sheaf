@@ -1,9 +1,9 @@
-//! A watermark laid out on a page, and `/SheafGenerators`' JSON.
+//! A watermark and a header laid out on a page, and `/SheafGenerators`' JSON.
 
 use std::collections::BTreeSet;
 
 use lopdf::dictionary;
-use sheaf_edit::{FontChoice, GridPos, Rotation, Z};
+use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Rotation, Z};
 
 use super::*;
 use crate::content::{Need, ResBody, ResKind};
@@ -20,9 +20,29 @@ fn text(text: &str, angle: f32, position: GridPos) -> WatermarkGen {
             angle,
         },
         position,
+    }
+}
+
+/// Watermark `wm` as generator `id`'s, over every page.
+fn over(id: u64, wm: &WatermarkGen) -> Generator {
+    Generator {
+        id: GenId(id),
+        spec: GenSpec::Watermark(Arc::new(wm.clone())),
         z: Z::Over,
         scope: Scope::All,
+        frozen: Frozen::default(),
         replaces: BTreeSet::from([PaginationKind::Watermark]),
+    }
+}
+
+/// What a layout reads of a page of `geom`: the first of one.
+fn ctx_of(geom: &Geom) -> PageCtx {
+    PageCtx {
+        geom: *geom,
+        position: 0,
+        count: 1,
+        label: "1".into(),
+        bates: None,
     }
 }
 
@@ -66,7 +86,7 @@ fn a_watermark_is_laid_out_upright_on_the_page_as_it_shows() {
         let geom = page(r);
         let size = geom.shown();
         let wm = text("DRAFT", 0.0, GridPos::Center);
-        let drawn = layout(GenId(1), &wm, &geom, None, &Reserved::default());
+        let drawn = layout(&over(1, &wm), &ctx_of(&geom), None, &Reserved::default());
         let m = drawn_in(&drawn.ops);
         let w = Std14::HelveticaBold.width("DRAFT", 72.0);
         let h = 72.0 * CAP_HEIGHT;
@@ -88,7 +108,7 @@ fn a_watermark_is_laid_out_upright_on_the_page_as_it_shows() {
         assert!(near(middle.y, size.height / 2.0), "{r:?}: {middle:?}");
 
         let wm = text("DRAFT", 90.0, GridPos::BottomRight);
-        let drawn = layout(GenId(1), &wm, &geom, None, &Reserved::default());
+        let drawn = layout(&over(1, &wm), &ctx_of(&geom), None, &Reserved::default());
         let m = drawn_in(&drawn.ops);
         let o = shown(&geom, m, Pt { x: 0.0, y: 0.0 });
         let along = shown(&geom, m, Pt { x: 1.0, y: 0.0 });
@@ -110,7 +130,7 @@ fn a_watermark_is_laid_out_upright_on_the_page_as_it_shows() {
 fn a_block_is_a_pagination_artifact_in_its_own_state() {
     let geom = page(Rotation::R0);
     let wm = text("Café 漢字", 0.0, GridPos::Center);
-    let drawn = layout(GenId(0xab), &wm, &geom, None, &Reserved::default());
+    let drawn = layout(&over(0xab, &wm), &ctx_of(&geom), None, &Reserved::default());
     let ops = &drawn.ops;
     let kinds: Vec<ResKind> = drawn.res.0.iter().map(|n| n.kind).collect();
     assert_eq!(
@@ -156,7 +176,7 @@ fn object(need: &Need) -> &Object {
 fn the_layout_digest_covers_what_is_drawn_never_names() {
     let geom = page(Rotation::R0);
     let wm = text("DRAFT", 45.0, GridPos::Center);
-    let free = layout(GenId(1), &wm, &geom, None, &Reserved::default());
+    let free = layout(&over(1, &wm), &ctx_of(&geom), None, &Reserved::default());
     let font = (free.res.0.iter())
         .find(|n| n.kind == ResKind::Font)
         .unwrap();
@@ -167,7 +187,7 @@ fn the_layout_digest_covers_what_is_drawn_never_names() {
         res: Res::dict(dictionary! { "Other" => 1 }),
     }]);
     taken.take(&other);
-    let clear = layout(GenId(1), &wm, &geom, None, &taken);
+    let clear = layout(&over(1, &wm), &ctx_of(&geom), None, &taken);
     assert_ne!(clear.ops, free.ops);
     let renamed = (clear.res.0.iter())
         .find(|n| n.kind == ResKind::Font)
@@ -188,13 +208,13 @@ fn the_layout_digest_covers_what_is_drawn_never_names() {
         },
         ..wm.clone()
     };
-    let other = layout(GenId(1), &faint, &geom, None, &Reserved::default());
+    let other = layout(&over(1, &faint), &ctx_of(&geom), None, &Reserved::default());
     assert_ne!(other.layout_digest, free.layout_digest);
     let moved = WatermarkGen {
         position: GridPos::Top,
         ..wm.clone()
     };
-    let other = layout(GenId(1), &moved, &geom, None, &Reserved::default());
+    let other = layout(&over(1, &moved), &ctx_of(&geom), None, &Reserved::default());
     assert_ne!(other.layout_digest, free.layout_digest);
 }
 
@@ -221,7 +241,7 @@ fn an_image_keeps_its_proportions_and_its_turn() {
         },
         ..text("x", 0.0, GridPos::Center)
     };
-    let none = layout(GenId(1), &image, &geom, None, &Reserved::default());
+    let none = layout(&over(1, &image), &ctx_of(&geom), None, &Reserved::default());
     assert!(none.ops.is_empty() && none.res.0.is_empty());
     let res = Res::dict(dictionary! { "Subtype" => "Image" });
     for (turns, across, up) in [(0, 40.0, 20.0), (1, 20.0, 40.0)] {
@@ -231,7 +251,12 @@ fn an_image_keeps_its_proportions_and_its_turn() {
             height: 20,
             turns,
         };
-        let drawn = layout(GenId(1), &image, &geom, Some(&art), &Reserved::default());
+        let drawn = layout(
+            &over(1, &image),
+            &ctx_of(&geom),
+            Some(&art),
+            &Reserved::default(),
+        );
         let text = String::from_utf8_lossy(&drawn.ops).into_owned();
         let w = size.width * 0.5;
         let h = w * up / across;
@@ -292,16 +317,8 @@ fn the_generators_json_holds_the_specs_without_paths() {
     let over = d.state().watermark(Z::Over).unwrap();
     let under = d.state().watermark(Z::Under).unwrap();
     let mut want = vec![
-        StoredGen::of(
-            over.id,
-            over.spec.watermark().unwrap(),
-            &mut unplaced.clone(),
-        ),
-        StoredGen::of(
-            under.id,
-            under.spec.watermark().unwrap(),
-            &mut unplaced.clone(),
-        ),
+        StoredGen::of(over, &mut unplaced.clone()),
+        StoredGen::of(under, &mut unplaced.clone()),
     ];
     want.sort_by(|a, b| a.id.cmp(&b.id));
     let mut got = stored.generators;
@@ -312,4 +329,169 @@ fn the_generators_json_holds_the_specs_without_paths() {
     assert!(text.contains(&format!(r#""id":"{}""#, over.id)), "{text}");
     assert!(text.contains(r#""scope":"all""#) && text.contains(r#""scope":"pages""#));
     assert!(text.contains(r#""replaces":["background"]"#), "{text}");
+}
+
+/// Header and footer `spec` as generator `id`'s, on every page, its date
+/// and file fixed.
+fn header_gen(id: u64, spec: HeaderFooterSpec) -> Generator {
+    Generator {
+        id: GenId(id),
+        spec: GenSpec::HeaderFooter(Arc::new(spec)),
+        z: Z::Over,
+        scope: Scope::All,
+        frozen: Frozen {
+            date: "2026-10-17".into(),
+            file: "report.pdf".into(),
+            bates: None,
+        },
+        replaces: BTreeSet::from([PaginationKind::Header, PaginationKind::Footer]),
+    }
+}
+
+/// A header's text goes out in its face's WinAnsi, one byte a character,
+/// escaped; each slot is an artifact of its own, its list named, never
+/// inline, and saying it's the header's or the footer's and whose; the
+/// face is the spec's, one font for the whole header.
+#[test]
+fn a_header_goes_out_in_win_ansi_with_a_named_list() {
+    let mut spec = crate::tx::fixture::header("Café “x” – € (a\\b)");
+    spec.texts[5] = "<<file>>".into();
+    spec.font = FontChoice::TimesRoman;
+    let g = header_gen(0x2a, spec);
+    let drawn = layout(&g, &ctx_of(&page(Rotation::R0)), None, &Reserved::default());
+    let out = &drawn.ops;
+    let text = b"(Caf\xe9 \x93x\x94 \x96 \x80 \\(a\\\\b\\)) Tj";
+    assert!(out.windows(text.len()).any(|w| w == text), "{out:?}");
+    assert!(out.starts_with(b"/Artifact /Sh"), "{out:?}");
+    assert!(!out.windows(2).any(|w| w == b"<<"), "no list inline");
+    let kinds: Vec<ResKind> = drawn.res.0.iter().map(|n| n.kind).collect();
+    assert_eq!(
+        kinds,
+        [ResKind::Properties, ResKind::Font, ResKind::Properties]
+    );
+    let font = &drawn.res.0[1];
+    assert_eq!(font.res, Std14::TimesRoman.resource().into());
+    for (need, kind) in [(&drawn.res.0[0], "Header"), (&drawn.res.0[2], "Footer")] {
+        let want = dictionary! {
+            "Type" => "Pagination",
+            "Subtype" => kind,
+            "SheafGen" => Object::string_literal("g2a"),
+        };
+        assert_eq!(object(need), &Object::Dictionary(want));
+        let name = format!("/{} BDC", String::from_utf8_lossy(&need.name));
+        assert!(String::from_utf8_lossy(out).contains(&name), "{out:?}");
+    }
+    let marked = String::from_utf8_lossy(out).matches(" BDC").count();
+    assert_eq!(marked, 2);
+}
+
+/// The same header on the same page gives the same bytes, names and
+/// digest, twice and on two threads.
+#[test]
+fn identical_headers_write_identical_bytes() {
+    fn write() -> Drawn {
+        let spec = HeaderFooterSpec {
+            texts: [
+                "Café “x”".into(),
+                "Page <<1>> of <<N>>".into(),
+                "<<bates>>".into(),
+                "<<file>>".into(),
+                String::new(),
+                "<<date>>".into(),
+            ],
+            bates: Some(sheaf_edit::BatesSpec::default()),
+            color: [200, 30, 30],
+            ..crate::tx::fixture::header("")
+        };
+        let ctx = PageCtx {
+            geom: page(Rotation::R90),
+            position: 4,
+            count: 9,
+            label: "5".into(),
+            bates: Some(17),
+        };
+        layout(&header_gen(7, spec), &ctx, None, &Reserved::default())
+    }
+    let first = write();
+    assert!(!first.ops.is_empty());
+    assert_eq!(write(), first);
+    let threads: Vec<_> = (0..2).map(|_| std::thread::spawn(write)).collect();
+    for t in threads {
+        assert_eq!(t.join().unwrap(), first);
+    }
+}
+
+/// On a page turned any way, a header's text reads left to right along
+/// the top of the page as it shows, its baseline `top` and its cap height
+/// below the top edge, at the left margin; a footer's along the bottom,
+/// `bottom` above it.
+#[test]
+fn a_header_is_laid_out_upright_on_the_page_as_it_shows() {
+    let mut spec = crate::tx::fixture::header("Head");
+    spec.texts[4] = "Foot".into();
+    let g = header_gen(1, spec);
+    for r in [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270] {
+        let geom = page(r);
+        let size = geom.shown();
+        let drawn = layout(&g, &ctx_of(&geom), None, &Reserved::default());
+        let text = String::from_utf8_lossy(&drawn.ops).into_owned();
+        let tm: Vec<Affine> = (text.lines())
+            .filter(|l| l.ends_with(" Tm"))
+            .map(|line| {
+                let n: Vec<f32> = (line.split(' ').take(6))
+                    .map(|v| v.parse().unwrap())
+                    .collect();
+                Affine {
+                    a: n[0],
+                    b: n[1],
+                    c: n[2],
+                    d: n[3],
+                    e: n[4],
+                    f: n[5],
+                }
+            })
+            .collect();
+        let [head, foot] = tm[..] else {
+            panic!("{text}")
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        for m in [head, foot] {
+            let o = shown(&geom, m, Pt { x: 0.0, y: 0.0 });
+            let along = shown(&geom, m, Pt { x: 1.0, y: 0.0 });
+            let up = shown(&geom, m, Pt { x: 0.0, y: 1.0 });
+            assert!(near(along.x - o.x, 1.0) && near(along.y, o.y), "{r:?}");
+            assert!(near(up.x, o.x) && near(up.y - o.y, -1.0), "{r:?}");
+        }
+        let o = shown(&geom, head, Pt { x: 0.0, y: 0.0 });
+        assert!(
+            near(o.x, 72.0) && near(o.y, 36.0 + 10.0 * 0.72),
+            "{r:?}: {o:?}"
+        );
+        let o = shown(&geom, foot, Pt { x: 0.0, y: 0.0 });
+        let w = Std14::Helvetica.width("Foot", 10.0);
+        assert!(near(o.x + w / 2.0, size.width / 2.0), "{r:?}: {o:?}");
+        assert!(near(o.y, size.height - 36.0), "{r:?}: {o:?}");
+    }
+}
+
+/// Where every slot is blank, as a Bates number on a page without one,
+/// nothing is drawn: the block is empty, laid out as nothing is.
+#[test]
+fn a_header_with_nothing_to_draw_draws_nothing() {
+    let spec = HeaderFooterSpec {
+        bates: Some(sheaf_edit::BatesSpec::default()),
+        ..crate::tx::fixture::header("<<bates>>")
+    };
+    let g = header_gen(1, spec);
+    let geom = page(Rotation::R0);
+    let none = layout(&g, &ctx_of(&geom), None, &Reserved::default());
+    assert!(none.ops.is_empty() && none.res.0.is_empty());
+    assert_eq!(none.layout_digest, Drawn::empty().layout_digest);
+    let numbered = PageCtx {
+        bates: Some(3),
+        ..ctx_of(&geom)
+    };
+    let drawn = layout(&g, &numbered, None, &Reserved::default());
+    assert!(String::from_utf8_lossy(&drawn.ops).contains("(000003) Tj"));
+    assert_eq!(layout_digest(&g, &numbered, None), drawn.layout_digest);
 }

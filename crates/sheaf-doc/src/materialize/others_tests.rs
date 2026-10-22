@@ -1,13 +1,15 @@
-//! Others' watermarks and backgrounds (M10.5 slice 16, proposal 31): a
-//! watermark of the document's replaces those of its kind Acrobat, an
-//! older sheaf or another file drew on the pages it covers, never the
-//! author's own; RemoveWatermark takes them off, and the author's only when
-//! asked to, saying what it found. What's taken out is spliced from the
-//! streams it's in, each a copy of its own; the names only it used leave
-//! the page's resources, and what they named the file. One a splice
-//! refuses stays, counted. What an older sheaf kept in the watermarks it
-//! drew, its settings with an image's path, Clean Copy takes out of them,
-//! what they draw kept; a list it can't be taken out of keeps it, counted.
+//! Others' watermarks, backgrounds, headers and footers (M10.5 slices 16
+//! and 17, proposal 31): a watermark or a header and footer of the
+//! document's replaces those of its kind Acrobat, an older sheaf or another
+//! file drew on the pages it covers, never the author's own;
+//! RemoveWatermark and RemoveHeaderFooter take them off, and the author's
+//! only when asked to, saying what they found, as a dialog counts it
+//! before ([`others_on`]). What's taken out is spliced from the streams
+//! it's in, each a copy of its own; the names only it used leave the
+//! page's resources, and what they named the file. One a splice refuses
+//! stays, counted. What an older sheaf kept in the watermarks it drew, its
+//! settings with an image's path, Clean Copy takes out of them, what they
+//! draw kept; a list it can't be taken out of keeps it, counted.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -17,15 +19,16 @@ use in_progress::NoProgress;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{Op, Z};
 
+use super::header_tests::{ACROBAT_HEADER, AUTHORED, older_header_file};
 use super::recognized_tests::{contents, depth, drawn, everything, pages, stream};
-use super::removal_tests::{opened, scratch};
+use super::removal_tests::{opened, scratch, text_file};
 use super::{How, Onto, Profile, SaveInput, SaveTarget, StrategyKind, Why};
 use crate::content::{Balance, PagOrigin, PaginationKind};
 use crate::effects::{Flags, Removed, RemovedKind};
-use crate::generate::fixture as older;
-use crate::model::{Document, Filter, LegacySel, MarkedSel, PageDef, PageId};
+use crate::generate::{fixture as older, header};
+use crate::model::{Document, Filter, LegacySel, MarkedSel, PageDef, PageId, StreamSel};
 use crate::prim::{Key, Val};
-use crate::tx::fixture as fx;
+use crate::tx::{OthersFound, fixture as fx, others_on};
 
 /// The page's own text.
 pub(crate) const BODY: &[u8] = b"BT /F1 12 Tf 72 700 Td (body) Tj ET";
@@ -47,6 +50,20 @@ const ACROBAT_Q: [&[u8]; 3] = [
 const ACROBAT_UNSAFE: &[u8] =
     b"/Artifact <</Type /Pagination /Subtype /Watermark>> BDC q 1 0 0 1 150 350 cm /Fm0 Do Q \
       0 0 1 rg EMC";
+/// Acrobat's header leaving a color set after it, which no splice takes
+/// out either.
+pub(crate) const ACROBAT_HEADER_UNSAFE: &[u8] =
+    b"/Artifact <</Type /Pagination /Subtype /Header>> BDC q 1 0 0 1 72 740 cm /Fm0 Do Q \
+      0 0 1 rg EMC";
+/// A running head and foot as a word processor marks them, the author's
+/// own, around the page's text, each in a `q` of its own, which a splice
+/// takes out.
+pub(crate) const RUNNING: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Header>> BDC q BT \
+    /F1 10 Tf 72 760 Td (RUNNING HEAD) Tj ET Q EMC BT /F1 12 Tf 72 700 Td (body) Tj ET \
+    /Artifact <</Type /Pagination /Subtype /Footer>> BDC q BT /F1 10 Tf 72 30 Td \
+    (RUNNING FOOT) Tj ET Q EMC";
+/// Content that can't be read: it closes marked content it never opened.
+pub(crate) const UNREAD: &[u8] = b"0 0 1 rg 10 10 50 50 re f EMC";
 
 /// A file of a page for each of `streams`, each its `/Contents`' streams,
 /// under a node whose resources are Helvetica as `/F1`, a form Acrobat
@@ -385,16 +402,15 @@ fn an_older_sheaf_s_watermark_is_replaced() {
 #[test]
 fn what_a_splice_refuses_stays_and_is_counted() {
     let dir = scratch();
-    let unread: &[u8] = b"0 0 1 rg 10 10 50 50 re f EMC";
-    let file = acrobat_file(&[&[BODY, ACROBAT_UNSAFE], &[unread]]);
+    let file = acrobat_file(&[&[BODY, ACROBAT_UNSAFE], &[UNREAD]]);
     for how in [How::Rewritten, How::Appended] {
         let (path, mut doc) = opened(&dir, "a.pdf", &file);
         doc.commit_ops(vec![watermark("MINE")], "watermark")
             .unwrap();
         let report = how.save(&mut doc, &path);
         let notes: Vec<String> = report.notes.iter().map(|n| n.to_string()).collect();
-        let note = "1 watermark or background other programs or files drew stays on page 1: \
-                    taking it out would change what else the page draws.";
+        let note = "1 watermark, background, header or footer other programs or files drew \
+                    stays on page 1: taking it out would change what else the page draws.";
         assert!(notes.iter().any(|n| n == note), "{how:?}: {notes:?}");
         let pdf = Pdf::load(&path).unwrap();
         let text = drawn(&pdf, pages(&pdf)[0]);
@@ -605,4 +621,395 @@ fn settings_a_list_cant_lose_stay_and_are_counted() {
             "{how:?}"
         );
     }
+}
+
+/// Every page of `doc`, in order.
+fn all(doc: &Document) -> Vec<PageId> {
+    doc.state().order().iter().copied().collect()
+}
+
+/// What taking the header and footer off `pages` of `doc` would find of
+/// others', the author's own taken when `include_authored`.
+fn headers_on(doc: &Document, pages: &[PageId], include_authored: bool) -> OthersFound {
+    others_on(doc.state(), &header::kinds(), pages, include_authored)
+}
+
+/// Acrobat's header taken off with no header of the document's, a page at
+/// a time, the count before saying what the line of the two says together:
+/// a filter on each page, which removes; written, the pages draw no form
+/// and their resources name none, and a Rewrite holds neither the form nor
+/// its text. Both ways.
+fn acrobat_s_header_removed(how: How) {
+    let dir = scratch();
+    let other: &[u8] = b"BT /F1 12 Tf 72 700 Td (other) Tj ET";
+    let file = acrobat_file(&[&[BODY, ACROBAT_HEADER], &[other, ACROBAT_HEADER]]);
+    let (_, mut doc) = opened(&dir, "a.pdf", &file);
+    let all = all(&doc);
+    let acrobat = OthersFound {
+        acrobat: 2,
+        ..OthersFound::default()
+    };
+    assert_eq!(headers_on(&doc, &all, false), acrobat);
+    let each = all.iter().map(|&p| fx::remove_header(&[p])).collect();
+    let c = doc.commit_ops(each, "remove").unwrap();
+    assert_eq!(
+        c.lines[0].text,
+        "Remove the header and footer from 2 pages (2 made in Acrobat)"
+    );
+    assert!(c.effects.effects.flags.contains(Flags::REMOVES));
+    let filter = Filter::DropMarked(MarkedSel::Pagination {
+        kinds: header::kinds(),
+        origins: BTreeSet::from([PagOrigin::Acrobat]),
+    });
+    for &page in &all {
+        let def = doc.state().def(page).unwrap();
+        assert_eq!(def.content.filters, im::Vector::unit(filter.clone()));
+    }
+    assert_eq!(headers_on(&doc, &all, false), OthersFound::default());
+    let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
+    for page in pages(&pdf) {
+        let text = drawn(&pdf, page);
+        assert!(
+            !text.contains("/Fm0") && text.contains(") Tj"),
+            "{how:?}: {text}"
+        );
+        assert_eq!(bound(&pdf, page, "XObject"), Vec::<String>::new());
+    }
+    if how == How::Rewritten {
+        assert!(!holds_acrobat_s(&pdf));
+        assert!(!everything(&pdf).contains("ACROBAT"));
+    }
+}
+
+crate::both_ways!(
+    acrobat_s_header_is_removed,
+    acrobat_s_header_is_removed_appended: acrobat_s_header_removed
+);
+
+/// The author's running heads and feet, as a word processor marks them: a
+/// header of the document's leaves them, and RemoveHeaderFooter leaves them
+/// and says so. Asked to take the author's, it takes those a splice can,
+/// and says the one whose font is set outside a `q` stays; counted again,
+/// those taken are out already. Both ways.
+fn running_heads(how: How) {
+    let dir = scratch();
+    let file = acrobat_file(&[&[RUNNING], &[BODY, AUTHORED]]);
+    let (_, mut doc) = opened(&dir, "a.pdf", &file);
+    let set = fx::set_header(fx::header("Mine"), None);
+    doc.commit_ops(vec![set], "header").unwrap();
+    let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
+    let text = drawn(&pdf, pages(&pdf)[0]) + &drawn(&pdf, pages(&pdf)[1]);
+    for kept in ["RUNNING HEAD", "RUNNING FOOT", "Chapter One"] {
+        assert!(text.contains(kept), "{how:?}, {kept}: {text}");
+    }
+    assert_eq!(text.matches("(Mine)").count(), 2, "{how:?}: {text}");
+    let all = all(&doc);
+    let left = OthersFound {
+        authored_left: 3,
+        ..OthersFound::default()
+    };
+    assert_eq!(headers_on(&doc, &all, false), left);
+    let c = doc
+        .commit_ops(vec![fx::remove_header(&all)], "remove")
+        .unwrap();
+    assert_eq!(
+        c.lines[0].text,
+        "Remove the header and footer from pages 1, 2 (3 the author's left in place)"
+    );
+    assert!(doc.state().header_footer().is_none());
+    assert!(
+        all.iter()
+            .all(|&p| doc.state().def(p).unwrap().content.filters.is_empty())
+    );
+    let taken = OthersFound {
+        authored: 2,
+        authored_left: 1,
+        ..OthersFound::default()
+    };
+    assert_eq!(headers_on(&doc, &all, true), taken);
+    let asked = Op::RemoveHeaderFooter {
+        pages: fx::ids(&all),
+        include_authored: true,
+    };
+    let c = doc.commit_ops(vec![asked], "remove theirs too").unwrap();
+    assert_eq!(
+        c.lines[0].text,
+        "Remove the header and footer from pages 1, 2 (2 the author's; 1 the author's left in \
+         place)"
+    );
+    let out = OthersFound {
+        authored_left: 1,
+        ..OthersFound::default()
+    };
+    assert_eq!(headers_on(&doc, &all, true), out);
+    assert_eq!(headers_on(&doc, &all, false), out);
+    let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
+    let (first, second) = (drawn(&pdf, pages(&pdf)[0]), drawn(&pdf, pages(&pdf)[1]));
+    assert!(
+        !first.contains("RUNNING") && first.contains("(body)"),
+        "{how:?}: {first}"
+    );
+    assert!(second.contains("(Chapter One)"), "{how:?}: {second}");
+}
+
+crate::both_ways!(
+    the_author_s_running_heads_are_left_unless_asked,
+    the_author_s_running_heads_are_left_unless_asked_appended: running_heads
+);
+
+/// A header an older sheaf drew, its list marked `/SheafStamp`, is taken
+/// off by RemoveHeaderFooter, which says so, and isn't drawn after. Both
+/// ways.
+fn older_header_removed(how: How) {
+    let dir = scratch();
+    let (_, mut doc) = opened(&dir, "older.pdf", &older_header_file());
+    let all = all(&doc);
+    let older = OthersFound {
+        older_sheaf: 1,
+        ..OthersFound::default()
+    };
+    assert_eq!(headers_on(&doc, &all, false), older);
+    let c = doc
+        .commit_ops(vec![fx::remove_header(&all)], "remove")
+        .unwrap();
+    assert_eq!(
+        c.lines[0].text,
+        "Remove the header and footer from pages 1–3 (1 made by an older sheaf)"
+    );
+    let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
+    let text = drawn(&pdf, pages(&pdf)[2]);
+    assert!(
+        !text.contains("Draft") && text.contains("(page 2)"),
+        "{how:?}: {text}"
+    );
+    assert_eq!(depth(&pdf, pages(&pdf)[2]).1, Balance::default(), "{how:?}");
+}
+
+crate::both_ways!(
+    an_older_sheaf_s_header_is_removed,
+    an_older_sheaf_s_header_is_removed_appended: older_header_removed
+);
+
+/// A header and footer an older sheaf drew, marked `/SheafStamp`, on one
+/// stream beside an artifact of another type, an author's running head
+/// and a watermark of an older sheaf's.
+const MIXED: &[u8] = b"q 1 0 0 rg 0 0 10 10 re f Q\n\
+    /Artifact <</Type /Pagination /Subtype /Header /SheafStamp true>> BDC \
+    q BT /F1 9 Tf (Head) Tj ET Q EMC\n\
+    /Artifact <</Type /Layout>> BDC 0 0 m 9 9 l S EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Footer /SheafStamp true>> BDC \
+    /Span <</ActualText (x)>> BDC (nested) Tj EMC EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Header>> BDC (author) Tj EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Watermark /SheafStamp true>> BDC (wm) Tj EMC\n\
+    0 0 1 rg";
+
+/// What [`MIXED`] is with the header and footer taken out.
+const MIXED_LEFT: &[u8] = b"q 1 0 0 rg 0 0 10 10 re f Q\n\n\
+    /Artifact <</Type /Layout>> BDC 0 0 m 9 9 l S EMC\n\n\
+    /Artifact <</Type /Pagination /Subtype /Header>> BDC (author) Tj EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Watermark /SheafStamp true>> BDC (wm) Tj EMC\n\
+    0 0 1 rg";
+
+/// A header an older sheaf drew in the page's stream.
+const OLDER_HEAD: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Header /SheafStamp true>> BDC \
+    q BT /F1 9 Tf (Head) Tj ET Q EMC";
+
+/// Inline image data holding ` EI `.
+const IMAGE: &[u8] = b"BI /W 6 /H 1 /BPC 8 /CS /G ID  EI EI\nEI";
+
+/// A header an older sheaf drew that opens in one stream and ends in the
+/// next, and a third stream.
+const ACROSS: [&[u8]; 3] = [
+    b"q 0 0 1 rg /Artifact <</Subtype /Header /SheafStamp true>> BDC q BT /F1 9 Tf",
+    b"(Head) Tj ET Q EMC 0 0 9 9 re f Q",
+    b"0 g",
+];
+
+/// RemoveHeaderFooter takes out what it takes and every other byte of the
+/// page stays as it was, each stream it changes a new object, written both
+/// ways: an older sheaf's header, a stream of its own after the page's,
+/// leaves the page drawing the `q` before them, its own stream and the
+/// `Q` the header's began with; on one stream, only an older sheaf's
+/// header and footer go, not another type of artifact, an author's
+/// running head or a watermark; inline image data holding ` EI ` is
+/// counted, not scanned for, and stays; and a header across two streams
+/// is taken out of both, the third as it was.
+#[test]
+fn a_removal_takes_out_what_it_takes_and_nothing_else() {
+    let dir = scratch();
+    let image = [OLDER_HEAD, b"\nq 6 0 0 1 0 0 cm ", IMAGE, b" Q"].concat();
+    let file = acrobat_file(&[
+        &[older::Q, BODY, older::HEADER],
+        &[MIXED],
+        &[&image],
+        &ACROSS,
+    ]);
+    let original = Pdf::load_mem(&file).unwrap();
+    let was = contents(&original, pages(&original)[0]);
+    let across = contents(&original, pages(&original)[3]);
+    for how in [How::Rewritten, How::Appended] {
+        let (_, mut doc) = opened(&dir, "a.pdf", &file);
+        let all = all(&doc);
+        let c = (doc.commit_ops(vec![fx::remove_header(&all)], "remove")).unwrap();
+        assert_eq!(
+            c.lines[0].text,
+            "Remove the header and footer from pages 1–4 (5 made by an older sheaf; 1 the \
+             author's left in place)",
+            "{how:?}"
+        );
+        let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
+        let [first, mixed, imaged, split] = pages(&pdf)[..] else {
+            panic!("four pages")
+        };
+        let now = contents(&pdf, first);
+        let kept: Vec<Vec<u8>> = (now.iter())
+            .map(|&id| stream(&pdf, id).1.trim_ascii().to_vec())
+            .collect();
+        assert_eq!(kept, [&b"q"[..], BODY, b"Q"], "{how:?}");
+        assert_eq!(now[..2], was[..2], "{how:?}: as they were");
+        assert_ne!(now[2], was[2], "{how:?}: a new stream");
+        assert_eq!(depth(&pdf, first).1, Balance::default(), "{how:?}");
+        let [one] = contents(&pdf, mixed)[..] else {
+            panic!("one stream")
+        };
+        let left = stream(&pdf, one).1;
+        assert_eq!(
+            String::from_utf8_lossy(&left),
+            String::from_utf8_lossy(MIXED_LEFT),
+            "{how:?}"
+        );
+        let [one] = contents(&pdf, imaged)[..] else {
+            panic!("one stream")
+        };
+        let want = [b"\nq 6 0 0 1 0 0 cm ", IMAGE, b" Q"].concat();
+        assert_eq!(stream(&pdf, one).1, want, "{how:?}");
+        let now = contents(&pdf, split);
+        let left: Vec<Vec<u8>> = now.iter().map(|&id| stream(&pdf, id).1).collect();
+        assert_eq!(
+            left,
+            [&b"q 0 0 1 rg "[..], b" 0 0 9 9 re f Q", b"0 g"],
+            "{how:?}"
+        );
+        assert!(now[0] != across[0] && now[1] != across[1], "{how:?}: new");
+        assert_eq!(now[2], across[2], "{how:?}: as it was");
+    }
+}
+
+/// A page brought in from a file sheaf saved with a header draws that
+/// header, which no generator of the document's backs; RemoveHeaderFooter
+/// takes it out, its stream with it, and counts it as another file's. Both
+/// ways.
+fn foreign_header(how: How) {
+    let dir = scratch();
+    let (_, mut other) = opened(&dir, "other.pdf", &text_file(1));
+    let theirs = fx::set_header(fx::header("THEIRS"), None);
+    other.commit_ops(vec![theirs], "header").unwrap();
+    let theirs = other.state().header_footer().unwrap().id;
+    let (_, mut doc) = opened(&dir, "a.pdf", &text_file(1));
+    let src = super::tests::add(&doc, &How::Rewritten.write(&other), "other.pdf");
+    super::tests::insert(&mut doc, &src, 0);
+    let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
+    assert!(drawn(&pdf, pages(&pdf)[1]).contains("(THEIRS)"), "{how:?}");
+    let page = doc.page(1).unwrap();
+    let from_other = OthersFound {
+        other_files: 1,
+        ..OthersFound::default()
+    };
+    assert_eq!(headers_on(&doc, &[page], false), from_other);
+    let c = doc
+        .commit_ops(vec![fx::remove_header(&[page])], "remove")
+        .unwrap();
+    assert_eq!(
+        c.lines[0].text,
+        "Remove the header and footer from page 2 (1 from other files)"
+    );
+    let def = doc.state().def(page).unwrap();
+    let filter = Filter::DropStreams(StreamSel::SheafGen(theirs));
+    assert_eq!(def.content.filters, im::Vector::unit(filter));
+    let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
+    assert!(!drawn(&pdf, pages(&pdf)[1]).contains("THEIRS"), "{how:?}");
+}
+
+crate::both_ways!(
+    another_file_s_header_is_kept_until_removed,
+    another_file_s_header_is_kept_until_removed_appended: foreign_header
+);
+
+/// Acrobat's header that no splice takes out stays where the document's
+/// is drawn, and the save is made, a note counting it; RemoveHeaderFooter
+/// says it stays, and a page whose content can't be read.
+#[test]
+fn a_header_a_splice_refuses_stays_and_is_counted() {
+    let dir = scratch();
+    let file = acrobat_file(&[&[BODY, ACROBAT_HEADER_UNSAFE], &[UNREAD]]);
+    for how in [How::Rewritten, How::Appended] {
+        let (path, mut doc) = opened(&dir, "a.pdf", &file);
+        let set = fx::set_header(fx::header("Mine"), None);
+        doc.commit_ops(vec![set], "header").unwrap();
+        let report = how.save(&mut doc, &path);
+        let notes: Vec<String> = report.notes.iter().map(|n| n.to_string()).collect();
+        let note = "1 watermark, background, header or footer other programs or files drew \
+                    stays on page 1: taking it out would change what else the page draws.";
+        assert!(notes.iter().any(|n| n == note), "{how:?}: {notes:?}");
+        let pdf = Pdf::load(&path).unwrap();
+        let text = drawn(&pdf, pages(&pdf)[0]);
+        assert!(
+            text.contains("/Fm0 Do") && text.contains("(Mine)"),
+            "{how:?}: {text}"
+        );
+        assert_eq!(depth(&pdf, pages(&pdf)[0]).1, Balance::default(), "{how:?}");
+    }
+    let (_, mut doc) = opened(&dir, "b.pdf", &file);
+    let all = all(&doc);
+    let left = OthersFound {
+        refused: 1,
+        unreadable: 1,
+        ..OthersFound::default()
+    };
+    assert_eq!(headers_on(&doc, &all, true), left);
+    let c = (doc.commit_ops(vec![fx::remove_header(&all)], "remove")).unwrap();
+    assert_eq!(
+        c.lines[0].text,
+        "Remove the header and footer from pages 1, 2 (1 left in place, as taking it out \
+         would change the page; 1 page that can't be read left as it was)"
+    );
+    assert!(
+        all.iter()
+            .all(|&p| doc.state().def(p).unwrap().content.filters.is_empty())
+    );
+}
+
+/// A page brought in from another revision of the document's file draws
+/// the block its header drew there, which the header backs while it's on
+/// the page: taken off it, that block is another file's, which the removal
+/// takes out, and the count before, taking the header off first, says so.
+#[test]
+fn a_header_s_block_from_another_revision_is_another_file_s_once_off() {
+    let dir = scratch();
+    let (_, mut doc) = opened(&dir, "a.pdf", &text_file(1));
+    let ours = fx::set_header(fx::header("OURS"), None);
+    doc.commit_ops(vec![ours], "header").unwrap();
+    let saved = How::Rewritten.write(&doc);
+    let page = doc.page(0).unwrap();
+    let turned = fx::rotate(&[page], sheaf_edit::Turn::Quarter);
+    doc.commit_ops(vec![turned], "rotate").unwrap();
+    let revised = How::Rewritten.write(&doc);
+    let (_, mut again) = opened(&dir, "b.pdf", &saved);
+    let src = super::tests::add(&again, &revised, "revised.pdf");
+    super::tests::insert(&mut again, &src, 0);
+    let brought = again.page(1).unwrap();
+    let from_other = OthersFound {
+        other_files: 1,
+        ..OthersFound::default()
+    };
+    assert_eq!(headers_on(&again, &[brought], false), from_other);
+    let c = (again.commit_ops(vec![fx::remove_header(&[brought])], "remove")).unwrap();
+    assert_eq!(
+        c.lines[0].text,
+        "Remove the header and footer from page 2 (1 from other files)"
+    );
+    let pdf = Pdf::load_mem(&How::Rewritten.write(&again)).unwrap();
+    let text = drawn(&pdf, pages(&pdf)[1]);
+    assert!(!text.contains("OURS"), "{text}");
+    assert!(drawn(&pdf, pages(&pdf)[0]).contains("(OURS)"));
 }

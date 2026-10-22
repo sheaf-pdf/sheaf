@@ -15,7 +15,7 @@ use super::*;
 use crate::history::{FixedCount, MAX_VERSIONS};
 use crate::realize::ViewInputs;
 use crate::tx::fixture::{self as fx, ids};
-use crate::tx::{Base, Derive, JobKind, Stale};
+use crate::tx::{Base, JobKind, Stale};
 
 /// An OCR run: its group, and the version its pages were rendered from.
 struct Ocr {
@@ -255,15 +255,14 @@ fn a_rollback_after_a_save_keeps_the_saved_version() {
 fn a_revert_over_a_later_edit_names_it() {
     let mut d = doc();
     let p0 = id_at(&d, 0);
-    let copy = crate::store::blank(d.store(), 1);
+    let other = crate::store::blank(d.store(), 1);
     let run = start(&mut d);
     flush(&mut d, &run, &[(p0, "a")]).unwrap();
-    let strip = Derive::StripHeaderFooter;
-    d.commit_page_base(vec![(p0, copy, 0)], strip, "Strip page 1")
-        .unwrap();
+    let replace = fx::replace(&[p0], &other, [0], "b.pdf");
+    d.commit_ops(vec![replace], "Replace page 1").unwrap();
     let at = where_at(&d);
     let e = d.revert_group(run.group, "Recognize text").unwrap_err();
-    let by = Some("Strip page 1".into());
+    let by = Some("Replace page 1".into());
     assert_eq!(
         e,
         EditError::Conflict {

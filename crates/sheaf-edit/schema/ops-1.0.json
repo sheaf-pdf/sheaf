@@ -440,7 +440,7 @@
     },
     "HeaderFooterSpec": {
       "additionalProperties": false,
-      "description": "A header and footer: six slots of text, drawn on every page in scope.\nWhat `<<date>>` and `<<file>>` say is fixed when it's set, and Bates\nnumbers are counted then (M10.5 §3.5).",
+      "description": "A header and footer: six slots of text, drawn on every page in scope.\nWhat `<<date>>` and `<<file>>` say is fixed when it's set, and Bates\nnumbers are counted then (M10.5 §3.5); the page number, count and\nlabel are read from the document as it's written.",
       "properties": {
         "bates": {
           "anyOf": [
@@ -469,6 +469,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "font": {
+          "$ref": "#/$defs/FontChoice",
+          "default": "helvetica",
+          "description": "The face the text is drawn in: Helvetica, the face headers were\ndrawn in before there was a choice, unless it's said."
+        },
         "margins": {
           "$ref": "#/$defs/Margins",
           "description": "From the top to the header, from the bottom to the footer, and from\nthe sides to the text."
@@ -479,7 +484,7 @@
           "type": "number"
         },
         "texts": {
-          "description": "Header left, center, right; footer left, center, right. Each can\nuse `<<1>>` (the page number), `<<N>>` (the page count),\n`<<date>>`, `<<file>>` and `<<bates>>`.",
+          "description": "Header left, center, right; footer left, center, right. Each can\nuse `<<1>>` (the page number), `<<N>>` (the page count),\n`<<label>>` (the page's label, or its number without labels),\n`<<date>>`, `<<file>>` and `<<bates>>`.",
           "items": {
             "type": "string"
           },
@@ -2076,7 +2081,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "The header and footer, on the pages `scope` says, in place of any\nthere is.",
+          "description": "The header and footer, on the pages `scope` says, in place of any\nthere is, and of those Acrobat or an earlier sheaf drew there. The\nauthor's own stay.",
           "properties": {
             "op": {
               "const": "set-header-footer",
@@ -2098,8 +2103,11 @@
         },
         {
           "additionalProperties": false,
-          "description": "Take the header and footer off `pages`.",
+          "description": "Take the header and footer off `pages`, and those Acrobat, an older\nsheaf or another file drew there. `include_authored` takes the\nauthor's own off too: those the program that made the file drew.",
           "properties": {
+            "include_authored": {
+              "type": "boolean"
+            },
             "op": {
               "const": "remove-header-footer",
               "type": "string"

@@ -8,7 +8,9 @@ use std::sync::Arc;
 use im::Vector;
 use in_progress::NoProgress;
 use lopdf::{Object, dictionary};
-use sheaf_edit::{AnnotRef, BatesSpec, Delta, HeaderFooterSpec, MarkPatch, Op, Turn, Vec2};
+use sheaf_edit::{
+    AnnotRef, BatesSpec, Delta, HeaderFooterSpec, LabelStyle, MarkPatch, Op, Turn, Vec2,
+};
 
 use super::fixture::{dragging, every_input, hiding, layer, their_comment};
 use super::*;
@@ -357,11 +359,13 @@ fn a_turn_changes_only_a_header_s_pages_keys_and_a_box_its_page_s() {
     assert_eq!(key(&cropped, p2, &screen), after[&p2]);
 }
 
-/// Bates numbers count the header's pages in order: a move changes the
-/// keys of the pages whose numbers it changes, and a header of Bates
-/// numbers alone reads no page's position.
+/// Bates numbers are fixed when the header's set: a move changes neither
+/// a number nor the key of a page of a header of Bates numbers alone. A
+/// header of page numbers or labels changes the keys of the pages whose
+/// places a move changes, and one of the count none; new labels change the
+/// keys of a header of labels' pages, and of no other's.
 #[test]
-fn a_move_changes_the_keys_of_pages_whose_bates_numbers_it_changes() {
+fn a_move_changes_the_keys_of_pages_whose_live_tokens_it_changes() {
     let mut d = doc_of(6, &[]);
     let ids: Vec<PageId> = d.state().order().iter().copied().collect();
     let spec = HeaderFooterSpec {
@@ -372,25 +376,73 @@ fn a_move_changes_the_keys_of_pages_whose_bates_numbers_it_changes() {
         ..fx::header("<<bates>>")
     };
     let covered = &ids[1..5];
-    d.commit_ops(vec![fx::set_header(spec, Some(covered))], "Bates")
+    d.commit_ops(vec![fx::set_header(spec.clone(), Some(covered))], "Bates")
         .unwrap();
+    let numbers = |st: &DocState| -> Vec<Option<u64>> {
+        let g = st.header_footer().unwrap();
+        ids.iter().map(|&id| g.frozen.bates_number(id)).collect()
+    };
+    let first = numbers(d.state());
+    assert_eq!(
+        first,
+        [None, Some(100), Some(101), Some(102), Some(103), None]
+    );
     let screen = ViewInputs::screen();
+    let reads = render_reads(d.state(), ids[1], &screen);
+    assert!(!reads.contains(&Key::Order) && !reads.contains(&Key::Labels));
     for (moved, before) in [(ids[0], None), (ids[4], Some(ids[2]))] {
-        let (was, numbers) = (keys(d.state(), &screen), d.state().clone());
+        let was = keys(d.state(), &screen);
         d.commit_ops(vec![fx::move_pages(&[moved], before)], "Move")
+            .unwrap();
+        assert_eq!(keys(d.state(), &screen), was);
+        assert_eq!(numbers(d.state()), first);
+    }
+    // Set again, it numbers the pages in their order now: the keys of the
+    // pages whose numbers that changes change.
+    let was = keys(d.state(), &screen);
+    let covered = covered.to_vec();
+    d.commit_ops(vec![fx::set_header(spec, Some(&covered))], "Bates")
+        .unwrap();
+    let now = keys(d.state(), &screen);
+    let renumbered = numbers(d.state());
+    assert_ne!(renumbered, first);
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(now[id] != was[id], renumbered[i] != first[i], "{id:?}");
+    }
+    // Roman numbers from the first page, which relabel every page.
+    let labels = |d: &Document| Op::SetPageLabels {
+        ranges: Some(vec![fx::label(
+            d.page(0).unwrap(),
+            LabelStyle::LowerRoman,
+            "",
+            1,
+        )]),
+    };
+    for (text, by_place) in [("<<1>>", true), ("<<label>>", true), ("of <<N>>", false)] {
+        d.commit_ops(vec![fx::set_header(fx::header(text), None)], "Header")
+            .unwrap();
+        let (was, then) = (keys(d.state(), &screen), d.state().clone());
+        d.commit_ops(vec![fx::move_pages(&[ids[3]], Some(ids[1]))], "Move")
             .unwrap();
         let st = d.state();
         let now = keys(st, &screen);
         for &id in &ids {
-            let renumbered = numbers.bates_of(id) != st.bates_of(id);
-            assert_eq!(now[&id] != was[&id], renumbered, "{id:?}");
+            let moved = by_place && then.pos_of(id) != st.pos_of(id);
+            assert_eq!(now[&id] != was[&id], moved, "{text}: {id:?}");
         }
+        let relabelled = text == "<<label>>";
+        let reads = render_reads(d.state(), ids[0], &screen);
+        assert_eq!(reads.contains(&Key::Labels), relabelled, "{text}");
+        assert!(reads.contains(&Key::Order), "{text}");
+        let was = keys(d.state(), &screen);
+        d.commit_ops(vec![labels(&d)], "Labels").unwrap();
+        let now = keys(d.state(), &screen);
+        assert!(
+            ids.iter().all(|id| (now[id] != was[id]) == relabelled),
+            "{text}"
+        );
+        d.undo().unwrap();
     }
-    let numbers: Vec<_> = ids.iter().map(|&id| d.state().bates_of(id)).collect();
-    assert_eq!(
-        numbers,
-        [None, Some(100), Some(102), Some(103), Some(101), None]
-    );
 }
 
 /// A record's change is its page's: another tool's comment drawn from
@@ -509,33 +561,36 @@ fn keys_change_with_ocr_text_a_header_a_deleted_comment_and_a_field_value() {
     assert_eq!(key(&st, p0, &ViewInputs::content_only()), content);
 }
 
-/// A header its page's file draws already isn't drawn again: that page's
-/// key reads no position, though the header's tokens do.
+/// A header its page's file draws already, as its blocks laid out alike
+/// there say, isn't drawn again: that page's key reads no position. Moved
+/// where its tokens read otherwise, it's drawn anew, and its key is a
+/// drawn page's.
 #[test]
 fn a_header_its_base_draws_reads_no_position() {
-    let mut f = crate::forms::fixture::Form::new(3);
-    let mut texts: [String; 6] = Default::default();
-    texts[0] = "Page <<1>>".into();
-    let hf = crate::stamps::HeaderFooter {
-        texts,
-        pages: Some(vec![PageId(2)]),
-        ..Default::default()
-    };
-    let stored = crate::stamps::to_catalog(&hf, &[PageId(0), PageId(1), PageId(2)]);
-    let catalog = f.catalog;
-    f.dict(catalog).set(crate::stamps::CATALOG_KEY, stored);
-    let mut d = opened(f.bytes(), "drawn.pdf");
-    let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap());
-    let st = d.state();
-    assert_eq!(
-        [p0, p1, p2].map(|p| st.header_covers(p)),
-        [false, false, true]
-    );
-    let screen = ViewInputs::screen();
-    let before = keys(st, &screen);
-    d.commit_ops(vec![fx::move_pages(&[p2], Some(p0))], "Move")
+    for (text, moved) in [("Draft", false), ("Page <<1>>", true)] {
+        let mut d = doc_of(3, &[]);
+        let p2 = d.page(2).unwrap();
+        d.commit_ops(
+            vec![fx::set_header(fx::header(text), Some(&[p2]))],
+            "Header",
+        )
         .unwrap();
-    assert_eq!(keys(d.state(), &screen), before);
+        let bytes = crate::materialize::How::Rewritten.write(&d);
+        let mut d = opened(bytes, "drawn.pdf");
+        let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap());
+        let st = d.state();
+        let g = st.header_footer().unwrap();
+        assert_eq!([p0, p1, p2].map(|p| g.covers(p)), [false, false, true]);
+        let screen = ViewInputs::screen();
+        assert!(untouched(st, p2, &screen), "{text}");
+        let before = keys(st, &screen);
+        d.commit_ops(vec![fx::move_pages(&[p2], Some(p0))], "Move")
+            .unwrap();
+        let after = keys(d.state(), &screen);
+        assert_eq!(after[&p2] != before[&p2], moved, "{text}");
+        assert_eq!(!untouched(d.state(), p2, &screen), moved, "{text}");
+        assert_eq!((after[&p0], after[&p1]), (before[&p0], before[&p1]));
+    }
 }
 
 /// A save changes no key, an undo back to a value gives its keys back,
@@ -820,4 +875,91 @@ fn a_watermark_keys_the_pages_it_is_on() {
         .unwrap();
     assert_ne!(was(&d, p1).0, before.0);
     assert_eq!(was(&d, p1).1, before.1);
+}
+
+/// A header's layout on a page is laid out once for every version of the
+/// document that lays the page out alike ([`content::header_digest`]),
+/// and what's kept is what laying it out again gives, in every version:
+/// its tokens read where a page is, the count, its label and its Bates
+/// number, its spec changed under the same generator, its pages moved,
+/// one deleted, relabelled, turned, and the edits undone.
+///
+/// [`content::header_digest`]: crate::materialize::emit::content::header_digest
+#[test]
+fn a_header_s_layouts_are_kept_as_laid_out_in_every_version() {
+    use crate::generate;
+    use crate::materialize::emit::content;
+
+    let mut d = doc_of(40, &[]);
+    let ids: Vec<PageId> = d.state().order().iter().copied().collect();
+    let mut spec = fx::header("Page <<1>> of <<N>>");
+    spec.texts[2] = "<<label>>".into();
+    spec.texts[5] = "<<bates>>".into();
+    spec.bates = Some(BatesSpec {
+        start: 7,
+        ..BatesSpec::default()
+    });
+    // Every page's layout in the current version, as kept and as laid
+    // out afresh, which must agree; and how many were kept already.
+    let check = |d: &Document, case: &str| {
+        let st = d.state();
+        let mut kept = 0;
+        for (pos, &p) in st.order().iter().enumerate() {
+            let geom = st.geom(p).unwrap();
+            for g in st.generators().values().filter(|g| g.covers(p)) {
+                let ctx = generate::page_ctx(st, g, p, pos, geom);
+                let key = content::laid_key(g, p, &ctx);
+                kept += usize::from(st.laid().get(&key).is_some());
+                let fresh = generate::layout_digest(g, &ctx, None);
+                let laid = content::model_layout_digest(st, g, p, geom);
+                assert_eq!(laid, Some(fresh), "{case}: {p:?}");
+                assert_eq!(st.laid().get(&key), Some(fresh), "{case}: {p:?}");
+            }
+        }
+        kept
+    };
+    d.commit_ops(
+        vec![fx::set_header(spec.clone(), Some(&ids[2..30]))],
+        "Header",
+    )
+    .unwrap();
+    let first = d.state().clone();
+    assert_eq!(check(&d, "set"), 0);
+    // Laid out again alike: every layout kept.
+    assert_eq!(check(&d, "again"), 28);
+    let kept: Vec<PageId> = (ids[2..30].iter())
+        .copied()
+        .filter(|&p| p != ids[10])
+        .collect();
+    let edits: Vec<(&str, Op)> = vec![
+        ("moved", fx::move_pages(&ids[35..], Some(ids[0]))),
+        ("deleted", fx::delete(&[ids[10]])),
+        (
+            "relabelled",
+            Op::SetPageLabels {
+                ranges: Some(vec![fx::label(ids[0], LabelStyle::UpperRoman, "A-", 3)]),
+            },
+        ),
+        ("turned", fx::rotate(&[ids[4]], Turn::Quarter)),
+        (
+            "respecified",
+            fx::set_header(
+                HeaderFooterSpec {
+                    first_number: 5,
+                    ..spec.clone()
+                },
+                Some(&kept),
+            ),
+        ),
+    ];
+    for (case, op) in edits {
+        d.commit_ops(vec![op], case).unwrap();
+        check(&d, case);
+    }
+    // Every version shares the one memo, and the first's layouts are
+    // kept still.
+    assert!(std::ptr::eq(first.laid(), d.state().laid()));
+    while d.undo().unwrap().is_some() {
+        check(&d, "undone");
+    }
 }

@@ -33,7 +33,7 @@ use super::record::{SaveInput, SaveRecord, TailFlags};
 use crate::effects::{AnnotOps, Flags, PathEffects, Removed, RemovedKind, SigClass, judge};
 use crate::forms::rules;
 use crate::forms::sigs::{Pending, SigImpact, sig_impact};
-use crate::model::{GenSpec, Generator};
+use crate::model::{GenSpec, Generator, PageId};
 use crate::prim::Key;
 use crate::serialize::durable::FileStamp;
 
@@ -125,9 +125,6 @@ pub enum Why {
     /// sections, which the save writes too, removed or replaced text the
     /// file has (§11.10): an Append would leave it readable.
     RecoveredRemovals,
-    /// The header and footer is drawn by a Rewrite, as it was before
-    /// generators (until slice 17).
-    LegacyHeaderFooter,
 }
 
 impl Why {
@@ -172,9 +169,6 @@ impl fmt::Display for Why {
             Why::Chosen => f.write_str("you chose to rewrite it"),
             Why::RecoveredRemovals => {
                 f.write_str("the recovered changes removed text the file holds")
-            }
-            Why::LegacyHeaderFooter => {
-                f.write_str("the header and footer is drawn on the whole file")
             }
         }
     }
@@ -421,10 +415,10 @@ impl SavePlan {
 /// - **A Rewrite** otherwise, for every reason found: another file
 ///   ([`Why::OtherTarget`]), no record (or one of a whole document a
 ///   recovery sidecar restored), the file changed on disk (which asks), a
-///   file that can't take an update, the legacy header and footer, pending
-///   sections that removed or replaced text, what the path removes or
-///   replaces (strict removal), and a save transform an Append can't
-///   carry.
+///   file that can't take an update, pending sections that removed or
+///   replaced text, what the path removes or replaces (strict removal: a
+///   generator's live tokens laid out again remove nothing,
+///   `LIVE_REDRAW`), and a save transform an Append can't carry.
 ///
 /// It asks before it breaks or flags the primary's signatures, while they
 /// hold, by what it does to each ([`sig_impact`]): an Append by the
@@ -444,7 +438,6 @@ pub fn plan(input: &SaveInput, target: &SaveTarget) -> SavePlan {
             path: target.path.clone(),
         });
     }
-    let header = input.target.header_footer().is_some();
     let mut why = Vec::new();
     let Some(saved) = (input.saved.as_ref()).filter(|s| s.record.knows_file()) else {
         if !target.same_file {
@@ -453,9 +446,6 @@ pub fn plan(input: &SaveInput, target: &SaveTarget) -> SavePlan {
         why.push(Why::NoSaveRecord);
         if changed {
             why.push(Why::FileChanged);
-        }
-        if header {
-            why.push(Why::LegacyHeaderFooter);
         }
         return rewritten(input, why, asks, None);
     };
@@ -482,9 +472,6 @@ pub fn plan(input: &SaveInput, target: &SaveTarget) -> SavePlan {
     }
     if !record.takes_updates() {
         why.push(Why::BaseUnsound);
-    }
-    if header {
-        why.push(Why::LegacyHeaderFooter);
     }
     if pending.is_some_and(|tail| tail.removes) {
         why.push(Why::RecoveredRemovals);
@@ -769,13 +756,11 @@ pub fn forced_rewrite(input: &SaveInput, target: &SaveTarget) -> SavePlan {
 /// the sidecar's flags: whether they remove or replace text the file has
 /// or a transform in them would need a Rewrite, their classes of change
 /// and the fields they touch. None when no section can follow the saved
-/// file: nothing says what it holds, it can't take an update, or the
-/// legacy header and footer is drawn, which only a Rewrite draws (until
-/// slice 17).
+/// file: nothing says what it holds, or it can't take an update.
 pub(crate) fn sidecar(input: &SaveInput) -> Option<(SavePlan, TailFlags)> {
     let saved = input.saved.as_ref()?;
     let record = &saved.record;
-    if !record.takes_updates() || input.target.header_footer().is_some() {
+    if !record.takes_updates() {
         return None;
     }
     let path = judge(&saved.state, &input.target, &input.path_keys);
@@ -820,8 +805,9 @@ pub fn forced_append(input: &SaveInput, onto: Onto) -> SavePlan {
 /// What the reader is told of a save of `input`, an Append of `path` from
 /// the saved file or else a Rewrite: what save policy's `transforms` do,
 /// with what they ask first put in `asks` (dropping an XFA part whose
-/// datasets hold values); and a conformance claim what it draws breaks
-/// ([`claim_broken`]).
+/// datasets hold values); a conformance claim what it draws breaks
+/// ([`claim_broken`]); and Bates numbers that couldn't be read back
+/// ([`unnumbered`]).
 fn told(
     input: &SaveInput,
     path: Option<&PathEffects>,
@@ -845,7 +831,39 @@ fn told(
         }
     }
     notes.extend(claim_broken(input, path));
+    notes.extend(unnumbered(input));
     notes
+}
+
+/// The note a save of `input` gives when its header numbers its pages and
+/// some it covers have no number because another tool merged its blocks
+/// on them into their content, which keeps no number (§3.5): they're drawn
+/// without one until the header is set again, which numbers them anew.
+/// Read only where the header's file says so ([`Saved::unnumbered`]).
+///
+/// [`Saved::unnumbered`]: crate::generate::Saved::unnumbered
+fn unnumbered(input: &SaveInput) -> Option<Note> {
+    let g = input.target.header_footer()?;
+    g.spec.header_footer()?.bates.as_ref()?;
+    let pages: Vec<PageId> = (input.target.pages())
+        .filter(|&(p, def, _)| {
+            let src = &def.base.src;
+            g.covers(p)
+                && g.frozen.bates_number(p).is_none()
+                && src.marked()
+                && (src.generators().iter())
+                    .any(|s| s.id == g.id && s.unnumbered().binary_search(&def.base.index).is_ok())
+        })
+        .map(|(p, _, _)| p)
+        .collect();
+    if pages.is_empty() {
+        return None;
+    }
+    let on = crate::describe::pages_text(&pages, &input.target);
+    Some(Note(format!(
+        "The Bates numbers on {on} can't be read: another program merged the header into the \
+         page. They're saved without them; set the header and footer again to number them."
+    )))
 }
 
 /// The note a save of `input`, an Append of `path` or else a Rewrite, gives
@@ -876,7 +894,7 @@ fn claim_broken(input: &SaveInput, path: Option<&PathEffects>) -> Option<Note> {
     }
     let (mut watermark, mut background, mut header) = (false, false, false);
     for g in drawn {
-        match (&g.spec, g.z()) {
+        match (&g.spec, g.z) {
             (GenSpec::HeaderFooter(_), _) => header = true,
             (GenSpec::Watermark(_), Z::Over) => watermark = true,
             (GenSpec::Watermark(_), Z::Under) => background = true,

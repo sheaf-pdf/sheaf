@@ -23,7 +23,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use im::Vector;
-use sheaf_edit::{BlobSel, DestView, Imported, MarkKind, NewMark};
+use sheaf_edit::{BatesSpec, BlobSel, DestView, HeaderFooterSpec, Imported, MarkKind, NewMark};
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt};
 use crate::content::{PagOrigin, PaginationKind};
@@ -35,11 +35,10 @@ use crate::labels::LabelSpec;
 use crate::measure::Scale;
 use crate::model::{
     AnnotBody, AnnotRec, Bookmark, ContentStack, DocState, FieldNode, FieldProps, Filter, Foreign,
-    FormDoc, FormInst, GenId, GenSpec, Generator, Layer, LegacySel, Mark, MarkedSel, OutlineId,
-    PageDef, PageId, Scope, ScriptState, Static, Target, Terminal, WatermarkContent, WatermarkGen,
-    Widget, WidgetProps,
+    FormDoc, FormInst, Frozen, GenId, GenSpec, Generator, Layer, LegacySel, Mark, MarkedSel,
+    OutlineId, PageDef, PageId, Scope, ScriptState, Static, Target, Terminal, WatermarkContent,
+    WatermarkGen, Widget, WidgetProps,
 };
-use crate::stamps::{Bates, HeaderFooter};
 use crate::tape::{Row, Tape};
 use crate::text_layer::TextLayer;
 use crate::tx::ResolvedOp;
@@ -321,19 +320,26 @@ impl HeapSize for LabelSpec {
     }
 }
 
-impl HeapSize for Bates {
+impl HeapSize for BatesSpec {
     fn heap_size(&self) -> usize {
         self.prefix.heap_size() + self.suffix.heap_size()
     }
 }
 
-impl HeapSize for HeaderFooter {
+impl HeapSize for HeaderFooterSpec {
     fn heap_size(&self) -> usize {
-        self.texts.iter().map(String::heap_size).sum::<usize>()
-            + self.pages.heap_size()
-            + self.date.heap_size()
-            + self.file.heap_size()
-            + self.bates.heap_size()
+        self.texts.iter().map(String::heap_size).sum::<usize>() + self.bates.heap_size()
+    }
+}
+
+/// Its date and file, and its Bates numbers, a B-tree of them.
+impl HeapSize for Frozen {
+    fn heap_size(&self) -> usize {
+        let Frozen { date, file, bates } = self;
+        let numbers = bates.as_ref().map_or(0, |b| {
+            2 * size_of::<usize>() + b.len() * size_of::<(PageId, u64)>()
+        });
+        date.heap_size() + file.heap_size() + numbers
     }
 }
 
@@ -360,15 +366,13 @@ impl HeapSize for Scope {
 impl HeapSize for WatermarkGen {
     fn heap_size(&self) -> usize {
         self.content.heap_size()
-            + self.scope.heap_size()
-            + self.replaces.len() * size_of::<PaginationKind>()
     }
 }
 
 impl HeapSize for GenSpec {
     fn heap_size(&self) -> usize {
         match self {
-            GenSpec::HeaderFooter(hf) => size_of::<HeaderFooter>() + hf.heap_size(),
+            GenSpec::HeaderFooter(hf) => size_of::<HeaderFooterSpec>() + hf.heap_size(),
             GenSpec::Watermark(wm) => size_of::<WatermarkGen>() + wm.heap_size(),
         }
     }
@@ -377,6 +381,9 @@ impl HeapSize for GenSpec {
 impl HeapSize for Generator {
     fn heap_size(&self) -> usize {
         self.spec.heap_size()
+            + self.scope.heap_size()
+            + self.frozen.heap_size()
+            + self.replaces.len() * size_of::<PaginationKind>()
     }
 }
 
@@ -756,7 +763,7 @@ impl HeapSize for ResolvedOp {
             | R::SetPageBoxes { pages, .. }
             | R::ClearOcrText { pages }
             | R::RemoveWatermark { pages, .. }
-            | R::RemoveHeaderFooter { pages } => pages.heap_size(),
+            | R::RemoveHeaderFooter { pages, .. } => pages.heap_size(),
             R::DuplicatePages { pages, locals } => pages.heap_size() + buf(locals),
             R::InsertPages {
                 name,
@@ -796,10 +803,7 @@ impl HeapSize for ResolvedOp {
             | R::AdoptAnnotations { annots: marks } => marks.heap_size(),
             R::SetOcrText { .. } => 0,
             R::SetWatermark { content, scope, .. } => content.heap_size() + scope.heap_size(),
-            R::SetHeaderFooter { spec, scope } => {
-                spec.texts.iter().map(String::heap_size).sum::<usize>() + scope.heap_size()
-            }
-            R::SetPageBase { pages, .. } => buf(pages),
+            R::SetHeaderFooter { spec, scope } => spec.heap_size() + scope.heap_size(),
             R::Revert { label } => label.heap_size(),
         }
     }

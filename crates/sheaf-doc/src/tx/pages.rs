@@ -19,13 +19,12 @@ use crate::file::ForeignAnnot;
 use crate::geom::{Geom, MIN_SIDE, Rect};
 use crate::labels::LabelSpec;
 use crate::model::{
-    AnnotBody, AnnotRec, Bookmark, ContentStack, DocState, Foreign, FormRef, GenSpec, Generator,
-    Mark, PageBase, PageDef, PageId, Scope, WatermarkGen,
+    AnnotBody, AnnotRec, Bookmark, ContentStack, DocState, Foreign, FormRef, Generator, Mark,
+    PageBase, PageDef, PageId, Scope,
 };
 use crate::open::FileBody;
 use crate::prim::{Key, Val};
 use crate::source::ObjRef;
-use crate::stamps::HeaderFooter;
 use crate::store::Src;
 
 /// Moves `pages`, kept in document order, to just before `before`, none
@@ -229,52 +228,29 @@ pub(crate) fn duplicate(lw: &mut Lower, pages: &[PageId]) -> Result<(), EditErro
 }
 
 /// Each copy in `pairs` (a page, its copy, and the copy's number) on the
-/// pages of each generator that names its page: the header/footer's after
-/// its page, a watermark's among them.
+/// pages of each generator whose scope names its page. None gets a Bates
+/// number, which only setting the header again gives (§6.5).
 fn join_scope(lw: &mut Lower, pairs: &[(PageId, PageId, u32)]) {
-    let copy_of: HashMap<PageId, PageId> = pairs.iter().map(|&(p, c, _)| (p, c)).collect();
     let generators: Vec<Arc<Generator>> = lw.rec.generators().values().cloned().collect();
     for g in generators {
-        let spec = match &g.spec {
-            GenSpec::Watermark(wm) => {
-                let Scope::Pages(on) = &wm.scope else {
-                    continue;
-                };
-                let copies: Vec<PageId> = (pairs.iter())
-                    .filter(|(p, ..)| on.contains(p))
-                    .map(|&(_, copy, _)| copy)
-                    .collect();
-                if copies.is_empty() {
-                    continue;
-                }
-                let mut on = on.clone();
-                on.extend(copies);
-                GenSpec::Watermark(Arc::new(WatermarkGen {
-                    scope: Scope::Pages(on),
-                    ..WatermarkGen::clone(wm)
-                }))
-            }
-            GenSpec::HeaderFooter(hf) => {
-                let Some(scope) = hf
-                    .pages
-                    .as_ref()
-                    .filter(|s| s.iter().any(|p| copy_of.contains_key(p)))
-                else {
-                    continue;
-                };
-                let pages = (scope.iter())
-                    .flat_map(|p| std::iter::once(*p).chain(copy_of.get(p).copied()))
-                    .collect();
-                GenSpec::HeaderFooter(Arc::new(HeaderFooter {
-                    pages: Some(pages),
-                    ..HeaderFooter::clone(hf)
-                }))
-            }
+        let Scope::Pages(on) = &g.scope else {
+            continue;
         };
-        let id = g.id;
-        let g = Generator { id, spec };
+        let copies: Vec<PageId> = (pairs.iter())
+            .filter(|(p, ..)| on.contains(p))
+            .map(|&(_, copy, _)| copy)
+            .collect();
+        if copies.is_empty() {
+            continue;
+        }
+        let mut on = on.clone();
+        on.extend(copies);
+        let g = Generator {
+            scope: Scope::Pages(on),
+            ..Generator::clone(&g)
+        };
         lw.rec
-            .put(Key::Generator(id), Some(Val::Generator(Arc::new(g))));
+            .put(Key::Generator(g.id), Some(Val::Generator(Arc::new(g))));
     }
 }
 
@@ -388,33 +364,14 @@ pub(crate) fn replace(
     bring_in(lw, from, name, &shown, bring)
 }
 
-/// The page labels: `ranges`, or none.
+/// The page labels: `ranges`, or none. A header whose `<<label>>` draws a
+/// label its face can't draw all of is said ([`Notice::Unencodable`]).
 pub(crate) fn set_labels(lw: &mut Lower, ranges: Option<Vec<LabelSpec>>) {
     let labels = (ranges.filter(|r| !r.is_empty())).map(|r| Val::Labels(r.into()));
     lw.rec.put(Key::Labels, labels);
-}
-
-/// Each page shown from page `index` of `src`, its next copy, keeping what
-/// it holds, its boxes and its turn, which are in PageSpace, which a copy
-/// keeps: it's made of the page's base with the same media box. The flow
-/// made the copy for the page's boxes as they were (a watermark is placed
-/// on its crop), so they're read.
-pub(crate) fn set_base(lw: &mut Lower, pages: &[(PageId, Src, u32)]) {
-    let mut copies = NextCopy::of(&lw.rec);
-    for (id, src, index) in pages {
-        let def = lw.rec.def(*id).expect("resolved");
-        if def.base.src == *src && def.base.index == *index {
-            continue;
-        }
-        let content = def.content.clone();
-        let base = PageBase {
-            src: src.clone(),
-            index: *index,
-        };
-        let copy = copies.take(&base);
-        let def = PageDef::new(base, copy, content);
-        lw.read(Key::Geom(*id));
-        lw.rec.put(Key::Page(*id), Some(Val::Page(Arc::new(def))));
+    let header = lw.rec.header_footer();
+    if header.is_some_and(|g| super::content::label_unencodable(&lw.rec, g)) {
+        lw.notices.push(Notice::Unencodable);
     }
 }
 

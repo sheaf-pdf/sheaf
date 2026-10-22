@@ -344,13 +344,15 @@ fn literal(query: &str) -> Query {
 
 /// A search walks the document's pages in its order, each read from its
 /// own realization (§10.5): Find hits an untouched page, an inserted
-/// file's page turned 90°, a duplicate, a crop and a page with recognized
-/// text and a header not yet saved, each at its position, its matches on
-/// its visible box; a pattern finds the numbers on every page, recognized
-/// ones among them; and the header and the recognized words, and a phrase
-/// running from the page's own line onto theirs, are found on their page
-/// under the screen's inputs, and not with the page's content alone. A
-/// source PDFium refuses is searched through its groups.
+/// file's page turned 90°, a duplicate, a crop with a header not yet
+/// saved and a page with recognized text, each at its position, its
+/// matches on its visible box; a pattern finds the numbers on every page,
+/// recognized ones among them; and the header, the recognized words, and
+/// a phrase running from the page's own line onto theirs, are found on
+/// their pages under the screen's inputs, and not with the page's content
+/// alone. (A header on the recognized page reads between the two until
+/// slice 18 draws recognized text before the generators.) A source PDFium
+/// refuses is searched through its groups.
 #[test]
 fn a_search_walks_the_document_s_order() {
     let mut d = opened(file(4, XrefType::CrossReferenceTable), "a.pdf", None);
@@ -368,7 +370,7 @@ fn a_search_walks_the_document_s_order() {
     ];
     let layer = sheaf_doc::text_layer::from_engine(seen, &d.geom(p3), "test");
     let mut ops = fx::ocr([(p3, Arc::new(layer))]);
-    ops.push(fx::set_header(fx::header("Draft"), Some(&[p3])));
+    ops.push(fx::set_header(fx::header("Draft"), Some(&[p2])));
     d.commit_ops(ops, "OCR").unwrap();
     crop(&mut d, p2);
     let st = d.state().clone();
@@ -398,13 +400,13 @@ fn a_search_walks_the_document_s_order() {
     assert_eq!(sorted, want);
     // A phrase from the page's own line onto the recognized words' finds
     // them across the line break.
-    for (q, word) in [
-        ("draft", "Draft"),
-        ("total", "Total"),
-        ("3 TOTAL", "3\nTotal"),
+    for (q, page, word) in [
+        ("draft", p2, "Draft"),
+        ("total", p3, "Total"),
+        ("3 TOTAL", p3, "3\nTotal"),
     ] {
         let found = searched(&text, &st, literal(q), &screen);
-        assert_eq!(found, [(at(p3), p3, vec![word.to_string()])]);
+        assert_eq!(found, [(at(page), page, vec![word.to_string()])]);
         assert_eq!(searched(&text, &st, literal(q), &content), []);
     }
     let alone = searched(&text, &st, numbers, &content);

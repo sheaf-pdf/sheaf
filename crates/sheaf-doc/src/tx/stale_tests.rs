@@ -19,7 +19,7 @@ use crate::text_layer::TextLayer;
 
 /// The version `d` is at, and a transaction of the user's on it, as a
 /// planner or a dialog takes one.
-fn planned(d: &Document) -> (VersionId, Tx) {
+pub(super) fn planned(d: &Document) -> (VersionId, Tx) {
     let snap = d.snapshot();
     (
         snap.version,
@@ -29,7 +29,7 @@ fn planned(d: &Document) -> (VersionId, Tx) {
 
 /// A commit of a transaction made on version `v`, landing as `stale`
 /// says.
-fn on(v: VersionId, stale: Stale) -> CommitOpts {
+pub(super) fn on(v: VersionId, stale: Stale) -> CommitOpts {
     CommitOpts::based(v, stale, "stale")
 }
 
@@ -234,7 +234,8 @@ fn a_stale_delete_is_relowered_with_the_cascades_of_what_came_since() {
     let st = d.state();
     let order: Vec<PageId> = st.order().iter().copied().collect();
     assert_eq!(order, [p0, p2, p3]);
-    assert_eq!(st.header_footer().unwrap().pages, Some(vec![p2]));
+    let on = crate::model::Scope::Pages(im::OrdSet::unit(p2));
+    assert_eq!(st.header_footer().unwrap().scope, on);
     assert_eq!(st.bookmark_count(), 0);
     let ends: Vec<&crate::annot::Annot> = st.marks_on(p2).collect();
     assert_eq!(ends.len(), 1);
@@ -298,19 +299,21 @@ fn what_names_a_page_deleted_since_conflicts() {
     }
 }
 
+/// Two pages each replaced by the same page of another file, one by the
+/// transaction and one by an edit since: each took that page's first copy,
+/// so merged, they'd be one copy of it twice.
 #[test]
 fn two_pages_shown_as_one_copy_of_a_page_conflict() {
     let mut d = doc_of(3, &[]);
-    let copy = crate::store::blank(d.store(), 2);
+    let other = crate::store::blank(d.store(), 2);
     let [p0, p1, _] = pages(&d);
     let (v, mut tx) = planned(&d);
-    let strip = Derive::StripHeaderFooter;
-    tx.set_page_base(vec![(p0, copy.clone(), 0)], strip)
+    tx.apply(fx::replace(&[p0], &other, [0], "b.pdf"), &NoProgress)
         .unwrap();
-    d.commit_page_base(vec![(p1, copy, 0)], strip, "Strip page 2")
-        .unwrap();
+    let replace = fx::replace(&[p1], &other, [0], "b.pdf");
+    d.commit_ops(vec![replace], "Replace page 2").unwrap();
     let e = refused(&mut d, |d| d.commit(tx, on(v, Stale::Validate)));
-    assert_eq!(e, conflict(Key::Page(p1), "Strip page 2"));
+    assert_eq!(e, conflict(Key::Page(p1), "Replace page 2"));
 }
 
 /// No op an edit since could make gives a page's annotation a name another
@@ -501,7 +504,7 @@ fn a_dialog_on_v_keeps_an_ocr_amend_of_v() {
     d.commit_ops_in_group(g, fx::ocr([(p0, layer("a"))]), "Recognize text")
         .unwrap();
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p1, copy.clone(), 0)], Derive::StripHeaderFooter)
+    tx.apply(fx::replace(&[p1], &copy, [0], "b.pdf"), &NoProgress)
         .unwrap();
     d.commit_ops_in_group(g, fx::ocr([(p2, layer("b"))]), "Recognize text")
         .unwrap();

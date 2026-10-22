@@ -453,11 +453,6 @@ fn copies_hold_only_the_pages_copied() {
     let bytes = crate::save::extract_bytes(&model.snapshot(), &[p0, p1]).unwrap();
     assert!(!says(&bytes, "MARK A 2") && says(&bytes, "MARK A 1"));
     assert_eq!(page_annots(&bytes, 0), 1);
-    // A derived copy is a copy of the page alone.
-    let src = model.snapshot().primary;
-    let bytes = crate::save::derived_copy(&src, &[0], &mut |_, _, _| Ok(())).unwrap();
-    assert!(!says(&bytes, "MARK A 1") && !says(&bytes, "MARK A 2"));
-    assert_eq!(page_annots(&bytes, 0), 0);
     // So is a stamp made from a page, and the forms the summary draws.
     let pdf = Pdf::load(&path).unwrap();
     let stamp = crate::stamp_lib::one_page(&pdf, 0).unwrap();

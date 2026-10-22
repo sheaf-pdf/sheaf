@@ -93,9 +93,6 @@ pub enum Origin {
 /// What made a blob in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryKind {
-    /// A copy sheaf made of another source's pages, a header and footer
-    /// stripped. Gone when that's an edit (slice 17).
-    Derived,
     /// A page stamp's one-page PDF, from the stamp library or made from a
     /// placed stamp's page, as one placed or pasted is.
     Library,

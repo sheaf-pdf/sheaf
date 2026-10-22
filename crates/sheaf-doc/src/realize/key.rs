@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::Arc;
 
-use sheaf_edit::Rotation;
+use sheaf_edit::{BatesSpec, HeaderFooterSpec, Margins, Rotation};
 use sheaf_util::Checksum;
 
 use super::{MarkDraw, ViewInputs};
@@ -32,13 +32,12 @@ use crate::materialize::emit::annots::{LinkTo, base_annots};
 use crate::materialize::emit::content;
 use crate::model::{
     AnnotBody, ContentStack, CtxNeeds, DocState, FieldProps, Filter, Foreign, FormDoc, FormInst,
-    FormRef, GenSpec, Generator, ImageRef, Layer, LegacySel, Mark, MarkedSel, PageBase, PageDef,
-    PageForm, PageId, Placed, RenderTables, ScriptState, Static, StreamSel, Terminal,
-    WatermarkContent, WatermarkGen, Widget, WidgetProps, XfaState,
+    FormRef, Frozen, GenSpec, Generator, ImageRef, Layer, LegacySel, Mark, MarkedSel, PageBase,
+    PageCtx, PageDef, PageForm, PageId, Placed, RenderTables, ScriptState, Static, StreamSel,
+    Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps, XfaState,
 };
 use crate::prim::Key;
 use crate::source::ObjRef;
-use crate::stamps::{self, Bates, HeaderFooter};
 use crate::store::{BlobId, BlobRef, Src};
 use crate::text_layer::{OcrWord, TextLayer};
 
@@ -94,14 +93,19 @@ pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<Re
     sum.feed(&drawn.generators.len());
     for on in &drawn.generators {
         let g = on.generator;
-        sum.feed(&g.id.0).feed(&g.spec).feed(&on.base_draws);
+        sum.feed(&g.id.0)
+            .feed(&recipe_digest(g, page))
+            .feed(&on.base_draws);
         if !on.base_draws {
-            // It's laid out in the page as it shows, turned.
+            // It's laid out in the page as it shows, turned, with what its
+            // tokens read of where the page is; its Bates number is its
+            // recipe's.
             sum.feed(drawn.geom);
             let CtxNeeds {
                 index,
                 count,
-                bates,
+                label,
+                bates: _,
             } = on.needs;
             if index {
                 sum.feed(&st.pos_of(page));
@@ -109,8 +113,8 @@ pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<Re
             if count {
                 sum.feed(&st.page_count());
             }
-            if bates {
-                sum.feed(&st.bates_of(page));
+            if label {
+                sum.feed(&st.label_of(page).as_deref());
             }
         }
     }
@@ -123,11 +127,11 @@ pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<Re
 
 /// The slots page `page` of `st` is drawn from under `inputs`: what it
 /// shows, and its annotations, the fields and form its widgets show, every
-/// generator (one may come to be on it), and the order when one on it
-/// reads where the page is or a link on it leads to a page, with what that
-/// page shows (whether it's still the link's), as far as the inputs draw
-/// them. Never its boxes or turn (§6.3). Under
-/// [`ViewInputs::content_only`], what it shows alone.
+/// generator (one may come to be on it), the order when one on it reads
+/// where the page is or a link on it leads to a page, with what that page
+/// shows (whether it's still the link's), and the labels when one on it
+/// draws the page's, as far as the inputs draw them. Never its boxes or
+/// turn (§6.3). Under [`ViewInputs::content_only`], what it shows alone.
 pub fn render_reads(st: &DocState, page: PageId, inputs: &ViewInputs) -> Vec<Key> {
     let mut reads = vec![Key::Page(page)];
     let Some(drawn) = Drawn::of(st, page, inputs) else {
@@ -166,8 +170,13 @@ pub fn render_reads(st: &DocState, page: PageId, inputs: &ViewInputs) -> Vec<Key
     if inputs.generators {
         reads.extend(st.generators().keys().map(|&g| Key::Generator(g)));
     }
-    if links || (drawn.generators.iter()).any(|on| !on.base_draws && on.needs.any()) {
+    // Whether its base draws one is read too: a block laid out alike there
+    // is one whose tokens read the page alike.
+    if links || drawn.generators.iter().any(|on| on.needs.order()) {
         reads.push(Key::Order);
+    }
+    if drawn.generators.iter().any(|on| on.needs.label) {
+        reads.push(Key::Labels);
     }
     reads
 }
@@ -187,12 +196,50 @@ pub(crate) fn form_digest(form: &FormDoc) -> u128 {
     sum.0.finish()
 }
 
-/// What watermark `wm` draws on each page it's on, whichever those are:
-/// its content, place, z and the kinds it replaces, which its blocks say
-/// they were drawn from (`/R`).
-pub(crate) fn recipe_digest(wm: &WatermarkGen) -> u128 {
+/// What generator `g` draws on page `page`, whichever pages it's on: its
+/// spec, z and the kinds it replaces, and what it fixed for the page (a
+/// header's date, file and the page's Bates number), which its blocks say
+/// they were drawn from (`/R`). A watermark's is the same on every page.
+pub(crate) fn recipe_digest(g: &Generator, page: PageId) -> u128 {
     let mut sum = Sum(Checksum::new());
-    sum.feed(wm);
+    match &g.spec {
+        GenSpec::HeaderFooter(hf) => sum.feed(&**hf),
+        GenSpec::Watermark(wm) => sum.feed(&**wm),
+    };
+    sum.feed(&(g.z as u8)).feed(&g.replaces);
+    if g.spec.header_footer().is_some() {
+        let Frozen { date, file, bates } = &g.frozen;
+        let n = bates.as_ref().and_then(|b| b.get(&page));
+        sum.feed(&**date).feed(&**file).feed(&n.copied());
+    }
+    sum.0.finish()
+}
+
+/// What a generator whose tokens read `needs` lays out on the page `ctx`
+/// says reads of it, as a digest: the page's boxes and turn, and of where
+/// the page is and its number only what the tokens read. A generator lays
+/// out pages alike in it alike.
+pub(crate) fn layout_reads(needs: CtxNeeds, ctx: &PageCtx) -> u128 {
+    let CtxNeeds {
+        index,
+        count,
+        label,
+        bates,
+    } = needs;
+    let mut sum = Sum(Checksum::new());
+    sum.feed(&ctx.geom);
+    if index {
+        sum.feed(&ctx.position);
+    }
+    if count {
+        sum.feed(&ctx.count);
+    }
+    if label {
+        sum.feed(&ctx.label);
+    }
+    if bates {
+        sum.feed(&ctx.bates);
+    }
     sum.0.finish()
 }
 
@@ -250,7 +297,6 @@ impl<'a> Drawn<'a> {
                 src: def.base.src.clone(),
                 index: def.base.index,
                 copy: def.copy,
-                content: None,
             };
             base_annots(&shown)
         };
@@ -280,17 +326,17 @@ impl<'a> Drawn<'a> {
         let mut on = Vec::new();
         let base = &def.base;
         // Whether the blocks of the document's generators the base holds are
-        // the watermarks and backgrounds on the page (`content::intact`),
-        // and which those blocks are, which are set aside when they aren't.
+        // the generators on the page (`content::intact`), and which those
+        // blocks are, which are set aside when they aren't.
         let marks = base.src.markers(base.index);
-        let watermarks = match inputs.generators {
+        let on_page = match inputs.generators {
             true => content::generators_on(st, page),
             false => Vec::new(),
         };
         let contents = base.src.page(base.index).map_or(&[][..], |f| &f.contents);
-        let intact = (watermarks.is_empty() && marks.is_empty())
-            || content::intact(st, page, &marks, contents, &watermarks, |g| {
-                content::model_layout_digest(g, geom)
+        let intact = (on_page.is_empty() && marks.is_empty())
+            || content::intact(st, page, &marks, contents, &on_page, |g| {
+                content::model_layout_digest(st, g, page, geom)
             });
         let backed = (marks.iter())
             .filter_map(|(_, m)| match m {
@@ -299,15 +345,12 @@ impl<'a> Drawn<'a> {
             })
             .collect();
         for g in generators.values().filter(|_| inputs.generators) {
-            let base_draws = match &g.spec {
-                GenSpec::HeaderFooter(_) if !st.header_covers(page) => continue,
-                GenSpec::HeaderFooter(hf) => stamps::base_draws(&base.src, base.index, hf),
-                GenSpec::Watermark(_) if !g.covers(page) => continue,
-                GenSpec::Watermark(_) => intact,
-            };
+            if !g.covers(page) {
+                continue;
+            }
             on.push(OnPage {
                 generator: g,
-                base_draws,
+                base_draws: intact,
                 needs: g.needs(),
             });
         }
@@ -889,30 +932,11 @@ impl Feed for XfaState {
     }
 }
 
-impl Feed for GenSpec {
-    fn feed(&self, sum: &mut Sum) {
-        match self {
-            GenSpec::HeaderFooter(hf) => sum.feed(&0u8).feed(hf),
-            GenSpec::Watermark(wm) => sum.feed(&1u8).feed(wm),
-        };
-    }
-}
-
-/// What it draws on each page it's on, but not which pages those are,
-/// which only [`Drawn`] asks.
+/// What it draws, and where on each page.
 impl Feed for WatermarkGen {
     fn feed(&self, sum: &mut Sum) {
-        let WatermarkGen {
-            content,
-            position,
-            z,
-            scope: _,
-            replaces,
-        } = self;
-        sum.feed(content)
-            .feed(&(*position as u8))
-            .feed(&(*z as u8))
-            .feed(replaces);
+        let WatermarkGen { content, position } = self;
+        sum.feed(content).feed(&(*position as u8));
     }
 }
 
@@ -1006,41 +1030,41 @@ impl Feed for PagOrigin {
     }
 }
 
-/// Its recipe: what it draws on each page it's on, but not which pages
-/// those are, which only [`Drawn`] asks.
-impl Feed for HeaderFooter {
+/// What it draws on each page it's on, but not which pages those are,
+/// which only [`Drawn`] asks.
+impl Feed for HeaderFooterSpec {
     fn feed(&self, sum: &mut Sum) {
-        let HeaderFooter {
+        let HeaderFooterSpec {
             texts,
-            font_size,
+            font,
+            size,
             color,
+            margins,
+            first_number,
+            bates,
+        } = self;
+        let Margins {
             top,
             bottom,
             left,
             right,
-            first_page_number,
-            pages: _,
-            date,
-            file,
-            bates,
-        } = self;
+        } = margins;
         sum.feed(texts)
-            .feed(font_size)
+            .feed(&(*font as u8))
+            .feed(size)
             .feed(color)
             .feed(top)
             .feed(bottom)
             .feed(left)
             .feed(right)
-            .feed(first_page_number)
-            .feed(date)
-            .feed(file)
+            .feed(first_number)
             .feed(bates);
     }
 }
 
-impl Feed for Bates {
+impl Feed for BatesSpec {
     fn feed(&self, sum: &mut Sum) {
-        let Bates {
+        let BatesSpec {
             prefix,
             suffix,
             digits,

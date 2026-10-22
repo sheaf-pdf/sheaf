@@ -380,18 +380,6 @@ pub(crate) fn is_ours<'a, P: Objects + ?Sized>(
         && mark(irt).is_some_and(|a| matches!(a.kind, AnnotKind::Replace { .. }))
 }
 
-/// `list`, a page's `/Annots`, without sheaf's marks and their companions
-/// ([`is_ours`]): what a page keeps of its own once its marks are
-/// records. A derived copy's pages keep these, and the emitter leaves the
-/// same entries out of a page it writes the records of.
-pub(crate) fn not_ours<P: Objects + ?Sized>(pdf: &P, list: &[Object]) -> Vec<Object> {
-    let annots = PageAnnots::new(list);
-    (list.iter())
-        .filter(|e| !is_ours(pdf, e, &annots))
-        .cloned()
-        .collect()
-}
-
 /// A text string's text, decoded as [`text_string`] decodes it, after its
 /// references.
 fn text<P: Objects + ?Sized>(pdf: &P, o: &Object) -> String {

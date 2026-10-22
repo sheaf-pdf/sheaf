@@ -34,10 +34,12 @@ pub(crate) struct Part {
 }
 
 impl Part {
-    /// Page `page`'s delta: its emission alone without the frame's keys
-    /// (the group's root, the catalog, the form and its fields), which
-    /// [`Part::frame`] writes for the group. What only those reach stays,
-    /// unnamed.
+    /// Page `page`'s delta: its emission alone ([`EmitScope::Delta`]),
+    /// which writes none of the frame's keys (the group's root, the
+    /// catalog, the form and its fields) that [`Part::frame`] writes for
+    /// the group, without the numbers it claims for them.
+    ///
+    /// [`EmitScope::Delta`]: crate::materialize::emit::EmitScope::Delta
     pub(crate) fn page(e: Emission, page: PageId) -> Result<Part> {
         let Emission {
             objects,
@@ -100,6 +102,92 @@ impl Part {
             + self.objects.capacity() * entry
             + self.syms.keys().len() * (3 * key + 16)
             + self.owned.len() * (key + size_of::<ObjectId>() + 32)
+    }
+}
+
+/// What a part writes that a page reaches, by key ([`Part::reached`]):
+/// each object as text, and the number it's written at when that's the
+/// source's own.
+#[cfg(test)]
+pub(crate) type Reached = BTreeMap<ObjKey, (String, Option<ObjectId>)>;
+
+#[cfg(test)]
+impl Part {
+    /// What it writes that page `page` reaches, by key: each object as
+    /// text, a placeholder in it as the key it names, a source's object
+    /// it keeps as it is as that object, and the number it's written at
+    /// when that's the source's own; and the keys it writes that the page
+    /// doesn't reach. Two deltas alike in these write the same section.
+    pub(crate) fn reached(&self, page: PageId) -> (Reached, BTreeSet<ObjKey>) {
+        let at: HashMap<ObjKey, &SymObject> =
+            self.objects.iter().map(|(key, obj)| (*key, obj)).collect();
+        let by_number: HashMap<ObjectId, ObjKey> =
+            self.owned.iter().map(|(key, id)| (*id, *key)).collect();
+        let mut reached = BTreeMap::new();
+        let mut next = vec![ObjKey::Page(page)];
+        while let Some(key) = next.pop() {
+            if reached.contains_key(&key) {
+                continue;
+            }
+            let Some(obj) = at.get(&key) else {
+                continue;
+            };
+            let mut named = Vec::new();
+            let text = match obj {
+                SymObject::Raw(r) => {
+                    if let Ok(obj) = r.src.pdf().get_object(r.id) {
+                        refs(obj, &mut |id| named.extend(by_number.get(&id)));
+                    }
+                    format!("raw {:?} {:?}", r.src.id(), r.id)
+                }
+                SymObject::Built(obj) => self.text(obj, &mut named),
+                SymObject::Deferred(d) => {
+                    let dict = self.text(&Object::Dictionary(d.dict.clone()), &mut named);
+                    let data = (d.data)().expect("a deferred stream's data");
+                    format!("deferred {dict} {}", sheaf_util::checksum(&data))
+                }
+            };
+            next.extend(named);
+            reached.insert(key, (text, self.owned.get(&key).copied()));
+        }
+        let unreached = (self.objects.iter())
+            .map(|(key, _)| *key)
+            .filter(|key| !reached.contains_key(key))
+            .collect();
+        (reached, unreached)
+    }
+
+    /// `obj` as text, each placeholder in it as the key it names, which
+    /// `named` gets.
+    fn text(&self, obj: &Object, named: &mut Vec<ObjKey>) -> String {
+        fn named_in(obj: &Object, syms: &Syms, named: &mut Vec<ObjKey>) -> Object {
+            match obj {
+                Object::Reference(r) => match syms.key(*r) {
+                    Some(key) => {
+                        named.push(key);
+                        Object::Name(format!("@{key:?}").into_bytes())
+                    }
+                    None => obj.clone(),
+                },
+                Object::Array(items) => {
+                    Object::Array(items.iter().map(|o| named_in(o, syms, named)).collect())
+                }
+                Object::Dictionary(d) => Object::Dictionary(dict_named(d, syms, named)),
+                Object::Stream(s) => {
+                    let dict = dict_named(&s.dict, syms, named);
+                    Object::Stream(Stream::new(dict, s.content.clone()))
+                }
+                _ => obj.clone(),
+            }
+        }
+        fn dict_named(d: &Dictionary, syms: &Syms, named: &mut Vec<ObjKey>) -> Dictionary {
+            let mut out = Dictionary::new();
+            for (k, v) in d.iter() {
+                out.set(k.clone(), named_in(v, syms, named));
+            }
+            out
+        }
+        format!("{:?}", named_in(obj, &self.syms, named))
     }
 }
 

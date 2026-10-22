@@ -73,8 +73,9 @@ pub enum PagOrigin {
 
 impl PagOrigin {
     /// Whose a generator's `replaces` takes out on the pages it covers
-    /// (§11.4), and RemoveWatermark by default: every tool's but the
-    /// author's own, which only `include_authored` asks for (proposal 31).
+    /// (§11.4), and RemoveWatermark and RemoveHeaderFooter by default:
+    /// every tool's but the author's own, which only `include_authored`
+    /// asks for (proposal 31).
     pub const REPLACED: [PagOrigin; 3] =
         [PagOrigin::Sheaf, PagOrigin::SheafLegacy, PagOrigin::Acrobat];
 }
@@ -420,7 +421,7 @@ impl PageBlocks {
     }
 
     /// Its pagination artifacts of `kinds` that `origins` drew: what a
-    /// filter, a generator's `replaces` and RemoveWatermark select (§3.4).
+    /// filter, a generator's `replaces` and a removal select (§3.4).
     pub fn selected<'a>(
         &'a self,
         kinds: &'a BTreeSet<PaginationKind>,
@@ -473,15 +474,21 @@ impl StreamMark {
 }
 
 /// What sheaf marked a `/Contents` stream as, by its dictionary alone
-/// (§11.4): a generator's block, with the digest of its layout (`/L`, None
-/// when it isn't 16 bytes), or a stream that isolates the page's own
-/// content. What a source reads of a page's streams without decompressing
-/// them ([`Source::markers`]).
+/// (§11.4): a generator's block, with the digests of its layout (`/L`) and
+/// of what it was drawn from (`/R`), each None when it isn't 16 bytes, and
+/// the page's Bates number (`/N`, decimal digits), when it has one; or a
+/// stream that isolates the page's own content. What a source reads of a
+/// page's streams without decompressing them ([`Source::markers`]).
 ///
 /// [`Source::markers`]: crate::source::Source::markers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Marker {
-    Gen { id: GenId, layout: Option<u128> },
+    Gen {
+        id: GenId,
+        layout: Option<u128>,
+        recipe: Option<u128>,
+        number: Option<u64>,
+    },
     Isolate,
 }
 
@@ -490,10 +497,18 @@ impl Marker {
     pub fn of(dict: &Dictionary) -> Option<Marker> {
         match StreamMark::of(dict) {
             StreamMark::Block(SheafBlock::Gen(id)) => {
-                let layout = (dict.get(b"SheafBlock").and_then(Object::as_dict).ok())
-                    .and_then(|block| block.get(b"L").ok()?.as_str().ok())
-                    .and_then(|l| Some(u128::from_be_bytes(l.try_into().ok()?)));
-                Some(Marker::Gen { id, layout })
+                let block = dict.get(b"SheafBlock").and_then(Object::as_dict).ok();
+                let string = |key: &[u8]| block?.get(key).ok()?.as_str().ok();
+                let digest = |key: &[u8]| Some(u128::from_be_bytes(string(key)?.try_into().ok()?));
+                let number = string(b"N")
+                    .filter(|n| (1..=20).contains(&n.len()) && n.iter().all(u8::is_ascii_digit))
+                    .and_then(|n| std::str::from_utf8(n).ok()?.parse().ok());
+                Some(Marker::Gen {
+                    id,
+                    layout: digest(b"L"),
+                    recipe: digest(b"R"),
+                    number,
+                })
             }
             StreamMark::Isolate => Some(Marker::Isolate),
             StreamMark::Plain

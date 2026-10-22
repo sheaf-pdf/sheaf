@@ -132,6 +132,39 @@ pub fn two_page_form() -> Form {
     f
 }
 
+/// [`two_page_form`] with a header Acrobat drew on each page after its
+/// content: a form whose `/PieceInfo` says so, drawing "ACROBATHEADER"
+/// above the fields.
+pub fn acrobat_headed_form() -> Form {
+    let mut f = two_page_form();
+    let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
+        "DocSettings" => dictionary! {}, "Private" => "Header",
+    } };
+    let helv = f.helv;
+    let form = f.pdf.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
+            "BBox" => vec![0.into(), 0.into(), 300.into(), 20.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => helv } },
+        },
+        b"BT /F1 12 Tf 2 5 Td (ACROBATHEADER) Tj ET".to_vec(),
+    ));
+    let header = f.pdf.add_object(Stream::new(
+        dictionary! {},
+        b"/Artifact <</Type /Pagination /Subtype /Header>> BDC q 1 0 0 1 72 760 cm /Xi0 Do Q \
+          EMC"
+        .to_vec(),
+    ));
+    for page in f.pages.clone() {
+        let dict = f.dict(page);
+        let body = dict.get(b"Contents").unwrap().clone();
+        dict.set("Contents", vec![body, header.into()]);
+        let resources = dict.get_mut(b"Resources").unwrap().as_dict_mut().unwrap();
+        resources.set("XObject", dictionary! { "Xi0" => form });
+    }
+    f
+}
+
 /// Blue pixels inside row `i` of a 612-pixel-wide render of a page whose
 /// shown area's top is at `top` in user space.
 pub fn blue_in(r: &Raster, i: usize, top: f32) -> usize {

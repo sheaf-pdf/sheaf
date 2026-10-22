@@ -3,19 +3,25 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::mark::Color;
+use crate::mark::{Color, FontChoice};
 use crate::page::Margins;
 
 /// A header and footer: six slots of text, drawn on every page in scope.
 /// What `<<date>>` and `<<file>>` say is fixed when it's set, and Bates
-/// numbers are counted then (M10.5 §3.5).
+/// numbers are counted then (M10.5 §3.5); the page number, count and
+/// label are read from the document as it's written.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HeaderFooterSpec {
     /// Header left, center, right; footer left, center, right. Each can
     /// use `<<1>>` (the page number), `<<N>>` (the page count),
+    /// `<<label>>` (the page's label, or its number without labels),
     /// `<<date>>`, `<<file>>` and `<<bates>>`.
     pub texts: [String; 6],
+    /// The face the text is drawn in: Helvetica, the face headers were
+    /// drawn in before there was a choice, unless it's said.
+    #[serde(default = "legacy_face")]
+    pub font: FontChoice,
     /// The text's size, in points.
     pub size: f32,
     pub color: Color,
@@ -26,6 +32,11 @@ pub struct HeaderFooterSpec {
     pub first_number: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bates: Option<BatesSpec>,
+}
+
+/// The face a header and footer that says none is drawn in.
+fn legacy_face() -> FontChoice {
+    FontChoice::Helvetica
 }
 
 /// Bates numbering: `<prefix><number, zero-padded to digits><suffix>`,

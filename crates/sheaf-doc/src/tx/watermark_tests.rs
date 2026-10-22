@@ -14,7 +14,7 @@ use super::tests::{commit, doc_of};
 use super::*;
 use crate::content::PaginationKind;
 use crate::model::{
-    Document, GenSpec, Generator, ImageRef, PageForm, Scope, WatermarkContent, WatermarkGen,
+    Document, Generator, ImageRef, PageForm, Scope, WatermarkContent, WatermarkGen,
 };
 use crate::prim::Key;
 use crate::store::BlobKind;
@@ -23,6 +23,11 @@ use crate::store::BlobKind;
 fn drawn(d: &Document, z: Z) -> Option<(GenId, WatermarkGen)> {
     let g = d.state().watermark(z)?;
     Some((g.id, WatermarkGen::clone(g.spec.watermark().unwrap())))
+}
+
+/// The generator of the watermark at `z`.
+fn drawn_by(d: &Document, z: Z) -> Option<Arc<Generator>> {
+    d.state().watermark(z).cloned()
 }
 
 /// The pages `scope` names, or None for every page.
@@ -79,8 +84,9 @@ fn a_watermark_is_one_generator_for_its_z() {
     let (id, wm) = drawn(&d, Z::Over).unwrap();
     assert_eq!(*c.effects.keys, BTreeSet::from([Key::Generator(id)]));
     assert_eq!(c.lines[0].text, "Add a watermark to all pages");
-    assert_eq!(wm.scope, Scope::All);
-    assert_eq!(wm.replaces, BTreeSet::from([PaginationKind::Watermark]));
+    let g = drawn_by(&d, Z::Over).unwrap();
+    assert_eq!(g.scope, Scope::All);
+    assert_eq!(g.replaces, BTreeSet::from([PaginationKind::Watermark]));
     assert!(matches!(&wm.content, WatermarkContent::Text { text, .. } if &**text == "DRAFT"));
     let c = commit(&mut d, Actor::User, vec![set("FINAL", Z::Over, None)]).unwrap();
     assert_eq!(c.lines[0].text, "Change the watermark on all pages");
@@ -94,10 +100,11 @@ fn a_watermark_is_one_generator_for_its_z() {
     )
     .unwrap();
     assert_eq!(c.lines[0].text, "Add a background to pages 2, 3");
-    let (behind, wm) = drawn(&d, Z::Under).unwrap();
+    let (behind, _) = drawn(&d, Z::Under).unwrap();
     assert_ne!(behind, id);
-    assert_eq!(named(&wm.scope), Some(vec![p1, p2]));
-    assert_eq!(wm.replaces, BTreeSet::from([PaginationKind::Background]));
+    let g = drawn_by(&d, Z::Under).unwrap();
+    assert_eq!(named(&g.scope), Some(vec![p1, p2]));
+    assert_eq!(g.replaces, BTreeSet::from([PaginationKind::Background]));
     assert_eq!(d.state().generators().len(), 2);
     assert_eq!(drawn(&d, Z::Over).unwrap().0, id, "the other z's stays");
     // Said again as it is, it changes nothing.
@@ -108,7 +115,7 @@ fn a_watermark_is_one_generator_for_its_z() {
     assert!(drawn(&d, Z::Under).is_none());
     let generator = d.state().generators()[&id].clone();
     assert!(generator.covers(p1));
-    assert_eq!((generator.z(), &*generator.scope()), (Z::Over, &Scope::All));
+    assert_eq!((generator.z, &generator.scope), (Z::Over, &Scope::All));
 }
 
 /// Taken off pages, a watermark is narrowed to the pages it's left on
@@ -123,7 +130,7 @@ fn a_removed_watermark_is_narrowed_or_gone() {
         fx::set_watermark(fx::watermark("B"), Z::Under, Some(&[p1, p2])),
     ];
     commit(&mut d, Actor::User, ops).unwrap();
-    let scope = |d: &Document, z| drawn(d, z).map(|(_, wm)| named(&wm.scope));
+    let scope = |d: &Document, z| drawn_by(d, z).map(|g| named(&g.scope));
     let c = commit(
         &mut d,
         Actor::User,
@@ -194,14 +201,14 @@ fn a_watermark_s_pages_follow_deletes_and_duplicates() {
         objects: 1,
     };
     assert_eq!(c.cascades, [dropped]);
-    let under = |d: &Document| drawn(d, Z::Under).map(|(_, wm)| named(&wm.scope).unwrap());
+    let under = |d: &Document| drawn_by(d, Z::Under).map(|g| named(&g.scope).unwrap());
     assert_eq!(under(&d), Some(vec![p1]));
     let c = commit(&mut d, Actor::User, vec![fx::duplicate(&[p1, p2])]).unwrap();
     let copies: Vec<PageId> = c.created.pages().collect();
     let mut want = vec![p1, copies[0]];
     want.sort();
     assert_eq!(under(&d), Some(want));
-    assert_eq!(drawn(&d, Z::Over).unwrap().1.scope, Scope::All);
+    assert_eq!(drawn_by(&d, Z::Over).unwrap().scope, Scope::All);
     assert_eq!(d.state().check_invariants(), Ok(()));
     commit(&mut d, Actor::User, vec![fx::delete(&[p1, copies[0]])]).unwrap();
     assert_eq!(under(&d), None);
@@ -538,15 +545,13 @@ fn watermarks_keep_the_invariants() {
     )
     .unwrap();
     let st = d.state().clone();
-    let (id, wm) = drawn(&d, Z::Over).unwrap();
+    let drawn = drawn_by(&d, Z::Over).unwrap();
+    let id = drawn.id;
     let with = |id: u64, scope: Scope| {
-        let wm = WatermarkGen {
-            scope,
-            ..wm.clone()
-        };
         let g = Generator {
             id: GenId(id),
-            spec: GenSpec::Watermark(Arc::new(wm)),
+            scope,
+            ..Generator::clone(&drawn)
         };
         (
             Key::Generator(GenId(id)),

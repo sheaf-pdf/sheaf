@@ -365,7 +365,7 @@ fn every_op(d: &Document) -> Vec<ResolvedOp> {
         },
         R::ReplacePages {
             pages: pages.clone(),
-            from: src.clone(),
+            from: src,
             name: "a.pdf".into(),
             with: vec![0],
             bring: Default::default(),
@@ -455,10 +455,10 @@ fn every_op(d: &Document) -> Vec<ResolvedOp> {
             others: Default::default(),
         },
         R::SetHeaderFooter { spec, scope: None },
-        R::RemoveHeaderFooter { pages },
-        R::SetPageBase {
-            pages: vec![(page, src, 0)],
-            why: Derive::StripHeaderFooter,
+        R::RemoveHeaderFooter {
+            pages,
+            include_authored: true,
+            others: Default::default(),
         },
         R::Revert {
             label: "Recognize text".into(),
@@ -477,7 +477,7 @@ fn caps_cover_every_op_target_and_actor() {
     let ops = every_op(&d);
     let names: std::collections::BTreeSet<&str> = ops.iter().map(ResolvedOp::name).collect();
     assert_eq!(names.len(), ops.len(), "one op of each kind");
-    assert_eq!(names.len(), 26, "every kind there is");
+    assert_eq!(names.len(), 25, "every kind there is");
     let actors = [
         Actor::User,
         Actor::Cli,
@@ -507,7 +507,6 @@ fn caps_cover_every_op_target_and_actor() {
                     R::InsertPages { .. }
                     | R::ReplacePages { .. }
                     | R::SetOcrText { .. }
-                    | R::SetPageBase { .. }
                     | R::Revert { .. },
                     _,
                 ) => Cap::User,
@@ -711,8 +710,9 @@ fn a_check_lowers_nothing() {
 }
 
 /// A batch of 7,000 ops of one kind is one line, a crop of pages names
-/// them, and a derived flow's rebase names what it did. 700 in a debug
-/// build, which checks every invariant after each op.
+/// them, and a removal of the header and footer says what it did (M10.5
+/// bug 8). 700 in a debug build, which checks every invariant after each
+/// op.
 #[test]
 fn a_run_of_one_kind_is_one_line() {
     let n = if cfg!(debug_assertions) { 700 } else { 7_000 };
@@ -738,12 +738,7 @@ fn a_run_of_one_kind_is_one_line() {
     };
     let c = commit(&mut d, Actor::User, vec![fx::crop(&first, m)]).unwrap();
     assert_eq!(c.lines[0].text, "Crop pages 1–3");
-    let copy = d.primary().clone();
-    let pages = (0..3).map(|i| (d.page(i).unwrap(), copy.clone(), 3 - i as u32));
-    let mut tx = d.tx(Actor::User);
-    tx.set_page_base(pages.collect(), Derive::StripHeaderFooter)
-        .unwrap();
-    let c = d.commit(tx, CommitOpts::default()).unwrap();
+    let c = commit(&mut d, Actor::User, vec![fx::remove_header(&first)]).unwrap();
     assert_eq!(
         c.lines[0].text,
         "Remove the header and footer from pages 1–3"
@@ -863,7 +858,7 @@ fn a_header_names_the_file_the_document_is_in() {
         scope: sheaf_edit::ScopeSel::All,
     };
     commit(&mut d, Actor::User, vec![set]).unwrap();
-    assert_eq!(d.state().header_footer().unwrap().file, "b.pdf");
+    assert_eq!(&*d.state().header_footer().unwrap().frozen.file, "b.pdf");
 }
 
 /// The same bytes inserted under another name are one blob, and their

@@ -553,7 +553,8 @@ fn a_page_that_cant_be_read_is_saved_without_its_watermark() {
             .unwrap();
         let report = how.save(&mut doc, &path);
         let notes: Vec<String> = report.notes.iter().map(|n| n.to_string()).collect();
-        let note = "No watermark or background is drawn on page 2, whose content can't be read.";
+        let note = "No watermark, background, header or footer is drawn on page 2, whose \
+                    content can't be read.";
         assert!(notes.iter().any(|n| n == note), "{how:?}: {notes:?}");
         let pdf = Pdf::load(&path).unwrap();
         let [first, second] = pages(&pdf)[..] else {

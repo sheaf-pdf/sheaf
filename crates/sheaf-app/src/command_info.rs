@@ -371,12 +371,12 @@ pub fn info(id: &str) -> Option<Info> {
         ),
         "workspace::HeaderFooter" => (
             "header-footer",
-            "Add, update or remove a header and footer: text with the page number, page count, date and file name.",
+            "Add, update or remove a header and footer: text with the page number, page count, page label, date and file name. It replaces one Acrobat or an older sheaf drew, and keeps the author's own running heads unless you remove them too.",
             &["page numbers", "running head", "footer", "stamp"],
         ),
         "workspace::BatesNumbering" => (
             "bates",
-            "Number every page with a Bates number, like ABC000123, in the header or footer.",
+            "Number every page with a Bates number, like ABC000123, in the header or footer: fixed as you apply it, so moving pages keeps their numbers.",
             &[
                 "legal",
                 "discovery",

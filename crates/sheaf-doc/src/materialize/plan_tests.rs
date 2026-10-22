@@ -438,9 +438,9 @@ fn pages_deleted_saved_and_undone_come_back_by_a_rewrite() {
 }
 
 /// Back at the saved state by another route (a turn and its turn back),
-/// the plan is Unchanged, before anything that would rewrite the file
-/// (the legacy header and footer among them): nothing is written, its
-/// bytes and time as they were, and the document is clean.
+/// the plan is Unchanged, with a header that numbers the pages saved
+/// before it or not: nothing is written, its bytes and time as they were,
+/// and the document is clean.
 #[test]
 fn back_at_the_saved_state_nothing_is_written() {
     let dir = scratch();
@@ -451,7 +451,7 @@ fn back_at_the_saved_state_nothing_is_written() {
             let set = fx::set_header(fx::header("Head <<1>>"), None);
             doc.commit_ops(vec![set], "header").unwrap();
             let report = saved(&mut doc, &path, AskAnswers::default()).unwrap();
-            assert_eq!(report.why, [Why::LegacyHeaderFooter]);
+            assert_eq!(report.strategy, Some(StrategyKind::Append));
         }
         let before = std::fs::read(&path).unwrap();
         let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -899,11 +899,14 @@ fn a_claim_what_sheaf_draws_breaks_gets_a_note() {
     let plan = planned(&doc, &path);
     assert!(matches!(plan.strategy, Strategy::Append { .. }), "{plan:?}");
     assert_eq!(claims(&plan), Vec::<String>::new());
-    // A Rewrite says it, of everything it draws.
+    // A Rewrite, for the watermark's text replaced, says it of everything
+    // it draws.
     let page = doc.page(0).unwrap();
+    let replaced = fx::set_watermark(fx::watermark("Final"), Z::Over, None);
     let background = fx::set_watermark(fx::watermark("Copy"), Z::Under, None);
     let header = fx::set_header(fx::header("Header"), Some(&[page]));
-    doc.commit_ops(vec![background, header], "more").unwrap();
+    doc.commit_ops(vec![replaced, background, header], "more")
+        .unwrap();
     let plan = planned(&doc, &path);
     assert!(
         matches!(plan.strategy, Strategy::Rewrite { .. }),

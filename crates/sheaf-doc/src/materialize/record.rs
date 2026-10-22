@@ -8,9 +8,10 @@
 //! input ([`SaveInput`]): the state it writes, and the saved side it
 //! writes after.
 //!
-//! What generators drew (`drawn`) stays empty until slice 17: only live
-//! tokens, which a watermark hasn't got, are drawn otherwise as pages
-//! move.
+//! What the generators drew on each page (`drawn`) is what a reorder or a
+//! label change after a save is judged against: a page whose block a
+//! generator's live tokens lay out otherwise now is written again, and
+//! the old block, drawn from the same recipe, may go (§7.2, §11.9).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -24,7 +25,7 @@ use super::key::ObjKey;
 use super::plan::{SaveTransform, StrategyKind};
 use crate::attachments::Objects;
 use crate::effects::SigClass;
-use crate::model::{DerivedCopies, DocState, GenId, PageId, Snapshot, VersionId};
+use crate::model::{DocState, GenId, PageId, Snapshot, VersionId};
 use crate::prim::Key;
 use crate::serialize::crypt::Crypt;
 use crate::serialize::durable::FileStamp;
@@ -71,9 +72,10 @@ pub struct SaveRecord {
     /// What the file's root objects hold that the state doesn't own.
     pub roots: Arc<RootValues>,
     pub tree: Arc<TreeShape>,
-    /// What each generator drew on each page, by its layout's and recipe's
-    /// digests. Empty until slice 17's live tokens.
-    pub drawn: Arc<HashMap<(PageId, GenId), (u128, u128)>>,
+    /// What each generator's block on each page is: as opened, what the
+    /// blocks the open recognized say ([`drawn_of`]); after a save, what it
+    /// drew on the pages it wrote, and the rest as they were.
+    pub drawn: Arc<DrawnBlocks>,
     /// What save policy already did to the file (§11.8), so a later save
     /// never repeats it.
     pub transforms: Arc<[SaveTransform]>,
@@ -208,6 +210,51 @@ impl SaveRecord {
     }
 }
 
+/// A generator's block on a page of a file (§3.5): the digests its
+/// `/SheafBlock` says, of its layout (`/L`) and of the recipe it was drawn
+/// from (`/R`), and its object, by the key the removal check finds it by in
+/// that file: the record's map's, or the opened file's own object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawnBlock {
+    pub layout: u128,
+    pub recipe: u128,
+    pub key: ObjKey,
+}
+
+/// The blocks generators drew on a file's pages, by page and generator.
+pub type DrawnBlocks = HashMap<(PageId, GenId), DrawnBlock>;
+
+/// The blocks `found`, the generators an open of `blob`'s file recognized
+/// ([`Source::generators`]), drew on its pages, each the page `page` says
+/// of its index there: the first block of each on a page, in a stream of
+/// its own that says both digests, the file's object at its own number.
+/// Read from what recognition read of the streams' markers, so a file no
+/// generator was found in is never walked.
+///
+/// [`Source::generators`]: crate::source::Source::generators
+pub fn drawn_of(
+    found: &[crate::generate::Saved],
+    blob: BlobId,
+    page: impl Fn(u32) -> Option<PageId>,
+) -> DrawnBlocks {
+    let mut drawn = HashMap::new();
+    for saved in found {
+        for &(index, obj, layout, recipe) in saved.blocks() {
+            let Some(page) = page(index) else {
+                continue;
+            };
+            let key = ObjKey::Base { blob, obj, copy: 0 };
+            let block = DrawnBlock {
+                layout,
+                recipe,
+                key,
+            };
+            drawn.entry((page, saved.id)).or_insert(block);
+        }
+    }
+    drawn
+}
+
 /// What a write says of the file it made, before the file is on disk: its
 /// [`SaveRecord`] but for the file's stamp and checksum, which the write to
 /// disk gives.
@@ -227,6 +274,7 @@ pub struct OutputRecord {
     pub present: Arc<BitSet>,
     pub roots: Arc<RootValues>,
     pub tree: Arc<TreeShape>,
+    pub drawn: Arc<DrawnBlocks>,
     pub transforms: Arc<[SaveTransform]>,
 }
 
@@ -250,7 +298,7 @@ impl OutputRecord {
             present: self.present,
             roots: self.roots,
             tree: self.tree,
-            drawn: Arc::default(),
+            drawn: self.drawn,
             transforms: self.transforms,
             pending_tail: None,
         }
@@ -390,7 +438,9 @@ pub const CATALOG_OWNED: &[&[u8]] = &[
     b"AcroForm",
     b"Version",
     b"SheafGenerators",
-    // The header and footer's settings, until slice 17's generators.
+    // Where an older sheaf kept its header and footer's settings: owned,
+    // and never written, so a save leaves its text out of the file (a
+    // header sheaf drew is in `/SheafGenerators` now).
     b"SheafHeaderFooter",
 ];
 pub const ACROFORM_OWNED: &[&[u8]] = &[
@@ -516,17 +566,14 @@ impl TreeShape {
 }
 
 /// What a save writes from: the state of the version it writes, the
-/// source it opened on and the derived copies its pages may show, and the
-/// saved side it writes after, when there's one, with the keys changed on
-/// the way.
+/// source it opened on, and the saved side it writes after, when there's
+/// one, with the keys changed on the way.
 #[derive(Clone)]
 pub struct SaveInput {
     pub version: VersionId,
     pub target: DocState,
     /// The primary: the file a Rewrite writes onto.
     pub primary: Src,
-    /// Which pages each derived copy was made from (until slice 17).
-    pub derived: Arc<DerivedCopies>,
     pub saved: Option<SavedSide>,
     /// The keys any step changed on the history tree's path from the saved
     /// version to this one (M10.5 §7.2), which the planner judges by value
@@ -550,7 +597,6 @@ impl SaveInput {
             version: snap.version,
             target: snap.state.clone(),
             primary: snap.primary.clone(),
-            derived: snap.derived.clone(),
             saved: None,
             path_keys: Arc::default(),
         }

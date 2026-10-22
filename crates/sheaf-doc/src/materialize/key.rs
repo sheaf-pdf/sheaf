@@ -37,10 +37,8 @@ pub enum ObjKey {
     /// its own number when it's the primary's and `copy` is 0, otherwise
     /// copied. For an object a page's annotations reach, `copy` is the
     /// page's [`PageDef::copy`](crate::PageDef::copy), which counts the
-    /// copies of a page across every insert of its bytes (for a derived
-    /// copy's page, which is written as the page it was made from, the
-    /// copy of that page it is); what its content and resources reach is
-    /// copy 0, shared by every copy of the page. For one a form instance
+    /// copies of a page across every insert of its bytes; what its content
+    /// and resources reach is copy 0, shared by every copy of the page. For one a form instance
     /// reaches, it's the instance's [`FormInst::copy`](crate::FormInst),
     /// fixed as it was made.
     Base {
@@ -68,8 +66,8 @@ pub enum ObjKey {
     /// itself): a font's descendant, descriptor and program.
     ResPart(ResId, u32),
     /// A stream of content sheaf draws on a page, by its digest: a
-    /// generator's block, or an OCR layer or a header and footer, in their
-    /// legacy shape until slices 17 and 18. Identical ones are one object.
+    /// generator's block, or an OCR layer, in its legacy shape until slice
+    /// 18. Identical ones are one object.
     Block(u128),
     /// A name tree of the catalog's `/Names` a save builds: the document
     /// scripts of forms that came in from other files beside the primary's.

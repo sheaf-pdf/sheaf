@@ -26,6 +26,7 @@ mod export;
 mod export_dialog;
 mod file_dialog;
 mod form_bar;
+mod generator_dialog;
 mod goto;
 mod groups;
 mod header_footer_dialog;

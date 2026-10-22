@@ -56,7 +56,6 @@ use std::sync::Arc;
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat};
 
 use super::Cx;
-use super::annots::derived;
 use crate::annot::AnnotId;
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::materialize::copy::Scope;
@@ -188,14 +187,8 @@ pub(crate) fn prepare(cx: &mut Cx) -> Plan {
         .filter(|src| src.id() != primary)
         .collect();
     let file = cx.primary.form();
-    // An overlay over a derived copy draws the records' widgets, not the
-    // copy's copies of them, and its form lists only theirs: the copy's own
-    // fields, every one of the file's, would have PDFium load them all
-    // (until slice 17).
-    let copied = cx.overlay.is_some() && derived(cx.primary);
-    let modeled = copied
-        || file.facts.damaged.is_none()
-            && (file.fields.is_empty() || st.form().names.contains_key(&own));
+    let modeled = file.facts.damaged.is_none()
+        && (file.fields.is_empty() || st.form().names.contains_key(&own));
     let mut plan = Plan {
         merged,
         split,

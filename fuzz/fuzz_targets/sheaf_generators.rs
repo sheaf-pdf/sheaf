@@ -1,6 +1,7 @@
-//! A file's watermarks and backgrounds on any bytes, found as an open
-//! finds them: its catalog's `/SheafGenerators` read, its pages' streams'
-//! markers, its images and pages bound to what its blocks draw, and each
+//! A file's generators (watermarks, backgrounds, headers and footers) on
+//! any bytes, found as an open finds them: its catalog's
+//! `/SheafGenerators` read, its pages' streams' markers and their Bates
+//! numbers, its images and pages bound to what its blocks draw, and each
 //! laid out on its first pages.
 
 #![no_main]

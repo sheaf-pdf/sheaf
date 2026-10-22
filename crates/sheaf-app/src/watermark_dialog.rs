@@ -12,8 +12,12 @@
 //! now ([`draw_preview`]), off the UI thread, again at each change of the
 //! settings and each change the document goes through
 //! ([`WatermarkDialog::follow`]), and the page realized from the state that
-//! leaves, as the screen draws it.
+//! leaves, as the screen draws it. It says what others drew of its kind on
+//! the selected pages, or all of them, which applying replaces and Remove
+//! takes off, counted once off the UI thread as it opens
+//! (`generator_dialog::Count`; proposal 31, D61).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,7 +27,7 @@ use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
     Subscription, Window, div, prelude::*, px,
 };
-use sheaf_doc::model::{ImageRef, PageForm, Scope, WatermarkContent as Drawn};
+use sheaf_doc::model::{ImageRef, PageForm, WatermarkContent as Drawn, WatermarkGen};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::LowerCx;
 use sheaf_doc::{Blob, DocState, Document, Snapshot, Src, Store, ViewInputs};
@@ -39,6 +43,7 @@ use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
 
 use crate::dialog_preview::{Preview, drawn_width, why};
+use crate::generator_dialog::{Count, FAMILIES, FONTS, STYLES, counted_pages, font_at, scope_text};
 use crate::jobs::Previewer;
 use crate::{DialogCancel, DialogNext, DialogPrev, DialogRun};
 
@@ -53,37 +58,6 @@ const COLORS: [(Color, &str); 5] = [
 ];
 const ROTATIONS: [f32; 4] = [0.0, 45.0, 90.0, -45.0];
 const OPACITIES: [f32; 5] = [0.1, 0.25, 0.5, 0.75, 1.0];
-
-/// The faces text is drawn in, by family (a row) and style (a column).
-const FAMILIES: [&str; 3] = ["Helvetica", "Times", "Courier"];
-const STYLES: [&str; 4] = ["Regular", "Bold", "Italic", "Bold Italic"];
-const FONTS: [[FontChoice; 4]; 3] = [
-    [
-        FontChoice::Helvetica,
-        FontChoice::HelveticaBold,
-        FontChoice::HelveticaOblique,
-        FontChoice::HelveticaBoldOblique,
-    ],
-    [
-        FontChoice::TimesRoman,
-        FontChoice::TimesBold,
-        FontChoice::TimesItalic,
-        FontChoice::TimesBoldItalic,
-    ],
-    [
-        FontChoice::Courier,
-        FontChoice::CourierBold,
-        FontChoice::CourierOblique,
-        FontChoice::CourierBoldOblique,
-    ],
-];
-
-/// `font`'s family and style, as [`FONTS`] has them.
-fn font_at(font: FontChoice) -> (usize, usize) {
-    (FONTS.iter().enumerate())
-        .find_map(|(family, row)| Some((family, row.iter().position(|&f| f == font)?)))
-        .unwrap_or((0, 1))
-}
 
 /// Each names pages of the version the dialog opened on
 /// ([`WatermarkDialog::opened`]).
@@ -111,6 +85,9 @@ pub struct WatermarkContext {
     /// and what the preview is drawn with.
     pub lower: Arc<LowerCx>,
     pub previewer: Previewer,
+    /// The selected pages (0-based), which the dialog counts others' on:
+    /// none for all of them.
+    pub selected: Vec<usize>,
 }
 
 impl WatermarkContext {
@@ -272,6 +249,9 @@ pub struct WatermarkDialog {
     art: Option<Art>,
     /// Remove takes the author's own off too.
     include_authored: bool,
+    /// What others drew of its kind on the pages `counted_on` names.
+    count: Count,
+    counted_on: String,
     /// The field with focus, for Tab.
     at: usize,
     error: Option<String>,
@@ -336,21 +316,13 @@ impl Start {
     /// What `st`'s watermark at `z` sets, from the defaults there.
     fn at(st: &DocState, z: Z) -> Start {
         let start = Start::new(z);
-        let Some(wm) = st.watermark(z).and_then(|g| g.spec.watermark()) else {
+        let Some((g, wm)) = st.watermark(z).and_then(|g| Some((g, g.spec.watermark()?))) else {
             return start;
-        };
-        let pages = match &wm.scope {
-            Scope::All => String::new(),
-            Scope::Pages(pages) => {
-                let mut at: Vec<usize> = pages.iter().filter_map(|&p| st.pos_of(p)).collect();
-                at.sort_unstable();
-                crate::insert_dialog::ranges_text(&at)
-            }
         };
         let start = Start {
             current: true,
             position: wm.position,
-            pages,
+            pages: scope_text(st, &g.scope),
             ..start
         };
         let kept = |page, placed| Some(Art::Kept { page, placed });
@@ -437,6 +409,9 @@ impl WatermarkDialog {
             Kind::Image => F_SCALE,
         };
         window.focus(&fields[at].read(cx).focus_handle(cx), cx);
+        let (pages, counted_on) = counted_pages(&ctx.opened, &ctx.selected);
+        let kinds = BTreeSet::from([WatermarkGen::kind_at(ctx.z)]);
+        let count = Count::begin(&ctx.opened, kinds, pages, |d: &mut Self| &mut d.count, cx);
         let mut d = Self {
             focus: cx.focus_handle(),
             now: ctx.opened.clone(),
@@ -450,6 +425,8 @@ impl WatermarkDialog {
             position: start.position,
             art: start.art,
             include_authored: false,
+            count,
+            counted_on,
             ctx,
             at,
             error: None,
@@ -795,10 +772,11 @@ impl Render for WatermarkDialog {
             cx.notify();
         }))
         .into_any_element();
-        let (title, note) = match self.ctx.z {
-            Z::Over => ("Watermark", "in front of the page's content"),
-            Z::Under => ("Background", "behind the page's content"),
+        let (title, note, what) = match self.ctx.z {
+            Z::Over => ("Watermark", "in front of the page's content", "watermark"),
+            Z::Under => ("Background", "behind the page's content", "background"),
         };
+        let found = dialog::subtitle(self.count.said(&self.counted_on, what)).into_any_element();
         let message = match (&self.error, &self.preview.failed) {
             (Some(e), _) | (None, Some(e)) => Some(dialog::message(e.clone(), true)),
             (None, None) => None,
@@ -841,6 +819,7 @@ impl Render for WatermarkDialog {
                             format!("of {} (empty: all)", self.ctx.page_count()),
                         ),
                     ))
+                    .child(row("Found", found))
                     .child(row("Remove", authored))
                     .children(message)
                     .child(row("Preview", picture))

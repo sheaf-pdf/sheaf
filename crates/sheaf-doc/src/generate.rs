@@ -1,38 +1,45 @@
 //! What a generator draws on a page (M10.5 §3.5): a watermark or
-//! background, laid out when a save writes the page, on the page as it
-//! shows (its visible box, turned as the page is turned), so it stays
-//! upright through a turn and on the page's own boxes through a crop.
+//! background, or the header and footer, laid out when a save writes the
+//! page, on the page as it shows (its visible box, turned as the page is
+//! turned), so it stays upright through a turn and on the page's own boxes
+//! through a crop.
 //!
-//! - [`layout`]: a watermark's content on one page, a [`Drawn`]: an
-//!   `/Artifact` whose property list (`/Type /Pagination /Subtype
-//!   /Watermark` or `/Background`, and `/SheafGen` naming the generator) is
-//!   named in the page's `/Properties`, its graphics state isolated in
-//!   `q`…`Q`. Text is in its [`FontChoice`]'s standard 14 face (a
+//! - [`layout`]: a generator's content on one page, a [`Drawn`]: an
+//!   `/Artifact` whose property list (`/Type /Pagination`, its kind's
+//!   `/Subtype`, and `/SheafGen` naming the generator) is named in the
+//!   page's `/Properties`, its graphics state isolated in `q`…`Q`. A
+//!   watermark's text is in its [`FontChoice`]'s standard 14 face (a
 //!   character the face can't draw is `?`); an image or a PDF's page is
 //!   [`Art`] the emitter gives it, `scale` of the page's width wide. It's
 //!   placed in a cell of a 3×3 grid over the page, 36 pt in from a side it
-//!   keeps to, its rotated bounding box inside.
-//!   [`layout_digest`] is its digest alone (`/L`), what a block laid out
-//!   alike again is told by.
-//! - [`recipe_digest`]: what a watermark draws on each page it's on, which
+//!   keeps to, its rotated bounding box inside. The header and footer's
+//!   slots are each an artifact of their own, `/Header` or `/Footer`, their
+//!   text in the spec's face along the page as it shows, their tokens read
+//!   of the page [`PageCtx`] says ([`header`]). [`layout_digest`] is its
+//!   digest alone (`/L`), what a block laid out alike again is told by.
+//! - [`recipe_digest`]: what a generator draws on each page it's on, which
 //!   its blocks say they were drawn from (`/R`).
 //! - [`catalog_json`]: what the catalog's `/SheafGenerators` says of the
-//!   document's watermarks, from which an open finds them again: versioned
+//!   document's generators, from which an open finds them again: versioned
 //!   JSON, its specs without paths or object numbers (an image or a page is
 //!   `"placed"`, the XObject its blocks draw, with the digest of the
-//!   resource it was drawn as and an image's turns).
+//!   resource it was drawn as and an image's turns), a header's date and
+//!   file; its Bates numbers are its blocks' (`/N`).
 //! - [`read`]: what an open finds ([`Saved`]): the generators
 //!   `/SheafGenerators` says there are, on the pages whose streams'
 //!   markers name them (empty blocks too), an image or a page bound to the
-//!   XObject a block of it draws. [`unfit`] says what a watermark can't
-//!   draw, for an op and for what's read.
+//!   XObject a block of it draws, a header's Bates numbers its blocks'.
+//!   [`unfit`] and [`header::unfit`] say what a generator can't draw, for
+//!   an op and for what's read.
+//! - [`header`]: the header and footer's slots, their tokens read on a
+//!   page and placed on it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use lopdf::{LazyPdf, Object, ObjectId, StringFormat, dictionary};
+use lopdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat, dictionary};
 use serde::{Deserialize, Serialize};
-use sheaf_edit::{FontChoice, GridPos, Z};
+use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Z};
 
 use crate::annot::{Box2, Pt};
 use crate::content::{
@@ -42,8 +49,8 @@ use crate::content::{
 use crate::geom::{Affine, Geom, Rect};
 use crate::materialize::emit::catalog::GENERATORS;
 use crate::model::{
-    DocState, GenSpec, Generator, ImageRef, PageForm, PageId, Placed, Scope, WatermarkContent,
-    WatermarkGen,
+    DocState, Frozen, GenSpec, Generator, ImageRef, PageCtx, PageForm, PageId, Placed, Scope,
+    WatermarkContent, WatermarkGen,
 };
 use crate::source::{ObjRef, Source};
 use crate::store::Src;
@@ -84,21 +91,15 @@ pub enum Art {
 const EDGE: f32 = 36.0;
 
 /// Text's height, for placing it: about Helvetica's cap height, a part of
-/// its size.
+/// its size, and taken for every Std14 face's.
 const CAP_HEIGHT: f32 = 0.72;
 
-/// Watermark `wm`, generator `id`'s, on a page of `geom`, its image or
-/// page `art` (None for text, or one that can't be had, which draws
-/// nothing); the names it draws with kept clear of `reserved`, those the
-/// page's resources bind already.
-pub fn layout(
-    id: GenId,
-    wm: &WatermarkGen,
-    geom: &Geom,
-    art: Option<&Art>,
-    reserved: &Reserved,
-) -> Drawn {
-    let drawn = write(id, wm, geom, art, |out| {
+/// Generator `g` on the page `ctx` says, a watermark's image or page `art`
+/// (None for text, or one that can't be had, which draws nothing); the
+/// names it draws with kept clear of `reserved`, those the page's
+/// resources bind already. Empty where it draws nothing.
+pub fn layout(g: &Generator, ctx: &PageCtx, art: Option<&Art>, reserved: &Reserved) -> Drawn {
+    let drawn = write(g, ctx, art, |out| {
         let (ops, res) = out.named(reserved, &[]);
         Drawn {
             ops: ops.into(),
@@ -111,8 +112,8 @@ pub fn layout(
 
 /// [`layout`]'s digest alone: what a block of it there says it is
 /// (`/L`), with no names to choose.
-pub fn layout_digest(id: GenId, wm: &WatermarkGen, geom: &Geom, art: Option<&Art>) -> u128 {
-    write(id, wm, geom, art, digest).unwrap_or_else(|| Drawn::empty().layout_digest)
+pub fn layout_digest(g: &Generator, ctx: &PageCtx, art: Option<&Art>) -> u128 {
+    write(g, ctx, art, digest).unwrap_or_else(|| Drawn::empty().layout_digest)
 }
 
 /// A digest of what `out` draws: its content named as though no page's
@@ -128,7 +129,84 @@ fn digest(out: &ContentWriter) -> u128 {
 
 /// What [`layout`] writes, handed to `done`: None when it draws nothing.
 fn write<R>(
-    id: GenId,
+    g: &Generator,
+    ctx: &PageCtx,
+    art: Option<&Art>,
+    done: impl FnOnce(&ContentWriter) -> R,
+) -> Option<R> {
+    match &g.spec {
+        GenSpec::Watermark(wm) => watermark(g, wm, &ctx.geom, art, done),
+        GenSpec::HeaderFooter(hf) => header_footer(g, hf, ctx, done),
+    }
+}
+
+/// The list a generator's artifact of `kind` is marked with: named in the
+/// page's `/Properties`, it says whose it is.
+fn list(g: &Generator, kind: PaginationKind) -> Dictionary {
+    dictionary! {
+        "Type" => "Pagination",
+        "Subtype" => Object::Name(kind.name().to_vec()),
+        "SheafGen" => Object::String(g.id.to_string().into_bytes(), StringFormat::Literal),
+    }
+}
+
+/// Header and footer `hf`, generator `g`'s, on the page `ctx` says, handed
+/// to `done`: each slot that isn't blank there an artifact of its own,
+/// marked as the header's or the footer's, its text in `hf`'s face along
+/// the page as it shows, its baseline where [`header::layout`] places it.
+/// None when every slot is blank there.
+fn header_footer<R>(
+    g: &Generator,
+    hf: &HeaderFooterSpec,
+    ctx: &PageCtx,
+    done: impl FnOnce(&ContentWriter) -> R,
+) -> Option<R> {
+    let face = Std14::from(hf.font);
+    let lines = header::layout(hf, &g.frozen, ctx, &face);
+    if lines.is_empty() {
+        return None;
+    }
+    // The page as shown to user space: where its x axis and its up (its y
+    // axis down) go.
+    let to_user = ctx.geom.from_view();
+    let o = to_user.apply(Pt { x: 0.0, y: 0.0 });
+    let ex = to_user.apply(Pt { x: 1.0, y: 0.0 });
+    let ey = to_user.apply(Pt { x: 0.0, y: 1.0 });
+    let mut out = ContentWriter::new();
+    for line in &lines {
+        let kind = match line.header {
+            true => PaginationKind::Header,
+            false => PaginationKind::Footer,
+        };
+        let at = to_user.apply(Pt {
+            x: line.x,
+            y: line.baseline,
+        });
+        out.begin_marked("Artifact", list(g, kind));
+        out.save();
+        out.begin_text();
+        out.fill_color(Color::rgb8(hf.color));
+        out.font(&face, line.size);
+        out.text_matrix(Affine {
+            a: ex.x - o.x,
+            b: ex.y - o.y,
+            c: o.x - ey.x,
+            d: o.y - ey.y,
+            e: at.x,
+            f: at.y,
+        });
+        out.text(&line.text);
+        out.end_text();
+        out.restore();
+        out.end_marked();
+    }
+    Some(done(&out))
+}
+
+/// Watermark `wm`, generator `g`'s, on a page of `geom`, its image or page
+/// `art`, handed to `done`: None when it draws nothing.
+fn watermark<R>(
+    g: &Generator,
     wm: &WatermarkGen,
     geom: &Geom,
     art: Option<&Art>,
@@ -188,14 +266,8 @@ fn write<R>(
         return None;
     }
     let frame = frame(geom, wm.position, w, h, angle);
-    let kind = WatermarkGen::kind_at(wm.z);
-    let props = dictionary! {
-        "Type" => "Pagination",
-        "Subtype" => Object::Name(kind.name().to_vec()),
-        "SheafGen" => Object::String(id.to_string().into_bytes(), StringFormat::Literal),
-    };
     let mut out = ContentWriter::new();
-    out.begin_marked("Artifact", props);
+    out.begin_marked("Artifact", list(g, WatermarkGen::kind_at(g.z)));
     out.save();
     out.gstate(GState {
         fill_alpha: Some(opacity),
@@ -366,11 +438,33 @@ fn turned(turns: u8, w: f32, h: f32) -> Affine {
     Affine { a, b, c, d, e, f }
 }
 
-/// What watermark `wm` draws on each page it's on, the render key's digest
-/// of it.
+/// What generator `g` draws on a page, the render key's digest of it.
 pub(crate) use crate::realize::recipe_digest;
 
-/// The catalog's `/SheafGenerators`, the document's watermarks as JSON in
+/// What generator `g`'s layout reads of page `id` of `st`, at place
+/// `position`, its boxes and turn `geom`: its label only when its tokens
+/// read it, and its Bates number, fixed when it was set.
+pub(crate) fn page_ctx(
+    st: &DocState,
+    g: &Generator,
+    id: PageId,
+    position: usize,
+    geom: &Geom,
+) -> PageCtx {
+    let label = match g.needs().label {
+        true => st.label_of(id).unwrap_or_default(),
+        false => Arc::default(),
+    };
+    PageCtx {
+        geom: *geom,
+        position: position as u32,
+        count: st.page_count() as u32,
+        label,
+        bates: g.frozen.bates_number(id),
+    }
+}
+
+/// The catalog's `/SheafGenerators`, the document's generators as JSON in
 /// ASCII: None when it has none. `drawn_as` says what each image or page
 /// is drawn as: its resource's digest, and the quarter turns an image
 /// shows upright at.
@@ -379,7 +473,7 @@ pub fn catalog_json(
     mut drawn_as: impl FnMut(&WatermarkContent) -> (ResId, u8),
 ) -> Option<Vec<u8>> {
     let generators: Vec<StoredGen> = (st.generators().values())
-        .filter_map(|g| Some(StoredGen::of(g.id, g.spec.watermark()?, &mut drawn_as)))
+        .map(|g| StoredGen::of(g, &mut drawn_as))
         .collect();
     if generators.is_empty() {
         return None;
@@ -412,12 +506,17 @@ struct StoredGen {
     scope: StoredScope,
     replaces: Vec<StoredPagination>,
     spec: StoredSpec,
+    /// What a header and footer fixed when it was set, but its Bates
+    /// numbers, which are its blocks' (`/N`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frozen: Option<StoredFrozen>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 enum StoredKind {
     Watermark,
+    HeaderFooter,
 }
 
 /// The pages it's on: every page, or those whose blocks name it.
@@ -448,10 +547,27 @@ impl StoredPagination {
     }
 }
 
+/// What it draws: a watermark's content and place, or a header and
+/// footer's spec, its face said.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct StoredSpec {
+#[serde(untagged)]
+enum StoredSpec {
+    Watermark(StoredWatermark),
+    HeaderFooter(HeaderFooterSpec),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct StoredWatermark {
     content: StoredContent,
     position: GridPos,
+}
+
+/// What a header and footer's `<<date>>` and `<<file>>` say.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct StoredFrozen {
+    date: String,
+    file: String,
 }
 
 /// What it draws: an image or a page is the XObject its blocks draw.
@@ -510,60 +626,81 @@ impl StoredArt {
 }
 
 impl StoredGen {
-    fn of(
-        id: GenId,
-        wm: &WatermarkGen,
-        drawn_as: &mut impl FnMut(&WatermarkContent) -> (ResId, u8),
-    ) -> StoredGen {
-        let content = match &wm.content {
-            WatermarkContent::Text {
-                text,
-                font,
-                size,
-                color,
-                opacity,
-                angle,
-            } => StoredContent::Text {
-                text: text.to_string(),
-                font: *font,
-                size: *size,
-                color: *color,
-                opacity: *opacity,
-                angle: *angle,
-            },
-            WatermarkContent::Image { scale, opacity, .. } => StoredContent::Image {
-                image: StoredArt::of(drawn_as(&wm.content)),
-                scale: *scale,
-                opacity: *opacity,
-            },
-            WatermarkContent::Page { scale, opacity, .. } => StoredContent::Page {
-                pdf: StoredArt::of(drawn_as(&wm.content)),
-                scale: *scale,
-                opacity: *opacity,
-            },
+    fn of(g: &Generator, drawn_as: &mut impl FnMut(&WatermarkContent) -> (ResId, u8)) -> StoredGen {
+        let (kind, spec, frozen) = match &g.spec {
+            GenSpec::Watermark(wm) => {
+                let content = match &wm.content {
+                    WatermarkContent::Text {
+                        text,
+                        font,
+                        size,
+                        color,
+                        opacity,
+                        angle,
+                    } => StoredContent::Text {
+                        text: text.to_string(),
+                        font: *font,
+                        size: *size,
+                        color: *color,
+                        opacity: *opacity,
+                        angle: *angle,
+                    },
+                    WatermarkContent::Image { scale, opacity, .. } => StoredContent::Image {
+                        image: StoredArt::of(drawn_as(&wm.content)),
+                        scale: *scale,
+                        opacity: *opacity,
+                    },
+                    WatermarkContent::Page { scale, opacity, .. } => StoredContent::Page {
+                        pdf: StoredArt::of(drawn_as(&wm.content)),
+                        scale: *scale,
+                        opacity: *opacity,
+                    },
+                };
+                let spec = StoredWatermark {
+                    content,
+                    position: wm.position,
+                };
+                (StoredKind::Watermark, StoredSpec::Watermark(spec), None)
+            }
+            GenSpec::HeaderFooter(hf) => {
+                let frozen = StoredFrozen {
+                    date: g.frozen.date.to_string(),
+                    file: g.frozen.file.to_string(),
+                };
+                let spec = StoredSpec::HeaderFooter(HeaderFooterSpec::clone(hf));
+                (StoredKind::HeaderFooter, spec, Some(frozen))
+            }
         };
         StoredGen {
-            id: id.to_string(),
-            kind: StoredKind::Watermark,
-            z: wm.z,
-            scope: match wm.scope {
+            id: g.id.to_string(),
+            kind,
+            z: g.z,
+            scope: match g.scope {
                 Scope::All => StoredScope::All,
                 Scope::Pages(_) => StoredScope::Pages,
             },
-            replaces: (wm.replaces.iter())
+            replaces: (g.replaces.iter())
                 .map(|&kind| StoredPagination::of(kind))
                 .collect(),
-            spec: StoredSpec {
-                content,
-                position: wm.position,
-            },
+            spec,
+            frozen,
+        }
+    }
+
+    /// The kinds of pagination artifact one of its kind at its z replaces,
+    /// as sheaf writes it: a watermark's or background's own, a header and
+    /// footer's both.
+    fn replacing(&self) -> Vec<StoredPagination> {
+        match self.kind {
+            StoredKind::Watermark => vec![StoredPagination::of(WatermarkGen::kind_at(self.z))],
+            StoredKind::HeaderFooter => vec![StoredPagination::Header, StoredPagination::Footer],
         }
     }
 }
 
-/// A watermark or background a file's `/SheafGenerators` and its pages'
-/// blocks say sheaf drew on it (§3.5), as [`read`] finds it: what an open
-/// makes a generator of ([`Saved::generator`]).
+/// A generator a file's `/SheafGenerators` and its pages' blocks say sheaf
+/// drew on it (§3.5), as [`read`] finds it: what an open makes a generator
+/// of ([`Saved::generator`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Saved {
     pub id: GenId,
@@ -575,12 +712,88 @@ pub struct Saved {
     /// The XObject its image or page is: the one its first block that
     /// draws one draws.
     placed: Option<ObjectId>,
+    /// A header's Bates numbers, by page index: its blocks' (`/N`).
+    numbers: BTreeMap<u32, u64>,
+    /// Its blocks in streams of their own that say both digests, in order:
+    /// each one's page, by index, its stream, and its layout's and recipe's
+    /// digests (`/L`, `/R`).
+    blocks: Vec<(u32, ObjectId, u128, u128)>,
+    /// The pages a header with Bates numbers is on whose blocks another
+    /// tool merged into a stream of the page's, which keeps no number.
+    unnumbered: Vec<u32>,
 }
 
 impl Saved {
     /// It as a generator of a document whose pages of `src`, its file, are
-    /// `page` by index: None when none of the pages it's on is one.
+    /// `page` by index: None when none of the pages it's on is one. A
+    /// header's Bates numbers are on the pages its blocks number.
     pub fn generator(&self, src: &Src, page: impl Fn(u32) -> Option<PageId>) -> Option<Generator> {
+        let scope = match &self.pages {
+            None => Scope::All,
+            Some(pages) => {
+                let on: im::OrdSet<PageId> = pages.iter().filter_map(|&i| page(i)).collect();
+                if on.is_empty() {
+                    return None;
+                }
+                Scope::Pages(on)
+            }
+        };
+        let stored = &self.stored;
+        let (spec, frozen) = match &stored.spec {
+            StoredSpec::Watermark(wm) => {
+                let spec = WatermarkGen {
+                    content: self.content(src, &wm.content)?,
+                    position: wm.position,
+                };
+                (GenSpec::Watermark(Arc::new(spec)), Frozen::default())
+            }
+            StoredSpec::HeaderFooter(hf) => {
+                let bates = hf.bates.as_ref().map(|_| {
+                    let numbers = self.numbers.iter();
+                    Arc::new(numbers.filter_map(|(&i, &n)| Some((page(i)?, n))).collect())
+                });
+                let frozen = stored.frozen.as_ref();
+                let frozen = Frozen {
+                    date: frozen.map_or("", |f| &f.date).into(),
+                    file: frozen.map_or("", |f| &f.file).into(),
+                    bates,
+                };
+                (GenSpec::HeaderFooter(Arc::new(hf.clone())), frozen)
+            }
+        };
+        // What [`read`] checks it says.
+        let replaces = match &spec {
+            GenSpec::Watermark(_) => BTreeSet::from([WatermarkGen::kind_at(stored.z)]),
+            GenSpec::HeaderFooter(_) => header::kinds(),
+        };
+        Some(Generator {
+            id: self.id,
+            spec,
+            z: stored.z,
+            scope,
+            frozen,
+            replaces,
+        })
+    }
+
+    /// The pages of its file, by index and in order, that a header with
+    /// Bates numbers is on but whose numbers can't be read: another tool
+    /// merged their blocks into a stream of the page's (§3.5).
+    pub fn unnumbered(&self) -> &[u32] {
+        &self.unnumbered
+    }
+
+    /// Its blocks in streams of their own that say both their digests: each
+    /// one's page, by index, its stream, and its layout's and recipe's
+    /// digests. What the opened file's record says it drew
+    /// ([`drawn_of`](crate::materialize::record::drawn_of)).
+    pub fn blocks(&self) -> &[(u32, ObjectId, u128, u128)] {
+        &self.blocks
+    }
+
+    /// A watermark's content as `stored` says it, its image or page the
+    /// XObject a block of it draws in `src`.
+    fn content(&self, src: &Src, stored: &StoredContent) -> Option<WatermarkContent> {
         let placed = |art: &StoredArt| {
             Some(Placed {
                 at: ObjRef {
@@ -591,7 +804,7 @@ impl Saved {
                 turns: art.turns % 4,
             })
         };
-        let content = match &self.stored.spec.content {
+        Some(match stored {
             StoredContent::Text {
                 text,
                 font,
@@ -625,48 +838,28 @@ impl Saved {
                 scale: *scale,
                 opacity: *opacity,
             },
-        };
-        let scope = match &self.pages {
-            None => Scope::All,
-            Some(pages) => {
-                let on: im::OrdSet<PageId> = pages.iter().filter_map(|&i| page(i)).collect();
-                if on.is_empty() {
-                    return None;
-                }
-                Scope::Pages(on)
-            }
-        };
-        let stored = &self.stored;
-        let wm = WatermarkGen {
-            content,
-            position: stored.spec.position,
-            z: stored.z,
-            scope,
-            // What [`read`] checks it says.
-            replaces: BTreeSet::from([WatermarkGen::kind_at(stored.z)]),
-        };
-        Some(Generator {
-            id: self.id,
-            spec: GenSpec::Watermark(Arc::new(wm)),
         })
     }
 }
 
-/// The watermarks and backgrounds sheaf drew on `src` (§3.5): what its
-/// catalog's `/SheafGenerators` says each is, on the pages whose blocks
-/// name it: by their streams' markers ([`Source::markers`]), and on a page
-/// holding no block in a stream of its own whose resources name a list of
-/// sheaf's, by the ranges its content marks, where another tool merged a
-/// block into a stream of its own. One said to be on every page that a page whose
+/// The generators sheaf drew on `src` (§3.5): what its catalog's
+/// `/SheafGenerators` says each is, on the pages whose blocks name it: by
+/// their streams' markers ([`Source::markers`]), and on a page holding no
+/// block in a stream of its own whose resources name a list of sheaf's,
+/// by the ranges its content marks, where another tool merged a block into
+/// a stream of its own. One said to be on every page that a page whose
 /// content can be read holds no block of, as when another tool added the
 /// page, is on the pages that hold one. An image or a page is the XObject
 /// a block of it draws in a stream of its own, named in its page's
-/// resources. Passed over, each with a log line: JSON that isn't the
-/// version sheaf writes; a generator that can't be read, whose id isn't
-/// one, that says what it draws or replaces in a way sheaf wouldn't, is on
-/// some pages but none holds a block of it, or whose image or page no
-/// block draws; a second of an id or a z. Never at open: a file's whole
-/// page table is read here, in [`crate::open::finish`].
+/// resources. A header's Bates numbers are its blocks' (`/N`); a page whose
+/// block another tool merged has none, which is logged and which a save
+/// notes. Passed over, each with a log line: JSON that isn't the version
+/// sheaf writes; a generator that can't be read, whose id isn't one, that
+/// says what it draws, its z or what it replaces in a way sheaf wouldn't,
+/// is on some pages but none holds a block of it, or whose image or page
+/// no block draws; a second of an id, or of its kind at its z (a second
+/// header). Never at open: a file's whole page table is read here, in
+/// [`crate::open::finish`].
 pub fn read(src: &Source) -> Vec<Saved> {
     let pdf = src.pdf();
     let Some(json) = stored_json(pdf) else {
@@ -693,15 +886,28 @@ pub fn read(src: &Source) -> Vec<Saved> {
             return Vec::new();
         }
     };
-    // Each generator's blocks in streams of their own: its pages, and the
-    // stream on each; and the pages each holds a block on, merged too.
-    let mut blocks: BTreeMap<GenId, Vec<(u32, ObjectId)>> = BTreeMap::new();
+    // Each generator's blocks in streams of their own; and the pages each
+    // holds a block on, merged too, and those only merged.
+    let mut blocks: BTreeMap<GenId, Vec<Block>> = BTreeMap::new();
     let mut holding: BTreeMap<GenId, BTreeSet<u32>> = BTreeMap::new();
+    let mut merged_on: BTreeMap<GenId, Vec<u32>> = BTreeMap::new();
     for index in 0..src.page_count() {
         let markers = src.markers(index);
         for &(stream, marker) in markers.iter() {
-            if let Marker::Gen { id, .. } = marker {
-                blocks.entry(id).or_default().push((index, stream));
+            if let Marker::Gen {
+                id,
+                layout,
+                recipe,
+                number,
+            } = marker
+            {
+                let block = Block {
+                    index,
+                    stream,
+                    number,
+                    digests: layout.zip(recipe),
+                };
+                blocks.entry(id).or_default().push(block);
                 holding.entry(id).or_default().insert(index);
             }
         }
@@ -709,10 +915,11 @@ pub fn read(src: &Source) -> Vec<Saved> {
         if !streams && names_a_list(src, index) {
             for id in merged(src, index) {
                 holding.entry(id).or_default().insert(index);
+                merged_on.entry(id).or_default().push(index);
             }
         }
     }
-    let mut zs = BTreeSet::new();
+    let mut kinds = BTreeSet::new();
     let mut found = Vec::new();
     for g in stored.generators {
         let g: StoredGen = match serde_json::from_value(g) {
@@ -726,7 +933,24 @@ pub fn read(src: &Source) -> Vec<Saved> {
             log::warn!("/SheafGenerators names a generator {:?}", g.id);
             continue;
         };
-        if g.replaces != [StoredPagination::of(WatermarkGen::kind_at(g.z))] {
+        // A header and footer is over the page's content, and says what it
+        // fixed.
+        let fits = match (&g.kind, &g.spec) {
+            (StoredKind::Watermark, StoredSpec::Watermark(_)) => true,
+            (StoredKind::HeaderFooter, StoredSpec::HeaderFooter(_)) => {
+                g.z == Z::Over && g.frozen.is_some()
+            }
+            _ => false,
+        };
+        if !fits {
+            log::warn!(
+                "generator {id} isn't a {:?} as sheaf writes one at {:?}",
+                g.kind,
+                g.z
+            );
+            continue;
+        }
+        if g.replaces != g.replacing() {
             log::warn!("generator {id} replaces {:?}", g.replaces);
             continue;
         }
@@ -754,14 +978,23 @@ pub fn read(src: &Source) -> Vec<Saved> {
             log::warn!("generator {id} is on no page");
             continue;
         }
-        let placed = match &g.spec.content {
-            StoredContent::Text { .. } => None,
-            StoredContent::Image { image: art, .. } | StoredContent::Page { pdf: art, .. } => {
+        let placed = match &g.spec {
+            StoredSpec::Watermark(StoredWatermark {
+                content: StoredContent::Text { .. },
+                ..
+            })
+            | StoredSpec::HeaderFooter(_) => None,
+            StoredSpec::Watermark(StoredWatermark {
+                content:
+                    content @ (StoredContent::Image { image: art, .. }
+                    | StoredContent::Page { pdf: art, .. }),
+                ..
+            }) => {
                 if art.res().is_none() {
                     log::warn!("generator {id}'s image or page says {:?}", art.placed);
                     continue;
                 }
-                let subtype = match g.spec.content {
+                let subtype = match content {
                     StoredContent::Image { .. } => b"Image".as_slice(),
                     _ => b"Form",
                 };
@@ -772,22 +1005,66 @@ pub fn read(src: &Source) -> Vec<Saved> {
             log::warn!("generator {id}'s image or page isn't drawn by a block of it");
             continue;
         }
-        if let Some(why) = unfit_values(g.spec.content.values()) {
+        let unfit = match &g.spec {
+            StoredSpec::Watermark(wm) => unfit_values(wm.content.values()),
+            StoredSpec::HeaderFooter(hf) => header::unfit(hf),
+        };
+        if let Some(why) = unfit {
             log::warn!("generator {id} can't be drawn: {why}");
             continue;
         }
-        if found.iter().any(|f: &Saved| f.id == id) || !zs.insert(g.z) {
-            log::warn!("generator {id} is a second of its id or at its z");
+        if found.iter().any(|f: &Saved| f.id == id) || !kinds.insert((g.kind, g.z)) {
+            log::warn!("generator {id} is a second of its id, or of its kind at its z");
             continue;
         }
+        let numbered = match &g.spec {
+            StoredSpec::HeaderFooter(hf) => hf.bates.is_some(),
+            StoredSpec::Watermark(_) => false,
+        };
+        let numbers: BTreeMap<u32, u64> = (on.iter())
+            .filter(|_| numbered)
+            .filter_map(|b| Some((b.index, b.number?)))
+            .collect();
+        let unnumbered: Vec<u32> = match numbered {
+            true => merged_on.remove(&id).unwrap_or_default(),
+            false => Vec::new(),
+        };
+        if let Some(&first) = unnumbered.first() {
+            log::warn!(
+                "{} pages of header {id}, from page {}, hold its blocks merged into their \
+                 content, whose Bates numbers can't be read",
+                unnumbered.len(),
+                first + 1
+            );
+        }
+        let blocks = (on.iter())
+            .filter_map(|b| {
+                let (layout, recipe) = b.digests?;
+                Some((b.index, b.stream, layout, recipe))
+            })
+            .collect();
         found.push(Saved {
             id,
             pages,
             stored: g,
             placed: placed.flatten(),
+            numbers,
+            unnumbered,
+            blocks,
         });
     }
     found
+}
+
+/// A generator's block in a stream of its own, as its marker says it.
+struct Block {
+    /// Its page, by index.
+    index: u32,
+    stream: ObjectId,
+    /// Its Bates number (`/N`).
+    number: Option<u64>,
+    /// Its layout's and recipe's digests (`/L`, `/R`), when it says both.
+    digests: Option<(u128, u128)>,
 }
 
 /// Whether page `index` of `src` names a list of sheaf's generators' in
@@ -829,14 +1106,13 @@ fn stored_json(pdf: &LazyPdf) -> Option<Vec<u8>> {
     Some(json.as_str().ok()?.to_vec())
 }
 
-/// The XObject the first of `blocks` (pages by index, and the stream on
-/// each) that draws one draws, when its page's resources name it and it's
-/// of `subtype` (`/Image` or `/Form`).
-fn rebind(src: &Source, blocks: &[(u32, ObjectId)], subtype: &[u8]) -> Option<ObjectId> {
+/// The XObject the first of `blocks` that draws one draws, when its page's
+/// resources name it and it's of `subtype` (`/Image` or `/Form`).
+fn rebind(src: &Source, blocks: &[Block], subtype: &[u8]) -> Option<ObjectId> {
     let lim = src.limits();
     let pdf = src.pdf();
-    blocks.iter().find_map(|&(index, block)| {
-        let stream = pdf.object_unkept(block).ok()?;
+    blocks.iter().find_map(|&Block { index, stream, .. }| {
+        let stream = pdf.object_unkept(stream).ok()?;
         let data = (stream.as_stream().ok()?)
             .decompressed_content_with_limit(lim.content.decompressed)
             .ok()?;
@@ -975,5 +1251,6 @@ fn ascii(json: &str) -> Vec<u8> {
 
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
+pub mod header;
 #[cfg(test)]
 mod tests;

@@ -9,8 +9,7 @@
 //! Each step keeps what it did ([`StepEffects`]): its effects, judged
 //! against the state its op found, and the pages and slots it touched,
 //! for the History panel's badge and, from slices 12–13, previews,
-//! approvals and the realizer. A generator's live redraw comes with slice
-//! 17.
+//! approvals and the realizer.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
@@ -26,8 +25,8 @@ use crate::content::{GenId, PagOrigin, PaginationKind};
 use crate::forms::{FieldId, Value};
 use crate::labels::LabelSpec;
 use crate::model::{
-    AnnotBody, AnnotRec, Bookmark, DocState, FieldNode, Filter, Foreign, GenSpec, Generator, Layer,
-    PageDef, PageId, Scope, Static, Terminal, WatermarkContent, WatermarkGen, Widget,
+    AnnotBody, AnnotRec, Bookmark, CtxNeeds, DocState, FieldNode, Filter, Foreign, GenSpec,
+    Generator, Layer, PageDef, PageId, Scope, Static, Terminal, WatermarkContent, Widget,
 };
 use crate::prim::{Key, Prim, Val, same};
 use crate::store::BlobId;
@@ -50,8 +49,9 @@ bitflags! {
         /// tape rows or author, a field's name or a value it held, a
         /// bookmark's title, a label prefix, OCR words, a header's text.
         const REPLACES_TEXT = 1 << 6;
-        /// A generator's live tokens laid out again under the same recipe,
-        /// which appends (slice 17).
+        /// A generator's live tokens laid out again under the same recipe:
+        /// a reorder or a label change under a header that numbers pages.
+        /// It appends.
         const LIVE_REDRAW = 1 << 7;
         const ANNOTS = 1 << 8;
         const FIELD_VALUES = 1 << 9;
@@ -537,8 +537,10 @@ fn judged(
 ) -> Result<Effects, Misfit> {
     Ok(match key {
         Key::Order => match (orders(before)?, orders(after)?) {
-            (Some(_), Some(_)) if cx.step => Effects::of(Flags::PAGE_ORDER, SigClass::OTHER),
-            (Some(a), Some(b)) => order(a, b),
+            (Some(_), Some(_)) if cx.step => {
+                Effects::of(Flags::PAGE_ORDER, SigClass::OTHER) | redrawn(cx, CtxNeeds::order)
+            }
+            (Some(a), Some(b)) => order(a, b) | redrawn(cx, CtxNeeds::order),
             _ => return Err(Misfit),
         },
         Key::Page(_) => page(pages(before)?, pages(after)?, cx, found),
@@ -549,9 +551,21 @@ fn judged(
         Key::Annot(_) => annot(annots(before)?, annots(after)?, found),
         Key::Field(_) => field(fields(before)?, fields(after)?, found),
         Key::Form => Effects::of(Flags::FORM, SigClass::OTHER),
-        Key::Labels => page_labels(labels(before)?, labels(after)?, found),
+        Key::Labels => {
+            page_labels(labels(before)?, labels(after)?, found) | redrawn(cx, |n| n.label)
+        }
         Key::Generator(_) => generator(generators(before)?, generators(after)?, cx, found),
     })
+}
+
+/// A generator's live tokens laid out again (§3.5): `LIVE_REDRAW` when a
+/// generator of the target's reads, of where its pages are, what `reads`
+/// says changed. It appends: only where a page is changes what it draws.
+fn redrawn(cx: &ClassifyCx, reads: fn(CtxNeeds) -> bool) -> Effects {
+    match (cx.target.generators().values()).any(|g| reads(g.needs())) {
+        true => Effects::of(Flags::LIVE_REDRAW, SigClass::OTHER),
+        false => Effects::NONE,
+    }
 }
 
 /// A new order: pages added and removed, by its difference from the old.
@@ -932,11 +946,12 @@ fn page_labels(
 }
 
 /// A generator added, changed or removed. One that was drawn in the saved
-/// file, gone, takes what it drew with it; so does a watermark drawing
-/// another text, image or page, or on fewer pages, and a header/footer
-/// changed at all. A watermark only laid out otherwise is drawn again
-/// (§7.1). One that replaces others' artifacts on pages of the saved file
-/// that drew them takes those off ([`replaced`]).
+/// file, gone, takes what it drew with it; so does one that draws
+/// otherwise ([`unsaid`]): a watermark another text, image or page, a
+/// header and footer other text, and either on fewer pages. One only laid
+/// out otherwise is drawn again (§7.1). One that replaces others'
+/// artifacts on pages of the saved file that drew them takes those off
+/// ([`replaced`]).
 fn generator(
     a: Option<&Arc<Generator>>,
     b: Option<&Arc<Generator>>,
@@ -950,13 +965,11 @@ fn generator(
     let flags = match (a, b) {
         (None, None) => Flags::empty(),
         (None, Some(_)) => Flags::CONTENT,
-        (Some(a), b) => match (&a.spec, b.map(|b| &b.spec)) {
-            (GenSpec::Watermark(was), Some(GenSpec::Watermark(now))) if !unsaid(was, now, cx) => {
-                Flags::CONTENT
-            }
-            (GenSpec::Watermark(was), _) => {
+        (Some(a), Some(b)) if !unsaid(a, b, cx) => Flags::CONTENT,
+        (Some(a), b) => match &a.spec {
+            GenSpec::Watermark(was) => {
                 let text = matches!(was.content, WatermarkContent::Text { .. });
-                let kind = match was.z {
+                let kind = match a.z {
                     Z::Over => RemovedKind::Watermark { text },
                     Z::Under => RemovedKind::Background { text },
                 };
@@ -967,7 +980,7 @@ fn generator(
                 };
                 drawn(b) | Flags::REMOVES | replaced
             }
-            (GenSpec::HeaderFooter(_), _) => {
+            GenSpec::HeaderFooter(_) => {
                 found.removed(RemovedKind::HeaderFooter, 1);
                 drawn(b) | Flags::REMOVES | Flags::REPLACES_TEXT
             }
@@ -983,7 +996,7 @@ fn generator(
     Effects::of(flags | others, SigClass::OTHER)
 }
 
-/// How many pages of the saved file watermark `b` takes others' artifacts
+/// How many pages of the saved file generator `b` takes others' artifacts
 /// off as it's drawn there now (§7.1's `replaces` row): those it covers
 /// that showed the same base page then, which holds pagination artifacts
 /// of a kind it replaces and the saved state's generators there didn't,
@@ -992,14 +1005,14 @@ fn generator(
 /// their sources keep once read: judging a save's path reads them, and a
 /// step's never does, judging what one step did in O(what it touched).
 fn replaced(b: Option<&Arc<Generator>>, cx: &ClassifyCx) -> usize {
-    let Some(wm) = b.and_then(|g| g.spec.watermark()) else {
+    let Some(g) = b else {
         return 0;
     };
-    if cx.step || wm.replaces.is_empty() {
+    if cx.step || g.replaces.is_empty() {
         return 0;
     }
     let origins = BTreeSet::from(PagOrigin::REPLACED);
-    let pages: Box<dyn Iterator<Item = &PageId>> = match &wm.scope {
+    let pages: Box<dyn Iterator<Item = &PageId>> = match &g.scope {
         Scope::All => Box::new(cx.target.order().iter()),
         Scope::Pages(on) => Box::new(on.iter()),
     };
@@ -1012,9 +1025,9 @@ fn replaced(b: Option<&Arc<Generator>>, cx: &ClassifyCx) -> usize {
             continue;
         }
         let saved_replaced = |k: &PaginationKind| {
-            (cx.saved.generators().values()).any(|g| g.covers(p) && g.replaces().contains(k))
+            (cx.saved.generators().values()).any(|g| g.covers(p) && g.replaces.contains(k))
         };
-        let kinds: BTreeSet<PaginationKind> = (wm.replaces.iter())
+        let kinds: BTreeSet<PaginationKind> = (g.replaces.iter())
             .filter(|k| !saved_replaced(k))
             .copied()
             .collect();
@@ -1032,16 +1045,30 @@ fn replaced(b: Option<&Arc<Generator>>, cx: &ClassifyCx) -> usize {
     n
 }
 
-/// Whether watermark `was`, become `now`, no longer draws something it
-/// drew: another text, image or page, or not on a page it was on that's
-/// still a page. Where it is, how big, turned, colored or see-through it
-/// is, and its z, are how it's laid out.
-fn unsaid(was: &WatermarkGen, now: &WatermarkGen, cx: &ClassifyCx) -> bool {
+/// Whether generator `was`, become `now`, no longer draws something it
+/// drew: a watermark another text, image or page; a header and footer
+/// other text (its slots, its first page number, its Bates numbering, or
+/// what its date, its file or a page's Bates number say); or either not
+/// on a page it was on that's still a page. Where it is, how big, turned,
+/// colored or see-through it is, its face, and its z, are how it's laid
+/// out.
+fn unsaid(was: &Generator, now: &Generator, cx: &ClassifyCx) -> bool {
     use WatermarkContent as C;
-    let another = match (&was.content, &now.content) {
-        (C::Text { text: a, .. }, C::Text { text: b, .. }) => a != b,
-        (C::Image { image: a, .. }, C::Image { image: b, .. }) => a != b,
-        (C::Page { page: a, .. }, C::Page { page: b, .. }) => a != b,
+    let another = match (&was.spec, &now.spec) {
+        (GenSpec::Watermark(a), GenSpec::Watermark(b)) => match (&a.content, &b.content) {
+            (C::Text { text: a, .. }, C::Text { text: b, .. }) => a != b,
+            (C::Image { image: a, .. }, C::Image { image: b, .. }) => a != b,
+            (C::Page { page: a, .. }, C::Page { page: b, .. }) => a != b,
+            _ => true,
+        },
+        (GenSpec::HeaderFooter(a), GenSpec::HeaderFooter(b)) => {
+            a.texts != b.texts
+                || a.first_number != b.first_number
+                || a.bates != b.bates
+                || was.frozen.date != now.frozen.date
+                || was.frozen.file != now.frozen.file
+                || renumbered(was, now, cx)
+        }
         _ => true,
     };
     let off = |on: &im::OrdSet<PageId>, p: &PageId| !on.contains(p) && cx.target.def(*p).is_some();
@@ -1051,6 +1078,24 @@ fn unsaid(was: &WatermarkGen, now: &WatermarkGen, cx: &ClassifyCx) -> bool {
             (Scope::All, Scope::Pages(on)) => cx.saved.order().iter().any(|p| off(on, p)),
             (Scope::Pages(was), Scope::Pages(on)) => was.iter().any(|p| off(on, p)),
         }
+}
+
+/// Whether header `was`, become `now`, says another Bates number, or none,
+/// on a page still in the document that it numbered.
+fn renumbered(was: &Generator, now: &Generator, cx: &ClassifyCx) -> bool {
+    let Some(numbers) = &was.frozen.bates else {
+        return false;
+    };
+    if now
+        .frozen
+        .bates
+        .as_ref()
+        .is_some_and(|b| Arc::ptr_eq(b, numbers))
+    {
+        return false;
+    }
+    (numbers.iter())
+        .any(|(&p, &n)| cx.target.def(p).is_some() && now.frozen.bates_number(p) != Some(n))
 }
 
 /// Adds the full names of the fields a change to `key` touches to `names`,

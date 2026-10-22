@@ -67,12 +67,12 @@ pub fn sheaf_annot(data: &[u8]) {
     }
 }
 
-/// `data` opened as a source, and the watermarks and backgrounds sheaf
-/// drew on it found as an open finds them: from its catalog's
-/// `/SheafGenerators` and the markers of its pages' streams, its images
-/// and pages bound to the XObjects their blocks draw. Each is made a
-/// generator of the pages it's on, and laid out as the realizer lays it
-/// out to tell whether a page's block is it, on its first pages.
+/// `data` opened as a source, and the generators sheaf drew on it found as
+/// an open finds them: from its catalog's `/SheafGenerators` and the
+/// markers of its pages' streams, its images and pages bound to the
+/// XObjects their blocks draw, a header's Bates numbers its blocks'. Each
+/// is made a generator of the pages it's on, and laid out as the realizer
+/// lays it out to tell whether a page's block is it, on its first pages.
 pub fn sheaf_generators(data: &[u8]) {
     let kind = BlobKind::file(Path::new("fuzzed.pdf"), None);
     let Ok(src) = Store::new().open(data.into(), kind) else {
@@ -86,7 +86,14 @@ pub fn sheaf_generators(data: &[u8]) {
             continue;
         };
         for i in 0..src.page_count().min(8) {
-            let _ = crate::materialize::emit::content::model_layout_digest(&g, &src.geom(i));
+            let ctx = crate::model::PageCtx {
+                geom: src.geom(i),
+                position: i,
+                count: src.page_count(),
+                label: (i + 1).to_string().into(),
+                bates: g.frozen.bates_number(PageId(u64::from(i))),
+            };
+            let _ = crate::materialize::emit::content::model_digest(&g, &ctx);
         }
     }
 }
@@ -216,12 +223,12 @@ thread_local! {
 /// [`op_json`]'s document: four pages, a form with every kind of field on
 /// the first two, sheaf's marks of every kind on the third, and on the
 /// fourth another tool's comment with a reply; bookmarks, roman labels on
-/// the first two pages and a header on the last two. The names the Op
-/// JSON fixture's references use are there (`Part I › Ch. 2`, `Appendix`,
-/// `a1b2-c3`, `acro-1`, `sheaf:12`). Read once, opened afresh each time,
-/// with the files its ops are granted: a stamp's page, an attachment's
-/// file and a file of two pages as assets 0, 1 and 2, and one of a page
-/// as `logo`.
+/// the first two pages and a header an older sheaf drew on the last two.
+/// The names the Op JSON fixture's references use are there
+/// (`Part I › Ch. 2`, `Appendix`, `a1b2-c3`, `acro-1`, `sheaf:12`). Read
+/// once, opened afresh each time, with the files its ops are granted: a
+/// stamp's page, an attachment's file and a file of two pages as assets 0,
+/// 1 and 2, and one of a page as `logo`.
 #[cfg(any(test, feature = "fixtures"))]
 struct OpJson {
     store: Arc<Store>,
@@ -237,7 +244,6 @@ impl OpJson {
             Form, MARK_FILE_BYTES, every_kind_in, every_mark_kind, holding, mark_stamp_pdf,
             outline_tree, write_marks,
         };
-        use crate::model::PageId;
         let mut f = every_kind_in(4);
         let pages = f.pages.clone();
         let mut third = f.dict(pages[2]).clone();
@@ -277,16 +283,11 @@ impl OpJson {
         ];
         f.dict(catalog)
             .set("PageLabels", dictionary! { "Nums" => labels });
-        let mut texts: [String; 6] = Default::default();
-        texts[0] = "Draft <<1>>".into();
-        let hf = crate::stamps::HeaderFooter {
-            texts,
-            pages: Some(vec![PageId(2), PageId(3)]),
-            ..Default::default()
-        };
-        let ids: Vec<PageId> = (0..4).map(PageId).collect();
-        let scope = crate::stamps::to_catalog(&hf, &ids);
-        f.dict(catalog).set(crate::stamps::CATALOG_KEY, scope);
+        for &page in &pages[2..] {
+            let mut dict = f.dict(page).clone();
+            crate::generate::fixture::legacy_header(&mut f.pdf, &mut dict);
+            *f.dict(page) = dict;
+        }
         let store = Store::new();
         let kind = BlobKind::file(Path::new("form.pdf"), None);
         let primary = store
@@ -743,7 +744,8 @@ mod tests {
 
     /// [`sheaf_generators`]' fixtures: files sheaf saved with a watermark of
     /// each kind on every page and a background on some, text over an image,
-    /// and a PDF's page over text.
+    /// and a PDF's page over text; and a header and footer, of page numbers
+    /// and Bates numbers on every page, then of labels on some.
     fn generator_fixtures() -> Vec<Vec<u8>> {
         use sheaf_edit::{BlobSel, GridPos, WatermarkContent, WatermarkSpec, Z};
         let image = crate::materialize::watermark_tests::png();
@@ -767,14 +769,21 @@ mod tests {
             scale: 0.5,
             opacity: 0.5,
         });
+        let mut numbered = crate::tx::fixture::header("Page <<1>> of <<N>>");
+        numbered.texts[5] = "<<bates>>".into();
+        numbered.bates = Some(sheaf_edit::BatesSpec::default());
+        let numbered = crate::tx::fixture::set_header(numbered, None);
+        let labeled = crate::tx::fixture::header("<<label>> <<date>>");
+        let labeled = crate::tx::fixture::set_header(labeled, Some(&[second]));
         let mut out = Vec::new();
-        for (over, under) in [
-            (crate::tx::fixture::watermark("DRAFT"), image),
-            (page, crate::tx::fixture::watermark("under")),
+        for (over, under, header) in [
+            (crate::tx::fixture::watermark("DRAFT"), image, numbered),
+            (page, crate::tx::fixture::watermark("under"), labeled),
         ] {
             let ops = vec![
                 crate::tx::fixture::set_watermark(over, Z::Over, None),
                 crate::tx::fixture::set_watermark(under, Z::Under, Some(&[second])),
+                header,
             ];
             d.commit_ops(ops, "watermark").unwrap();
             out.push(crate::materialize::How::Rewritten.write(&d));
@@ -782,7 +791,8 @@ mod tests {
         out
     }
 
-    /// Unmutated, the generators' fixtures are found again, both of each.
+    /// Unmutated, the generators' fixtures are found again, all three of
+    /// each, a header's Bates numbers too.
     #[test]
     fn the_generator_fixtures_are_found() {
         for fixture in generator_fixtures() {
@@ -790,8 +800,18 @@ mod tests {
             let src = Store::new().open(fixture.as_slice().into(), kind).unwrap();
             let found = src.generators();
             let pages: Vec<Option<Vec<u32>>> = found.iter().map(|g| g.pages.clone()).collect();
-            assert_eq!(found.len(), 2, "{pages:?}");
+            assert_eq!(found.len(), 3, "{pages:?}");
             assert!(pages.contains(&None) && pages.contains(&Some(vec![1])));
+            let page = |i: u32| Some(PageId(u64::from(i)));
+            let headers: Vec<_> = (found.iter())
+                .filter_map(|s| s.generator(&src, page))
+                .filter(|g| g.spec.header_footer().is_some())
+                .collect();
+            let [header] = &headers[..] else {
+                panic!("one header: {pages:?}")
+            };
+            let numbers = header.frozen.bates.as_deref().map(|b| b.len());
+            assert!(matches!(numbers, Some(3) | None), "{numbers:?}");
             for saved in found.iter() {
                 assert!(
                     saved
@@ -1071,6 +1091,7 @@ mod tests {
             },
             Op::RemoveHeaderFooter {
                 pages: positions("2"),
+                include_authored: false,
             },
             Op::SetWatermark {
                 spec: WatermarkSpec {

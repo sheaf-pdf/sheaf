@@ -287,7 +287,7 @@ fn a_pdfium_resave_keeps_the_watermark_found() {
         let st = d.state();
         let g = st.watermark(z).unwrap();
         let wm = g.spec.watermark().unwrap();
-        let on = match g.scope().as_ref() {
+        let on = match &g.scope {
             sheaf_doc::model::Scope::All => None,
             sheaf_doc::model::Scope::Pages(pages) => Some(
                 pages

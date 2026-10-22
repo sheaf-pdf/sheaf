@@ -1,5 +1,6 @@
 //! A header removed by splicing leaves the rest of the page as it drew:
-//! an Acrobat header is stripped (`stamps::strip`), and PDFium renders
+//! an Acrobat header is taken out as `RemoveHeaderFooter`'s filter takes
+//! it ([`PageBlocks::selected`] over [`splice_each`]), and PDFium renders
 //! every pixel outside the header's box as before. Once drawn between the
 //! body's text objects, and once as Acrobat lays it out: a `q` before the
 //! page's content, and the header after it, opening with the `Q` that
@@ -7,12 +8,15 @@
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_doc::content::{DrawnForms, PagOrigin, PageBlocks, PaginationKind, contents};
+use sheaf_doc::content::{
+    DrawnForms, PagOrigin, PageBlocks, PageContent, PaginationKind, ResCx, contents, splice_each,
+};
 use sheaf_doc::source::Limits;
-use sheaf_doc::stamps;
 use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_render::PageIndex;
@@ -69,6 +73,37 @@ fn page(streams: &[&[u8]]) -> (Pdf, ObjectId) {
     (pdf, page)
 }
 
+/// The headers and footers Acrobat or an older sheaf drew taken off page
+/// `page` of `pdf`, as `RemoveHeaderFooter`'s filter takes them: each
+/// stream that changes written anew, the rest as they were. Whether all
+/// of them were.
+fn strip(pdf: &mut Pdf, page: ObjectId) -> bool {
+    let lim = Limits::DEFAULT;
+    let mut dict = pdf.get_dictionary(page).unwrap().clone();
+    let content = PageContent::read(pdf, &contents(&dict), &lim).unwrap();
+    let resources = dict.get(b"Resources").ok();
+    let blocks = PageBlocks::of(pdf, &content, resources, &lim, &DrawnForms::default()).unwrap();
+    let res = ResCx::read(pdf, resources);
+    let kinds = BTreeSet::from([PaginationKind::Header, PaginationKind::Footer]);
+    let origins = BTreeSet::from(PagOrigin::REPLACED);
+    let groups: Vec<_> = (blocks.selected(&kinds, &origins))
+        .map(|p| p.cuts(content.concat(), &res, &lim).unwrap())
+        .collect();
+    let spliced = splice_each(content.concat(), &res, &lim, &groups);
+    let Some(streams) = spliced.streams(content.concat(), &[]) else {
+        return false;
+    };
+    let entries: Vec<Object> = (content.ids().iter().zip(streams))
+        .map(|(&id, stream)| match stream {
+            Cow::Borrowed(_) => id.into(),
+            Cow::Owned(bytes) => pdf.add_object(Stream::new(dictionary! {}, bytes)).into(),
+        })
+        .collect();
+    dict.set("Contents", entries);
+    pdf.objects.insert(page, Object::Dictionary(dict));
+    spliced.taken.iter().all(|&taken| taken)
+}
+
 fn render(pdf: &mut Pdf) -> Raster {
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
@@ -109,14 +144,14 @@ fn acrobats_header_keeps_the_q_it_opens_with() {
     ]);
 }
 
-/// The page of `streams` with its header stripped: every pixel outside
+/// The page of `streams` with its header taken out: every pixel outside
 /// the header's box as before, the header gone, and the body drawn.
 fn stripped_leaves_the_rest(streams: &[&[u8]]) {
     let (mut pdf, page) = page(streams);
-    let mut dict = pdf.get_dictionary(page).unwrap().clone();
+    let dict = pdf.get_dictionary(page).unwrap();
     let blocks = PageBlocks::read(
         &pdf,
-        &contents(&dict),
+        &contents(dict),
         dict.get(b"Resources").ok(),
         &Limits::DEFAULT,
         &DrawnForms::default(),
@@ -130,8 +165,7 @@ fn stripped_leaves_the_rest(streams: &[&[u8]]) {
     assert_eq!(found, [(PaginationKind::Header, PagOrigin::Acrobat)]);
 
     let before = render(&mut pdf);
-    assert!(stamps::strip(&mut pdf, &mut dict, 0).unwrap());
-    pdf.objects.insert(page, Object::Dictionary(dict));
+    assert!(strip(&mut pdf, page));
     let after = render(&mut pdf);
     assert_eq!((before.width, before.height), (W, H));
     assert_eq!((after.width, after.height), (W, H));

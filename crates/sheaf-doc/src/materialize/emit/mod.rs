@@ -5,12 +5,11 @@
 //! the same state, sources and previous map give the same objects in the
 //! same order, from any thread.
 //!
-//! - [`pages`]: each page's dictionary, from its base page's, read lazily;
-//!   a derived copy's page as the page it was made from ([`Shown`]).
-//! - [`content`]: what sheaf draws on a page: the watermarks and
-//!   backgrounds around its own content, isolated, with resources of its
-//!   own; OCR text and the header and footer through the legacy
-//!   installers.
+//! - [`pages`]: each page's dictionary, from its base page's, read lazily
+//!   ([`Shown`]).
+//! - [`content`]: what sheaf draws on a page: the generators around its
+//!   own content, isolated, with resources of its own; OCR text through
+//!   the legacy installer.
 //! - [`tree`]: the balanced page tree a Rewrite writes, and the saved
 //!   file's tree an Append splices the pages into.
 //! - [`catalog`]: the catalog by its ownership table (§9.1), and
@@ -62,11 +61,11 @@
 //! watermarks, backgrounds, header and footer and recognized text unless it
 //! asks for them; and what it
 //! hides, or a mark being dragged, is written flagged hidden under its own
-//! key. A derived copy's page is the page the copy has: the section goes
-//! over the copy's bytes. An overlay's frame ([`EmitScope::Frame`]) is the
+//! key. An overlay's frame ([`EmitScope::Frame`]) is the
 //! root, the catalog and the form alone, without the pages, so the realizer
-//! can emit each page on its own and keep it (its delta), and build the
-//! frame over the pages it puts together.
+//! can emit each page on its own and keep it (its delta,
+//! [`EmitScope::Delta`]: the page without them), and build the frame over
+//! the pages it puts together.
 
 pub mod annots;
 pub mod catalog;
@@ -87,12 +86,12 @@ use lopdf::{Dictionary, Object, ObjectId};
 use super::copy::{Closure, Pages, Scope};
 use super::key::{NameTree, ObjKey};
 use super::plan::{Note, SaveTransform};
-use super::record::SaveRecord;
+use super::record::{DrawnBlocks, SaveRecord};
 use crate::annot::{Annot, AnnotId, StampForm};
 use crate::content::sink::{self, Sink};
-use crate::content::{Res, ResBody, ResId, Reserved};
+use crate::content::{GenId, Res, ResBody, ResId, Reserved};
 use crate::forms::field::annot_flags;
-use crate::model::{AnnotBody, DerivedCopies, DocState, FormRef, PageId};
+use crate::model::{AnnotBody, DocState, FormRef, PageId};
 use crate::realize::{MarkDraw, ViewInputs};
 use crate::source::ObjRef;
 use crate::store::{BlobId, Src};
@@ -115,9 +114,14 @@ pub struct Emission {
     /// Annotations of the base the emission leaves out. None yet: the
     /// pages' `/Annots` are the base's.
     pub removed_annots: Vec<ObjRef>,
-    /// Keys whose old content an Append may drop: live redraws (slice
-    /// 10's removal check). None yet.
-    pub allowed_drops: Vec<ObjKey>,
+    /// The saved file's blocks a save's section may unlink though they're
+    /// derived (§11.9): live redraws, each the block a generator drew on a
+    /// page that it lays out otherwise now from the same recipe, for where
+    /// the page is, the count or its label, or its boxes or turn.
+    pub allowed_drops: AllowedDrops,
+    /// A save's blocks of the generators on the pages it wrote (§9.1's
+    /// `drawn`).
+    pub drawn: DrawnBlocks,
     /// What the reader should be told about the written file.
     pub notes: Vec<Note>,
     /// The keys written at the number of the primary's object they are,
@@ -134,6 +138,49 @@ pub struct Emission {
     /// finds nothing new.
     pub form_keys: Vec<ObjKey>,
     pub form_touched: bool,
+}
+
+/// The live redraws a save's section makes (§11.9): what the removal
+/// check lets go. A page's block is content-addressed, so pages laid out
+/// alike share one, and a redraw on one page says nothing of another's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AllowedDrops {
+    /// The saved file's blocks that may go though they're derived: each a
+    /// block whose every page draws its generator again from the recipe it
+    /// was drawn from, laid out otherwise, or is gone. Not judged, as the
+    /// walk reaches them.
+    pub keys: Vec<ObjKey>,
+    /// The pages that draw a generator again from the recipe their saved
+    /// block of it was drawn from: what it drew there before isn't judged
+    /// on them.
+    pub redrawn: HashSet<(PageId, GenId)>,
+}
+
+impl AllowedDrops {
+    /// The blocks of `candidates`, each a saved block of `prior`'s that a
+    /// live redraw replaced on some page, that every page of `st` it was on
+    /// drew again (`redrawn`), or that `st` has none of.
+    fn of(
+        st: &DocState,
+        prior: Option<&DrawnBlocks>,
+        mut candidates: BTreeSet<ObjKey>,
+        redrawn: HashSet<(PageId, GenId)>,
+    ) -> AllowedDrops {
+        if let Some(prior) = prior.filter(|_| !candidates.is_empty()) {
+            for (&(page, g), block) in prior {
+                if candidates.contains(&block.key)
+                    && !redrawn.contains(&(page, g))
+                    && st.pos_of(page).is_some()
+                {
+                    candidates.remove(&block.key);
+                }
+            }
+        }
+        AllowedDrops {
+            keys: candidates.into_iter().collect(),
+            redrawn,
+        }
+    }
 }
 
 impl Emission {
@@ -179,19 +226,25 @@ pub enum EmitScope {
     /// An overlay's frame over its pages: the root that lists them, the
     /// catalog over it and the form of the fields with a widget on them,
     /// without the pages themselves, each of which the realizer emits on
-    /// its own ([`EmitScope::Pages`] of one).
+    /// its own ([`EmitScope::Delta`]).
     Frame(Arc<[PageId]>),
+    /// One page of an overlay without the frame: what [`EmitScope::Pages`]
+    /// of it alone writes but the root, the catalog and the form, which
+    /// the realizer's delta leaves out for the frame to write.
+    Delta(PageId),
 }
 
 /// What an emission is written onto.
 #[derive(Clone, Copy)]
 pub enum EmitBase<'a> {
     /// A whole new file over `primary`'s objects: every page placed in a
-    /// new tree, the root objects' unowned keys from the primary. A derived
-    /// copy's page is written as the page `derived` says it was made from.
+    /// new tree, the root objects' unowned keys from the primary. `drawn`
+    /// is what the saved file's blocks are, when it's known: a block of it
+    /// a generator draws otherwise now from the same recipe is a live
+    /// redraw ([`Emission::allowed_drops`]).
     Rewrite {
         primary: &'a Src,
-        derived: &'a DerivedCopies,
+        drawn: Option<&'a DrawnBlocks>,
     },
     /// The saved file an Append writes after, `primary` the file it was,
     /// as `record` says it is: the node each page written goes under, its
@@ -201,7 +254,6 @@ pub enum EmitBase<'a> {
     /// ([`Closure::relinked`](super::deps::Closure::relinked)).
     Saved {
         primary: &'a Src,
-        derived: &'a DerivedCopies,
         record: &'a SaveRecord,
         parents: &'a BTreeMap<PageId, ObjKey>,
         tree: Option<&'a tree::Spliced>,
@@ -332,20 +384,13 @@ impl fmt::Display for PdfVersion {
 }
 
 /// What a page is written as: the page of a file whose dictionary, keys
-/// and annotations it is, and as which copy of it; for a derived copy's
-/// page (a header stripped, a watermark), the page it was made from (M10
-/// bug 1), with the copy's page what it draws.
+/// and annotations it is, and as which copy of it
+/// ([`PageDef::copy`](crate::PageDef::copy)).
 #[derive(Clone)]
 pub(crate) struct Shown {
     pub(crate) src: Src,
     pub(crate) index: u32,
-    /// [`PageDef::copy`](crate::PageDef::copy); for a derived copy's page,
-    /// the lowest copy of its original, from its own up, that no other
-    /// page is.
     pub(crate) copy: u32,
-    /// A derived copy's page: its `/Contents` and `/Resources` are what
-    /// the page draws.
-    pub(crate) content: Option<(Src, u32)>,
 }
 
 /// What the emitters share while they emit.
@@ -369,9 +414,6 @@ pub(crate) struct Cx<'a> {
     pub(crate) closure: Closure<'a>,
     pub(crate) version: PdfVersion,
     pub(crate) notes: Vec<Note>,
-    /// Each page's Bates number, by its place, when the header and footer
-    /// counts them.
-    pub(crate) bates: Vec<Option<u64>>,
     /// [`Emission::owned`] so far, and the numbers it holds.
     owned: BTreeMap<ObjKey, ObjectId>,
     claimed: HashSet<ObjectId>,
@@ -397,7 +439,7 @@ pub(crate) struct Cx<'a> {
     /// The pages the generators covering them aren't drawn on, whose
     /// content can't be read.
     pub(crate) unread: Vec<PageId>,
-    /// The pages where others' watermarks or backgrounds that a filter or a
+    /// The pages where others' pagination artifacts that a filter or a
     /// generator's `replaces` takes out stay, as a splice refuses them, and
     /// how many on each.
     pub(crate) stayed: Vec<(PageId, usize)>,
@@ -410,6 +452,17 @@ pub(crate) struct Cx<'a> {
     pub(crate) by_src: HashMap<(BlobId, ObjectId, u32), AnnotId>,
     /// The connectors of each group, by label, in document order.
     pub(crate) groups: HashMap<String, Vec<(PageId, Annot)>>,
+    /// What the saved file's blocks are, for a save that knows: what a
+    /// block drawn now replaces.
+    pub(crate) prior: Option<&'a DrawnBlocks>,
+    /// [`Emission::drawn`] so far.
+    pub(crate) drawn: DrawnBlocks,
+    /// The saved blocks a live redraw replaced so far, each of them
+    /// allowed to go once every page it was on draws it again or is gone
+    /// ([`AllowedDrops::keys`]).
+    pub(crate) allowed: BTreeSet<ObjKey>,
+    /// [`AllowedDrops::redrawn`] so far.
+    pub(crate) redrawn: HashSet<(PageId, GenId)>,
 }
 
 impl<'a> Cx<'a> {
@@ -436,7 +489,6 @@ impl<'a> Cx<'a> {
             closure,
             version,
             notes: Vec::new(),
-            bates: Vec::new(),
             owned: BTreeMap::new(),
             claimed: HashSet::new(),
             made: HashSet::new(),
@@ -452,6 +504,10 @@ impl<'a> Cx<'a> {
             settings_kept: Vec::new(),
             by_src: HashMap::new(),
             groups: HashMap::new(),
+            prior: None,
+            drawn: HashMap::new(),
+            allowed: BTreeSet::new(),
+            redrawn: HashSet::new(),
         }
     }
 
@@ -761,48 +817,19 @@ fn part(cx: &mut Cx, obj: &Object, key: &dyn Fn(usize) -> ObjKey) -> Object {
     obj
 }
 
-/// What each page of `st`, its derived copies `derived`, is written as
-/// ([`Shown`]): itself, or for a derived copy's page the page it was made
-/// from, through copies of copies, as the copy whose number no other page
-/// of it has.
-pub(crate) fn shown(st: &DocState, derived_copies: &DerivedCopies) -> HashMap<PageId, Shown> {
-    let mut out = HashMap::new();
-    let mut taken = HashSet::new();
-    let mut derived = Vec::new();
-    for (id, def, _) in st.pages() {
-        let made_from = (origin(derived_copies, &def.base.src, def.base.index))
-            .filter(|(src, index)| src.page(*index).is_some());
-        match made_from {
-            Some(from) => derived.push((id, def, from)),
-            None => {
-                taken.insert((def.base.src.id(), def.base.index, def.copy));
-                let shown = Shown {
-                    src: def.base.src.clone(),
-                    index: def.base.index,
-                    copy: def.copy,
-                    content: None,
-                };
-                out.insert(id, shown);
-            }
-        }
-    }
-    for (id, def, (src, index)) in derived {
-        let mut copy = def.copy;
-        while !taken.insert((src.id(), index, copy)) {
-            copy += 1;
-        }
-        let content = Some((def.base.src.clone(), def.base.index));
-        out.insert(
-            id,
-            Shown {
-                src,
-                index,
-                copy,
-                content,
-            },
-        );
-    }
-    out
+/// What each page of `st` is written as ([`Shown`]): its base page, as
+/// its copy.
+pub(crate) fn shown(st: &DocState) -> HashMap<PageId, Shown> {
+    (st.pages())
+        .map(|(id, def, _)| {
+            let shown = Shown {
+                src: def.base.src.clone(),
+                index: def.base.index,
+                copy: def.copy,
+            };
+            (id, shown)
+        })
+        .collect()
 }
 
 /// The page of `st` each source page's copy is written as, shown as
@@ -824,27 +851,6 @@ pub(crate) fn written_pages(
     pages
 }
 
-/// The page page `index` of `src` was made from, when `src` is a derived
-/// copy (its [`Derived`](crate::Derived) record), through copies of
-/// copies: None for a page that isn't a copy's.
-fn origin(derived_copies: &DerivedCopies, src: &Src, index: u32) -> Option<(Src, u32)> {
-    let mut at: Option<(Src, u32)> = None;
-    let mut index = index;
-    let mut id = src.id();
-    // A chain longer than there are copies would be a loop.
-    for _ in 0..derived_copies.len() {
-        let Some(derived) = derived_copies.get(&id) else {
-            break;
-        };
-        let Some(&i) = derived.pages.get(index as usize) else {
-            break;
-        };
-        (id, index) = (derived.from.id(), i);
-        at = Some((derived.from.clone(), i));
-    }
-    at
-}
-
 /// `st` as `base` writes it, `scope` of it, with save policy's
 /// `transforms` applied, and `p` counting the pages and saying when to
 /// stop. A whole file is written as a Rewrite, some keys onto a saved
@@ -856,13 +862,12 @@ pub fn emit(
     transforms: &[SaveTransform],
     p: &dyn Progress,
 ) -> Result<Emission> {
-    let (primary, derived, keys, saved) = match (&scope, base) {
-        (EmitScope::All, EmitBase::Rewrite { primary, derived }) => (primary, derived, None, None),
+    let (primary, keys, saved, prior) = match (&scope, base) {
+        (EmitScope::All, EmitBase::Rewrite { primary, drawn }) => (primary, None, None, drawn),
         (
             EmitScope::Keys(keys),
             EmitBase::Saved {
                 primary,
-                derived,
                 record,
                 parents,
                 tree,
@@ -870,32 +875,28 @@ pub fn emit(
             },
         ) => (
             primary,
-            derived,
             Some(&**keys),
             Some((record, parents, tree, relinked)),
+            Some(&*record.drawn),
         ),
         (EmitScope::Pages(pages), EmitBase::Overlay(overlay)) => {
-            return emit_overlay(st, pages, overlay, true, p);
+            return emit_overlay(st, pages, overlay, (true, true), p);
         }
         (EmitScope::Frame(pages), EmitBase::Overlay(overlay)) => {
-            return emit_overlay(st, pages, overlay, false, p);
+            return emit_overlay(st, pages, overlay, (false, true), p);
+        }
+        (EmitScope::Delta(page), EmitBase::Overlay(overlay)) => {
+            return emit_overlay(st, &[*page], overlay, (true, false), p);
         }
         _ => bail!(
             "a whole file is a Rewrite, some keys go onto the saved file, and some pages over \
              their source"
         ),
     };
-    let shown = shown(st, derived);
+    let shown = shown(st);
     let pages = written_pages(st, &shown);
     let order: Vec<PageId> = st.order().iter().copied().collect();
-    let bates = match st.header_footer() {
-        Some(hf) => hf.bates_numbers(&order),
-        None => Vec::new(),
-    };
-    let srcs = (shown.values())
-        .flat_map(|page| {
-            std::iter::once(&page.src).chain(page.content.as_ref().map(|(src, _)| src))
-        })
+    let srcs = (shown.values().map(|page| &page.src))
         .chain([primary])
         .map(|src| (src.id(), src.clone()))
         .collect();
@@ -904,6 +905,7 @@ pub fn emit(
         closure.saved(record.map.clone(), relinked);
     }
     let mut cx = Cx::new(st, primary, closure, transforms);
+    cx.prior = prior;
     cx.append = keys
         .zip(saved)
         .map(|(keys, (record, parents, tree, _))| Append {
@@ -915,10 +917,9 @@ pub fn emit(
         });
     cx.srcs = srcs;
     cx.shown = shown;
-    cx.bates = bates;
     claim(&mut cx, &order);
     if cx.append.is_some() {
-        appended(&mut cx, &order, p)?;
+        appended(&mut cx, p)?;
     } else {
         p.set_total(Some(st.page_count() as u64), crate::PAGES);
         let shape = tree::balanced(&order);
@@ -929,21 +930,22 @@ pub fn emit(
             p.inc(1);
         }
         tree::nodes(&mut cx, &shape);
-        catalog::catalog(&mut cx, &order);
+        catalog::catalog(&mut cx);
     }
     finish(cx, p)
 }
 
 /// `pages` of `st`, each a page of `o`'s source, as overlay `o`'s section
 /// writes them over the source, `p` counting them: each page as its source
-/// page has it (a derived copy's page as the copy has it), under one root
-/// that lists them in order, and the catalog over that root. Without
-/// `with_pages`, the root and the catalog alone: the overlay's frame.
+/// page has it, under one root that lists them in order, and the catalog
+/// over that root. Without `with_pages`, the root and the catalog alone:
+/// the overlay's frame; without `with_frame`, the pages alone: a delta,
+/// each page's `/Parent` the root still, which the frame writes.
 fn emit_overlay(
     st: &DocState,
     pages: &[PageId],
     o: &Overlay,
-    with_pages: bool,
+    (with_pages, with_frame): (bool, bool),
     p: &dyn Progress,
 ) -> Result<Emission> {
     let mut shown = HashMap::with_capacity(pages.len());
@@ -956,7 +958,6 @@ fn emit_overlay(
             src: def.base.src.clone(),
             index: def.base.index,
             copy: def.copy,
-            content: None,
         };
         shown.insert(id, page);
     }
@@ -992,8 +993,10 @@ fn emit_overlay(
         pages::page(&mut cx, id, def, geom, pos, root)?;
         p.inc(1);
     }
-    tree::nodes(&mut cx, &tree::Shape::flat(pages));
-    catalog::overlay(&mut cx);
+    if with_frame {
+        tree::nodes(&mut cx, &tree::Shape::flat(pages));
+        catalog::overlay(&mut cx);
+    }
     finish(cx, p)
 }
 
@@ -1014,15 +1017,24 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
     if !cx.unread.is_empty() {
         let pages = crate::describe::pages_text(&cx.unread, cx.st);
         cx.notes.push(Note(format!(
-            "No watermark or background is drawn on {pages}, whose content can't be read."
+            "No watermark, background, header or footer is drawn on {pages}, whose content \
+             can't be read."
         )));
     }
     if !cx.stayed.is_empty() {
         let on: Vec<PageId> = cx.stayed.iter().map(|&(page, _)| page).collect();
         let pages = crate::describe::pages_text(&on, cx.st);
         let (n, stay, them) = match cx.stayed.iter().map(|&(_, n)| n).sum::<usize>() {
-            1 => ("1 watermark or background".to_string(), "stays", "it"),
-            n => (format!("{n} watermarks or backgrounds"), "stay", "them"),
+            1 => (
+                "1 watermark, background, header or footer".to_string(),
+                "stays",
+                "it",
+            ),
+            n => (
+                format!("{n} watermarks, backgrounds, headers or footers"),
+                "stay",
+                "them",
+            ),
         };
         cx.notes.push(Note(format!(
             "{n} other programs or files drew {stay} on {pages}: taking {them} out would change \
@@ -1057,12 +1069,14 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
     let aliases = cx.form.aliases().collect();
     let form_keys = std::mem::take(&mut cx.form.keys);
     let form_touched = cx.form.touched;
+    let allowed_drops = AllowedDrops::of(cx.st, cx.prior, cx.allowed, cx.redrawn);
     Ok(Emission {
         objects: cx.objects,
         syms: cx.syms,
         version: cx.version,
         removed_annots: Vec::new(),
-        allowed_drops: Vec::new(),
+        allowed_drops,
+        drawn: cx.drawn,
         notes: cx.notes,
         owned: cx.owned,
         aliases,
@@ -1077,8 +1091,8 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
 /// that changed; the form, the outline, the document scripts and the page
 /// labels when any of theirs is in scope; and the catalog when it is, or
 /// when the section needs a later version than the file is, or the form
-/// or the outline came or went. `order` is the pages'.
-fn appended(cx: &mut Cx, order: &[PageId], p: &dyn Progress) -> Result<()> {
+/// or the outline came or went.
+fn appended(cx: &mut Cx, p: &dyn Progress) -> Result<()> {
     let st = cx.st;
     let append = cx.append.as_ref().expect("an Append");
     let (keys, record, parents, spliced) =
@@ -1175,7 +1189,7 @@ fn appended(cx: &mut Cx, order: &[PageId], p: &dyn Progress) -> Result<()> {
             outline,
             scripts,
         };
-        catalog::appended(cx, order, parts);
+        catalog::appended(cx, parts);
     }
     Ok(())
 }
