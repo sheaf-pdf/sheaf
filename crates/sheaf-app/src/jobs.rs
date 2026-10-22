@@ -3,16 +3,17 @@
 //! - **Jobs** write files (Export Pages, Split Document), one at a time
 //!   ([`DocView::run_job`]).
 //! - **Planners** plan an edit off the UI thread, over a snapshot (an
-//!   insert, a crop, a watermark, a header and footer, a comment import,
-//!   the blank-page search), and land it on the UI thread, committed with
-//!   the snapshot's version as its base ([`DocView::run_planner`]). Any
-//!   number run at once, beside a job and OCR's own run; Escape stops the
-//!   newest.
+//!   insert, Trim White, a watermark's or a header and footer's removal, a
+//!   comment import, the blank-page search), and land it on the UI thread,
+//!   committed with the snapshot's version as its base
+//!   ([`DocView::run_planner`]). Any number run at once, beside a job and
+//!   OCR's own run; Escape stops the newest.
 
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use gpui::Context;
 use sheaf_doc::{PageId, Store};
 use sheaf_ops::views::Views;
@@ -357,13 +358,25 @@ impl DocView {
 }
 
 /// What a dialog draws its preview of the document with (M10.5 §8.6):
-/// the document's store, which a copy the preview makes goes into; the
-/// document's render worker, with a realizer of the dialog's own, since a
-/// preview's state is never the screen's; and the page it shows, the
-/// active pane's as it opened.
+/// the document's store, which a copy the preview makes, or a file the
+/// dialog reads for its edit to draw, goes into; the document's render
+/// worker, with a realizer of the dialog's own, since a preview's state is
+/// never the screen's; and the page it shows, the active pane's as it
+/// opened.
 #[derive(Clone)]
 pub(crate) struct Previewer {
     pub(crate) store: Arc<Store>,
     pub(crate) views: Views,
     pub(crate) page: PageId,
+}
+
+impl Previewer {
+    /// The page it shows of `now`: its own, or the first, once `now`
+    /// hasn't it.
+    pub(crate) fn page_in(&self, now: &sheaf_doc::Snapshot) -> anyhow::Result<PageId> {
+        match now.state.def(self.page) {
+            Some(_) => Ok(self.page),
+            None => (now.state.page_at(0)).context("the document has no pages"),
+        }
+    }
 }

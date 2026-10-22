@@ -2,7 +2,7 @@
 //! [`ResourceNeeds`]: write each resource into the lopdf document being
 //! saved, once a save, and bind it in a resources dict. Transitional:
 //! slice 9's emitter names and writes resources itself, by key (§11.5),
-//! and the legacy installers reach these through
+//! and the old writers' mark appearances reach these through
 //! [`sink::Lopdf`](super::sink::Lopdf).
 //!
 //! [`ContentWriter`]: super::ContentWriter

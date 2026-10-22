@@ -12,9 +12,11 @@
 //! document's order and hits each where it draws, a refused source's
 //! through its groups. A plugin reads each page as the file will draw it,
 //! recognized text and a header not yet saved with it, but no field's
-//! value. Over the corpus's turned or offset pages, a duplicate's
-//! characters, read from its group's realization, are its source page's
-//! within 1/16 pt.
+//! value. Recognized text sheaf saved over a page whose content leaves
+//! its graphics state changed stays on its words under a header set
+//! later, on the screen and saved (slice 18). Over the corpus's turned or
+//! offset pages, a duplicate's characters, read from its group's
+//! realization, are its source page's within 1/16 pt.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself; the
 //! corpus test skips without the corpus.
@@ -30,21 +32,21 @@ use lopdf::xref::XrefType;
 use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::Geom;
-use sheaf_doc::realize::{EngineKey, ViewInputs};
+use sheaf_doc::materialize::How;
+use sheaf_doc::realize::{EngineKey, GroupKey, ViewInputs};
 use sheaf_doc::serialize::fixture::revision_cut_out;
 use sheaf_doc::store::BlobKind;
+use sheaf_doc::text_layer::fixture as saved;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{
-    Box2, Derive, DocState, Document, OcrWord, PageChars, PageId, Query, Store, TextOpts,
-    TextService,
+    Box2, DocState, Document, OcrWord, PageChars, PageId, Query, Store, TextOpts, TextService,
 };
-use sheaf_edit::Rotation;
-use sheaf_ops::crop::{CropSpec, Margins};
+use sheaf_edit::{Margins, Rotation};
 use sheaf_ops::text::{Found, Text};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Budget, OpenError, PageIndex, Renderer};
 
-use common::{file, opened, ready, views};
+use common::{file, opened, ready, views, written};
 
 /// A Letter page the file turns 90°, its crop box off the origin, with
 /// "Inserted upright" drawn up it: upright as the page shows.
@@ -152,13 +154,7 @@ fn crop(d: &mut Document, page: PageId) {
         bottom: 50.0,
         left: 20.0,
     };
-    let spec = CropSpec::Margins(margins);
-    let snap = d.snapshot();
-    let plan = sheaf_ops::crop::plan(d.store(), &snap, &[page], spec, &sheaf_ops::NoProgress);
-    let plan = plan.unwrap();
-    plan[0].note(d);
-    let pages = plan[0].bases().collect();
-    d.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
+    common::crop(d, &[page], margins);
 }
 
 fn word(text: &str, x: f32, y: f32, w: f32) -> OcrWord {
@@ -211,10 +207,13 @@ fn chars_come_from_each_page_s_realization() {
     assert!(matches!(engine(p3, &screen), EngineKey::Group(..)));
     assert!(matches!(engine(copy, &content), EngineKey::Group(..)));
     assert!(matches!(engine(p3, &content), EngineKey::Base(_)));
-    // The crop is a derived file's page, until slice 15.
-    let derived = st.def(p2).unwrap().base.src.id();
-    assert_ne!(derived, d.primary().id());
-    assert_eq!(engine(p2, &content), EngineKey::Base(derived));
+    // The crop is its file's page, its box changed: read from its group.
+    let primary = d.primary().id();
+    assert_eq!(st.def(p2).unwrap().base.src.id(), primary);
+    let cropped = engine(p2, &content);
+    let in_group =
+        matches!(cropped, EngineKey::Group(GroupKey { source, .. }, _) if source == primary);
+    assert!(in_group, "{cropped:?}");
     assert!(matches!(engine(turned, &screen), EngineKey::Base(_)));
 
     for (page, want) in [
@@ -599,6 +598,49 @@ fn plugin_text_leaves_field_values_out() {
     }
 }
 
+sheaf_doc::both_ways!(
+    a_saved_block_over_an_unbalanced_base_stays_in_place,
+    a_saved_block_over_an_unbalanced_base_stays_in_place_appended: block_in_place
+);
+
+/// Recognized text sheaf saved over a page whose own content leaves a `q`
+/// open, moved by a `cm` (`text_layer::fixture::block_page`), with a
+/// header set over it: each word of the text and of the page's own is
+/// where PDFium found it before, within 1/16 pt, as the screen reads the
+/// page before it's saved and as PDFium reads it saved `how`, with the
+/// header's word beside them.
+fn block_in_place(how: How) {
+    let mut bytes = Vec::new();
+    saved::block_page().save_to(&mut bytes).unwrap();
+    let boxes = |chars: &PageChars| -> Vec<(String, Box2)> {
+        (chars.words().into_iter())
+            .map(|(word, _, at)| (word, at))
+            .collect()
+    };
+    let was = boxes(&pdfium_s(&bytes, 0));
+    let said: Vec<&str> = was.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(said, ["Body", "text", "Saved", "words"]);
+    let mut d = opened(bytes, "block.pdf", None);
+    let p0 = d.page(0).unwrap();
+    let header = fx::set_header(fx::header("Draft"), None);
+    d.commit_ops(vec![header], "Header").unwrap();
+    let text = Text::new(views(), Budget::Screen);
+    let screen = boxes(&read(&text, &d, p0, &ViewInputs::screen()));
+    let saved = boxes(&pdfium_s(&written(&d, how), 0));
+    for (read, now) in [("the screen", screen), ("saved", saved)] {
+        for (word, at) in &was {
+            let found = now.iter().find(|(w, _)| w == word);
+            let (_, now_at) = found.unwrap_or_else(|| panic!("{how:?}, {read}: no {word}"));
+            assert!(
+                near(*now_at, *at),
+                "{how:?}, {read}: {word} at {now_at:?}, was {at:?}"
+            );
+        }
+        let draft = now.iter().filter(|(w, _)| w == "Draft").count();
+        assert_eq!((now.len(), draft), (5, 1), "{how:?}, {read}: {now:?}");
+    }
+}
+
 /// Whether a page's frame is more than the plain one, a y flip below the
 /// height: its file turns it, or its visible box is off the origin.
 fn moved(geom: &Geom) -> bool {
@@ -681,7 +723,7 @@ fn realized_glyphs_lie_within_a_sixteenth_of_a_point_of_the_source_s() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| realized_glyphs(&corpus, entry));
     let compared: usize = outcomes.iter().flatten().map(|o| o.0).sum();
     eprintln!("{} files: {compared} characters compared", entries.len());

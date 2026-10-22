@@ -65,7 +65,7 @@ fn corpus() -> Docs {
         return Vec::new();
     };
     let entries: Vec<_> = corpus
-        .manifest()
+        .forms()
         .unwrap()
         .into_iter()
         .filter(|e| !e.path.starts_with("forms/safedocs/"))

@@ -19,7 +19,7 @@ use crate::text_layer::TextLayer;
 
 /// The version `d` is at, and a transaction of the user's on it, as a
 /// planner or a dialog takes one.
-fn planned(d: &Document) -> (VersionId, Tx) {
+pub(super) fn planned(d: &Document) -> (VersionId, Tx) {
     let snap = d.snapshot();
     (
         snap.version,
@@ -29,7 +29,7 @@ fn planned(d: &Document) -> (VersionId, Tx) {
 
 /// A commit of a transaction made on version `v`, landing as `stale`
 /// says.
-fn on(v: VersionId, stale: Stale) -> CommitOpts {
+pub(super) fn on(v: VersionId, stale: Stale) -> CommitOpts {
     CommitOpts::based(v, stale, "stale")
 }
 
@@ -38,13 +38,27 @@ fn pages<const N: usize>(d: &Document) -> [PageId; N] {
     std::array::from_fn(|i| d.page(i).unwrap())
 }
 
-/// Recognized text of no words, told apart by `engine`.
-fn layer(engine: &str) -> Arc<TextLayer> {
+/// `by` points off each side of a page.
+fn all(by: f32) -> sheaf_edit::Margins {
+    sheaf_edit::Margins {
+        top: by,
+        bottom: by,
+        left: by,
+        right: by,
+    }
+}
+
+/// Recognized text of one word, `text`.
+fn layer(text: &str) -> Arc<TextLayer> {
     Arc::new(TextLayer {
-        words: Vec::new(),
-        lines: Vec::new(),
+        words: vec![crate::text_layer::OcrWord {
+            text: text.into(),
+            rect: rect(40.0),
+            confidence: 0.9,
+        }],
+        lines: std::iter::once(0..1).collect(),
         upright: Rotation::R0,
-        engine: engine.into(),
+        engine: "test".into(),
     })
 }
 
@@ -166,39 +180,38 @@ fn a_relowered_insert_keeps_every_id_it_drew() {
     assert_eq!(d.state(), &made);
 }
 
+/// A crop is its pages' boxes alone: made on an older version, it lands
+/// beside another page's delete, and conflicts with a crop of its own page
+/// made since, naming it.
 #[test]
 fn a_crop_lands_beside_another_page_s_delete_and_conflicts_with_its_own_page_s_crop() {
     let mut d = doc_of(4, &[]);
-    let copy = crate::store::blank(d.store(), 2);
     let [p0, p1, p2, p3] = pages(&d);
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p1, copy.clone(), 0)], Derive::Crop)
-        .unwrap();
+    tx.apply(fx::crop(&[p1], all(36.0)), &NoProgress).unwrap();
     d.commit_ops(vec![fx::delete(&[p3])], "Delete page 4")
         .unwrap();
     d.commit(tx, on(v, Stale::Validate)).unwrap();
-    let st = d.state();
-    let order: Vec<PageId> = st.order().iter().copied().collect();
+    let order: Vec<PageId> = d.state().order().iter().copied().collect();
     assert_eq!(order, [p0, p1, p2]);
-    assert_eq!(st.def(p1).unwrap().base.src, copy);
+    let cropped = crate::geom::Rect::new(36.0, 36.0, 576.0, 756.0);
+    assert_eq!(d.geom(p1).crop, cropped);
 
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p0, copy.clone(), 1)], Derive::Crop)
-        .unwrap();
-    d.commit_page_base(vec![(p0, copy.clone(), 0)], Derive::Crop, "Crop page 1")
+    tx.apply(fx::crop(&[p0], all(72.0)), &NoProgress).unwrap();
+    d.commit_ops(vec![fx::crop(&[p0], all(18.0))], "Crop page 1")
         .unwrap();
     let e = refused(&mut d, |d| d.commit(tx, on(v, Stale::Validate)));
-    assert_eq!(e, conflict(Key::Page(p0), "Crop page 1"));
+    assert_eq!(e, conflict(Key::Geom(p0), "Crop page 1"));
     assert_eq!(e.to_string(), "“Crop page 1” changed the same data");
 }
 
 #[test]
 fn a_merged_step_is_said_against_the_document_it_lands_on() {
     let mut d = doc_of(3, &[]);
-    let copy = crate::store::blank(d.store(), 2);
     let [p0, _, p2] = pages(&d);
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p2, copy, 0)], Derive::Crop).unwrap();
+    tx.apply(fx::crop(&[p2], all(36.0)), &NoProgress).unwrap();
     assert_eq!(tx.preview().lines[0].text, "Crop page 3");
     d.commit_ops(vec![fx::move_pages(&[p2], Some(p0))], "Move page 3")
         .unwrap();
@@ -225,7 +238,8 @@ fn a_stale_delete_is_relowered_with_the_cascades_of_what_came_since() {
     let st = d.state();
     let order: Vec<PageId> = st.order().iter().copied().collect();
     assert_eq!(order, [p0, p2, p3]);
-    assert_eq!(st.header_footer().unwrap().pages, Some(vec![p2]));
+    let on = crate::model::Scope::Pages(im::OrdSet::unit(p2));
+    assert_eq!(st.header_footer().unwrap().scope, on);
     assert_eq!(st.bookmark_count(), 0);
     let ends: Vec<&crate::annot::Annot> = st.marks_on(p2).collect();
     assert_eq!(ends.len(), 1);
@@ -272,14 +286,16 @@ fn what_names_a_page_deleted_since_conflicts() {
     };
     let bookmark = |page| fx::bookmark(None, None, "Two", Some(page));
     let header = |page| fx::set_header(fx::header("Draft"), Some(&[page]));
-    let ops: [&dyn Fn(PageId) -> Op; 4] = [&note, &labels, &bookmark, &header];
+    let watermark =
+        |page| fx::set_watermark(fx::watermark("Draft"), sheaf_edit::Z::Under, Some(&[page]));
+    let ops: [&dyn Fn(PageId) -> Op; 5] = [&note, &labels, &bookmark, &header, &watermark];
     for op in ops {
         let mut d = doc_of(3, &[]);
         let [_, p1, _] = pages(&d);
         let (v, mut tx) = planned(&d);
         tx.apply(op(p1), &NoProgress).unwrap();
-        // The page had no annotations, label range, bookmark or header, so
-        // its delete wrote none of the slots the op does.
+        // The page had no annotations, label range, bookmark, header or
+        // watermark, so its delete wrote none of the slots the op does.
         d.commit_ops(vec![fx::delete(&[p1])], "Delete page 2")
             .unwrap();
         let e = refused(&mut d, |d| d.commit(tx, on(v, Stale::Validate)));
@@ -287,18 +303,21 @@ fn what_names_a_page_deleted_since_conflicts() {
     }
 }
 
+/// Two pages each replaced by the same page of another file, one by the
+/// transaction and one by an edit since: each took that page's first copy,
+/// so merged, they'd be one copy of it twice.
 #[test]
 fn two_pages_shown_as_one_copy_of_a_page_conflict() {
     let mut d = doc_of(3, &[]);
-    let copy = crate::store::blank(d.store(), 2);
+    let other = crate::store::blank(d.store(), 2);
     let [p0, p1, _] = pages(&d);
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p0, copy.clone(), 0)], Derive::Crop)
+    tx.apply(fx::replace(&[p0], &other, [0], "b.pdf"), &NoProgress)
         .unwrap();
-    d.commit_page_base(vec![(p1, copy, 0)], Derive::Crop, "Crop page 2")
-        .unwrap();
+    let replace = fx::replace(&[p1], &other, [0], "b.pdf");
+    d.commit_ops(vec![replace], "Replace page 2").unwrap();
     let e = refused(&mut d, |d| d.commit(tx, on(v, Stale::Validate)));
-    assert_eq!(e, conflict(Key::Page(p1), "Crop page 2"));
+    assert_eq!(e, conflict(Key::Page(p1), "Replace page 2"));
 }
 
 /// No op an edit since could make gives a page's annotation a name another
@@ -391,6 +410,32 @@ fn a_second_header_footer_from_one_base_conflicts() {
     assert_eq!(e, conflict(Key::Generator(g), "Header A"));
 }
 
+/// Two watermarks of one z, set by dialogs opened on one version, can't
+/// both be: the second conflicts. A background beside the watermark can.
+#[test]
+fn a_second_watermark_of_one_z_from_one_base_conflicts() {
+    let mut d = doc_of(3, &[]);
+    let set = |text: &str, z| fx::set_watermark(fx::watermark(text), z, None);
+    let (v, mut a) = planned(&d);
+    a.apply(set("A", sheaf_edit::Z::Over), &NoProgress).unwrap();
+    let (_, mut b) = planned(&d);
+    b.apply(set("B", sheaf_edit::Z::Over), &NoProgress).unwrap();
+    let (_, mut under) = planned(&d);
+    under
+        .apply(set("C", sheaf_edit::Z::Under), &NoProgress)
+        .unwrap();
+    let opts = CommitOpts {
+        label: Some("Watermark A".into()),
+        ..on(v, Stale::Validate)
+    };
+    d.commit(a, opts).unwrap();
+    let g = d.state().watermark(sheaf_edit::Z::Over).unwrap().id;
+    let e = refused(&mut d, |d| d.commit(b, on(v, Stale::Validate)));
+    assert_eq!(e, conflict(Key::Generator(g), "Watermark A"));
+    d.commit(under, on(v, Stale::Validate)).unwrap();
+    assert_eq!(d.state().generators().len(), 2);
+}
+
 #[test]
 fn a_changed_decision_read_conflicts_either_way() {
     let mut d = doc_of(3, &[]);
@@ -463,7 +508,7 @@ fn a_dialog_on_v_keeps_an_ocr_amend_of_v() {
     d.commit_ops_in_group(g, fx::ocr([(p0, layer("a"))]), "Recognize text")
         .unwrap();
     let (v, mut tx) = planned(&d);
-    tx.set_page_base(vec![(p1, copy.clone(), 0)], Derive::Crop)
+    tx.apply(fx::replace(&[p1], &copy, [0], "b.pdf"), &NoProgress)
         .unwrap();
     d.commit_ops_in_group(g, fx::ocr([(p2, layer("b"))]), "Recognize text")
         .unwrap();

@@ -26,6 +26,14 @@
 //! operator and its operands, which the next operator would take. Removing
 //! a running head drawn in the middle of a text object can't shift the
 //! body text.
+//!
+//! A marked range kept may have its property list written again without
+//! some of its keys ([`without_keys`], how a filter takes an older sheaf's
+//! settings out of its watermarks): the list's other bytes, and every
+//! other byte of the content, as they were. Only a list written in the
+//! content, in one stream, is, and only when what's left of it reads as
+//! the list without those keys; otherwise it's refused
+//! ([`SpliceError::List`]).
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -45,6 +53,8 @@ pub enum SpliceError {
     Overlap(SpanAcross),
     #[error("taking out {0} would change what's drawn after it")]
     Unsafe(SpanAcross),
+    #[error("the property list of the range at {0} can't be written again without the keys asked")]
+    List(SpanAcross),
 }
 
 /// `content`'s streams with `drop` taken out, lexed with `res`: a stream
@@ -57,6 +67,148 @@ pub fn splice<'a>(
     lim: &Limits,
     drop: &[SpanAcross],
 ) -> Result<Vec<Cow<'a, [u8]>>, SpliceError> {
+    let cuts = checked(content, res, lim, drop)?;
+    Ok(written(content, &cuts, &[]))
+}
+
+/// What [`splice_each`] takes out of a page's content.
+pub struct Spliced {
+    /// Whether each group was taken out.
+    pub taken: Vec<bool>,
+    /// The cuts of those taken, in order.
+    cuts: Vec<Cut>,
+}
+
+impl Spliced {
+    /// Whether where `span` starts in `content` is taken out.
+    pub fn takes(&self, content: &Concat, span: SpanAcross) -> bool {
+        let at = content.offset(span.start);
+        (self.cuts.iter()).any(|c| at.is_some_and(|at| c.range.contains(&at)))
+    }
+
+    /// `content`'s streams with what's taken out taken out, and `rewrites`
+    /// made in what's kept; one in what's taken out goes with it. None when
+    /// no stream changes.
+    pub fn streams<'a>(
+        &self,
+        content: &'a Concat,
+        rewrites: &[Rewrite],
+    ) -> Option<Vec<Cow<'a, [u8]>>> {
+        let rewrites: Vec<&Rewrite> = (rewrites.iter())
+            .filter(|r| !(self.cuts.iter()).any(|c| overlap(&c.range, &r.range)))
+            .collect();
+        (!self.cuts.is_empty() || !rewrites.is_empty())
+            .then(|| written(content, &self.cuts, &rewrites))
+    }
+}
+
+/// `content`'s streams with as many of `groups` taken out as can be, lexed
+/// with `res`: each group the cuts that take one range out (as
+/// [`Pagination::cuts`] gives them), all of them when [`splice`] takes them
+/// together, else those it takes alone, together. What a filter and a
+/// generator's `replaces` take out (§11.4), whose ranges a splice refuses
+/// stay as they are.
+///
+/// [`Pagination::cuts`]: super::Pagination::cuts
+pub fn splice_each(
+    content: &Concat,
+    res: &ResCx,
+    lim: &Limits,
+    groups: &[Vec<SpanAcross>],
+) -> Spliced {
+    let none = |taken| Spliced {
+        taken,
+        cuts: Vec::new(),
+    };
+    if groups.is_empty() {
+        return none(Vec::new());
+    }
+    if let Ok(cuts) = checked(content, res, lim, &groups.concat()) {
+        return Spliced {
+            taken: vec![true; groups.len()],
+            cuts,
+        };
+    }
+    let taken: Vec<bool> = (groups.iter())
+        .map(|cuts| checked(content, res, lim, cuts).is_ok())
+        .collect();
+    let cuts: Vec<SpanAcross> = (groups.iter().zip(&taken))
+        .filter(|(_, taken)| **taken)
+        .flat_map(|(cuts, _)| cuts.iter().copied())
+        .collect();
+    if cuts.is_empty() {
+        return none(taken);
+    }
+    match checked(content, res, lim, &cuts) {
+        Ok(cuts) => Spliced { taken, cuts },
+        Err(_) => none(vec![false; groups.len()]),
+    }
+}
+
+/// A marked range's property list written again ([`without_keys`]):
+/// where it is in the joined bytes, and what it's now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rewrite {
+    range: Range<usize>,
+    with: Vec<u8>,
+}
+
+/// The property list of the `BDC` that opens `span` in `content`, lexed
+/// with `res`, without the entries `keys` names, every other byte of it as
+/// written: None when it has none of them. Refused when the range doesn't
+/// open with a `BDC` whose list is written in the content, in one stream,
+/// or what's left of the list doesn't read as it without them.
+pub fn without_keys(
+    content: &Concat,
+    res: &ResCx,
+    lim: &Limits,
+    span: SpanAcross,
+    keys: &[&[u8]],
+) -> Result<Option<Rewrite>, SpliceError> {
+    let range = content.offsets(span).ok_or(SpliceError::OutOfRange(span))?;
+    let refused = || SpliceError::List(span);
+    let at = |e: LexError| LexError {
+        at: e.at + range.start,
+        ..e
+    };
+    let s = content.bytes();
+    // Its operands, the list last, to its `BDC`.
+    let mut list = None;
+    let mut tokens = lex::lex(&s[range.clone()], res, lim);
+    loop {
+        match tokens.next().transpose().map_err(at)? {
+            Some((r, Tok::Operand(_))) => list = Some(r),
+            Some((_, Tok::Op(b"BDC"))) => break,
+            _ => return Err(refused()),
+        }
+    }
+    let list = list.map(|r| range.start + r.start..range.start + r.end);
+    let list = list
+        .filter(|r| s[r.clone()].starts_with(b"<<"))
+        .ok_or_else(refused)?;
+    let at = content.span(list.clone());
+    if at.start.stream != at.end.stream {
+        return Err(refused());
+    }
+    let with =
+        lex::without_entries(&s[list.clone()], keys, lim.content.depth).ok_or_else(refused)?;
+    Ok((with != s[list.clone()]).then_some(Rewrite { range: list, with }))
+}
+
+/// A range to take out, in the joined bytes.
+struct Cut {
+    range: Range<usize>,
+    span: SpanAcross,
+}
+
+/// The cuts that take `drop` out of `content`, lexed with `res`, in order,
+/// once they're found safe to take out together.
+fn checked(
+    content: &Concat,
+    res: &ResCx,
+    lim: &Limits,
+    drop: &[SpanAcross],
+) -> Result<Vec<Cut>, SpliceError> {
     let mut cuts = drop
         .iter()
         .map(|&span| {
@@ -73,15 +225,11 @@ pub fn splice<'a>(
         return Err(SpliceError::Overlap(pair[1].span));
     }
     check(content, res, lim, &cuts)?;
-    Ok((0..content.stream_count())
-        .map(|i| cut(content, i, &cuts))
-        .collect())
+    Ok(cuts)
 }
 
-/// A range to take out, in the joined bytes.
-struct Cut {
-    range: Range<usize>,
-    span: SpanAcross,
+fn overlap(a: &Range<usize>, b: &Range<usize>) -> bool {
+    a.start < b.end && b.start < a.end
 }
 
 /// A running count of opens and closes: where it is, and the lowest it's
@@ -354,24 +502,39 @@ fn in_comment(gap: &[u8]) -> bool {
     })
 }
 
-/// Stream `i` of `content` with `cuts` taken out. Whether a cut needs a
-/// space in its place is decided by the bytes kept either side of it, as
-/// a neighbouring cut may take the bytes next to it too.
-fn cut<'a>(content: &'a Concat, i: usize, cuts: &[Cut]) -> Cow<'a, [u8]> {
+/// `content`'s streams with `cuts` taken out and `rewrites` made, none of
+/// them in a cut: a stream neither touches is borrowed as it is.
+fn written<'a>(content: &'a Concat, cuts: &[Cut], rewrites: &[&Rewrite]) -> Vec<Cow<'a, [u8]>> {
+    (0..content.stream_count())
+        .map(|i| cut(content, i, cuts, rewrites))
+        .collect()
+}
+
+/// Stream `i` of `content` with `cuts` taken out and `rewrites` made.
+/// Whether a cut needs a space in its place is decided by the bytes kept
+/// either side of it, as a neighbouring cut may take the bytes next to it
+/// too; a list written again starts and ends with a delimiter, so needs
+/// none.
+fn cut<'a>(content: &'a Concat, i: usize, cuts: &[Cut], rewrites: &[&Rewrite]) -> Cow<'a, [u8]> {
     let s = content.bytes();
     let stream = content.range(i);
+    let mut edits: Vec<(&Range<usize>, &[u8])> = (cuts.iter())
+        .map(|c| (&c.range, &[][..]))
+        .chain(rewrites.iter().map(|r| (&r.range, &r.with[..])))
+        .filter(|(r, _)| r.start < stream.end && r.end > stream.start)
+        .collect();
+    edits.sort_by_key(|(r, _)| r.start);
     let mut out: Option<Vec<u8>> = None;
     let mut at = stream.start;
-    let mut cuts = cuts
-        .iter()
-        .filter(|c| c.range.start < stream.end && c.range.end > stream.start)
-        .peekable();
-    while let Some(cut) = cuts.next() {
+    let mut edits = edits.into_iter().peekable();
+    while let Some((range, with)) = edits.next() {
         let out = out.get_or_insert_with(|| Vec::with_capacity(stream.len()));
-        out.extend_from_slice(&s[at..cut.range.start.max(stream.start)]);
-        at = cut.range.end.min(stream.end);
-        // The next byte is taken too: the cut after it decides.
-        if cuts.peek().is_some_and(|c| c.range.start == at) {
+        out.extend_from_slice(&s[at..range.start.max(stream.start)]);
+        out.extend_from_slice(with);
+        at = range.end.min(stream.end);
+        // A list written again needs no space; when the next byte is taken
+        // too, the cut after it decides.
+        if !with.is_empty() || edits.peek().is_some_and(|(r, _)| r.start == at) {
             continue;
         }
         if at < stream.end

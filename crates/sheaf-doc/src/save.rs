@@ -8,14 +8,14 @@
 //! keep the primary's encryption and object numbers; exports keep its
 //! encryption (M10.5 proposal 10; print doesn't) and number from 1
 //! ([`Profile`]). An export writes what [`subset`] keeps of the state,
-//! markup filtered out of it for a clean copy, and Export Flattened and
-//! print draw marks into their pages with [`flatten_annots`], a post-pass
-//! on the checked graph.
+//! markup and an older sheaf's watermark settings filtered out of it for a
+//! clean copy, and Export Flattened and print draw marks into their pages
+//! with [`flatten_annots`], a post-pass on the checked graph.
 //!
 //! A file written to a path replaces it durably ([`durable::write`]). An
 //! export never replaces the document's file ([`Snapshot::file`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -24,17 +24,14 @@ use im::Vector;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 
 use crate::annot::{AnnotId, AnnotKind};
+use crate::content::{PagOrigin, PaginationKind};
 use crate::forms::FieldId;
-use crate::geom::{Geom, Rect};
-use crate::materialize::copy::{self, copy_page_dict, remap};
-use crate::materialize::graph::{self, Loaded};
 use crate::materialize::{self, Encryption, Numbering, PostPass, Profile, SaveInput, SaveTarget};
 use crate::model::{
-    AnnotBody, Bookmark, DocState, FieldNode, FormDoc, Mark, OutlineId, PageId, Snapshot, Target,
-    Terminal,
+    AnnotBody, Bookmark, DocState, FieldNode, Filter, FormDoc, LegacySel, Mark, MarkedSel,
+    OutlineId, PageDef, PageId, Snapshot, Target, Terminal,
 };
 use crate::serialize::durable;
-use crate::store::Src;
 
 /// Serialize a snapshot as a complete new PDF: what a save writes, the
 /// primary's encryption and object numbers kept.
@@ -85,8 +82,9 @@ fn written(
 }
 
 /// PDFlyer's "Export Clean Copy": the document as it stands, with every
-/// markup annotation removed, ours and anyone else's. Links, form fields
-/// and bookmarks stay. Refuses to overwrite the open file.
+/// markup annotation removed, ours and anyone else's, and the settings an
+/// older sheaf kept in its watermarks. Links, form fields and bookmarks
+/// stay. Refuses to overwrite the open file.
 pub fn export_clean_copy(model: &Snapshot, path: &Path) -> Result<()> {
     if is_the_file(model, path) {
         bail!("a clean copy can't replace the open file; choose another name");
@@ -98,7 +96,12 @@ pub fn export_clean_copy(model: &Snapshot, path: &Path) -> Result<()> {
 
 /// `st` with no markup: sheaf's marks and other tools' comments go, and
 /// what's left on each page is its links and widgets. The annotations the
-/// records don't hold go as it's written ([`strip_markup`]).
+/// records don't hold go as it's written ([`strip_markup`]). A page whose
+/// content holds a watermark or background an older sheaf drew loses the
+/// settings it kept there, an image's path among them, as it's written
+/// ([`Filter::StripLegacy`]); renaming the resources it drew with is slice
+/// 19's RemovePrivateData. Its pages' content is read to tell, each once a
+/// source.
 fn without_markup(st: &DocState) -> DocState {
     let annots = (st.pages()).map(|(id, _, _)| {
         let kept = (st.annots_on(id))
@@ -110,7 +113,24 @@ fn without_markup(st: &DocState) -> DocState {
             .map(|(aid, rec)| (aid, rec.body.clone()));
         (id, kept.collect())
     });
-    let pages = (st.pages()).map(|(id, def, geom)| (id, def.clone(), geom.clone()));
+    let kinds = BTreeSet::from([PaginationKind::Watermark, PaginationKind::Background]);
+    let origins = BTreeSet::from([PagOrigin::SheafLegacy]);
+    let pages = (st.pages()).map(|(id, def, geom)| {
+        let blocks = def.base.src.blocks(def.base.index);
+        let def = match blocks.is_ok_and(|b| b.selected(&kinds, &origins).next().is_some()) {
+            false => def.clone(),
+            true => {
+                let older = MarkedSel::Pagination {
+                    kinds: kinds.clone(),
+                    origins: origins.clone(),
+                };
+                let strip = Filter::StripLegacy(LegacySel::Marked(older));
+                let content = def.content.with_filter(strip);
+                Arc::new(PageDef::new(def.base.clone(), def.copy, content))
+            }
+        };
+        (id, def, geom.clone())
+    });
     let bookmarks = (st.bookmarks_preorder().into_iter())
         .filter_map(|(_, id, _)| Some((id, st.bookmark(id)?.clone())))
         .collect();
@@ -120,6 +140,7 @@ fn without_markup(st: &DocState) -> DocState {
         .annots(annots)
         .labels(st.labels().cloned())
         .generators(st.generators().values().cloned())
+        .opened_as(st)
         .form(
             (st.fields()).map(|(id, node)| (id, node.clone())),
             st.form().clone(),
@@ -164,9 +185,9 @@ pub fn extract_bytes(model: &Snapshot, ids: &[PageId]) -> Result<Vec<u8>> {
 /// pages left out goes, as `keep_only` takes such fields out of a file
 /// (bug 14), with the parents left with no kids; a connector whose other
 /// end is left out has no partner; a label range starts at the first page
-/// of its range kept; and the header/footer is on the pages kept of its
-/// own.
-fn subset(st: &DocState, ids: &[PageId], outline: bool) -> Option<DocState> {
+/// of its range kept; and a generator is on the pages kept of its own,
+/// with their Bates numbers.
+pub(crate) fn subset(st: &DocState, ids: &[PageId], outline: bool) -> Option<DocState> {
     let keep: HashSet<PageId> = ids.iter().copied().collect();
     let pages: Vec<_> = (st.pages())
         .filter(|(id, _, _)| keep.contains(id))
@@ -206,6 +227,7 @@ fn subset(st: &DocState, ids: &[PageId], outline: bool) -> Option<DocState> {
         .annots(annots)
         .labels(labels)
         .generators(generators)
+        .opened_as(st)
         .form(fields, form)
         .build();
     debug_assert_eq!(state.check_invariants(), Ok(()));
@@ -579,200 +601,6 @@ fn normal_appearance(pdf: &Pdf, annot: &Dictionary) -> Option<ObjectId> {
     states.get(&state).ok()?.as_reference().ok()
 }
 
-/// Pages of `src`, each given a new `/CropBox` (`[x0, y0, x1, y1]` in its
-/// user space), as a new PDF: what a cropped page becomes, since sources
-/// are files. See [`derived_copy`].
-pub fn cropped_copy(src: &Src, pages: &[(u32, [f32; 4])]) -> Result<Vec<u8>> {
-    let pages: Vec<(u32, Option<[f32; 4]>)> = pages.iter().map(|&(i, c)| (i, Some(c))).collect();
-    derived_copy(src, &pages, HeaderKept::Yes, &mut |_, _, _, _| Ok(()))
-}
-
-/// Whether a derived copy's pages still draw the header and footer their
-/// file drew: they do unless the copy strips it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeaderKept {
-    Yes,
-    No,
-}
-
-/// Pages of `src` as a new PDF, each with a new `/CropBox` when given,
-/// then passed to `fix` (with the new PDF, the page's dictionary, its
-/// geometry with its own `/Rotate`, and its position in `pages`) to change
-/// its content. sheaf's own marks are left out, since the model keeps
-/// them; other annotations, links and fields come along, and the form the
-/// fields are in, so the page shows them (see [`copy_form`]). A save
-/// writes the page it was made from instead, with the copy's content
-/// ([`Document::add_derived`]), which knows the copy by its blob: its
-/// catalog's `/SheafCopyOf` names `src`'s blob and the pages, so copies of
-/// different pages are different blobs. With `header`
-/// [`HeaderKept::Yes`], the copy's catalog says which of its pages draw
-/// the header and footer `src`'s says it drew (`stamps::base_draws`), so
-/// a save doesn't draw it again.
-pub fn derived_copy(
-    src: &Src,
-    pages: &[(u32, Option<[f32; 4]>)],
-    header: HeaderKept,
-    fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, &Geom, usize) -> Result<()>,
-) -> Result<Vec<u8>> {
-    let from = graph::eager(src).context("loading the source")?;
-    let loaded = Loaded::from_pdf(&from)?;
-    let mut pdf = Pdf::with_version("1.7");
-    let pages_id = pdf.new_object_id();
-    let mut map: HashMap<ObjectId, ObjectId> = HashMap::new();
-    let mut kids: Vec<Object> = Vec::with_capacity(pages.len());
-    copy::reserve(
-        pages
-            .iter()
-            .filter_map(|&(index, _)| loaded.pages.get(index as usize).copied()),
-        &mut pdf,
-        &mut map,
-    );
-    let mut filled = HashSet::new();
-    for (position, &(index, crop)) in pages.iter().enumerate() {
-        let page = *loaded
-            .pages
-            .get(index as usize)
-            .with_context(|| format!("no page {index} in the source"))?;
-        let mut dict = copy_page_dict(&from, page, &mut pdf, &mut map)?;
-        let id = if filled.insert(page) {
-            map[&page]
-        } else {
-            pdf.new_object_id()
-        };
-        for (k, v) in loaded.inherited.get(&page).into_iter().flatten() {
-            if !dict.has(k) {
-                let v = remap(&from, v, &mut pdf, &mut map)?;
-                dict.set(k.clone(), v);
-            }
-        }
-        // sheaf's marks stay out: the records hold them.
-        let annots = (dict.get(b"Annots").ok())
-            .and_then(|a| pdf.dereference(a).ok())
-            .and_then(|(_, o)| o.as_array().ok())
-            .map(|list| crate::file::not_ours(&pdf, list));
-        match annots {
-            Some(list) if !list.is_empty() => dict.set("Annots", list),
-            Some(_) => {
-                dict.remove(b"Annots");
-            }
-            None => {}
-        }
-        if let Some(crop) = crop {
-            dict.set(
-                "CropBox",
-                crop.iter().map(|&v| Object::from(v)).collect::<Vec<_>>(),
-            );
-        }
-        let rotate = dict
-            .get(b"Rotate")
-            .ok()
-            .and_then(|o| o.as_i64().ok())
-            .unwrap_or(0);
-        let boxed = |key: &[u8]| {
-            (dict.get(key).ok())
-                .and_then(|o| o.as_array().ok())
-                .and_then(|a| crate::annot::box_of(a))
-                .map(|[a, b, c, d]| Rect::new(a, b, c, d))
-        };
-        let geom = Geom::read(boxed(b"MediaBox"), boxed(b"CropBox"), rotate);
-        fix(&mut pdf, &mut dict, &geom, position)?;
-        dict.set("Parent", pages_id);
-        dict.set("Type", Object::Name(b"Page".to_vec()));
-        pdf.objects.insert(id, Object::Dictionary(dict));
-        kids.push(id.into());
-    }
-    let count = kids.len() as i64;
-    let kept: HashSet<ObjectId> = kids.iter().filter_map(|k| k.as_reference().ok()).collect();
-    pdf.objects.insert(
-        pages_id,
-        Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count }),
-    );
-    // What it's a copy of: the document knows a copy by its blob, so
-    // copies of different pages differ however alike the pages are.
-    let indexes: Vec<Object> = pages.iter().map(|&(i, _)| i64::from(i).into()).collect();
-    let mut catalog = dictionary! {
-        "Type" => "Catalog",
-        "Pages" => pages_id,
-        "SheafCopyOf" => dictionary! {
-            "Blob" => Object::string_literal(src.id().stem()),
-            "Pages" => indexes,
-        },
-    };
-    if let Some(form) = copy_form(&from, &mut pdf, &mut map)? {
-        catalog.set("AcroForm", pdf.add_object(form));
-    }
-    if header == HeaderKept::Yes
-        && let Some((hf, scope)) = src.header_footer()
-    {
-        let on = |index: u32| scope.as_ref().is_none_or(|s| s.contains(&(index as usize)));
-        let positions: Vec<usize> = (pages.iter().enumerate())
-            .filter(|(_, (index, _))| on(*index))
-            .map(|(at, _)| at)
-            .collect();
-        if !positions.is_empty() {
-            let scope = (positions.len() < pages.len()).then_some(positions);
-            catalog.set(crate::stamps::CATALOG_KEY, crate::stamps::stored(hf, scope));
-        }
-    }
-    let catalog = pdf.add_object(catalog);
-    pdf.trailer.set("Root", catalog);
-    // Links to pages that weren't copied lead nowhere, and widgets there
-    // leave their fields: they go, and so does what only they reached.
-    crate::kept::keep_only(&mut pdf, &kept);
-    pdf.prune_objects();
-    let mut out = Vec::new();
-    pdf.save_to(&mut out)?;
-    Ok(out)
-}
-
-/// The form of `from`, as far as the pages copied into `pdf` reach it
-/// (their widgets' fields, copied with them through `map`): the roots
-/// among `/Fields` and `/CO` that were copied, and `/DR`, `/DA`, `/Q` and
-/// `NeedAppearances`. PDFium draws widgets only in a document with a form
-/// (M10 bug 1). None when no field was copied. The XFA copy, usage rights
-/// and `/SigFlags` describe the whole file, so they stay behind.
-fn copy_form(
-    from: &Pdf,
-    pdf: &mut Pdf,
-    map: &mut HashMap<ObjectId, ObjectId>,
-) -> Result<Option<Dictionary>> {
-    let Some(form) = from
-        .catalog()
-        .ok()
-        .and_then(|c| c.get(b"AcroForm").ok())
-        .and_then(|f| from.dereference(f).ok())
-        .and_then(|(_, f)| f.as_dict().ok())
-    else {
-        return Ok(None);
-    };
-    let copied = |key: &[u8]| -> Vec<Object> {
-        form.get(key)
-            .ok()
-            .and_then(|a| from.dereference(a).ok())
-            .and_then(|(_, a)| a.as_array().ok())
-            .into_iter()
-            .flatten()
-            .filter_map(|f| map.get(&f.as_reference().ok()?).copied())
-            .map(Object::Reference)
-            .collect()
-    };
-    let fields = copied(b"Fields");
-    if fields.is_empty() {
-        return Ok(None);
-    }
-    let co = copied(b"CO");
-    let mut out = dictionary! { "Fields" => fields };
-    if !co.is_empty() {
-        out.set("CO", co);
-    }
-    for key in [b"DR".as_slice(), b"DA", b"Q", b"NeedAppearances"] {
-        if let Ok(v) = form.get(key) {
-            out.set(key.to_vec(), remap(from, v, pdf, map)?);
-        }
-    }
-    Ok(Some(out))
-}
-
 /// Whether `path` names `model`'s document's file ([`Snapshot::file`]),
 /// which an export never replaces.
 fn is_the_file(model: &Snapshot, path: &Path) -> bool {
@@ -853,9 +681,9 @@ mod tests {
     use super::*;
     use crate::annot::Annot;
     use crate::history::FixedCount;
+    use crate::materialize::ocr_tests::{HELLO_HEX, fonts_of, is_glyphless, set_layer};
     use crate::materialize::rewrite_tests::{
-        HELLO_HEX, annots_read, fonts_of, make_pdf, open, read_outline, read_pages, set_layer,
-        tempdir,
+        annots_read, make_pdf, open, read_outline, read_pages, tempdir,
     };
     use crate::model::FlatOutlineItem;
     use crate::tx::fixture as fx;
@@ -1448,7 +1276,11 @@ mod tests {
         let all = String::from_utf8_lossy(&pdf.get_page_content(page)).into_owned();
         assert!(all.contains(HELLO_HEX), "{all}");
         assert!(all.contains("/SheafFlat1 Do"), "{all}");
-        assert!(fonts_of(&pdf, page).has(b"SheafOcr"));
+        assert!(
+            fonts_of(&pdf, page)
+                .iter()
+                .any(|(_, f)| is_glyphless(&pdf, f))
+        );
 
         let out = dir.join("clean.pdf");
         export_clean_copy(&snap, &out).unwrap();

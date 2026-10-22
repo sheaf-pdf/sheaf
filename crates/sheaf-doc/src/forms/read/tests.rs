@@ -1000,7 +1000,7 @@ fn corpus_hybrid_reference_files_read_their_newest_revision() {
     let (mut files, mut sampled) = (0, 0);
     let mut differ = Vec::new();
     // pypdf couldn't read the `unparsed` ones: their rows say nothing.
-    for entry in corpus.manifest().unwrap() {
+    for entry in corpus.forms().unwrap() {
         if entry.kind == "unparsed" {
             continue;
         }
@@ -1256,7 +1256,7 @@ fn corpus_hybrid_forms_bind_their_xfa() {
         return;
     };
     let mut forms = 0;
-    for entry in corpus.manifest().unwrap() {
+    for entry in corpus.forms().unwrap() {
         if entry.kind != "hybrid" || entry.path.starts_with("forms/safedocs/") {
             continue;
         }

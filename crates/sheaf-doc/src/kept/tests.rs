@@ -9,6 +9,7 @@ use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
 use crate::effects::{Removed, RemovedKind};
+use crate::materialize::ocr_tests::ocr_block;
 use crate::materialize::{
     AskAnswers, How, StrategyKind, Why, forced_rewrite, materialize, removal, save,
 };
@@ -453,11 +454,6 @@ fn copies_hold_only_the_pages_copied() {
     let bytes = crate::save::extract_bytes(&model.snapshot(), &[p0, p1]).unwrap();
     assert!(!says(&bytes, "MARK A 2") && says(&bytes, "MARK A 1"));
     assert_eq!(page_annots(&bytes, 0), 1);
-    // A crop is a copy of the page alone.
-    let src = model.snapshot().primary;
-    let bytes = crate::save::cropped_copy(&src, &[(0, [0.0, 0.0, 300.0, 300.0])]).unwrap();
-    assert!(!says(&bytes, "MARK A 1") && !says(&bytes, "MARK A 2"));
-    assert_eq!(page_annots(&bytes, 0), 0);
     // So is a stamp made from a page, and the forms the summary draws.
     let pdf = Pdf::load(&path).unwrap();
     let stamp = crate::stamp_lib::one_page(&pdf, 0).unwrap();
@@ -747,18 +743,10 @@ fn ocr_layer(text: &str) -> std::sync::Arc<crate::text_layer::TextLayer> {
     ))
 }
 
-/// How many streams of the file `pdf` hold an OCR layer's text (not the
-/// `q` that sets it apart).
+/// How many streams of the file `pdf` are an OCR layer's block.
 fn ocr_layers(pdf: &[u8]) -> usize {
     (Pdf::load_mem(pdf).unwrap().objects.values())
-        .filter(|o| {
-            o.as_stream().is_ok_and(|s| {
-                s.dict.has(b"SheafOcrLayer")
-                    && s.decompressed_content()
-                        .unwrap_or_else(|_| s.content.clone())
-                        != b"q\n"
-            })
-        })
+        .filter(|o| (o.as_stream()).is_ok_and(|s| ocr_block(&s.dict).is_some()))
         .count()
 }
 
@@ -794,9 +782,9 @@ crate::both_ways!(
 );
 
 /// A layer saved in an earlier session, part of the page's own content
-/// once the file opens again, recognized over: the removal check finds
-/// the old words in what the Append would unlink, so the save is a
-/// Rewrite, which takes them out.
+/// once the file opens again, recognized over: the re-OCR filters it out,
+/// replaced text, so the save is a Rewrite, which takes the old words out
+/// (the removal check would find them in what an Append unlinks).
 fn re_ocr_reopened(how: How) {
     let dir = tempdir();
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
@@ -811,7 +799,7 @@ fn re_ocr_reopened(how: How) {
         .commit_ops(layer(&model, "OCRNEWWORD"), "ocr")
         .unwrap();
     let why = saved_without(&mut model, &path, "OCROLDWORD");
-    assert!(matches!(why[..], [Why::RemovalCheck { .. }]), "{why:?}");
+    assert_eq!(why, [Why::ReplacesText(gone(RemovedKind::OcrLayers, 1))]);
     let now = std::fs::read(&path).unwrap();
     assert_eq!(ocr_layers(&now), 1);
     assert!(readable(&now, "OCRNEWWORD"));

@@ -41,6 +41,7 @@ use sheaf_edit::{BlobSel, Local, Op};
 
 use crate::annot::AnnotId;
 use crate::change::ChangeSet;
+use crate::content::{BlockId, ContentError};
 use crate::effects::StepEffects;
 use crate::forms::FieldId;
 use crate::labels::LabelSpec;
@@ -65,17 +66,28 @@ pub(crate) mod pages;
 pub mod resolve;
 
 #[cfg(test)]
+mod boxes_tests;
+#[cfg(test)]
 mod cascade_tests;
+#[cfg(test)]
+mod header_tests;
+#[cfg(test)]
+mod ocr_tests;
 #[cfg(test)]
 mod stale_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod watermark_tests;
 
 pub use caps::{Actor, Cap, JobKind, Target, actor_allows, cap_of};
 pub use cascade::{Cascade, Rule};
+pub use content::others_on;
 pub use error::{EditError, Notice, notice_text};
 pub use marks::{mark_changes, mark_kind, mark_patch, mark_style};
-pub use resolve::{At, BookmarkChange, Derive, ResolvedOp, incoming, op_name, ready_to_insert};
+pub use resolve::{
+    At, BookmarkChange, OthersFound, ResolvedOp, incoming, op_name, ready_to_insert,
+};
 
 /// Who the user is, as the host fills a mark in (§6.8): the name marks are
 /// by, the initials dynamic stamps write, and how they write the date and
@@ -329,21 +341,15 @@ pub struct Preview {
 }
 
 /// An op as a transaction took it, kept to lower it again on another
-/// version ([`Stale::Relower`]). The op is kept as it came, not boxed: a
-/// transaction may keep thousands (OCR's 7,000 pages), and a box each is
-/// an allocation more an op.
+/// version ([`Stale::Relower`]): the op, the ids lowering it drew, and
+/// whether resolving it read the order (a position, a span, every page).
+/// The op is kept as it came, not boxed: a transaction may keep thousands
+/// (OCR's 7,000 pages), and a box each is an allocation more an op.
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum Entry {
-    /// An op, the ids lowering it drew, and whether resolving it read the
-    /// order (a position, a span, every page).
-    Op {
-        op: Op,
-        drawn: Drawn,
-        positional: bool,
-    },
-    /// The internal page rebase of a derived flow ([`Tx::set_page_base`]).
-    Base(Vec<(PageId, Src, u32)>, Derive),
+pub(crate) struct Entry {
+    op: Op,
+    drawn: Drawn,
+    positional: bool,
 }
 
 /// The ids an op's lowering drew, of each kind in order: what lowering it
@@ -355,6 +361,7 @@ pub(crate) struct Drawn {
     fields: Vec<FieldId>,
     annots: Vec<AnnotId>,
     generators: Vec<GenId>,
+    blocks: Vec<BlockId>,
 }
 
 impl Drawn {
@@ -365,6 +372,7 @@ impl Drawn {
         self.fields.reverse();
         self.annots.reverse();
         self.generators.reverse();
+        self.blocks.reverse();
         self
     }
 }
@@ -456,7 +464,7 @@ impl Tx {
         self.allowed(&resolved)?;
         let positional = reads.contains(&Key::Order);
         let (made, drawn) = self.lower(resolved, reads, pins, p)?;
-        self.entries.push(Entry::Op {
+        self.entries.push(Entry {
             op,
             drawn,
             positional,
@@ -559,42 +567,6 @@ impl Tx {
         }
     }
 
-    /// The internal page rebase of a derived flow (transitional, until
-    /// slice 17): each page shown from page `index` of `src`, a copy the
-    /// flow made and noted ([`Document::add_derived`]), as `why` says.
-    ///
-    /// [`Document::add_derived`]: crate::model::Document::add_derived
-    pub fn set_page_base(
-        &mut self,
-        pages: Vec<(PageId, Src, u32)>,
-        why: Derive,
-    ) -> Result<OpResult, EditError> {
-        self.ready()?;
-        let op = "set-page-base";
-        for &(id, ref src, index) in &pages {
-            if self.state.def(id).is_none() {
-                return Err(EditError::not_found(op, format!("page {}", id.0)));
-            }
-            if index >= src.page_count() {
-                return Err(EditError::invalid(
-                    op,
-                    format!("page {} isn't in the source", index + 1),
-                ));
-            }
-        }
-        let entry = Entry::Base(pages.clone(), why);
-        let resolved = ResolvedOp::SetPageBase { pages, why };
-        self.allowed(&resolved)?;
-        let (made, _) = self.lower(
-            resolved,
-            BTreeSet::new(),
-            Drawn::default(),
-            &in_progress::NoProgress,
-        )?;
-        self.entries.push(entry);
-        Ok(made)
-    }
-
     /// Ops wait for the document's file to open.
     fn ready(&self) -> Result<(), EditError> {
         match self.cx.ready {
@@ -632,17 +604,18 @@ impl Tx {
     /// `pins` holds first: what it made, and the ids it drew.
     fn lower(
         &mut self,
-        op: ResolvedOp,
+        mut op: ResolvedOp,
         reads: BTreeSet<Key>,
         pins: Drawn,
         p: &dyn Progress,
     ) -> Result<(OpResult, Drawn), EditError> {
         let before = self.state.clone();
-        let line = crate::describe::describe(&op, &before);
         let mut lw = Lower::new(Rec::new(before.clone()), &self.cx, p, op.name());
         lw.reads = reads;
         lw.pins = pins.reversed();
-        lower_op(&mut lw, &op)?;
+        lower_op(&mut lw, &mut op)?;
+        // Said once lowered, which may count what it found.
+        let line = crate::describe::describe(&op, &before);
         let cascades = cascade::settle(&mut lw)?;
         let Lower {
             rec,
@@ -770,15 +743,7 @@ impl TxParts {
     /// Whether resolving one of its ops read the order: a position, a span
     /// or every page.
     pub(crate) fn positional(&self) -> bool {
-        (self.entries.iter()).any(|e| {
-            matches!(
-                e,
-                Entry::Op {
-                    positional: true,
-                    ..
-                }
-            )
-        })
+        self.entries.iter().any(|e| e.positional)
     }
 
     /// Its ops lowered again on `state`, version `at`'s, as its own were,
@@ -791,15 +756,8 @@ impl TxParts {
         tx.pins = self.pins;
         tx.grants = self.grants;
         tx.named = self.named;
-        for entry in self.entries {
-            match entry {
-                Entry::Op { op, drawn, .. } => {
-                    tx.apply_pinned(op, drawn, &in_progress::NoProgress)?;
-                }
-                Entry::Base(pages, why) => {
-                    tx.set_page_base(pages, why)?;
-                }
-            }
+        for Entry { op, drawn, .. } in self.entries {
+            tx.apply_pinned(op, drawn, &in_progress::NoProgress)?;
         }
         Ok(tx.into_parts())
     }
@@ -998,6 +956,20 @@ impl<'a> Lower<'a> {
         id
     }
 
+    /// A new layer's block id: the one pinned next, else a random one.
+    /// Not checked against the document's: nothing indexes them, and with
+    /// 53 random bits two never meet, as two files' never do (§4); a
+    /// layer's text is taken out by its kind, never by its id.
+    pub(crate) fn block_id(&mut self) -> BlockId {
+        let pinned = self.pins.blocks.pop();
+        let id = pinned.unwrap_or_else(|| {
+            let drawn = &self.drawn.blocks;
+            BlockId::draw(&mut fastrand::Rng::new(), |id| drawn.contains(&id))
+        });
+        self.drawn.blocks.push(id);
+        id
+    }
+
     /// A lowering read of `key`.
     pub(crate) fn read(&mut self, key: Key) {
         self.reads.insert(key);
@@ -1019,10 +991,17 @@ impl<'a> Lower<'a> {
     pub(crate) fn invalid(&self, why: impl std::fmt::Display) -> EditError {
         EditError::invalid(self.op, why)
     }
+
+    /// [`EditError::Content`] for `err`, about page `page`'s source page:
+    /// named as the page it is here.
+    pub(crate) fn content(&self, err: ContentError, page: PageId) -> EditError {
+        let pos = self.rec.pos_of(page).expect("a page of the document's");
+        EditError::content(self.op, pos as u32, err)
+    }
 }
 
 /// `op` lowered into `lw`.
-fn lower_op(lw: &mut Lower, op: &ResolvedOp) -> Result<(), EditError> {
+fn lower_op(lw: &mut Lower, op: &mut ResolvedOp) -> Result<(), EditError> {
     use ResolvedOp as R;
     match op {
         R::MovePages { pages, before } => {
@@ -1050,20 +1029,15 @@ fn lower_op(lw: &mut Lower, op: &ResolvedOp) -> Result<(), EditError> {
             with,
             bring,
         } => pages::replace(lw, pages, from, name, with, bring),
+        R::SetPageBoxes {
+            pages,
+            crop,
+            trim,
+            bleed,
+            art,
+        } => pages::set_boxes(lw, pages, crop, trim, bleed, art),
         R::SetPageLabels { ranges } => {
             pages::set_labels(lw, ranges.clone());
-            Ok(())
-        }
-        R::SetPageBase { pages, why } => {
-            pages::set_base(lw, pages);
-            // A watermark's text is drawn into the copies, out of the
-            // model's sight: the flow says what it drew.
-            if let Derive::Watermark {
-                unencodable: true, ..
-            } = why
-            {
-                lw.notices.push(Notice::Unencodable);
-            }
             Ok(())
         }
         R::AddBookmark {
@@ -1133,22 +1107,36 @@ fn lower_op(lw: &mut Lower, op: &ResolvedOp) -> Result<(), EditError> {
             Ok(())
         }
         R::AdoptAnnotations { annots } => marks::adopt(lw, annots),
-        R::SetOcrText { page, layer } => {
-            content::set_ocr(lw, *page, Some(layer.clone()));
-            Ok(())
-        }
+        R::SetOcrText { page, layer } => content::set_ocr(lw, *page, layer),
         R::ClearOcrText { pages } => {
-            for &page in pages {
-                content::set_ocr(lw, page, None);
+            for (i, &page) in pages.iter().enumerate() {
+                lw.pages_done(i, pages.len())?;
+                content::clear_ocr(lw, page)?;
             }
             Ok(())
         }
-        R::SetHeaderFooter { spec, scope } => {
-            content::set_header_footer(lw, spec, scope.clone());
+        R::SetWatermark {
+            content: drawn,
+            position,
+            z,
+            scope,
+        } => content::set_watermark(lw, drawn, *position, *z, scope.as_ref()),
+        R::RemoveWatermark {
+            z,
+            pages,
+            include_authored,
+            others,
+        } => {
+            *others = content::remove_watermark(lw, *z, pages, *include_authored)?;
             Ok(())
         }
-        R::RemoveHeaderFooter { pages } => {
-            content::remove_header_footer(lw, pages);
+        R::SetHeaderFooter { spec, scope } => content::set_header_footer(lw, spec, scope.as_ref()),
+        R::RemoveHeaderFooter {
+            pages,
+            include_authored,
+            others,
+        } => {
+            *others = content::remove_header_footer(lw, pages, *include_authored)?;
             Ok(())
         }
         R::Revert { .. } => Err(EditError::internal(

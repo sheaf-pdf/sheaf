@@ -29,9 +29,11 @@ fn blank(pages: u32) -> Document {
 }
 
 /// "Stopped" and exit status 130, not "failed": however the op passed
-/// the cancel back, with context or inside an `io::Error`.
+/// the cancel back, with context or inside an `io::Error`, or as an edit's
+/// lowering stopping, which a planner's work passes back.
 #[test]
 fn a_cancel_is_told_from_a_failure() {
+    use sheaf_doc::EditError;
     let io = || std::io::Error::from(Cancelled);
     assert!(was_cancelled(&Cancelled.into()));
     assert!(was_cancelled(
@@ -41,8 +43,10 @@ fn a_cancel_is_told_from_a_failure() {
     assert!(was_cancelled(
         &anyhow::Error::new(io()).context("writing out.pdf")
     ));
+    assert!(was_cancelled(&EditError::Cancelled.into()));
     assert!(!was_cancelled(&std::io::Error::other("x").into()));
     assert!(!was_cancelled(&anyhow::anyhow!("x")));
+    assert!(!was_cancelled(&EditError::NotReady.into()));
 }
 
 /// Once the files are read, the combine dialog says "Writing…": its

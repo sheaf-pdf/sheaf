@@ -2,8 +2,9 @@
 //! each bound on its own (their names differ by version, so both link
 //! into one `Linker`). What they have in common is written once,
 //! `shared.rs`, and included in each version's module, where `api` is
-//! that version's bindings. Marks (0.2 has fewer kinds and fields) and
-//! `storage` (0.3 adds preferences) differ: `v03.rs`, `v02.rs`.
+//! that version's bindings. Marks (0.2 has fewer kinds and fields),
+//! `storage` (0.3 adds preferences) and `ocr` (only 0.2 asks for a page's
+//! layer, and is answered none) differ: `v03.rs`, `v02.rs`.
 
 pub(crate) mod bindings_v03 {
     wasmtime::component::bindgen!({

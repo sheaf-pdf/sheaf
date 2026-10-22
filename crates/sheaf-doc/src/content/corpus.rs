@@ -4,8 +4,10 @@
 //! splices back to each stream's own bytes, read apart; its marked content
 //! balances; its `q`/`Q` balance is what lopdf's `Content::decode` counts;
 //! its words decode through its fonts; its pagination artifacts are
-//! classified as the tools that made the files drew them; and each of
-//! them splices out, as a strip cuts it, or is refused, Acrobat's never.
+//! classified as the tools that made the files drew them; each of them
+//! splices out, as a strip cuts it, or is refused, Acrobat's never; and
+//! each list of theirs written in the content can be written again without
+//! a key, as Clean Copy writes an older sheaf's.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
@@ -17,7 +19,6 @@ use super::tests::blank;
 use super::*;
 use crate::forms::corpus::{Corpus, Entry, each_entry};
 use crate::source::Limits;
-use crate::stamps;
 use crate::store::{BlobKind, Store};
 
 const LIM: &Limits = &Limits::DEFAULT;
@@ -43,10 +44,18 @@ struct Outcome {
     origins: BTreeMap<(PaginationKind, PagOrigin), usize>,
     /// Pagination artifacts spliced out alone, as a strip cuts them, by
     /// who drew them and whether the splice was made; Acrobat's refused,
-    /// and pages whose strip of a kind (`stamps::stripped`) is refused.
+    /// and pages where splicing out together every artifact of a kind
+    /// that a filter or a generator's `replaces` selects
+    /// ([`PageBlocks::selected`]) is refused.
     splices: BTreeMap<(PagOrigin, bool), usize>,
     acrobat_refused: Vec<String>,
     unstrippable: Vec<String>,
+    /// Pagination artifacts' lists written again without `/Type`, as a
+    /// filter writes an older sheaf's without what it kept, by whether the
+    /// list is written in the content and whether it could be; and those
+    /// in the content refused, each a line.
+    rewrites: BTreeMap<(bool, bool), usize>,
+    unrewritable: Vec<String>,
     nested: usize,
     /// The words pages draw, decoded through their fonts.
     words: usize,
@@ -283,9 +292,27 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                     if p.origin == PagOrigin::Acrobat && !made {
                         out.acrobat_refused.push(format!("{at}: {:?}", p.kind));
                     }
+                    let range = blocks.marked.iter().find(|m| m.span == p.span);
+                    let inline = range.is_some_and(|m| matches!(m.props, Some(Props::Inline(_))));
+                    let made = match without_keys(concat, &res, LIM, p.span, &[b"Type"]) {
+                        Ok(_) => true,
+                        Err(e) => {
+                            if inline {
+                                out.unrewritable.push(format!("{at}: {e}"));
+                            }
+                            false
+                        }
+                    };
+                    *out.rewrites.entry((inline, made)).or_default() += 1;
                 }
-                for kinds in [stamps::HEADER_FOOTER, stamps::WATERMARK, stamps::BACKGROUND] {
-                    let cuts: Vec<SpanAcross> = stamps::stripped(&blocks, kinds)
+                // What a filter or a generator's `replaces` selects.
+                let origins = BTreeSet::from(PagOrigin::REPLACED);
+                for kinds in [
+                    BTreeSet::from([PaginationKind::Header, PaginationKind::Footer]),
+                    BTreeSet::from([PaginationKind::Watermark]),
+                    BTreeSet::from([PaginationKind::Background]),
+                ] {
+                    let cuts: Vec<SpanAcross> = (blocks.selected(&kinds, &origins))
                         .flat_map(|p| p.cuts(concat, &res, LIM).unwrap())
                         .collect();
                     if let Err(e) = splice(concat, &res, LIM, &cuts) {
@@ -317,7 +344,7 @@ fn corpus_content_lexes_splices_and_classifies() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let started = Instant::now();
     let outcomes = each_entry(&entries, |entry| read_file(&corpus, entry));
     let took = started.elapsed();
@@ -326,14 +353,19 @@ fn corpus_content_lexes_splices_and_classifies() {
     let (unread, unbalanced) = (all(|o| &o.unread), all(|o| &o.unbalanced));
     let (changed, miscounted) = (all(|o| &o.changed), all(|o| &o.miscounted));
     let (refused, unstrippable) = (all(|o| &o.acrobat_refused), all(|o| &o.unstrippable));
+    let unrewritable = all(|o| &o.unrewritable);
     let mut origins: BTreeMap<(PaginationKind, PagOrigin), usize> = BTreeMap::new();
     let mut splices: BTreeMap<(PagOrigin, bool), usize> = BTreeMap::new();
+    let mut rewrites: BTreeMap<(bool, bool), usize> = BTreeMap::new();
     for o in &outcomes {
         for (key, n) in &o.origins {
             *origins.entry(*key).or_default() += n;
         }
         for (key, n) in &o.splices {
             *splices.entry(*key).or_default() += n;
+        }
+        for (key, n) in &o.rewrites {
+            *rewrites.entry(*key).or_default() += n;
         }
     }
     eprintln!(
@@ -373,8 +405,23 @@ fn corpus_content_lexes_splices_and_classifies() {
             n(false)
         );
     }
+    let n = |inline, made| rewrites.get(&(inline, made)).copied().unwrap_or(0);
+    eprintln!(
+        "  Lists written again without /Type: {} of {} in the content; {} of {} named",
+        n(true, true),
+        n(true, true) + n(true, false),
+        n(false, true),
+        n(false, true) + n(false, false),
+    );
     assert!(unread.is_empty(), "{unread:#?}");
     assert!(unbalanced.is_empty(), "{unbalanced:#?}");
+    // Word ends one page's first stream inside a footer's list, which no
+    // rewrite of one stream reaches.
+    let split = "forms/safedocs/0837070.pdf page 1: ";
+    assert!(
+        unrewritable.len() == 1 && unrewritable[0].starts_with(split),
+        "{unrewritable:#?}"
+    );
     assert!(changed.is_empty(), "{changed:#?}");
     assert!(miscounted.is_empty(), "{miscounted:#?}");
     // One page of Acrobat's watermark has the body's `q` and `BT` inside
@@ -382,7 +429,7 @@ fn corpus_content_lexes_splices_and_classifies() {
     let opens_the_body = "forms/safedocs/0112530.pdf page 1";
     assert_eq!(refused, [&format!("{opens_the_body}: Watermark")]);
     assert_eq!(unstrippable.len(), 1, "{unstrippable:#?}");
-    assert!(unstrippable[0].starts_with(&format!("{opens_the_body}, [Watermark]")));
+    assert!(unstrippable[0].starts_with(&format!("{opens_the_body}, {{Watermark}}")));
 
     // Acrobat's files have Acrobat's artifacts of the kinds they say, but
     // where its forms are drawn unmarked, which is no artifact; Word's and

@@ -11,9 +11,11 @@ use std::sync::Arc;
 use lopdf::{LazyPdf, Object, Stream, dictionary};
 
 use super::Limits;
+use crate::PageId;
 use crate::content::{
     self, Concat, DrawnForms, PageBlocks, PageContent, PropertiesDict, ResCx, SpanAcross,
 };
+use crate::model::LEGACY_KEYS;
 use crate::store::{BlobKind, Src, Store};
 
 /// `data` read lazily: every object the cross-reference table lists, and
@@ -65,6 +67,37 @@ pub fn sheaf_annot(data: &[u8]) {
     }
 }
 
+/// `data` opened as a source, and the generators sheaf drew on it found as
+/// an open finds them: from its catalog's `/SheafGenerators` and the
+/// markers of its pages' streams, its images and pages bound to the
+/// XObjects their blocks draw, a header's Bates numbers its blocks'. Each
+/// is made a generator of the pages it's on, and laid out as the realizer
+/// lays it out to tell whether a page's block is it, on its first pages.
+pub fn sheaf_generators(data: &[u8]) {
+    let kind = BlobKind::file(Path::new("fuzzed.pdf"), None);
+    let Ok(src) = Store::new().open(data.into(), kind) else {
+        return;
+    };
+    for i in 0..src.page_count() {
+        let _ = src.markers(i);
+    }
+    for saved in src.generators().iter() {
+        let Some(g) = saved.generator(&src, |i| Some(PageId(u64::from(i)))) else {
+            continue;
+        };
+        for i in 0..src.page_count().min(8) {
+            let ctx = crate::model::PageCtx {
+                geom: src.geom(i),
+                position: i,
+                count: src.page_count(),
+                label: (i + 1).to_string().into(),
+                bates: g.frozen.bates_number(PageId(u64::from(i))),
+            };
+            let _ = crate::materialize::emit::content::model_digest(&g, &ctx);
+        }
+    }
+}
+
 /// `data` as a page's content, lexed under the default caps, every token
 /// taken: whole, and as two streams split at its middle. The resources
 /// name a color space of each size an inline image may be drawn in.
@@ -89,8 +122,11 @@ pub fn lexer(data: &[u8]) {
 /// Acrobat's and one with an artifact in it: its marked ranges, names and
 /// blocks, and a splice of each range at the top, of all of them at once
 /// widened to touch ([`touching`]), and of its pagination artifacts as a
-/// strip cuts them. Where a splice is made, what it keeps lexes as the
-/// tokens it kept. Returns how many were made.
+/// strip cuts them; and each range at the top with what an older sheaf
+/// kept in its list taken out of it. Where a splice is made, what it
+/// keeps lexes as the tokens it kept; where a list is written again, the
+/// content lexes as it did but for the list, which reads as it did without
+/// those keys. Returns how many were made.
 pub fn splice(data: &[u8]) -> usize {
     let lim = &Limits::DEFAULT;
     let mut pdf = lopdf::Document::with_version("1.7");
@@ -121,8 +157,9 @@ pub fn splice(data: &[u8]) -> usize {
     let _ = content::names_used(concat, &res, lim, &[]);
     let props = PropertiesDict::read(&pdf, Some(&resources));
     let mut drops: Vec<Vec<SpanAcross>> = Vec::new();
+    let mut top: Vec<SpanAcross> = Vec::new();
     if let Ok(found) = content::marked(concat, &props, &res, lim) {
-        let top: Vec<SpanAcross> = found
+        top = found
             .iter()
             .filter(|m| m.depth == 0)
             .map(|m| m.span)
@@ -147,6 +184,14 @@ pub fn splice(data: &[u8]) -> usize {
     for drop in drops {
         if let Ok(kept) = content::splice(concat, &res, lim, &drop) {
             assert_kept(concat, &res, &kept, &drop);
+            made += 1;
+        }
+    }
+    for span in top {
+        if let Ok(Some(rewrite)) = content::without_keys(concat, &res, lim, span, &LEGACY_KEYS) {
+            let nothing = content::splice_each(concat, &res, lim, &[]);
+            let rewritten = (nothing.streams(concat, &[rewrite])).expect("a list written again");
+            assert_rewritten(concat, &res, &rewritten);
             made += 1;
         }
     }
@@ -178,12 +223,12 @@ thread_local! {
 /// [`op_json`]'s document: four pages, a form with every kind of field on
 /// the first two, sheaf's marks of every kind on the third, and on the
 /// fourth another tool's comment with a reply; bookmarks, roman labels on
-/// the first two pages and a header on the last two. The names the Op
-/// JSON fixture's references use are there (`Part I › Ch. 2`, `Appendix`,
-/// `a1b2-c3`, `acro-1`, `sheaf:12`). Read once, opened afresh each time,
-/// with the files its ops are granted: a stamp's page, an attachment's
-/// file and a file of two pages as assets 0, 1 and 2, and one of a page
-/// as `logo`.
+/// the first two pages and a header an older sheaf drew on the last two.
+/// The names the Op JSON fixture's references use are there
+/// (`Part I › Ch. 2`, `Appendix`, `a1b2-c3`, `acro-1`, `sheaf:12`). Read
+/// once, opened afresh each time, with the files its ops are granted: a
+/// stamp's page, an attachment's file and a file of two pages as assets 0,
+/// 1 and 2, and one of a page as `logo`.
 #[cfg(any(test, feature = "fixtures"))]
 struct OpJson {
     store: Arc<Store>,
@@ -199,7 +244,6 @@ impl OpJson {
             Form, MARK_FILE_BYTES, every_kind_in, every_mark_kind, holding, mark_stamp_pdf,
             outline_tree, write_marks,
         };
-        use crate::model::PageId;
         let mut f = every_kind_in(4);
         let pages = f.pages.clone();
         let mut third = f.dict(pages[2]).clone();
@@ -239,16 +283,11 @@ impl OpJson {
         ];
         f.dict(catalog)
             .set("PageLabels", dictionary! { "Nums" => labels });
-        let mut texts: [String; 6] = Default::default();
-        texts[0] = "Draft <<1>>".into();
-        let hf = crate::stamps::HeaderFooter {
-            texts,
-            pages: Some(vec![PageId(2), PageId(3)]),
-            ..Default::default()
-        };
-        let ids: Vec<PageId> = (0..4).map(PageId).collect();
-        let scope = crate::stamps::to_catalog(&hf, &ids);
-        f.dict(catalog).set(crate::stamps::CATALOG_KEY, scope);
+        for &page in &pages[2..] {
+            let mut dict = f.dict(page).clone();
+            crate::generate::fixture::legacy_header(&mut f.pdf, &mut dict);
+            *f.dict(page) = dict;
+        }
         let store = Store::new();
         let kind = BlobKind::file(Path::new("form.pdf"), None);
         let primary = store
@@ -354,6 +393,41 @@ fn assert_kept(content: &Concat, res: &ResCx, kept: &[Cow<[u8]>], drop: &[SpanAc
         .map(|(r, _)| &kept.bytes()[r])
         .collect();
     assert_eq!(before, after, "the tokens a splice kept");
+}
+
+/// That `rewritten`, `content` with a list written again without
+/// [`LEGACY_KEYS`], lexes as `content` does but for that list, which reads
+/// as it did without them.
+fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>]) {
+    let lim = &Limits::DEFAULT;
+    let tokens = |c: &Concat| -> Vec<Vec<u8>> {
+        (c.lex(res, lim))
+            .map(|t| c.bytes()[t.expect("a list written again lexes").0].to_vec())
+            .collect()
+    };
+    let streams: Vec<&[u8]> = rewritten.iter().map(|s| &**s).collect();
+    let (before, after) = (tokens(content), tokens(&Concat::new(&streams)));
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "the tokens a list written again kept"
+    );
+    let changed: Vec<_> = before.iter().zip(&after).filter(|(b, a)| b != a).collect();
+    let [(was, now)] = changed[..] else {
+        panic!("a list written again is one token: {changed:?}")
+    };
+    let read = |list: &[u8]| content::object(list, lim.content.depth);
+    let Some(Object::Dictionary(mut left)) = read(was) else {
+        panic!("a list written again was one")
+    };
+    for key in LEGACY_KEYS {
+        left.remove(key);
+    }
+    assert_eq!(
+        read(now),
+        Some(Object::Dictionary(left)),
+        "the list written again"
+    );
 }
 
 /// [`sheaf_annot`]'s file, opened as a source.
@@ -668,6 +742,86 @@ mod tests {
         ]
     }
 
+    /// [`sheaf_generators`]' fixtures: files sheaf saved with a watermark of
+    /// each kind on every page and a background on some, text over an image,
+    /// and a PDF's page over text; and a header and footer, of page numbers
+    /// and Bates numbers on every page, then of labels on some.
+    fn generator_fixtures() -> Vec<Vec<u8>> {
+        use sheaf_edit::{BlobSel, GridPos, WatermarkContent, WatermarkSpec, Z};
+        let image = crate::materialize::watermark_tests::png();
+        let mut d = crate::tx::tests::doc_of(3, &[]);
+        let second = d.page(1).unwrap();
+        let png = (d.store())
+            .intern(image.clone().into(), BlobKind::image(&image).unwrap())
+            .unwrap();
+        let art = |content| WatermarkSpec {
+            content,
+            position: GridPos::BottomRight,
+        };
+        let image = art(WatermarkContent::Image {
+            image: Some(BlobSel::Id(png.id())),
+            scale: 0.25,
+            opacity: 0.5,
+        });
+        let page = art(WatermarkContent::Page {
+            pdf: Some(BlobSel::Id(d.primary().id())),
+            page: 1,
+            scale: 0.5,
+            opacity: 0.5,
+        });
+        let mut numbered = crate::tx::fixture::header("Page <<1>> of <<N>>");
+        numbered.texts[5] = "<<bates>>".into();
+        numbered.bates = Some(sheaf_edit::BatesSpec::default());
+        let numbered = crate::tx::fixture::set_header(numbered, None);
+        let labeled = crate::tx::fixture::header("<<label>> <<date>>");
+        let labeled = crate::tx::fixture::set_header(labeled, Some(&[second]));
+        let mut out = Vec::new();
+        for (over, under, header) in [
+            (crate::tx::fixture::watermark("DRAFT"), image, numbered),
+            (page, crate::tx::fixture::watermark("under"), labeled),
+        ] {
+            let ops = vec![
+                crate::tx::fixture::set_watermark(over, Z::Over, None),
+                crate::tx::fixture::set_watermark(under, Z::Under, Some(&[second])),
+                header,
+            ];
+            d.commit_ops(ops, "watermark").unwrap();
+            out.push(crate::materialize::How::Rewritten.write(&d));
+        }
+        out
+    }
+
+    /// Unmutated, the generators' fixtures are found again, all three of
+    /// each, a header's Bates numbers too.
+    #[test]
+    fn the_generator_fixtures_are_found() {
+        for fixture in generator_fixtures() {
+            let kind = BlobKind::file(Path::new("fixture.pdf"), None);
+            let src = Store::new().open(fixture.as_slice().into(), kind).unwrap();
+            let found = src.generators();
+            let pages: Vec<Option<Vec<u32>>> = found.iter().map(|g| g.pages.clone()).collect();
+            assert_eq!(found.len(), 3, "{pages:?}");
+            assert!(pages.contains(&None) && pages.contains(&Some(vec![1])));
+            let page = |i: u32| Some(PageId(u64::from(i)));
+            let headers: Vec<_> = (found.iter())
+                .filter_map(|s| s.generator(&src, page))
+                .filter(|g| g.spec.header_footer().is_some())
+                .collect();
+            let [header] = &headers[..] else {
+                panic!("one header: {pages:?}")
+            };
+            let numbers = header.frozen.bates.as_deref().map(|b| b.len());
+            assert!(matches!(numbers, Some(3) | None), "{numbers:?}");
+            for saved in found.iter() {
+                assert!(
+                    saved
+                        .generator(&src, |i| Some(PageId(u64::from(i))))
+                        .is_some()
+                );
+            }
+        }
+    }
+
     /// [`sheaf_annot`]'s fixtures: every kind of mark as a save writes it,
     /// and the same with version 1's payloads, which have no version or
     /// digest. Each is the annotations' objects as lopdf writes them,
@@ -784,6 +938,9 @@ mod tests {
               BT /SheafHF 9 Tf (wm) Tj ET Q EMC /Span <</MCID 0>> BDC (x) Tj EMC",
             b"1 g /Artifact <</Subtype /Background>> BDC 0 0 m 9 9 l S \
               BI /W 2 /H 1 /BPC 8 /CS /CS3 ID ab EIxyz EI EMC Q",
+            b"/Artifact <</Type/Pagination/Subtype/Background/SheafStamp true\
+              /SheafSettings({\"path\":\"/a (b)\"}) % kept\n/D <</SheafStamp 1>>>> BDC\n\
+              q\n0.5 g 0 0 9 9 re f\nQ\nEMC\n",
         ]
         .map(<[u8]>::to_vec)
         .into_iter()
@@ -811,9 +968,10 @@ mod tests {
     /// local and grant. Between them they reach each cascade.
     fn applying() -> Vec<sheaf_edit::Op> {
         use sheaf_edit::{
-            Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Delta, Local, MarkKind,
-            MarkPatch, NewMark, Op, PageLabelRange, PageRef, PageSel, PageSource, Patch, ScopeSel,
-            Sibling, Turn, Vec2,
+            Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Delta, FontChoice,
+            GridPos, Local, Margins, MarkKind, MarkPatch, NewMark, Op, PageLabelRange, PageRef,
+            PageSel, PageSource, Patch, ScopeSel, Sibling, Turn, Vec2, WatermarkContent,
+            WatermarkSpec, Z,
         };
         let pos = PageRef::Pos;
         let positions = |s: &str| PageSel::Positions(s.parse().unwrap());
@@ -933,6 +1091,64 @@ mod tests {
             },
             Op::RemoveHeaderFooter {
                 pages: positions("2"),
+                include_authored: false,
+            },
+            Op::SetWatermark {
+                spec: WatermarkSpec {
+                    content: WatermarkContent::Text {
+                        text: "Café 機密".into(),
+                        font: FontChoice::TimesRoman,
+                        size: 60.0,
+                        color: [200, 30, 30],
+                        opacity: 0.3,
+                        angle: 45.0,
+                    },
+                    position: GridPos::Center,
+                },
+                z: Z::Over,
+                scope: ScopeSel::All,
+            },
+            Op::SetWatermark {
+                spec: WatermarkSpec {
+                    content: WatermarkContent::Page {
+                        pdf: Some(BlobSel::With("logo".into())),
+                        page: 1,
+                        scale: 0.5,
+                        opacity: 0.5,
+                    },
+                    position: GridPos::BottomRight,
+                },
+                z: Z::Under,
+                scope: ScopeSel::Pages(positions("1-3")),
+            },
+            Op::RemoveWatermark {
+                z: Some(Z::Under),
+                pages: positions("2"),
+                include_authored: false,
+            },
+            Op::SetPageBoxes {
+                pages: positions("2"),
+                crop: Patch::Set(BoxSpec::Margins(Margins {
+                    top: 36.0,
+                    bottom: 36.0,
+                    left: 18.0,
+                    right: 18.0,
+                })),
+                trim: Patch::Keep,
+                bleed: Patch::Keep,
+                art: Patch::Set(BoxSpec::Rect(crate::annot::Box2 {
+                    x: 72.0,
+                    y: 72.0,
+                    w: 288.0,
+                    h: 144.0,
+                })),
+            },
+            Op::SetPageBoxes {
+                pages: positions("1"),
+                crop: Patch::Keep,
+                trim: Patch::Clear,
+                bleed: Patch::Keep,
+                art: Patch::Keep,
             },
         ];
         // The fixture's marks of every kind on the first page; a reply's
@@ -1010,7 +1226,8 @@ mod tests {
     /// them, so the repository holds no PDF. The target
     /// `SHEAF_FUZZ_TARGET` names takes the marks' fixtures when it's
     /// `sheaf_annot`, the content when it's `lexer` or `splice`, Op JSON
-    /// when it's `op_json`, and the files otherwise.
+    /// when it's `op_json`, files sheaf saved with watermarks when it's
+    /// `sheaf_generators`, and the files otherwise.
     #[test]
     #[ignore = "fuzz.yml's seeds"]
     fn write_fuzz_seeds() {
@@ -1028,6 +1245,9 @@ mod tests {
             Ok("lexer") => named(content_fixtures(), |n| format!("content-{n}")).collect(),
             Ok("splice") => named(splice_fixtures(), |n| format!("content-{n}")).collect(),
             Ok("op_json") => named(op_json_fixtures(), |n| format!("ops-{n}.json")).collect(),
+            Ok("sheaf_generators") => {
+                named(generator_fixtures(), |n| format!("generators-{n}.pdf")).collect()
+            }
             _ => named(fixtures(), |n| format!("fixture-{n}.pdf")).collect(),
         };
         for (name, seed) in seeds {
@@ -1092,6 +1312,24 @@ mod tests {
                     let kept = std::env::temp_dir().join(format!("sheaf-fuzz-marks-{n}-{case}"));
                     std::fs::write(&kept, &data).unwrap();
                     eprintln!("marks {n}, case {case}: the input is {}", kept.display());
+                    std::panic::resume_unwind(panic);
+                }
+            }
+        }
+        for (n, fixture) in generator_fixtures().iter().enumerate() {
+            for case in 0..CASES {
+                let mut data = fixture.clone();
+                for _ in 0..rng.usize(1..=4) {
+                    mutate(&mut rng, &mut data, TOKENS);
+                }
+                let ran = std::panic::catch_unwind(|| sheaf_generators(&data));
+                if let Err(panic) = ran {
+                    let kept = std::env::temp_dir().join(format!("sheaf-fuzz-gens-{n}-{case}.pdf"));
+                    std::fs::write(&kept, &data).unwrap();
+                    eprintln!(
+                        "generators {n}, case {case}: the input is {}",
+                        kept.display()
+                    );
                     std::panic::resume_unwind(panic);
                 }
             }

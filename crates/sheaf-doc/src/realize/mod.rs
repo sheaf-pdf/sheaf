@@ -28,7 +28,9 @@
 //! is next opened. Each source's allocator grows by every key its sections
 //! wrote, for the session (`alloc`). The groups found are a state's: a new
 //! state finds them again. The digests of the last [`INPUTS_KEPT`] inputs
-//! that hide or drag something are kept, with their sets.
+//! that hide or drag something are kept, with their sets, and the last few
+//! images and pages watermarks drew, so each is made once, not once a page
+//! (`Arts`).
 
 mod alloc;
 mod assemble;
@@ -52,7 +54,7 @@ use sheaf_util::Checksum;
 
 pub use inputs::{MarkDraw, OcgOverride, ViewInputs};
 pub use key::{RenderKey, render_key, render_reads};
-pub(crate) use key::{form_digest, page_digest};
+pub(crate) use key::{form_digest, layout_reads, page_digest, recipe_digest};
 #[cfg(any(test, feature = "fixtures"))]
 pub use untouched::emission_is_base;
 pub use untouched::untouched;
@@ -61,6 +63,7 @@ use alloc::Numbers;
 use assemble::Part;
 
 use crate::layers::LayerId;
+use crate::materialize::emit::content::Arts;
 use crate::materialize::emit::{self, EmitBase, EmitScope, Overlay, RotatePolicy};
 use crate::model::{DocState, PageId};
 use crate::source::Source;
@@ -163,6 +166,8 @@ pub struct Realizer {
     /// The digests of inputs lately asked of, with the inputs, newest
     /// first ([`Realizer::inputs_id`]).
     inputs: Mutex<VecDeque<(ViewInputs, u128)>>,
+    /// Watermarks' images and pages, made once for every page's delta.
+    arts: Arts,
 }
 
 /// The groups found in one state, by group, inputs and whether PDFium
@@ -293,6 +298,7 @@ impl Realizer {
                     src: src.clone(),
                     inputs,
                     rotate: RotatePolicy::KeepBase,
+                    arts: Some(&self.arts),
                 };
                 let scope = EmitScope::Frame(members.pages.clone());
                 let e = emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress)?;
@@ -400,7 +406,7 @@ impl Realizer {
     }
 
     /// Page `page`'s delta, which draws as `key` says: kept, or emitted
-    /// alone over `src`.
+    /// alone over `src` without the frame ([`EmitScope::Delta`]).
     fn delta(
         &self,
         st: &DocState,
@@ -420,8 +426,9 @@ impl Realizer {
             src: src.clone(),
             inputs,
             rotate: RotatePolicy::KeepBase,
+            arts: Some(&self.arts),
         };
-        let scope = EmitScope::Pages([page].into());
+        let scope = EmitScope::Delta(page);
         let e = emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress)?;
         let part = Arc::new(Part::page(e, page)?);
         let weight = part.weight();

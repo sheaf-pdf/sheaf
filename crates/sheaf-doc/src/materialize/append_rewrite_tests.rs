@@ -9,22 +9,23 @@
 //! actions go, where each annotation that goes somewhere goes, the
 //! records' or not, and which name another page as theirs; the outline;
 //! the page labels; the field tree and values; the form's own keys and
-//! whether it has an XFA part; the header and footer; and where the open
-//! action goes.
+//! whether it has an XFA part; the header and footer; the watermarks and
+//! backgrounds found again; and where the open action goes. Half the runs
+//! start from a file sheaf saved with a watermark and a background, so
+//! what's found is set aside or kept as edits and saves go.
 //!
 //! Over ops since slice 11, with fixed cases beside it: labels moved with
 //! their first page, links to pages a later Append brings, a node split and
-//! then reordered, and the header and footer over a reorder, which stands
-//! in for slice 17's live tokens. And a case for each gap the property
+//! then reordered, and the header and footer over a reorder, its live
+//! tokens drawn again. And a case for each gap the property
 //! found: what a page shown as another page changes (its links, bookmarks
 //! and number), fields parted from their widgets or written over them,
 //! save policy's XFA drop applied and taken back, a header's pages and the
 //! labels after a delete, a primary object's place taken by another record
 //! of it, a comment made editable on a copy, and a page appended over a
 //! primary page's object that page takes back. And for the gaps slice
-//! 10's review found: a crop's copy made the page's copy 0 by a move, and
-//! a copy's action, inline link or screen annotation going to a page
-//! brought in or duplicated after it. And for the rebase's: a screen
+//! 10's review found: a copy's action, inline link or screen annotation
+//! going to a page brought in or duplicated after it. And for the rebase's: a screen
 //! annotation on a page written at another number, or brought in again as
 //! the copy an undone insert had, and a later instance's widget and field
 //! read as the instance's copy. And for slice 12's: a connector group's
@@ -38,7 +39,7 @@ use std::sync::Arc;
 use in_progress::NoProgress;
 use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use proptest::prelude::*;
-use sheaf_edit::{Anchor, Op, PageRef, Style as MarkStyle, Turn};
+use sheaf_edit::{Anchor, HeaderFooterSpec, Op, PageRef, Style as MarkStyle, Turn, Z};
 
 use super::append::Refused;
 use super::plan::{Onto, Strategy, forced_append};
@@ -57,12 +58,11 @@ use crate::history::{AllOf, FixedCount, MemoryBudget};
 use crate::labels::{LabelRange, LabelSpec, Style};
 use crate::model::history_tests::{self, Run, with_theirs};
 use crate::model::{
-    AnnotBody, DocState, Document, FieldProps, FormInst, PageId, Target, TextStyle, XfaState,
+    AnnotBody, DocState, Document, FieldProps, FormInst, ImageRef, PageForm, PageId, Scope, Target,
+    TextStyle, WatermarkContent, XfaState,
 };
-use crate::stamps::HeaderFooter;
 use crate::store::Src;
 use crate::text_layer::{OcrWord, TextLayer};
-use crate::tx::Derive;
 use crate::tx::fixture as fx;
 
 /// Page `page`'s link of [`with_theirs`] goes to page `to`.
@@ -100,9 +100,9 @@ fn files(xfa: bool) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// [`files`], the document's open action going to its second page when
-/// `open` (the property's: the fixed cases that append a page's delete,
-/// replacement or rebase, which would leave the open action naming a page
-/// outside the tree, are refused for it, slice 10's review).
+/// `open` (the property's: the fixed cases that append a page's delete or
+/// replacement, which would leave the open action naming a page outside
+/// the tree, are refused for it, slice 10's review).
 fn files_opening(xfa: bool, open: bool) -> (Vec<u8>, Vec<u8>) {
     let mut f = every_kind_in(6);
     for page in 0..6 {
@@ -220,6 +220,15 @@ type FieldSays = (
     )>,
 );
 
+/// The header and footer: its spec, its date and file, the places of the
+/// pages it's on, and its Bates numbers by the places of their pages.
+type HeaderSays = (
+    HeaderFooterSpec,
+    [Arc<str>; 2],
+    Option<Vec<usize>>,
+    Option<Vec<(usize, u64)>>,
+);
+
 /// What a file says, reopened, as the property compares it.
 #[derive(Debug, PartialEq)]
 struct Reopened {
@@ -230,8 +239,11 @@ struct Reopened {
     /// The form's `/CO` by full name, `/DA`, `/Q`, `/NeedAppearances`,
     /// `/SigFlags`, and its XFA part.
     form: (Vec<String>, Option<Arc<str>>, u8, bool, i64, XfaState),
-    /// The header and footer, and the places of the pages it's on.
-    header: Option<(HeaderFooter, Option<Vec<usize>>)>,
+    header: Option<HeaderSays>,
+    /// The watermarks and backgrounds found: each one's z, what it draws
+    /// and where, what it replaces, and the places of the pages it's on
+    /// (None: every page).
+    watermarks: Vec<(Z, String, Option<Vec<usize>>)>,
     /// Where the catalog's `/OpenAction` goes, when it has one.
     open: Option<Dest>,
 }
@@ -415,14 +427,49 @@ fn reopened(path: &Path) -> Reopened {
     let calc = (form.calc_order.iter())
         .filter_map(|&f| st.full_name(f))
         .collect();
-    let header = st.header_footer().map(|hf| {
-        let on = hf.pages.as_deref().map(|pages| places(st, pages));
-        let hf = HeaderFooter {
-            pages: None,
-            ..HeaderFooter::clone(hf)
+    let header = st.header_footer().map(|g| {
+        let on = match &g.scope {
+            Scope::All => None,
+            Scope::Pages(pages) => Some(places(st, &pages.iter().copied().collect::<Vec<_>>())),
         };
-        (hf, on)
+        let spec = HeaderFooterSpec::clone(g.spec.header_footer().unwrap());
+        let numbers = g.frozen.bates.as_ref().map(|numbers| {
+            let mut placed: Vec<(usize, u64)> = (numbers.iter())
+                .filter_map(|(&p, &n)| Some((st.pos_of(p)?, n)))
+                .collect();
+            placed.sort();
+            placed
+        });
+        let frozen = [g.frozen.date.clone(), g.frozen.file.clone()];
+        (spec, frozen, on, numbers)
     });
+    let watermarks = [Z::Under, Z::Over]
+        .into_iter()
+        .filter_map(|z| {
+            let g = st.watermark(z)?;
+            let wm = g.spec.watermark()?;
+            // An image or a page by what it was drawn as, not where it is.
+            let draws = match &wm.content {
+                WatermarkContent::Image {
+                    image: ImageRef::Placed(p),
+                    scale,
+                    opacity,
+                } => format!("image {:?} {} {scale} {opacity}", p.res, p.turns),
+                WatermarkContent::Page {
+                    page: PageForm::Placed(p),
+                    scale,
+                    opacity,
+                } => format!("page {:?} {scale} {opacity}", p.res),
+                other => format!("{other:?}"),
+            };
+            let on = match &g.scope {
+                Scope::All => None,
+                Scope::Pages(pages) => Some(places(st, &pages.iter().copied().collect::<Vec<_>>())),
+            };
+            let said = format!("{draws} {:?} {:?}", wm.position, g.replaces);
+            Some((z, said, on))
+        })
+        .collect();
     Reopened {
         pages,
         outline,
@@ -437,6 +484,7 @@ fn reopened(path: &Path) -> Reopened {
             form.xfa,
         ),
         header,
+        watermarks,
         open: opened_at(&opened.doc),
     }
 }
@@ -531,6 +579,7 @@ fn differences(saved: &Reopened, fresh: &Reopened) -> Vec<String> {
     part("labels".into(), &saved.labels, &fresh.labels);
     part("form".into(), &saved.form, &fresh.form);
     part("header".into(), &saved.header, &fresh.header);
+    part("watermarks".into(), &saved.watermarks, &fresh.watermarks);
     part("the open action".into(), &saved.open, &fresh.open);
     out
 }
@@ -620,13 +669,33 @@ fn forced(doc: &mut Document, path: &Path) -> Strategy {
 const SAVES: u8 = history_tests::PRUNE + 1;
 const ACTIONS: u8 = SAVES + 9;
 
-/// A run of `actions` over [`files`], with an XFA part when `xfa`: the
-/// saves compared as they're made.
-fn run(xfa: bool, actions: &[(u8, u64)]) {
+/// `bytes` saved by sheaf with a watermark on every page and a background
+/// on the second, which an open finds again: a file of `dir`'s.
+fn watermarked(dir: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    let path = dir.join("marked.pdf");
+    std::fs::write(&path, bytes).unwrap();
+    let mut doc = crate::open::file(&path, None).unwrap().doc;
+    let second = doc.page(1).unwrap();
+    let ops = vec![
+        fx::set_watermark(fx::watermark("DRAFT"), Z::Over, None),
+        fx::set_watermark(fx::watermark("under"), Z::Under, Some(&[second])),
+    ];
+    doc.commit_ops(ops, "watermark").unwrap();
+    How::Rewritten.write(&doc)
+}
+
+/// A run of `actions` over [`files`], with an XFA part when `xfa`, and
+/// the document's file saved by sheaf with a watermark and a background
+/// when `marked`: the saves compared as they're made.
+fn run(xfa: bool, marked: bool, actions: &[(u8, u64)]) {
     // Mark ids come from the thread's generator: the same ones each run.
     fastrand::seed(1);
     let dir = scratch();
     let (primary, other) = files_opening(xfa, true);
+    let primary = match marked {
+        true => watermarked(&dir, primary),
+        false => primary,
+    };
     let a = dir.join("a.pdf");
     std::fs::write(&a, primary).unwrap();
     let b = dir.join("b.pdf");
@@ -666,8 +735,12 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
-    fn append_rewrite_reopen_alike(xfa in any::<bool>(), actions in runs()) {
-        run(xfa, &actions);
+    fn append_rewrite_reopen_alike(
+        xfa in any::<bool>(),
+        marked in any::<bool>(),
+        actions in runs(),
+    ) {
+        run(xfa, marked, &actions);
     }
 }
 
@@ -676,8 +749,12 @@ proptest! {
 
     #[test]
     #[ignore = "1,024 cases: cargo test -p sheaf-doc --release -- --ignored append_rewrite"]
-    fn append_rewrite_reopen_alike_1024(xfa in any::<bool>(), actions in runs()) {
-        run(xfa, &actions);
+    fn append_rewrite_reopen_alike_1024(
+        xfa in any::<bool>(),
+        marked in any::<bool>(),
+        actions in runs(),
+    ) {
+        run(xfa, marked, &actions);
     }
 }
 
@@ -784,25 +861,29 @@ fn append_rewrite_a_split_then_a_reorder() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The header and footer, counting pages, over a reorder: a Rewrite for
-/// the legacy header and footer, which draws every page's numbers again.
-/// It stands in for slice 17's live tokens, whose reorder appends what
-/// their layout changed.
+/// The header and footer, counting pages, over a reorder: an Append, which
+/// draws again the numbers on the pages that moved, their old blocks let
+/// go (a live redraw), then the same after the file is opened again, its
+/// blocks found by their markers.
 #[test]
 fn append_rewrite_a_header_over_a_reorder() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, true);
     let set = fx::set_header(fx::header("Page <<1>> of <<N>>"), None);
     doc.commit_ops(vec![set], "header").unwrap();
-    let report = save(&mut doc, &path, &answers(), &NoProgress).unwrap();
-    assert_eq!(report.why, [Why::LegacyHeaderFooter]);
+    appends(&mut doc, &path);
     reopens_as_rewritten(&doc, &dir, "header");
     let [first, last] = [0, 5].map(|i| doc.page(i).unwrap());
     let reorder = fx::move_pages(&[last], Some(first));
     doc.commit_ops(vec![reorder], "reorder").unwrap();
-    let report = save(&mut doc, &path, &answers(), &NoProgress).unwrap();
-    assert_eq!(report.why, [Why::LegacyHeaderFooter]);
+    appends(&mut doc, &path);
     reopens_as_rewritten(&doc, &dir, "reordered");
+    let mut again = crate::open::file(&path, None).unwrap().doc;
+    let first = again.page(0).unwrap();
+    let reorder = fx::move_pages(&[first], None);
+    again.commit_ops(vec![reorder], "reorder").unwrap();
+    appends(&mut again, &path);
+    reopens_as_rewritten(&again, &dir, "reopened and reordered");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -833,26 +914,27 @@ fn other(doc: &Document, dir: &Path) -> Src {
     doc.store().read_file(&path, None).unwrap().0
 }
 
-/// Page `i` of `doc` shown as page `index` of `source`.
-fn rebase(doc: &mut Document, i: usize, source: &Src, index: u32) {
+/// Page `i` of `doc` replaced by page `index` of `source`, which goes by
+/// `name`.
+fn replaced(doc: &mut Document, i: usize, source: &Src, index: u32, name: &str) {
     let id = doc.page(i).unwrap();
-    let pages = vec![(id, source.clone(), index)];
-    doc.commit_page_base(pages, Derive::Crop, "rebase").unwrap();
+    let replace = fx::replace(&[id], source, [index], name);
+    doc.commit_ops(vec![replace], "replace").unwrap();
 }
 
 /// The fourth page, which bookmark B and the second page's link go to,
-/// made to show the sixth page again: no page is the fourth page's object
-/// now, so the link to it goes, as a Rewrite leaves it out; and the page
-/// is written at a number of its own, so the bookmark is written again,
-/// going there.
+/// replaced by the sixth page: no page is the fourth page's object now, so
+/// the link to it goes, as a Rewrite leaves it out; and the page is
+/// written at a number of its own, so the bookmark is written again, going
+/// there.
 #[test]
-fn append_rewrite_a_rebased_page_s_links_go_and_bookmarks_follow() {
+fn append_rewrite_a_replaced_page_s_links_go_and_bookmarks_follow() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, false);
     let primary = doc.primary().clone();
-    rebase(&mut doc, 3, &primary, 5);
+    replaced(&mut doc, 3, &primary, 5, "a.pdf");
     assert_eq!(forced(&mut doc, &path), APPENDED);
-    reopens_as_rewritten(&doc, &dir, "rebased");
+    reopens_as_rewritten(&doc, &dir, "replaced");
     let back = crate::open::file(&path, None).unwrap().doc;
     let st = back.state();
     let b = (st.bookmarks_preorder().into_iter()).find(|(_, _, b)| &*b.title == "B");
@@ -860,17 +942,17 @@ fn append_rewrite_a_rebased_page_s_links_go_and_bookmarks_follow() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A page a Rewrite wrote at the primary object it was, made to show
+/// A page a Rewrite wrote at the primary object it was, replaced by
 /// another page: the next Rewrite writes it at a number of its own, the
 /// old one being an object it no longer is.
 #[test]
-fn append_rewrite_a_rebased_page_leaves_its_number_to_a_rewrite() {
+fn append_rewrite_a_replaced_page_leaves_its_number_to_a_rewrite() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, false);
     let copy = dir.join("b.pdf");
     assert_eq!(planned(&mut doc, &copy).why, [Why::OtherTarget]);
     let primary = doc.primary().clone();
-    rebase(&mut doc, 3, &primary, 5);
+    replaced(&mut doc, 3, &primary, 5, "a.pdf");
     let report = planned(&mut doc, &path);
     assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     reopens_as_rewritten(&doc, &dir, "rewritten");
@@ -993,7 +1075,7 @@ fn append_rewrite_fields_after_a_rewrite_are_written_over_themselves() {
     let dir = scratch();
     let (_, mut doc) = opened(&dir, true);
     let other = other(&doc, &dir);
-    rebase(&mut doc, 1, &other, 1);
+    replaced(&mut doc, 1, &other, 1, "form.pdf");
     let copy = dir.join("b.pdf");
     planned(&mut doc, &copy);
     let first = doc.page(0).unwrap();
@@ -1065,9 +1147,8 @@ fn append_rewrite_an_xfa_part_policy_keeps_again_comes_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A header and footer on one page, saved by a Rewrite; a page before it
-/// deleted: the catalog, which says its pages by their places, is written
-/// again.
+/// A header and footer on one page, saved; a page before it deleted: the
+/// header is on its page still, found by its block there.
 #[test]
 fn append_rewrite_a_header_s_pages_follow_a_delete() {
     let dir = scratch();
@@ -1075,7 +1156,7 @@ fn append_rewrite_a_header_s_pages_follow_a_delete() {
     let fifth = doc.page(4).unwrap();
     let set = fx::set_header(fx::header("On one page"), Some(&[fifth]));
     doc.commit_ops(vec![set], "header").unwrap();
-    assert_eq!(planned(&mut doc, &path).why, [Why::LegacyHeaderFooter]);
+    appends(&mut doc, &path);
     let first = doc.page(0).unwrap();
     doc.commit_ops(vec![fx::delete(&[first])], "delete")
         .unwrap();
@@ -1170,7 +1251,7 @@ fn append_rewrite_a_primary_page_s_number_goes_to_the_page_it_is() {
     let other = other(&doc, &dir);
     let copy = dir.join("b.pdf");
     planned(&mut doc, &copy);
-    rebase(&mut doc, 4, &other, 0);
+    replaced(&mut doc, 4, &other, 0, "form.pdf");
     let third = doc.page(2).unwrap();
     let primary = doc.primary().clone();
     let replace = fx::replace(&[third], &primary, 3..5, "a.pdf");
@@ -1184,12 +1265,13 @@ fn append_rewrite_a_primary_page_s_number_goes_to_the_page_it_is() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// After a Rewrite, the first page's form shown by the fifth page too,
-/// then the first replaced by its own page again: the replacement's
-/// widgets are an instance of the form of their own (M10.5 §3.7), written
-/// as objects of their own, so nothing the section refers to is the
-/// primary's objects the fifth page's widgets were in the file, and the
-/// Append is taken.
+/// The fifth page replaced by the first page, its form another instance
+/// of the file's (copy 1), and the first by the other file's first page,
+/// saved by a Rewrite; then the first replaced by its own page again: the
+/// replacement's widgets are an instance of the form of their own (M10.5
+/// §3.7, copy 2), written as objects of their own, so nothing the section
+/// refers to is the primary's objects the fifth page's widgets are in the
+/// file, and the Append is taken.
 #[test]
 fn append_rewrite_a_page_replaced_by_its_own_page_is_a_form_of_its_own() {
     let dir = scratch();
@@ -1197,15 +1279,18 @@ fn append_rewrite_a_page_replaced_by_its_own_page_is_a_form_of_its_own() {
     let other = other(&doc, &dir);
     let [first, fifth] = [0, 4].map(|i| doc.page(i).unwrap());
     let primary = doc.primary().clone();
-    let pages = vec![(fifth, primary.clone(), 0), (first, other, 0)];
-    doc.commit_page_base(pages, Derive::Crop, "rebase").unwrap();
+    let pages = vec![
+        fx::replace(&[fifth], &primary, [0], "a.pdf"),
+        fx::replace(&[first], &other, [0], "form.pdf"),
+    ];
+    doc.commit_ops(pages, "replace").unwrap();
     let copy = dir.join("b.pdf");
     planned(&mut doc, &copy);
     let replace = fx::replace(&[first], &primary, [0], "a.pdf");
     doc.commit_ops(vec![replace], "replace").unwrap();
     let st = doc.state();
     let copies: BTreeSet<u32> = (st.widgets_on(first)).map(|(_, w)| w.inst.copy).collect();
-    assert_eq!(copies, BTreeSet::from([1]));
+    assert_eq!(copies, BTreeSet::from([2]));
     assert_eq!(forced(&mut doc, &copy), APPENDED);
     reopens_as_rewritten(&doc, &dir, "replaced");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1283,9 +1368,9 @@ fn append_rewrite_pages_that_trade_their_objects_keep_their_order() {
     std::fs::write(&path, pages_file(3)).unwrap();
     let mut doc = crate::open::file(&path, None).unwrap().doc;
     let primary = doc.primary().clone();
-    rebase(&mut doc, 0, &primary, 2);
-    rebase(&mut doc, 1, &primary, 0);
-    rebase(&mut doc, 0, &primary, 1);
+    replaced(&mut doc, 0, &primary, 2, "a.pdf");
+    replaced(&mut doc, 1, &primary, 0, "a.pdf");
+    replaced(&mut doc, 0, &primary, 1, "a.pdf");
     appends(&mut doc, &path);
     reopens_as_rewritten(&doc, &dir, "traded");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1321,65 +1406,6 @@ fn append_rewrite_a_copy_s_link_action_follows_its_page() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A file of two pages, the first named by what `holder` puts in it,
-/// given the file and its first page's object. The first page duplicated,
-/// and both cropped by one crop, whose two pages are both made from the
-/// first page: the first in order is its copy 0, the page its object is,
-/// and the duplicate copy 1. Saved; then the duplicate moved first, which
-/// makes it copy 0 and the first copy 1, though neither is written (one
-/// node holds both). The file's number for the first page's object still
-/// holds the first, where what names it by number goes, while a Rewrite
-/// writes the duplicate there: the Append is refused (finding 6 of slice
-/// 10's review), and the save is a Rewrite.
-fn a_crop_s_copy_made_copy_0_by_a_move(
-    holder: impl FnOnce(&mut Form, ObjectId),
-    want: impl FnOnce(&Document, PageId) -> Refused,
-) {
-    use crate::store::{BlobKind, MemoryKind, Origin};
-    let dir = scratch();
-    let path = dir.join("a.pdf");
-    let mut f = Form::new(2);
-    let to = f.pages[0];
-    holder(&mut f, to);
-    std::fs::write(&path, f.bytes()).unwrap();
-    let mut doc = crate::open::file(&path, None).unwrap().doc;
-    let first = doc.page(0).unwrap();
-    doc.commit_ops(vec![fx::duplicate(&[first])], "duplicate")
-        .unwrap();
-    let copy = doc.page(1).unwrap();
-    assert_eq!(doc.state().def(copy).unwrap().copy, 1);
-    let primary = doc.primary().clone();
-    let crop = [0.0, 0.0, 400.0, 500.0];
-    let bytes = crate::save::cropped_copy(&primary, &[(0, crop), (0, crop)]).unwrap();
-    let kind = BlobKind::Pdf {
-        password: None,
-        origin: Origin::Memory(MemoryKind::Derived),
-    };
-    let cropped = doc.store().open(Arc::from(bytes), kind).unwrap();
-    let derived = crate::Derived {
-        from: primary,
-        pages: vec![0, 0],
-    };
-    doc.add_derived(&cropped, derived);
-    let pages = vec![(first, cropped.clone(), 0), (copy, cropped, 1)];
-    doc.commit_page_base(pages, Derive::Crop, "crop").unwrap();
-    planned(&mut doc, &path);
-    reopens_as_rewritten(&doc, &dir, "cropped");
-    doc.commit_ops(vec![fx::move_pages(&[copy], Some(first))], "move")
-        .unwrap();
-    // `Refused::why` is `BaseObjectsMissing` for several refusals: which
-    // one stops it.
-    let want = want(&doc, copy);
-    assert_eq!(refusal(&doc), Some(want));
-    let report = planned(&mut doc, &path);
-    reopens_as_rewritten(&doc, &dir, "moved");
-    assert_eq!(
-        (report.strategy, report.why),
-        (Some(StrategyKind::Rewrite), vec![Why::BaseObjectsMissing])
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// Why an Append of `doc`'s state onto the file it was saved as, the
 /// removal check vetoing, is refused ([`Refused`]): None when it isn't.
 fn refusal(doc: &Document) -> Option<Refused> {
@@ -1391,46 +1417,6 @@ fn refusal(doc: &Document) -> Option<Refused> {
     let e = out.err()?;
     let refused = e.chain().find_map(|c| c.downcast_ref::<Refused>()).cloned();
     Some(refused.unwrap_or_else(|| panic!("not refused: {e:#}")))
-}
-
-/// The second page's link going to the first, which the Append writes
-/// again (the first page's copies came and went), its destination the
-/// first page's object. It's the primary's copy 0, whose references are
-/// numbers, so `Closure::stale` refuses it before `held` would: the
-/// open action's case below is `held`'s.
-#[test]
-fn append_rewrite_a_crop_s_copy_made_copy_0_by_a_move_rewrites() {
-    a_crop_s_copy_made_copy_0_by_a_move(
-        |f, to| {
-            let link = f.pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Link",
-                "Rect" => vec![100.into(), 10.into(), 120.into(), 30.into()],
-                "Dest" => vec![to.into(), "Fit".into()],
-            });
-            f.set_annots(1, &[link]);
-        },
-        |doc, _| {
-            // The link's page, third now.
-            let st = doc.state();
-            let (link, _) = st.foreign_on(doc.page(2).unwrap()).next().unwrap();
-            Refused::Stale(ObjKey::Annot(link))
-        },
-    );
-}
-
-/// The catalog's `/OpenAction` going to the first page, which the
-/// catalog's keys sheaf doesn't own keep as the file has them: `held`
-/// refuses it, the duplicate's page not at the first page's object.
-#[test]
-fn append_rewrite_an_open_action_to_a_crop_s_copy_made_copy_0_rewrites() {
-    a_crop_s_copy_made_copy_0_by_a_move(
-        |f, to| {
-            let catalog = f.catalog;
-            f.dict(catalog)
-                .set("OpenAction", vec![to.into(), "Fit".into()]);
-        },
-        |_, copy| Refused::Held(ObjKey::Page(copy)),
-    );
 }
 
 /// [`append_rewrite_a_copy_s_link_action_follows_its_page`] with what

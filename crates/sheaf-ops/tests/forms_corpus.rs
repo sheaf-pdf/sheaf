@@ -49,7 +49,7 @@ fn every_form_opens_and_is_checked() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     // The checks run on other threads, the opens on this one.
     let queue = Mutex::new(entries.iter().enumerate());
     let checked = Mutex::new(BTreeMap::new());
@@ -236,7 +236,7 @@ fn every_form_reads_as_its_manifest_row() {
         return;
     };
     let entries: Vec<Entry> = corpus
-        .manifest()
+        .forms()
         .unwrap()
         .into_iter()
         .filter(|e| e.kind != "unparsed")

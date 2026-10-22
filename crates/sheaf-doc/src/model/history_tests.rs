@@ -24,9 +24,10 @@ use in_progress::NoProgress;
 use lopdf::{Object, ObjectId, dictionary};
 use proptest::prelude::*;
 use sheaf_edit::{
-    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Bring, Delta, Imported, LabelStyle,
-    Local, MarkKind, MarkPatch, NewMark, Op, OutlineBring, PageRef, PageSel, Patch, RangeSet,
-    ScopeSel, Sibling, Style, Turn, Vec2,
+    Anchor, AnnotRef, BatesSpec, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Delta,
+    GridPos, Imported, LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, Op, OutlineBring,
+    PageRef, PageSel, Patch, RangeSet, ScopeSel, Sibling, Style, Turn, Vec2, WatermarkContent,
+    WatermarkSpec, Z,
 };
 
 use super::tests::{flat, opened_doc, square, tl};
@@ -39,21 +40,21 @@ use crate::open::FileAnnots;
 use crate::store::Blob;
 use crate::tx::bookmarks::{kids_of, subtree};
 use crate::tx::fixture as fx;
-use crate::tx::{Base, Derive, JobKind, Made, OpResult, Stale};
+use crate::tx::{Base, JobKind, Made, OpResult, Stale};
 
 /// The plugin whose calls the run's plugin groups are.
 const PLUGIN: &str = "test-plugin";
 
 /// The ops a run makes versions of, by name: below [`KINDS`], an action
-/// is an op of the kind at its place here, the page rebase of a derived
-/// flow last (`Tx::set_page_base`).
-const OPS: [&str; 22] = [
+/// is an op of the kind at its place here.
+const OPS: [&str; 24] = [
     "move-pages",
     "rotate-pages",
     "delete-pages",
     "duplicate-pages",
     "insert-pages",
     "replace-pages",
+    "set-page-boxes",
     "set-page-labels",
     "add-bookmark",
     "patch-bookmarks",
@@ -67,9 +68,10 @@ const OPS: [&str; 22] = [
     "adopt-annotations",
     "set-ocr-text",
     "clear-ocr-text",
+    "set-watermark",
+    "remove-watermark",
     "set-header-footer",
     "remove-header-footer",
-    "set-page-base",
 ];
 
 /// A run's actions: below this, an op of the kind [`OPS`] names; then
@@ -156,12 +158,6 @@ impl Locals {
     fn of(&self, made: Made) -> Option<Local> {
         self.named.iter().find(|(_, m)| *m == made).map(|&(l, _)| l)
     }
-}
-
-/// An op, or the internal page rebase of a derived flow.
-enum Gen {
-    Op(Box<Op>),
-    Base(Vec<(PageId, Src, u32)>),
 }
 
 /// Other tools' annotations on page `page` of `f`: a comment named
@@ -704,16 +700,10 @@ impl Run {
     /// `rng`, lowered into it; what it makes that it names, noted in
     /// `locals`. One that fails leaves `tx` as it was.
     fn lower(&self, tx: &mut Tx, kind: u8, rng: &mut fastrand::Rng, locals: &mut Locals) {
-        match self.op(tx.state(), kind, rng, locals) {
-            Gen::Base(pages) => {
-                let _ = tx.set_page_base(pages, Derive::Crop);
-            }
-            Gen::Op(op) => {
-                let names = declared(&op);
-                if let Ok(OpResult { made }) = tx.apply(*op, &NoProgress) {
-                    locals.named.extend(names.into_iter().zip(made));
-                }
-            }
+        let op = self.op(tx.state(), kind, rng, locals);
+        let names = declared(&op);
+        if let Ok(OpResult { made }) = tx.apply(op, &NoProgress) {
+            locals.named.extend(names.into_iter().zip(made));
         }
     }
 
@@ -721,7 +711,7 @@ impl Run {
     /// sometimes naming what it makes with locals from `locals`, and what
     /// earlier ops made by theirs. A kind with nothing to act on is one
     /// that has: a patch of marks with no mark adds one, and so on.
-    fn op(&self, st: &DocState, kind: u8, rng: &mut fastrand::Rng, locals: &Locals) -> Gen {
+    fn op(&self, st: &DocState, kind: u8, rng: &mut fastrand::Rng, locals: &Locals) -> Op {
         let pages: Vec<PageId> = st.order().iter().copied().collect();
         let marks: Vec<(PageId, &Annot)> = pages
             .iter()
@@ -751,7 +741,10 @@ impl Run {
             "delete-annotations" if marks.is_empty() && foreign.is_empty() => "add-mark",
             "adopt-annotations" if adoptable.is_empty() => "add-mark",
             "clear-ocr-text" if layered.is_empty() => "set-ocr-text",
-            "remove-header-footer" if st.generators().is_empty() => "set-header-footer",
+            "remove-watermark" if st.watermark(Z::Over).or(st.watermark(Z::Under)).is_none() => {
+                "set-watermark"
+            }
+            "remove-header-footer" if st.header_footer().is_none() => "set-header-footer",
             k => k,
         };
         let page = |rng: &mut fastrand::Rng| pages[rng.usize(..pages.len())];
@@ -899,7 +892,7 @@ impl Run {
             dashed: rng.u8(..4) == 0,
             cloudy: false,
         };
-        Gen::Op(Box::new(match kind {
+        match kind {
             "move-pages" => {
                 let ids = some(rng);
                 let rest: Vec<PageId> =
@@ -958,6 +951,41 @@ impl Run {
                     from,
                     with: Some(within(rng, src.page_count())),
                     bring: bring(rng),
+                }
+            }
+            "set-page-boxes" => {
+                // A box by margins off what the page shows, or in PageSpace,
+                // or cleared; now and then one off the page, or leaving
+                // too little of it, which fails. The crop mostly, the
+                // others now and then.
+                let page_box = |rng: &mut fastrand::Rng| match rng.u8(..6) {
+                    0 => Patch::Clear,
+                    1..=3 => Patch::Set(BoxSpec::Margins(Margins {
+                        top: rng.f32() * 120.0,
+                        bottom: rng.f32() * 120.0,
+                        left: rng.f32() * 120.0,
+                        right: rng.f32() * 120.0,
+                    })),
+                    _ => Patch::Set(BoxSpec::Rect(Box2 {
+                        x: rng.f32() * 120.0 - 10.0,
+                        y: rng.f32() * 120.0 - 10.0,
+                        w: rng.f32() * 480.0,
+                        h: rng.f32() * 640.0,
+                    })),
+                };
+                let other = |rng: &mut fastrand::Rng| match rng.u8(..4) {
+                    0 => page_box(rng),
+                    _ => Patch::Keep,
+                };
+                Op::SetPageBoxes {
+                    pages: match rng.u8(..8) {
+                        0 => PageSel::All,
+                        _ => some_pages(rng),
+                    },
+                    crop: page_box(rng),
+                    trim: other(rng),
+                    bleed: other(rng),
+                    art: other(rng),
                 }
             }
             "set-page-labels" => Op::SetPageLabels {
@@ -1229,30 +1257,68 @@ impl Run {
                     pages: select(rng, &ids, true),
                 }
             }
-            "set-header-footer" => Op::SetHeaderFooter {
-                spec: fx::header(&format!("h{}", rng.u8(..))),
+            "set-watermark" => Op::SetWatermark {
+                spec: WatermarkSpec {
+                    content: WatermarkContent::Text {
+                        text: format!("w{}", rng.u8(..)),
+                        font: Default::default(),
+                        size: [36.0, 72.0][rng.usize(..2)],
+                        color: [rng.u8(..), 0, 0],
+                        opacity: rng.f32(),
+                        angle: [0.0, 45.0][rng.usize(..2)],
+                    },
+                    position: [GridPos::Center, GridPos::TopLeft][rng.usize(..2)],
+                },
+                z: [Z::Over, Z::Under][rng.usize(..2)],
                 scope: match rng.bool() {
                     true => ScopeSel::All,
                     false => ScopeSel::Pages(some_pages(rng)),
                 },
             },
+            "remove-watermark" => Op::RemoveWatermark {
+                z: [None, Some(Z::Over), Some(Z::Under)][rng.usize(..3)],
+                pages: match rng.bool() {
+                    true => PageSel::All,
+                    false => some_pages(rng),
+                },
+                include_authored: rng.bool(),
+            },
+            "set-header-footer" => {
+                let n = rng.u8(..);
+                let mut spec = fx::header(&format!("h{n}"));
+                // Live tokens, which a reorder or a label change lays out
+                // again, or Bates numbers, fixed when it's set.
+                match rng.u8(..4) {
+                    0 => {}
+                    1 => spec.texts[4] = "Page <<1>> of <<N>>".into(),
+                    2 => spec.texts[3] = "<<label>>".into(),
+                    _ => {
+                        spec.texts[5] = "<<bates>>".into();
+                        spec.bates = Some(BatesSpec {
+                            prefix: "B".into(),
+                            suffix: String::new(),
+                            digits: 4,
+                            start: u64::from(n),
+                        });
+                    }
+                }
+                Op::SetHeaderFooter {
+                    spec,
+                    scope: match rng.bool() {
+                        true => ScopeSel::All,
+                        false => ScopeSel::Pages(some_pages(rng)),
+                    },
+                }
+            }
             "remove-header-footer" => Op::RemoveHeaderFooter {
                 pages: match rng.bool() {
                     true => PageSel::All,
                     false => some_pages(rng),
                 },
+                include_authored: rng.bool(),
             },
-            "set-page-base" => {
-                let pages = (some(rng).into_iter())
-                    .map(|id| {
-                        let (src, _) = source(rng);
-                        (id, src.clone(), rng.u32(..src.page_count()))
-                    })
-                    .collect();
-                return Gen::Base(pages);
-            }
             k => unreachable!("kind {k}"),
-        }))
+        }
     }
 
     /// Every version recorded, rebuilt from the opened version's state by
@@ -1588,6 +1654,7 @@ fn each_kind_s_no_op_pushes_nothing() {
         ranges: Some(vec![fx::label(p0, LabelStyle::LowerRoman, "", 1)]),
     };
     let header = || fx::set_header(fx::header("Draft"), None);
+    let watermark = || fx::set_watermark(fx::watermark("Draft"), Z::Over, Some(&[p0]));
     let layer = tl("text");
     // What the no-ops leave as it is.
     let before = vec![
@@ -1595,6 +1662,7 @@ fn each_kind_s_no_op_pushes_nothing() {
         fx::delete_named(p1, &["theirs-2"]),
         roman(),
         header(),
+        watermark(),
         fx::ocr([(p2, layer.clone())]).remove(0),
     ];
     d.commit_ops(before, "before").unwrap();
@@ -1619,6 +1687,16 @@ fn each_kind_s_no_op_pushes_nothing() {
             pages: none(),
             locals: Vec::new(),
         },
+        // Nothing off each side.
+        fx::crop(
+            &[p1],
+            Margins {
+                top: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+                right: 0.0,
+            },
+        ),
         roman(),
         fx::patch_bookmark(a, BookmarkPatch::default()),
         // B and its pages, after A and its.
@@ -1642,14 +1720,19 @@ fn each_kind_s_no_op_pushes_nothing() {
         Op::AdoptAnnotations { annots: Vec::new() },
         fx::ocr([(p2, layer)]).remove(0),
         fx::clear_ocr(&[p0]),
+        watermark(),
+        // Off a page it isn't on.
+        fx::remove_watermark(None, &[p1]),
         header(),
-        Op::RemoveHeaderFooter { pages: none() },
+        Op::RemoveHeaderFooter {
+            pages: none(),
+            include_authored: false,
+        },
     ];
     let names: BTreeSet<&str> = no_ops.iter().map(crate::tx::op_name).collect();
     assert_eq!(names.len(), no_ops.len());
-    // And the page rebase of no pages.
     assert_eq!(
-        names.len() + 1,
+        names.len(),
         usize::from(KINDS) - 5,
         "every kind that has one"
     );
@@ -1659,8 +1742,4 @@ fn each_kind_s_no_op_pushes_nothing() {
         d.commit_ops(vec![op], "no-op").unwrap();
         assert_eq!((d.version_count(), d.current_version()), (n, at), "{name}");
     }
-    let mut tx = d.tx(Actor::User);
-    tx.set_page_base(Vec::new(), Derive::Crop).unwrap();
-    d.commit(tx, label("no-op")).unwrap();
-    assert_eq!((d.version_count(), d.current_version()), (n, at));
 }

@@ -15,11 +15,20 @@
 //!   catalog never, and nor are `/Parent`, `/P` and `/IRT`, which point
 //!   back up a tree or across to another annotation.
 //! - **Derived objects** are judged on their record inputs, the saved
-//!   state's against the target's: a sheaf mark's
-//!   objects, and what they reach, on what the mark says; the blocks drawn
-//!   over a page (OCR text, the header and footer) on its OCR words and
-//!   header text. A resource sheaf drew with is its user's, and says
-//!   nothing of its own.
+//!   state's against the target's: a sheaf mark's objects, and what they
+//!   reach, on what the mark says; the blocks drawn on a page (OCR text and
+//!   the generators: the header and footer, watermarks and backgrounds) on
+//!   its OCR words, its header's text there and what its watermarks draw,
+//!   a block the file held when it opened too, when the saved state backs
+//!   its generator; `/SheafGenerators` on what every generator's recipe
+//!   says. A resource sheaf drew with, a page's resources it made and the
+//!   streams that isolate a page's content are their user's, and say
+//!   nothing of their own. A live redraw's old block, which a generator
+//!   lays out otherwise now from the same recipe, may go once every page
+//!   it was on draws it again or is gone ([`Section::allowed`]): a page
+//!   number drawn again leaks nothing. Pages laid out alike share a block,
+//!   which is judged on each page that held it, what a generator drew on
+//!   one left out only where it draws again.
 //! - **Other objects** are judged on their text, as a [`TextBag`]: their
 //!   strings; what content draws through its fonts (a page's, a form's, a
 //!   tiling pattern's, a Type 3 glyph's); scripts, rich text, XFA and XMP
@@ -44,14 +53,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId, Stream};
 
 use super::append::refs;
+use super::emit::AllowedDrops;
 use super::key::ObjKey;
 use super::record::SavedSide;
 use crate::annot::{AnnotId, AnnotKind};
-use crate::content::{Concat, FontDecoders, ReadObjects, ResCx, TextBag, text_bag};
+use crate::content::{Concat, FontDecoders, GenId, Marker, ReadObjects, ResCx, TextBag, text_bag};
 use crate::file::text_string;
-use crate::model::{AnnotBody, AnnotRec, DocState, FormRef, Mark, PageId};
+use crate::model::{
+    AnnotBody, AnnotRec, DocState, FormRef, GenSpec, ImageRef, Mark, PageForm, PageId,
+    WatermarkContent, WatermarkGen,
+};
 use crate::prim::Key;
 use crate::source::Limits;
+use crate::source::ObjRef;
 use crate::store::BlobId;
 
 /// What the check does with a removal it finds.
@@ -176,8 +190,14 @@ pub(crate) struct Section<'a> {
     pub target: &'a DocState,
     /// The primary's blob: its objects the file holds at their numbers.
     pub primary: BlobId,
-    /// Keys whose old objects may go (live redraws, slice 17).
-    pub allowed: &'a [ObjKey],
+    /// The saved file's blocks that may go, as derived as they are: live
+    /// redraws ([`Emission::allowed_drops`]), each a block whose every page
+    /// draws its generator again from the same recipe, or is gone, which
+    /// isn't judged; and the pages that draw one again, on which what it
+    /// drew before isn't judged.
+    ///
+    /// [`Emission::allowed_drops`]: super::emit::Emission::allowed_drops
+    pub allowed: &'a AllowedDrops,
     /// The slots the save's path says remove or replace text, when the
     /// reader agreed that what it lists stays readable (an Append anyway):
     /// a derived object judged on their values in the two states is what
@@ -240,7 +260,7 @@ pub fn of_rewrite(
         saved,
         target: &input.target,
         primary: primary.id(),
-        allowed: &[],
+        allowed: &out.allowed_drops,
         said: &BTreeSet::new(),
         lim,
     }))
@@ -271,6 +291,8 @@ struct Item {
 /// The check under way.
 struct Walk<'a> {
     s: &'a Section<'a>,
+    /// [`Section::allowed`]'s blocks.
+    allowed: HashSet<ObjKey>,
     /// What the section writes, or refers to, by number: not unlinked.
     linked: HashSet<u32>,
     /// The saved file's keys by number, found when first asked.
@@ -282,6 +304,11 @@ struct Walk<'a> {
     /// The pages whose old blocks were examined, each with the first's
     /// key.
     pages: BTreeMap<PageId, ObjKey>,
+    /// The old blocks judged on their pages, by number: a block pages laid
+    /// out alike share is judged on each page that held it.
+    blocks: HashMap<u32, ObjKey>,
+    /// Whether the old `/SheafGenerators` was examined.
+    generators: bool,
     /// The other old objects' text, in the order they were examined.
     bags: Vec<(ObjKey, TextBag)>,
     /// The first old object that couldn't be read.
@@ -299,11 +326,14 @@ impl<'a> Walk<'a> {
         }
         Walk {
             s,
+            allowed: s.allowed.keys.iter().copied().collect(),
             linked,
             keys: OnceLock::new(),
             seen: HashSet::new(),
             marks: BTreeMap::new(),
             pages: BTreeMap::new(),
+            blocks: HashMap::new(),
+            generators: false,
             bags: Vec::new(),
             unread: None,
         }
@@ -330,6 +360,15 @@ impl<'a> Walk<'a> {
     fn examine(&mut self, item: Item, next: &mut VecDeque<Item>) {
         let s = self.s;
         if self.seen.contains(&item.id.0) {
+            if let (Some(page), Some(&key)) = (item.page, self.blocks.get(&item.id.0)) {
+                self.pages.entry(page).or_insert(key);
+            }
+            return;
+        }
+        // A live redraw's block may go, unread.
+        let key = self.key(item.id);
+        if self.allowed.contains(&key) {
+            self.seen.insert(item.id.0);
             return;
         }
         let obj = match s.old.object_unkept(item.id) {
@@ -350,18 +389,46 @@ impl<'a> Walk<'a> {
             return;
         }
         self.seen.insert(item.id.0);
-        let key = self.key(item.id);
-        if s.allowed.contains(&key) {
-            return;
-        }
         if let Some(a) = self.mark_of(&key) {
             self.marks.entry(a).or_insert(key);
             return;
         }
+        // A block of sheaf's the file held when it opened is judged as the
+        // block it is, on what's drawn over its page, for a generator the
+        // saved state backs; a stream that isolates content says nothing,
+        // when it holds only that; recognized text's is the file's own, its
+        // words read as any stream's are.
+        if let ObjKey::Base { .. } = key
+            && let Ok(stream) = obj.as_stream()
+            && let Some(marker) = Marker::of(&stream.dict)
+        {
+            let isolates = || {
+                (stream.decompressed_content_with_limit(s.lim.content.decompressed))
+                    .is_ok_and(|data| crate::content::isolates(&data).is_some())
+            };
+            match (marker, item.page) {
+                (Marker::Isolate, _) if isolates() => return,
+                (Marker::Isolate, _) => {}
+                (Marker::Gen { id, .. }, Some(page)) if s.saved.state.backs(id, page) => {
+                    self.pages.entry(page).or_insert(key);
+                    self.blocks.insert(item.id.0, key);
+                    return;
+                }
+                (Marker::Gen { .. } | Marker::Ocr(_), _) => {}
+            }
+        }
         match (key, item.page) {
-            (ObjKey::Res(_) | ObjKey::ResPart(..) | ObjKey::Shared(_), _) => return,
+            (
+                ObjKey::Res(_) | ObjKey::ResPart(..) | ObjKey::Shared(_) | ObjKey::PageRes { .. },
+                _,
+            ) => return,
             (ObjKey::Block(_), Some(page)) => {
                 self.pages.entry(page).or_insert(key);
+                self.blocks.insert(item.id.0, key);
+                return;
+            }
+            (ObjKey::Generators, _) => {
+                self.generators = true;
                 return;
             }
             _ => {}
@@ -374,12 +441,15 @@ impl<'a> Walk<'a> {
                 self.unread.get_or_insert(key);
             }
         }
-        let page = match key {
-            ObjKey::Page(id) => Some(id),
+        // A page the file held when it opened is the primary's object, which
+        // the section writes as the page.
+        let page = match (key, s.objects.get(&item.id).map(|(k, _)| *k)) {
+            (ObjKey::Page(id), _) | (_, Some(ObjKey::Page(id))) => Some(id),
             _ => None,
         };
         for (id, how) in children(&obj, &item.how, &resources) {
-            if !self.linked.contains(&id.0) && !self.seen.contains(&id.0) {
+            let block = page.is_some() && self.blocks.contains_key(&id.0);
+            if !self.linked.contains(&id.0) && (!self.seen.contains(&id.0) || block) {
                 next.push_back(Item { id, how, page });
             }
         }
@@ -419,13 +489,15 @@ impl<'a> Walk<'a> {
     }
 
     /// What the walk found, derived objects first: a mark that says less
-    /// now, then a page with less drawn over it, the first the save's path
-    /// didn't say (a misclassification) before the first it did; then what
-    /// couldn't be read, then the first object whose text the section
-    /// hasn't got. What a mark says is its slot's to say; what's drawn
-    /// over a page is its recognized text, its page's slot's, and the
-    /// header and footer's, a generator's (a page's place and the count
-    /// change that too, which no slot says).
+    /// now, then a page with less drawn over it, then generators that draw
+    /// less, the first the save's path didn't say (a misclassification)
+    /// before the first it did; then what couldn't be read, then the first
+    /// object whose text the section hasn't got. What a mark says is its
+    /// slot's to say; what's drawn over a page is its recognized text, its
+    /// page's slot's, and the header and footer's and its watermarks', a
+    /// generator's (a page's place and the count change the header's too,
+    /// which no slot says): but what a generator drew in a block that's a
+    /// live redraw, which may go.
     fn found(&self) -> Option<Found> {
         let s = self.s;
         let (was, now) = (&s.saved.state, s.target);
@@ -446,7 +518,8 @@ impl<'a> Walk<'a> {
         let (then, after) = (Drawn::new(was), Drawn::new(now));
         let header = (s.said.iter()).any(|k| matches!(k, Key::Generator(_)));
         for (&page, &key) in &self.pages {
-            let ([ocr, hf], [a, b]) = (then.on(page), after.on(page));
+            let redrawn = |g: GenId| s.allowed.redrawn.contains(&(page, g));
+            let ([ocr, hf], [a, b]) = (then.on(page, redrawn), after.on(page, |_| false));
             let mut drawn = a;
             drawn.extend(&b);
             let mut all = ocr.clone();
@@ -465,6 +538,12 @@ impl<'a> Walk<'a> {
                 return Some(derived(key, false));
             }
             said.get_or_insert(key);
+        }
+        if self.generators && generators_say(was).missing_from(&generators_say(now)) > 0 {
+            if !header {
+                return Some(derived(ObjKey::Generators, false));
+            }
+            said.get_or_insert(ObjKey::Generators);
         }
         if let Some(key) = said {
             return Some(derived(key, true));
@@ -780,27 +859,24 @@ fn blob_hash(id: BlobId) -> u128 {
     sheaf_util::checksum(&bytes)
 }
 
-/// What sheaf draws over the pages of a state, as words ([`Drawn::on`]):
-/// the Bates numbers the header and footer counts found once.
+/// What sheaf draws over the pages of a state, as words ([`Drawn::on`]).
 struct Drawn<'a> {
     st: &'a DocState,
-    bates: OnceLock<Vec<Option<u64>>>,
 }
 
 impl<'a> Drawn<'a> {
     fn new(st: &'a DocState) -> Drawn<'a> {
-        Drawn {
-            st,
-            bates: OnceLock::new(),
-        }
+        Drawn { st }
     }
 
-    /// The words drawn over page `id`: its OCR text, then the header and
-    /// footer's text on it. Nothing for a page the state hasn't got.
-    fn on(&self, id: PageId) -> [TextBag; 2] {
+    /// The words drawn over page `id`: its OCR text, then what the
+    /// generators on it draw there but those `skip` names: the header and
+    /// footer's text on it, and what its watermarks draw. Nothing for a
+    /// page the state hasn't got.
+    fn on(&self, id: PageId, skip: impl Fn(GenId) -> bool) -> [TextBag; 2] {
         let st = self.st;
         let (mut ocr, mut bag) = (TextBag::default(), TextBag::default());
-        let Some(pos) = st.pos_of(id) else {
+        let (Some(pos), Some(geom)) = (st.pos_of(id), st.geom(id)) else {
             return [ocr, bag];
         };
         if let Some(layer) = st.ocr_text(id) {
@@ -808,22 +884,69 @@ impl<'a> Drawn<'a> {
                 ocr.add(&word.text);
             }
         }
-        if let Some(hf) = crate::stamps::drawn_over(st, id)
-            && let Some(geom) = st.geom(id)
-        {
-            let bates = self.bates.get_or_init(|| {
-                let order: Vec<PageId> = st.order().iter().copied().collect();
-                hf.bates_numbers(&order)
-            });
-            let facts = crate::stamps::PageFacts {
-                index: pos,
-                count: st.page_count(),
-                bates: bates.get(pos).copied().flatten(),
-            };
-            for placed in hf.layout(geom.shown(), &facts) {
-                bag.add(&placed.text);
+        let on = crate::materialize::emit::content::generators_on(st, id);
+        for g in on.into_iter().filter(|g| !skip(g.id)) {
+            match &g.spec {
+                GenSpec::HeaderFooter(hf) => {
+                    let ctx = crate::generate::page_ctx(st, g, id, pos, geom);
+                    for (_, text) in crate::generate::header::slots(hf, &g.frozen, &ctx) {
+                        bag.add(&text);
+                    }
+                }
+                GenSpec::Watermark(wm) => watermark_says(wm, &mut bag),
             }
         }
         [ocr, bag]
+    }
+}
+
+/// What every generator of `st` is drawn from, as words: what its
+/// watermarks draw ([`watermark_says`]), and its header and footer's
+/// recipe: its slots as they're written, tokens and all, what its date and
+/// file say, and its Bates numbers' prefix and suffix.
+fn generators_say(st: &DocState) -> TextBag {
+    let mut bag = TextBag::default();
+    for g in st.generators().values() {
+        match &g.spec {
+            GenSpec::HeaderFooter(hf) => {
+                for text in &hf.texts {
+                    bag.add(text);
+                }
+                bag.add(&g.frozen.date);
+                bag.add(&g.frozen.file);
+                if let Some(bates) = &hf.bates {
+                    bag.add(&bates.prefix);
+                    bag.add(&bates.suffix);
+                }
+            }
+            GenSpec::Watermark(wm) => watermark_says(wm, &mut bag),
+        }
+    }
+    bag
+}
+
+/// Adds what watermark `wm` draws to `bag`: its text, or its image or
+/// page, by hash.
+fn watermark_says(wm: &WatermarkGen, bag: &mut TextBag) {
+    let placed = |at: &ObjRef| {
+        let mut bytes = blob_hash(at.src.id()).to_be_bytes().to_vec();
+        bytes.extend(at.id.0.to_be_bytes());
+        bytes.extend(at.id.1.to_be_bytes());
+        sheaf_util::checksum(&bytes)
+    };
+    match &wm.content {
+        WatermarkContent::Text { text, .. } => bag.add(text),
+        WatermarkContent::Image { image, .. } => bag.add_hash(match image {
+            ImageRef::Blob(blob) => blob_hash(blob.id()),
+            ImageRef::Placed(p) => placed(&p.at),
+        }),
+        WatermarkContent::Page { page, .. } => bag.add_hash(match page {
+            PageForm::Blob { pdf, index } => {
+                let mut bytes = blob_hash(pdf.id()).to_be_bytes().to_vec();
+                bytes.extend(index.to_be_bytes());
+                sheaf_util::checksum(&bytes)
+            }
+            PageForm::Placed(p) => placed(&p.at),
+        }),
     }
 }

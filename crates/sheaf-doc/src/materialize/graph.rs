@@ -1,6 +1,5 @@
 //! A source loaded whole, as lopdf sees it (M10.5 §11.2): what a Rewrite
-//! edits the primary as ([`rewrite_graph`]), and what the old writers copy
-//! other files' pages out of.
+//! edits the primary as ([`rewrite_graph`]).
 //!
 //! A Rewrite's graph is the primary loaded eagerly with the emitted
 //! objects put in at their numbers, for `keep_only` to prune against the
@@ -12,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use anyhow::{Context, Result, bail};
 use lopdf::{Document as Pdf, Object, ObjectId, Stream};
 
-use super::copy::inherited_attrs;
 use super::emit::{Emission, SymObject, Syms};
 use super::key::ObjKey;
 use super::number::Numbers;
@@ -283,25 +281,5 @@ fn follow(obj: &mut Object, to: &mut dyn FnMut(ObjectId) -> Option<ObjectId>) {
         Object::Dictionary(d) => d.iter_mut().for_each(|(_, o)| follow(o, to)),
         Object::Stream(s) => s.dict.iter_mut().for_each(|(_, o)| follow(o, to)),
         _ => {}
-    }
-}
-
-/// A loaded source's pages, and what each inherits, read before anything
-/// is re-parented.
-pub(crate) struct Loaded {
-    /// Page object ids in page order.
-    pub(crate) pages: Vec<ObjectId>,
-    /// Inherited attributes per page, as found in the original tree.
-    pub(crate) inherited: HashMap<ObjectId, Vec<(Vec<u8>, Object)>>,
-}
-
-impl Loaded {
-    pub(crate) fn from_pdf(pdf: &Pdf) -> Result<Self> {
-        let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
-        let mut inherited = HashMap::new();
-        for &page in &pages {
-            inherited.insert(page, inherited_attrs(pdf, page));
-        }
-        Ok(Self { pages, inherited })
     }
 }

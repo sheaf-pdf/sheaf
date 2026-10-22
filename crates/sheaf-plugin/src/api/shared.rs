@@ -768,11 +768,11 @@ impl api::document::Host for HostState {
     }
 }
 
-/// Page `page` of the call's base, its text as the file will draw it: an
-/// unsaved header and recognized text with it, and no annotation's or
-/// field's text, which PDFium never reads as a page's text (M10.5 §14.3;
-/// [`ViewInputs::plugin_text`]). Read: what it draws so. With the map into
-/// its frame, the API's page coordinates.
+/// Page `page` of the call's base, its text as the file will draw it now:
+/// recognized text and a header, saved or not, with it, and no
+/// annotation's or field's text, which PDFium never reads as a page's
+/// text (M10.5 §14.3; [`ViewInputs::plugin_text`]). Read: what it draws
+/// so. With the map into its frame, the API's page coordinates.
 fn drawn_text(host: &mut HostState, page: u64) -> Result<(Arc<PageChars>, Affine), String> {
     let inputs = ViewInputs::plugin_text();
     let (d, snap, id) = host.page_base(page, &inputs)?;
@@ -862,32 +862,24 @@ impl api::patterns::Host for HostState {
     }
 }
 
-impl api::ocr::Host for HostState {
-    fn recognize(
-        &mut self,
-        page: u64,
-        options: api::ocr::OcrOptions,
-    ) -> Result<api::ocr::TextLayer, String> {
-        let (d, snap, id) = self.page_base(page, &ViewInputs::content_only())?;
-        let ocr = d.ocr.clone().ok_or("OCR isn't available")?;
-        let to_view = to_frame(snap, id);
-        let started = Instant::now();
-        let layer = ocr.recognize(snap, id, options.language, options.dpi);
-        // The engine's time isn't the plugin's.
-        self.deadline += started.elapsed();
-        layer
-            .map(|l| layer_to_wit(&l, to_view))
-            .map_err(|e| format!("{e:#}"))
-    }
-
-    /// Read: what the page shows.
-    fn page_text_layer(&mut self, page: u64) -> Option<api::ocr::TextLayer> {
-        let snap = self.base()?;
-        let page = PageId(page);
-        let layer = (snap.state.ocr_text(page)).map(|l| layer_to_wit(l, to_frame(snap, page)));
-        self.read([Key::Page(page)]);
-        layer
-    }
+/// Page `page` of the call's base recognized now with the user's engine,
+/// from its content alone, its words in its frame: `ocr.recognize` in
+/// either API (`v03.rs`, `v02.rs`). Read: what that content draws.
+fn recognized(
+    host: &mut HostState,
+    page: u64,
+    options: api::ocr::OcrOptions,
+) -> Result<api::ocr::TextLayer, String> {
+    let (d, snap, id) = host.page_base(page, &ViewInputs::content_only())?;
+    let ocr = d.ocr.clone().ok_or("OCR isn't available")?;
+    let to_view = to_frame(snap, id);
+    let started = Instant::now();
+    let layer = ocr.recognize(snap, id, options.language, options.dpi);
+    // The engine's time isn't the plugin's.
+    host.deadline += started.elapsed();
+    layer
+        .map(|l| layer_to_wit(&l, to_view))
+        .map_err(|e| format!("{e:#}"))
 }
 
 impl api::ui::Host for HostState {

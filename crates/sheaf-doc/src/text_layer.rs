@@ -1,11 +1,14 @@
 //! OCR text layers.
 //!
-//! A [`TextLayer`] is the words an OCR engine recognized on one page. It
-//! lives in [`DocState`](crate::DocState) until the document is saved, when
-//! it is written into the page as an invisible text layer (text render mode
-//! 3) so PDFium, Acrobat and everything else can search and select it.
-//! Until then a page's realization draws it the same way, so Find and
-//! selection read it from there (M10.5 §10.5).
+//! A [`TextLayer`] is the words an OCR engine recognized on one page. It's
+//! page content (M10.5 §3.4): a layer of the page's content stack, drawn
+//! over its own content as a block of its own (§11.4), invisible text
+//! (text render mode 3) that PDFium, Acrobat and everything else can
+//! search and select. A page's realization draws it as a save writes it,
+//! so Find and selection read it from there (§10.5). A layer in a file is
+//! one like any other, saved or not: re-recognizing the page, or clearing
+//! its text, takes it out (`StreamSel::SheafOcr`, `MarkedSel::SheafOcr`),
+//! the layer an older sheaf wrote too.
 //!
 //! Word rects are in PageSpace (M10.5 §5), like marks, so cropping or
 //! turning the page moves none of them. The frame the text reads upright
@@ -21,14 +24,16 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
-use lopdf::{Dictionary, Object, Stream, dictionary};
+use lopdf::{Object, dictionary};
 
 use crate::annot::{Box2, Pt};
-use crate::content::sink::{self, Sink};
-use crate::content::{ContentWriter, Font, Glyphless, Res, Reserved, ResourceNeeds, TextMode};
+use crate::content::{BlockId, ContentWriter, Glyphless, Reserved, ResourceNeeds, TextMode};
 use crate::geom::{Affine, Geom};
 
 pub use sheaf_edit::{OcrWord, TextLayer};
+
+#[cfg(any(test, feature = "fixtures"))]
+pub mod fixture;
 
 /// A layer from words as the engine saw them: in points, in the view frame
 /// of `geom`, the page as it was rendered. Words are grouped into lines
@@ -101,17 +106,19 @@ pub(crate) fn overlaps_line(line: Box2, r: Box2) -> bool {
 
 // ----- PDF writing ------------------------------------------------------------
 
-/// Resource name of the layer's font on a page, until slice 18's blocks.
-pub(crate) const FONT_NAME: &str = "SheafOcr";
-/// Marks the content streams we add, so a re-save can find and replace them.
-const MARKER: &str = "SheafOcrLayer";
-
-/// The content stream for `layer`: invisible text, one `Tj` per word,
-/// fitted to the word's box by horizontal scaling, in [`Glyphless`] named
-/// [`FONT_NAME`]; and the font it needs. Text runs along the upright
-/// frame's x, so it's turned by [`TextLayer::upright`]. Starts with `Q` to
-/// close the `q` that precedes the original content.
-pub(crate) fn to_content(layer: &TextLayer) -> (Vec<u8>, ResourceNeeds) {
+/// Layer `layer`, block `id`'s, as its block draws it (§11.4): invisible
+/// text, one `Tj` per word, fitted to the word's box by horizontal scaling,
+/// in [`Glyphless`]; marked `/ShOCR` with a property list that names its
+/// block (`<< /SheafOcrBlock (b…) >>`), so a stream another tool merges it
+/// into still says what it is; and in a `q` of its own, so the text mode
+/// it sets reaches nothing drawn after it. Text runs along the upright
+/// frame's x, so it's turned by [`TextLayer::upright`]. The names it draws
+/// with, the font's and the list's, are kept clear of `reserved`.
+pub(crate) fn block(
+    layer: &TextLayer,
+    id: BlockId,
+    reserved: &Reserved,
+) -> (Vec<u8>, ResourceNeeds) {
     let to_user = Affine::upright(layer.upright).inverse();
     let theta = layer.upright.degrees() as f32;
     let (cs, sn) = (theta.to_radians().cos(), theta.to_radians().sin());
@@ -127,7 +134,9 @@ pub(crate) fn to_content(layer: &TextLayer) -> (Vec<u8>, ResourceNeeds) {
         }
     };
     let mut w = ContentWriter::new();
-    w.restore();
+    let list = dictionary! { "SheafOcrBlock" => Object::string_literal(id.to_string()) };
+    w.begin_marked("ShOCR", list);
+    w.save();
     w.begin_text();
     w.text_mode(TextMode::Invisible);
     let mut last_fs: Option<f32> = None;
@@ -163,84 +172,9 @@ pub(crate) fn to_content(layer: &TextLayer) -> (Vec<u8>, ResourceNeeds) {
         }
     }
     w.end_text();
-    w.finish(
-        &Reserved::default(),
-        &[(Glyphless.resource().id, FONT_NAME)],
-    )
-}
-
-/// Add `layer` to `page` (an owned, flattened page dictionary about to be
-/// written), read and written through `sink`: `/Contents` becomes `[q,
-/// original…, layer]` and `/Resources` is inlined with the layer's font,
-/// the `q` and the font written once a save. A layer of ours the page
-/// holds already ([`has_layer`]) is taken out first, so a re-OCR leaves
-/// one. An empty layer only takes the old one out.
-pub(crate) fn install(sink: &mut dyn Sink, page: &mut Dictionary, layer: &TextLayer) {
-    if has_layer(sink, page) {
-        strip(sink, page);
-    }
-    if layer.is_empty() {
-        return;
-    }
-    let (content, needs) = to_content(layer);
-    let q = Stream::new(dictionary! { MARKER => true }, b"q\n".to_vec());
-    let q = sink.resource(&Res::of([q.into()]));
-    let mut stream = Stream::new(dictionary! { MARKER => true }, content);
-    let _ = stream.compress();
-    let ocr = sink.add(stream.into());
-    // Never decode the original streams: array entries are concatenated
-    // with whitespace, and the q/Q pair isolates whatever state they leave.
-    let mut entries = vec![Object::Reference(q)];
-    entries.extend(sink::content_entries(sink, page));
-    entries.push(Object::Reference(ocr));
-    page.set("Contents", Object::Array(entries));
-    let mut resources = sink::resources(sink, page);
-    sink::bind(sink, &needs, &mut resources);
-    page.set("Resources", Object::Dictionary(resources));
-}
-
-/// Whether the page has an OCR layer of ours in its content: a stream
-/// marked as one in its `/Contents` array.
-pub(crate) fn has_layer(sink: &mut dyn Sink, page: &Dictionary) -> bool {
-    layer_entries(sink, page).is_some_and(|(_, ours)| ours.contains(&true))
-}
-
-/// Remove a layer we wrote earlier from the page's `/Contents`.
-pub(crate) fn strip(sink: &mut dyn Sink, page: &mut Dictionary) {
-    let Some((entries, ours)) = layer_entries(sink, page) else {
-        return;
-    };
-    if !ours.contains(&true) {
-        return;
-    }
-    let kept: Vec<Object> = (entries.into_iter().zip(ours))
-        .filter_map(|(e, ours)| (!ours).then_some(e))
-        .collect();
-    match kept.len() {
-        0 => {
-            page.remove(b"Contents");
-        }
-        1 => page.set("Contents", kept[0].clone()),
-        _ => page.set("Contents", Object::Array(kept)),
-    }
-}
-
-/// The page's `/Contents` array, when it has one, and which of its
-/// entries are a layer's streams.
-fn layer_entries(sink: &mut dyn Sink, page: &Dictionary) -> Option<(Vec<Object>, Vec<bool>)> {
-    let entries = match page.get(b"Contents").ok()? {
-        Object::Array(entries) => entries.clone(),
-        Object::Reference(r) => sink.array(*r)?,
-        _ => return None,
-    };
-    let ours = (entries.iter())
-        .map(|e| {
-            (e.as_reference().ok())
-                .and_then(|r| sink.stream_dict(r))
-                .is_some_and(|d| d.has(MARKER.as_bytes()))
-        })
-        .collect();
-    Some((entries, ours))
+    w.restore();
+    w.end_marked();
+    w.finish(reserved)
 }
 
 #[cfg(test)]
@@ -249,8 +183,7 @@ mod tests {
     use sheaf_edit::Rotation;
 
     use super::*;
-    use crate::content::sink::Lopdf;
-    use crate::content::{self, ResObjects};
+    use crate::content::{Font, Need, Res, ResKind, ResObjects};
     use crate::geom::Rect;
 
     const ROTATIONS: [Rotation; 4] = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
@@ -358,8 +291,13 @@ mod tests {
         );
     }
 
+    /// [`block`] of `l` with no names taken, as block 0x2a.
+    fn written(l: &TextLayer) -> (Vec<u8>, ResourceNeeds) {
+        block(l, BlockId(0x2a), &Reserved::default())
+    }
+
     #[test]
-    fn content_places_invisible_fitted_text() {
+    fn block_places_invisible_fitted_text() {
         let l = layer(
             vec![
                 word("Hello", 72.0, 100.0, 40.0, 10.0),
@@ -367,10 +305,22 @@ mod tests {
             ],
             Rotation::R0,
         );
-        let (c, needs) = to_content(&l);
+        let (c, needs) = written(&l);
         let c = String::from_utf8(c).unwrap();
-        assert!(c.starts_with("Q\nBT\n3 Tr\n"), "{c}");
-        assert!(c.contains("/SheafOcr 10 Tf\n"), "{c}");
+        let [list, font] = &needs.0[..] else {
+            panic!("{needs:?}")
+        };
+        let name = |n: &Need| String::from_utf8(n.name.clone()).unwrap();
+        // Marked as the block's, its text invisible in a `q` of its own.
+        let start = format!("/ShOCR /{} BDC\nq\nBT\n3 Tr\n", name(list));
+        assert!(c.starts_with(&start), "{c}");
+        assert!(c.ends_with("ET\nQ\nEMC\n"), "{c}");
+        assert_eq!(list.kind, ResKind::Properties);
+        let said = dictionary! { "SheafOcrBlock" => Object::string_literal("b2a") };
+        assert_eq!(list.res, Res::dict(said));
+        assert!(c.contains(&format!("/{} 10 Tf\n", name(font))), "{c}");
+        assert!(font.name.starts_with(b"Sh"));
+        assert_eq!(font.res, Glyphless.resource().into());
         // 5 code units, size 10, width 40 → 200*40/(10*5) = 160.
         assert!(
             c.contains("1 0 0 1 72 682 Tm\n160 Tz\n<00480065006C006C006F> Tj\n"),
@@ -378,13 +328,42 @@ mod tests {
         );
         // The 10 pt gap becomes a space scaled to fit it.
         assert!(c.contains("1 0 0 1 112 682 Tm\n200 Tz\n<0020> Tj\n"), "{c}");
-        assert!(c.ends_with("ET\n"));
         assert_eq!(c.matches(" Tf").count(), 1, "font size emitted once");
-        let [font] = &needs.0[..] else {
-            panic!("{needs:?}")
-        };
-        assert_eq!(font.name, b"SheafOcr");
-        assert_eq!(font.res, Glyphless.resource().into());
+    }
+
+    /// The fixtures' block is what [`block`] writes: its bytes frozen in
+    /// [`fixture::OCR_BLOCK`], with the names it gives the font and list.
+    #[test]
+    fn the_fixture_block_is_what_block_writes() {
+        let (c, needs) = block(
+            &fixture::layer(),
+            BlockId(fixture::BLOCK_ID),
+            &Reserved::default(),
+        );
+        assert_eq!(c, fixture::OCR_BLOCK, "{}", String::from_utf8_lossy(&c));
+        let names: Vec<&[u8]> = needs.0.iter().map(|n| &n.name[..]).collect();
+        assert_eq!(names, [fixture::OCR_LIST, fixture::OCR_FONT]);
+    }
+
+    /// The names a block draws with keep clear of those the page binds to
+    /// something else.
+    #[test]
+    fn block_names_keep_clear_of_the_page_s() {
+        let (_, needs) = written(&two_lines());
+        let mut reserved = Reserved::default();
+        reserved.take(&ResourceNeeds(
+            (needs.0.iter())
+                .map(|n| Need {
+                    res: Res::dict(dictionary! { "Other" => 1 }),
+                    ..n.clone()
+                })
+                .collect(),
+        ));
+        let (_, clear) = block(&two_lines(), BlockId(0x2a), &reserved);
+        for (was, now) in needs.0.iter().zip(&clear.0) {
+            assert_eq!((was.kind, &was.res), (now.kind, &now.res));
+            assert_ne!(was.name, now.name);
+        }
     }
 
     /// The text runs along the upright frame's x: turned with the page it
@@ -399,7 +378,7 @@ mod tests {
                 word("wörld", 130.0, 100.0, 50.0, 10.0),
                 word("日本", 72.0, 120.0, 30.0, 10.0),
             ];
-            to_content(&layer(words, Rotation::R90))
+            written(&layer(words, Rotation::R90))
         }
         let first = write();
         assert_eq!(write(), first);
@@ -410,10 +389,10 @@ mod tests {
     }
 
     #[test]
-    fn content_turns_with_the_upright_frame() {
+    fn block_turns_with_the_upright_frame() {
         let matrix = |geom: Geom| {
             let l = from_engine(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], &geom, "t");
-            let c = String::from_utf8(to_content(&l).0).unwrap();
+            let c = String::from_utf8(written(&l).0).unwrap();
             let tm = c.lines().find(|l| l.ends_with(" Tm")).unwrap();
             tm.trim_end_matches(" Tm").to_string()
         };
@@ -431,71 +410,22 @@ mod tests {
         assert_eq!(off, "1 0 0 1 -27 814");
     }
 
-    fn sink<'a>(pdf: &'a mut Pdf, res: &'a mut ResObjects) -> Lopdf<'a> {
-        Lopdf { pdf, res }
-    }
-
-    #[test]
-    fn install_and_strip_are_idempotent() {
-        let mut pdf = Pdf::with_version("1.5");
-        let orig = pdf.add_object(Stream::new(dictionary! {}, b"0 0 m".to_vec()));
-        let font = pdf.add_object(dictionary! { "Type" => "Font" });
-        let res = pdf.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
-        let mut page = dictionary! { "Type" => "Page", "Contents" => orig, "Resources" => res };
-        let l = layer(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], Rotation::R0);
-        let mut objs = ResObjects::default();
-        install(&mut sink(&mut pdf, &mut objs), &mut page, &l);
-        let contents = page.get(b"Contents").unwrap().as_array().unwrap().clone();
-        assert_eq!(contents.len(), 3);
-        assert_eq!(contents[1], Object::Reference(orig));
-        let fonts = page
-            .get(b"Resources")
-            .unwrap()
-            .as_dict()
-            .unwrap()
-            .get(b"Font")
-            .unwrap()
-            .as_dict()
-            .unwrap()
-            .clone();
-        assert!(fonts.has(b"F1"));
-        assert_eq!(
-            fonts.get(b"SheafOcr").unwrap(),
-            &Object::Reference(objs.object(&mut pdf, &Glyphless.resource().into()))
-        );
-        // A second install replaces rather than stacks.
-        let before = pdf.objects.len();
-        assert!(has_layer(&mut sink(&mut pdf, &mut objs), &page));
-        install(&mut sink(&mut pdf, &mut objs), &mut page, &l);
-        assert_eq!(page.get(b"Contents").unwrap().as_array().unwrap().len(), 3);
-        assert_eq!(pdf.objects.len(), before + 1, "only a new content stream");
-        strip(&mut sink(&mut pdf, &mut objs), &mut page);
-        assert_eq!(page.get(b"Contents").unwrap(), &Object::Reference(orig));
-        assert!(!has_layer(&mut sink(&mut pdf, &mut objs), &page));
-        // An empty layer leaves the page alone.
-        let empty = layer(vec![], Rotation::R0);
-        install(&mut sink(&mut pdf, &mut objs), &mut page, &empty);
-        assert_eq!(page.get(b"Contents").unwrap(), &Object::Reference(orig));
-    }
-
+    /// The font a block draws in is Tesseract's glyphless Type0, one
+    /// resource however many blocks draw in it, written once a save.
     #[test]
     fn font_objects_match_tesseract_layout() {
         let mut pdf = Pdf::with_version("1.5");
-        let l = layer(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], Rotation::R0);
-        let mut res = ResObjects::default();
-        let mut pages = [dictionary! {}, dictionary! {}];
-        for page in &mut pages {
-            install(&mut sink(&mut pdf, &mut res), page, &l);
-        }
-        let font = |page: &Dictionary| {
-            let resources = page.get(b"Resources").unwrap().as_dict().unwrap();
-            let fonts = resources.get(b"Font").unwrap().as_dict().unwrap();
-            fonts.get(b"SheafOcr").unwrap().as_reference().unwrap()
+        let font = |l: &TextLayer| {
+            let (_, needs) = written(l);
+            let font = needs.0.into_iter().find(|n| n.kind == ResKind::Font);
+            font.unwrap().res
         };
-        let q = |page: &Dictionary| content::contents(page)[0];
-        assert_eq!(font(&pages[0]), font(&pages[1]), "one font a save");
-        assert_eq!(q(&pages[0]), q(&pages[1]), "one q a save");
-        let type0 = pdf.get_dictionary(font(&pages[0])).unwrap();
+        let mut res = ResObjects::default();
+        let one = layer(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], Rotation::R0);
+        let first = res.object(&mut pdf, &font(&one));
+        let second = res.object(&mut pdf, &font(&two_lines()));
+        assert_eq!(first, second, "one font a save");
+        let type0 = pdf.get_dictionary(first).unwrap();
         assert_eq!(
             type0.get(b"Encoding").unwrap().as_name().unwrap(),
             b"Identity-H"
@@ -532,8 +462,5 @@ mod tests {
             .unwrap();
         let cmap = String::from_utf8(cmap.decompressed_content().unwrap()).unwrap();
         assert!(cmap.contains("beginbfrange"));
-        let q = pdf.get_object(q(&pages[0])).unwrap().as_stream().unwrap();
-        assert_eq!(q.content, b"q\n");
-        assert!(q.dict.has(MARKER.as_bytes()));
     }
 }

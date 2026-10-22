@@ -35,6 +35,8 @@
 //!   readable, or reports it where the reader agreed it stays readable,
 //!   but for a derived object whose removal the save's path didn't say
 //!   (a misclassification), unless they agreed to what the check finds;
+//!   the blocks a generator lays out otherwise now from the same recipe
+//!   (live redraws) may go;
 //!   the form, with the file, when the section writes any of it or writes
 //!   a page at another number; in debug builds every object read back.
 //! - **Save policy** (§11.8): what the file had of it applies to what the
@@ -42,8 +44,9 @@
 //!   that policy keeps now, which comes back.
 //! - **The record**: the file's, its map grown by the section's keys, its
 //!   tree spliced when the section wrote a node, its root objects' unowned
-//!   keys as the section wrote them, the transforms the section applied,
-//!   and the section's cross-reference facts.
+//!   keys as the section wrote them, the generators' blocks on the pages
+//!   the section wrote as it drew them (`drawn`), the transforms the
+//!   section applied, and the section's cross-reference facts.
 //! - **A restored document's pending tail** (§11.10), the sections of the
 //!   recovery sidecar it was restored from, which its file hasn't got, is
 //!   the file's as far as the section goes: the section follows it, and
@@ -63,8 +66,8 @@ use super::emit::{self, Emission, EmitBase, EmitScope, SymObject};
 use super::key::ObjKey;
 use super::plan::{Note, SavePlan, SaveTransform, StrategyKind, Why};
 use super::record::{
-    ACROFORM_OWNED, CATALOG_OWNED, OUTLINES_OWNED, OutputRecord, RootValues, SaveInput, SaveRecord,
-    unowned,
+    ACROFORM_OWNED, CATALOG_OWNED, DrawnBlocks, OUTLINES_OWNED, OutputRecord, RootValues,
+    SaveInput, SaveRecord, unowned,
 };
 use super::removal::{self, Mode};
 use super::{Output, deps, number, verify};
@@ -98,8 +101,7 @@ pub enum Refused {
     /// A key that is a primary object would be written, or is in the file,
     /// somewhere other than its own number, or its number in the file still
     /// holds another record of that object (a page brought in again before
-    /// the first, a crop's copy made the page's copy 0 by a move): only a
-    /// Rewrite renumbers them.
+    /// the first): only a Rewrite renumbers them.
     #[error("{0:?}'s object in the saved file is another's there")]
     Held(ObjKey),
     /// What the file has of the key's object, which the section doesn't
@@ -210,7 +212,6 @@ pub fn append(
     let scope = EmitScope::Keys(Arc::new(deps.keys));
     let onto = EmitBase::Saved {
         primary: &input.primary,
-        derived: &input.derived,
         record,
         parents: &deps.parents,
         tree: deps.tree.as_ref(),
@@ -443,6 +444,24 @@ pub fn append(
         }
         None => record.tree.clone(),
     };
+    // What the generators drew: the file's, but on the pages the section
+    // writes, as it draws them, and none on the pages gone.
+    let wrote: HashSet<PageId> = (e.objects.iter())
+        .filter_map(|(key, _)| match key {
+            ObjKey::Page(page) => Some(*page),
+            _ => None,
+        })
+        .collect();
+    let stale = |page: &PageId| wrote.contains(page) || input.target.def(*page).is_none();
+    let drawn = match e.drawn.is_empty() && !record.drawn.keys().any(|(p, _)| stale(p)) {
+        true => record.drawn.clone(),
+        false => {
+            let mut drawn = DrawnBlocks::clone(&record.drawn);
+            drawn.retain(|(page, _), _| !stale(page));
+            drawn.extend(e.drawn.iter().map(|(&at, &block)| (at, block)));
+            Arc::new(drawn)
+        }
+    };
     let xref = match &update {
         Some(update) => XrefFacts {
             kind: record.xref.kind,
@@ -474,6 +493,7 @@ pub fn append(
         present: record.present.clone(),
         roots: Arc::new(roots(&record.roots, &objects)),
         tree,
+        drawn,
         transforms: transforms.into(),
     };
     let mut out = tail.map_or_else(Vec::new, |tail| tail.to_vec());
@@ -484,6 +504,7 @@ pub fn append(
         record,
         notes,
         unjudged,
+        allowed_drops: e.allowed_drops,
     })
 }
 
@@ -571,10 +592,9 @@ impl<'a> Saved<'a> {
 /// that page by number again): the object would be the other's to what
 /// refers to it by number. A key the section doesn't write is where the
 /// file's map has it (else at its own number, as [`Saved::number`] finds
-/// it): a page that's another page's copy 0 now (a crop's copies trading
-/// which is copy 0 as they're moved), which the file has at a number of
-/// its own, isn't at the page's object, where a Rewrite writes it and what
-/// refers to the page by number goes.
+/// it): a page that's another page's copy 0 now, which the file has at a
+/// number of its own, isn't at the page's object, where a Rewrite writes
+/// it and what refers to the page by number goes.
 fn held(
     e: &Emission,
     numbers: &number::Appended,

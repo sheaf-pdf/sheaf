@@ -1,11 +1,15 @@
-//! Where the legacy installers draw (M10.5 slice 9): a [`Sink`] reads what
-//! a page dictionary names and takes what an installer adds, so
-//! `text_layer::install` and `stamps::install` serve both the lopdf
-//! document an old writer builds ([`Lopdf`]) and the emitter, whose page
-//! dictionaries refer to objects by key.
+//! Where content's resources are written (M10.5 slice 9): a [`Sink`] reads
+//! what a dictionary names and writes the resources a [`ContentWriter`]'s
+//! content draws with, once however many draw with them, so a mark's
+//! appearance form ([`bind`]) serves both the lopdf document an old writer
+//! builds ([`Lopdf`]) and the emitter, whose dictionaries refer to objects
+//! by key; the emitter reads a page's `/Contents` and `/Resources` through
+//! it too.
 //!
-//! A page dictionary and what a sink reads for it are in one space: an
-//! old writer's object numbers, or the emitter's placeholders.
+//! A dictionary and what a sink reads for it are in one space: an old
+//! writer's object numbers, or the emitter's placeholders.
+//!
+//! [`ContentWriter`]: super::ContentWriter
 
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
@@ -15,20 +19,14 @@ use super::res::Res;
 use super::to_lopdf::ResObjects;
 use super::writer::{Reserved, ResourceNeeds};
 
-/// What an installer reads a page through and adds to.
+/// What content's resources are read through and written to.
 pub trait Sink {
     /// The dictionary object `id` is, references followed: None for
     /// anything else, or what can't be read.
     fn dict(&mut self, id: ObjectId) -> Option<Dictionary>;
 
-    /// The dictionary of the stream object `id` is, without its data.
-    fn stream_dict(&mut self, id: ObjectId) -> Option<Dictionary>;
-
     /// The array object `id` is.
     fn array(&mut self, id: ObjectId) -> Option<Vec<Object>>;
-
-    /// `obj`, a new object of the page's own: where it is.
-    fn add(&mut self, obj: Object) -> ObjectId;
 
     /// `res`'s object, written once however many pages draw with it.
     fn resource(&mut self, res: &Res) -> ObjectId;
@@ -50,17 +48,8 @@ impl Sink for Lopdf<'_> {
         self.pdf.get_dictionary(id).ok().cloned()
     }
 
-    fn stream_dict(&mut self, id: ObjectId) -> Option<Dictionary> {
-        let stream = self.pdf.get_object(id).ok()?.as_stream().ok()?;
-        Some(stream.dict.clone())
-    }
-
     fn array(&mut self, id: ObjectId) -> Option<Vec<Object>> {
         self.pdf.get_object(id).ok()?.as_array().ok().cloned()
-    }
-
-    fn add(&mut self, obj: Object) -> ObjectId {
-        self.pdf.add_object(obj)
     }
 
     fn resource(&mut self, res: &Res) -> ObjectId {

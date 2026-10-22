@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use sheaf_edit::{
-    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Bring, HeaderFooterSpec, LabelStyle,
-    Margins, NewMark, Op, PageLabelRange, PageRef, PageSel, PageSource, RangeSet, ScopeSel,
-    Sibling, Turn,
+    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Box2, BoxSpec, Bring, FontChoice,
+    GridPos, HeaderFooterSpec, LabelStyle, Margins, NewMark, Op, PageLabelRange, PageRef, PageSel,
+    PageSource, Patch, RangeSet, ScopeSel, Sibling, Turn, WatermarkContent, WatermarkSpec, Z,
 };
 
-use super::{Actor, Commit, CommitOpts, Derive, EditError, JobKind, Tx};
+use super::{Actor, Commit, CommitOpts, EditError, JobKind, Tx};
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::labels::LabelSpec;
 use crate::model::{Document, GroupId, GroupKind, OutlineId, PageId};
@@ -50,20 +50,6 @@ impl Document {
             ..CommitOpts::labelled(label)
         };
         self.commit(tx, opts)
-    }
-
-    /// Each of `pages` shown from page `index` of `src`, a copy a derived
-    /// flow made as `why` says ([`Tx::set_page_base`]), as a version of the
-    /// user's labelled `label`.
-    pub fn commit_page_base(
-        &mut self,
-        pages: Vec<(PageId, Src, u32)>,
-        why: Derive,
-        label: &str,
-    ) -> Result<Commit, EditError> {
-        let mut tx = self.tx(Actor::User);
-        tx.set_page_base(pages, why)?;
-        self.commit(tx, CommitOpts::labelled(label))
     }
 
     /// `ops` lowered in a transaction of the user's, what the pages they
@@ -194,6 +180,28 @@ pub fn rotate(pages: &[PageId], by: Turn) -> Op {
     }
 }
 
+/// `pages` cropped by `m`, off each side as it shows.
+pub fn crop(pages: &[PageId], m: Margins) -> Op {
+    Op::SetPageBoxes {
+        pages: ids(pages),
+        crop: Patch::Set(BoxSpec::Margins(m)),
+        trim: Patch::Keep,
+        bleed: Patch::Keep,
+        art: Patch::Keep,
+    }
+}
+
+/// `page` cropped to `to`, in PageSpace.
+pub fn crop_to(page: PageId, to: Box2) -> Op {
+    Op::SetPageBoxes {
+        pages: ids(&[page]),
+        crop: Patch::Set(BoxSpec::Rect(to)),
+        trim: Patch::Keep,
+        bleed: Patch::Keep,
+        art: Patch::Keep,
+    }
+}
+
 /// File `src`, as the reader picked it by `name`.
 pub fn file(src: &Src, name: &str) -> PageSource {
     PageSource::File {
@@ -292,6 +300,7 @@ pub fn header(text: &str) -> HeaderFooterSpec {
     texts[0] = text.into();
     HeaderFooterSpec {
         texts,
+        font: FontChoice::Helvetica,
         size: 10.0,
         color: [0, 0, 0],
         margins: Margins {
@@ -313,6 +322,52 @@ pub fn set_header(spec: HeaderFooterSpec, pages: Option<&[PageId]>) -> Op {
             None => ScopeSel::All,
             Some(pages) => ScopeSel::Pages(ids(pages)),
         },
+    }
+}
+
+/// The header and footer taken off `pages`, with the headers and footers
+/// others but the author drew there.
+pub fn remove_header(pages: &[PageId]) -> Op {
+    Op::RemoveHeaderFooter {
+        pages: ids(pages),
+        include_authored: false,
+    }
+}
+
+/// A watermark of `text`, in the middle of the page, in the watermark
+/// dialog's defaults.
+pub fn watermark(text: &str) -> WatermarkSpec {
+    WatermarkSpec {
+        content: WatermarkContent::Text {
+            text: text.into(),
+            font: FontChoice::HelveticaBold,
+            size: 72.0,
+            color: [200, 30, 30],
+            opacity: 0.3,
+            angle: 45.0,
+        },
+        position: GridPos::Center,
+    }
+}
+
+/// `spec` set at `z` on `pages`, or on every page.
+pub fn set_watermark(spec: WatermarkSpec, z: Z, pages: Option<&[PageId]>) -> Op {
+    Op::SetWatermark {
+        spec,
+        z,
+        scope: match pages {
+            None => ScopeSel::All,
+            Some(pages) => ScopeSel::Pages(ids(pages)),
+        },
+    }
+}
+
+/// The watermark at `z`, or both, taken off `pages`.
+pub fn remove_watermark(z: Option<Z>, pages: &[PageId]) -> Op {
+    Op::RemoveWatermark {
+        z,
+        pages: ids(pages),
+        include_authored: false,
     }
 }
 

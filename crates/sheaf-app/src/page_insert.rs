@@ -1,5 +1,6 @@
 //! Edits planned off the UI thread (M10.5 §14.1), each a planner
-//! (jobs.rs):
+//! (jobs.rs), and the edits of dialogs, committed on the version they
+//! opened on:
 //! - **Inserts:** Document > Insert Pages (a PDF's, Blank Pages… and From
 //!   Images…) and Replace Pages…. Off the UI thread the file is read into
 //!   the document's store, what lowering reads of it is read, and the op
@@ -8,18 +9,35 @@
 //!   version if the document has moved on (`Stale::Relower`). Pages with no
 //!   file of their own become PDFs in the generated-file cache
 //!   (`sheaf_doc::generated`) first.
-//! - **Derived pages:** Crop Pages, Watermark / Background and Header &
-//!   Footer show pages from copies made of them off the UI thread, over
-//!   the version their dialog opened on, and commit on that version
-//!   (`Stale::Validate`): an edit since to what they changed is a conflict,
-//!   and nothing changes. The Header & Footer dialog previews its page as
-//!   it would draw (`header_footer_dialog`); Crop's and Watermark's adopt
-//!   that preview in M10.5 slices 15 and 16.
+//! - **Crop Pages** changes pages' boxes alone (M10.5 slice 15). Margins
+//!   are one op, committed on the version the dialog opened on
+//!   (`Stale::Validate`): an edit since to a page's boxes is a conflict,
+//!   and nothing changes. Trim White is a planner: it measures each page's
+//!   content as it draws through the document's views, off the UI thread
+//!   (`sheaf_ops::crop::trim_white`), and commits on the version it
+//!   measured in the same way, measuring again on the current one when
+//!   that conflicts. The dialog previews its page as either would draw it
+//!   (`crop_dialog`).
+//! - **Watermark / Background** is the document's watermark at that z
+//!   (M10.5 slice 16), laid out on each page as a save writes it. Setting
+//!   it is one op, committed on the version the dialog opened on as a
+//!   crop is. Remove is a planner: its lowering reads each page's content
+//!   off the UI thread, for the watermarks other programs and files drew,
+//!   which it takes off too and counts by who drew them (§6.5, D61), and
+//!   it commits on the version the dialog opened on; the notice is its
+//!   line, with those counts. The dialog previews its page as applying
+//!   would draw it (`watermark_dialog`).
+//! - **Header & Footer** is the document's header and footer (M10.5 slice
+//!   17), set and taken off as a watermark is: setting it is one op,
+//!   committed on the version the dialog opened on, and Remove is a
+//!   planner, which takes off the headers and footers others drew too and
+//!   counts them. The dialog previews its page as applying would draw it
+//!   (`header_footer_dialog`).
+//! - **Page Labels**, from its dialog, commits on the version the dialog
+//!   opened on in the same way.
 //!
 //! None opens an engine: the render worker opens a file's when one of its
 //! pages is first drawn (M10.5 §10.3).
-//! - **Page Labels**, from its dialog, commits on the version the dialog
-//!   opened on in the same way.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -31,14 +49,15 @@ use sheaf_doc::images::PageFit;
 use sheaf_doc::labels::Style;
 use sheaf_doc::tx::LowerCx;
 use sheaf_doc::{
-    Actor, Commit, CommitOpts, Derive, DocState, Document, JobKind, PageId, Snapshot, Src, Stale,
-    Store, Tx, VersionId,
+    Actor, Blob, Commit, CommitOpts, DocState, Document, EditError, JobKind, PageId, Snapshot, Src,
+    Stale, Store, Tx, VersionId,
 };
 use sheaf_edit::{
-    BlobSel, Bring, FormBring, Op, OutlineBring, PageLabelRange, PageRef, PageSel, PageSize,
-    PageSource, RangeSet, ScopeSel,
+    BlobSel, BoxSpec, Bring, FormBring, Margins, Op, OutlineBring, PageLabelRange, PageRef,
+    PageSel, PageSize, PageSource, Patch, RangeSet, Z,
 };
-use sheaf_ops::derive::DerivedSource;
+use sheaf_ops::crop::{self, Trimmed};
+use sheaf_ops::views::Views;
 use sheaf_ops::{Progress, Tracker};
 
 use crate::docview::{DocView, State, failed};
@@ -421,39 +440,6 @@ pub(crate) fn ids_at(snap: &Snapshot, indexes: &[usize]) -> Vec<PageId> {
 }
 
 impl DocView {
-    /// `tx` with each page of `copies` shown from the copy a derived flow
-    /// made of it, as `why` says, for a version called `label`: None when
-    /// that failed, which the notice says.
-    fn show_copies(
-        &mut self,
-        mut tx: Tx,
-        copies: &[DerivedSource],
-        why: Derive,
-        label: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<Tx> {
-        let pages: Vec<(PageId, Src, u32)> = copies.iter().flat_map(|c| c.bases()).collect();
-        if !pages.is_empty()
-            && let Err(e) = tx.set_page_base(pages, why)
-        {
-            self.set_notice(failed(label, &e), cx);
-            return None;
-        }
-        Some(tx)
-    }
-
-    /// The copies a committed derived flow shows pages from: noted with
-    /// the document, so a save writes their pages as the ones they were
-    /// made of.
-    fn keep_copies(&mut self, copies: &[DerivedSource]) {
-        let State::Ready(doc) = &mut self.state else {
-            return;
-        };
-        for c in copies {
-            c.note(&mut doc.model);
-        }
-    }
-
     /// A transaction of the user's on `snap`'s version: None while no
     /// document is open.
     fn user_tx_at(&self, snap: &Snapshot) -> Option<Tx> {
@@ -479,6 +465,18 @@ impl DocView {
         (doc.model.page_count(), idx)
     }
 
+    /// The 0-based indexes of the selected pages, in document order, when
+    /// more than one is: what the Crop Pages dialog offers as the selection,
+    /// and what the Watermark and Header & Footer dialogs count others' on;
+    /// none otherwise.
+    pub(crate) fn selected_indexes(&self) -> Vec<usize> {
+        let (_, targets) = self.target_indexes();
+        match targets.len() {
+            0 | 1 => Vec::new(),
+            _ => targets,
+        }
+    }
+
     /// The ids of the pages at these 0-based indexes.
     pub(crate) fn page_ids_at(&self, indexes: &[usize]) -> Vec<PageId> {
         let State::Ready(doc) = &self.state else {
@@ -489,15 +487,63 @@ impl DocView {
 }
 
 impl DocView {
-    /// Document > Crop Pages: pages `ids` of `opened`, the version the
-    /// dialog opened on, cropped as `spec` says. Cropped copies are made
-    /// off the UI thread, in memory, into the document's store; the pages
-    /// are then shown from them, as one step on `opened`.
+    /// Document > Crop Pages, by margins: pages `ids` of `opened`, the
+    /// version the dialog opened on, each cropped by `margins` off its
+    /// sides as it shows, as one op committed on `opened`. Margins that
+    /// leave too little of a page crop nothing, and the notice says so.
     pub(crate) fn crop_pages(
         &mut self,
         opened: Snapshot,
         ids: Vec<PageId>,
-        spec: sheaf_ops::crop::CropSpec,
+        margins: Margins,
+        cx: &mut Context<Self>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        let n = ids.len();
+        let label = crop_label(n);
+        let Some(tx) = self.user_tx_at(&opened) else {
+            return;
+        };
+        let Some(tx) = self.lower_in(tx, vec![crop_op(ids, margins)], &label, cx) else {
+            return;
+        };
+        let opts = CommitOpts::based(opened.version, Stale::Validate, label.as_str());
+        if let Ok(commit) = self.commit(tx, opts, cx) {
+            let mut notice = format!("Cropped {n} page{}", if n == 1 { "" } else { "s" });
+            if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+                notice = format!("{notice}. {told}");
+            }
+            self.set_notice(notice, cx);
+        }
+    }
+
+    /// Document > Crop Pages, Trim White: pages `ids` of `opened`, the
+    /// version the dialog opened on, each cropped down to its content with
+    /// [`crop::PAD`] to spare, as one step. They're measured off the UI
+    /// thread, as their content draws through the document's views in the
+    /// background's budget ([`crop::trim_white`]), and the crops commit on
+    /// the version they were measured in (M10.5 §8.5).
+    pub(crate) fn trim_white(
+        &mut self,
+        opened: Snapshot,
+        ids: Vec<PageId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.trim_from(opened, ids, 1, cx);
+    }
+
+    /// [`trim_white`](Self::trim_white) of pages `ids`, measured in `snap`,
+    /// on its `attempt`th try: when another edit since changed a page's
+    /// boxes or what it draws, the commit conflicts, and they're measured
+    /// again in the document as it is then, the pages still in it, up to
+    /// [`TRIM_ATTEMPTS`] tries; then the conflict's notice stays.
+    fn trim_from(
+        &mut self,
+        snap: Snapshot,
+        ids: Vec<PageId>,
+        attempt: u32,
         cx: &mut Context<Self>,
     ) {
         let State::Ready(doc) = &self.state else {
@@ -506,26 +552,79 @@ impl DocView {
         if ids.is_empty() {
             return;
         }
-        let store = doc.model.store().clone();
-        let n = ids.len();
-        let label = format!("Crop {n} page{}", if n == 1 { "" } else { "s" });
+        // A realizer of its own: the state it measures in is never the
+        // screen's.
+        let views = Views::new(doc.views.pool().clone());
+        let lower = doc.model.lower_cx(Actor::Job(JobKind::Trim));
         let work = {
-            let opened = opened.clone();
-            move |p: &Tracker| sheaf_ops::crop::plan(&store, &opened, &ids, spec, p)
-        };
-        let land = {
-            let label = label.clone();
-            move |v: &mut DocView, copies: Vec<DerivedSource>, cx: &mut Context<DocView>| {
-                let tx = v.user_tx_at(&opened)?;
-                let tx = v.show_copies(tx, &copies, Derive::Crop, &label, cx)?;
-                let opts = CommitOpts::based(opened.version, Stale::Validate, label.as_str());
-                v.commit(tx, opts, cx).ok()?;
-                v.keep_copies(&copies);
-                Some(format!("Cropped {n} page{}", if n == 1 { "" } else { "s" }))
+            let (snap, ids) = (snap.clone(), ids.clone());
+            move |p: &Tracker| {
+                let (pad, urgency) = (crop::PAD, crop::Urgency::Background);
+                crop::trim_white(&views, &snap, lower, &ids, pad, urgency, p)
             }
         };
-        self.run_planner(&label, work, |_| None, land, cx);
+        let land = move |v: &mut DocView, found: Trimmed, cx: &mut Context<DocView>| {
+            let State::Ready(doc) = &v.state else {
+                return None;
+            };
+            let label = crop_label(found.crops.len());
+            let mut tx = Document::tx_at(&snap, doc.model.lower_cx(Actor::Job(JobKind::Trim)));
+            if let Err(e) = found.lower(&mut tx) {
+                return Some(failed(&label, &e));
+            }
+            let opts = CommitOpts::based(snap.version, Stale::Validate, label.as_str());
+            match v.commit(tx, opts, cx) {
+                Ok(commit) => Some(trimmed_notice(&found, &commit)),
+                Err(EditError::Conflict { .. }) if attempt < TRIM_ATTEMPTS => {
+                    let now = v.model_snapshot()?;
+                    let ids = (ids.into_iter())
+                        .filter(|&id| now.state.def(id).is_some())
+                        .collect();
+                    v.trim_from(now, ids, attempt + 1, cx);
+                    None
+                }
+                // The commit's notice says why.
+                Err(_) => None,
+            }
+        };
+        self.run_planner("Trim White", work, |_| None, land, cx);
     }
+}
+
+/// The op cropping pages `ids` by `margins`, off each side as it shows:
+/// what the Crop Pages dialog applies, and what its preview lowers.
+pub(crate) fn crop_op(ids: Vec<PageId>, margins: Margins) -> Op {
+    Op::SetPageBoxes {
+        pages: PageSel::ids(ids),
+        crop: Patch::Set(BoxSpec::Margins(margins)),
+        trim: Patch::Keep,
+        bleed: Patch::Keep,
+        art: Patch::Keep,
+    }
+}
+
+/// How many times Trim White measures pages before a conflict stands.
+const TRIM_ATTEMPTS: u32 = 3;
+
+/// What undo calls a crop of `n` pages.
+fn crop_label(n: usize) -> String {
+    format!("Crop {n} page{}", if n == 1 { "" } else { "s" })
+}
+
+/// What the reader is told of Trim White's `found`, committed as `commit`:
+/// how many pages it cropped, and how many it left as they were.
+fn trimmed_notice(found: &Trimmed, commit: &Commit) -> String {
+    let n = found.crops.len();
+    let mut notice = format!("Trimmed {n} page{}", if n == 1 { "" } else { "s" });
+    match found.left.len() {
+        0 => {}
+        1 => notice.push_str(", 1 left as it was"),
+        left => notice.push_str(&format!(", {left} left as they were")),
+    }
+    if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
+        notice = format!("{notice}. {told}");
+    }
+    notice
 }
 
 impl DocView {
@@ -595,146 +694,147 @@ impl DocView {
     }
 }
 
-/// The op that sets `hf` on the pages it names of `opened`, its dialog's
-/// version (None: all of them), or with `hf` None or empty, removes the
-/// header and footer from every page `opened` has, by id, never by order.
-pub(crate) fn header_footer_op(
-    hf: Option<sheaf_doc::stamps::HeaderFooter>,
-    opened: &Snapshot,
-) -> Op {
-    match hf.filter(|hf| !hf.is_empty()) {
-        Some(hf) => Op::SetHeaderFooter {
-            spec: hf.spec(),
-            scope: match hf.pages {
-                None => ScopeSel::All,
-                Some(pages) => ScopeSel::Pages(PageSel::ids(pages)),
-            },
-        },
-        None => Op::RemoveHeaderFooter {
+impl DocView {
+    /// Document > Header & Footer: `set`, the dialog's op, which sets the
+    /// header and footer on the pages it names of `opened`, the version
+    /// the dialog opened on, committed on that version. Text its font
+    /// can't draw all of is said in the notice, and so is a change of
+    /// nothing.
+    pub(crate) fn set_header_footer(&mut self, opened: Snapshot, set: Op, cx: &mut Context<Self>) {
+        let label = "Header & footer";
+        let Some(tx) = self.user_tx_at(&opened) else {
+            return;
+        };
+        let Some(tx) = self.lower_in(tx, vec![set], label, cx) else {
+            return;
+        };
+        let opts = CommitOpts::based(opened.version, Stale::Validate, label);
+        if let Ok(commit) = self.commit(tx, opts, cx) {
+            let none = "No change to the header and footer";
+            self.set_notice(line_notice(&commit, none), cx);
+        }
+    }
+
+    /// Document > Header & Footer, Remove: the header and footer taken off
+    /// every page of `opened`, the version the dialog opened on, and those
+    /// other programs and files drew, the author's own too with
+    /// `include_authored`, planned as [`remove_watermark`]'s removal is.
+    ///
+    /// [`remove_watermark`]: Self::remove_watermark
+    pub(crate) fn remove_header_footer(
+        &mut self,
+        opened: Snapshot,
+        include_authored: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let remove = Op::RemoveHeaderFooter {
             pages: PageSel::ids(opened.state.order().iter().copied()),
-        },
+            include_authored,
+        };
+        let (label, none) = ("Remove header & footer", "No header or footer to remove");
+        self.plan_removal(opened, remove, label, none, cx);
     }
 }
 
 impl DocView {
-    /// Document > Header & Footer: set (or with None, remove) the
-    /// header/footer, from the dialog opened on `opened`. Pages whose file
-    /// already has one drawn are moved onto copies without it first, in
-    /// the same undo step, so the new one isn't drawn over the old.
-    pub(crate) fn set_header_footer(
+    /// Document > Watermark / Background: `set`, the dialog's op, which
+    /// sets the watermark at its z on the pages it names of `opened`, the
+    /// version the dialog opened on, committed on that version, holding
+    /// `holds`, the file it draws, until it is. Text its font can't draw
+    /// all of is said in the notice, and so is a change of nothing.
+    pub(crate) fn set_watermark(
         &mut self,
         opened: Snapshot,
-        hf: Option<sheaf_doc::stamps::HeaderFooter>,
+        set: Op,
+        holds: Option<Blob>,
+        cx: &mut Context<Self>,
+    ) {
+        let (label, none) = match &set {
+            Op::SetWatermark { z: Z::Under, .. } => ("Background", "No change to the background"),
+            _ => ("Watermark", "No change to the watermark"),
+        };
+        let Some(mut tx) = self.user_tx_at(&opened) else {
+            return;
+        };
+        if let Some(blob) = holds {
+            tx.pin(blob);
+        }
+        let Some(tx) = self.lower_in(tx, vec![set], label, cx) else {
+            return;
+        };
+        let opts = CommitOpts::based(opened.version, Stale::Validate, label);
+        if let Ok(commit) = self.commit(tx, opts, cx) {
+            self.set_notice(line_notice(&commit, none), cx);
+        }
+    }
+
+    /// Document > Watermark / Background, Remove: the watermark at `z`
+    /// taken off every page of `opened`, the version the dialog opened on,
+    /// and those other programs and files drew, the author's own too with
+    /// `include_authored` ([`plan_removal`](Self::plan_removal)).
+    pub(crate) fn remove_watermark(
+        &mut self,
+        opened: Snapshot,
+        z: Z,
+        include_authored: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let remove = Op::RemoveWatermark {
+            z: Some(z),
+            pages: PageSel::ids(opened.state.order().iter().copied()),
+            include_authored,
+        };
+        let (label, none) = match z {
+            Z::Over => ("Remove watermark", "No watermark to remove"),
+            Z::Under => ("Remove background", "No background to remove"),
+        };
+        self.plan_removal(opened, remove, label, none, cx);
+    }
+
+    /// `remove`, a dialog's removal from the pages it names of `opened`,
+    /// the version the dialog opened on, as a planner called `label`: its
+    /// lowering reads each page's content off the UI thread (§6.5), and it
+    /// commits on `opened`. The notice is its line, which counts what it
+    /// found of others' by who drew them, and what it left in place (D61),
+    /// or `none` when it changed nothing.
+    fn plan_removal(
+        &mut self,
+        opened: Snapshot,
+        remove: Op,
+        label: &'static str,
+        none: &'static str,
         cx: &mut Context<Self>,
     ) {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let store = doc.model.store().clone();
-        let label = if hf.is_some() {
-            "Header & footer"
-        } else {
-            "Remove header & footer"
-        };
+        let lower = doc.model.lower_cx(Actor::User);
         let work = {
             let opened = opened.clone();
-            move |p: &Tracker| sheaf_ops::derive::strip_stamps(&store, &opened, p)
+            move |p: &Tracker| {
+                let mut tx = Document::tx_at(&opened, lower);
+                tx.apply(remove, p)?;
+                Ok(tx)
+            }
         };
-        let land = move |v: &mut DocView, copies: Vec<DerivedSource>, cx: &mut Context<DocView>| {
-            let set = header_footer_op(hf, &opened);
-            let tx = v.user_tx_at(&opened)?;
-            let tx = v.show_copies(tx, &copies, Derive::StripHeaderFooter, label, cx)?;
-            let tx = v.lower_in(tx, vec![set], label, cx)?;
+        let land = move |v: &mut DocView, tx: Tx, cx: &mut Context<DocView>| {
             let opts = CommitOpts::based(opened.version, Stale::Validate, label);
             let commit = v.commit(tx, opts, cx).ok()?;
-            v.keep_copies(&copies);
-            let mut notice = format!("{label}: shown now, written when you save");
-            if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
-                notice = format!("{notice}. {told}");
-            }
-            Some(notice)
+            Some(line_notice(&commit, none))
         };
         self.run_planner(label, work, |_| None, land, cx);
     }
 }
 
-impl DocView {
-    /// 0-based indexes of these pages, in document order.
-    pub(crate) fn indexes_of(&self, ids: &[PageId]) -> Vec<usize> {
-        let State::Ready(doc) = &self.state else {
-            return Vec::new();
-        };
-        doc.model
-            .state()
-            .order()
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| ids.contains(p))
-            .map(|(i, _)| i)
-            .collect()
-    }
-}
-
-impl DocView {
-    /// Document > Watermark / Background: draw `wm` on pages `pages` (None:
-    /// all) of `opened`, the version the dialog opened on, stripping the
-    /// old one of its kind everywhere; with `wm` None, remove it. Pages
-    /// show generated copies, as cropped pages do, so what's on screen is
-    /// what's saved.
-    pub(crate) fn apply_watermark(
-        &mut self,
-        opened: Snapshot,
-        behind: bool,
-        wm: Option<sheaf_doc::watermark::Watermark>,
-        pages: Option<Vec<PageId>>,
-        cx: &mut Context<Self>,
-    ) {
-        let State::Ready(doc) = &self.state else {
-            return;
-        };
-        let store = doc.model.store().clone();
-        let scope: Vec<PageId> =
-            pages.unwrap_or_else(|| opened.state.order().iter().copied().collect());
-        let what = if behind { "Background" } else { "Watermark" };
-        let label = if wm.is_some() {
-            what.to_string()
-        } else {
-            format!("Remove {}", what.to_lowercase())
-        };
-        // Its text is drawn into the copies, out of the model's sight.
-        let why = match &wm {
-            Some(wm) => Derive::Watermark {
-                behind,
-                unencodable: wm.unencodable(),
-            },
-            None => Derive::RemoveWatermark { behind },
-        };
-        let work = {
-            let opened = opened.clone();
-            move |p: &Tracker| {
-                let wm = wm.as_ref();
-                sheaf_ops::derive::watermark(&store, &opened, behind, wm, &scope, p)
-            }
-        };
-        let land = {
-            let label = label.clone();
-            move |v: &mut DocView, copies: Vec<DerivedSource>, cx: &mut Context<DocView>| {
-                if copies.is_empty() {
-                    return Some(format!("No {} to remove", what.to_lowercase()));
-                }
-                let n: usize = copies.iter().map(|c| c.pages.len()).sum();
-                let tx = v.user_tx_at(&opened)?;
-                let tx = v.show_copies(tx, &copies, why, &label, cx)?;
-                let opts = CommitOpts::based(opened.version, Stale::Validate, label.as_str());
-                let commit = v.commit(tx, opts, cx).ok()?;
-                v.keep_copies(&copies);
-                let mut notice = format!("{label}: {n} page{}", if n == 1 { "" } else { "s" });
-                if let Some(told) = sheaf_doc::notice_text(&commit.notices) {
-                    notice = format!("{notice}. {told}");
-                }
-                Some(notice)
-            }
-        };
-        self.run_planner(&label, work, |_| None, land, cx);
+/// What the reader is told of a watermark's or a header and footer's
+/// `commit`: its line, with its notices, or `none` when it changed nothing.
+fn line_notice(commit: &Commit, none: &str) -> String {
+    let line = commit.lines.first().filter(|_| commit.version.is_some());
+    let Some(line) = line else {
+        return none.to_string();
+    };
+    match sheaf_doc::notice_text(&commit.notices) {
+        Some(told) => format!("{}. {told}", line.text),
+        None => line.text.clone(),
     }
 }

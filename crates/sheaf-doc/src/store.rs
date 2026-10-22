@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
+use image::ImageFormat;
 use zeroize::Zeroizing;
 
 use crate::serialize::durable::FileStamp;
@@ -33,19 +34,27 @@ pub fn blob_id(bytes: &[u8]) -> BlobId {
     }
 }
 
-/// What a blob is: a PDF, or a file a mark attaches. Images come with
-/// what interns them.
+/// What a blob is: a PDF, an image a watermark draws, or a file a mark
+/// attaches.
 pub enum BlobKind {
     Pdf {
         /// What it was opened with, if it needed one.
         password: Option<Zeroizing<String>>,
         origin: Origin,
     },
+    /// An image file, of the type its bytes say it is.
+    Image(ImageFormat),
     /// The bytes of a file an attachment mark holds.
     Attachment,
 }
 
 impl BlobKind {
+    /// An image file's, by what its bytes say they are: None when they're
+    /// no image sheaf reads.
+    pub fn image(bytes: &[u8]) -> Option<BlobKind> {
+        sheaf_image::io::sniff(bytes).map(BlobKind::Image)
+    }
+
     /// A page stamp's one-page PDF: a library stamp's, or one made from a
     /// placed stamp's page.
     pub fn stamp() -> BlobKind {
@@ -84,9 +93,6 @@ pub enum Origin {
 /// What made a blob in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryKind {
-    /// A copy sheaf made of another source's pages: cropped, watermarked,
-    /// a header and footer stripped. Gone when those are edits (slice 17).
-    Derived,
     /// A page stamp's one-page PDF, from the stamp library or made from a
     /// placed stamp's page, as one placed or pasted is.
     Library,
@@ -323,7 +329,7 @@ impl Blob {
     pub fn password(&self) -> Option<&str> {
         match &self.0.kind {
             BlobKind::Pdf { password, .. } => password.as_deref().map(String::as_str),
-            BlobKind::Attachment => None,
+            BlobKind::Image(_) | BlobKind::Attachment => None,
         }
     }
 }

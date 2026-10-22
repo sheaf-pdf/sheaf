@@ -8,8 +8,12 @@
 //! The outline comes from its emitter ([`super::outline`]), and the form
 //! from its ([`super::form`]), which also gives `/Names /JavaScript` when
 //! forms from other files bring document scripts, and `/Perms` without
-//! Reader's usage rights when the save drops them (`DropUr3`). The header
-//! gives the version (§11.7), so a Rewrite writes no `/Version`.
+//! Reader's usage rights when the save drops them (`DropUr3`).
+//! `/SheafGenerators` names a string of its own
+//! ([`ObjKey::Generators`]) saying what the generators are, when there
+//! are any; `/SheafHeaderFooter`, where an older sheaf kept its header's
+//! settings, is owned and never written. The header gives the version
+//! (§11.7), so a Rewrite writes no `/Version`.
 //!
 //! An Append's catalog ([`appended`]) holds the keys the state doesn't own
 //! as the saved file holds them ([`RootValues`]), so a key a save dropped
@@ -30,11 +34,9 @@ use super::Cx;
 use crate::materialize::copy::Scope;
 use crate::materialize::key::ObjKey;
 use crate::materialize::record::CATALOG_OWNED;
-use crate::model::PageId;
 
-/// The catalog, over the tree's root, and the page labels it names;
-/// `order` is the pages'.
-pub(crate) fn catalog(cx: &mut Cx, order: &[PageId]) {
+/// The catalog, over the tree's root, and the page labels it names.
+pub(crate) fn catalog(cx: &mut Cx) {
     let primary = cx.primary.clone();
     let source = (primary.pdf().catalog().ok().cloned()).unwrap_or_default();
     let scope = Scope {
@@ -87,11 +89,20 @@ pub(crate) fn catalog(cx: &mut Cx, order: &[PageId]) {
         );
         out.set("PageLabels", cx.placeholder(ObjKey::Labels));
     }
-    if let Some(hf) = st.header_footer() {
-        let settings = crate::stamps::to_catalog(hf, order);
-        out.set(crate::stamps::CATALOG_KEY, settings);
+    if let Some(json) = crate::generate::catalog_json(st, |c| super::content::drawn_as(cx, c)) {
+        cx.push(ObjKey::Generators, generators(json));
+        out.set(GENERATORS, cx.placeholder(ObjKey::Generators));
     }
     cx.push(ObjKey::Catalog, Object::Dictionary(out));
+}
+
+/// The catalog's key for what the document's generators are.
+pub(crate) const GENERATORS: &str = "SheafGenerators";
+
+/// `/SheafGenerators`' object: its JSON, a string of its own
+/// ([`crate::generate::catalog_json`]).
+pub(crate) fn generators(json: Vec<u8>) -> Object {
+    Object::String(json, lopdf::StringFormat::Literal)
 }
 
 /// What an Append's catalog names that its emission decided: the page
@@ -109,8 +120,8 @@ pub(crate) struct Parts {
 /// doesn't own, `/Perms` without Reader's usage rights when the save drops
 /// them and `/Names` with the document scripts when they were emitted; the
 /// owned keys from the target state; and `/Version`, the later of the
-/// file's and what the section needs. `order` is the pages'.
-pub(crate) fn appended(cx: &mut Cx, order: &[PageId], parts: Parts) {
+/// file's and what the section needs.
+pub(crate) fn appended(cx: &mut Cx, parts: Parts) {
     let record = cx.saved().expect("an Append");
     let primary = cx.primary.clone();
     let scope = Scope {
@@ -172,9 +183,8 @@ pub(crate) fn appended(cx: &mut Cx, order: &[PageId], parts: Parts) {
     if st.label_ranges().is_some_and(|r| !r.is_empty()) {
         out.set("PageLabels", cx.placeholder(ObjKey::Labels));
     }
-    if let Some(hf) = st.header_footer() {
-        let settings = crate::stamps::to_catalog(hf, order);
-        out.set(crate::stamps::CATALOG_KEY, settings);
+    if !st.generators().is_empty() {
+        out.set(GENERATORS, cx.placeholder(ObjKey::Generators));
     }
     let version: PdfVersion = cx.version.max(record.pdf_version);
     out.set("Version", Object::Name(version.to_string().into_bytes()));

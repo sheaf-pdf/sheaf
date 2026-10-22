@@ -44,9 +44,9 @@ pub struct HistoryStats {
     /// does.
     pub step_bytes: usize,
     /// Bytes of every blob the document's store holds, each counted once:
-    /// the opened file, inserted ones, derived copies and saved ones,
-    /// whatever holds them. Trimming frees none of it; pruning, what only
-    /// the pruned versions held.
+    /// the opened file, inserted ones and saved ones, whatever holds
+    /// them. Trimming frees none of it; pruning, what only the pruned
+    /// versions held.
     pub blob_bytes: usize,
     /// Bytes of the blobs only versions off the current line hold (inserts
     /// that were undone), each counted once: the part of `blob_bytes`

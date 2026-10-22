@@ -13,11 +13,12 @@
 //! photos.
 //!
 //! A page is read as it's drawn, through the document's views, with its
-//! content alone (M10.5 §10.4): an unsaved header or watermark never
-//! makes a page content. Its text is read with recognized text not yet
-//! saved, which is the page's too, and its pixels without, recognized
-//! text being invisible. An edited, inserted or duplicated page is read
-//! from its realization, and so is every page of a source PDFium refuses.
+//! content alone (M10.5 §10.4): a header or watermark sheaf draws, saved
+//! or not, never makes a page content. Its text is read with its
+//! recognized text, saved or not, which is the page's too, and its pixels
+//! without, recognized text being invisible. An edited, inserted or
+//! duplicated page is read from its realization, and so is every page of
+//! a source PDFium refuses.
 //! The engines open in the background's budget, so a search never closes
 //! one the screen shows.
 
@@ -157,7 +158,7 @@ pub fn find(
         if has_annots {
             continue;
         }
-        // Text, the file's and any unsaved OCR's, never a header's.
+        // Text, the file's and any recognized, never a header's.
         let says = (TextService::chars(&text, snap, id, &read))
             .map(|chars| text_says(&chars.text(0, chars.len())))
             .unwrap_or(Says::Nothing);

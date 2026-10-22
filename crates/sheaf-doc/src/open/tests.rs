@@ -79,10 +79,9 @@ pub(crate) fn assert_every_fact(st: &DocState) {
         (ids[0], Style::LowerRoman)
     );
     let hf = st.header_footer().expect("a header/footer");
-    assert_eq!(
-        (hf.texts[0].as_str(), &hf.pages),
-        ("Draft", &Some(vec![ids[2]]))
-    );
+    let on = crate::model::Scope::Pages([ids[2]].into_iter().collect());
+    let texts = &hf.spec.header_footer().unwrap().texts;
+    assert_eq!((texts[0].as_str(), &hf.scope), ("Draft", &on));
     let outline: Vec<(u16, &str, Option<PageId>, bool)> = st
         .bookmarks_preorder()
         .iter()
@@ -150,8 +149,14 @@ fn finish_never_lexes_content() {
             dictionary! { "Filter" => "FlateDecode" },
             b"\x00\xff not deflate: BT ( ] >> q Tj".to_vec(),
         ));
-        f.dict(page)
-            .set("Contents", vec![garbage.into(), Object::Reference(garbage)]);
+        // sheaf's blocks stay: an open reads their dictionaries alone.
+        let blocks = (crate::content::contents(f.dict(page)).into_iter()).filter(|&id| {
+            let stream = f.pdf.get_object(id).and_then(Object::as_stream);
+            stream.is_ok_and(|s| s.dict.has(b"SheafBlock"))
+        });
+        let mut entries = vec![garbage.into(), Object::Reference(garbage)];
+        entries.extend(blocks.map(Object::Reference).collect::<Vec<_>>());
+        f.dict(page).set("Contents", entries);
         contents.push(garbage);
     }
     let src = f.source();
@@ -171,8 +176,8 @@ fn finish_never_lexes_content() {
     assert_eq!(facts.labels, Some(vec![roman]));
     assert_eq!(facts.form.fields.len(), 1);
     assert_eq!(facts.form.widgets[&0].len(), 1);
-    let scope = facts.header_footer.and_then(|(_, scope)| scope);
-    assert_eq!(scope, Some(vec![2]));
+    let pages: Vec<Option<Vec<u32>>> = facts.generators.iter().map(|g| g.pages.clone()).collect();
+    assert_eq!(pages, [Some(vec![2])]);
     let outline: Vec<(u16, Option<u32>)> =
         facts.outline.iter().map(|b| (b.depth, b.page)).collect();
     assert_eq!(outline, [(0, Some(0)), (1, Some(2))]);
@@ -597,7 +602,11 @@ fn a_page_of_v1_replacements_reads_in_linear_time() {
     let started = std::time::Instant::now();
     let facts = finish(&f.source(), &NoProgress);
     let page = f.dict(f.pages[0]).clone();
-    let kept = crate::file::not_ours(&f.pdf, page.get(b"Annots").unwrap().as_array().unwrap());
+    let list = page.get(b"Annots").unwrap().as_array().unwrap();
+    let annots = crate::file::PageAnnots::new(list);
+    let kept: Vec<&Object> = (list.iter())
+        .filter(|e| !crate::file::is_ours(&f.pdf, e, &annots))
+        .collect();
     let took = started.elapsed();
     // None has its StrikeOut, so each is another tool's, and kept.
     assert!(facts.annots.marks().is_empty());
@@ -892,7 +901,6 @@ enum Fact {
     Marks,
     Foreign,
     Labels,
-    HeaderFooter,
     Attachments,
     Collection,
     Layers,
@@ -913,7 +921,7 @@ struct Outcome {
     damaged: bool,
     /// What was read: marks, other tools' comments, attachments, layers.
     counts: [usize; 4],
-    /// Whether it has labels, a header/footer, a portfolio schema,
+    /// Whether it has labels, generators sheaf drew, a portfolio schema,
     /// bookmark styles.
     with: [bool; 4],
     /// What its document's records break, opened.
@@ -1004,7 +1012,7 @@ fn compare(corpus: &Corpus, entry: &Entry) -> Outcome {
         ],
         with: [
             facts.labels.is_some(),
-            facts.header_footer.is_some(),
+            !facts.generators.is_empty(),
             facts.collection.is_some(),
             facts
                 .outline
@@ -1044,10 +1052,6 @@ fn compare(corpus: &Corpus, entry: &Entry) -> Outcome {
             facts.labels == crate::labels::label_ranges(&pdf),
         ),
         (
-            Fact::HeaderFooter,
-            facts.header_footer == crate::stamps::from_catalog(&pdf),
-        ),
-        (
             Fact::Attachments,
             facts.attachments == crate::attachments::attachments_in(&pdf, pdf.page_iter()),
         ),
@@ -1076,7 +1080,7 @@ fn the_open_s_facts_from_the_source_equal_the_eager_reading() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| compare(&corpus, entry));
     let count = |f: fn(&Outcome) -> bool| outcomes.iter().filter(|o| f(o)).count();
     let total = |i: usize| outcomes.iter().map(|o| o.counts[i]).sum::<usize>();
@@ -1084,7 +1088,7 @@ fn the_open_s_facts_from_the_source_equal_the_eager_reading() {
     eprintln!(
         "{} files: {} sources don't open, {} don't load eagerly, {} number their pages \
          otherwise; {} marks, {} other tools' comments, {} attachments, {} layers; {} with \
-         labels, {} with a header/footer, {} portfolios, {} with bookmark styles",
+         labels, {} with sheaf's generators, {} portfolios, {} with bookmark styles",
         outcomes.len(),
         count(|o| o.unopened),
         count(|o| o.unloaded),

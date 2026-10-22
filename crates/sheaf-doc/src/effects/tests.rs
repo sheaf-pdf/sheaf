@@ -3,17 +3,21 @@
 //! same means nothing. `judge` over a path, what it found removed, the
 //! fields it touched and the slots that changed.
 
+use sheaf_edit::{FontChoice, GridPos};
+
 use super::*;
 use crate::annot::{Box2, Pt};
+use crate::content::{BlockId, ResId};
 use crate::file::ForeignAnnot;
 use crate::forms::FieldKind;
 use crate::forms::field::Mk;
 use crate::labels::Style;
 use crate::model::{
-    FieldProps, FormDoc, FormInst, GenId, GenSpec, Mark, OutlineId, PageBase, SourceId, Target,
-    TextStyle, WidgetProps,
+    FieldProps, Filter, FormDoc, FormInst, Frozen, GenId, GenSpec, ImageRef, LegacySel, Mark,
+    MarkedSel, OutlineId, PageBase, Placed, Scope, SourceId, StreamSel, Target, TextStyle,
+    WatermarkGen, WidgetProps,
 };
-use crate::stamps::HeaderFooter;
+use crate::source::ObjRef;
 use crate::store::{Src, Store};
 use crate::tape::{Line, Op, Row, Tape};
 use crate::text_layer::{OcrWord, TextLayer};
@@ -197,12 +201,61 @@ fn labels(prefixes: &[&str]) -> Val {
 }
 
 fn header(t: &str) -> Val {
-    let mut hf = HeaderFooter::default();
-    hf.texts[0] = t.into();
+    let spec = crate::tx::fixture::header(t);
     Val::Generator(Arc::new(Generator {
         id: GenId(1),
-        spec: GenSpec::HeaderFooter(Arc::new(hf)),
+        spec: GenSpec::HeaderFooter(Arc::new(spec)),
+        z: Z::Over,
+        scope: Scope::All,
+        frozen: Frozen::default(),
+        replaces: BTreeSet::from([PaginationKind::Header, PaginationKind::Footer]),
     }))
+}
+
+/// A watermark at `z` drawing `content` at `position` on `scope`.
+fn watermark(content: WatermarkContent, position: GridPos, z: Z, scope: Scope) -> Val {
+    let wm = WatermarkGen { content, position };
+    Val::Generator(Arc::new(Generator {
+        id: GenId(1),
+        spec: GenSpec::Watermark(Arc::new(wm)),
+        z,
+        scope,
+        frozen: Frozen::default(),
+        replaces: BTreeSet::from([WatermarkGen::kind_at(z)]),
+    }))
+}
+
+/// `text`, 72 points, red, a third opaque, at 45°.
+fn wm_text(text: &str, size: f32) -> WatermarkContent {
+    WatermarkContent::Text {
+        text: text.into(),
+        font: Default::default(),
+        size,
+        color: [200, 30, 30],
+        opacity: 0.3,
+        angle: 45.0,
+    }
+}
+
+/// The image object `n` of `src` draws, half the page wide.
+fn wm_image(src: &Src, n: u32, scale: f32) -> WatermarkContent {
+    WatermarkContent::Image {
+        image: ImageRef::Placed(Placed {
+            at: ObjRef {
+                src: src.clone(),
+                id: (n, 0),
+            },
+            res: ResId(u128::from(n)),
+            turns: 0,
+        }),
+        scale,
+        opacity: 1.0,
+    }
+}
+
+/// Pages `ids`.
+fn on(ids: &[u64]) -> Scope {
+    Scope::Pages(ids.iter().map(|&i| PageId(i)).collect())
 }
 
 fn layer(words: &str) -> Arc<TextLayer> {
@@ -218,10 +271,28 @@ fn layer(words: &str) -> Arc<TextLayer> {
     ))
 }
 
-/// `st`'s page `i` with `text` its recognized text, or none.
+/// `st`'s page `i` with `text` its recognized text, block `b1`'s, or
+/// none.
 fn with_ocr(st: &DocState, i: u64, text: Option<Arc<TextLayer>>) -> Val {
+    with_layer(st, i, text.map(|text| (BlockId(1), text)))
+}
+
+/// `st`'s page `i` with `layer` its recognized text, a block's id and its
+/// text, or none.
+fn with_layer(st: &DocState, i: u64, layer: Option<(BlockId, Arc<TextLayer>)>) -> Val {
     let def = st.def(PageId(i)).unwrap();
-    let content = def.content.with_ocr_text(text);
+    let layer = layer.map(|(id, text)| Layer {
+        id,
+        body: Static::OcrText(text),
+    });
+    let content = def.content.with_ocr(layer);
+    Val::Page(Arc::new(PageDef::new(def.base.clone(), def.copy, content)))
+}
+
+/// `st`'s page `i` with `filter` added to its filters.
+fn with_filter(st: &DocState, i: u64, filter: Filter) -> Val {
+    let def = st.def(PageId(i)).unwrap();
+    let content = def.content.with_filter(filter);
     Val::Page(Arc::new(PageDef::new(def.base.clone(), def.copy, content)))
 }
 
@@ -601,6 +672,95 @@ fn recognized_text() {
         ],
     );
     assert_eq!(p.flags, Flags::CONTENT);
+    // The same text in another block is another layer.
+    let other = with_layer(&st, 0, Some((BlockId(2), layer("first"))));
+    let p = path(&st, &[(page, Some(other))]);
+    assert_eq!(p.flags, removes);
+}
+
+/// The recognized text sheaf wrote in the file, taken out by a filter, in
+/// streams of its own or merged into another's: replaced text, once a
+/// page, whether a layer replaces it or not; the filter taken off again,
+/// it's put back, and nothing's gone.
+#[test]
+fn saved_recognized_text_filtered() {
+    let st = blank(1);
+    let page = Key::Page(PageId(0));
+    let removes = Flags::CONTENT | Flags::REMOVES | Flags::REPLACES_TEXT;
+    let streams = Filter::DropStreams(StreamSel::SheafOcr);
+    let merged = Filter::DropMarked(MarkedSel::SheafOcr);
+    for filter in [&streams, &merged] {
+        assert!(filter.drops_ocr());
+        let p = path(&st, &[(page, Some(with_filter(&st, 0, filter.clone())))]);
+        assert_eq!(p.flags, removes, "{filter:?}");
+        assert_eq!(removed(&p), [(RemovedKind::OcrLayers, 1)]);
+        assert_eq!(p.sig, OTHER);
+    }
+    let both = holding(st.clone(), &[(page, with_filter(&st, 0, streams))]);
+    let both = holding(both.clone(), &[(page, with_filter(&both, 0, merged))]);
+    let both = holding(
+        both.clone(),
+        &[(page, with_ocr(&both, 0, Some(layer("new"))))],
+    );
+    let p = path(&st, &[(page, both.get(&page))]);
+    assert_eq!(p.flags, removes);
+    assert_eq!(removed(&p), [(RemovedKind::OcrLayers, 1)]);
+    let p = path(&both, &[(page, st.get(&page))]);
+    assert_eq!(p.flags, removes, "the layer goes");
+    assert_eq!(removed(&p), [(RemovedKind::OcrLayers, 1)]);
+    let filtered = holding(
+        st.clone(),
+        &[(
+            page,
+            with_filter(&st, 0, Filter::DropStreams(StreamSel::SheafOcr)),
+        )],
+    );
+    let p = path(&filtered, &[(page, st.get(&page))]);
+    assert_eq!(p.flags, Flags::CONTENT);
+    assert!(removed(&p).is_empty());
+    assert!(!Filter::DropStreams(StreamSel::SheafGen(GenId(5))).drops_ocr());
+}
+
+/// A filter added takes what it filters out of the page: removed; taken
+/// off again, it's put back, and nothing's gone.
+#[test]
+fn filters_added_and_taken_off() {
+    let st = blank(2);
+    let page = Key::Page(PageId(0));
+    let filter = Filter::DropStreams(StreamSel::SheafGen(GenId(5)));
+    let p = path(&st, &[(page, Some(with_filter(&st, 0, filter.clone())))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
+    assert_eq!(p.sig, OTHER);
+    let filtered = holding(st.clone(), &[(page, with_filter(&st, 0, filter))]);
+    let p = path(&filtered, &[(page, Some(with_ocr(&st, 0, None)))]);
+    assert_eq!(p.flags, Flags::CONTENT);
+    assert!(removed(&p).is_empty());
+    let marked = Filter::DropMarked(MarkedSel::SheafGen(GenId(5)));
+    let p = path(
+        &filtered,
+        &[(page, Some(with_filter(&filtered, 0, marked)))],
+    );
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    let acrobat_s = Filter::DropMarked(MarkedSel::Pagination {
+        kinds: BTreeSet::from([crate::content::PaginationKind::Watermark]),
+        origins: BTreeSet::from([crate::content::PagOrigin::Acrobat]),
+    });
+    let p = path(&st, &[(page, Some(with_filter(&st, 0, acrobat_s.clone())))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
+    // What an older sheaf kept, taken out, is counted apart: what's drawn
+    // stays.
+    let older = Filter::StripLegacy(LegacySel::Marked(MarkedSel::Pagination {
+        kinds: BTreeSet::from([crate::content::PaginationKind::Watermark]),
+        origins: BTreeSet::from([crate::content::PagOrigin::SheafLegacy]),
+    }));
+    let p = path(&st, &[(page, Some(with_filter(&st, 0, older.clone())))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::OlderSettings, 1)]);
+    let both = holding(st.clone(), &[(page, with_filter(&st, 0, acrobat_s))]);
+    let p = path(&both, &[(page, Some(with_filter(&both, 0, older)))]);
+    assert_eq!(removed(&p), [(RemovedKind::OlderSettings, 1)]);
 }
 
 #[test]
@@ -712,8 +872,8 @@ fn the_form_bookmarks_labels_and_generators() {
         put(&st, l, None).flags,
         Flags::LABELS | Flags::REPLACES_TEXT
     );
-    // The legacy header: added is drawn; changed or gone, its text with
-    // it.
+    // The header: added is drawn; its text changed, or gone, its text
+    // with it.
     let g = Key::Generator(GenId(1));
     let e = put(&st, g, Some(header("Draft")));
     assert_eq!((e.flags, e.sig), (Flags::CONTENT, OTHER));
@@ -730,6 +890,291 @@ fn the_form_bookmarks_labels_and_generators() {
     );
 }
 
+/// A header and footer (§7.1): added, it's drawn; laid out otherwise (its
+/// face, size, color, margins) or on more pages, drawn again, which an
+/// Append writes. Drawing other text (its slots, its first page number,
+/// its Bates numbering, what its date or file or a page's Bates number
+/// says) replaces its text; so does leaving a page that's still a page,
+/// and going. A page that goes with its number isn't what it removes.
+#[test]
+fn headers_and_footers() {
+    let src = crate::store::blank(&Store::new(), 3);
+    let st = state_of(&src, 3);
+    let g = Key::Generator(GenId(1));
+    let hf = |spec: &sheaf_edit::HeaderFooterSpec, scope: Scope, numbers: &[(u64, u64)]| {
+        let numbers = numbers.iter().map(|&(p, n)| (PageId(p), n)).collect();
+        Val::Generator(Arc::new(Generator {
+            id: GenId(1),
+            spec: GenSpec::HeaderFooter(Arc::new(spec.clone())),
+            z: Z::Over,
+            scope,
+            frozen: Frozen {
+                date: "2026-10-21".into(),
+                file: "a.pdf".into(),
+                bates: Some(Arc::new(numbers)),
+            },
+            replaces: BTreeSet::from([PaginationKind::Header, PaginationKind::Footer]),
+        }))
+    };
+    let spec = sheaf_edit::HeaderFooterSpec {
+        bates: Some(sheaf_edit::BatesSpec::default()),
+        ..crate::tx::fixture::header("Page <<1>> <<bates>>")
+    };
+    let numbered = [(0, 1), (1, 2)];
+    let e = put(&st, g, Some(hf(&spec, on(&[0, 1]), &numbered)));
+    assert_eq!((e.flags, e.sig), (Flags::CONTENT, OTHER));
+    let st = holding(st, &[(g, hf(&spec, on(&[0, 1]), &numbered))]);
+    let with = |change: fn(&mut sheaf_edit::HeaderFooterSpec)| {
+        let mut spec = spec.clone();
+        change(&mut spec);
+        spec
+    };
+    for laid_out in [
+        hf(
+            &with(|s| s.font = FontChoice::TimesRoman),
+            on(&[0, 1]),
+            &numbered,
+        ),
+        hf(&with(|s| s.size = 14.0), on(&[0, 1]), &numbered),
+        hf(&with(|s| s.color = [200, 0, 0]), on(&[0, 1]), &numbered),
+        hf(&with(|s| s.margins.top = 20.0), on(&[0, 1]), &numbered),
+        hf(&spec, Scope::All, &numbered),
+    ] {
+        let p = path(&st, &[(g, Some(laid_out))]);
+        assert_eq!((p.flags, p.sig), (Flags::CONTENT, OTHER));
+        assert!(removed(&p).is_empty());
+    }
+    let text = Flags::REMOVES | Flags::REPLACES_TEXT;
+    let generator = |frozen: Frozen| {
+        let Some(Val::Generator(g)) = st.get(&g) else {
+            panic!("a header")
+        };
+        Val::Generator(Arc::new(Generator {
+            frozen,
+            ..Generator::clone(&g)
+        }))
+    };
+    let dated = generator(Frozen {
+        date: "2027-01-01".into(),
+        ..header_of(&st).frozen.clone()
+    });
+    let filed = generator(Frozen {
+        file: "b.pdf".into(),
+        ..header_of(&st).frozen.clone()
+    });
+    for unsaid in [
+        hf(
+            &with(|s| s.texts[0] = "Page <<1>>".into()),
+            on(&[0, 1]),
+            &numbered,
+        ),
+        hf(&with(|s| s.first_number = 5), on(&[0, 1]), &numbered),
+        hf(
+            &with(|s| s.bates.as_mut().unwrap().digits = 8),
+            on(&[0, 1]),
+            &numbered,
+        ),
+        hf(&spec, on(&[0, 1]), &[(0, 1), (1, 3)]),
+        hf(&spec, on(&[0]), &[(0, 1)]),
+        dated,
+        filed,
+    ] {
+        let p = path(&st, &[(g, Some(unsaid))]);
+        assert_eq!(p.flags, Flags::CONTENT | text);
+        assert_eq!(removed(&p), [(RemovedKind::HeaderFooter, 1)]);
+    }
+    let p = path(&st, &[(g, None)]);
+    let gone = (p.flags, removed(&p));
+    assert_eq!(gone, (text, vec![(RemovedKind::HeaderFooter, 1)]));
+    // A page gone with its number isn't what it removes.
+    let p = path(
+        &st,
+        &[
+            (Key::Order, Some(order(&[0, 2]))),
+            (Key::Page(PageId(1)), None),
+            (g, Some(hf(&spec, on(&[0]), &[(0, 1)]))),
+        ],
+    );
+    assert!(
+        !removed(&p)
+            .iter()
+            .any(|(k, _)| *k == RemovedKind::HeaderFooter)
+    );
+}
+
+/// A reorder or a label change under a header whose tokens read where a
+/// page is (its place, the count, its label) or its label draws them again
+/// (`LIVE_REDRAW`, §7.1), which removes nothing; under one that reads
+/// neither it draws nothing again. A step judges a reorder alike.
+#[test]
+fn live_tokens_are_drawn_again() {
+    let src = crate::store::blank(&Store::new(), 3);
+    let st = state_of(&src, 3);
+    let g = Key::Generator(GenId(1));
+    let live = |yes: bool| match yes {
+        true => Flags::LIVE_REDRAW,
+        false => Flags::empty(),
+    };
+    for (text, reordered, relabelled) in [
+        ("Page <<1>>", true, false),
+        ("of <<N>>", true, false),
+        ("<<label>>", true, true),
+        ("Draft <<date>>", false, false),
+    ] {
+        let st = holding(st.clone(), &[(g, header(text))]);
+        let reorder = [(Key::Order, Some(order(&[1, 0, 2])))];
+        let p = path(&st, &reorder);
+        assert_eq!(p.flags, Flags::PAGE_ORDER | live(reordered), "{text}");
+        let after = putting(&st, &reorder);
+        let (before, now) = (st.get(&Key::Order), after.get(&Key::Order));
+        let cx = ClassifyCx::of_step(&st, &after);
+        let step = classify(&Key::Order, before.as_ref(), now.as_ref(), &cx);
+        assert_eq!(step.flags, Flags::PAGE_ORDER | live(reordered), "{text}");
+        let p = path(&st, &[(Key::Labels, Some(labels(&["A-"])))]);
+        assert_eq!(p.flags, Flags::LABELS | live(relabelled), "{text}");
+    }
+}
+
+/// The header and footer `st` holds.
+fn header_of(st: &DocState) -> &Generator {
+    st.header_footer().expect("a header and footer")
+}
+
+/// A watermark (§7.1): added, it's drawn; laid out otherwise (where, how
+/// big, turned, colored, see-through), drawn again, which an Append
+/// writes. Drawing another text replaces its text; another image removes
+/// what it drew; so does leaving a page that's still a page, and going.
+#[test]
+fn watermarks_and_backgrounds() {
+    use sheaf_edit::GridPos::{Center, TopLeft};
+    let src = crate::store::blank(&Store::new(), 3);
+    let st = state_of(&src, 3);
+    let g = Key::Generator(GenId(1));
+    let over = |content, position, scope| watermark(content, position, Z::Over, scope);
+    let e = put(&st, g, Some(over(wm_text("A", 72.0), Center, Scope::All)));
+    assert_eq!((e.flags, e.sig), (Flags::CONTENT, OTHER));
+    let st = holding(st, &[(g, over(wm_text("A", 72.0), Center, on(&[0, 1])))]);
+    for laid_out in [
+        over(wm_text("A", 72.0), TopLeft, on(&[0, 1])),
+        over(wm_text("A", 40.0), Center, on(&[0, 1])),
+        over(wm_text("A", 72.0), Center, on(&[0, 1, 2])),
+        over(wm_text("A", 72.0), Center, Scope::All),
+    ] {
+        let p = path(&st, &[(g, Some(laid_out))]);
+        assert_eq!((p.flags, p.sig), (Flags::CONTENT, OTHER));
+        assert!(removed(&p).is_empty());
+    }
+    let text = Flags::REMOVES | Flags::REPLACES_TEXT;
+    let replaced = RemovedKind::Watermark { text: true };
+    for unsaid in [
+        over(wm_text("B", 72.0), Center, on(&[0, 1])),
+        over(wm_text("A", 72.0), Center, on(&[1])),
+        over(wm_image(&src, 9, 0.5), Center, on(&[0, 1])),
+    ] {
+        let p = path(&st, &[(g, Some(unsaid))]);
+        assert_eq!(p.flags, Flags::CONTENT | text);
+        assert_eq!(removed(&p), [(replaced, 1)]);
+    }
+    let p = path(&st, &[(g, None)]);
+    assert_eq!((p.flags, removed(&p)), (text, vec![(replaced, 1)]));
+    // A page gone from its pages with the page isn't what it removes.
+    let p = path(
+        &st,
+        &[
+            (Key::Order, Some(order(&[1, 2]))),
+            (Key::Page(PageId(0)), None),
+            (g, Some(over(wm_text("A", 72.0), Center, on(&[1])))),
+        ],
+    );
+    assert!(!removed(&p).iter().any(|(k, _)| *k == replaced));
+    // An image behind: another is removed, not text.
+    let under = |content| watermark(content, Center, Z::Under, Scope::All);
+    let st = holding(st, &[(g, under(wm_image(&src, 9, 0.5)))]);
+    let p = path(&st, &[(g, Some(under(wm_image(&src, 9, 1.0))))]);
+    assert_eq!(p.flags, Flags::CONTENT);
+    let p = path(&st, &[(g, Some(under(wm_image(&src, 8, 0.5))))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Background { text: false }, 1)]);
+    // From every page to one.
+    let narrowed = watermark(wm_image(&src, 9, 0.5), Center, Z::Under, on(&[0]));
+    let p = path(&st, &[(g, Some(narrowed))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+}
+
+/// A watermark replacing others' of its kind (§7.1's `replaces` row): on
+/// a page of the saved file whose base page holds Acrobat's, it takes that
+/// off; on one with none, or as a background, which replaces another kind,
+/// it's drawn; nor where the saved state's watermark replaced them
+/// already. A step reads no page's blocks.
+#[test]
+fn a_watermark_replacing_others_takes_them_off() {
+    use crate::materialize::others_tests::{ACROBAT, BODY, acrobat_file};
+    use sheaf_edit::GridPos::{Center, TopLeft};
+    let file = acrobat_file(&[&[BODY, ACROBAT], &[b"0 g".as_slice()]]);
+    let kind = crate::store::BlobKind::file(std::path::Path::new("acrobat.pdf"), None);
+    let src = Store::new().open(file.into(), kind).unwrap();
+    let st = state_of(&src, 2);
+    let g = Key::Generator(GenId(1));
+    let over = |position, scope| watermark(wm_text("A", 72.0), position, Z::Over, scope);
+    let p = path(&st, &[(g, Some(over(Center, Scope::All)))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
+    let p = path(&st, &[(g, Some(over(Center, on(&[1]))))]);
+    assert_eq!((p.flags, removed(&p)), (Flags::CONTENT, vec![]));
+    let behind = watermark(wm_text("A", 72.0), Center, Z::Under, Scope::All);
+    assert_eq!(put(&st, g, Some(behind)).flags, Flags::CONTENT);
+    let target = putting(&st, &[(g, Some(over(Center, Scope::All)))]);
+    let prims = [Prim {
+        key: g,
+        before: None,
+        after: target.get(&g),
+    }];
+    assert_eq!(
+        StepEffects::of(&st, &target, &prims).effects.flags,
+        Flags::CONTENT
+    );
+    let saved = holding(st, &[(g, over(Center, on(&[0])))]);
+    let p = path(&saved, &[(g, Some(over(TopLeft, Scope::All)))]);
+    assert_eq!((p.flags, removed(&p)), (Flags::CONTENT, vec![]));
+}
+
+/// A header and footer replacing others' (§7.1's `replaces` row): on a
+/// page of the saved file whose base page holds Acrobat's header, it takes
+/// that off; on one with none it's drawn, and a step reads no page's
+/// blocks. Taking it off the page by a filter, as RemoveHeaderFooter does,
+/// removes too.
+#[test]
+fn a_header_replacing_others_takes_them_off() {
+    use crate::materialize::header_tests::ACROBAT_HEADER;
+    use crate::materialize::others_tests::{BODY, acrobat_file};
+    let file = acrobat_file(&[&[BODY, ACROBAT_HEADER], &[BODY]]);
+    let kind = crate::store::BlobKind::file(std::path::Path::new("acrobat.pdf"), None);
+    let src = Store::new().open(file.into(), kind).unwrap();
+    let st = state_of(&src, 2);
+    let g = Key::Generator(GenId(1));
+    let p = path(&st, &[(g, Some(header("Mine")))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
+    let target = putting(&st, &[(g, Some(header("Mine")))]);
+    let prims = [Prim {
+        key: g,
+        before: None,
+        after: target.get(&g),
+    }];
+    assert_eq!(
+        StepEffects::of(&st, &target, &prims).effects.flags,
+        Flags::CONTENT
+    );
+    let page = Key::Page(PageId(0));
+    let acrobat_s = Filter::DropMarked(MarkedSel::Pagination {
+        kinds: crate::generate::header::kinds(),
+        origins: BTreeSet::from([crate::content::PagOrigin::Acrobat]),
+    });
+    let p = path(&st, &[(page, Some(with_filter(&st, 0, acrobat_s)))]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
+}
+
 /// A value a slot can't hold is judged as everything.
 #[test]
 fn a_misfit_is_everything() {
@@ -741,6 +1186,7 @@ fn a_misfit_is_everything() {
 
 /// Values of every slot, a few each: the same twice over, built apart.
 fn samples(st: &DocState) -> Vec<(Key, Vec<Option<Val>>)> {
+    let wm = |text, position, z, scope| Some(watermark(wm_text(text, 72.0), position, z, scope));
     let annots = || {
         let mut vals = vec![None, Some(of_widget(widget(0, Some("Off"))))];
         vals.push(Some(of_widget(widget(0, Some("Yes")))));
@@ -795,6 +1241,30 @@ fn samples(st: &DocState) -> Vec<(Key, Vec<Option<Val>>)> {
                 Some(with_ocr(st, 0, None)),
                 Some(with_ocr(st, 0, Some(layer("a")))),
                 Some(with_ocr(st, 0, Some(layer("b")))),
+                Some(with_layer(st, 0, Some((BlockId(2), layer("b"))))),
+                Some(with_filter(
+                    st,
+                    0,
+                    Filter::DropStreams(StreamSel::SheafGen(GenId(5))),
+                )),
+                Some(with_filter(st, 0, Filter::DropStreams(StreamSel::SheafOcr))),
+                Some(with_filter(st, 0, Filter::DropMarked(MarkedSel::SheafOcr))),
+                Some(with_filter(
+                    st,
+                    0,
+                    Filter::DropMarked(MarkedSel::Pagination {
+                        kinds: BTreeSet::from([crate::content::PaginationKind::Watermark]),
+                        origins: BTreeSet::from([crate::content::PagOrigin::Acrobat]),
+                    }),
+                )),
+                Some(with_filter(
+                    st,
+                    0,
+                    Filter::StripLegacy(LegacySel::Marked(MarkedSel::Pagination {
+                        kinds: BTreeSet::from([crate::content::PaginationKind::Watermark]),
+                        origins: BTreeSet::from([crate::content::PagOrigin::SheafLegacy]),
+                    })),
+                )),
             ],
         ),
         (Key::Geom(PageId(0)), geoms().into()),
@@ -843,7 +1313,15 @@ fn samples(st: &DocState) -> Vec<(Key, Vec<Option<Val>>)> {
         ),
         (
             Key::Generator(GenId(1)),
-            vec![None, Some(header("a")), Some(header("b"))],
+            vec![
+                None,
+                Some(header("a")),
+                Some(header("b")),
+                wm("a", GridPos::Center, Z::Over, Scope::All),
+                wm("a", GridPos::Top, Z::Over, Scope::All),
+                wm("a", GridPos::Center, Z::Over, on(&[1])),
+                wm("b", GridPos::Center, Z::Under, Scope::All),
+            ],
         ),
     ];
     // Each value again, built apart from the first.

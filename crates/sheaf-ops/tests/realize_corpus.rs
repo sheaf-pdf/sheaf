@@ -1,7 +1,12 @@
 //! The realizer over real files (M10.5 slice 13): over every form of the
 //! corpus and a sample of its pool, each file edited (a header on its
-//! first, middle and last page, another tool's comment deleted and a
-//! field's value set where it has them, nothing turned). Two tiers:
+//! first, middle and last page, from slice 17 with live page numbers and
+//! Bates numbers, and from slice 16 a watermark there too, each replacing
+//! others' of its kind on them; another tool's comment deleted and a
+//! field's value set where it has them; nothing turned). Two tiers, each
+//! also over the corpus's scans (`scans/`, from slice 18), whose edited
+//! pages take recognized text as well, beside any another program gave
+//! them:
 //!
 //! - **The predicate:** on every page, under each consumer's inputs (the
 //!   screen's, a plugin's, print preview's with and without markup, and
@@ -38,6 +43,8 @@
 //! (`scripts/fetch-pdfium.sh`). To look at a few files by hand, name them
 //! in [`ONLY`]; the tiers' own runs leave it unset.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{BufRead, BufReader, Read as _};
 use std::path::Path;
@@ -50,8 +57,10 @@ use sheaf_doc::model::{FieldNode, Terminal};
 use sheaf_doc::prim::{Key, Prim, Val};
 use sheaf_doc::realize::{EngineKey, PageView, Realizer, ViewInputs, emission_is_base, untouched};
 use sheaf_doc::serialize::crypt::Crypt;
+use sheaf_doc::text_layer::from_engine;
 use sheaf_doc::tx::fixture as fx;
-use sheaf_doc::{DocState, Document, PageId};
+use sheaf_doc::{Box2, DocState, Document, EditError, OcrWord, PageId};
+use sheaf_edit::{BatesSpec, Z};
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 use sheaf_render::{OpenError, PageIndex};
 
@@ -89,7 +98,7 @@ struct Pick {
 /// The pool's inventory, a row a file: its path and whether it's
 /// encrypted, in order.
 fn inventory(corpus: &Corpus) -> Vec<(String, bool)> {
-    let path = corpus.root.join("index/safedocs-inventory.tsv.gz");
+    let path = corpus.root.join("index/safedocs-forms-inventory.tsv.gz");
     let file = std::fs::File::open(&path).unwrap();
     let mut lines = BufReader::new(flate2::read::GzDecoder::new(file)).lines();
     let header = lines.next().unwrap().unwrap();
@@ -174,7 +183,7 @@ fn files(corpus: &Corpus) -> Vec<Pick> {
         .map(String::from)
         .collect();
     let mut picks: BTreeMap<String, BTreeSet<&'static str>> = BTreeMap::new();
-    for entry in corpus.manifest().unwrap() {
+    for entry in corpus.forms().unwrap() {
         picks.entry(entry.path).or_default().insert("corpus form");
     }
     for path in &pool {
@@ -230,6 +239,35 @@ fn files(corpus: &Corpus) -> Vec<Pick> {
         .collect()
 }
 
+/// Every scan of the corpus, each picked by its kind as `scans/`'s
+/// manifest gives it.
+fn scans(corpus: &Corpus) -> Vec<Pick> {
+    (corpus.scans().unwrap().into_iter())
+        .map(|entry| {
+            let kind = match entry.kind.as_str() {
+                "scan" => "scan",
+                "scan-ocr" => "scan with recognized text",
+                "scan-text" => "scan with visible text",
+                "text" => "scan-like, text",
+                "no-text" => "scan-like, no text",
+                _ => "scan, kind unknown",
+            };
+            Pick {
+                path: entry.path,
+                why: BTreeSet::from([kind]),
+            }
+        })
+        .collect()
+}
+
+/// Which of the corpus's files a run checks: the forms and the pool's
+/// sample ([`files`]), or the scans ([`scans`]).
+#[derive(Clone, Copy, PartialEq)]
+enum Set {
+    Forms,
+    Scans,
+}
+
 /// Each consumer's inputs, named.
 fn every_input() -> [(&'static str, ViewInputs); 5] {
     [
@@ -274,6 +312,8 @@ struct Outcome {
     /// and another tool's comment deleted.
     field: bool,
     comment: bool,
+    /// A scan's edited pages that took recognized text.
+    recognized: usize,
 }
 
 /// `d`'s state with the first text field that shows on a page holding
@@ -307,8 +347,8 @@ fn filled(st: &mut DocState, value: &str) -> Vec<PageId> {
     pages
 }
 
-/// The file at `path`: opened, edited, and checked by `tier`.
-fn check(path: &Path, tier: Tier) -> Outcome {
+/// The file at `path`: opened, edited (for `set`), and checked by `tier`.
+fn check(path: &Path, tier: Tier, set: Set) -> Outcome {
     let mut out = Outcome::default();
     let mut d: Document = match sheaf_doc::open::file(path, None) {
         Ok(opened) => opened.doc,
@@ -334,7 +374,7 @@ fn check(path: &Path, tier: Tier) -> Outcome {
             out.classes.insert(class);
         }
     }
-    if let Err(e) = edit_and_check(&mut d, tier, &mut out) {
+    if let Err(e) = edit_and_check(&mut d, tier, set, &mut out) {
         out.failed = Some(format!("{e:#}"));
     }
     out.refused = src.base_refused();
@@ -349,7 +389,7 @@ fn check(path: &Path, tier: Tier) -> Outcome {
 /// told, as the pool's openers tell it, and the page is viewed again, now
 /// in its group; but a section refused over a base PDFium reads fails, so
 /// a section sheaf wrote wrong isn't drawn standalone unseen.
-fn engine_for(
+fn engine_of(
     realizer: &Realizer,
     st: &DocState,
     page: PageId,
@@ -366,20 +406,64 @@ fn engine_for(
                 return Err(e.context("PDFium refuses the section over a base it reads"));
             }
             src.refuse_base();
-            engine_for(realizer, st, page, inputs)
+            engine_of(realizer, st, page, inputs)
         }
         engine => Ok((view, engine?)),
     }
 }
 
+/// `d`'s `pages` each given recognized text, one word across the page a
+/// quarter of the way down, a version each: those that took it. A page
+/// whose content can't be read (`EditError::Content`), or that shows
+/// nothing, takes none.
+fn recognized(d: &mut Document, pages: &[PageId]) -> anyhow::Result<Vec<PageId>> {
+    let mut took = Vec::new();
+    for &page in pages {
+        let geom = d.snapshot().geom(page);
+        let shown = geom.shown();
+        let word = OcrWord {
+            text: "SHEAFREALIZEDOCR".into(),
+            rect: Box2 {
+                x: shown.width * 0.1,
+                y: shown.height * 0.25,
+                w: shown.width * 0.6,
+                h: shown.height * 0.02,
+            },
+            confidence: 1.0,
+        };
+        let layer = from_engine(vec![word], &geom, "corpus");
+        if layer.words.is_empty() {
+            continue;
+        }
+        match d.commit_ops(fx::ocr([(page, Arc::new(layer))]), "Recognize text") {
+            Ok(_) => took.push(page),
+            Err(EditError::Content { .. }) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(took)
+}
+
 /// [`check`]'s work on the opened document `d`.
-fn edit_and_check(d: &mut Document, tier: Tier, out: &mut Outcome) -> anyhow::Result<()> {
+fn edit_and_check(d: &mut Document, tier: Tier, set: Set, out: &mut Outcome) -> anyhow::Result<()> {
     let n = d.state().page_count();
     let order: Vec<PageId> = d.state().order().iter().copied().collect();
     let mut covered: Vec<PageId> = [0, n / 2, n - 1].map(|i| order[i]).to_vec();
     covered.dedup();
-    let header = fx::set_header(fx::header("Realized <<1>> of <<n>>"), Some(&covered));
-    d.commit_ops(vec![header], "Header")?;
+    if set == Set::Scans {
+        out.recognized = recognized(d, &covered)?.len();
+    }
+    let mut spec = fx::header("Realized <<1>> of <<N>>");
+    spec.texts[5] = "<<bates>>".into();
+    spec.bates = Some(BatesSpec {
+        prefix: "R".into(),
+        suffix: String::new(),
+        digits: 4,
+        start: 1,
+    });
+    let header = fx::set_header(spec, Some(&covered));
+    let watermark = fx::set_watermark(fx::watermark("REALIZED"), Z::Over, Some(&covered));
+    d.commit_ops(vec![header, watermark], "Header and watermark")?;
     let mut edited: BTreeSet<PageId> = covered.iter().copied().collect();
     let comment = (order.iter()).find_map(|&p| {
         let (id, _) = (d.state().foreign_on(p)).find(|(_, f)| !f.summary.is_link())?;
@@ -418,7 +502,7 @@ fn edit_and_check(d: &mut Document, tier: Tier, out: &mut Outcome) -> anyhow::Re
     let realizer = Realizer::new();
     let left = order.iter().copied().find(|p| !edited.contains(p));
     for page in edited.iter().copied().chain(left) {
-        let (view, engine) = engine_for(&realizer, &st, page, &inputs)?;
+        let (view, engine) = engine_of(&realizer, &st, page, &inputs)?;
         let ours = engine.render_appearances(PageIndex(view.index), WIDTH)?;
         let at = st.pos_of(page).expect("a page") as u32;
         let theirs = render_appearances(&saved, password.as_deref(), PageIndex(at), WIDTH)?;
@@ -450,7 +534,15 @@ fn edit_and_check(d: &mut Document, tier: Tier, out: &mut Outcome) -> anyhow::Re
 #[test]
 #[ignore = "corpus tier: cargo test -p sheaf-ops --test realize_corpus -- --ignored --nocapture"]
 fn the_predicate_agrees_with_the_emission_on_every_page() {
-    run(Tier::Predicate);
+    run(Tier::Predicate, Set::Forms);
+}
+
+/// [`the_predicate_agrees_with_the_emission_on_every_page`] over the
+/// corpus's scans, their edited pages recognized too.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test realize_corpus -- --ignored --nocapture"]
+fn the_predicate_agrees_on_every_scan() {
+    run(Tier::Predicate, Set::Scans);
 }
 
 /// Every file: its edited pages and one left alone render from their
@@ -460,38 +552,27 @@ fn the_predicate_agrees_with_the_emission_on_every_page() {
 #[test]
 #[ignore = "corpus tier: cargo test -p sheaf-ops --test realize_corpus -- --ignored --nocapture"]
 fn realizations_render_as_saved() {
-    run(Tier::Pixels);
+    run(Tier::Pixels, Set::Forms);
 }
 
-/// `picks`, or those of them [`ONLY`] names when it's set: every one it
-/// names, or a failure, as it is when it's set and names none (a leftover
-/// export mustn't make a whole run check nothing). A narrowed run says so.
-fn only(picks: Vec<Pick>) -> Vec<Pick> {
-    let Ok(only) = std::env::var(ONLY) else {
-        return picks;
-    };
-    let named: BTreeSet<&str> = (only.split(',').map(str::trim))
-        .filter(|p| !p.is_empty())
-        .collect();
-    assert!(!named.is_empty(), "{ONLY} is set but names no file");
-    let picks: Vec<Pick> = (picks.into_iter())
-        .filter(|pick| named.contains(pick.path.as_str()))
-        .collect();
-    assert_eq!(
-        picks.len(),
-        named.len(),
-        "{ONLY} names a file the tier doesn't pick: {only}"
-    );
-    eprintln!("narrowed by {ONLY} to {} files", picks.len());
-    picks
+/// [`realizations_render_as_saved`] over the corpus's scans, their edited
+/// pages recognized too.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test realize_corpus -- --ignored --nocapture"]
+fn scans_render_as_saved() {
+    run(Tier::Pixels, Set::Scans);
 }
 
-/// `tier` over every file, its counts printed by class.
-fn run(tier: Tier) {
+/// `tier` over every file of `set`, its counts printed by class.
+fn run(tier: Tier, set: Set) {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let picks = only(files(&corpus));
+    let all = match set {
+        Set::Forms => files(&corpus),
+        Set::Scans => scans(&corpus),
+    };
+    let picks = common::narrowed(ONLY, all, |pick| &pick.path);
     let entries: Vec<Entry> = (picks.iter())
         .map(|pick| Entry {
             path: pick.path.clone(),
@@ -499,17 +580,19 @@ fn run(tier: Tier) {
         })
         .collect();
     let started = std::time::Instant::now();
-    let outcomes = each_entry(&entries, |e| check(&corpus.path(e), tier));
-    let name = match tier {
-        Tier::Predicate => "realize_corpus predicate",
-        Tier::Pixels => "realize_corpus pixels",
+    let outcomes = each_entry(&entries, |e| check(&corpus.path(e), tier, set));
+    let name = match (tier, set) {
+        (Tier::Predicate, Set::Forms) => "realize_corpus predicate",
+        (Tier::Pixels, Set::Forms) => "realize_corpus pixels",
+        (Tier::Predicate, Set::Scans) => "realize_corpus predicate, scans",
+        (Tier::Pixels, Set::Scans) => "realize_corpus pixels, scans",
     };
     // Per class: files, pages compared, differing past the allowance and
     // within it, pages checked, disagreeing.
     let mut classes: BTreeMap<&str, [usize; 6]> = BTreeMap::new();
     let mut picked: BTreeMap<&str, usize> = BTreeMap::new();
     let (mut unopened, mut failed, mut standalone, mut refused) = (0, 0, 0, 0);
-    let (mut fields, mut comments) = (0, 0);
+    let (mut fields, mut comments, mut recognized) = (0, 0, 0);
     let mut problems = Vec::new();
     for (pick, o) in picks.iter().zip(&outcomes) {
         for why in &pick.why {
@@ -534,6 +617,7 @@ fn run(tier: Tier) {
         refused += usize::from(o.refused);
         fields += usize::from(o.field);
         comments += usize::from(o.comment);
+        recognized += o.recognized;
         for class in o.classes.iter().copied().chain(["all"]) {
             let counts = classes.entry(class).or_default();
             counts[0] += 1;
@@ -545,6 +629,9 @@ fn run(tier: Tier) {
         }
     }
     eprintln!("{name}: {} files picked: {picked:?}", picks.len());
+    if set == Set::Scans {
+        eprintln!("{name}: {recognized} edited pages took recognized text");
+    }
     eprintln!(
         "{name}: {unopened} don't open, {failed} failed; {standalone} realized standalone, \
          {refused} of them refused by PDFium; another tool's comment deleted in {comments}; \

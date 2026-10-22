@@ -16,7 +16,7 @@ use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dict
 use super::*;
 use crate::history::FixedCount;
 use crate::labels::{LabelSpec, Style};
-use crate::model::{Document, OutlineId, PageId, SourceId};
+use crate::model::{Document, OutlineId, PageId};
 use crate::serialize::durable::FileStamp;
 use crate::serialize::fixture::{
     FORM_SECRETS, USER, encrypted, form, holds, object_streams_encrypted, rc4_aes_128_and_aes_256,
@@ -1226,33 +1226,6 @@ fn drawn(src: &Src, index: u32) -> Vec<u8> {
         .collect()
 }
 
-/// A derived copy of page `index` of `d`'s primary, cropped to `crop`,
-/// noted with `d`, and the page rebased onto it.
-fn crop(d: &mut Document, page: PageId, index: u32, crop: [f32; 4]) -> SourceId {
-    let bytes = crate::save::cropped_copy(d.primary(), &[(index, crop)]).unwrap();
-    derive(d, &bytes, index, page)
-}
-
-/// `bytes`, a derived copy of page `index` of `d`'s primary, noted with
-/// `d`, and `page` rebased onto its first page.
-pub(crate) fn derive(d: &mut Document, bytes: &[u8], index: u32, page: PageId) -> SourceId {
-    let kind = BlobKind::Pdf {
-        password: None,
-        origin: crate::store::Origin::Memory(crate::store::MemoryKind::Derived),
-    };
-    let copy = d.store().open(Arc::from(bytes), kind).unwrap();
-    let derived = crate::Derived {
-        from: d.primary().clone(),
-        pages: vec![index],
-    };
-    d.add_derived(&copy, derived);
-    let source = copy.id();
-    let why = crate::tx::Derive::Crop;
-    d.commit_page_base(vec![(page, copy, 0)], why, "rebase")
-        .unwrap();
-    source
-}
-
 /// A header and footer is drawn once on each page a Rewrite writes; opened
 /// again, the pages that draw it already aren't drawn on twice, a cropped
 /// one among them, and a page from another file is drawn on, numbered
@@ -1269,9 +1242,17 @@ fn the_header_is_drawn_once_and_not_again_where_the_base_draws_it() {
     assert!(holds(&drawn(&once, 1), b"(Head 2)"));
 
     let mut d = open(&first.bytes, None);
-    assert_eq!(d.state().header_footer().unwrap().texts, head.texts);
-    let first_page = d.page(0).unwrap();
-    crop(&mut d, first_page, 0, [0.0, 0.0, 400.0, 500.0]);
+    let g = d.state().header_footer().unwrap();
+    assert_eq!(g.spec.header_footer().unwrap().texts, head.texts);
+    let second = d.page(1).unwrap();
+    let half_inch = sheaf_edit::Margins {
+        top: 36.0,
+        bottom: 36.0,
+        left: 36.0,
+        right: 36.0,
+    };
+    d.commit_ops(vec![fx::crop(&[second], half_inch)], "crop")
+        .unwrap();
     let other = add(&d, &bytes(&file("B", 1, false)), "other.pdf");
     insert(&mut d, &other, 0);
     let again = source_of(&rewrite(&d, Profile::default()));
@@ -1279,162 +1260,6 @@ fn the_header_is_drawn_once_and_not_again_where_the_base_draws_it() {
     assert_eq!(counts, [1, 1, 1]);
     assert!(holds(&drawn(&again, 2), b"(Head 3)"));
     assert!(holds(&drawn(&again, 0), b"(Head 1)"));
-}
-
-/// An OCR layer of `text`, one word, on a Letter page.
-fn layer(text: &str) -> Arc<crate::text_layer::TextLayer> {
-    let word = crate::text_layer::OcrWord {
-        text: text.into(),
-        rect: crate::annot::Box2 {
-            x: 72.0,
-            y: 100.0,
-            w: 60.0,
-            h: 12.0,
-        },
-        confidence: 0.9,
-    };
-    let geom = crate::geom::Geom::read(None, None, 0);
-    Arc::new(crate::text_layer::from_engine(vec![word], &geom, "test"))
-}
-
-/// Page `index`'s `/Contents` entries in `pdf` marked as an OCR layer's.
-fn ocr_streams(pdf: &Pdf, index: usize) -> Vec<ObjectId> {
-    let page = pdf.get_pages().into_values().nth(index).unwrap();
-    let page = pdf.get_dictionary(page).unwrap();
-    let entries = match page.get(b"Contents").unwrap() {
-        Object::Array(a) => a.clone(),
-        Object::Reference(r) => match pdf.get_object(*r).unwrap() {
-            Object::Array(a) => a.clone(),
-            _ => vec![Object::Reference(*r)],
-        },
-        _ => Vec::new(),
-    };
-    (entries.iter())
-        .filter_map(|e| e.as_reference().ok())
-        .filter(|&r| {
-            let s = pdf.get_object(r).unwrap().as_stream().unwrap();
-            s.dict.has(b"SheafOcrLayer")
-        })
-        .collect()
-}
-
-/// Recognized again over a layer a save wrote, a page has one layer: the
-/// new one, the old one gone from the file.
-#[test]
-fn a_re_ocr_over_a_base_layer_leaves_one_layer() {
-    let mut d = open(&bytes(&file("A", 1, false)), None);
-    let page = d.page(0).unwrap();
-    let (old, new) = (layer("first"), layer("second"));
-    let set = |layer: &Arc<_>| fx::ocr([(page, Arc::clone(layer))]);
-    d.commit_ops(set(&old), "ocr").unwrap();
-    let first = rewrite(&d, Profile::default());
-    let once = crate::file::load_pdf_mem(&first.bytes, None).unwrap();
-    assert_eq!(ocr_streams(&once, 0).len(), 2, "the q and the layer");
-
-    let mut d = open(&first.bytes, None);
-    let page = d.page(0).unwrap();
-    let set = fx::ocr([(page, Arc::clone(&new))]);
-    d.commit_ops(set, "ocr again").unwrap();
-    let again = rewrite(&d, Profile::default());
-    let pdf = crate::file::load_pdf_mem(&again.bytes, None).unwrap();
-    let marked = ocr_streams(&pdf, 0);
-    assert_eq!(marked.len(), 2, "the q and one layer");
-    let content = |id: ObjectId| {
-        let s = pdf.get_object(id).unwrap().as_stream().unwrap();
-        s.decompressed_content()
-            .unwrap_or_else(|_| s.content.clone())
-    };
-    let (want, gone) = (
-        crate::text_layer::to_content(&new).0,
-        crate::text_layer::to_content(&old).0,
-    );
-    assert_eq!(content(marked[1]), want);
-    let streams = pdf
-        .objects
-        .keys()
-        .copied()
-        .filter(|&id| pdf.get_object(id).is_ok_and(|o| o.as_stream().is_ok()));
-    assert!(streams.into_iter().all(|id| content(id) != gone));
-}
-
-/// OCR layers on every page draw in one font and open with one `q`: a
-/// resource is written once a file.
-#[test]
-fn ocr_pages_share_one_font() {
-    let mut d = open(&bytes(&file("A", 3, false)), None);
-    let layers: Vec<_> = (0..3)
-        .map(|i| (d.page(i).unwrap(), layer(&format!("word{i}"))))
-        .collect();
-    d.commit_ops(fx::ocr(layers), "ocr").unwrap();
-    let out = rewrite(&d, Profile::default());
-    let pdf = crate::file::load_pdf_mem(&out.bytes, None).unwrap();
-    let type0 = (pdf.objects.values())
-        .filter_map(|o| o.as_dict().ok())
-        .filter(|d| d.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Type0"))
-        .count();
-    assert_eq!(type0, 1);
-    let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
-    let font = |page: ObjectId| {
-        let page = pdf.get_dictionary(page).unwrap();
-        let (_, res) = pdf.dereference(page.get(b"Resources").unwrap()).unwrap();
-        let fonts = res
-            .as_dict()
-            .unwrap()
-            .get(b"Font")
-            .unwrap()
-            .as_dict()
-            .unwrap();
-        fonts.get(b"SheafOcr").unwrap().clone()
-    };
-    assert!(pages.iter().all(|&p| font(p) == font(pages[0])));
-    let q: Vec<ObjectId> = (0..3).map(|i| ocr_streams(&pdf, i)[0]).collect();
-    assert!(q.iter().all(|&id| id == q[0]), "{q:?}");
-    let layers: BTreeSet<ObjectId> = (0..3).map(|i| ocr_streams(&pdf, i)[1]).collect();
-    assert_eq!(layers.len(), 3);
-}
-
-/// A page whose content a derived copy redrew is written as the page it
-/// was made from: its object, its annotations, the copy's content and the
-/// state's crop box. The copy's page isn't written.
-#[test]
-fn a_derived_page_is_written_as_its_original_object_with_derived_content() {
-    let mut pdf = file("A", 2, false);
-    let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
-    let note = pdf.add_object(dictionary! {
-        "Type" => "Annot", "Subtype" => "Square", "P" => pages[0],
-        "Rect" => vec![100.into(), 100.into(), 150.into(), 150.into()],
-    });
-    (pdf.get_dictionary_mut(pages[0]).unwrap()).set("Annots", vec![note.into()]);
-    let before = bytes(&pdf);
-    let mut d = open(&before, None);
-    let first = d.page(0).unwrap();
-    let redrawn = crate::save::derived_copy(
-        d.primary(),
-        &[(0, Some([0.0, 0.0, 300.0, 400.0]))],
-        crate::save::HeaderKept::Yes,
-        &mut |pdf, page, _, _| {
-            let stream = Stream::new(dictionary! {}, b"0 0 m 9 9 l S".to_vec());
-            page.set("Contents", pdf.add_object(stream));
-            Ok(())
-        },
-    )
-    .unwrap();
-    derive(&mut d, &redrawn, 0, first);
-    let out = rewrite(&d, Profile::default());
-    let now = source_of(&out);
-    let written: Vec<ObjectId> = now.page_ids().collect();
-    assert_eq!(written, pages);
-    let page = now.pdf().get_dictionary(pages[0]).unwrap();
-    assert_eq!(
-        page.get(b"Annots").unwrap(),
-        &Object::Array(vec![note.into()])
-    );
-    assert_eq!(drawn(&now, 0).trim_ascii(), b"0 0 m 9 9 l S");
-    let crop: Vec<f64> = (page.get(b"CropBox").unwrap().as_array().unwrap().iter())
-        .map(|v| v.as_float().unwrap())
-        .collect();
-    assert_eq!(crop, [0.0, 0.0, 300.0, 400.0]);
-    assert!(holds(&drawn(&now, 1), b"(A 1)"));
 }
 
 /// `objects`, each its number and body, as a file with a cross-reference

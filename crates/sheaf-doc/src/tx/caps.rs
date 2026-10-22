@@ -32,6 +32,8 @@ pub enum Actor {
 pub enum JobKind {
     /// Text recognition: it sets and clears OCR text, nothing else.
     Ocr,
+    /// Trim White: it sets page boxes, nothing else.
+    Trim,
     /// A comment import.
     Import,
     /// Pages inserted from a file.
@@ -121,14 +123,16 @@ pub fn cap_of(op: &ResolvedOp, targets: &[Target]) -> Cap {
                 false => Cap::Plugin,
             }
         }
-        R::AdoptAnnotations { .. }
+        R::SetPageBoxes { .. }
+        | R::AdoptAnnotations { .. }
         | R::ClearOcrText { .. }
+        | R::SetWatermark { .. }
+        | R::RemoveWatermark { .. }
         | R::SetHeaderFooter { .. }
         | R::RemoveHeaderFooter { .. } => Cap::Approval,
         R::InsertPages { .. }
         | R::ReplacePages { .. }
         | R::SetOcrText { .. }
-        | R::SetPageBase { .. }
         | R::Revert { .. } => Cap::User,
     }
 }
@@ -151,6 +155,7 @@ pub fn actor_allows(actor: &Actor, cap: Cap, op: &ResolvedOp) -> bool {
             op,
             ResolvedOp::SetOcrText { .. } | ResolvedOp::ClearOcrText { .. }
         ),
+        Actor::Job(JobKind::Trim) => matches!(op, ResolvedOp::SetPageBoxes { .. }),
         // A manifest grants nothing more until plugin API 0.4's
         // permissions (slice 20).
         Actor::Plugin { .. } => cap == Cap::Plugin,

@@ -4,25 +4,24 @@
 //! read through accessors: no struct literal outside this module can make
 //! one whose derived indexes don't fit its tables.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use im::Vector;
 use lopdf::ObjectId;
-use sheaf_edit::Rotation;
+use sheaf_edit::{Rotation, Z};
 
 use super::{
-    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, GenId, GenSpec, Generator, Mark,
-    OutlineId, PageDef, PageId, Terminal, Widget,
+    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, GenId, Generator, Mark, OutlineId,
+    PageDef, PageId, Scope, Terminal, Widget,
 };
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::forms::{FieldId, full_name_of};
 use crate::geom::Geom;
 use crate::labels::{LabelRange, LabelSpec};
 use crate::prim::{Key, Mismatch, Val};
-use crate::stamps::HeaderFooter;
 use crate::store::BlobId;
 use crate::text_layer::TextLayer;
 
@@ -52,11 +51,23 @@ pub struct DocState {
     /// What sheaf draws on pages from one definition each:
     /// [`Key::Generator`].
     generators: im::OrdMap<GenId, Arc<Generator>>,
+    /// The generators the file the document opened had, by id, whatever
+    /// became of them since: whose blocks in its pages are its own
+    /// ([`DocState::backs`]). Never changed by an edit.
+    opened_generators: Arc<Opened>,
     /// Every node of the form's field tree: [`Key::Field`].
     fields: im::OrdMap<FieldId, Arc<FieldNode>>,
     /// The form as a whole: [`Key::Form`].
     form: Arc<FormDoc>,
     idx: Indexes,
+}
+
+/// The generators the file a document opened had, by id, and that file
+/// ([`DocState::backs`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Opened {
+    file: Option<BlobId>,
+    ids: BTreeSet<GenId>,
 }
 
 /// What a state derives from its tables to find things without a scan:
@@ -69,10 +80,9 @@ struct Indexes {
     /// asked: the clones of one `order` share it, and a new `order`
     /// starts another.
     pos: Arc<OnceLock<HashMap<PageId, u32>>>,
-    /// The pages the header/footer is on, each with the Bates number it
-    /// draws there when it counts them, built the first time one is asked:
-    /// a new order, or new generators, start another.
-    header: Arc<OnceLock<HashMap<PageId, Option<u64>>>>,
+    /// Each page's label, when the document has labels, built the first
+    /// time one is asked: a new order, or new labels, start another.
+    labels: Arc<OnceLock<HashMap<PageId, Arc<str>>>>,
     /// The page showing each copy of each source page, by the source, the
     /// page's object and the copy, built the first time one is asked. Of
     /// two that do (a page the tree lists twice), the first in order: a new
@@ -91,6 +101,43 @@ struct Indexes {
     names: im::OrdSet<(u64, FieldId)>,
     /// The hash each node is under in `names`.
     named: im::HashMap<FieldId, u64>,
+    /// Headers' and footers' layouts' digests, one for every version
+    /// derived from this one, which lay a page out alike from the same
+    /// ([`Laid`]).
+    laid: Arc<Laid>,
+}
+
+/// Layouts' digests, each by the generator, its recipe on the page and
+/// what its layout reads of the page, which is all a header's layout
+/// reads (`emit::content::header_digest`), so whatever version asks;
+/// let go whole past [`LAID_CAP`] of them.
+#[derive(Default)]
+pub(crate) struct Laid(Mutex<HashMap<LaidKey, u128>>);
+
+/// What a layout is laid out from: the generator, its recipe on the page
+/// (`realize::recipe_digest`) and what it reads of the page
+/// (`realize::layout_reads`).
+pub(crate) type LaidKey = (GenId, u128, u128);
+
+/// The layouts [`Laid`] keeps at most: a "Page n of N" header on 7,000
+/// pages before and after a move fills 14,000.
+const LAID_CAP: usize = 1 << 15;
+
+impl Laid {
+    /// The digest kept for `key`.
+    pub(crate) fn get(&self, key: &LaidKey) -> Option<u128> {
+        let kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        kept.get(key).copied()
+    }
+
+    /// `digest`, kept for `key`.
+    pub(crate) fn put(&self, key: LaidKey, digest: u128) {
+        let mut kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() >= LAID_CAP {
+            kept.clear();
+        }
+        kept.insert(key, digest);
+    }
 }
 
 /// A copy of a source page, as [`DocState::page_showing`] finds the page
@@ -163,6 +210,7 @@ impl PartialEq for DocState {
             annots,
             labels,
             generators,
+            opened_generators,
             fields,
             form,
             idx: _,
@@ -176,6 +224,7 @@ impl PartialEq for DocState {
             && *annots == other.annots
             && *labels == other.labels
             && *generators == other.generators
+            && *opened_generators == other.opened_generators
             && *fields == other.fields
             && *form == other.form
     }
@@ -254,6 +303,28 @@ impl Builder {
         self
     }
 
+    /// `ids`, the generators `file`, the file the document opened, has
+    /// ([`DocState::backs`]).
+    pub fn opened_generators(
+        mut self,
+        file: BlobId,
+        ids: impl IntoIterator<Item = GenId>,
+    ) -> Builder {
+        self.st.opened_generators = Arc::new(Opened {
+            file: Some(file),
+            ids: ids.into_iter().collect(),
+        });
+        self
+    }
+
+    /// The file the document `st` is a state of opened, and the generators
+    /// it had, as `st` has them: what a state made of `st`'s pages backs as
+    /// `st` does.
+    pub fn opened_as(mut self, st: &DocState) -> Builder {
+        self.st.opened_generators = st.opened_generators.clone();
+        self
+    }
+
     /// `fields`, every node of the form's field tree, and `form`, the
     /// form they make, in place of those it has.
     pub fn form(
@@ -294,6 +365,7 @@ impl DocState {
                 annots: im::HashMap::new(),
                 labels: None,
                 generators: im::OrdMap::new(),
+                opened_generators: Arc::default(),
                 fields: im::OrdMap::new(),
                 form: Arc::default(),
                 idx: Indexes::default(),
@@ -327,7 +399,7 @@ impl DocState {
                 Some(Val::Order(v)) => {
                     self.order = v;
                     self.idx.pos = Arc::default();
-                    self.idx.header = Arc::default();
+                    self.idx.labels = Arc::default();
                     self.idx.shows = Arc::default();
                 }
                 _ => return misfit,
@@ -375,19 +447,19 @@ impl DocState {
                 };
                 self.idx.name(id, old.as_ref(), self.annots.get(&id));
             }
-            Key::Labels => match val {
-                Some(Val::Labels(v)) => self.labels = Some(v),
-                None => self.labels = None,
-                _ => return misfit,
-            },
-            Key::Generator(id) => {
+            Key::Labels => {
                 match val {
-                    Some(Val::Generator(v)) => _ = self.generators.insert(id, v),
-                    None => _ = self.generators.remove(&id),
+                    Some(Val::Labels(v)) => self.labels = Some(v),
+                    None => self.labels = None,
                     _ => return misfit,
                 }
-                self.idx.header = Arc::default();
+                self.idx.labels = Arc::default();
             }
+            Key::Generator(id) => match val {
+                Some(Val::Generator(v)) => _ = self.generators.insert(id, v),
+                None => _ = self.generators.remove(&id),
+                _ => return misfit,
+            },
             Key::Field(id) => {
                 let new = match val {
                     Some(Val::Field(v)) => Some(v),
@@ -478,46 +550,31 @@ impl DocState {
         pos.get(&id).map(|&i| i as usize)
     }
 
-    /// Whether the header/footer is on page `id`: O(1) once a state of
-    /// this order and these generators has found one.
-    pub fn header_covers(&self, id: PageId) -> bool {
-        match self.header_footer() {
-            Some(hf) if hf.pages.is_some() => self.header_pages().contains_key(&id),
-            Some(_) => self.pages.contains_key(&id),
-            None => false,
+    /// The layouts' digests this version and those derived from it share
+    /// ([`Laid`]).
+    pub(crate) fn laid(&self) -> &Laid {
+        &self.idx.laid
+    }
+
+    /// Page `id`'s label: its number when the document has no labels.
+    /// O(1) once a state of this order and these labels has found one.
+    pub fn label_of(&self, id: PageId) -> Option<Arc<str>> {
+        if self.labels.is_none() {
+            return Some((self.pos_of(id)? + 1).to_string().into());
         }
+        let labels = self.idx.labels.get_or_init(|| self.label_table());
+        labels.get(&id).cloned()
     }
 
-    /// The Bates number the header/footer draws on page `id`: None when it
-    /// doesn't count them, or isn't on the page. O(1) once a state of this
-    /// order and these generators has numbered its pages.
-    pub fn bates_of(&self, id: PageId) -> Option<u64> {
-        self.header_footer()?.bates.as_ref()?;
-        self.header_pages().get(&id).copied().flatten()
-    }
-
-    /// The header/footer's pages, and their Bates numbers.
-    fn header_pages(&self) -> &HashMap<PageId, Option<u64>> {
-        self.idx.header.get_or_init(|| self.number_header_pages())
-    }
-
-    /// The header/footer's pages in this order, as
-    /// [`HeaderFooter::bates_numbers`] numbers them.
-    fn number_header_pages(&self) -> HashMap<PageId, Option<u64>> {
-        let Some(hf) = self.header_footer() else {
-            return HashMap::new();
-        };
-        let scope: Option<HashSet<PageId>> =
-            (hf.pages.as_ref()).map(|p| p.iter().copied().collect());
-        let mut next = hf.bates.as_ref().map(|b| b.start);
-        let mut on = HashMap::new();
-        for &id in &self.order {
-            if scope.as_ref().is_none_or(|scope| scope.contains(&id)) {
-                on.insert(id, next);
-                next = next.map(|n| n + 1);
-            }
-        }
-        on
+    /// Every page's label, by page.
+    fn label_table(&self) -> HashMap<PageId, Arc<str>> {
+        let labels = self.page_labels().unwrap_or_default();
+        (self.order.iter().enumerate())
+            .map(|(i, &id)| {
+                let label = labels.get(i).cloned();
+                (id, label.unwrap_or_else(|| (i + 1).to_string()).into())
+            })
+            .collect()
     }
 
     /// The page showing copy `copy` of the page whose object is `object` in
@@ -583,6 +640,8 @@ impl DocState {
             annots,
             labels: _,
             generators,
+            // Read through `backs`.
+            opened_generators: _,
             fields,
             form,
             idx: _,
@@ -645,7 +704,8 @@ impl DocState {
         })
     }
 
-    /// Page `id`'s recognized text, which no file holds yet.
+    /// Page `id`'s recognized text: the layer its stack draws, saved or
+    /// not. Text a file held when it opened is the page's own content.
     pub fn ocr_text(&self, id: PageId) -> Option<&Arc<TextLayer>> {
         self.def(id)?.content.ocr_text()
     }
@@ -687,12 +747,33 @@ impl DocState {
         &self.generators
     }
 
-    /// The header/footer: the spec of the generator that draws it as sheaf
-    /// did before generators (M10.5 slice 8, until 17).
-    pub fn header_footer(&self) -> Option<&Arc<HeaderFooter>> {
-        self.generators
-            .values()
-            .find_map(|g| g.spec.header_footer())
+    /// The generator of the header and footer.
+    pub fn header_footer(&self) -> Option<&Arc<Generator>> {
+        (self.generators.values()).find(|g| g.spec.header_footer().is_some())
+    }
+
+    /// The generator of the watermark (`z` over) or the background
+    /// (under).
+    pub fn watermark(&self, z: Z) -> Option<&Arc<Generator>> {
+        (self.generators.values()).find(|g| g.spec.watermark().is_some() && g.z == z)
+    }
+
+    /// Whether a block of generator `id` in page `page`'s own content is
+    /// the document's (M10.5 §3.5): `id` is a generator of its that covers
+    /// the page, and draws it anew; or the page is one of the file it
+    /// opened, and `id` one of its generators, or one that file had, which
+    /// an edit since removed. Such a block is what a save lays out again or
+    /// leaves out, never the page's content; any other, another file's, is,
+    /// though it names a generator of the document's, as every revision of
+    /// a file does: a page brought in from another revision keeps it.
+    pub fn backs(&self, id: GenId, page: PageId) -> bool {
+        if self.generators.get(&id).is_some_and(|g| g.covers(page)) {
+            return true;
+        }
+        let opened = &self.opened_generators;
+        let file = |def: &Arc<PageDef>| Some(def.base.src.id()) == opened.file;
+        (self.generators.contains_key(&id) || opened.ids.contains(&id))
+            && self.pages.get(&page).is_some_and(file)
     }
 
     /// Annotation `id`.
@@ -968,8 +1049,9 @@ impl DocState {
     /// bookmarks and the field nodes are trees from their roots, each node
     /// in once, a field under the parent it names, and a bookmark going to
     /// a page there is. Each label range starts at a page there is. There's
-    /// one header/footer at most, on pages there are, and each generator is
-    /// under its id. Every index is what its table makes again.
+    /// one generator at most of each kind and z, each under its id, on
+    /// pages there are, and numbering only pages it's on. Every index is
+    /// what its table makes again.
     ///
     /// Not: that another tool's reply is to a comment on its page, as files
     /// have them to ones that are gone or elsewhere, nor a mark's that names
@@ -988,6 +1070,7 @@ impl DocState {
             annots,
             labels,
             generators,
+            opened_generators: _,
             fields,
             form,
             idx,
@@ -1174,13 +1257,31 @@ impl DocState {
         hold(headers <= 1, || {
             Invariant::Generators(format!("{headers} draw a header/footer"))
         })?;
+        for z in [Z::Under, Z::Over] {
+            let drawn = (generators.values())
+                .filter(|g| g.spec.watermark().is_some() && g.z == z)
+                .count();
+            hold(drawn <= 1, || {
+                Invariant::Generators(format!("{drawn} draw the {z:?} watermark"))
+            })?;
+        }
         for g in generators.values() {
-            let scope = match &g.spec {
-                GenSpec::HeaderFooter(hf) => hf.pages.iter().flatten(),
-            };
-            for &page in scope {
-                hold(pages.contains_key(&page), || {
-                    Invariant::Generators(format!("{:?} is on {page:?}, which isn't a page", g.id))
+            if let Scope::Pages(scope) = &g.scope {
+                hold(!scope.is_empty(), || {
+                    Invariant::Generators(format!("{:?} is on no page", g.id))
+                })?;
+                for &page in scope {
+                    hold(pages.contains_key(&page), || {
+                        Invariant::Generators(format!(
+                            "{:?} is on {page:?}, which isn't a page",
+                            g.id
+                        ))
+                    })?;
+                }
+            }
+            for &page in g.frozen.bates.iter().flat_map(|b| b.keys()) {
+                hold(pages.contains_key(&page) && g.covers(page), || {
+                    Invariant::Generators(format!("{:?} numbers {page:?}, which it isn't on", g.id))
                 })?;
             }
         }
@@ -1193,9 +1294,9 @@ impl DocState {
                 Invariant::Index("the positions aren't the order's".into())
             })?;
         }
-        if let Some(header) = idx.header.get() {
-            hold(*header == self.number_header_pages(), || {
-                Invariant::Index("the header/footer's pages aren't its own".into())
+        if let Some(labels) = idx.labels.get() {
+            hold(*labels == self.label_table(), || {
+                Invariant::Index("the labels aren't the pages'".into())
             })?;
         }
         if let Some(shows) = idx.shows.get() {
@@ -1236,7 +1337,8 @@ impl DocState {
     /// a version other than its own (M10.5 §8.5's `Stale::Validate`), at
     /// `keys`, breaks a rule of uniqueness that neither state it came from
     /// (`was`: that version's and the transaction's) broke: the generator
-    /// of a written one's kind and z ([`GenSpec::same_place`]), the
+    /// of a written one's kind and z
+    /// ([`GenSpec::same_place`](super::GenSpec::same_place)), the
     /// annotation a written one's `/NM` names on its page too, the node a
     /// written one's full name, or one under it, names too, the page that
     /// shows the copy of its source page a written one now does. Files
@@ -1283,7 +1385,7 @@ impl DocState {
                         continue;
                     };
                     let other = (self.generators.values())
-                        .find(|other| other.id != g && other.spec.same_place(&made.spec));
+                        .find(|other| other.id != g && other.same_place(made));
                     if let Some(other) = other {
                         return Err(Key::Generator(other.id));
                     }
@@ -1332,7 +1434,7 @@ impl DocState {
     /// name in this state, which isn't one of its pages: a page the version
     /// took away, which the transaction didn't see go, as the page of
     /// annotations, an annotation's, a bookmark's target, a label range's
-    /// start, or among a generator's pages.
+    /// start, or among a generator's pages or those it numbers.
     pub(crate) fn resolves_after<'a>(
         &self,
         keys: impl IntoIterator<Item = &'a Key>,
@@ -1348,10 +1450,10 @@ impl DocState {
                 }
                 Key::Generator(g) => {
                     if let Some(g) = self.generators.get(&g) {
-                        let scope = match &g.spec {
-                            GenSpec::HeaderFooter(hf) => hf.pages.iter().flatten(),
-                        };
-                        named.extend(scope);
+                        if let Scope::Pages(scope) = &g.scope {
+                            named.extend(scope.iter().copied());
+                        }
+                        named.extend(g.frozen.bates.iter().flat_map(|b| b.keys().copied()));
                     }
                 }
                 Key::Order
@@ -1374,9 +1476,9 @@ impl DocState {
     /// per-bookmark or per-generator map, a path down from the root, and
     /// for an annotation or a field, others in the indexes that find it by
     /// name; for a new order, the positions and the page map it finds, and
-    /// for a new order or new generators, the header/footer's pages. A
-    /// whole value (the top-level bookmarks, the labels, the form) is its
-    /// prim's.
+    /// for a new order or new labels, the labels it finds when a generator
+    /// draws them. A whole value (the top-level bookmarks, the labels, the
+    /// form) is its prim's.
     pub(crate) fn snapshot_bytes(&self, keys: impl IntoIterator<Item = Key>) -> usize {
         let DocState {
             order,
@@ -1388,15 +1490,18 @@ impl DocState {
             annots,
             labels: _,
             generators,
+            // One for every version, which none changes.
+            opened_generators: _,
             fields,
             form: _,
             idx,
         } = self;
-        let mut new_order = false;
+        let (mut new_order, mut new_labels) = (false, false);
         let [mut p, mut g, mut b, mut pa, mut a, mut f, mut gens] = [0; 7];
         for key in keys {
             match key {
                 Key::Order => new_order = true,
+                Key::Labels => new_labels = true,
                 Key::Page(_) => p += 1,
                 Key::Geom(_) => g += 1,
                 Key::Bookmark(_) => b += 1,
@@ -1404,7 +1509,7 @@ impl DocState {
                 Key::Annot(_) => a += 1,
                 Key::Field(_) => f += 1,
                 Key::Generator(_) => gens += 1,
-                Key::OutlineRoots | Key::Labels | Key::Form => {}
+                Key::OutlineRoots | Key::Form => {}
             }
         }
         // A hash table of positions, about an eighth of it empty, and the
@@ -1418,17 +1523,16 @@ impl DocState {
             }
             false => 0,
         };
-        // A header/footer on every page counting nothing needs no table.
-        let header = match self.header_footer() {
-            Some(hf) if (new_order || gens > 0) && (hf.pages.is_some() || hf.bates.is_some()) => {
-                let on = hf.pages.as_ref().map_or(order.len(), Vec::len);
-                table(on, size_of::<(PageId, Option<u64>)>())
-            }
-            _ => 0,
+        // Labels are found for a generator that draws them, a few bytes of
+        // text each.
+        let drawn = || (generators.values()).any(|g| g.needs().label);
+        let labelled = match self.labels.is_some() && (new_order || new_labels) && drawn() {
+            true => table(order.len(), size_of::<(PageId, Arc<str>)>() + 8),
+            false => 0,
         };
         size_of::<DocState>()
             + positions
-            + header
+            + labelled
             + path_copies::<(PageId, Arc<PageDef>)>(p, pages.len(), HAMT)
             + path_copies::<(PageId, Arc<Geom>)>(g, geoms.len(), HAMT)
             + path_copies::<(OutlineId, Arc<Bookmark>)>(b, bookmarks.len(), HAMT)
@@ -1548,7 +1652,8 @@ mod tests {
         d.commit_ops(vec![add, header], "add").unwrap();
         let st = d.state().clone();
         assert_eq!(st.pos_of(p0), Some(0));
-        assert_eq!(st.bates_of(p0), Some(100));
+        let header = st.header_footer().unwrap();
+        assert_eq!(header.frozen.bates_number(p0), Some(100));
         let def = st.def(p0).unwrap();
         let object = def.base.src.page(def.base.index).unwrap().id;
         assert_eq!(st.page_showing(def.base.src.id(), object, 0), Some(p0));
@@ -1564,8 +1669,8 @@ mod tests {
                 "the positions aren't the order's",
             ),
             (
-                &|idx| idx.header = Arc::new(OnceLock::from(HashMap::from([(p0, Some(7))]))),
-                "the header/footer's pages aren't its own",
+                &|idx| idx.labels = Arc::new(OnceLock::from(HashMap::from([(p0, "7".into())]))),
+                "the labels aren't the pages'",
             ),
             (
                 &|idx| idx.shows = Arc::new(OnceLock::from(BTreeMap::new())),
@@ -1615,7 +1720,7 @@ mod tests {
     /// A header of Bates numbers from 100.
     fn numbered() -> sheaf_edit::HeaderFooterSpec {
         sheaf_edit::HeaderFooterSpec {
-            bates: Some(crate::stamps::Bates {
+            bates: Some(sheaf_edit::BatesSpec {
                 start: 100,
                 ..Default::default()
             }),
@@ -1623,34 +1728,39 @@ mod tests {
         }
     }
 
-    /// The header/footer's pages and Bates numbers are those
-    /// [`HeaderFooter::bates_numbers`] counts in the order, after a move
-    /// and with a scope or without; the page map finds a duplicate as the
-    /// copy it is, and the first in order of two that show one.
+    /// Each page's label is the one its place has, by the labels, or its
+    /// number without them, after a move and with labels set again; the
+    /// page map finds a duplicate as the copy it is, and the first in
+    /// order of two that show one.
     #[test]
     fn the_state_s_tables_find_what_a_walk_does() {
-        use crate::tx::fixture::{duplicate, move_pages, set_header};
+        use crate::tx::fixture::{duplicate, label, move_pages};
         let mut d = crate::tx::tests::doc_of(6, &[]);
         let ids: Vec<PageId> = d.state().order().iter().copied().collect();
-        let numbered_as_walked = |st: &DocState| {
-            let order: Vec<PageId> = st.order().iter().copied().collect();
-            let hf = st.header_footer().unwrap();
-            let bates: Vec<Option<u64>> = order.iter().map(|&id| st.bates_of(id)).collect();
-            assert_eq!(bates, hf.bates_numbers(&order));
-            for &id in &order {
-                assert_eq!(st.header_covers(id), hf.covers(id), "{id:?}");
-            }
+        let labelled_as_walked = |st: &DocState| {
+            let count = st.page_count();
+            let walked =
+                (st.page_labels()).unwrap_or_else(|| (1..=count).map(|n| n.to_string()).collect());
+            let found: Vec<String> = (st.order().iter())
+                .map(|&id| st.label_of(id).unwrap().to_string())
+                .collect();
+            assert_eq!(found, walked);
             assert_eq!(st.check_invariants(), Ok(()));
         };
-        let scoped = set_header(numbered(), Some(&[ids[1], ids[3], ids[4]]));
-        d.commit_ops(vec![scoped], "Header").unwrap();
-        numbered_as_walked(d.state());
+        labelled_as_walked(d.state());
+        let style = sheaf_edit::LabelStyle::LowerRoman;
+        let ranges = vec![label(ids[0], style, "", 1), label(ids[3], style, "A-", 1)];
+        let set = |ranges| sheaf_edit::Op::SetPageLabels {
+            ranges: Some(ranges),
+        };
+        d.commit_ops(vec![set(ranges.clone())], "Labels").unwrap();
+        labelled_as_walked(d.state());
         d.commit_ops(vec![move_pages(&[ids[4]], Some(ids[0]))], "Move")
             .unwrap();
-        numbered_as_walked(d.state());
-        d.commit_ops(vec![set_header(numbered(), None)], "Header")
+        labelled_as_walked(d.state());
+        d.commit_ops(vec![set(ranges[..1].to_vec())], "Labels")
             .unwrap();
-        numbered_as_walked(d.state());
+        labelled_as_walked(d.state());
 
         d.commit_ops(vec![duplicate(&[ids[2]])], "Duplicate")
             .unwrap();

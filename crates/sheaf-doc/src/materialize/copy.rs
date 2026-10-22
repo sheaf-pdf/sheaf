@@ -353,37 +353,6 @@ fn is_type<P: Objects + ?Sized>(pdf: &P, id: ObjectId, kind: &[u8]) -> bool {
     )
 }
 
-/// Page-level keys a page may inherit from its ancestors in the page tree.
-/// We flatten the tree, so these must be copied onto each page.
-pub(crate) const INHERITED: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
-
-/// Values of the inheritable keys, resolved by walking up `/Parent`.
-pub(crate) fn inherited_attrs(pdf: &Pdf, page: ObjectId) -> Vec<(Vec<u8>, Object)> {
-    let mut out = Vec::new();
-    let mut found: HashSet<&[u8]> = HashSet::new();
-    let mut id = page;
-    for _ in 0..64 {
-        let Ok(dict) = pdf.get_dictionary(id) else {
-            break;
-        };
-        for key in INHERITED {
-            if !found.contains(key)
-                && let Ok(v) = dict.get(key)
-            {
-                found.insert(key);
-                if id != page {
-                    out.push((key.to_vec(), v.clone()));
-                }
-            }
-        }
-        match dict.get(b"Parent").and_then(|p| p.as_reference()) {
-            Ok(parent) => id = parent,
-            Err(_) => break,
-        }
-    }
-    out
-}
-
 /// Clone a page dictionary from `src` into `dst`, deep-copying everything it
 /// references (resources, content, annotations…) with fresh object numbers.
 /// Other pages aren't copied (see [`remap`]): a reference to one the caller
@@ -418,19 +387,6 @@ pub(crate) fn copy_page_dict(
         .entry(new_id)
         .or_insert_with(|| Object::Dictionary(out.clone()));
     Ok(out)
-}
-
-/// Numbers in `dst` for the pages of a file that are being copied into it,
-/// before any is, so a link from one to another follows it ([`remap`])
-/// instead of becoming null.
-pub(crate) fn reserve(
-    pages: impl IntoIterator<Item = ObjectId>,
-    dst: &mut Pdf,
-    map: &mut HashMap<ObjectId, ObjectId>,
-) {
-    for page in pages {
-        map.entry(page).or_insert_with(|| dst.new_object_id());
-    }
 }
 
 /// A page or a node of the page tree.

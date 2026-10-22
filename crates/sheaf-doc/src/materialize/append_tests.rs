@@ -37,7 +37,7 @@ fn rect(r: [i64; 4]) -> Object {
 /// saying its number, as lopdf writes it in `kind`: the root gives every
 /// page its box and its font, and the first node, of more than one,
 /// turns its pages a quarter on a smaller box.
-fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
+pub(super) fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
     let mut pdf = Pdf::with_version(version);
     let root = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
@@ -88,7 +88,7 @@ fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
 
 /// `doc` saved over its file as the plan says, which must be an Append:
 /// the file's bytes before, and the section after them.
-fn planned_in_place(doc: &mut Document) -> (Vec<u8>, Vec<u8>) {
+pub(super) fn planned_in_place(doc: &mut Document) -> (Vec<u8>, Vec<u8>) {
     let path = doc.file().unwrap().0.to_path_buf();
     let was = std::fs::read(&path).unwrap();
     let report = save(doc, &path, &AskAnswers::default(), &NoProgress).unwrap();
@@ -102,7 +102,7 @@ fn planned_in_place(doc: &mut Document) -> (Vec<u8>, Vec<u8>) {
 /// `doc`'s current version appended to its file in place, whatever a plan
 /// would decide ([`save_appended`]), the save recorded: the file's bytes
 /// before, and the section after them.
-fn appended_in_place(doc: &mut Document) -> Result<(Vec<u8>, Vec<u8>), SaveStop> {
+pub(super) fn appended_in_place(doc: &mut Document) -> Result<(Vec<u8>, Vec<u8>), SaveStop> {
     let path = doc.file().unwrap().0.to_path_buf();
     let was = std::fs::read(&path).unwrap();
     save_appended(doc, &path)?;
@@ -118,7 +118,7 @@ fn lazy(bytes: &[u8]) -> LazyPdf {
 
 /// The objects `section`, after a file of `base` bytes, writes: those
 /// that read from past its end, but its cross-reference stream.
-fn written(base: usize, section: &[u8], whole: &Path) -> BTreeSet<ObjectId> {
+pub(super) fn written(base: usize, section: &[u8], whole: &Path) -> BTreeSet<ObjectId> {
     let bytes = std::fs::read(whole).unwrap();
     assert_eq!(bytes.len(), base + section.len());
     let pdf = lazy(&bytes);
@@ -129,7 +129,7 @@ fn written(base: usize, section: &[u8], whole: &Path) -> BTreeSet<ObjectId> {
 }
 
 /// The keys `doc`'s saved record has at `numbers`.
-fn keys_at(doc: &Document, numbers: &BTreeSet<ObjectId>) -> BTreeSet<ObjKey> {
+pub(super) fn keys_at(doc: &Document, numbers: &BTreeSet<ObjectId>) -> BTreeSet<ObjKey> {
     let map = &doc.saved_record().unwrap().map;
     (map.keys.iter())
         .filter(|(_, at)| numbers.contains(at))
@@ -137,7 +137,7 @@ fn keys_at(doc: &Document, numbers: &BTreeSet<ObjectId>) -> BTreeSet<ObjKey> {
         .collect()
 }
 
-fn square(id: u64) -> Annot {
+pub(super) fn square(id: u64) -> Annot {
     Annot {
         id: AnnotId(id),
         kind: AnnotKind::Square {
@@ -335,6 +335,82 @@ fn a_page_moved_across_nodes_carries_its_parent_and_inherited_keys() {
     assert_eq!(said(&path), ["page 1", "page 2", "page 0", "page 3"]);
 }
 
+/// [`file`]'s pages under two nodes of two, written with a stream, the
+/// first page holding a mark of sheaf's and another tool's comment.
+fn commented() -> Vec<u8> {
+    let bytes = file(&[2, 2], XrefType::CrossReferenceStream, "1.7");
+    let mut pdf = Pdf::load_mem(&bytes).unwrap();
+    let first = pdf.get_pages()[&1];
+    let mark = crate::annot::to_pdf(&square(3), &mut pdf).main;
+    let mark = pdf.add_object(mark);
+    let theirs = pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text", "NM" => Object::string_literal("theirs"),
+        "Rect" => rect([100, 700, 120, 720]), "Contents" => Object::string_literal("their note"),
+    });
+    let annots = vec![Object::Reference(mark), Object::Reference(theirs)];
+    pdf.get_dictionary_mut(first).unwrap().set("Annots", annots);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+/// A crop is the page's boxes alone (proposal 27): saved, the plan is an
+/// Append whose section writes the cropped pages' dictionaries and nothing
+/// else, though the first page under a node that turns and boxes its pages
+/// holds a mark and another tool's comment. Reopened, each cropped page
+/// has its crop, the content and annotations it had, and the comments.
+#[test]
+fn a_crop_appends_only_page_dicts() {
+    let dir = scratch();
+    let bytes = commented();
+    let margins = sheaf_edit::Margins {
+        top: 50.0,
+        bottom: 20.0,
+        left: 72.0,
+        right: 30.0,
+    };
+    for (name, cropped) in [("first.pdf", &[0][..]), ("every.pdf", &[0, 1, 2, 3])] {
+        let (path, mut doc) = opened(&dir, name, &bytes);
+        let pages: Vec<PageId> = cropped.iter().map(|&i| doc.page(i).unwrap()).collect();
+        doc.commit_ops(vec![fx::crop(&pages, margins)], "crop")
+            .unwrap();
+        let (base, section) = planned_in_place(&mut doc);
+        let wrote = written(base.len(), &section, &path);
+        let was = Pdf::load_mem(&base).unwrap();
+        let own: BTreeSet<ObjectId> = (cropped.iter())
+            .map(|&i| was.get_pages()[&(i as u32 + 1)])
+            .collect();
+        assert_eq!(wrote, own, "{name}: the cropped pages alone");
+        let keys = keys_at(&doc, &wrote);
+        let want: BTreeSet<ObjKey> = pages.iter().map(|&p| ObjKey::Page(p)).collect();
+        assert_eq!(keys, want, "{name}");
+        let now = Pdf::load(&path).unwrap();
+        for &at in &wrote {
+            let page = now.get_dictionary(at).unwrap();
+            assert_eq!(page.get(b"Type").unwrap().as_name().unwrap(), b"Page");
+            let before = was.get_dictionary(at).unwrap();
+            for key in [&b"Contents"[..], b"Annots", b"Parent"] {
+                assert_eq!(page.get(key).ok(), before.get(key).ok(), "{name}: {key:?}");
+            }
+        }
+        let back = crate::open::file(&path, None).unwrap().doc;
+        for (&i, &p) in cropped.iter().zip(&pages) {
+            let crop = doc.geom(p).crop;
+            let at = was.get_pages()[&(i as u32 + 1)];
+            let written = now.get_dictionary(at).unwrap().get(b"CropBox").unwrap();
+            let [x0, y0, x1, y1] = [crop.x0, crop.y0, crop.x1, crop.y1].map(Object::from);
+            assert_eq!(written, &Object::from(vec![x0, y0, x1, y1]), "{name}");
+            let geom = back.geom(back.page(i).unwrap());
+            assert_eq!(geom, doc.geom(p), "{name}: page {i}");
+            assert_ne!(geom.crop, geom.media, "{name}: page {i}");
+        }
+        let first = back.page(0).unwrap();
+        assert_eq!(back.state().marks_on(first).count(), 1, "{name}");
+        assert_eq!(back.state().foreign_on(first).count(), 1, "{name}");
+        assert_eq!(said(&path), ["page 0", "page 1", "page 2", "page 3"]);
+    }
+}
+
 /// A node grown past max(128, its size at open) splits; a second Append
 /// writes the node split off under the same key and number, and the pages
 /// reopen in order.
@@ -503,7 +579,7 @@ fn a_version_bump_writes_the_catalog_with_its_version() {
     let contents = page.get(b"Contents").unwrap().as_array().unwrap();
     let layered = (contents.iter()).any(|c| {
         let stream = pdf.get_object(c.as_reference().unwrap()).unwrap();
-        stream.as_stream().unwrap().dict.has(b"SheafOcrLayer")
+        super::ocr_tests::ocr_block(&stream.as_stream().unwrap().dict).is_some()
     });
     assert!(layered);
 }

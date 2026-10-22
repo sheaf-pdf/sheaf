@@ -160,6 +160,48 @@ pub fn object(operand: &[u8], depth: usize) -> Option<Object> {
     }
 }
 
+/// A dictionary operand as written, but for its entries whose keys are
+/// among `keys`: each goes with the spaces and tabs before it on its line,
+/// and every other byte stays, comments, line ends and what the
+/// dictionaries it holds hold among them. None when an entry isn't a name
+/// and an object, or what's left isn't one operand that reads as the
+/// dictionary without those entries ([`object`]), nested no more than
+/// `depth` deep.
+pub(crate) fn without_entries(dict: &[u8], keys: &[&[u8]], depth: usize) -> Option<Vec<u8>> {
+    let Object::Dictionary(mut left) = object(dict, depth)? else {
+        return None;
+    };
+    let inner = dict.strip_suffix(b">>").filter(|i| i.starts_with(b"<<"))?;
+    let mut cut = Vec::new();
+    let mut at = 2;
+    while let Some(key) = next_raw(inner, at, depth) {
+        let (key, _) = key.ok()?;
+        let (value, Raw::Operand) = next_raw(inner, key.end, depth)?.ok()? else {
+            return None;
+        };
+        let decoded = (inner[key.start] == b'/').then(|| name(&inner[key.clone()]))??;
+        if keys.contains(&&*decoded) {
+            let line = inner[at..key.start]
+                .iter()
+                .rposition(|&c| !matches!(c, b' ' | b'\t'));
+            cut.push(line.map_or(at, |i| at + i + 1)..value.end);
+        }
+        at = value.end;
+    }
+    let mut out = Vec::with_capacity(dict.len());
+    let mut from = 0;
+    for r in cut {
+        out.extend_from_slice(&dict[from..r.start]);
+        from = r.end;
+    }
+    out.extend_from_slice(&dict[from..]);
+    for key in keys {
+        left.remove(key);
+    }
+    let (whole, _) = next_raw(&out, 0, depth)?.ok()?;
+    (whole == (0..out.len()) && object(&out, depth)? == Object::Dictionary(left)).then_some(out)
+}
+
 /// What's next in an operand read as an object.
 enum Item {
     /// An object, or None for what isn't one.

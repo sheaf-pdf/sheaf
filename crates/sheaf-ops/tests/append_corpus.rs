@@ -5,6 +5,34 @@
 //!   the plan rewrites or asks, why is counted; the removal check never
 //!   finds a derived object's text gone (a `RemovalMisclassified`), and
 //!   its vetoes on the files' own objects are counted, for tuning;
+//! - a crop is the page's boxes alone (M10.5 slice 15; ignored, as a
+//!   corpus tier): every file's first page cropped and saved as planned
+//!   reopens cropped, an Append writing that page's dictionary and
+//!   nothing else, and the form check finds nothing in the file it didn't
+//!   find before; where the plan rewrites or asks, why is counted;
+//! - a watermark's round trip (M10.5 slice 16; ignored, as a corpus
+//!   tier): every file watermarked on every page, saved each way, keeps
+//!   its form check's findings, opens with the watermark found on every
+//!   page, Acrobat's own replaced but where a splice refuses one, and
+//!   taken off is a Rewrite whose file holds and draws none of its text;
+//! - a header and footer's round trip (M10.5 slice 17; ignored, as a
+//!   corpus tier): every file given page and Bates numbers on every page,
+//!   saved each way, keeps its form check's findings, opens with the
+//!   header found on every page and each its Bates number, Acrobat's
+//!   replaced and the author's own left; its pages reordered, it appends,
+//!   the numbers drawn again and the Bates numbers going with their
+//!   pages, the removal check finding nothing; taken off, it's a Rewrite
+//!   whose file holds and draws none of its text;
+//! - recognized text's round trip (M10.5 slice 18; ignored, as a corpus
+//!   tier): every file's pages given recognized text, a word a page, which
+//!   takes nothing out, appended where the file takes it, keep their form
+//!   check's findings and open with each word drawn once, a page whose
+//!   content can't be read counted; given a header, each page is isolated
+//!   once and keeps its text; recognized again, and then cleared, each is
+//!   a Rewrite whose file holds and draws none of the text it replaced or
+//!   cleared; and the same over the corpus's scans (`scans/`), where a
+//!   scan holding another program's recognized text still draws all of
+//!   it after ours is added and after ours is cleared;
 //! - deleted means deleted, both ways, on every file (ignored, as it
 //!   takes about seven minutes; each slice's Verify and commit run it): a
 //!   page, a mark, a reply, a mark's text, another tool's comment or a
@@ -34,15 +62,31 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use lopdf::{Document as Pdf, Object, ObjectId};
+use sheaf_doc::content::{
+    FontDecoders, PagOrigin, PageContent, PaginationKind, ResCx, TextBag, text_bag,
+};
+use sheaf_doc::effects::{Flags, judge};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::sigs::Verdict;
+use sheaf_doc::forms::{Finding, Report};
+use sheaf_doc::geom::Geom;
 use sheaf_doc::materialize::{
-    Ask, AskAnswers, How, Onto, SaveStop, Strategy, StrategyKind, Why, forced_append, materialize,
-    plan, removal, save, save_rewritten, write_file,
+    Ask, AskAnswers, How, Note, Onto, SaveStop, Strategy, StrategyKind, Why, forced_append,
+    materialize, plan, removal, save, save_rewritten, write_file,
 };
-use sheaf_doc::tx::fixture::{add, bookmark, delete, delete_annots, delete_bookmark, update};
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, PageId, Pt};
-use sheaf_edit::Rotation;
+use sheaf_doc::model::Scope;
+use sheaf_doc::text_layer::from_engine;
+use sheaf_doc::tx::fixture::{
+    add, bookmark, clear_ocr, crop, delete, delete_annots, delete_bookmark, header as fx_header,
+    move_pages, remove_header, remove_watermark, set_header, set_watermark, update,
+    watermark as fx_watermark,
+};
+use sheaf_doc::{
+    Actor, Annot, AnnotId, AnnotKind, Box2, CommitOpts, Document, EditError, OcrWord, PageId, Pt,
+};
+use sheaf_edit::{BatesSpec, HeaderFooterSpec, Margins, Op, PageRef, Rotation, Z};
+
+mod common;
 
 /// A directory of its own for `test`'s copies, empty.
 fn scratch(test: &str) -> PathBuf {
@@ -200,7 +244,7 @@ fn every_file_appends_a_mark_as_planned_and_reopens_with_it() {
         return;
     };
     let dir = scratch("marked");
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| marked(entry, &corpus, &dir));
     let (mut files, mut appended, mut asked) = (0, 0, 0);
     let mut rewritten: BTreeMap<String, Vec<&str>> = BTreeMap::new();
@@ -252,6 +296,1137 @@ fn every_file_appends_a_mark_as_planned_and_reopens_with_it() {
             MARKED.appended
         );
     }
+}
+
+// ----- A crop appends page dicts alone --------------------------------------
+
+/// What a crop of a copy's first page, saved as planned, came to.
+enum Cropped {
+    /// Appended, the section the page's dictionary alone.
+    Appended,
+    /// Rewritten, for these reasons.
+    Rewritten(String),
+    /// The plan asked about the file's signatures first.
+    Asked,
+    /// The page shows too little to crop by [`CROP_BY`] a side.
+    TooSmall,
+}
+
+/// Points off each side of the first page as it shows.
+const CROP_BY: f32 = 18.0;
+
+/// Corpus paths, comma-separated, to run [`crop_appends_only_page_dicts`]
+/// on alone (`SHEAF_CROP_ONLY=forms/irs/f1040.pdf,…`): for looking at a few
+/// files by hand. Unset, it crops every file.
+const CROP_ONLY: &str = "SHEAF_CROP_ONLY";
+
+/// A copy of `entry`'s file with its first page cropped by [`CROP_BY`] a
+/// side, saved to itself as planned, asking nothing, then reopened: None
+/// when it doesn't open.
+fn cropped(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<Cropped, String>> {
+    let path = copy_of(entry, corpus, dir, "crop-")?;
+    let outcome = (|| {
+        let mut doc = opened(&path)?;
+        let before = std::fs::read(&path).unwrap();
+        let page = doc.page(0)?;
+        let shown = doc.geom(page).shown();
+        let least = 2.0 * CROP_BY + sheaf_doc::geom::MIN_SIDE;
+        if shown.width < least || shown.height < least {
+            return Some(Ok(Cropped::TooSmall));
+        }
+        let by = Margins {
+            top: CROP_BY,
+            bottom: CROP_BY,
+            left: CROP_BY,
+            right: CROP_BY,
+        };
+        if let Err(e) = doc.commit_ops(vec![crop(&[page], by)], "crop") {
+            return Some(Err(format!("no crop: {e}")));
+        }
+        Some(saved_cropped(&mut doc, page, &path, &before))
+    })();
+    remove(&path);
+    outcome
+}
+
+/// [`cropped`]'s save of `doc`, its page `page` cropped, to `path`, whose
+/// bytes were `before`, and its reopen.
+fn saved_cropped(
+    doc: &mut Document,
+    page: PageId,
+    path: &Path,
+    before: &[u8],
+) -> Result<Cropped, String> {
+    let report = match save(doc, path, &AskAnswers::default(), &NoProgress) {
+        Ok(report) => report,
+        Err(SaveStop::Ask(Ask::Signatures { .. })) => return Ok(Cropped::Asked),
+        Err(stop) => return Err(format!("stopped: {stop}")),
+    };
+    let after = std::fs::read(path).unwrap();
+    let cropped = match report.strategy {
+        Some(StrategyKind::Append) if !after.starts_with(before) => {
+            return Err("an Append that doesn't keep the file's bytes first".into());
+        }
+        Some(StrategyKind::Append) => {
+            let wrote = common::appended_objects(before.len(), &after);
+            let others: Vec<&ObjectId> = (wrote.iter())
+                .filter(|(_, page)| !**page)
+                .map(|(id, _)| id)
+                .collect();
+            if !others.is_empty() || wrote.is_empty() {
+                return Err(format!(
+                    "the Append wrote {} objects, {others:?} not pages",
+                    wrote.len()
+                ));
+            }
+            Cropped::Appended
+        }
+        Some(StrategyKind::Rewrite) => Cropped::Rewritten(reasons(&report.why)),
+        other => return Err(format!("saved as {other:?}")),
+    };
+    // What the form check finds after that it didn't before: nothing a
+    // save told of, as this one asks first.
+    let was = sheaf_doc::forms::check(before, None).ok();
+    nothing_found(was.as_ref(), path, |_| false)?;
+    let again = opened(path).ok_or("the saved file doesn't open")?;
+    let first = again.page(0).ok_or("no first page")?;
+    let (shows, showed) = (again.geom(first).visible(), doc.geom(page).visible());
+    if shows != showed {
+        return Err(format!(
+            "reopened, it shows {shows:?}, cropped to {showed:?}"
+        ));
+    }
+    Ok(cropped)
+}
+
+/// Every file's first page cropped, saved as planned (slice 15): an Append
+/// writes the page's dictionary alone, never another object, and no save
+/// gives the form check a finding the file didn't have.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn crop_appends_only_page_dicts() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let dir = scratch("cropped");
+    let entries = common::narrowed(CROP_ONLY, corpus.forms().unwrap(), |e| &e.path);
+    let outcomes = each_entry(&entries, |entry| cropped(entry, &corpus, &dir));
+    let (mut files, mut appended, mut asked, mut small) = (0, 0, 0, 0);
+    let mut rewritten: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    let mut failed = BTreeMap::new();
+    for (entry, outcome) in entries.iter().zip(outcomes) {
+        let Some(outcome) = outcome else {
+            continue;
+        };
+        files += 1;
+        match outcome {
+            Ok(Cropped::Appended) => appended += 1,
+            Ok(Cropped::Rewritten(why)) => rewritten.entry(why).or_default().push(&entry.path),
+            Ok(Cropped::Asked) => asked += 1,
+            Ok(Cropped::TooSmall) => small += 1,
+            Err(e) => {
+                failed.insert(entry.path.clone(), e);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    println!(
+        "{files} of {} files cropped: {appended} appended with page dictionaries alone, {} \
+         rewritten, {asked} asked about their signatures first, {small} too small to crop; {} \
+         failed",
+        entries.len(),
+        rewritten.values().map(Vec::len).sum::<usize>(),
+        failed.len(),
+    );
+    for (why, paths) in &rewritten {
+        let some = paths[..paths.len().min(4)].join(", ");
+        println!("  rewritten for {why}: {} ({some})", paths.len());
+    }
+    for (path, why) in &failed {
+        println!("{path}: {why}");
+    }
+    assert!(failed.is_empty());
+}
+
+// ----- A watermark's round trip ---------------------------------------------
+
+/// Corpus paths, comma-separated, to run [`watermark_round_trips`] on alone
+/// (`SHEAF_WATERMARK_ONLY=forms/irs/f1040.pdf,…`): for looking at a few
+/// files by hand. Unset, it takes every file.
+const WATERMARK_ONLY: &str = "SHEAF_WATERMARK_ONLY";
+
+/// The text of the watermark every file takes.
+const WATERMARK: &str = "SHEAF-CORPUS-WATERMARK";
+
+/// What a watermark's round trips through a copy of a file came to.
+#[derive(Default)]
+struct RoundTrip {
+    /// Why the first save each way was a Rewrite where it was asked to
+    /// append: the file can't take an Append.
+    declined: Vec<String>,
+    /// Acrobat's watermarks on its pages, and those left once each way's
+    /// first save replaced them, which a splice refused.
+    acrobat: usize,
+    acrobat_left: usize,
+}
+
+/// The pagination artifacts of `doc`'s file of kind `kind` drawn by
+/// `origin`, page by page, counted.
+fn artifacts(doc: &Document, kind: PaginationKind, origin: PagOrigin) -> usize {
+    let src = doc.primary();
+    (0..src.page_count())
+        .filter_map(|i| src.blocks(i).ok())
+        .map(|b| {
+            (b.pagination.iter())
+                .filter(|p| p.kind == kind && p.origin == origin)
+                .count()
+        })
+        .sum()
+}
+
+/// The words `doc`'s file draws on its pages, decoded through its fonts:
+/// none of a page whose content can't be read.
+fn drawn_words(doc: &Document) -> TextBag {
+    let src = doc.primary();
+    let (pdf, lim) = (src.pdf(), src.limits());
+    let mut bag = TextBag::default();
+    for page in (0..src.page_count()).filter_map(|i| src.page(i)) {
+        let Ok(content) = PageContent::read(pdf, &page.contents, lim) else {
+            continue;
+        };
+        let resources = page.resources.as_deref();
+        let fonts = FontDecoders::read(pdf, resources, lim);
+        let res = ResCx::read(pdf, resources);
+        if let Ok(words) = text_bag(content.concat(), &res, lim, &fonts) {
+            bag.extend(&words);
+        }
+    }
+    bag
+}
+
+/// Whether `finding` is what a save told to break signatures and drop an
+/// XFA part's values may leave: what save policy decides, and asks about
+/// first.
+fn told(finding: &Finding) -> bool {
+    matches!(
+        finding,
+        Finding::StaleSignature { .. }
+            | Finding::StaleSigFlags { .. }
+            | Finding::XfaMismatch { .. }
+            | Finding::EarlierValues { .. }
+    )
+}
+
+/// How many times `bag` holds `word`.
+fn times(bag: &TextBag, word: &str) -> usize {
+    bag.words().find(|(w, _)| *w == word).map_or(0, |(_, n)| n)
+}
+
+/// A copy of `entry`'s file watermarked on every page, saved each way
+/// (an Append where the file takes one), then opened again and the
+/// watermark taken off, saved as planned: None when it doesn't open.
+fn watermarked(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<RoundTrip, String>> {
+    let original = std::fs::read(corpus.path(entry)).ok()?;
+    let was = sheaf_doc::forms::check(&original, None).ok();
+    let mut trip = RoundTrip::default();
+    for how in [How::Rewritten, How::Appended] {
+        let path = copy_of(entry, corpus, dir, &format!("wm-{how:?}-"))?;
+        let outcome = (|| {
+            let mut doc = opened(&path)?;
+            let acrobat = artifacts(&doc, PaginationKind::Watermark, PagOrigin::Acrobat);
+            Some(
+                round_trip(&mut doc, &path, how, was.as_ref()).map(|(declined, left)| {
+                    trip.declined.extend(declined);
+                    trip.acrobat += acrobat;
+                    trip.acrobat_left += left;
+                }),
+            )
+        })();
+        remove(&path);
+        if let Err(e) = outcome? {
+            return Some(Err(format!("{how:?}: {e}")));
+        }
+    }
+    Some(Ok(trip))
+}
+
+/// [`watermarked`]'s saves of `doc`, opened from `path`, the first `how`,
+/// the file's form check `was` before: why the first wasn't an Append
+/// asked for, and how many of Acrobat's watermarks it left.
+fn round_trip(
+    doc: &mut Document,
+    path: &Path,
+    how: How,
+    was: Option<&Report>,
+) -> Result<(Option<String>, usize), String> {
+    let set = set_watermark(fx_watermark(WATERMARK), Z::Over, None);
+    doc.commit_ops(vec![set], "watermark")
+        .map_err(|e| format!("no watermark: {e}"))?;
+    let declined = match how {
+        How::Rewritten => save_rewritten(doc, path).map(|_| None),
+        How::Appended => appended_or_not(doc, path).map(|(strategy, _)| match strategy {
+            Strategy::Rewrite { why } => Some(reasons(&why)),
+            _ => None,
+        }),
+    }
+    .map_err(|stop| format!("the first save stopped: {stop}"))?;
+    nothing_found(was, path, told)?;
+    let mut again = opened(path).ok_or("the saved file doesn't open")?;
+    let found = again
+        .state()
+        .watermark(Z::Over)
+        .ok_or("its watermark isn't found")?;
+    if found.scope != Scope::All {
+        return Err(format!("found on {:?}, not every page", found.scope));
+    }
+    let left = artifacts(&again, PaginationKind::Watermark, PagOrigin::Acrobat);
+    let pages: Vec<PageId> = again.state().order().iter().copied().collect();
+    again
+        .commit_ops(vec![remove_watermark(Some(Z::Over), &pages)], "remove")
+        .map_err(|e| format!("not removed: {e}"))?;
+    let answers = AskAnswers {
+        break_signatures: true,
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    let report = save(&mut again, path, &answers, &NoProgress).map_err(|e| format!("{e}"))?;
+    if report.strategy != Some(StrategyKind::Rewrite) {
+        return Err(format!("removed, saved as {:?}", report.strategy));
+    }
+    if readable(&std::fs::read(path).unwrap(), &written_as(WATERMARK)) {
+        return Err("removed, its text can still be read".into());
+    }
+    let reopened = opened(path).ok_or("the file it was removed from doesn't open")?;
+    if times(&drawn_words(&reopened), WATERMARK) > 0 {
+        return Err("removed, its text is still drawn".into());
+    }
+    Ok((declined, left))
+}
+
+/// Every file watermarked on every page, saved each way, opened again and
+/// the watermark taken off (slice 16): the form check finds nothing the
+/// file didn't have before; the watermark is found again, on every page;
+/// Acrobat's watermarks are replaced, but where a splice refuses to take
+/// one out, which only the page of one file's needs; taken off, the save
+/// is a Rewrite, and its text can't be read in the file or drawn.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn watermark_round_trips() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let dir = scratch("watermarked");
+    let entries = common::narrowed(WATERMARK_ONLY, corpus.forms().unwrap(), |e| &e.path);
+    let outcomes = each_entry(&entries, |entry| watermarked(entry, &corpus, &dir));
+    let (mut files, mut acrobat) = (0, 0);
+    let mut declined: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut left, mut failed) = (BTreeMap::new(), BTreeMap::new());
+    for (entry, outcome) in entries.iter().zip(outcomes) {
+        match outcome {
+            None => {}
+            Some(Ok(trip)) => {
+                files += 1;
+                acrobat += trip.acrobat;
+                for why in trip.declined {
+                    *declined.entry(why).or_default() += 1;
+                }
+                if trip.acrobat_left > 0 {
+                    left.insert(entry.path.as_str(), trip.acrobat_left);
+                }
+            }
+            Some(Err(e)) => {
+                files += 1;
+                failed.insert(entry.path.clone(), e);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    println!(
+        "{files} of {} files watermarked both ways, found again and removed; of Acrobat's \
+         watermarks on their pages, {acrobat} each way's together, {} left ({left:?}); {} failed",
+        entries.len(),
+        left.values().sum::<usize>(),
+        failed.len(),
+    );
+    for (why, n) in &declined {
+        println!("  appended as a Rewrite for {why}: {n}");
+    }
+    for (path, why) in &failed {
+        println!("{path}: {why}");
+    }
+    assert!(failed.is_empty());
+    // Its watermark has the body's `q` and `BT` inside its range, which no
+    // splice can take without the body: left each way.
+    let refused = "forms/safedocs/0112530.pdf";
+    assert!(
+        left.iter().all(|(&path, &n)| path == refused && n == 2),
+        "{left:?}"
+    );
+}
+
+// ----- A header and footer's round trip -------------------------------------
+
+/// Corpus paths, comma-separated, to run [`header_round_trips`] on alone
+/// (`SHEAF_HEADER_ONLY=forms/irs/f1040.pdf,…`): for looking at a few files
+/// by hand. Unset, it takes every file.
+const HEADER_ONLY: &str = "SHEAF_HEADER_ONLY";
+
+/// The text at the left of the header every file takes, and its Bates
+/// numbers' prefix.
+const HEADER: &str = "SHEAF-CORPUS-HEADER";
+const BATES: &str = "SHEAFBATES";
+
+/// The others whose headers and footers a header and footer of sheaf's
+/// replaces: Acrobat and an older sheaf (§11.4). A corpus file has none
+/// of sheaf's own.
+const REPLACED: [PagOrigin; 2] = [PagOrigin::Acrobat, PagOrigin::SheafLegacy];
+
+/// The header and footer every file takes: [`HEADER`] at the header's
+/// left, "Page <<1>> of <<N>>" at the footer's center, and its Bates
+/// number, six digits after [`BATES`] from 1, at its right.
+fn corpus_header() -> HeaderFooterSpec {
+    let mut spec = fx_header(HEADER);
+    spec.texts[4] = "Page <<1>> of <<N>>".into();
+    spec.texts[5] = "<<bates>>".into();
+    spec.bates = Some(BatesSpec {
+        prefix: BATES.into(),
+        suffix: String::new(),
+        digits: 6,
+        start: 1,
+    });
+    spec
+}
+
+/// What a header and footer's round trips through a copy of a file came
+/// to, each way's together.
+#[derive(Default)]
+struct HeaderTrip {
+    /// Why the first save was a Rewrite where it was asked to append: the
+    /// file can't take an Append.
+    declined: Vec<String>,
+    /// Others' headers and footers on its pages ([`REPLACED`]'s), and
+    /// those left once the first save replaced them.
+    theirs: usize,
+    theirs_left: usize,
+    /// The author's own headers and footers, which stay.
+    authored: usize,
+    /// Reorders saved, each an Append; of them, those appended anyway, as
+    /// the file's signatures don't allow it; and those whose save asked
+    /// about the signatures with no Append to offer, which aren't saved. A
+    /// file of one page isn't reordered.
+    reordered: usize,
+    anyway: usize,
+    asked: usize,
+    /// What each save told the reader, by kind ([`note_kind`]).
+    notes: Vec<String>,
+}
+
+/// The headers and footers `doc`'s file draws by any of `origins`, page by
+/// page, counted.
+fn headers_by(doc: &Document, origins: &[PagOrigin]) -> usize {
+    let kinds = [PaginationKind::Header, PaginationKind::Footer];
+    (kinds.iter())
+        .flat_map(|&kind| origins.iter().map(move |&origin| (kind, origin)))
+        .map(|(kind, origin)| artifacts(doc, kind, origin))
+        .sum()
+}
+
+/// The Bates numbers `doc`'s header and footer gives its pages, in order.
+fn bates_numbers(doc: &Document) -> Result<Vec<Option<u64>>, String> {
+    let st = doc.state();
+    let g = (st.header_footer()).ok_or("its header and footer isn't found")?;
+    Ok((st.order().iter())
+        .map(|&p| g.frozen.bates_number(p))
+        .collect())
+}
+
+/// What kind of thing `note` tells: its words up to the pages it names,
+/// numbers as `n`.
+fn note_kind(note: &Note) -> String {
+    let text = &note.0;
+    let end = [text.find(" on "), text.find(':')]
+        .into_iter()
+        .flatten()
+        .min();
+    let words = &text[..end.unwrap_or(text.len())];
+    words.replace(|c: char| c.is_ascii_digit(), "n")
+}
+
+/// A copy of `entry`'s file given [`corpus_header`] on every page, saved
+/// each way (an Append where the file takes one), then opened again, its
+/// pages reordered and saved as planned, and opened again and the header
+/// and footer taken off, saved as planned: None when it doesn't open.
+fn headed(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<HeaderTrip, String>> {
+    let original = std::fs::read(corpus.path(entry)).ok()?;
+    let was = sheaf_doc::forms::check(&original, None).ok();
+    let mut trip = HeaderTrip::default();
+    for how in [How::Rewritten, How::Appended] {
+        let path = copy_of(entry, corpus, dir, &format!("hf-{how:?}-"))?;
+        let outcome = (|| {
+            let mut doc = opened(&path)?;
+            Some(header_trip(&mut doc, &path, how, was.as_ref(), &mut trip))
+        })();
+        remove(&path);
+        if let Err(e) = outcome? {
+            return Some(Err(format!("{how:?}: {e}")));
+        }
+    }
+    Some(Ok(trip))
+}
+
+/// [`headed`]'s saves of `doc`, opened from `path`, the first `how`, the
+/// file's form check `was` before, counted in `trip`.
+fn header_trip(
+    doc: &mut Document,
+    path: &Path,
+    how: How,
+    was: Option<&Report>,
+    trip: &mut HeaderTrip,
+) -> Result<(), String> {
+    let theirs = headers_by(doc, &REPLACED);
+    let authored = headers_by(doc, &[PagOrigin::Authored]);
+    let set = set_header(corpus_header(), None);
+    doc.commit_ops(vec![set], "header")
+        .map_err(|e| format!("no header and footer: {e}"))?;
+    let numbers = bates_numbers(doc)?;
+    let (declined, notes) = match how {
+        How::Rewritten => save_rewritten(doc, path).map(|report| (None, report.notes)),
+        How::Appended => appended_or_not(doc, path).map(|(strategy, notes)| match strategy {
+            Strategy::Rewrite { why } => (Some(reasons(&why)), notes),
+            _ => (None, notes),
+        }),
+    }
+    .map_err(|stop| format!("the first save stopped: {stop}"))?;
+    trip.declined.extend(declined);
+    trip.notes.extend(notes.iter().map(note_kind));
+    nothing_found(was, path, told)?;
+    let again = opened(path).ok_or("the saved file doesn't open")?;
+    let found = (again.state().header_footer()).ok_or("its header and footer isn't found")?;
+    if found.scope != Scope::All {
+        return Err(format!("found on {:?}, not every page", found.scope));
+    }
+    let reread = bates_numbers(&again)?;
+    if reread != numbers {
+        return Err(format!(
+            "its Bates numbers read back {reread:?}, not {numbers:?}"
+        ));
+    }
+    trip.theirs += theirs;
+    trip.theirs_left += headers_by(&again, &REPLACED);
+    trip.authored += authored;
+    let authored_now = headers_by(&again, &[PagOrigin::Authored]);
+    if authored_now != authored {
+        return Err(format!("the author's own {authored_now}, from {authored}"));
+    }
+    let order: Vec<PageId> = again.state().order().iter().copied().collect();
+    let mut last = again;
+    if let [first, .., end] = order[..] {
+        let mut traded = numbers.clone();
+        traded.rotate_right(1);
+        last.commit_ops(vec![move_pages(&[end], Some(first))], "reorder")
+            .map_err(|e| format!("not reordered: {e}"))?;
+        let flags = saved_flags(&mut last)?;
+        if !flags.is_some_and(|f| f.contains(Flags::LIVE_REDRAW)) {
+            return Err(format!("reordered, its flags are {flags:?}"));
+        }
+        let mut answers = AskAnswers {
+            drop_xfa_values: true,
+            ..Default::default()
+        };
+        let mut saved = save(&mut last, path, &answers, &NoProgress);
+        let anyway = matches!(
+            saved,
+            Err(SaveStop::Ask(Ask::Signatures {
+                append_anyway: Some(_),
+                ..
+            }))
+        );
+        if anyway {
+            // Appended anyway, as the reader may: the removal check still
+            // stops it on whatever it finds (`Mode::Anyway`).
+            answers.append_anyway = true;
+            saved = save(&mut last, path, &answers, &NoProgress);
+        }
+        match saved {
+            Ok(report) if report.strategy == Some(StrategyKind::Append) => {
+                trip.reordered += 1;
+                trip.anyway += usize::from(anyway);
+                trip.notes.extend(report.notes.iter().map(note_kind));
+                last = opened(path).ok_or("the reordered file doesn't open")?;
+                let reread = bates_numbers(&last)?;
+                if reread != traded {
+                    return Err(format!(
+                        "reordered, its Bates numbers read back {reread:?}, not {traded:?}"
+                    ));
+                }
+            }
+            Ok(report) => {
+                return Err(format!(
+                    "reordered, saved as {:?} for {}",
+                    report.strategy,
+                    reasons(&report.why)
+                ));
+            }
+            Err(SaveStop::Ask(Ask::Signatures { .. })) => trip.asked += 1,
+            Err(stop) => return Err(format!("reordered, the save stopped: {stop}")),
+        }
+    }
+    let pages: Vec<PageId> = last.state().order().iter().copied().collect();
+    last.commit_ops(vec![remove_header(&pages)], "remove")
+        .map_err(|e| format!("not removed: {e}"))?;
+    let answers = AskAnswers {
+        break_signatures: true,
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    let report = save(&mut last, path, &answers, &NoProgress).map_err(|e| format!("{e}"))?;
+    trip.notes.extend(report.notes.iter().map(note_kind));
+    if report.strategy != Some(StrategyKind::Rewrite) {
+        return Err(format!("removed, saved as {:?}", report.strategy));
+    }
+    let bytes = std::fs::read(path).unwrap();
+    for text in [HEADER, BATES] {
+        if readable(&bytes, &written_as(text)) {
+            return Err(format!("removed, {text} can still be read"));
+        }
+    }
+    let reopened = opened(path).ok_or("the file it was removed from doesn't open")?;
+    let words = drawn_words(&reopened);
+    if (words.words()).any(|(w, _)| w.contains(HEADER) || w.contains(BATES)) {
+        return Err("removed, its text is still drawn".into());
+    }
+    Ok(())
+}
+
+/// Every file given a header and footer with page and Bates numbers on
+/// every page, saved each way, opened again and its pages reordered, then
+/// the header and footer taken off (slice 17): the form check finds
+/// nothing the file didn't have before; the header is found again, on
+/// every page, each its Bates number; others' headers and footers are
+/// replaced, every one, as every one the corpus has can be spliced out
+/// (`content::corpus`), and the author's own stay; the reorder, a live
+/// redraw, appends, anyway where the file's signatures don't allow it,
+/// the Bates numbers going with their pages; taken off, the save is a
+/// Rewrite, and its text can't be read in the file or drawn; and the
+/// removal check never finds a derived object's text gone. The notes the
+/// saves gave are counted by kind.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn header_round_trips() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let dir = scratch("headed");
+    let entries = common::narrowed(HEADER_ONLY, corpus.forms().unwrap(), |e| &e.path);
+    let outcomes = each_entry(&entries, |entry| headed(entry, &corpus, &dir));
+    let (mut files, mut theirs, mut authored) = (0, 0, 0);
+    let (mut reordered, mut anyway, mut asked) = (0, 0, 0);
+    let (mut declined, mut notes) = (BTreeMap::new(), BTreeMap::new());
+    let (mut left, mut failed) = (BTreeMap::new(), BTreeMap::new());
+    for (entry, outcome) in entries.iter().zip(outcomes) {
+        match outcome {
+            None => {}
+            Some(Ok(trip)) => {
+                files += 1;
+                theirs += trip.theirs;
+                authored += trip.authored;
+                reordered += trip.reordered;
+                anyway += trip.anyway;
+                asked += trip.asked;
+                for why in trip.declined {
+                    *declined.entry(why).or_insert(0usize) += 1;
+                }
+                for kind in trip.notes {
+                    *notes.entry(kind).or_insert(0usize) += 1;
+                }
+                if trip.theirs_left > 0 {
+                    left.insert(entry.path.as_str(), trip.theirs_left);
+                }
+            }
+            Some(Err(e)) => {
+                files += 1;
+                failed.insert(entry.path.clone(), e);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let vetoes = removal::vetoes();
+    println!(
+        "{files} of {} files given a header and footer both ways, found again and removed; \
+         {reordered} reorders appended, {anyway} of them anyway over their signatures, {asked} \
+         asked about their signatures with no Append to offer; of Acrobat's and an older \
+         sheaf's headers and footers on their pages, {theirs} each way's together, {} left \
+         ({left:?}); the author's own {authored}, all left; {} failed; removal check vetoes: {} \
+         derived",
+        entries.len(),
+        left.values().sum::<usize>(),
+        failed.len(),
+        vetoes.derived,
+    );
+    for (why, n) in &declined {
+        println!("  appended as a Rewrite for {why}: {n}");
+    }
+    for (kind, n) in &notes {
+        println!("  noted {n} times: {kind}");
+    }
+    for (path, why) in &failed {
+        println!("{path}: {why}");
+    }
+    assert!(failed.is_empty());
+    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(vetoes.derived, 0, "a derived object's text was found gone");
+}
+
+// ----- Recognized text's round trip -----------------------------------------
+
+/// Corpus paths, comma-separated, to run [`ocr_round_trips`] on alone
+/// (`SHEAF_OCR_ONLY=forms/irs/f1040.pdf,…`): for looking at a few files by
+/// hand. Unset, it takes every file.
+const OCR_ONLY: &str = "SHEAF_OCR_ONLY";
+
+/// The word recognized on each page, the page's number after it, and the
+/// word recognized there again.
+const OCR: &str = "SHEAFCORPUSOCR";
+const REOCR: &str = "SHEAFCORPUSREOCR";
+
+/// A scan holding another program's recognized text, as `scans/`'s
+/// manifest calls it.
+const SCAN_OCR: &str = "scan-ocr";
+
+/// What recognized text's round trip through a copy of a file came to.
+#[derive(Default)]
+struct OcrTrip {
+    /// The saves that added text or a header, each an Append where the
+    /// file takes one: those that appended, and why each other was a
+    /// Rewrite, after what it added.
+    appended: usize,
+    declined: Vec<String>,
+    /// What the first recognition gave the file's pages.
+    took: Took,
+    /// The words the file drew before it took any text, and the strings
+    /// in codes its fonts don't say the text of, on a scan with another
+    /// program's recognized text ([`SCAN_OCR`]): all still drawn after ours
+    /// was added and after ours was cleared.
+    theirs: usize,
+}
+
+/// What [`recognized`] gave a document's pages.
+#[derive(Default)]
+struct Took {
+    /// The word each page took, in order: none where the page shows
+    /// nothing, or its content can't be read.
+    words: Vec<Option<String>>,
+    /// Pages whose content can't be read, which took no text
+    /// (`EditError::Content`), and pages that show nothing to read it on.
+    unreadable: usize,
+    unshown: usize,
+}
+
+impl Took {
+    /// Which pages took text, in order.
+    fn pages(&self) -> Vec<bool> {
+        self.words.iter().map(Option::is_some).collect()
+    }
+}
+
+/// `text` as an engine reads it on a page shown as `geom` shows it: one
+/// word, in the view frame's points, across the page a quarter of the way
+/// down.
+fn word_on(geom: &Geom, text: &str) -> OcrWord {
+    let shown = geom.shown();
+    OcrWord {
+        text: text.into(),
+        rect: Box2 {
+            x: shown.width * 0.1,
+            y: shown.height * 0.25,
+            w: shown.width * 0.6,
+            h: shown.height * 0.02,
+        },
+        confidence: 1.0,
+    }
+}
+
+/// `doc`'s pages each given recognized text, one word ([`word_on`]):
+/// `word` and the page's number from 1, in one version. A page whose
+/// content can't be read (`EditError::Content`) is left as it was.
+fn recognized(doc: &mut Document, word: &str) -> Result<Took, String> {
+    let snap = doc.snapshot();
+    let mut tx = Document::tx_at(&snap, doc.lower_cx(Actor::User));
+    let mut took = Took::default();
+    for (n, &page) in (1..).zip(snap.state.order()) {
+        let geom = snap.geom(page);
+        let said = format!("{word}{n}");
+        let layer = from_engine(vec![word_on(&geom, &said)], &geom, "corpus");
+        if layer.words.is_empty() {
+            took.unshown += 1;
+            took.words.push(None);
+            continue;
+        }
+        let set = Op::SetOcrText {
+            page: PageRef::Id(page),
+            layer: Arc::new(layer),
+        };
+        match tx.apply(set, &NoProgress) {
+            Ok(_) => took.words.push(Some(said)),
+            Err(EditError::Content { .. }) => {
+                took.unreadable += 1;
+                took.words.push(None);
+            }
+            Err(e) => return Err(format!("page {n} not recognized: {e}")),
+        }
+    }
+    doc.commit(tx, CommitOpts::labelled("Recognize text"))
+        .map_err(|e| format!("not recognized: {e}"))?;
+    Ok(took)
+}
+
+/// What a save of `doc`'s current version would judge it does to the
+/// version saved (§7.1): None when none is. The version is left unsealed.
+fn saved_flags(doc: &mut Document) -> Result<Option<Flags>, String> {
+    let v = doc.current_version();
+    let input = doc.save_input(v).map_err(|e| format!("{e:#}"))?;
+    let flags = (input.saved.as_ref())
+        .map(|saved| judge(&saved.state, &input.target, &input.path_keys).flags);
+    drop(input);
+    doc.abandon_save(v);
+    Ok(flags)
+}
+
+/// `doc` appended to `path`, its file, having taken `what`, text or a
+/// header, as "Append anyway" appends ([`appended_or_not`]). Counted in
+/// `trip`: an Append, which keeps the file's bytes first, or why it was a
+/// Rewrite.
+fn added_and_saved(
+    doc: &mut Document,
+    path: &Path,
+    what: &str,
+    trip: &mut OcrTrip,
+) -> Result<(), String> {
+    let before = std::fs::read(path).unwrap();
+    let (strategy, _) = appended_or_not(doc, path)
+        .map_err(|stop| format!("{what} added, the save stopped: {stop}"))?;
+    match strategy {
+        Strategy::Rewrite { why } => {
+            trip.declined
+                .push(format!("{what} added, for {}", reasons(&why)));
+        }
+        _ if !std::fs::read(path).unwrap().starts_with(&before) => {
+            return Err(format!(
+                "{what} added, an Append that doesn't keep the file's bytes first"
+            ));
+        }
+        _ => trip.appended += 1,
+    }
+    Ok(())
+}
+
+/// `doc` saved to `path`, its file, as planned, having lost text: a
+/// Rewrite for the text it replaces, signatures and an XFA part's values
+/// given up when it asks, as the other tiers' removals are saved.
+fn removed_and_saved(doc: &mut Document, path: &Path) -> Result<(), String> {
+    let answers = AskAnswers {
+        break_signatures: true,
+        drop_xfa_values: true,
+        ..Default::default()
+    };
+    let report = save(doc, path, &answers, &NoProgress).map_err(|e| format!("{e}"))?;
+    let replaces = (report.why.iter()).any(|w| matches!(w, Why::ReplacesText(_)));
+    match report.strategy {
+        Some(StrategyKind::Rewrite) if replaces => Ok(()),
+        other => Err(format!("saved as {other:?} for {}", reasons(&report.why))),
+    }
+}
+
+/// What the form check finds in the file at `path` that it didn't in the
+/// file it was (`was`; none to compare when its check failed), as
+/// [`Report::added_since`] tells it, but what the save may leave
+/// (`leaves`, [`told`] where it was told to): an error, when it finds any.
+/// A finding the file had, naming fewer now (widgets on no page the save
+/// dropped, a missing font fewer widgets name), isn't one.
+fn nothing_found(
+    was: Option<&Report>,
+    path: &Path,
+    leaves: fn(&Finding) -> bool,
+) -> Result<(), String> {
+    let Some(was) = was else {
+        return Ok(());
+    };
+    let bytes = std::fs::read(path).unwrap();
+    let now = sheaf_doc::forms::check(&bytes, None).map_err(|e| format!("check: {e:#}"))?;
+    let added: Vec<_> = (now.added_since(was).into_iter())
+        .filter(|f| !leaves(f))
+        .collect();
+    match added.is_empty() {
+        true => Ok(()),
+        false => Err(format!("the form check finds {added:?}")),
+    }
+}
+
+/// An error unless `doc`'s file draws each word its pages `took` once
+/// ([`drawn_words`]).
+fn each_once(doc: &Document, took: &Took) -> Result<(), String> {
+    let words = drawn_words(doc);
+    for (n, word) in (1..).zip(&took.words) {
+        let Some(word) = word else {
+            continue;
+        };
+        match times(&words, word) {
+            1 => {}
+            t => return Err(format!("page {n}'s {word} is drawn {t} times")),
+        }
+    }
+    Ok(())
+}
+
+/// An error unless each of `doc`'s pages is isolated once: one stream of
+/// `q`s before its own content and one of `Q`s after, sheaf's
+/// `/SheafBlock << /K /Isolate >>`. A page whose content can't be read
+/// isn't, and took no text (`took`).
+fn isolated_once(doc: &Document, took: &Took) -> Result<(), String> {
+    let src = doc.primary();
+    for (i, word) in (0..src.page_count()).zip(&took.words) {
+        match src.blocks(i) {
+            Ok(blocks) if blocks.isolation.len() == 2 => {}
+            Ok(blocks) => {
+                return Err(format!(
+                    "page {} is isolated by {} streams",
+                    i + 1,
+                    blocks.isolation.len()
+                ));
+            }
+            Err(_) if word.is_none() => {}
+            Err(e) => return Err(format!("page {}, which took text: {e}", i + 1)),
+        }
+    }
+    Ok(())
+}
+
+/// An error when a word with `word` in it, as the pages' recognized text
+/// says it, can be read in the file at `path` ([`readable`]) or is drawn
+/// there.
+fn none_left(path: &Path, word: &str) -> Result<(), String> {
+    if readable(&std::fs::read(path).unwrap(), &written_as(word)) {
+        return Err(format!("{word} can still be read"));
+    }
+    let doc = opened(path).ok_or("the saved file doesn't open")?;
+    if (drawn_words(&doc).words()).any(|(w, _)| w.contains(word)) {
+        return Err(format!("{word} is still drawn"));
+    }
+    Ok(())
+}
+
+/// An error unless `now`, what a file draws, holds each word the file
+/// drew before it took any text (`theirs`), and each string drawn in codes
+/// its font doesn't say the text of (by hash), as many times.
+fn kept(theirs: &TextBag, now: &TextBag) -> Result<(), String> {
+    let missing = theirs.missing_from(now);
+    if missing == 0 {
+        return Ok(());
+    }
+    let now: BTreeMap<&str, usize> = now.words().collect();
+    let words: Vec<String> = (theirs.words())
+        .filter(|&(word, n)| now.get(word).copied().unwrap_or(0) < n)
+        .take(5)
+        .map(|(word, _)| word.to_string())
+        .collect();
+    Err(format!(
+        "{missing} of the {} words and strings the file drew are gone, among them {words:?}",
+        theirs.len()
+    ))
+}
+
+/// A copy of `entry`'s file whose every page is given recognized text,
+/// saved (an Append where the file takes one) and opened again; given a
+/// header, saved so and opened again; recognized again, saved as planned;
+/// then opened again and its text cleared, saved as planned: None when it
+/// doesn't open. A scan with another program's recognized text
+/// ([`SCAN_OCR`]) keeps drawing it.
+fn recognized_trip(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<OcrTrip, String>> {
+    let original = std::fs::read(corpus.path(entry)).ok()?;
+    let was = sheaf_doc::forms::check(&original, None).ok();
+    let path = copy_of(entry, corpus, dir, "ocr-")?;
+    let outcome = (|| {
+        let mut doc = opened(&path)?;
+        let theirs = (entry.kind == SCAN_OCR).then(|| drawn_words(&doc));
+        Some(ocr_trip(&mut doc, &path, was.as_ref(), theirs.as_ref()))
+    })();
+    remove(&path);
+    outcome
+}
+
+/// [`recognized_trip`]'s edits and saves of `doc`, opened from `path`, the
+/// file's form check `was` before, and the words it drew then, when they
+/// must be kept (`theirs`).
+fn ocr_trip(
+    doc: &mut Document,
+    path: &Path,
+    was: Option<&Report>,
+    theirs: Option<&TextBag>,
+) -> Result<OcrTrip, String> {
+    let mut trip = OcrTrip::default();
+    let took = recognized(doc, OCR)?;
+    if took.words.iter().all(Option::is_none) {
+        trip.took = took;
+        return Ok(trip);
+    }
+    // Text where the pages hold none adds content and takes nothing out.
+    let flags = saved_flags(doc)?;
+    let adds = flags.is_some_and(|f| {
+        f.contains(Flags::CONTENT) && !f.intersects(Flags::REMOVES | Flags::REPLACES_TEXT)
+    });
+    if !adds {
+        return Err(format!("recognized, its flags are {flags:?}"));
+    }
+    added_and_saved(doc, path, "text", &mut trip)?;
+    nothing_found(was, path, told).map_err(|e| format!("text added, {e}"))?;
+    let mut again = opened(path).ok_or("the saved file doesn't open")?;
+    each_once(&again, &took)?;
+    if let Some(theirs) = theirs {
+        kept(theirs, &drawn_words(&again)).map_err(|e| format!("text added, {e}"))?;
+    }
+    // A header over it: each page is isolated once, its text kept after
+    // its own content, as it was.
+    again
+        .commit_ops(vec![set_header(fx_header(HEADER), None)], "header")
+        .map_err(|e| format!("no header: {e}"))?;
+    added_and_saved(&mut again, path, "a header", &mut trip)?;
+    nothing_found(was, path, told).map_err(|e| format!("a header added, {e}"))?;
+    let mut headed = opened(path).ok_or("the headed file doesn't open")?;
+    isolated_once(&headed, &took)?;
+    each_once(&headed, &took)?;
+    // Recognized again: the text the file holds is replaced.
+    let retook = recognized(&mut headed, REOCR)?;
+    if retook.pages() != took.pages() {
+        return Err(format!(
+            "recognized again, {} pages took text, from {}",
+            retook.words.iter().flatten().count(),
+            took.words.iter().flatten().count()
+        ));
+    }
+    removed_and_saved(&mut headed, path).map_err(|e| format!("recognized again, {e}"))?;
+    nothing_found(was, path, told).map_err(|e| format!("recognized again, {e}"))?;
+    none_left(path, OCR).map_err(|e| format!("recognized again, {e}"))?;
+    let mut last = opened(path).ok_or("the file recognized again doesn't open")?;
+    each_once(&last, &retook)?;
+    // Cleared: a page that took no text, as its content can't be read,
+    // can't be cleared either.
+    let snap = last.snapshot();
+    let mut tx = Document::tx_at(&snap, last.lower_cx(Actor::User));
+    for ((n, &page), word) in (1..).zip(snap.state.order()).zip(&retook.words) {
+        match tx.apply(clear_ocr(&[page]), &NoProgress) {
+            Ok(_) => {}
+            Err(EditError::Content { .. }) if word.is_none() => {}
+            Err(e) => return Err(format!("page {n} not cleared: {e}")),
+        }
+    }
+    last.commit(tx, CommitOpts::labelled("Clear recognized text"))
+        .map_err(|e| format!("not cleared: {e}"))?;
+    removed_and_saved(&mut last, path).map_err(|e| format!("cleared, {e}"))?;
+    nothing_found(was, path, told).map_err(|e| format!("cleared, {e}"))?;
+    none_left(path, REOCR).map_err(|e| format!("cleared, {e}"))?;
+    if let Some(theirs) = theirs {
+        let cleared = opened(path).ok_or("the cleared file doesn't open")?;
+        kept(theirs, &drawn_words(&cleared)).map_err(|e| format!("cleared, {e}"))?;
+        trip.theirs = theirs.len();
+    }
+    trip.took = took;
+    Ok(trip)
+}
+
+/// Every file's pages given recognized text, one word a page, appended and
+/// opened again; given a header, appended; recognized again; and then
+/// cleared (slice 18): the text adds and takes nothing out; each page's
+/// word is drawn once, where it took one, a page whose content can't be
+/// read counted and left as it was; the header isolates each page once,
+/// its text kept after its own content; recognized again, the save is a
+/// Rewrite for the text it replaces, and the first words can't be read in
+/// the file or drawn; cleared, a Rewrite too, and so for the second; after
+/// each save the form check finds nothing the file didn't have before;
+/// and the removal check never finds a derived object's text gone. The
+/// saves that add are counted: those that appended, and why the others
+/// were Rewrites.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn ocr_round_trips() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let entries = common::narrowed(OCR_ONLY, corpus.forms().unwrap(), |e| &e.path);
+    recognized_tier(&corpus, &entries, "recognized");
+}
+
+/// [`ocr_round_trips`] over the corpus's scans (`scans/`), real scanned
+/// pages with CCITT, JBIG2 and JPX images among them; and on each holding
+/// another program's recognized text ([`SCAN_OCR`]), every word the file
+/// drew before is still drawn, as many times, after ours is added and
+/// after ours is cleared.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn ocr_round_trips_scans() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let entries = common::narrowed(OCR_ONLY, corpus.scans().unwrap(), |e| &e.path);
+    recognized_tier(&corpus, &entries, "recognized-scans");
+}
+
+/// [`recognized_trip`] over `entries`, its counts printed and its failures
+/// asserted; `name` the scratch directory's.
+fn recognized_tier(corpus: &Corpus, entries: &[Entry], name: &str) {
+    let dir = scratch(name);
+    let outcomes = each_entry(entries, |entry| recognized_trip(entry, corpus, &dir));
+    let (mut files, mut saves, mut appended) = (0, 0, 0);
+    let (mut untaken, mut unreadable, mut unshown) = (0, 0, 0);
+    let (mut theirs, mut words) = (0, 0);
+    let (mut declined, mut failed) = (BTreeMap::new(), BTreeMap::new());
+    for (entry, outcome) in entries.iter().zip(outcomes) {
+        match outcome {
+            None => {}
+            Some(Ok(trip)) => {
+                files += 1;
+                saves += trip.appended + trip.declined.len();
+                appended += trip.appended;
+                unreadable += trip.took.unreadable;
+                unshown += trip.took.unshown;
+                untaken += usize::from(trip.took.words.iter().all(Option::is_none));
+                theirs += usize::from(trip.theirs > 0);
+                words += trip.theirs;
+                for why in trip.declined {
+                    *declined.entry(why).or_insert(0usize) += 1;
+                }
+            }
+            Some(Err(e)) => {
+                files += 1;
+                failed.insert(entry.path.clone(), e);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let vetoes = removal::vetoes();
+    let scans = entries.iter().filter(|e| e.kind == SCAN_OCR).count();
+    println!(
+        "{files} of {} files recognized, given a header, recognized again and cleared, {untaken} \
+         taking no text; of {saves} saves adding text or a header, {appended} appended; \
+         {unreadable} pages whose content can't be read and {unshown} that show nothing took \
+         none; {} failed; removal check vetoes: {} derived",
+        entries.len(),
+        failed.len(),
+        vetoes.derived,
+    );
+    if scans > 0 {
+        println!(
+            "of {scans} scans with another program's recognized text, {theirs} keep all {words} \
+             words and strings they drew, with ours added and with ours cleared"
+        );
+    }
+    for (why, n) in &declined {
+        println!("  a Rewrite, {why}: {n}");
+    }
+    for (path, why) in &failed {
+        println!("{path}: {why}");
+    }
+    assert!(failed.is_empty());
+    assert_eq!(vetoes.derived, 0, "a derived object's text was found gone");
 }
 
 // ----- Deleted means deleted, both ways --------------------------------------
@@ -449,8 +1624,8 @@ fn own_objects(pdf: &Pdf, at: ObjectId) -> Vec<ObjectId> {
 /// `doc` appended to its file at `path`, as "Append anyway" appends
 /// (whatever its signatures allow, what it removes reported): a Rewrite
 /// instead when the section can't follow the file, as any save makes it.
-/// How it wrote.
-fn appended_or_not(doc: &mut Document, path: &Path) -> Result<Strategy, SaveStop> {
+/// How it wrote, and what the reader is told of it.
+fn appended_or_not(doc: &mut Document, path: &Path) -> Result<(Strategy, Vec<Note>), SaveStop> {
     let v = doc.current_version();
     let input = doc
         .save_input(v)
@@ -466,9 +1641,9 @@ fn appended_or_not(doc: &mut Document, path: &Path) -> Result<Strategy, SaveStop
     };
     match write_file(&input, &plan, doc.save_target(path), &answers, &NoProgress) {
         Ok(written) => {
-            let strategy = written.strategy.clone();
+            let said = (written.strategy.clone(), written.notes.clone());
             (written.record_in(doc)).map_err(|e| SaveStop::Failed(format!("{e:#}")))?;
-            Ok(strategy)
+            Ok(said)
         }
         Err(stop) => {
             doc.abandon_save(v);
@@ -527,7 +1702,7 @@ fn saved_then_deleted(
     }
     let first = match how {
         How::Rewritten => save_rewritten(doc, path).map(|_| None),
-        How::Appended => appended_or_not(doc, path).map(Some),
+        How::Appended => appended_or_not(doc, path).map(|(strategy, _)| Some(strategy)),
     };
     match first {
         Ok(None | Some(Strategy::Append { .. })) => {}
@@ -627,7 +1802,7 @@ fn deleted_means_deleted_both_ways() {
         return;
     };
     let dir = scratch("deleted");
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let mut failed = BTreeMap::new();
     let mut declined = [0; 6];
     for how in [How::Rewritten, How::Appended] {
@@ -736,7 +1911,7 @@ fn the_removal_check_finds_what_a_page_delete_rewrite_took_out() {
     let Some(corpus) = Corpus::or_skip() else {
         return;
     };
-    let entries = corpus.manifest().unwrap();
+    let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| oracle(entry, &corpus));
     let mut files = 0;
     let (mut found, mut not) = (0, Vec::new());

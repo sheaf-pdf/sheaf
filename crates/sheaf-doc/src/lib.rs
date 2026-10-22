@@ -21,6 +21,7 @@ pub mod effects;
 pub mod exchange;
 pub mod file;
 pub mod forms;
+pub mod generate;
 pub mod generated;
 pub mod geom;
 pub mod history;
@@ -43,11 +44,9 @@ pub mod save;
 pub mod serialize;
 pub mod source;
 pub mod stamp_lib;
-pub mod stamps;
 pub mod store;
 pub mod text_layer;
 pub mod tx;
-pub mod watermark;
 
 pub use sheaf_edit::{DestView, PageSize, Rotation, tape};
 
@@ -55,10 +54,10 @@ pub use annot::{Annot, AnnotId, AnnotKind, Box2, Pt, default_author, pdf_date_no
 pub use change::{Cause, ChangeSet};
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
-    AnnotBody, AnnotRec, Bookmark, ContentStack, CtxNeeds, Derived, DerivedCopies, DocState,
-    Document, FlatOutlineItem, Foreign, FormInst, FormRef, GenId, GenSpec, Generator, GroupId,
-    GroupKind, Invariant, Layer, Mark, OutlineId, PageBase, PageDef, PageId, Snapshot, SourceId,
-    Static, Step, Target, TextStyle, VersionId, VersionView,
+    AnnotBody, AnnotRec, Bookmark, ContentStack, CtxNeeds, DocState, Document, FlatOutlineItem,
+    Foreign, FormInst, FormRef, GenId, GenSpec, Generator, GroupId, GroupKind, Invariant, Layer,
+    Mark, OutlineId, PageBase, PageDef, PageId, Snapshot, SourceId, Static, Step, Target,
+    TextStyle, VersionId, VersionView,
 };
 pub use page_chars::{Glyph, PageChars, Query, TextHit, TextOpts, TextService};
 pub use realize::{MarkDraw, OcgOverride, RenderKey, ViewInputs, render_key, render_reads};
@@ -66,7 +65,7 @@ pub use source::{ObjRef, Source};
 pub use store::{Blob, BlobId, BlobRef, Src, Store};
 pub use text_layer::{OcrWord, TextLayer};
 pub use tx::{
-    Actor, Base, Commit, CommitOpts, Derive, EditError, Grant, Identity, JobKind, Notice, Preview,
+    Actor, Base, Commit, CommitOpts, EditError, Grant, Identity, JobKind, Notice, Preview,
     ResolvedOp, Stale, Tx, notice_text,
 };
 

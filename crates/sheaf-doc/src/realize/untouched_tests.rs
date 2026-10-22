@@ -16,7 +16,9 @@ use super::fixture::{every_input, hiding, layer, their_comment};
 use super::*;
 use crate::forms::Value;
 use crate::forms::fixture::Form;
-use crate::materialize::tests::{add, bytes, derive, file, insert, open};
+use crate::materialize::header_tests::ACROBAT_HEADER;
+use crate::materialize::others_tests::{ACROBAT, BODY, acrobat_file};
+use crate::materialize::tests::{add, bytes, file, insert, open};
 use crate::model::history_tests::{with_ours, with_theirs};
 use crate::model::{FieldNode, Terminal};
 use crate::prim::{Key, Prim, Val};
@@ -24,16 +26,47 @@ use crate::tx::fixture as fx;
 use crate::tx::tests::opened;
 
 /// Whether each page of `st` is untouched under `inputs`, in order,
-/// asserting that an overlay of it alone says the same.
+/// asserting that an overlay of it alone says the same, and that its delta
+/// writes what that overlay writes of it ([`delta_alike`]).
 fn verdicts(st: &DocState, inputs: &ViewInputs, case: &str) -> Vec<bool> {
     (st.order().iter())
         .map(|&p| {
             let model = untouched(st, p, inputs);
             let emitted = emission_is_base(st, p, inputs).unwrap();
             assert_eq!(model, emitted, "{case}: {p:?} under {inputs:?}");
+            delta_alike(st, p, inputs, case);
             model
         })
         .collect()
+}
+
+/// Page `page`'s delta ([`EmitScope::Delta`]) writes what the overlay of
+/// it alone ([`EmitScope::Pages`]) writes of it without the frame, as the
+/// realizer's deltas did before they skipped the frame: every object the
+/// page reaches alike, at the same numbers, and nothing the page doesn't
+/// reach that the overlay didn't write.
+fn delta_alike(st: &DocState, page: PageId, inputs: &ViewInputs, case: &str) {
+    let src = st.def(page).unwrap().base.src.clone();
+    let overlay = Overlay {
+        src,
+        inputs,
+        rotate: RotatePolicy::KeepBase,
+        arts: None,
+    };
+    let part = |scope| {
+        let e = emit::emit(st, scope, EmitBase::Overlay(&overlay), &[], &NoProgress).unwrap();
+        Part::page(e, page).unwrap().reached(page)
+    };
+    let (whole, whole_unreached) = part(EmitScope::Pages([page].into()));
+    let (delta, delta_unreached) = part(EmitScope::Delta(page));
+    assert_eq!(delta, whole, "{case}: {page:?}'s delta under {inputs:?}");
+    assert!(
+        delta_unreached.is_subset(&whole_unreached),
+        "{case}: {page:?}'s delta under {inputs:?} writes {:?}",
+        delta_unreached
+            .difference(&whole_unreached)
+            .collect::<Vec<_>>()
+    );
 }
 
 /// [`verdicts`] under every consumer's inputs: the screen's.
@@ -50,23 +83,18 @@ fn theirs() -> Form {
     f
 }
 
-/// `d`'s page `page`, its primary's page `index`, cropped as a crop
-/// writes its derived copy.
-fn crop(d: &mut crate::Document, index: u32, page: PageId) {
-    let crop = [36.0, 36.0, 400.0, 500.0];
-    let copy = crate::save::cropped_copy(d.primary(), &[(index, crop)]).unwrap();
-    derive(d, &copy, index, page);
-}
-
 /// Every case the predicate decides agrees with the emission, under every
 /// consumer's inputs: a file as opened, its forms and other tools'
 /// comments drawn as they are; pages that inherit their boxes and
 /// resources, whose overlay writes them out under another parent; sheaf's
 /// marks in the file, which the screen draws itself; a comment hidden or
 /// deleted; a field's value, which no save writes yet; a header; recognized
-/// text; a duplicate; a turned page, which the job turns; a crop; fields
-/// whose `/Parent` isn't the parent whose `/Kids` lists them; a link to a
-/// page deleted.
+/// text; a duplicate; a turned page, which the job turns; a watermark and a
+/// background, which OCR's inputs don't draw, and the same found again in
+/// the file, then moved and removed; a header of page numbers found again,
+/// then its pages moved, and one replacing Acrobat's; a crop; fields
+/// whose `/Parent` isn't the parent whose `/Kids` lists them;
+/// a link to a page deleted.
 #[test]
 fn the_predicate_agrees_with_the_emission_in_every_case() {
     let all = |n: usize| vec![true; n];
@@ -127,15 +155,93 @@ fn the_predicate_agrees_with_the_emission_in_every_case() {
     assert_eq!(agree(d.state(), "edited"), [false, false, true, false]);
     let ocr = verdicts(d.state(), &ViewInputs::content_only(), "edited");
     assert_eq!(ocr, [true, true, true, false]);
-    // A crop: the page is its derived copy's, its bytes its own, but for
-    // the widgets its records draw from the page it was made from.
+    // A watermark and a background, which every consumer but OCR draws.
+    let mut d = opened(theirs().bytes(), "form.pdf");
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let set = |z, page| fx::set_watermark(fx::watermark("Draft"), z, Some(&[page]));
+    let ops = vec![set(sheaf_edit::Z::Over, p0), set(sheaf_edit::Z::Under, p1)];
+    d.commit_ops(ops, "Watermarks").unwrap();
+    assert_eq!(agree(d.state(), "watermarked"), [false, false, true]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "watermarked");
+    assert_eq!(ocr, all(3));
+    // The same, saved and found again: drawn as the file draws them where
+    // they're as they were, but under OCR's inputs, which set their blocks
+    // aside; moved or removed, set aside where they were.
+    let saved = crate::materialize::How::Rewritten.write(&d);
+    let mut d = opened(saved, "found.pdf");
+    assert_eq!(agree(d.state(), "found"), all(3));
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "found");
+    assert_eq!(ocr, [false, false, true]);
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let mut moved = fx::watermark("Draft");
+    moved.position = sheaf_edit::GridPos::Top;
+    let moved = fx::set_watermark(moved, sheaf_edit::Z::Over, Some(&[p0]));
+    d.commit_ops(vec![moved], "Move").unwrap();
+    assert_eq!(agree(d.state(), "moved"), [false, true, true]);
+    let removed = fx::remove_watermark(Some(sheaf_edit::Z::Under), &[p1]);
+    d.commit_ops(vec![removed], "Remove").unwrap();
+    assert_eq!(agree(d.state(), "removed"), [false, false, true]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "removed");
+    assert_eq!(ocr, [false, false, true]);
+    // Acrobat's watermark on both pages, one under a watermark of the
+    // document's, which replaces it where it's drawn, and so not under
+    // OCR's inputs; the other's taken off by a filter, under any.
+    let other: &[u8] = b"BT /F1 12 Tf 72 700 Td (other) Tj ET";
+    let streams: [&[&[u8]]; 2] = [&[BODY, ACROBAT], &[other, ACROBAT]];
+    let mut d = opened(acrobat_file(&streams), "acrobat.pdf");
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let mine = fx::set_watermark(fx::watermark("Draft"), sheaf_edit::Z::Over, Some(&[p0]));
+    d.commit_ops(vec![mine], "Watermark").unwrap();
+    assert_eq!(agree(d.state(), "acrobat's replaced"), [false, true]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "acrobat's replaced");
+    assert_eq!(ocr, all(2));
+    let removed = fx::remove_watermark(Some(sheaf_edit::Z::Over), &[p1]);
+    d.commit_ops(vec![removed], "Remove").unwrap();
+    assert_eq!(agree(d.state(), "acrobat's removed"), [false, false]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "acrobat's removed");
+    assert_eq!(ocr, [true, false]);
+    // A header of page numbers, saved and found again: drawn as the file
+    // draws it where it reads as it did, and anew where a move changed
+    // where its pages are; Acrobat's header replaced under one.
+    let mut d = open(&bytes(&file("A", 3, false)), None);
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let numbers = fx::set_header(fx::header("Page <<1>> of <<N>>"), Some(&[p0, p1]));
+    d.commit_ops(vec![numbers], "Header").unwrap();
+    assert_eq!(agree(d.state(), "numbered"), [false, false, true]);
+    let saved = crate::materialize::How::Rewritten.write(&d);
+    let mut d = opened(saved, "numbered.pdf");
+    assert_eq!(agree(d.state(), "numbered, found"), all(3));
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "numbered, found");
+    assert_eq!(ocr, [false, false, true]);
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    d.commit_ops(vec![fx::move_pages(&[p1], Some(p0))], "Move")
+        .unwrap();
+    assert_eq!(agree(d.state(), "numbered, moved"), [false, false, true]);
+    let streams: [&[&[u8]]; 2] = [&[BODY, ACROBAT_HEADER], &[other, ACROBAT_HEADER]];
+    let mut d = opened(acrobat_file(&streams), "acrobat.pdf");
+    let p0 = d.page(0).unwrap();
+    let mine = fx::set_header(fx::header("Mine"), Some(&[p0]));
+    d.commit_ops(vec![mine], "Header").unwrap();
+    assert_eq!(agree(d.state(), "acrobat's header replaced"), [false, true]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "acrobat's header");
+    assert_eq!(ocr, all(2));
+    // A crop: the page's box isn't its base page's, which no job draws
+    // (spike C failed), under every consumer's inputs.
+    let to = crate::Box2 {
+        x: 36.0,
+        y: 36.0,
+        w: 364.0,
+        h: 464.0,
+    };
     let mut d = open(&bytes(&file("A", 2, false)), None);
     let p1 = d.page(1).unwrap();
-    crop(&mut d, 1, p1);
-    assert_eq!(agree(d.state(), "crop"), all(2));
+    d.commit_ops(vec![fx::crop_to(p1, to)], "Crop").unwrap();
+    assert_eq!(agree(d.state(), "crop"), [true, false]);
+    let ocr = verdicts(d.state(), &ViewInputs::content_only(), "crop");
+    assert_eq!(ocr, [true, false]);
     let mut d = opened(theirs().bytes(), "form.pdf");
     let p1 = d.page(1).unwrap();
-    crop(&mut d, 1, p1);
+    d.commit_ops(vec![fx::crop_to(p1, to)], "Crop").unwrap();
     assert_eq!(agree(d.state(), "crop of widgets"), [true, false, true]);
     // A form inserted from a file whose defaults aren't the document's,
     // which its overlay pushes down onto its roots.
@@ -325,6 +431,38 @@ fn deltas_are_kept_by_page_and_key_under_their_cap() {
         .map(|((page, _), _, _)| *page)
         .collect();
     assert_eq!(left, order[1..]);
+}
+
+/// An image watermark on every page of a group is made once a realizer:
+/// each page's delta, emitted alone, draws the image the first made, and
+/// so does a group made again for another edit. Another realizer makes it
+/// once of its own.
+#[test]
+fn a_watermark_s_image_is_made_once_a_realizer() {
+    use crate::materialize::emit::content::ARTS_MADE;
+    use crate::materialize::watermark_tests::{image_watermark, png};
+    let mut d = open(&bytes(&file("A", 3, false)), None);
+    let (_png, spec) = image_watermark(&d, &png());
+    let set = fx::set_watermark(spec, sheaf_edit::Z::Over, None);
+    d.commit_ops(vec![set], "Watermark").unwrap();
+    let screen = ViewInputs::screen();
+    let first = d.page(0).unwrap();
+    let realizer = Realizer::new();
+    let made = ARTS_MADE.get();
+    let opened = |realizer: &Realizer, d: &crate::Document| {
+        let view = realizer.view(d.state(), first, &screen).unwrap();
+        realizer.open(d.state(), view.engine, &screen).unwrap();
+    };
+    opened(&realizer, &d);
+    assert_eq!(kept(&realizer).len(), 3);
+    assert_eq!(ARTS_MADE.get() - made, 1);
+    let background = fx::set_watermark(fx::watermark("Copy"), sheaf_edit::Z::Under, None);
+    d.commit_ops(vec![background], "Background").unwrap();
+    opened(&realizer, &d);
+    assert_eq!(kept(&realizer).len(), 6);
+    assert_eq!(ARTS_MADE.get() - made, 1);
+    opened(&Realizer::new(), &d);
+    assert_eq!(ARTS_MADE.get() - made, 2);
 }
 
 /// A view asked for again and again under inputs hiding comments digests

@@ -270,8 +270,15 @@ impl Tape {
     }
 }
 
-/// `decimals` places with thousands separators; negatives get a minus.
+/// The most places after the point an amount is written with: an `f64`
+/// holds about 15 significant digits, so more would only be noise. A tape
+/// that asks for more, as Op JSON or a file's mark may, shows that many.
+pub const MAX_DECIMALS: usize = 15;
+
+/// `decimals` places, at most [`MAX_DECIMALS`], with thousands
+/// separators; negatives get a minus.
 pub fn fmt_amount(v: f64, decimals: usize) -> String {
+    let decimals = decimals.min(MAX_DECIMALS);
     let neg = v < 0.0 && v.abs() >= 0.5 * 10f64.powi(-(decimals as i32));
     let scale = 10f64.powi(decimals as i32);
     let units = (v.abs() * scale).round() as u128;
@@ -452,6 +459,13 @@ mod tests {
         assert_eq!(fmt_amount(1234.5, 0), "1,235");
         assert_eq!(fmt_amount(-0.001, 2), "0.00");
         assert_eq!(fmt_amount(0.12345, 4), "0.1235");
+        // Past what an f64 holds, as many places as it does: u32::MAX
+        // places once wrapped to -1 and divided by zero.
+        let most = fmt_amount(1.5, MAX_DECIMALS);
+        assert_eq!(most, "1.500000000000000");
+        for places in [MAX_DECIMALS + 1, u32::MAX as usize, usize::MAX] {
+            assert_eq!(fmt_amount(1.5, places), most, "{places}");
+        }
         assert_eq!(parse_amount("(84.50)"), Some(-84.5));
     }
 

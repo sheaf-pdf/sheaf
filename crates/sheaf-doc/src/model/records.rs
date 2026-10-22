@@ -10,31 +10,43 @@
 //! each its own record, its kids by id. And the generators (§3.5): what
 //! sheaf draws on pages from one definition.
 //!
-//! A stack holds what something makes today: recognized text. Filters on
-//! the page's own content, layers under it, a layer's id and kind, and
-//! placed forms come with the features that make them (slices 16–19). A
-//! generator is today's header/footer, with its own scope, date and file,
-//! and its Bates numbers counted at each Rewrite; its scope, frozen values
-//! and the watermark come with slices 16–17. A form instance is one per
+//! A stack holds what something makes today: recognized text over the
+//! page, a block of its own named by its id; filters that take others'
+//! watermarks and backgrounds out of its own content (Remove Watermark's):
+//! blocks of sheaf's no generator of the document's backs, and the
+//! pagination artifacts Acrobat, an older sheaf or, asked to, the author
+//! drew; filters that take the recognized text sheaf wrote in its file out
+//! (a re-OCR's and Clear's); and one that takes the settings an older
+//! sheaf kept out of its watermarks (Clean Copy's). Other filters, layers
+//! under it, a layer's kind and placed forms come with the features that
+//! make them (slice 19). A generator is a header and
+//! footer or a watermark or background, with its z, its scope, what it
+//! fixed when it was set (the date, the file and Bates numbers) and the
+//! kinds of others' artifacts it replaces. A form instance is one per
 //! insert of a source's pages, or duplicate of them, and the form's own
 //! keys (`/DR`, `/CO`, `/DA`…) are written from [`FormDoc`].
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::{Arc, LazyLock, OnceLock};
 
 use anyhow::Result;
 use im::Vector;
-use sheaf_edit::DestView;
+use sheaf_edit::{Color, DestView, FontChoice, GridPos, HeaderFooterSpec, Z};
 
 use crate::annot::{Annot, AnnotId};
+use crate::content::{BlockId, PagOrigin, PaginationKind, ResId};
 use crate::file::ForeignAnnot;
 use crate::forms::field::{Action, Border, Choice, Mk, Trigger};
 use crate::forms::{FieldId, FieldKind, Value};
+use crate::geom::Geom;
 use crate::model::{OutlineId, PageId, SourceId, TextStyle};
 use crate::source::ObjRef;
-use crate::stamps::HeaderFooter;
 use crate::store::{BlobRef, Src};
 use crate::text_layer::TextLayer;
+
+// A generator's id is the one its blocks name it by (M10.5 §4).
+pub use crate::content::GenId;
 
 /// A record's digest of what it draws (M10.5 §10.2), worked out the first
 /// time it's asked for and kept with it. No part of what the record is: a
@@ -124,15 +136,112 @@ pub struct PageBase {
     pub index: u32,
 }
 
-/// What's drawn over a page's own content, bottom first.
+/// What's taken out of a page's own content, and what's drawn over it,
+/// bottom first.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ContentStack {
+    /// Applied to the page's own content as a save writes it, in order.
+    pub filters: Vector<Filter>,
     pub over: Vector<Layer>,
 }
 
-/// One thing drawn over a page.
+/// What a save takes out of a page's own content (M10.5 §3.4): sheaf's
+/// blocks that no generator of the document's backs, which another file
+/// drew, or which another tool merged into a stream of its own; others'
+/// pagination artifacts, by kind and by who drew them; the recognized text
+/// sheaf wrote in the file; and the private data an older sheaf kept in
+/// what it drew.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Filter {
+    /// Marked ranges, spliced out of the streams they're in (§13): each
+    /// stream that loses one is a copy of its own, so a page that shares
+    /// it keeps it whole.
+    DropMarked(MarkedSel),
+    /// Whole streams of its `/Contents`.
+    DropStreams(StreamSel),
+    /// What an older sheaf kept in what it drew, taken out, what it drew
+    /// kept: the keys of [`LEGACY_KEYS`] in the property lists of the
+    /// ranges selected, written again without them (§13, §15), each stream
+    /// a copy of its own as [`Filter::DropMarked`]'s are. A list that
+    /// can't be written so keeps them, said in a note. Clean Copy's
+    /// (`save::export_clean_copy`).
+    StripLegacy(LegacySel),
+}
+
+impl Filter {
+    /// Whether it takes out the recognized text sheaf wrote in the file
+    /// ([`StreamSel::SheafOcr`], [`MarkedSel::SheafOcr`]): replaced text,
+    /// where the others take out what's drawn (§7.1).
+    pub fn drops_ocr(&self) -> bool {
+        matches!(
+            self,
+            Filter::DropStreams(StreamSel::SheafOcr) | Filter::DropMarked(MarkedSel::SheafOcr)
+        )
+    }
+}
+
+/// What an older sheaf kept in a watermark's property list: its settings,
+/// an image's path among them, and its mark.
+pub const LEGACY_KEYS: [&[u8]; 2] = [b"SheafSettings", b"SheafStamp"];
+
+/// What a [`Filter::StripLegacy`] takes an older sheaf's private data out
+/// of: marked ranges, whose property lists are written in the content.
+/// Slice 19's RemovePrivateData adds streams.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LegacySel {
+    Marked(MarkedSel),
+}
+
+/// The marked ranges a [`Filter::DropMarked`] takes out.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MarkedSel {
+    /// A generator's blocks merged into another stream: the ranges whose
+    /// property list has `/SheafGen` naming it.
+    SheafGen(GenId),
+    /// The pagination artifacts of `kinds` that `origins` drew
+    /// ([`PageBlocks::selected`]), each cut as [`Pagination::cuts`] says;
+    /// one a splice refuses stays. A block of sheaf's in a stream of its
+    /// own isn't cut: one the document's generators back is set aside
+    /// anyway, and another file's is left out whole.
+    ///
+    /// [`PageBlocks::selected`]: crate::content::PageBlocks::selected
+    /// [`Pagination::cuts`]: crate::content::Pagination::cuts
+    Pagination {
+        kinds: BTreeSet<PaginationKind>,
+        origins: BTreeSet<PagOrigin>,
+    },
+    /// sheaf's OCR blocks merged into another stream: the ranges whose
+    /// property list has `/SheafOcrBlock`, whatever block it names. An op
+    /// puts it only once a splice is shown to take them out, and fails
+    /// where one refuses ([`EditError::Content`]).
+    ///
+    /// [`EditError::Content`]: crate::tx::EditError::Content
+    SheafOcr,
+}
+
+/// The streams a [`Filter::DropStreams`] leaves out.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StreamSel {
+    /// A generator's blocks: the streams whose `/SheafBlock` names it.
+    SheafGen(GenId),
+    /// sheaf's recognized text in the file: its OCR blocks, each a stream
+    /// marked `/SheafBlock << /K /Ocr >>`, whatever block it names; and
+    /// the layer an older sheaf wrote, the `/SheafOcrLayer` stream after
+    /// the page's content with the `q` stream before it that its leading
+    /// `Q` ends, both or neither, as [`PageBlocks::legacy_ocr`] pairs
+    /// them, so what's left balances as it did.
+    ///
+    /// [`PageBlocks::legacy_ocr`]: crate::content::PageBlocks::legacy_ocr
+    SheafOcr,
+}
+
+/// One thing drawn over a page: a block of its own in the file (§11.4).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layer {
+    /// Its block's (`/SheafBlock << /B (b…) >>`): drawn when it's made,
+    /// kept by one that replaces it on the stack, saved or not, and shared
+    /// by a duplicate.
+    pub id: BlockId,
     pub body: Static,
 }
 
@@ -171,18 +280,51 @@ impl ContentStack {
         self.over.iter().find_map(|l| l.body.ocr_text())
     }
 
-    /// The stack with `text` as its recognized text, in place of what it
+    /// The layer of its recognized text, if it has some.
+    pub fn ocr_layer(&self) -> Option<&Layer> {
+        self.over.iter().find(|l| l.body.ocr_text().is_some())
+    }
+
+    /// The stack with `layer` as its recognized text, in place of what it
     /// had, or with none: the empty one when that leaves nothing.
-    pub fn with_ocr_text(&self, text: Option<Arc<TextLayer>>) -> Arc<ContentStack> {
+    pub fn with_ocr(&self, layer: Option<Layer>) -> Arc<ContentStack> {
         let mut over = self.over.clone();
         over.retain(|l| l.body.ocr_text().is_none());
-        over.extend(text.map(|text| Layer {
-            body: Static::OcrText(text),
-        }));
-        if over.is_empty() {
-            return ContentStack::empty();
+        over.extend(layer);
+        ContentStack {
+            filters: self.filters.clone(),
+            over,
         }
-        Arc::new(ContentStack { over })
+        .shared()
+    }
+
+    /// The stack with `filter` after its filters, unless it has it.
+    pub fn with_filter(&self, filter: Filter) -> Arc<ContentStack> {
+        self.with_filters([filter])
+    }
+
+    /// The stack with each of `filters` after its filters, in order, but
+    /// those it has.
+    pub fn with_filters(&self, filters: impl IntoIterator<Item = Filter>) -> Arc<ContentStack> {
+        let mut with = self.filters.clone();
+        for filter in filters {
+            if !with.contains(&filter) {
+                with.push_back(filter);
+            }
+        }
+        ContentStack {
+            filters: with,
+            over: self.over.clone(),
+        }
+        .shared()
+    }
+
+    /// It, or the empty one when it's empty.
+    fn shared(self) -> Arc<ContentStack> {
+        match self.filters.is_empty() && self.over.is_empty() {
+            true => ContentStack::empty(),
+            false => Arc::new(self),
+        }
     }
 }
 
@@ -666,115 +808,279 @@ impl Bookmark {
     }
 }
 
-/// A generator's id: random in [1, 2^53), as an id a file will hold is
-/// (M10.5 §4), so two files' never meet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct GenId(pub u64);
-
-impl GenId {
-    /// One drawn from `rng` that `taken` says no generator has.
-    pub(crate) fn draw(rng: &mut fastrand::Rng, taken: impl Fn(GenId) -> bool) -> GenId {
-        loop {
-            let id = GenId(rng.u64(1..1 << 53));
-            if !taken(id) {
-                return id;
-            }
-        }
-    }
-}
-
 /// Content sheaf draws on pages from one definition, laid out on each
-/// page as a save writes it.
+/// page as a save writes it (M10.5 §3.5): what it draws, over the page's
+/// content or under it, on which pages, what it fixed when it was set, and
+/// the kinds of pagination artifact others drew that it takes off its pages
+/// (its own kinds, §11.4).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Generator {
     pub id: GenId,
     pub spec: GenSpec,
+    pub z: Z,
+    pub scope: Scope,
+    pub frozen: Frozen,
+    pub replaces: BTreeSet<PaginationKind>,
+}
+
+/// What a generator fixed when it was set (M10.5 §3.5, proposal 8): what
+/// `<<date>>` and `<<file>>` say, and each page's Bates number, by page,
+/// counted then in the order of the pages it covered from the spec's
+/// start, so a reorder never renumbers them and a page added later has
+/// none. Setting it again is how to renumber. Empty for a watermark.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Frozen {
+    pub date: Arc<str>,
+    pub file: Arc<str>,
+    pub bates: Option<Arc<im::OrdMap<PageId, u64>>>,
+}
+
+impl Frozen {
+    /// Page `page`'s Bates number, if it has one.
+    pub fn bates_number(&self, page: PageId) -> Option<u64> {
+        self.bates.as_ref()?.get(&page).copied()
+    }
 }
 
 /// What a generator draws.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GenSpec {
-    /// The header/footer as sheaf drew it before generators (until slice
-    /// 17): the pages it's on, its date and file fixed when it was set,
-    /// Bates numbers counted at each Rewrite, and drawn only by one.
-    HeaderFooter(Arc<HeaderFooter>),
+    /// The header and footer, and Bates numbers.
+    HeaderFooter(Arc<HeaderFooterSpec>),
+    /// A watermark or background.
+    Watermark(Arc<WatermarkGen>),
 }
 
 impl GenSpec {
-    /// The header/footer it draws, if it's one.
-    pub fn header_footer(&self) -> Option<&Arc<HeaderFooter>> {
+    /// The header and footer it draws, if it's one.
+    pub fn header_footer(&self) -> Option<&Arc<HeaderFooterSpec>> {
         match self {
             GenSpec::HeaderFooter(hf) => Some(hf),
+            GenSpec::Watermark(_) => None,
         }
     }
 
-    /// Whether it and `other` are of one kind and z, of which a document
-    /// has one generator at most (M10.5 §6.4). A header/footer has no z:
-    /// a document has one.
-    pub(crate) fn same_place(&self, other: &GenSpec) -> bool {
-        match (self, other) {
-            (GenSpec::HeaderFooter(_), GenSpec::HeaderFooter(_)) => true,
+    /// The watermark or background it draws, if it's one.
+    pub fn watermark(&self) -> Option<&Arc<WatermarkGen>> {
+        match self {
+            GenSpec::Watermark(wm) => Some(wm),
+            GenSpec::HeaderFooter(_) => None,
         }
     }
+}
+
+/// The pages a generator draws on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// Every page, those added later too.
+    All,
+    /// These, never none: a generator on none is gone.
+    Pages(im::OrdSet<PageId>),
+}
+
+impl Scope {
+    /// Whether page `page` is among them: O(log n).
+    pub fn covers(&self, page: PageId) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Pages(pages) => pages.contains(&page),
+        }
+    }
+}
+
+/// A watermark or background (M10.5 §3.5's `WatermarkSpec`): what it
+/// draws, and where on each page. Laid out on each page as it shows when a
+/// save writes it, so it stays upright through a turn, and on the page's
+/// own boxes; its generator says whether it's over the page's content or
+/// under it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WatermarkGen {
+    pub content: WatermarkContent,
+    pub position: GridPos,
+}
+
+impl WatermarkGen {
+    /// The kind of pagination artifact one at `z` is: a watermark over the
+    /// content, a background under it.
+    pub fn kind_at(z: Z) -> PaginationKind {
+        match z {
+            Z::Over => PaginationKind::Watermark,
+            Z::Under => PaginationKind::Background,
+        }
+    }
+}
+
+/// What a watermark draws: an op's [`sheaf_edit::WatermarkContent`], its
+/// file held.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WatermarkContent {
+    /// `text` in `font`, kept as it was said, though the font may draw
+    /// some of it as `?`.
+    Text {
+        text: Arc<str>,
+        font: FontChoice,
+        size: f32,
+        color: Color,
+        opacity: f32,
+        angle: f32,
+    },
+    Image {
+        image: ImageRef,
+        scale: f32,
+        opacity: f32,
+    },
+    Page {
+        page: PageForm,
+        scale: f32,
+        opacity: f32,
+    },
+}
+
+/// The image a watermark draws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageRef {
+    /// An image file in the store.
+    Blob(BlobRef),
+    /// The image XObject a saved block draws, which an open binds it to.
+    Placed(Placed),
+}
+
+/// The PDF page a watermark draws (a stamp's is a
+/// [`stamp_lib::PageForm`](crate::stamp_lib::PageForm)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageForm {
+    /// Page `index` (0-based) of a PDF in the store.
+    Blob { pdf: BlobRef, index: u32 },
+    /// The form XObject a saved block draws, which an open binds it to.
+    Placed(Placed),
+}
+
+/// An image or a page a saved block draws, as an open finds it: the
+/// XObject, the resource it was drawn as (its digest, which named it and
+/// which the blocks' layouts were digested with, so a block laid out alike
+/// again is the one the file has), and the quarter turns clockwise an
+/// image shows upright at (0 for a page). The file's `/SheafGenerators`
+/// says the last two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placed {
+    pub at: ObjRef,
+    pub res: ResId,
+    pub turns: u8,
 }
 
 /// Which of a page's places in the document a generator's tokens read
 /// (M10.5 §3.5), besides the page's boxes and turn, which its layout always
-/// does: what a reorder changes on the pages it's on.
+/// does: what a reorder or new labels change on the pages it's on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CtxNeeds {
     /// The page's position (`<<1>>`).
     pub index: bool,
     /// How many pages there are (`<<N>>`).
     pub count: bool,
-    /// The page's Bates number (`<<bates>>`).
+    /// The page's label (`<<label>>`).
+    pub label: bool,
+    /// The page's Bates number (`<<bates>>`), fixed when it was set.
     pub bates: bool,
 }
 
 impl CtxNeeds {
-    /// Whether it reads any of them.
-    pub fn any(self) -> bool {
-        self.index || self.count || self.bates
+    /// Whether it reads where the page is in the order, which a reorder
+    /// changes: its position, the count or its label.
+    pub fn order(self) -> bool {
+        self.index || self.count || self.label
     }
 }
 
+/// What a generator's layout reads of one page (M10.5 §3.5): its boxes and
+/// turn, its position (0-based) and the page count, its label and its
+/// Bates number. What its tokens don't read ([`Generator::needs`]) may be
+/// left at its default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageCtx {
+    pub geom: Geom,
+    pub position: u32,
+    pub count: u32,
+    pub label: Arc<str>,
+    pub bates: Option<u64>,
+}
+
 impl Generator {
-    /// What its tokens read of the pages it's on.
+    /// What its tokens read of the pages it's on: nothing, for a
+    /// watermark.
     pub fn needs(&self) -> CtxNeeds {
         match &self.spec {
-            GenSpec::HeaderFooter(hf) => hf.needs(),
+            GenSpec::HeaderFooter(hf) => crate::generate::header::needs(hf),
+            GenSpec::Watermark(_) => CtxNeeds::default(),
         }
     }
 
+    /// Whether it draws on page `page`.
+    pub fn covers(&self, page: PageId) -> bool {
+        self.scope.covers(page)
+    }
+
+    /// The kinds of pagination artifact it draws (§11.4): a watermark's or
+    /// a background's own, a header and footer's both.
+    pub fn kinds(&self) -> BTreeSet<PaginationKind> {
+        match &self.spec {
+            GenSpec::HeaderFooter(_) => crate::generate::header::kinds(),
+            GenSpec::Watermark(_) => BTreeSet::from([WatermarkGen::kind_at(self.z)]),
+        }
+    }
+
+    /// Whether it and `other` are of one kind and z, of which a document
+    /// has one generator at most (M10.5 §6.4): a header and footer, a
+    /// watermark, a background.
+    pub(crate) fn same_place(&self, other: &Generator) -> bool {
+        let kind = |g: &Generator| match g.spec {
+            GenSpec::HeaderFooter(_) => 0,
+            GenSpec::Watermark(_) => 1,
+        };
+        kind(self) == kind(other) && self.z == other.z
+    }
+
     /// It once only the pages `stays` says stay are left: on those of the
-    /// pages it names, or none when that's none of them; every page when it
-    /// names none. How many of the pages it names went.
+    /// pages its scope names, or none when that's none of them; every page
+    /// when it names none; the Bates numbers of the pages that went
+    /// dropped, never given to another. How many of the pages it names
+    /// went: its scope's, or with every page its Bates numbers'.
     pub(crate) fn on_pages_left(
         self: &Arc<Self>,
         stays: impl Fn(PageId) -> bool,
     ) -> (Option<Arc<Generator>>, usize) {
-        match &self.spec {
-            GenSpec::HeaderFooter(hf) => {
-                let Some(scope) = &hf.pages else {
-                    return (Some(self.clone()), 0);
-                };
-                let left: Vec<PageId> = scope.iter().copied().filter(|&p| stays(p)).collect();
-                let went = scope.len() - left.len();
-                if went == 0 {
-                    return (Some(self.clone()), 0);
+        let (scope, went) = match &self.scope {
+            Scope::All => (Scope::All, 0),
+            Scope::Pages(on) => {
+                let left: im::OrdSet<PageId> = on.iter().copied().filter(|&p| stays(p)).collect();
+                if left.is_empty() {
+                    return (None, on.len());
                 }
-                let g = (!left.is_empty()).then(|| {
-                    let hf = HeaderFooter {
-                        pages: Some(left),
-                        ..HeaderFooter::clone(hf)
-                    };
-                    Arc::new(Generator {
-                        id: self.id,
-                        spec: GenSpec::HeaderFooter(Arc::new(hf)),
-                    })
-                });
-                (g, went)
+                let went = on.len() - left.len();
+                (Scope::Pages(left), went)
             }
+        };
+        // The numbers left share the rest of the map's nodes.
+        let bates = self.frozen.bates.as_ref().map(|numbers| {
+            let mut left = im::OrdMap::clone(numbers);
+            for p in numbers.keys().filter(|&&p| !stays(p)) {
+                left.remove(p);
+            }
+            (numbers.len() - left.len(), left)
+        });
+        // A page with a number is one it covers.
+        let went = went.max(bates.as_ref().map_or(0, |(went, _)| *went));
+        if went == 0 {
+            return (Some(self.clone()), 0);
         }
+        let frozen = Frozen {
+            bates: bates.map(|(_, left)| Arc::new(left)),
+            ..self.frozen.clone()
+        };
+        let g = Generator {
+            scope,
+            frozen,
+            ..Generator::clone(self)
+        };
+        (Some(Arc::new(g)), went)
     }
 }

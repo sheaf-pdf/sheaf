@@ -2417,7 +2417,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             }
         });
     }
-    let (content, needs) = w.finish(&Reserved::default(), &[]);
+    let (content, needs) = w.finish(&Reserved::default());
     (
         dict,
         Appearance {
@@ -2754,7 +2754,7 @@ pub fn tape_pdf(a: &Annot) -> Option<Vec<u8>> {
     let page = Geom::read(Some(Rect::new(0.0, 0.0, rect.w, rect.h)), None, 0);
     let mut w = ContentWriter::new();
     tape_content(&mut w, at, *size, look, &tape, a.color, &page.from_view());
-    let (content, needs) = w.finish(&Reserved::default(), &[]);
+    let (content, needs) = w.finish(&Reserved::default());
     let mut pdf = lopdf::Document::with_version("1.5");
     let mut resources = Dictionary::new();
     ResObjects::default().bind(&mut pdf, &needs, &mut resources);

@@ -1,24 +1,27 @@
-//! Helpers the forms tests share: fixtures, saving both ways, and what a
-//! saved file holds. A test that saves both ways is a case taking its
-//! [`How`], run twice by `sheaf_doc::both_ways!`: by a Rewrite, and by an
-//! Append. And what the realization, text and blank-page tests share: a
+//! Helpers the forms tests share: fixtures, a crop, saving both ways, and
+//! what a saved file holds. A test that saves both ways is a case taking
+//! its [`How`], run twice by `sheaf_doc::both_ways!`: by a Rewrite, and by
+//! an Append. And what the realization, text and blank-page tests share: a
 //! file of pages saying "page i", opened as the app opens it, views over a
 //! pool of their own, and an OCR engine that reads nothing.
 
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use lopdf::xref::XrefType;
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
+use lopdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{Form, Rect, source};
 use sheaf_doc::forms::{FileForm, Finding, Report, Value, check};
 pub use sheaf_doc::materialize::{How, StrategyKind};
 use sheaf_doc::store::BlobKind;
-use sheaf_doc::{Document, FixedCount, Src, Store};
+use sheaf_doc::tx::fixture as fx;
+use sheaf_doc::{Actor, CommitOpts, Document, FixedCount, PageId, Src, Stale, Store};
+use sheaf_edit::Margins;
 use sheaf_image::raster::Raster;
 use sheaf_ocr::{EngineInfo, EngineKind, InputKind, OcrEngine, OcrImage, OcrWord};
 use sheaf_ops::views::Views;
@@ -30,14 +33,60 @@ pub fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sheaf-forms-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // SAFETY: each test sets the same value before any reads it.
-    unsafe {
-        std::env::set_var(
-            "SHEAF_CACHE_DIR",
-            std::env::temp_dir().join(format!("sheaf-forms-cache-{}", std::process::id())),
-        )
-    };
+    // A test in a process of its own ([`own_cache`]) keeps the cache
+    // directory it was started with.
+    if std::env::var_os(OWN_CACHE).is_none() {
+        // SAFETY: each test sets the same value before any reads it.
+        unsafe {
+            std::env::set_var(
+                "SHEAF_CACHE_DIR",
+                std::env::temp_dir().join(format!("sheaf-forms-cache-{}", std::process::id())),
+            )
+        };
+    }
     dir
+}
+
+/// Set in the process [`own_cache`] runs a test in: the file it writes
+/// once the test has run.
+const OWN_CACHE: &str = "SHEAF_TEST_OWN_CACHE";
+
+/// `test`, which runs `body`, run in a process of its own (the binary run
+/// again for `test` alone) whose `SHEAF_CACHE_DIR` is a new, empty
+/// directory no other test writes to, which must still be empty after:
+/// opening a file can write to the cache (another tool's stamp, kept as a
+/// mark), so a directory the binary's tests share can't say what one test
+/// wrote. In that process, `body` itself.
+pub fn own_cache(test: &str, body: impl FnOnce()) {
+    if let Some(done) = std::env::var_os(OWN_CACHE) {
+        body();
+        std::fs::write(done, "").unwrap();
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("sheaf-own-cache-{test}-{}", std::process::id()));
+    let (cache, done) = (dir.join("cache"), dir.join("done"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&cache).unwrap();
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([test, "--exact", "--nocapture", "--quiet"])
+        .env(OWN_CACHE, &done)
+        .env("SHEAF_CACHE_DIR", &cache)
+        .output()
+        .unwrap_or_else(|e| panic!("running {test} in its own process: {e}"));
+    let said = || {
+        let [out, err] = [&out.stdout, &out.stderr].map(|b| String::from_utf8_lossy(b));
+        format!("{out}{err}")
+    };
+    assert!(out.status.success(), "{test}: {}\n{}", out.status, said());
+    assert!(
+        done.exists(),
+        "{test} ran nothing in its own process: does `{test} --exact` still name it?"
+    );
+    let cached: Vec<PathBuf> = (std::fs::read_dir(&cache).unwrap())
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert!(cached.is_empty(), "{test} wrote to the cache: {cached:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `path` opened as the app opens it.
@@ -70,6 +119,50 @@ pub fn blue(form: &mut Form, name: &str, page: usize, i: usize, value: &str) -> 
     ));
     form.dict(id).set("AP", dictionary! { "N" => ap });
     id
+}
+
+/// Two pages: on the first, text fields `a` (blue) and `c` and a check
+/// box; on the second, `b` (blue).
+pub fn two_page_form() -> Form {
+    let mut f = Form::new(2);
+    blue(&mut f, "a", 0, 0, "Alpha");
+    f.text("c", 0, row(1));
+    f.check_box("box", 0, row(2), true);
+    blue(&mut f, "b", 1, 0, "Beta");
+    f
+}
+
+/// [`two_page_form`] with a header Acrobat drew on each page after its
+/// content: a form whose `/PieceInfo` says so, drawing "ACROBATHEADER"
+/// above the fields.
+pub fn acrobat_headed_form() -> Form {
+    let mut f = two_page_form();
+    let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
+        "DocSettings" => dictionary! {}, "Private" => "Header",
+    } };
+    let helv = f.helv;
+    let form = f.pdf.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
+            "BBox" => vec![0.into(), 0.into(), 300.into(), 20.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => helv } },
+        },
+        b"BT /F1 12 Tf 2 5 Td (ACROBATHEADER) Tj ET".to_vec(),
+    ));
+    let header = f.pdf.add_object(Stream::new(
+        dictionary! {},
+        b"/Artifact <</Type /Pagination /Subtype /Header>> BDC q 1 0 0 1 72 760 cm /Xi0 Do Q \
+          EMC"
+        .to_vec(),
+    ));
+    for page in f.pages.clone() {
+        let dict = f.dict(page);
+        let body = dict.get(b"Contents").unwrap().clone();
+        dict.set("Contents", vec![body, header.into()]);
+        let resources = dict.get_mut(b"Resources").unwrap().as_dict_mut().unwrap();
+        resources.set("XObject", dictionary! { "Xi0" => form });
+    }
+    f
 }
 
 /// Blue pixels inside row `i` of a 612-pixel-wide render of a page whose
@@ -195,6 +288,35 @@ pub fn drops_xfa(doc: &Document, path: &Path) -> bool {
     (plan.transforms.iter()).any(|t| matches!(t, SaveTransform::DropXfa { .. }))
 }
 
+/// `pages` of `doc` cropped by `m`, as Document > Crop Pages crops them:
+/// one op, in a transaction made on the version the dialog opened on,
+/// validated.
+pub fn crop(doc: &mut Document, pages: &[PageId], m: Margins) {
+    let snap = doc.snapshot();
+    let mut tx = Document::tx_at(&snap, doc.lower_cx(Actor::User));
+    tx.apply(fx::crop(pages, m), &sheaf_ops::NoProgress)
+        .unwrap();
+    let opts = CommitOpts::based(snap.version, Stale::Validate, "Crop");
+    doc.commit(tx, opts).unwrap();
+}
+
+/// What the section of `whole` after its first `base` bytes, the file it
+/// was appended to, writes: the objects read from past them, but its
+/// cross-reference stream, each with whether it's a page's dictionary.
+pub fn appended_objects(base: usize, whole: &[u8]) -> BTreeMap<ObjectId, bool> {
+    let limits = &sheaf_doc::source::Limits::DEFAULT.reader;
+    let pdf = LazyPdf::open(Arc::<[u8]>::from(whole), None, limits).unwrap();
+    let past = |id| pdf.raw_span(id).is_some_and(|span| span.start >= base);
+    (pdf.ids().filter(|&id| past(id)))
+        .filter_map(|id| {
+            let object = pdf.get(id).ok();
+            let named = |name: &[u8]| object.and_then(|o| o.type_name().ok()) == Some(name);
+            let page = matches!(object, Some(Object::Dictionary(_))) && named(b"Page");
+            (!named(b"XRef")).then_some((id, page))
+        })
+        .collect()
+}
+
 /// What `doc` writes `how`.
 pub fn written(doc: &Document, how: How) -> Vec<u8> {
     match how {
@@ -246,6 +368,30 @@ pub fn corpus_form(path: &str) -> Option<Vec<u8>> {
     let corpus = Corpus::or_skip()?;
     let entry = corpus.entry(path).unwrap().expect("in the manifest");
     Some(std::fs::read(corpus.path(&entry)).unwrap())
+}
+
+/// `items`, or those of them whose corpus path (`path`) the environment
+/// variable `var` names, comma-separated, when it's set: every one it
+/// names, or a failure, as it is when it's set and names none (a leftover
+/// export mustn't make a whole run check nothing). A narrowed run says so.
+pub fn narrowed<T>(var: &str, items: Vec<T>, path: impl Fn(&T) -> &str) -> Vec<T> {
+    let Ok(only) = std::env::var(var) else {
+        return items;
+    };
+    let named: BTreeSet<&str> = (only.split(',').map(str::trim))
+        .filter(|p| !p.is_empty())
+        .collect();
+    assert!(!named.is_empty(), "{var} is set but names no file");
+    let items: Vec<T> = (items.into_iter())
+        .filter(|item| named.contains(path(item)))
+        .collect();
+    assert_eq!(
+        items.len(),
+        named.len(),
+        "{var} names a file the run doesn't take: {only}"
+    );
+    eprintln!("narrowed by {var} to {} files", items.len());
+    items
 }
 
 /// `bytes` with field `name`'s `/V` set to `value` (its appearance as it

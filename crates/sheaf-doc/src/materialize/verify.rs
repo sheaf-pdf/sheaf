@@ -534,23 +534,6 @@ fn checked(finding: &Finding) -> bool {
     )
 }
 
-/// What `finding` names: its widgets', fields' or fonts' names, each
-/// on its own; None for a damaged tree, which names no field.
-fn items(finding: &Finding) -> Vec<Option<&str>> {
-    match finding {
-        Finding::Orphans(names)
-        | Finding::OffPage(names)
-        | Finding::SharedWidgets(names)
-        | Finding::WrongPage(names)
-        | Finding::NullPage(names)
-        | Finding::WrongParent(names)
-        | Finding::DuplicateNames(names)
-        | Finding::NoAppearance(names) => names.iter().map(|n| Some(n.as_str())).collect(),
-        Finding::MissingFonts(fonts) => fonts.iter().map(|(f, _)| Some(f.as_str())).collect(),
-        _ => vec![None],
-    }
-}
-
 /// `report`'s findings that no input's report has, by kind and what each
 /// names (None for what names nothing). A name an input's finding of the
 /// kind has, or has under a parent of its own (`P.name`, sheaf's parent
@@ -565,7 +548,7 @@ fn new_findings<'a>(
 ) -> Vec<(&'static str, Option<&'a str>)> {
     let found: Vec<(&'static str, Option<&str>)> = (report.findings.iter())
         .filter(|f| checked(f))
-        .flat_map(|f| items(f).into_iter().map(move |item| (f.kind(), item)))
+        .flat_map(|f| f.items().into_iter().map(move |item| (f.kind(), item)))
         .collect();
     if found.is_empty() {
         return found;
@@ -577,7 +560,7 @@ fn new_findings<'a>(
             let damaged = (input.findings.iter()).any(|f| matches!(f, Finding::Damaged(_)));
             for f in &input.findings {
                 had.extend(
-                    items(f)
+                    f.items()
                         .into_iter()
                         .map(|i| (f.kind(), i.map(str::to_string))),
                 );

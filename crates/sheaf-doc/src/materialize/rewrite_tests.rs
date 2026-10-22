@@ -1,8 +1,8 @@
 //! What a save writes, by the new writer: save.rs's tests of the old
 //! writers, ported (M10.5 slice 9). Pages and their order, bookmarks,
 //! marks and other tools' comments, stamps and attachments, encryption,
-//! the header and footer, labels and OCR layers. A test that saves both
-//! ways has an Append half ([`crate::both_ways!`]).
+//! the header and footer and labels; OCR layers are `ocr_tests`'. A test
+//! that saves both ways has an Append half ([`crate::both_ways!`]).
 //! The fixtures here are the export tests' too (`save::tests`).
 
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::FixedCount;
 use crate::materialize::{self, AskAnswers, Came, How, StrategyKind, Why};
 use crate::model::{Document, FlatOutlineItem, Mark, PageId};
-use crate::save::{HeaderKept, derived_copy, rewrite, rewrite_to_path, text_string};
+use crate::save::{rewrite, rewrite_to_path, text_string};
 use crate::serialize::crypt::Crypt;
 use crate::store::{BlobKind, Src, Store};
 use crate::tx::fixture as fx;
@@ -151,23 +151,20 @@ pub(crate) fn read_pages(bytes: &[u8]) -> Vec<(String, i64)> {
                 .unwrap()
                 .to_string();
             // Attributes may live on the page or be inherited; both are valid.
-            let resolved = crate::materialize::copy::inherited_attrs(&pdf, id);
-            let dict = pdf.get_dictionary(id).unwrap();
-            let has = |k: &[u8]| dict.has(k) || resolved.iter().any(|(kk, _)| kk == k);
-            let rot = dict
-                .get(b"Rotate")
-                .ok()
-                .cloned()
-                .or_else(|| {
-                    resolved
-                        .iter()
-                        .find(|(k, _)| k == b"Rotate")
-                        .map(|(_, v)| v.clone())
-                })
-                .and_then(|o| o.as_i64().ok())
-                .unwrap_or(0);
-            assert!(has(b"Resources"), "page lost its resources");
-            assert!(has(b"MediaBox"), "page lost its media box");
+            let inherited = |key: &[u8]| {
+                let mut at = id;
+                for _ in 0..64 {
+                    let dict = pdf.get_dictionary(at).ok()?;
+                    if let Ok(v) = dict.get(key) {
+                        return Some(v.clone());
+                    }
+                    at = dict.get(b"Parent").and_then(Object::as_reference).ok()?;
+                }
+                None
+            };
+            let rot = (inherited(b"Rotate").and_then(|o| o.as_i64().ok())).unwrap_or(0);
+            assert!(inherited(b"Resources").is_some(), "page lost its resources");
+            assert!(inherited(b"MediaBox").is_some(), "page lost its media box");
             (mark, rot)
         })
         .collect()
@@ -2687,13 +2684,14 @@ fn encrypted_source_saves(how: How) {
     assert_eq!(items[0].1, "Top");
 }
 
-/// A header/footer is drawn into page content as pagination
-/// artifacts on save, its settings kept in the catalog; a derived copy
-/// can strip it again.
+/// A header/footer is drawn into page content as its generator's blocks
+/// on save, pagination artifacts of sheaf's own, what it is said in the
+/// catalog's `/SheafGenerators` and nothing in `/SheafHeaderFooter`; an
+/// open finds it again (taking it off is `header_tests`' and
+/// `others_tests`').
 #[test]
-fn header_footer_is_drawn_stored_and_strippable() {
+fn header_footer_is_drawn_and_found_again() {
     use crate::content::{PagOrigin, PaginationKind};
-    use crate::stamps::HEADER_FOOTER;
     let dir = tempdir();
     let a = make_pdf(&dir, "hf.pdf", "H", 2, &[]);
     let mut model = open(&a, &[], crate::history::default_policy());
@@ -2709,7 +2707,7 @@ fn header_footer_is_drawn_stored_and_strippable() {
     let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
     for (i, &p) in pages.iter().enumerate() {
         let dict = pdf.get_dictionary(p).unwrap();
-        // A footer of sheaf's before M10.5.
+        // A footer of sheaf's.
         let blocks = src.blocks(i as u32).unwrap();
         let found: Vec<_> = blocks
             .pagination
@@ -2718,7 +2716,7 @@ fn header_footer_is_drawn_stored_and_strippable() {
             .collect();
         assert_eq!(
             found,
-            [(PaginationKind::Footer, PagOrigin::SheafLegacy)],
+            [(PaginationKind::Footer, PagOrigin::Sheaf)],
             "page {i}"
         );
         let all: Vec<u8> = dict
@@ -2740,32 +2738,15 @@ fn header_footer_is_drawn_stored_and_strippable() {
         let want = format!("(Page {} of 2)", i + 1);
         assert!(String::from_utf8_lossy(&all).contains(&want), "page {i}");
     }
-    let (stored, scope) = crate::stamps::from_catalog(&pdf).unwrap();
-    assert_eq!(stored.texts, footer.texts);
-    assert_eq!(scope, None);
+    assert!(!pdf.catalog().unwrap().has(b"SheafHeaderFooter"));
     // Read from a source, as it opens: the same.
-    assert_eq!(
-        crate::stamps::from_catalog(src.pdf()),
-        Some((stored, scope))
-    );
-    // Stripped, both pages come back clean.
-    let bytes = derived_copy(
-        &info(&Store::new(), &out),
-        &[(0, None), (1, None)],
-        HeaderKept::No,
-        &mut |pdf, d, _, at| {
-            assert!(crate::stamps::strip(pdf, d, at as u32, HEADER_FOOTER)?);
-            Ok(())
-        },
-    )
-    .unwrap();
-    let clean = crate::forms::fixture::source(bytes);
-    for i in 0..clean.page_count() {
-        let blocks = clean.blocks(i).unwrap();
-        assert!(!blocks.has(HEADER_FOOTER), "page {i}");
-        // The page's own content is left, and its balance.
-        assert_eq!(blocks.balance, Default::default());
-    }
+    let [saved] = &src.generators()[..] else {
+        panic!("one generator")
+    };
+    let page = |i: u32| Some(crate::model::PageId(u64::from(i)));
+    let g = saved.generator(&src, page).unwrap();
+    assert_eq!(g.spec.header_footer().unwrap().texts, footer.texts);
+    assert_eq!(g.scope, crate::model::Scope::All);
 }
 
 crate::both_ways!(
@@ -2817,296 +2798,6 @@ fn page_labels_follow_pages(how: How) {
     let out = dir.join("none.pdf");
     rewrite_to_path(&model.snapshot(), &out).unwrap();
     assert_eq!(read(&out), None);
-}
-
-// ----- OCR text layers ---------------------------------------------------
-
-pub(crate) fn ocr_layer(text: &str) -> std::sync::Arc<crate::text_layer::TextLayer> {
-    use crate::annot::Box2;
-    use crate::text_layer::OcrWord;
-    std::sync::Arc::new(crate::text_layer::from_engine(
-        vec![OcrWord {
-            text: text.into(),
-            rect: Box2 {
-                x: 72.0,
-                y: 100.0,
-                w: 100.0,
-                h: 12.0,
-            },
-            confidence: 0.95,
-        }],
-        &crate::geom::Geom::read(None, None, 0),
-        "test",
-    ))
-}
-
-pub(crate) fn set_layer(model: &mut Document, page: PageId, text: &str) {
-    model
-        .commit_ops(fx::ocr(vec![(page, ocr_layer(text))]), "ocr")
-        .unwrap();
-}
-
-/// The page's /Contents as an array (a lone reference becomes one entry).
-pub(crate) fn contents_of(pdf: &Pdf, page: ObjectId) -> Vec<Object> {
-    let dict = pdf.get_dictionary(page).unwrap();
-    match pdf.dereference(dict.get(b"Contents").unwrap()).unwrap().1 {
-        Object::Array(a) => a.clone(),
-        _ => vec![dict.get(b"Contents").unwrap().clone()],
-    }
-}
-
-pub(crate) fn stream_text(pdf: &Pdf, entry: &Object) -> String {
-    let s = pdf
-        .get_object(entry.as_reference().unwrap())
-        .unwrap()
-        .as_stream()
-        .unwrap();
-    String::from_utf8_lossy(&s.decompressed_content().unwrap()).into_owned()
-}
-
-pub(crate) fn fonts_of(pdf: &Pdf, page: ObjectId) -> Dictionary {
-    // Inline on the page, or referenced (possibly inherited).
-    let (res, ids) = pdf.get_page_resources(page).unwrap();
-    let res: Dictionary = match res {
-        Some(d) => d.clone(),
-        None => pdf.get_dictionary(ids[0]).unwrap().clone(),
-    };
-    pdf.dereference(res.get(b"Font").unwrap())
-        .unwrap()
-        .1
-        .as_dict()
-        .unwrap()
-        .clone()
-}
-
-pub(crate) fn glyphless_fonts(pdf: &Pdf) -> usize {
-    pdf.objects
-        .values()
-        .filter(|o| {
-            o.as_dict().is_ok_and(|d| {
-                d.get(b"Subtype")
-                    .is_ok_and(|s| s.as_name().is_ok_and(|n| n == b"Type0"))
-                    && d.get(b"BaseFont")
-                        .is_ok_and(|b| b.as_name().is_ok_and(|n| n == b"GlyphLessFont"))
-            })
-        })
-        .count()
-}
-
-pub(crate) const HELLO_HEX: &str = "<00480065006C006C006F>";
-
-#[test]
-fn rewrite_writes_invisible_text_layer() {
-    let dir = tempdir();
-    let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
-    let mut model = open(&a, &[], Box::new(FixedCount(10)));
-    let ids: Vec<PageId> = model.state().order().iter().copied().collect();
-    set_layer(&mut model, ids[1], "Hello");
-    let bytes = rewrite(&model.snapshot()).unwrap();
-    assert_eq!(
-        read_pages(&bytes),
-        vec![("A 0".into(), 0), ("A 1".into(), 0), ("A 2".into(), 0)]
-    );
-    let pdf = Pdf::load_mem(&bytes).unwrap();
-    let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
-    let contents = contents_of(&pdf, pages[1]);
-    assert_eq!(contents.len(), 3);
-    assert_eq!(stream_text(&pdf, &contents[0]), "q\n");
-    assert!(stream_text(&pdf, &contents[1]).contains("MARK A 1"));
-    let layer = stream_text(&pdf, &contents[2]);
-    assert!(layer.starts_with("Q\nBT\n3 Tr\n"), "{layer}");
-    assert!(layer.contains(HELLO_HEX), "{layer}");
-    // Inherited fonts survive next to ours, inline on the page.
-    let fonts = fonts_of(&pdf, pages[1]);
-    assert!(fonts.has(b"F1"));
-    let type0 = pdf
-        .get_dictionary(fonts.get(b"SheafOcr").unwrap().as_reference().unwrap())
-        .unwrap();
-    assert_eq!(type0.get(b"Subtype").unwrap().as_name().unwrap(), b"Type0");
-    let cid = pdf
-        .get_dictionary(
-            type0.get(b"DescendantFonts").unwrap().as_array().unwrap()[0]
-                .as_reference()
-                .unwrap(),
-        )
-        .unwrap();
-    assert_eq!(cid.get(b"DW").unwrap().as_i64().unwrap(), 500);
-    assert!(type0.has(b"ToUnicode"));
-    // Other pages are untouched.
-    for &p in [pages[0], pages[2]].iter() {
-        assert_eq!(contents_of(&pdf, p).len(), 1);
-        assert!(!fonts_of(&pdf, p).has(b"SheafOcr"));
-    }
-}
-
-#[test]
-fn an_append_writes_a_layer_in_an_unchanged_order() {
-    let dir = tempdir();
-    let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
-    let original = std::fs::read(&a).unwrap();
-    let mut model = open(&a, &[], Box::new(FixedCount(10)));
-    let ids: Vec<PageId> = model.state().order().iter().copied().collect();
-    set_layer(&mut model, ids[0], "Hello");
-    let bytes = How::Appended.write(&model);
-    assert!(bytes.starts_with(&original), "original bytes preserved");
-    assert_eq!(
-        read_pages(&bytes),
-        vec![("A 0".into(), 0), ("A 1".into(), 0)]
-    );
-    let pdf = Pdf::load_mem(&bytes).unwrap();
-    let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
-    let contents = contents_of(&pdf, pages[0]);
-    assert_eq!(contents.len(), 3);
-    assert!(stream_text(&pdf, &contents[2]).contains(HELLO_HEX));
-    // The rewritten page pulled its inherited attributes down.
-    let dict = pdf.get_dictionary(pages[0]).unwrap();
-    assert!(dict.has(b"MediaBox"));
-    assert!(dict.get(b"Resources").unwrap().as_dict().is_ok(), "inline");
-    let fonts = fonts_of(&pdf, pages[0]);
-    assert!(fonts.has(b"F1") && fonts.has(b"SheafOcr"));
-    assert!(!pdf.get_dictionary(pages[1]).unwrap().has(b"Resources"));
-    assert_eq!(glyphless_fonts(&pdf), 1);
-    // Saved in place, as planned (a layer added removes nothing), the file
-    // reopens with the layer.
-    let report = materialize::save(&mut model, &a, &AskAnswers::default(), &NoProgress);
-    assert_eq!(report.unwrap().strategy, Some(StrategyKind::Append));
-    let saved = Pdf::load(&a).unwrap();
-    let p0 = saved.get_pages()[&1];
-    assert_eq!(contents_of(&saved, p0).len(), 3);
-}
-
-#[test]
-fn an_append_writes_a_layer_in_a_changed_tree() {
-    let dir = tempdir();
-    let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
-    let original = std::fs::read(&a).unwrap();
-    let mut model = open(&a, &[], Box::new(FixedCount(10)));
-    let ids: Vec<PageId> = model.state().order().iter().copied().collect();
-    set_layer(&mut model, ids[2], "Hello");
-    model
-        .commit_ops(vec![fx::delete(&[ids[0]])], "del")
-        .unwrap();
-    let bytes = How::Appended.write(&model);
-    assert!(bytes.starts_with(&original));
-    assert_eq!(
-        read_pages(&bytes),
-        vec![("A 1".into(), 0), ("A 2".into(), 0)]
-    );
-    let pdf = Pdf::load_mem(&bytes).unwrap();
-    let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
-    assert_eq!(contents_of(&pdf, pages[0]).len(), 1);
-    let contents = contents_of(&pdf, pages[1]);
-    assert_eq!(contents.len(), 3);
-    assert!(stream_text(&pdf, &contents[2]).contains(HELLO_HEX));
-    assert!(fonts_of(&pdf, pages[1]).has(b"F1"));
-}
-
-#[test]
-fn one_font_set_per_file() {
-    let dir = tempdir();
-    let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
-    let mut model = open(&a, &[], Box::new(FixedCount(10)));
-    let ids: Vec<PageId> = model.state().order().iter().copied().collect();
-    model
-        .commit_ops(
-            fx::ocr(vec![
-                (ids[0], ocr_layer("one")),
-                (ids[1], ocr_layer("two")),
-                (ids[2], ocr_layer("three")),
-            ]),
-            "ocr",
-        )
-        .unwrap();
-    let bytes = rewrite(&model.snapshot()).unwrap();
-    let pdf = Pdf::load_mem(&bytes).unwrap();
-    assert_eq!(glyphless_fonts(&pdf), 1);
-    let q_streams = pdf
-        .objects
-        .values()
-        .filter(|o| {
-            o.as_stream()
-                .is_ok_and(|s| s.decompressed_content().unwrap() == b"q\n")
-        })
-        .count();
-    assert_eq!(q_streams, 1);
-}
-
-#[test]
-fn duplicate_shares_layer_and_is_not_double_rotated() {
-    let dir = tempdir();
-    let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
-    let mut model = open(&a, &[], Box::new(FixedCount(10)));
-    let ids: Vec<PageId> = model.state().order().iter().copied().collect();
-    model
-        .commit_ops(vec![fx::rotate(&[ids[0]], Turn::Quarter)], "rot")
-        .unwrap();
-    set_layer(&mut model, ids[0], "Hello");
-    model
-        .commit_ops(vec![fx::duplicate(&[ids[0]])], "dup")
-        .unwrap();
-    let bytes = rewrite(&model.snapshot()).unwrap();
-    assert_eq!(
-        read_pages(&bytes),
-        vec![("A 0".into(), 90), ("A 0".into(), 90), ("A 1".into(), 0)]
-    );
-    let pdf = Pdf::load_mem(&bytes).unwrap();
-    let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
-    for &p in &pages[..2] {
-        let contents = contents_of(&pdf, p);
-        assert_eq!(contents.len(), 3);
-        assert!(stream_text(&pdf, &contents[2]).contains(HELLO_HEX));
-    }
-}
-
-#[test]
-fn reinstall_replaces_previous_layer() {
-    let dir = tempdir();
-    let a = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-    let mut model = open(&a, &[], Box::new(FixedCount(10)));
-    let p0 = model.page(0).unwrap();
-    set_layer(&mut model, p0, "Hello");
-    let b = dir.join("b.pdf");
-    rewrite_to_path(&model.snapshot(), &b).unwrap();
-
-    // Re-OCR the saved file: the old layer goes, the new one comes.
-    let mut model = open(&b, &[], Box::new(FixedCount(10)));
-    let p0 = model.page(0).unwrap();
-    set_layer(&mut model, p0, "World");
-    let bytes = rewrite(&model.snapshot()).unwrap();
-    let pdf = Pdf::load_mem(&bytes).unwrap();
-    let page = pdf.get_pages()[&1];
-    let contents = contents_of(&pdf, page);
-    assert_eq!(contents.len(), 3);
-    let all = String::from_utf8_lossy(&pdf.get_page_content(page)).into_owned();
-    assert!(all.contains("<0057006F0072006C0064>"), "{all}");
-    assert!(!all.contains(HELLO_HEX), "{all}");
-    assert_eq!(glyphless_fonts(&pdf), 1);
-
-    // Saving the file again with no layer in the model keeps what's baked.
-    let model = open(&b, &[], Box::new(FixedCount(10)));
-    let bytes = rewrite(&model.snapshot()).unwrap();
-    let pdf = Pdf::load_mem(&bytes).unwrap();
-    let page = pdf.get_pages()[&1];
-    assert_eq!(contents_of(&pdf, page).len(), 3);
-}
-
-#[test]
-fn empty_layer_writes_nothing() {
-    let dir = tempdir();
-    let a = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-    let mut model = open(&a, &[], Box::new(FixedCount(10)));
-    let p0 = model.page(0).unwrap();
-    let empty = std::sync::Arc::new(crate::text_layer::from_engine(
-        vec![],
-        &crate::geom::Geom::read(None, None, 0),
-        "test",
-    ));
-    model.commit_ops(fx::ocr(vec![(p0, empty)]), "ocr").unwrap();
-    let bytes = rewrite(&model.snapshot()).unwrap();
-    let pdf = Pdf::load_mem(&bytes).unwrap();
-    let page = pdf.get_pages()[&1];
-    assert_eq!(contents_of(&pdf, page).len(), 1);
-    assert_eq!(glyphless_fonts(&pdf), 0);
 }
 
 pub(crate) fn tempdir() -> std::path::PathBuf {

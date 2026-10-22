@@ -28,6 +28,17 @@ pub struct PdfA {
     pub level: Option<char>,
 }
 
+/// As the claim is named: "PDF/A-2b", "PDF/A-4".
+impl std::fmt::Display for PdfA {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PDF/A-{}", self.part)?;
+        match self.level {
+            Some(level) => write!(f, "{}", level.to_ascii_lowercase()),
+            None => Ok(()),
+        }
+    }
+}
+
 /// One of the values a claim is made of.
 #[derive(Clone, Copy)]
 enum Claim {

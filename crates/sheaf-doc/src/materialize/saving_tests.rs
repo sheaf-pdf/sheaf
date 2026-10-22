@@ -90,8 +90,9 @@ fn pages_of(path: &Path) -> Vec<(i64, bool)> {
                 _ => vec![page.get(b"Contents").unwrap().clone()],
             };
             let layered = entries.iter().any(|e| {
-                (pdf.dereference(e).ok())
-                    .is_some_and(|(_, o)| o.as_stream().is_ok_and(|s| s.dict.has(b"SheafOcrLayer")))
+                (pdf.dereference(e).ok()).is_some_and(|(_, o)| {
+                    (o.as_stream()).is_ok_and(|s| super::ocr_tests::ocr_block(&s.dict).is_some())
+                })
             });
             (rotate, layered)
         })

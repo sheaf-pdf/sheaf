@@ -14,6 +14,7 @@ use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dict
 use sheaf_edit::{Rotation, Turn};
 
 use super::append;
+use super::emit::AllowedDrops;
 use super::key::ObjKey;
 use super::plan::{
     AppendAnyway, Ask, AskAnswers, Note, Onto, SaveStop, Strategy, Why, forced_append,
@@ -518,8 +519,8 @@ fn the_veto_on_a_certified_file_asks_and_never_rewrites() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// How many of the streams of the page of the file at `path` are marked
-/// as an OCR layer's: its `q` and its text, for one layer.
+/// How many of the streams of the page of the file at `path` are an OCR
+/// layer's block.
 fn marked_in(path: &Path) -> usize {
     let pdf = Pdf::load(path).unwrap();
     let page = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
@@ -530,17 +531,20 @@ fn marked_in(path: &Path) -> usize {
     };
     (entries.iter())
         .filter(|e| {
-            (pdf.dereference(e).ok())
-                .is_some_and(|(_, o)| o.as_stream().is_ok_and(|s| s.dict.has(b"SheafOcrLayer")))
+            (pdf.dereference(e).ok()).is_some_and(|(_, o)| {
+                (o.as_stream()).is_ok_and(|s| super::ocr_tests::ocr_block(&s.dict).is_some())
+            })
         })
         .count()
 }
 
-/// A re-OCR over a layer saved in an earlier session: drawing the new
-/// layer takes the file's out of the page's content, and the removal check
-/// finds its words in what that unlinks, so the save is a Rewrite, with
-/// one layer. Over a layer saved in this session, the same, judged on
-/// the words the page's block was drawn from.
+/// A re-OCR over a layer saved in an earlier session, forced to append:
+/// drawing the new layer takes the file's out of the page's content, and
+/// the removal check finds its words in what that unlinks, so the save is
+/// a Rewrite, with one layer. Over a layer saved in this session, the
+/// same, judged on the words the page's block was drawn from. Planned,
+/// either is a Rewrite from the start: the old words are replaced text
+/// (kept::tests' `re_ocr_reopened`).
 #[test]
 fn a_re_ocr_over_a_saved_layer_is_a_rewrite() {
     let dir = scratch();
@@ -549,13 +553,13 @@ fn a_re_ocr_over_a_saved_layer_is_a_rewrite() {
     let ocr = |text: &str| fx::ocr([(page, layer(text))]);
     doc.commit_ops(ocr("first"), "ocr").unwrap();
     save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
-    assert_eq!(marked_in(&path), 2);
+    assert_eq!(marked_in(&path), 1);
     // This session: the page's block.
     doc.commit_ops(ocr("second"), "ocr").unwrap();
     let (strategy, _) = forced(&mut doc, &AskAnswers::default()).unwrap();
     let key = vetoed(&strategy);
     assert!(matches!(key, Some(ObjKey::Block(_))), "{strategy:?}");
-    assert_eq!(marked_in(&path), 2);
+    assert_eq!(marked_in(&path), 1);
 
     // An earlier session: the file's own streams.
     let mut doc = crate::open::file(&path, None).unwrap().doc;
@@ -573,7 +577,7 @@ fn a_re_ocr_over_a_saved_layer_is_a_rewrite() {
             ..before
         }
     );
-    assert_eq!(marked_in(&path), 2);
+    assert_eq!(marked_in(&path), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -694,6 +698,18 @@ fn checked(
     }
     let mut dict = old.get_dictionary(page).unwrap().clone();
     dict.set("Resources", dictionary! { "XObject" => xobjects });
+    check_of(&old, doc, page, objects, dict)
+}
+
+/// What the removal check finds when a section writes `doc`'s first page,
+/// at `page` in the file `old` reads, as `dict`, and `objects`.
+fn check_of(
+    old: &LazyPdf,
+    doc: &Document,
+    page: ObjectId,
+    mut objects: BTreeMap<ObjectId, (ObjKey, Object)>,
+    dict: Dictionary,
+) -> Option<Found> {
     let id = doc.page(0).unwrap();
     objects.insert(page, (ObjKey::Page(id), dict.into()));
     let input = doc.recovery_input();
@@ -701,16 +717,67 @@ fn checked(
     let catalog = saved.record.map.keys[&ObjKey::Catalog];
     let primary = input.primary.id();
     removal::check(&Section {
-        old: &old,
+        old,
         objects: &objects,
         trailer: &[catalog],
         saved,
         target: &input.target,
         primary,
-        allowed: &[],
+        allowed: &AllowedDrops::default(),
         said: &BTreeSet::new(),
         lim: &Limits::DEFAULT,
     })
+}
+
+/// A stream that says it isolates a page's content, but that another tool
+/// made draw text too, is judged on its text: a section that unlinks it
+/// finds the text gone. One that isolates alone says nothing.
+#[test]
+fn an_isolating_stream_that_draws_is_read() {
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, "a.pdf", &text_file(1));
+    let set = fx::set_watermark(fx::watermark("DRAFT"), sheaf_edit::Z::Over, None);
+    doc.commit_ops(vec![set], "watermark").unwrap();
+    save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
+    let mut pdf = Pdf::load(&path).unwrap();
+    let page = pdf.get_pages()[&1];
+    let ids = super::recognized_tests::contents(&pdf, page);
+    let (open, close) = (ids[0], ids[2]);
+    let mut stream = pdf.get_object(open).unwrap().as_stream().unwrap().clone();
+    stream.dict.remove(b"Filter");
+    stream.set_content(b"q BT /F1 12 Tf 72 300 Td (Secret) Tj ET".to_vec());
+    pdf.objects.insert(open, stream.into());
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    let (path, doc) = opened(&dir, "b.pdf", &bytes);
+    let old = LazyPdf::open(
+        Arc::<[u8]>::from(std::fs::read(&path).unwrap()),
+        None,
+        &Limits::DEFAULT.reader,
+    )
+    .unwrap();
+    let without = |gone: ObjectId| {
+        let mut dict = old.get_dictionary(page).unwrap().clone();
+        let left: Vec<Object> = (ids.iter())
+            .filter(|&&c| c != gone)
+            .map(|&c| Object::Reference(c))
+            .collect();
+        dict.set("Contents", left);
+        check_of(&old, &doc, page, BTreeMap::new(), dict)
+    };
+    let key = ObjKey::Base {
+        blob: doc.primary().id(),
+        obj: open,
+        copy: 0,
+    };
+    let gone = Found {
+        key,
+        derived: false,
+        said: false,
+    };
+    assert_eq!(without(open), Some(gone));
+    assert_eq!(without(close), None);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn helvetica() -> Dictionary {
@@ -783,4 +850,82 @@ fn a_re_subset_font_with_the_same_text_passes() {
     let changed = [(subset("GHIJKL+Arial"), Some(other), "<00070009>")];
     assert!(checked(&path, &doc, page, &changed).is_some());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A header's block a section unlinks, which the header lays out otherwise
+/// now from the same recipe, its page moved (a live redraw), may go when
+/// the section's emission allows it, or isn't judged on the page that
+/// draws it again: else it's judged on what the header said there, and the
+/// page number it drew gone is a misclassification. The opened file's
+/// record says the block, at its own number.
+#[test]
+fn an_allowed_live_redraw_s_old_block_may_go() {
+    let dir = scratch();
+    let (_, mut doc) = opened(&dir, "a.pdf", &text_file(2));
+    let set = fx::set_header(fx::header("Page <<1>> of <<N>>"), None);
+    doc.commit_ops(vec![set], "header").unwrap();
+    let (path, mut doc) = opened(&dir, "b.pdf", &super::How::Rewritten.write(&doc));
+    let [first, second] = [0, 1].map(|i| doc.page(i).unwrap());
+    let reorder = fx::move_pages(&[second], Some(first));
+    doc.commit_ops(vec![reorder], "reorder").unwrap();
+    let src = doc.primary().clone();
+    let facts = src.page(0).unwrap();
+    let markers = src.markers(0);
+    let block = (markers.iter())
+        .find(|(_, m)| matches!(m, crate::content::Marker::Gen { .. }))
+        .expect("the header's block")
+        .0;
+    let key = ObjKey::Base {
+        blob: src.id(),
+        obj: block,
+        copy: 0,
+    };
+    let input = doc.recovery_input();
+    let saved = input.saved.as_ref().unwrap();
+    let g = doc.state().header_footer().unwrap().id;
+    assert_eq!(saved.record.drawn[&(first, g)].key, key);
+    // The first page's dictionary written over without the block.
+    let old = LazyPdf::open(
+        Arc::<[u8]>::from(std::fs::read(&path).unwrap()),
+        None,
+        &Limits::DEFAULT.reader,
+    )
+    .unwrap();
+    let mut dict = old.get_dictionary(facts.id).unwrap().clone();
+    let left: Vec<Object> = (facts.contents.iter())
+        .filter(|&&c| c != block)
+        .map(|&c| Object::Reference(c))
+        .collect();
+    dict.set("Contents", left);
+    let objects = BTreeMap::from([(facts.id, (ObjKey::Page(first), dict.into()))]);
+    let catalog = saved.record.map.keys[&ObjKey::Catalog];
+    let check = |allowed: &AllowedDrops| {
+        removal::check(&Section {
+            old: &old,
+            objects: &objects,
+            trailer: &[catalog],
+            saved,
+            target: &input.target,
+            primary: src.id(),
+            allowed,
+            said: &BTreeSet::new(),
+            lim: &Limits::DEFAULT,
+        })
+    };
+    let misclassified = Found {
+        key,
+        derived: true,
+        said: false,
+    };
+    assert_eq!(check(&AllowedDrops::default()), Some(misclassified));
+    let keys = AllowedDrops {
+        keys: vec![key],
+        ..AllowedDrops::default()
+    };
+    assert_eq!(check(&keys), None);
+    let redrawn = AllowedDrops {
+        redrawn: [(first, g)].into(),
+        ..AllowedDrops::default()
+    };
+    assert_eq!(check(&redrawn), None);
 }

@@ -265,25 +265,34 @@ fn refuse(src: &Src) -> impl Fn() + Send + Sync + 'static {
 }
 
 /// A snapshot's pages as OCR reads them (M10.5 §10.4): each realized under
-/// [`ViewInputs::content_only`], so an unsaved header, a widget or a
-/// comment is never read as the page's content, drawn and its text read
-/// there ([`Text`]) in the background's budget, which never closes an
-/// engine the screen shows.
+/// [`ViewInputs::content_only`], so a header or footer sheaf draws, saved
+/// or not, a widget or a comment is never read as the page's content,
+/// drawn and its text read there ([`Text`]) in the background's budget,
+/// which never closes an engine the screen shows. Its text is read with
+/// the recognized text on its stack too, as blank detection reads it, so
+/// the page's own recognized text counts as text whether it's saved or
+/// not.
 pub struct ViewPages {
     views: Views,
     text: Text,
     snap: Snapshot,
     inputs: ViewInputs,
+    read: ViewInputs,
 }
 
 impl ViewPages {
     /// The pages of `snap`, drawn by `views`.
     pub fn new(views: Views, snap: Snapshot) -> ViewPages {
+        let inputs = ViewInputs::content_only();
         ViewPages {
             text: Text::new(views.clone(), Budget::Background),
             views,
             snap,
-            inputs: ViewInputs::content_only(),
+            read: ViewInputs {
+                ocr_over: true,
+                ..inputs.clone()
+            },
+            inputs,
         }
     }
 
@@ -301,7 +310,7 @@ impl ViewPages {
 
 impl PageSource for ViewPages {
     fn text_len(&self, page: &OcrPage) -> Result<usize> {
-        let rx = self.text.chars(&self.snap.state, page.id, &self.inputs);
+        let rx = self.text.chars(&self.snap.state, page.id, &self.read);
         let chars = block_on(rx).context("the render thread is gone")??;
         Ok(chars.text_len())
     }

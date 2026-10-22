@@ -56,7 +56,6 @@ use std::sync::Arc;
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat};
 
 use super::Cx;
-use super::annots::derived;
 use crate::annot::AnnotId;
 use crate::forms::{FieldId, FieldKind, Value};
 use crate::materialize::copy::Scope;
@@ -188,14 +187,8 @@ pub(crate) fn prepare(cx: &mut Cx) -> Plan {
         .filter(|src| src.id() != primary)
         .collect();
     let file = cx.primary.form();
-    // An overlay over a derived copy draws the records' widgets, not the
-    // copy's copies of them, and its form lists only theirs: the copy's own
-    // fields, every one of the file's, would have PDFium load them all
-    // (until slice 17).
-    let copied = cx.overlay.is_some() && derived(cx.primary);
-    let modeled = copied
-        || file.facts.damaged.is_none()
-            && (file.fields.is_empty() || st.form().names.contains_key(&own));
+    let modeled = file.facts.damaged.is_none()
+        && (file.fields.is_empty() || st.form().names.contains_key(&own));
     let mut plan = Plan {
         merged,
         split,
@@ -684,7 +677,11 @@ impl Fields {
     /// takes such a field out of a file (bug 14). An edit that takes a
     /// node's last widget takes the node too (the `widget.field` cascade,
     /// M10.5 §6.5); the rule here keeps what's written to what the file
-    /// showed, whatever the state holds.
+    /// showed, whatever the state holds. Nor is a node that isn't a field
+    /// with a value (no terminal) and has no node under it written, as one
+    /// whose `/Kids` another node holds: written, it would be a typeless
+    /// terminal field of its own, and a duplicate where its name is
+    /// another's (Greg, 2026-10-22).
     ///
     /// [`showed`]: Self::showed
     fn field(&mut self, cx: &mut Cx, fid: FieldId) -> bool {
@@ -703,7 +700,7 @@ impl Fields {
             }
         }
         let shows = (node.term.as_ref()).is_some_and(|t| !t.widgets.is_empty() || t.outside > 0);
-        if kids.is_empty() && !shows && self.showed(node) {
+        if kids.is_empty() && !shows && (node.term.is_none() || self.showed(node)) {
             self.written.remove(&fid);
             self.gone.insert(fid);
             return false;
@@ -791,7 +788,11 @@ impl Fields {
             }
         }
         // Widgets on page templates: a kid of the primary's own instance
-        // nothing accounts for and that no page shows.
+        // nothing accounts for and that no page shows, when it's a widget.
+        // Any other such kid isn't the field's to write: a page, or the
+        // catalog, as 0092321's `Page2[0]` lists it, copied as a kid would
+        // carry what the save wrote anew, a removed generator's text in
+        // the catalog's `/SheafGenerators` among it (Greg, 2026-10-22).
         let primary = cx.primary.id();
         if copy == 0 && r.src.id() == primary && !split && self.scoped.is_none() {
             let pdf = r.src.pdf();
@@ -804,9 +805,15 @@ impl Fields {
                     .chain(form.widgets.values().flatten().map(|w| w.object))
                     .collect()
             });
+            let widget = |k: &ObjectId| {
+                (pdf.get_dictionary(*k).ok())
+                    .and_then(|d| d.get(b"Subtype").ok())
+                    .is_some_and(|s| s.as_name().is_ok_and(|s| s == b"Widget"))
+            };
             let outside: Vec<ObjectId> = (listed.into_iter().flatten())
                 .filter_map(|k| k.as_reference().ok())
                 .filter(|k| !self.accounted.contains(k) && !known.contains(k))
+                .filter(widget)
                 .collect();
             for k in outside {
                 let k = cx.sym(&Object::Reference(k), &scope);

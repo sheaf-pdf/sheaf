@@ -8,11 +8,11 @@ use std::sync::Arc;
 use crate::measure::{Measured, Scale};
 use crate::tape::{self, Line, Row, Tape, TapeLook};
 use crate::{
-    Anchor, AnnotId, AnnotRef, BatesSpec, BlobId, BlobSel, BookmarkPatch, BookmarkRef, Box2, Bring,
-    Delta, DestView, FormBring, HeaderFooterSpec, Imported, LabelStyle, Local, Margins, MarkKind,
-    MarkPatch, NewMark, OcrWord, Op, OutlineBring, OutlineId, PageId, PageLabelRange, PageRef,
-    PageSel, PageSource, Patch, Pt, RangeSet, Rotation, ScopeSel, Sibling, Style, TextLayer,
-    TextStyle, Turn, Vec2,
+    Anchor, AnnotId, AnnotRef, BatesSpec, BlobId, BlobSel, BookmarkPatch, BookmarkRef, Box2,
+    BoxSpec, Bring, Delta, DestView, FontChoice, FormBring, GridPos, HeaderFooterSpec, Imported,
+    LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, OcrWord, Op, OutlineBring, OutlineId,
+    PageId, PageLabelRange, PageRef, PageSel, PageSource, Patch, Pt, RangeSet, Rotation, ScopeSel,
+    Sibling, Style, TextLayer, TextStyle, Turn, Vec2, WatermarkContent, WatermarkSpec, Z,
 };
 
 fn r(x: f32, y: f32, w: f32, h: f32) -> Box2 {
@@ -269,6 +269,25 @@ pub fn every_op() -> Vec<Op> {
                 outline: OutlineBring::MergeByTitle,
             },
         },
+        Op::SetPageBoxes {
+            pages: PageSel::Positions(pos("2-3")),
+            crop: Patch::Set(BoxSpec::Margins(Margins {
+                top: 36.0,
+                bottom: 36.0,
+                left: 18.0,
+                right: 18.0,
+            })),
+            trim: Patch::Set(BoxSpec::Rect(r(18.0, 18.0, 576.0, 756.0))),
+            bleed: Patch::Clear,
+            art: Patch::Keep,
+        },
+        Op::SetPageBoxes {
+            pages: PageSel::All,
+            crop: Patch::Clear,
+            trim: Patch::Keep,
+            bleed: Patch::Keep,
+            art: Patch::Clear,
+        },
         Op::SetPageLabels {
             ranges: Some(vec![
                 PageLabelRange {
@@ -421,6 +440,51 @@ pub fn every_op() -> Vec<Op> {
         Op::ClearOcrText {
             pages: PageSel::Positions(pos("1-7000")),
         },
+        Op::SetWatermark {
+            spec: WatermarkSpec {
+                content: WatermarkContent::Text {
+                    text: "Café DRAFT".into(),
+                    font: FontChoice::TimesBoldItalic,
+                    size: 72.0,
+                    color: [200, 30, 30],
+                    opacity: 0.3,
+                    angle: 45.0,
+                },
+                position: GridPos::Center,
+            },
+            z: Z::Over,
+            scope: ScopeSel::All,
+        },
+        Op::SetWatermark {
+            spec: WatermarkSpec {
+                content: WatermarkContent::Image {
+                    image: Some(BlobSel::With("seal".into())),
+                    scale: 0.5,
+                    opacity: 0.2,
+                },
+                position: GridPos::BottomRight,
+            },
+            z: Z::Under,
+            scope: ScopeSel::Pages(PageSel::Positions(pos("2-4"))),
+        },
+        Op::SetWatermark {
+            spec: WatermarkSpec {
+                content: WatermarkContent::Page {
+                    pdf: Some(BlobSel::Asset(3)),
+                    page: 2,
+                    scale: 1.0,
+                    opacity: 1.0,
+                },
+                position: GridPos::TopLeft,
+            },
+            z: Z::Under,
+            scope: ScopeSel::All,
+        },
+        Op::RemoveWatermark {
+            z: None,
+            pages: PageSel::All,
+            include_authored: true,
+        },
         Op::SetHeaderFooter {
             spec: HeaderFooterSpec {
                 texts: [
@@ -431,6 +495,7 @@ pub fn every_op() -> Vec<Op> {
                     "Page <<1>> of <<N>>".into(),
                     "<<bates>>".into(),
                 ],
+                font: FontChoice::Helvetica,
                 size: 10.0,
                 color: [20, 20, 20],
                 margins: Margins {
@@ -449,7 +514,15 @@ pub fn every_op() -> Vec<Op> {
         },
         Op::SetHeaderFooter {
             spec: HeaderFooterSpec {
-                texts: Default::default(),
+                texts: [
+                    "<<label>>".into(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ],
+                font: FontChoice::TimesRoman,
                 size: 9.0,
                 color: [0, 0, 0],
                 margins: Margins {
@@ -465,6 +538,7 @@ pub fn every_op() -> Vec<Op> {
         },
         Op::RemoveHeaderFooter {
             pages: PageSel::All,
+            include_authored: true,
         },
     ];
     ops.extend(kinds().into_iter().map(|kind| Op::AddMark {

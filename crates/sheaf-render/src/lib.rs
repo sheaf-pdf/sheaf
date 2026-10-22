@@ -10,9 +10,9 @@
 //!
 //! PDFium is process-global and not thread-safe, so every use of it holds one
 //! lock (`pdfium::lock`): the pool's worker and the threads that open an
-//! engine of their own (a print, an export, Trim White's scan) take turns,
-//! a call into an engine at a time. A scan for blank pages, like OCR,
-//! reads pages through the pool.
+//! engine of their own (a print, an export) take turns, a call into an
+//! engine at a time. A scan for blank pages and Trim White's, like OCR,
+//! read pages through the pool.
 
 pub mod pool;
 
@@ -427,6 +427,14 @@ pub mod pdfium {
         pub fn render_appearances(&self, page: PageIndex, width: u32) -> Result<Raster> {
             let _pdfium = lock();
             appearances(&self.doc, page, width)
+        }
+
+        /// The document as PDFium writes it (`FPDF_SaveAsCopy`), as another
+        /// tool built on PDFium would save it: what such a save keeps of
+        /// what sheaf wrote.
+        pub fn save_copy(&self) -> Result<Vec<u8>> {
+            let _pdfium = lock();
+            Ok(self.doc.save_to_bytes()?)
         }
 
         /// A page `width` pixels wide, RGBA, transparent where nothing is

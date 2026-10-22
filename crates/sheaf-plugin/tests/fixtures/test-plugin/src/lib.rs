@@ -355,7 +355,7 @@ impl Guest for TestPlugin {
                 let lines = boxes(&text::text_boxes(p, top)?);
                 Err(format!("hits {hits}; words {words}; boxes {lines}"))
             }
-            // OCR page 1; report the words and whether a layer was stored.
+            // OCR page 1; report the words and the engine.
             "ocr" => {
                 let p = document::pages().first().map(|p| p.id).ok_or("no pages")?;
                 let layer = sheaf_plugin_api::ocr::recognize(
@@ -366,12 +366,7 @@ impl Guest for TestPlugin {
                     },
                 )?;
                 let words: Vec<String> = layer.words.iter().map(|w| w.text.clone()).collect();
-                Err(format!(
-                    "{} by {} stored={}",
-                    words.join(" "),
-                    layer.engine,
-                    sheaf_plugin_api::ocr::page_text_layer(p).is_some()
-                ))
+                Err(format!("{} by {}", words.join(" "), layer.engine))
             }
             // Render a corner of page 1 in gray and describe it.
             "render" => {

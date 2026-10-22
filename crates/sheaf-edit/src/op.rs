@@ -12,10 +12,11 @@ use crate::header_footer::HeaderFooterSpec;
 use crate::ids::Local;
 use crate::labels::PageLabelRange;
 use crate::mark::{Anchor, Color, Imported, MarkPatch, NewMark, Style};
-use crate::page::{DestView, Rotation, TextStyle};
+use crate::page::{BoxSpec, DestView, Rotation, TextStyle};
 use crate::patch::Patch;
 use crate::refs::{AnnotRef, BlobSel, BookmarkRef, PageRef, PageSel, RangeSet, ScopeSel};
 use crate::text_layer::TextLayer;
+use crate::watermark::{WatermarkSpec, Z};
 
 /// An edit, as a caller states it ("delete pages 3–5"). A document lowers
 /// it into changes of its model, inside a transaction; whatever it makes
@@ -69,6 +70,20 @@ pub enum Op {
         with: Option<RangeSet>,
         #[serde(default)]
         bring: Bring,
+    },
+    /// The boxes of `pages`: a crop hides what's outside it and moves
+    /// nothing. Cleared, the crop is the media box and the others are
+    /// gone.
+    SetPageBoxes {
+        pages: PageSel,
+        #[serde(default, skip_serializing_if = "Patch::is_keep")]
+        crop: Patch<BoxSpec>,
+        #[serde(default, skip_serializing_if = "Patch::is_keep")]
+        trim: Patch<BoxSpec>,
+        #[serde(default, skip_serializing_if = "Patch::is_keep")]
+        bleed: Patch<BoxSpec>,
+        #[serde(default, skip_serializing_if = "Patch::is_keep")]
+        art: Patch<BoxSpec>,
     },
     /// The page labels, in place of any there are; none removes them.
     SetPageLabels {
@@ -163,14 +178,40 @@ pub enum Op {
     /// Take the OCR text off `pages`: what's not saved yet and what's in
     /// the file.
     ClearOcrText { pages: PageSel },
+    /// The watermark (`z` over the pages' content) or background (under
+    /// it) `spec` says, on the pages `scope` says, in place of the one of
+    /// that `z` there is, and of those of its kind Acrobat or an earlier
+    /// sheaf drew there. The author's own stay.
+    SetWatermark {
+        spec: WatermarkSpec,
+        z: Z,
+        scope: ScopeSel,
+    },
+    /// Take the watermark (`z` over), the background (under) or both (no
+    /// `z`) off `pages`. `include_authored` takes the author's own off too:
+    /// those the program that made the file drew.
+    RemoveWatermark {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        z: Option<Z>,
+        pages: PageSel,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_authored: bool,
+    },
     /// The header and footer, on the pages `scope` says, in place of any
-    /// there is.
+    /// there is, and of those Acrobat or an earlier sheaf drew there. The
+    /// author's own stay.
     SetHeaderFooter {
         spec: HeaderFooterSpec,
         scope: ScopeSel,
     },
-    /// Take the header and footer off `pages`.
-    RemoveHeaderFooter { pages: PageSel },
+    /// Take the header and footer off `pages`, and those Acrobat, an older
+    /// sheaf or another file drew there. `include_authored` takes the
+    /// author's own off too: those the program that made the file drew.
+    RemoveHeaderFooter {
+        pages: PageSel,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_authored: bool,
+    },
 }
 
 /// A turn of a page from where it is, clockwise. In JSON, degrees: 90,

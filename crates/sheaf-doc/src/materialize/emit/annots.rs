@@ -60,7 +60,7 @@ use crate::materialize::key::{ObjKey, Part};
 use crate::model::{AnnotBody, DocState, Foreign, FormRef, Mark, PageId};
 use crate::open::FileBody;
 use crate::source::ObjRef;
-use crate::store::{BlobKind, MemoryKind, Origin, Src};
+use crate::store::Src;
 
 /// Page `id`'s annotations, emitted: its `/Annots`, None when it has
 /// none. `shown` is what the page is written as; `tags`, whether it keeps
@@ -244,17 +244,14 @@ impl Page<'_> {
 
     /// An annotation of the page the records don't hold, as written: None
     /// for a pop-up, which goes with what opens it, and for what the view
-    /// doesn't draw. A derived copy's widgets are copies of its records',
-    /// which an overlay over the copy writes from the records, until slice
-    /// 17's content stack.
+    /// doesn't draw.
     fn unmodeled(&self, cx: &mut Cx, entry: &Object) -> Option<Object> {
         let shown = self.shown;
         let pdf = shown.src.pdf();
         let (_, dict) = pdf.dereference(entry).ok()?;
         let dict = dict.as_dict().ok()?;
         let widget = is(dict, b"Subtype", b"Widget");
-        let copied = widget && cx.overlay.is_some() && derived(&shown.src);
-        if is(dict, b"Subtype", b"Popup") || copied || !cx.draws_unmodeled(widget) {
+        if is(dict, b"Subtype", b"Popup") || !cx.draws_unmodeled(widget) {
             return None;
         }
         let scope = Scope {
@@ -745,18 +742,6 @@ pub(crate) fn dead_link(
     LinkTo::of(st, own, base, f) == LinkTo::Nowhere
 }
 
-/// Whether `src` is a derived copy of another source's pages (a crop, a
-/// header stripped, a watermark), until slice 17.
-pub(crate) fn derived(src: &Src) -> bool {
-    matches!(
-        src.blob().kind(),
-        BlobKind::Pdf {
-            origin: Origin::Memory(MemoryKind::Derived),
-            ..
-        }
-    )
-}
-
 /// Whether `dict`'s `key` is the name `name`.
 pub(crate) fn is(dict: &Dictionary, key: &[u8], name: &[u8]) -> bool {
     dict.get(key)
@@ -791,7 +776,7 @@ impl Cx<'_> {
                     .map(|(bbox, matrix)| (id, bbox, matrix))
                     .ok_or_else(|| anyhow::anyhow!("a form with no box"))
             }
-            FormRef::Blob(page) => blob_form(page.bytes()).map(|(objects, bbox, matrix)| {
+            FormRef::Blob(page) => blob_form(page.bytes(), 0).map(|(objects, bbox, matrix)| {
                 let id = self.resource_of(objects);
                 (Object::Reference(id), bbox, matrix)
             }),
@@ -912,15 +897,18 @@ impl Cx<'_> {
     }
 }
 
-/// A one-page PDF's page made a form, as a resource's objects (the form
-/// first, a reference `(i, 0)` to the `i`th), with its `/BBox` and
-/// `/Matrix`.
-fn blob_form(
+/// Page `index` (from 0) of the PDF `bytes` made a form, as a resource's
+/// objects (the form first, a reference `(i, 0)` to the `i`th), with its
+/// `/BBox` and `/Matrix`: a page stamp's one page, or a watermark's page.
+pub(crate) fn blob_form(
     bytes: &[u8],
+    index: u32,
 ) -> anyhow::Result<(Vec<Object>, crate::geom::Rect, crate::geom::Affine)> {
     let src = lopdf::Document::load_mem(bytes)?;
     let mut dst = lopdf::Document::new();
-    let form = crate::stamp_lib::page_form(&src, &mut dst)?;
+    let page = (src.get_pages().get(&(index + 1)).copied())
+        .ok_or_else(|| anyhow::anyhow!("the file has no page {}", index + 1))?;
+    let form = (crate::stamp_lib::page_forms(&src, &[page], &mut dst)?).remove(0);
     let order: Vec<ObjectId> = std::iter::once(form.id)
         .chain(dst.objects.keys().copied().filter(|&id| id != form.id))
         .collect();

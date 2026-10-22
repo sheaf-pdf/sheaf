@@ -25,14 +25,15 @@
 //! elsewhere; each measurement gives its peak and what it added to the
 //! RSS it started from.
 //!
-//! The rows that run the writer (Rewrite, Bates' Rewrite, flatten and
-//! crop's copy) have run up to 1.46× faster in another build of this file,
-//! with nothing they run changed, and hold steady within a build. That is
-//! code placement: a Rewrite of the heavy 7k is mostly sheaf-doc's own
-//! loops around lopdf's load and the writer. The baselines are this file's.
+//! The rows that run the writer (Rewrite, Bates' Rewrite, flatten, and
+//! crop's copy until slice 15) have run up to 1.46× faster in another
+//! build of this file, with nothing they run changed, and hold steady
+//! within a build. That is code placement: a Rewrite of the heavy 7k is
+//! mostly sheaf-doc's own loops around lopdf's load and the writer. The
+//! baselines are this file's.
 //! From slice 7 the Rewrite, Bates' Rewrite, the flatten and the
 //! incremental save write through sheaf-doc's `serialize/` rather than
-//! lopdf's writer (crop's copy still goes through lopdf's until slice 15),
+//! lopdf's writer (crop's copy went through lopdf's until slice 15),
 //! and the incremental save and the flatten replace their file durably,
 //! fsynced with its directory. From slice 9 the Rewrite, Bates' Rewrite
 //! and the flatten are the new writer's (`materialize`), the flatten a
@@ -55,17 +56,17 @@
 //! every page's content classified cold (`Source::blocks`), with neither a
 //! baseline nor a gate, and a Rewrite of 20,000 of sheaf's marks, some of
 //! them text, beside the writer from before marks were drawn through the
-//! content toolkit, with no gate; from slice 6 Bates' apply classifies
-//! every page, cold, to find an old header to strip. Slice 7's are the
-//! incremental save of one mark and the Rewrite again on an AES-256 copy
-//! of the synthetic and heavy fixtures, made by lopdf beside them, with
-//! neither a baseline nor a gate. Slice 8's is 1,000 mark adds on the
-//! heavy 7k, whose annotations and widgets are records from then on,
-//! beside slice 1's AnnotAdd and the same adds on blank pages, so an add
-//! that scans the records shows. Slice 9's are the Rewrite by
-//! `materialize`, from its plan and with its post-conditions, in a process
-//! of its own on the synthetic and heavy fixtures, beside slice 8's
-//! writer's numbers ([`WriterBaseline`], taken from that slice's build,
+//! content toolkit, with no gate; from slice 6 until slice 17, which made
+//! it one op, Bates' apply classified every page, cold, to find an old
+//! header to strip. Slice 7's are the incremental save of one mark and the
+//! Rewrite again on an AES-256 copy of the synthetic and heavy fixtures,
+//! made by lopdf beside them, with neither a baseline nor a gate. Slice 8's
+//! is 1,000 mark adds on the heavy 7k, whose annotations and widgets are
+//! records from then on, beside slice 1's AnnotAdd and the same adds on
+//! blank pages, so an add that scans the records shows. Slice 9's are the
+//! Rewrite by `materialize`, from its plan and with its post-conditions, in
+//! a process of its own on the synthetic and heavy fixtures, beside slice
+//! 8's writer's numbers ([`WriterBaseline`], taken from that slice's build,
 //! since slice 9 deleted the writer), and alone in
 //! `rewrites_on_the_synthetic_and_heavy_7k`; and, with neither a baseline
 //! nor a gate, the opened file's record (part of ready, timed apart), and
@@ -89,7 +90,7 @@
 //! engine opened and rendered cold, each run a new edit ([`drawn`]); the
 //! screen's engines after the first page of each of 220 groups is drawn,
 //! weighed and by the RSS added; and the thumbnail strip after a crop of
-//! every page and the legacy header, every page's preview drawn through a
+//! every page and a header, every page's preview drawn through a
 //! pool of its own, two panes' groups pinned, with each group's assembly
 //! in the time. Slice 14's are Find over every page of the synthetic and
 //! the heavy through the text service, as opened and with a header on
@@ -97,49 +98,94 @@
 //! past its bound), with neither a baseline nor a gate, one run each; and
 //! alone in `text_walks_on_the_synthetic_and_heavy_7k`, Find Blank Pages
 //! over every page and Find with a header on every page past six pinned
-//! group engines, with the engines each opened. From
-//! slice 13 the crop and Bates' apply open no engine on
-//! the copies they make, as the app's don't (its render worker opens one
-//! when a page of a copy is first drawn), where their rows counted one
-//! each before. So far slice 1's history bench, slice 3's geometry walk,
-//! slice 4's ready, slice 5's ready on 20,000 of sheaf's marks, slice 8's
-//! mark adds, slice 9's Rewrite, slice 10's incremental save on the
-//! scanned 7k ([`INCREMENTAL_GATE_MS`]), slice 11's check of a delete on
-//! every fixture ([`CHECK_GATE`]), slice 12's snapshot ([`SNAPSHOT_GATE`]),
-//! flat pushes ([`FLAT`]) and 200 OCR versions within the history budget
-//! ([`HISTORY_BUDGET`]), and slice 13's realize + open + render on the
-//! synthetic and heavy ([`REALIZE_GATE_SYNTHETIC`],
+//! group engines, with the engines each opened. From slice 15 a crop is one
+//! op over the pages' boxes, with no copy, as the Crop Pages dialog commits
+//! it: "crop all pages" and "validated after a delete" time the transaction
+//! made on the version the dialog opened on, the op and the commit by
+//! value, beside slice 2's crop, copy and all; the row that timed the edit
+//! apart from the copy is gone. Alone in `trim_white_on_the_7k`, each
+//! fixture in a process of its own, with neither a baseline nor a gate, one
+//! run of Trim White over every page cropped, as the app's planner trims:
+//! measured through a pool of its own in the background's budget, its crops
+//! committed by value, with the engines it opened, and the group engines a
+//! second walk opened. Slice 16's are a watermark set on every page, the
+//! commit timed, and with an image background under every page too, the
+//! Rewrite that draws both and the Append onto the file as opened, and the
+//! file it writes opened again, ready with both found, with neither a
+//! baseline nor a gate, and the census of that Rewrite's pages
+//! ([`Census`]); and from slice 16 the thumbnail strip draws a watermark on
+//! every page beside the crop and the header, as the gate table's row
+//! says. Slice 17's are the census of the Rewrite that draws Bates
+//! numbers on every page, and proposal 8's verdict, live page numbers
+//! kept: "Page n of N" set on every page and a page drawn, then saved to
+//! the work copy and every page moved by one move: the Append that writes
+//! it as the app saves (a live redraw) and the section it writes, in the
+//! session that saved it and on the file opened again, a moved page drawn,
+//! and the move undone and one page deleted, a page drawn, in the session
+//! and on the file opened again, each draw realized, opened and drawn at
+//! 1024 px in a group none drew before ([`LiveRow`]). From slice 17 Bates'
+//! apply is one op, which makes no copy and reads no page's content. Slice
+//! 18's are recognized text set on every page in one transaction on the
+//! file opened afresh, its lowering reading each page's blocks cold, and
+//! the Append that writes it as the app saves, with the section it writes
+//! and the census of the file it leaves: one glyphless font, and one block
+//! of recognized text a page, each its own; in the history bench, the
+//! first of the 7,000 `SetOcrText` lowered, every blank page's blocks read
+//! cold. From slice 18 the realize gate's edited page draws its recognized
+//! text as a block of its own after its isolated content, before the
+//! header. So far slice 1's history bench, slice 3's geometry walk, slice
+//! 4's ready, slice 5's ready on 20,000 of sheaf's marks, slice 8's mark
+//! adds, slice 9's Rewrite, slice 10's incremental save on the scanned 7k
+//! ([`INCREMENTAL_GATE_MS`]), slice 11's check of a
+//! delete on every fixture ([`CHECK_GATE`]), slice 12's snapshot
+//! ([`SNAPSHOT_GATE`]), flat pushes ([`FLAT`]) and 200 OCR versions within
+//! the history budget ([`HISTORY_BUDGET`]), and slice 13's realize + open +
+//! render on the synthetic and heavy ([`REALIZE_GATE_SYNTHETIC`],
 //! [`REALIZE_GATE_HEAVY`]), engines after 200 groups and the thumbnail
-//! strip's memory ([`SCREEN_BYTES`]) and its rate ([`STRIP_GATE`]) assert,
-//! after their tables print.
+//! strip's memory ([`SCREEN_BYTES`]) and its rate ([`STRIP_GATE`]), and
+//! slice 15's crop of every page, as made and validated after a delete, on
+//! every fixture ([`CROP_GATE`]), and slice 16's census of a watermark and
+//! an image background on every page, on every fixture, and slice 17's
+//! Bates apply on every fixture ([`BATES_GATE`]) with its Rewrite's one
+//! font, and on every fixture the live-token reorder's Append within
+//! [`REORDER_GATE`] and its section within [`REORDER_SECTION_MB`], and
+//! each page drawn within the realize gate ([`LiveRows`]), and slice 18's
+//! census of recognized text on every page, on every fixture, assert,
+//! after their tables print; but the rows that miss, Greg's accepted misses
+//! ([`ACCEPTED_MISSES`]), only when [`PROPOSAL_8`] is set.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::executor::block_on;
-use lopdf::Object;
+use in_progress::{Level, Progress, Unit};
+use lopdf::{Dictionary, Object, ObjectId};
+use sheaf_doc::content::Marker;
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
 use sheaf_doc::realize::{EngineKey, GROUP, Realizer};
 use sheaf_doc::serialize::fixture::{USER, encrypt_dict, rc4_aes_128_and_aes_256};
-use sheaf_doc::stamps::{Bates, HeaderFooter};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::{
-    add, delete, duplicate, header, insert, move_pages, ocr, rotate, set_header,
+    add, crop, delete, duplicate, header, insert, move_pages, ocr, rotate, set_header,
+    set_watermark, watermark,
 };
 use sheaf_doc::{
-    Actor, Annot, AnnotId, AnnotKind, Base, Box2, CommitOpts, Derive, Document, GroupKind, JobKind,
-    OcrWord, PageId, Query, Src, Stale, Store, TextLayer, ViewInputs,
+    Actor, Annot, AnnotId, AnnotKind, Base, Blob, Box2, CommitOpts, Document, GroupKind, JobKind,
+    OcrWord, PageId, Query, Snapshot, Src, Stale, Store, TextLayer, ViewInputs,
 };
-use sheaf_edit::{Anchor, Op, PageRef, Rotation, Style, Turn};
+use sheaf_edit::{
+    Anchor, BatesSpec, BlobSel, GridPos, HeaderFooterSpec, Margins, Op, PageRef, Rotation, Style,
+    Turn, WatermarkContent, WatermarkSpec, Z,
+};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
 use sheaf_ops::blank::{self, BlankParams};
-use sheaf_ops::crop::{CropSpec, Margins};
+use sheaf_ops::crop::{self, Urgency, trim_white};
 use sheaf_ops::text::{Found, Text};
 use sheaf_ops::views::Views;
 use sheaf_render::pdfium::PdfiumEngine;
@@ -181,6 +227,142 @@ const VISITS: usize = 4;
 /// What the thumbnail strip fills at least, in pages a second (slice 2's
 /// rate), on the synthetic and heavy fixtures.
 const STRIP_GATE: f64 = 310.0;
+/// A crop of every page, made and committed as the Crop Pages dialog
+/// commits it, at most (slice 15), on every fixture.
+const CROP_GATE: Duration = Duration::from_millis(200);
+/// Bates numbers applied to every page, one op on the file opened afresh,
+/// at most (slice 17), on every fixture.
+const BATES_GATE: Duration = Duration::from_millis(50);
+/// Proposal 8's gate (slice 17): after a save, a reorder of every page of
+/// the heavy 7k under "Page n of N" appends at most this many megabytes,
+/// planned and written in at most [`REORDER_GATE`].
+const REORDER_SECTION_MB: f64 = 8.0;
+const REORDER_GATE: Duration = Duration::from_secs(1);
+/// Set to assert the rows of proposal 8's gate and the everyday triggers
+/// of a live redraw that miss ([`ACCEPTED_MISSES`]). Greg kept page
+/// numbers live and accepted the misses (2026-10-22): the first page
+/// drawn of a group none drew before realizes every page of it, each laid
+/// out anew (on the heavy 12–20 ms of emission, 2 ms of assembly, 8–12 ms
+/// of PDFium's open and 9–11 ms of its cold render), which a lead
+/// window of a few pages (option A) would cut; and on the file opened
+/// again the reorder's Append classifies and rebuilds every page's content
+/// cold. Option A is to revisit.
+const PROPOSAL_8: &str = "SHEAF_GATE_PROPOSAL_8";
+/// What a missed row's gate says.
+const ACCEPTED: &str = "accepted miss (Greg, 2026-10-22); option A, a lead window, to revisit";
+
+/// Proposal 8's rows and the everyday triggers of a live redraw (slice
+/// 17's follow-up): a page drawn after "Page n of N" is set on every page,
+/// unsaved; the Append of every page moved after a save, and a moved page
+/// drawn; a page drawn after one is deleted after the save; and on the
+/// file opened again, the same move's Append, and a page drawn after one
+/// is deleted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LiveRow {
+    SetDrawn,
+    Reorder,
+    MovedDrawn,
+    DeletedDrawn,
+    ReopenedReorder,
+    ReopenedDeletedDrawn,
+}
+
+/// The [`LiveRow`]s that miss their gates, measured on a quiet machine
+/// after slice 17's follow-up (a header laid out once a page for every
+/// version, deltas without the frame): every draw on the synthetic and
+/// the heavy (19–27 ms against 15, 32–42 ms against 25), and the Append
+/// on the file opened again (0.89–1.11 s on the synthetic, either side of
+/// 1 s, and 1.57 s on the heavy); asserted only when [`PROPOSAL_8`] is
+/// set. The scanned has no realize gate, and its Appends pass (the one on
+/// the file opened again in 0.89–0.97 s).
+const ACCEPTED_MISSES: &[(Kind, LiveRow)] = &[
+    (Kind::Synthetic, LiveRow::SetDrawn),
+    (Kind::Synthetic, LiveRow::MovedDrawn),
+    (Kind::Synthetic, LiveRow::DeletedDrawn),
+    (Kind::Synthetic, LiveRow::ReopenedReorder),
+    (Kind::Synthetic, LiveRow::ReopenedDeletedDrawn),
+    (Kind::Heavy, LiveRow::SetDrawn),
+    (Kind::Heavy, LiveRow::MovedDrawn),
+    (Kind::Heavy, LiveRow::DeletedDrawn),
+    (Kind::Heavy, LiveRow::ReopenedReorder),
+    (Kind::Heavy, LiveRow::ReopenedDeletedDrawn),
+];
+
+/// The gates of `kind`'s [`LiveRow`]s: a page drawn within the fixture's
+/// realize gate (none on the scanned), an Append within [`REORDER_GATE`],
+/// each asserted, but the [`ACCEPTED_MISSES`] only when [`PROPOSAL_8`] is
+/// set.
+#[derive(Clone, Copy)]
+struct LiveRows {
+    kind: Kind,
+}
+
+impl LiveRows {
+    fn of(kind: Kind) -> LiveRows {
+        LiveRows { kind }
+    }
+
+    /// Whether `row` misses on this fixture, Greg's accepted miss.
+    fn missed(self, row: LiveRow) -> bool {
+        ACCEPTED_MISSES.contains(&(self.kind, row))
+    }
+
+    /// The gate a draw's row says.
+    fn draw(self, row: LiveRow) -> String {
+        match self.kind.realize_gate() {
+            None => String::new(),
+            Some(gate) => self.says(row, format!("< {} ms", gate.as_millis())),
+        }
+    }
+
+    /// The gate an Append's row says.
+    fn append(self, row: LiveRow) -> String {
+        self.says(row, format!("≤ {} s", REORDER_GATE.as_secs()))
+    }
+
+    fn says(self, row: LiveRow, gate: String) -> String {
+        match self.missed(row) {
+            true => format!("{gate}, {ACCEPTED}, asserted with {PROPOSAL_8}"),
+            false => format!("{gate}, asserted"),
+        }
+    }
+
+    /// Whether `row` is asserted in this run.
+    fn asserted(self, row: LiveRow) -> bool {
+        !self.missed(row) || std::env::var_os(PROPOSAL_8).is_some()
+    }
+
+    /// `row`, a page drawn in `took`, within the fixture's realize gate.
+    fn assert_draw(self, row: LiveRow, took: Duration) {
+        if let Some(gate) = self.kind.realize_gate()
+            && self.asserted(row)
+        {
+            assert!(
+                took < gate,
+                "{row:?}: a page took {took:?} to draw, over {gate:?}"
+            );
+        }
+    }
+
+    /// `row`, an Append planned and written in `took`, within
+    /// [`REORDER_GATE`].
+    fn assert_append(self, row: LiveRow, took: Duration) {
+        if self.asserted(row) {
+            assert!(
+                took <= REORDER_GATE,
+                "{row:?}: the Append of every page moved under \"Page n of N\" took {took:?}, \
+                 over {REORDER_GATE:?}"
+            );
+        }
+    }
+}
+/// The crop the crop rows make of every page: half an inch a side.
+const HALF_INCH: Margins = Margins {
+    top: 36.0,
+    bottom: 36.0,
+    left: 36.0,
+    right: 36.0,
+};
 /// Set in the processes a fixture's gates run in (see [`run`]): the file
 /// each writes once its rows are done, and which rows those are.
 const OWN_PROCESS: &str = "SHEAF_GATE_FIXTURE_PROCESS";
@@ -211,7 +393,6 @@ struct Baseline {
     rewrite_added_mb: f64,
     rewrite_out_mb: f64,
     crop_ms: f64,
-    crop_edit_ms: f64,
     bates_apply_ms: f64,
     bates_rewrite_ms: f64,
     flatten_ms: f64,
@@ -235,7 +416,6 @@ const SYNTHETIC: Baseline = Baseline {
     rewrite_added_mb: 50.5,
     rewrite_out_mb: 3.27,
     crop_ms: 445.0,
-    crop_edit_ms: 1.65,
     bates_apply_ms: 114.0,
     bates_rewrite_ms: 750.0,
     flatten_ms: 336.0,
@@ -259,7 +439,6 @@ const HEAVY: Baseline = Baseline {
     rewrite_added_mb: 248.0,
     rewrite_out_mb: 17.7,
     crop_ms: 2326.0,
-    crop_edit_ms: 1.70,
     bates_apply_ms: 270.0,
     bates_rewrite_ms: 3979.0,
     flatten_ms: 3489.0,
@@ -283,7 +462,6 @@ const SCANNED: Baseline = Baseline {
     rewrite_added_mb: 1021.0,
     rewrite_out_mb: 473.0,
     crop_ms: 2256.0,
-    crop_edit_ms: 1.71,
     bates_apply_ms: 428.0,
     bates_rewrite_ms: 1708.0,
     flatten_ms: 1495.0,
@@ -491,6 +669,7 @@ fn run_parts(test: &str, kind: Kind, parts: &[&str]) {
         match std::env::var(PART).as_deref() {
             Ok("flatten") => flatten(kind),
             Ok("rewrite") => rewrite_part(kind),
+            Ok("trim") => trim_part(kind),
             _ => gates(kind),
         }
         std::fs::write(done, "").unwrap();
@@ -959,112 +1138,137 @@ fn gates(kind: Kind) {
         gate: String::new(),
     });
 
-    // Crop every page by half an inch a side, as the app does: the cropped
-    // copy made in memory and interned, then the edit onto it. From slice
-    // 13 no engine opens on the copy then: the app's render worker opens
-    // one when a page of it is first drawn.
-    let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
-    let half_inch = CropSpec::Margins(Margins {
-        top: 36.0,
-        right: 36.0,
-        bottom: 36.0,
-        left: 36.0,
-    });
-    let mut edits = Vec::new();
-    let (crop, _) = measure(RUNS, || {
-        let snap = doc.snapshot();
-        let (t, edit) = timed(|| {
-            let plan =
-                sheaf_ops::crop::plan(doc.store(), &snap, &ids, half_inch, &NoProgress).unwrap();
-            timed(|| {
-                let pages = (plan.iter())
-                    .flat_map(|copy| {
-                        copy.note(&mut doc);
-                        copy.bases()
-                    })
-                    .collect();
-                doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
-            })
-            .0
+    // A watermark on every page, as the Watermark dialog sets it (slice
+    // 16): one op over the document, laid out on each page when a save or
+    // an overlay writes it, so the commit touches no page. Then with an
+    // image background under every page too: the Rewrite that draws both,
+    // the Append onto the file as opened, and the census of the Rewrite's
+    // pages, asserted: what their resources name that the file's didn't
+    // is one image, one font and one graphics state, and the pages have
+    // one resources dictionary for each the file's pages had. No baseline.
+    let (commit_watermark, _) = measure(QUICK_RUNS, || {
+        let (t, ()) = timed(|| {
+            doc.commit_ops(vec![every_watermark()], "Watermark")
+                .unwrap();
         });
-        edits.push(edit);
         doc.undo().unwrap();
         t
     });
     rows.push(Row::time(
-        "crop all pages",
-        crop,
-        base.crop_ms,
-        "< 200 ms, slice 15",
-    ));
-    rows.push(Row::time(
-        "crop all pages, the edit",
-        median(edits),
-        base.crop_edit_ms,
+        "watermark all pages, commit",
+        commit_watermark,
+        f64::NAN,
         "",
     ));
-    // The crop's edit as its dialog lands it (slice 12): made on the
-    // version the dialog opened on, and committed after the user deleted
-    // the last page, by value (`Stale::Validate`): each slot it changes
-    // checked against the version it lands on, then the post-merge check.
-    // Every page but the deleted one is cropped.
+    let image = background_image(&doc);
+    let ops = vec![every_watermark(), image_background(&image)];
+    doc.commit_ops(ops, "Watermarks").unwrap();
+    let snap = doc.snapshot();
+    let mut watermarked_mb = 0.0;
+    let (watermarked_rewrite, _) = measure(RUNS, || {
+        let (t, bytes) = timed(|| sheaf_doc::save::rewrite(&snap).unwrap());
+        watermarked_mb = mb(bytes.len() as u64);
+        t
+    });
+    let written = sheaf_doc::save::rewrite(&snap).unwrap();
+    // That file opened again, its watermark and background found: ready,
+    // with every page's streams' dictionaries read for their markers.
+    let marked = dir.join(format!("{}-{PAGES}-watermarked.pdf", kind.name()));
+    std::fs::write(&marked, &written).unwrap();
+    let census = Census::of(doc.primary(), written);
+    drop(snap);
+    let (found_ready, _) = measure(QUICK_RUNS, || {
+        let (t, opened) = timed(|| sheaf_doc::open::file(&marked, None).unwrap());
+        assert_eq!(opened.doc.state().generators().len(), 2, "both found");
+        t
+    });
+    std::fs::remove_file(&marked).unwrap();
+    let (watermarked_append, _) = measure(RUNS, || planned_and_put_back(&mut doc, &work));
+    doc.undo().unwrap();
+    drop(image);
+    let what = "watermark + image background, all pages";
+    rows.push(Row::time(
+        &format!("{what}, Rewrite"),
+        watermarked_rewrite,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row {
+        what: format!("{what}, Rewrite, the file written"),
+        now: Some(watermarked_mb),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: String::new(),
+    });
+    rows.push(Row::time(
+        &format!("{what}, Append"),
+        watermarked_append,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row::time(
+        &format!("{what}, ready, found again"),
+        found_ready,
+        f64::NAN,
+        "",
+    ));
+    rows.extend(census.rows());
+
+    // Crop every page by half an inch a side, as the Crop Pages dialog
+    // does from slice 15: one op over every page's boxes, in a transaction
+    // made on the version the dialog opened on, committed by value
+    // (`Stale::Validate`). No copy is made, and no engine opens.
+    let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
+    let half_inch = HALF_INCH;
+    let (all, _) = measure(RUNS, || {
+        let opened = doc.snapshot();
+        let (t, ()) = timed(|| cropped(&mut doc, &opened, &ids, half_inch));
+        doc.undo().unwrap();
+        t
+    });
+    let crop_gate = format!("< {} ms, asserted", CROP_GATE.as_millis());
+    rows.push(Row::time("crop all pages", all, base.crop_ms, &crop_gate));
+    // The crop as its dialog lands it (slice 12): made on the version the
+    // dialog opened on, and committed after the user deleted the last
+    // page, by value: each slot it changes checked against the version it
+    // lands on, then the post-merge check. Every page but the deleted one
+    // is cropped.
     let opened = doc.snapshot();
-    let plan = sheaf_ops::crop::plan(doc.store(), &opened, &ids, half_inch, &NoProgress).unwrap();
     let last = *ids.last().expect("the fixture has pages");
-    let bases: Vec<(PageId, Src, u32)> = (plan.iter())
-        .flat_map(|copy| {
-            copy.note(&mut doc);
-            copy.bases()
-        })
-        .filter(|&(page, ..)| page != last)
-        .collect();
+    let kept = &ids[..ids.len() - 1];
     let (validated, _) = measure(RUNS, || {
         doc.commit_ops(vec![delete(&[last])], "Delete page")
             .unwrap();
-        let pages = bases.clone();
-        let (t, ()) = timed(|| {
-            let mut tx = Document::tx_at(&opened, doc.lower_cx(Actor::User));
-            tx.set_page_base(pages, Derive::Crop).unwrap();
-            let opts = CommitOpts::based(opened.version, Stale::Validate, "Crop");
-            doc.commit(tx, opts).unwrap();
-        });
+        let (t, ()) = timed(|| cropped(&mut doc, &opened, kept, half_inch));
         doc.undo().unwrap();
         doc.undo().unwrap();
         t
     });
-    drop((plan, bases, opened));
+    drop(opened);
     rows.push(Row::time(
         "crop all pages, validated after a delete",
         validated,
-        base.crop_edit_ms,
-        "< 200 ms, slice 15",
+        base.crop_ms,
+        crop_gate,
     ));
 
-    // The thumbnail strip (slice 13's gate): every page cropped, the crop
-    // landed, and the legacy header on all of them, then every page's
-    // preview in order as the strip draws them, through a pool of its own
-    // whose two panes pin their groups (12 and 13, 26 and 27, as slice 2
-    // measured it). Each group's overlay is realized when its first page
-    // is drawn, by a realizer that has seen nothing, so its assembly is in
-    // the time. The screen's engines are weighed after each group.
+    // The thumbnail strip (slice 13's gate): every page cropped, a
+    // watermark on every page (slice 16) and a header on all of them, its
+    // blocks laid out on each (slice 17), then every page's preview in
+    // order as the strip draws them, through a pool of its own whose two
+    // panes pin their groups (12 and 13, 26 and 27, as slice 2 measured
+    // it). Each group's overlay is realized when its first page is drawn,
+    // by a realizer that has seen nothing, so its assembly is in the time.
+    // The screen's engines are weighed after each group.
     let snap = doc.snapshot();
-    let plan = sheaf_ops::crop::plan(doc.store(), &snap, &ids, half_inch, &NoProgress).unwrap();
-    let pages = (plan.iter())
-        .flat_map(|copy| {
-            copy.note(&mut doc);
-            copy.bases()
-        })
-        .collect();
-    doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
-    drop((plan, snap));
-    let mut texts: [String; 6] = Default::default();
-    texts[1] = "Draft".into();
-    texts[4] = "Page <<1>> of <<N>>".into();
-    let legacy = HeaderFooter {
-        texts,
-        ..Default::default()
-    };
-    set_header_footer(&mut doc, &legacy);
+    cropped(&mut doc, &snap, &ids, half_inch);
+    drop(snap);
+    doc.commit_ops(vec![every_watermark()], "Watermark")
+        .unwrap();
+    let mut paged = header("");
+    paged.texts[1] = "Draft".into();
+    paged.texts[4] = "Page <<1>> of <<N>>".into();
+    set_header_footer(&mut doc, &paged);
     let pool = EnginePool::new().unwrap();
     let views = Views::new(pool.clone());
     for groups in [[12, 13], [26, 27]] {
@@ -1086,15 +1290,16 @@ fn gates(kind: Kind) {
         })
     });
     drop((views, pool));
-    doc.undo().unwrap();
-    doc.undo().unwrap();
+    for _ in 0..3 {
+        doc.undo().unwrap();
+    }
     let strip_rate = f64::from(PAGES) / fill_all.as_secs_f64();
     let gate = match kind {
         Kind::Scanned => String::new(),
         _ => format!("≥ {STRIP_GATE} pages/s, asserted"),
     };
     rows.push(Row {
-        what: format!("thumbnail strip, crop + header, {PREVIEW_W} px"),
+        what: format!("thumbnail strip, crop + watermark + header, {PREVIEW_W} px"),
         now: Some(strip_rate),
         unit: "pages/s",
         baseline: kind.strip_pages_per_s(),
@@ -1119,18 +1324,13 @@ fn gates(kind: Kind) {
 
     // Bates numbers on every page, as the app applies them, and the
     // Rewrite that draws them. Each apply is a first one, on the file
-    // opened afresh (untimed): it classifies every page cold, where
-    // another on the same document would find their blocks known.
-    let mut texts: [String; 6] = Default::default();
-    texts[5] = "<<bates>>".into();
-    let bates = HeaderFooter {
-        texts,
-        bates: Some(Bates {
-            prefix: "GATE".into(),
-            ..Default::default()
-        }),
+    // opened afresh (untimed).
+    let mut bates = header("");
+    bates.texts[5] = "<<bates>>".into();
+    bates.bates = Some(BatesSpec {
+        prefix: "GATE".into(),
         ..Default::default()
-    };
+    });
     let (apply, _) = measure(RUNS, || {
         let mut fresh = sheaf_doc::open::file(&work, None).unwrap().doc;
         let (t, ()) = timed(|| set_header_footer(&mut fresh, &bates));
@@ -1142,18 +1342,214 @@ fn gates(kind: Kind) {
     let (drawn, _) = measure(RUNS, || {
         timed(|| sheaf_doc::save::rewrite(&snap).unwrap()).0
     });
+    // What that Rewrite's pages name that the file's didn't: the header's
+    // one font, which every page's block shares.
+    let bates_census = Census::of(doc.primary(), sheaf_doc::save::rewrite(&snap).unwrap());
     drop((snap, doc));
     rows.push(Row::time(
         "Bates apply, all pages",
         apply,
         base.bates_apply_ms,
-        "< 50 ms, slice 17",
+        format!("< {} ms, asserted", BATES_GATE.as_millis()),
     ));
     rows.push(Row::time(
         "Bates, the Rewrite that draws it",
         drawn,
         base.bates_rewrite_ms,
         "",
+    ));
+    rows.push(Row {
+        what: "Bates, census: fonts added".into(),
+        now: Some(bates_census.fonts.len() as f64),
+        unit: "",
+        baseline: f64::NAN,
+        gate: "1, asserted".into(),
+    });
+
+    // Recognized text on every page, as an OCR run's layers land (slice
+    // 18): set on every page in one transaction, on the file opened afresh
+    // (untimed), so the lowering reads each page's blocks cold to find the
+    // text it holds; then the Append that writes it as the app saves, the
+    // section it writes, and the census of the file it leaves: one
+    // glyphless font, and one block of recognized text a page. No
+    // baseline.
+    let layer = Arc::new(ocr_layer(0));
+    let (recognized, _) = measure(RUNS, || {
+        let mut fresh = sheaf_doc::open::file(&work, None).unwrap().doc;
+        let ops = every_page_recognized(&fresh, &layer);
+        let (t, ()) = timed(|| {
+            fresh.commit_ops(ops, "OCR").unwrap();
+        });
+        drop(fresh);
+        t
+    });
+    let mut recognizing = sheaf_doc::open::file(&work, None).unwrap().doc;
+    let ops = every_page_recognized(&recognizing, &layer);
+    recognizing.commit_ops(ops, "OCR").unwrap();
+    let mut ocr_section = 0;
+    let (ocr_append, ocr_mem) = measure(RUNS, || {
+        let (t, n) = planned_section(&mut recognizing, &work);
+        ocr_section = n;
+        t
+    });
+    let (_, _, appended) =
+        planned_save(&mut recognizing, &work, |file| std::fs::read(file).unwrap());
+    let ocr_census = Census::of(recognizing.primary(), appended);
+    drop((recognizing, layer));
+    let what = "recognized text, all pages";
+    rows.push(Row::time(
+        &format!("{what}, one Tx (blocks read cold)"),
+        recognized,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row::time(
+        &format!("{what}, Append"),
+        ocr_append,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row::added(
+        &format!("{what}, Append"),
+        ocr_mem,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row {
+        what: format!("{what}, the section"),
+        now: Some(mb(ocr_section)),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: String::new(),
+    });
+    rows.extend(ocr_census.ocr_rows());
+
+    // Proposal 8's verdict (slice 17), live page numbers kept (Greg,
+    // 2026-10-22): "Page <<1>> of <<N>>" set on every page, a page drawn
+    // before any save (the first everyday trigger); saved to the work
+    // copy, then the first half of the pages moved after the second by one
+    // move (which keeps them in document order, so no one move reverses
+    // them), which lays every page's number out again: the Append that
+    // writes it as the app saves (planned, a live redraw, and written),
+    // the section it writes, and a moved page drawn; and the move undone
+    // and the first page deleted (the second trigger), a page drawn. Each
+    // draw is at 1024 px through the engine pool, each run in a group none
+    // drew before (`first_drawn`). In the session that saved it, the
+    // blocks the move draws are numbered in the file already (another
+    // page's before), so the section is the pages and the tree; the same
+    // move on the file opened afresh, whose record knows its blocks only as
+    // the file's objects, writes every block anew, and its delete is drawn
+    // too.
+    let mut live = sheaf_doc::open::file(&work, None).unwrap().doc;
+    let mut paged = header("");
+    paged.texts[4] = "Page <<1>> of <<N>>".into();
+    set_header_footer(&mut live, &paged);
+    let set_drawn = first_drawn(&live);
+    sheaf_doc::materialize::save(&mut live, &work, &AskAnswers::default(), &NoProgress).unwrap();
+    let half: Vec<PageId> = (live.state().order().iter())
+        .take(PAGES as usize / 2)
+        .copied()
+        .collect();
+    live.commit_ops(vec![move_pages(&half, None)], "Move")
+        .unwrap();
+    let mut section = 0;
+    let (reorder, reorder_mem) = measure(RUNS, || {
+        let (t, n) = planned_section(&mut live, &work);
+        section = n;
+        t
+    });
+    let moved = first_drawn(&live);
+    live.undo().unwrap();
+    let first = live.state().order()[0];
+    live.commit_ops(vec![delete(&[first])], "Delete").unwrap();
+    let deleted = first_drawn(&live);
+    drop(live);
+    let mut reopened = sheaf_doc::open::file(&work, None).unwrap().doc;
+    let half: Vec<PageId> = (reopened.state().order().iter())
+        .take(PAGES as usize / 2)
+        .copied()
+        .collect();
+    reopened
+        .commit_ops(vec![move_pages(&half, None)], "Move")
+        .unwrap();
+    let mut reopened_section = 0;
+    let (reopened_reorder, reopened_mem) = measure(RUNS, || {
+        let (t, n) = planned_section(&mut reopened, &work);
+        reopened_section = n;
+        t
+    });
+    reopened.undo().unwrap();
+    let first = reopened.state().order()[0];
+    reopened
+        .commit_ops(vec![delete(&[first])], "Delete")
+        .unwrap();
+    let reopened_deleted = first_drawn(&reopened);
+    drop(reopened);
+    let what = "\"Page n of N\" on all pages";
+    let moved_what = format!("{what}, all moved after a save");
+    let opened_what = format!("{moved_what}, the file opened again");
+    let live_rows = LiveRows::of(kind);
+    rows.push(Row::time(
+        &format!("{what}, set, unsaved: a page drawn 1024 px"),
+        set_drawn,
+        f64::NAN,
+        live_rows.draw(LiveRow::SetDrawn),
+    ));
+    rows.push(Row::time(
+        &format!("{moved_what}, Append"),
+        reorder,
+        f64::NAN,
+        live_rows.append(LiveRow::Reorder),
+    ));
+    rows.push(Row::added(
+        &format!("{moved_what}, Append"),
+        reorder_mem,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row {
+        what: format!("{moved_what}, the section"),
+        now: Some(mb(section)),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: format!("≤ {REORDER_SECTION_MB} MB, asserted"),
+    });
+    rows.push(Row::time(
+        &format!("{moved_what}: a moved page drawn 1024 px"),
+        moved,
+        f64::NAN,
+        live_rows.draw(LiveRow::MovedDrawn),
+    ));
+    rows.push(Row::time(
+        &format!("{what}, one deleted after a save: a page drawn 1024 px"),
+        deleted,
+        f64::NAN,
+        live_rows.draw(LiveRow::DeletedDrawn),
+    ));
+    rows.push(Row::time(
+        &format!("{opened_what}, Append"),
+        reopened_reorder,
+        f64::NAN,
+        live_rows.append(LiveRow::ReopenedReorder),
+    ));
+    rows.push(Row::added(
+        &format!("{opened_what}, Append"),
+        reopened_mem,
+        f64::NAN,
+        "",
+    ));
+    rows.push(Row {
+        what: format!("{opened_what}, the section"),
+        now: Some(mb(reopened_section)),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: format!("≤ {REORDER_SECTION_MB} MB, asserted"),
+    });
+    rows.push(Row::time(
+        &format!("{what}, one deleted, the file opened again: a page drawn 1024 px"),
+        reopened_deleted,
+        f64::NAN,
+        live_rows.draw(LiveRow::ReopenedDeletedDrawn),
     ));
 
     std::fs::remove_file(&work).unwrap();
@@ -1195,6 +1591,37 @@ fn gates(kind: Kind) {
             "realize + open + render took {realized:?}, over {gate:?}"
         );
     }
+    census.assert();
+    assert!(
+        apply < BATES_GATE,
+        "Bates numbers on every page took {apply:?}, over {BATES_GATE:?}"
+    );
+    assert_eq!(
+        bates_census.fonts.len(),
+        1,
+        "the fonts the Bates numbers' Rewrite added"
+    );
+    ocr_census.assert_ocr();
+    let section = section.max(reopened_section);
+    assert!(
+        mb(section) <= REORDER_SECTION_MB,
+        "the Append of every page moved under \"Page n of N\" wrote {:.2} MB",
+        mb(section)
+    );
+    live_rows.assert_append(LiveRow::Reorder, reorder);
+    live_rows.assert_append(LiveRow::ReopenedReorder, reopened_reorder);
+    live_rows.assert_draw(LiveRow::SetDrawn, set_drawn);
+    live_rows.assert_draw(LiveRow::MovedDrawn, moved);
+    live_rows.assert_draw(LiveRow::DeletedDrawn, deleted);
+    live_rows.assert_draw(LiveRow::ReopenedDeletedDrawn, reopened_deleted);
+    assert!(
+        all < CROP_GATE,
+        "a crop of every page took {all:?}, over {CROP_GATE:?}"
+    );
+    assert!(
+        validated < CROP_GATE,
+        "a crop of every page validated after a delete took {validated:?}, over {CROP_GATE:?}"
+    );
     assert!(
         visits_heaviest <= SCREEN_BYTES,
         "the screen's engines weighed {:.1} MB visiting {visited} groups",
@@ -1305,6 +1732,31 @@ fn realize_open_render(doc: &mut Document, middle: u32, pool: &EnginePool<Engine
     realized
 }
 
+/// A page of `doc`, whose every page a live header numbers, drawn at 1024
+/// px as the page view draws it, through a pool of its own once a first
+/// page was: the median, each run a page in a group none drew before, by a
+/// realizer that has seen nothing, so its group is realized (every page of
+/// it laid out anew: set, moved or renumbered), its engine opened and the
+/// page rendered cold (proposal 8's draw, and the everyday triggers').
+fn first_drawn(doc: &Document) -> Duration {
+    let pool = EnginePool::new().unwrap();
+    let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
+    drawn(&Views::new(pool.clone()), doc, ids[0], 1024);
+    let mut run = 0;
+    let (t, _) = measure(QUICK_RUNS, || {
+        run += 1;
+        let page = ids[run * 7 * GROUP as usize];
+        let views = Views::new(pool.clone());
+        let (t, engine) = timed(|| drawn(&views, doc, page, 1024));
+        assert!(
+            matches!(engine, EngineKey::Group(..)),
+            "the page drew from {engine:?}"
+        );
+        t
+    });
+    t
+}
+
 /// The incremental save of one mark and the Rewrite on [`aes_256`]'s copy
 /// of the `kind` fixture, opened with its password, so every object they
 /// write is encrypted, an AES IV a keyed hash of the object's key (slices
@@ -1390,6 +1842,23 @@ fn incremental_rows(
 /// abandoned, and the file cut back to what it was, its time too, so its
 /// record's stamp holds again.
 fn planned_and_put_back(doc: &mut Document, work: &Path) -> Duration {
+    planned_section(doc, work).0
+}
+
+/// [`planned_and_put_back`], and the bytes the Append wrote after the
+/// file.
+fn planned_section(doc: &mut Document, work: &Path) -> (Duration, u64) {
+    let (t, section, ()) = planned_save(doc, work, |_| ());
+    (t, section)
+}
+
+/// [`planned_section`], and what `look` makes of the file as the save
+/// left it, before it's cut back.
+fn planned_save<T>(
+    doc: &mut Document,
+    work: &Path,
+    look: impl FnOnce(&Path) -> T,
+) -> (Duration, u64, T) {
     use sheaf_doc::materialize::{Onto, Strategy, plan, write_file};
     let meta = std::fs::metadata(work).unwrap();
     let (len, mtime) = (meta.len(), meta.modified().unwrap());
@@ -1405,11 +1874,13 @@ fn planned_and_put_back(doc: &mut Document, work: &Path) -> Duration {
     assert!(written.wrote, "the save wrote nothing");
     assert_eq!(written.strategy, Strategy::Append { onto: Onto::Saved });
     doc.abandon_save(v);
+    let section = std::fs::metadata(work).unwrap().len() - len;
+    let looked = look(work);
     let file = std::fs::File::options().write(true).open(work).unwrap();
     file.set_len(len).unwrap();
     file.set_modified(mtime).unwrap();
     file.sync_all().unwrap();
-    t
+    (t, section, looked)
 }
 
 /// How long the section of that save takes to make in memory, every check
@@ -1560,27 +2031,315 @@ fn rewrites_on_the_synthetic_and_heavy_7k() {
     }
 }
 
-/// Header & Footer as the app applies it: every source loaded to find the
-/// pages whose file already draws one, those moved onto stripped copies,
-/// then `hf` set, in one transaction. No engine opens on the copies (from
-/// slice 13 the app's render worker opens one when a page is drawn).
-fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) {
-    let snap = doc.snapshot();
-    let copies = sheaf_ops::derive::strip_stamps(doc.store(), &snap, &NoProgress).unwrap();
-    let pages: Vec<_> = (copies.iter())
-        .flat_map(|copy| {
-            copy.note(doc);
-            copy.bases()
-        })
-        .collect();
-    let mut tx = doc.tx(Actor::User);
-    if !pages.is_empty() {
-        tx.set_page_base(pages, Derive::StripHeaderFooter).unwrap();
+/// Trim White over every page of each fixture, each in a process of its
+/// own (see [`run`]), with neither a baseline nor a gate (slice 15).
+#[test]
+#[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
+fn trim_white_on_the_7k() {
+    for kind in [Kind::Synthetic, Kind::Heavy, Kind::Scanned] {
+        run_parts("trim_white_on_the_7k", kind, &["trim"]);
     }
-    let set = set_header(hf.spec(), hf.pages.as_deref());
-    tx.apply(set, &NoProgress).unwrap();
-    doc.commit(tx, CommitOpts::labelled("Header & footer"))
-        .unwrap();
+}
+
+/// Trim White over every page of the `kind` fixture, as Document > Crop
+/// Pages… trims them, every page cropped first: each page measured in a
+/// state that crops it as its file does, drawn under `content_only` at 72
+/// dpi through a pool of its own in the background's budget, as the app's
+/// planner measures them; then its crops lowered and committed by value
+/// on the version it measured. A page whose only change is its crop draws
+/// from its source's base engine there, so a first walk, untimed, counts
+/// the group engines it opens: a look at the pool's open engines a page,
+/// a round trip to its worker each. It reads each page's facts cold, as
+/// the app has by the time it trims, so the second walk, timed, is the
+/// planner's alone. One run, the walk taking seconds.
+fn trim_part(kind: Kind) {
+    let path = fixture(kind);
+    let cache = path.parent().unwrap().join("cache");
+    // SAFETY: every test here sets the same value before anything reads it.
+    unsafe { std::env::set_var("SHEAF_CACHE_DIR", &cache) };
+    let mut doc = sheaf_doc::open::file(&path, None).unwrap().doc;
+    let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
+    let snap = doc.snapshot();
+    cropped(&mut doc, &snap, &ids, HALF_INCH);
+    let snap = doc.snapshot();
+    let lower = doc.lower_cx(Actor::Job(JobKind::Trim));
+    let walk = |pool: &EnginePool<EngineKey>, progress: &dyn Progress| {
+        let views = Views::new(pool.clone());
+        let (pad, urgency) = (crop::PAD, Urgency::Background);
+        let found = trim_white(&views, &snap, lower.clone(), &ids, pad, urgency, progress);
+        found.unwrap()
+    };
+    let pool = EnginePool::new().unwrap();
+    let groups = GroupsOpened::new(pool.clone());
+    let first = walk(&pool, &groups);
+    groups.look();
+    drop(pool);
+    let pool = EnginePool::new().unwrap();
+    let (measured, found) = timed(|| walk(&pool, &NoProgress));
+    assert_eq!(found, first, "the second walk finds what the first did");
+    let opened = pool.opened();
+    drop(pool);
+    let (committed, commit) = timed(|| {
+        let mut tx = Document::tx_at(&snap, lower);
+        found.lower(&mut tx).unwrap();
+        let opts = CommitOpts::based(snap.version, Stale::Validate, "Crop");
+        doc.commit(tx, opts).unwrap()
+    });
+    assert!(commit.version.is_some(), "Trim White cropped nothing");
+    let count = |what: &str, n: usize| Row {
+        what: what.into(),
+        now: Some(n as f64),
+        unit: "",
+        baseline: f64::NAN,
+        gate: String::new(),
+    };
+    print_table(
+        &format!("Trim White on the {} 7k (slice 15)", kind.name()),
+        "baseline",
+        &[
+            Row::time("Trim White, all pages, measured", measured, f64::NAN, ""),
+            Row::time("Trim White, its crops committed", committed, f64::NAN, ""),
+            count("Trim White, pages cropped", found.crops.len()),
+            count("Trim White, pages left as they were", found.left.len()),
+            count("Trim White, engines opened", opened),
+            count("Trim White, group engines opened", groups.count()),
+        ],
+    );
+}
+
+/// `pages` of `doc` cropped by `m`, as Document > Crop Pages crops them:
+/// one op, in a transaction made on `opened`, the version the dialog
+/// opened on, committed by value.
+fn cropped(doc: &mut Document, opened: &Snapshot, pages: &[PageId], m: Margins) {
+    let mut tx = Document::tx_at(opened, doc.lower_cx(Actor::User));
+    tx.apply(crop(pages, m), &NoProgress).unwrap();
+    let opts = CommitOpts::based(opened.version, Stale::Validate, "Crop");
+    doc.commit(tx, opts).unwrap();
+}
+
+/// Header & Footer as the app applies it: `spec` set on every page, one
+/// op, which reads no page's content (from slice 17 the headers others
+/// drew are replaced as a save writes or a view draws the pages).
+fn set_header_footer(doc: &mut Document, spec: &HeaderFooterSpec) {
+    let set = set_header(spec.clone(), None);
+    doc.commit_ops(vec![set], "Header & footer").unwrap();
+}
+
+/// A text watermark over every page, as the Watermark dialog sets one.
+fn every_watermark() -> Op {
+    set_watermark(watermark("DRAFT"), Z::Over, None)
+}
+
+/// A PNG interned in `doc`'s store, held while it's named: a background's
+/// image, 600 by 400 pixels of a gradient.
+fn background_image(doc: &Document) -> Blob {
+    let rgb = image::RgbImage::from_fn(600, 400, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+    });
+    let png = sheaf_image::encode::png(&rgb, 72).unwrap();
+    let kind = BlobKind::image(&png).expect("a PNG is an image");
+    doc.store().intern(png.into(), kind).unwrap()
+}
+
+/// `image` under every page, half its width, as translucent as
+/// [`every_watermark`], so the two share a graphics state.
+fn image_background(image: &Blob) -> Op {
+    let spec = WatermarkSpec {
+        content: WatermarkContent::Image {
+            image: Some(BlobSel::Id(image.id())),
+            scale: 0.5,
+            opacity: 0.3,
+        },
+        position: GridPos::Center,
+    };
+    set_watermark(spec, Z::Under, None)
+}
+
+/// What a save's pages draw with that their file's didn't, page by page
+/// (slice 16's census, slice 17's of Bates numbers and slice 18's of
+/// recognized text): the objects their resources name under names the
+/// file's pages' resources don't have, by kind, and the resources
+/// dictionaries the pages have, beside how many the file's had (by the
+/// object, or the dictionary written inline); and the blocks of
+/// recognized text they draw (`/SheafBlock << /K /Ocr … >>`), with how
+/// many pages draw other than one.
+struct Census {
+    images: HashSet<ObjectId>,
+    forms: HashSet<ObjectId>,
+    fonts: HashSet<ObjectId>,
+    states: HashSet<ObjectId>,
+    properties: HashSet<ObjectId>,
+    page_res: HashSet<ObjectId>,
+    base_res: HashSet<String>,
+    ocr: HashSet<ObjectId>,
+    ocr_not_one: usize,
+}
+
+impl Census {
+    /// Of `written`, a file of `file`'s pages in order (a Rewrite, or an
+    /// Append onto it), sheaf drawing on every one.
+    fn of(file: &Src, written: Vec<u8>) -> Census {
+        let store = Store::new();
+        let kind = BlobKind::file(Path::new("census.pdf"), None);
+        let blob = store.intern(written.into(), kind).unwrap();
+        let out = store.source(&blob).unwrap();
+        assert_eq!(out.page_count(), file.page_count());
+        let mut census = Census {
+            images: HashSet::new(),
+            forms: HashSet::new(),
+            fonts: HashSet::new(),
+            states: HashSet::new(),
+            properties: HashSet::new(),
+            page_res: HashSet::new(),
+            base_res: HashSet::new(),
+            ocr: HashSet::new(),
+            ocr_not_one: 0,
+        };
+        let dict = |src: &Src, o: &Object| -> Option<Dictionary> {
+            Some(src.pdf().dereference(o).ok()?.1.as_dict().ok()?.clone())
+        };
+        for (was, now) in file.pages().iter().zip(out.pages()) {
+            let base = was.resources.as_deref();
+            census.base_res.insert(match base {
+                Some(Object::Reference(r)) => format!("{r:?}"),
+                inline => format!("{inline:?}"),
+            });
+            let Some(Object::Reference(at)) = now.resources.as_deref() else {
+                panic!("a page a generator draws on has resources of its own");
+            };
+            census.page_res.insert(*at);
+            let recognized: Vec<ObjectId> = (now.contents.iter().copied())
+                .filter(|&id| {
+                    (out.pdf().get(id).ok())
+                        .and_then(|o| Marker::of(&o.as_stream().ok()?.dict))
+                        .is_some_and(|m| matches!(m, Marker::Ocr(_)))
+                })
+                .collect();
+            census.ocr_not_one += usize::from(recognized.len() != 1);
+            census.ocr.extend(recognized);
+            let base = base.and_then(|o| dict(file, o)).unwrap_or_default();
+            let res = out.pdf().get_dictionary(*at).unwrap().clone();
+            for category in [b"XObject".as_slice(), b"Font", b"ExtGState", b"Properties"] {
+                let names = |src: &Src, d: &Dictionary| {
+                    (d.get(category).ok())
+                        .and_then(|o| dict(src, o))
+                        .unwrap_or_default()
+                };
+                let (had, has) = (names(file, &base), names(&out, &res));
+                for (name, value) in has.iter().filter(|(name, _)| !had.has(name)) {
+                    let Object::Reference(id) = value else {
+                        panic!("{} is written inline", String::from_utf8_lossy(name));
+                    };
+                    let subtype = (out.pdf().get(*id).ok())
+                        .and_then(|o| o.as_stream().ok().map(|s| s.dict.clone()))
+                        .and_then(|d| {
+                            d.get(b"Subtype")
+                                .and_then(Object::as_name)
+                                .ok()
+                                .map(<[u8]>::to_vec)
+                        });
+                    let set = match (category, subtype.as_deref()) {
+                        (b"XObject", Some(b"Image")) => &mut census.images,
+                        (b"XObject", _) => &mut census.forms,
+                        (b"Font", _) => &mut census.fonts,
+                        (b"ExtGState", _) => &mut census.states,
+                        _ => &mut census.properties,
+                    };
+                    set.insert(*id);
+                }
+            }
+        }
+        census
+    }
+
+    /// Its rows: what it counts, and what's asserted of it.
+    fn rows(&self) -> Vec<Row> {
+        let count = |what: &str, n: usize, gate: String| Row {
+            what: format!("census: {what}"),
+            now: Some(n as f64),
+            unit: "",
+            baseline: f64::NAN,
+            gate,
+        };
+        let one = || "1, asserted".to_string();
+        vec![
+            count("images added", self.images.len(), one()),
+            count("fonts added", self.fonts.len(), one()),
+            count("graphics states added", self.states.len(), one()),
+            count("forms added", self.forms.len(), "0, asserted".into()),
+            count("property lists added", self.properties.len(), String::new()),
+            count(
+                "pages' resources dictionaries",
+                self.page_res.len(),
+                format!("the file's {}, asserted", self.base_res.len()),
+            ),
+        ]
+    }
+
+    /// One image, one font and one graphics state added to the file, no
+    /// form, and a resources dictionary for each the file's pages had.
+    fn assert(&self) {
+        let counts = [
+            self.images.len(),
+            self.fonts.len(),
+            self.states.len(),
+            self.forms.len(),
+        ];
+        assert_eq!(
+            counts,
+            [1, 1, 1, 0],
+            "the watermark's images, fonts, graphics states and forms"
+        );
+        assert_eq!(
+            self.page_res.len(),
+            self.base_res.len(),
+            "a resources dictionary for each the file's pages had"
+        );
+    }
+
+    /// Its rows for recognized text on every page: the font it adds, its
+    /// blocks, and the property lists that name them.
+    fn ocr_rows(&self) -> Vec<Row> {
+        let count = |what: &str, n: usize, gate: String| Row {
+            what: format!("recognized text, census: {what}"),
+            now: Some(n as f64),
+            unit: "",
+            baseline: f64::NAN,
+            gate,
+        };
+        vec![
+            count("fonts added", self.fonts.len(), "1, asserted".into()),
+            count(
+                "blocks",
+                self.ocr.len(),
+                format!("{PAGES}, one a page, asserted"),
+            ),
+            count(
+                "pages drawing other than one",
+                self.ocr_not_one,
+                "0, asserted".into(),
+            ),
+            count("property lists added", self.properties.len(), String::new()),
+        ]
+    }
+
+    /// One font added to the file, the glyphless font every block draws
+    /// with, and one block of recognized text on every page, each its own.
+    fn assert_ocr(&self) {
+        assert_eq!(self.fonts.len(), 1, "the fonts recognized text added");
+        assert_eq!(
+            self.ocr_not_one, 0,
+            "pages drawing other than one block of recognized text"
+        );
+        assert_eq!(self.ocr.len(), PAGES as usize, "blocks of recognized text");
+    }
+}
+
+/// `layer` on every page of `doc`, one `SetOcrText` a page, as an OCR
+/// run's flushes set it.
+fn every_page_recognized(doc: &Document, layer: &Arc<TextLayer>) -> Vec<Op> {
+    let ids = doc.state().order().iter();
+    ocr(ids.map(|&id| (id, layer.clone())))
 }
 
 /// Page `id` of `doc` drawn `width` wide under the screen's inputs by
@@ -1598,6 +2357,52 @@ fn drawn(views: &Views, doc: &Document, id: PageId, width: u32) -> EngineKey {
     let rx = (views.draw(st, id, &view, &screen, job, format, 1, budget)).unwrap();
     block_on(rx).expect("the render thread is gone").unwrap();
     view.engine
+}
+
+/// A walk's progress that notes, at each step, the group engines open in
+/// its pool: each one a walk that reads one page at a time opened, since
+/// the engine a page was drawn from is still open when the next begins.
+struct GroupsOpened {
+    pool: EnginePool<EngineKey>,
+    seen: Mutex<HashSet<EngineKey>>,
+}
+
+impl GroupsOpened {
+    fn new(pool: EnginePool<EngineKey>) -> Self {
+        GroupsOpened {
+            pool,
+            seen: Mutex::default(),
+        }
+    }
+
+    /// Notes the group engines open now.
+    fn look(&self) {
+        let open = self.pool.open_engines().into_iter();
+        let groups = open.filter(|e| matches!(e, EngineKey::Group(..)));
+        self.seen.lock().unwrap().extend(groups);
+    }
+
+    /// The group engines seen open.
+    fn count(&self) -> usize {
+        self.seen.lock().unwrap().len()
+    }
+}
+
+impl Progress for GroupsOpened {
+    fn set_total(&self, _: Option<u64>, _: Unit) {}
+    fn set(&self, _: u64) {
+        self.look();
+    }
+    fn inc(&self, _: u64) {
+        self.look();
+    }
+    fn message(&self, _: Level, _: &str) {}
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn child(&self, _: &str, _: f64) -> Box<dyn Progress> {
+        Box::new(NoProgress)
+    }
 }
 
 /// Slice 14's walks over every page of the synthetic and heavy 7k, with
@@ -1656,8 +2461,9 @@ fn text_walks_on_the_synthetic_and_heavy_7k() {
 /// (M10.5 slice 1). Beside them, with neither a baseline nor a gate, one
 /// transaction of 7,000 ops of one kind, an OCR run's layer set on every
 /// page, lowered and then committed as an OCR group's version, which
-/// History shows as one line (slice 11); an OCR run as the app makes one
-/// ([`ocr_run`]): 700 flushes, each amending the group's version, the
+/// History shows as one line (slice 11), each page's blocks read as it's
+/// lowered, the first run's cold (slice 18); an OCR run as the app makes
+/// one ([`ocr_run`]): 700 flushes, each amending the group's version, the
 /// last ones joining a version of thousands of steps; and an insert of 10
 /// pages made on a version, then lowered again on the current one after
 /// the user moved a page (slice 12).
@@ -1738,6 +2544,7 @@ fn history_at_7k_pages_and_20k_marks() {
         d.undo().unwrap();
     }
     let (add, reorder) = (median(adds), median(reorders));
+    let lowered_cold = lowered[0];
     print_table(
         "history: 7,000 pages, 20,000 marks",
         "slice 2",
@@ -1752,6 +2559,12 @@ fn history_at_7k_pages_and_20k_marks() {
             Row::time(
                 "7,000 SetOcrText in one Tx, lowered",
                 median(lowered),
+                f64::NAN,
+                "",
+            ),
+            Row::time(
+                "  the first, each page's blocks read cold",
+                lowered_cold,
                 f64::NAN,
                 "",
             ),

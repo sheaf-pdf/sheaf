@@ -1,27 +1,33 @@
-//! A page keeps its form through the page tools (M10 slice 3). Crop,
-//! watermark and Remove Header/Footer carry its fields into the copy they
-//! make, so the page shows them, and a save writes them back as they were
-//! (bug 1). A removed page's widgets leave the file, values and all, even
-//! ones only the structure tree's parent tree reaches (bug 5). A form left
-//! with no fields goes, and direct-object fields are pruned too (bug 10).
-//! Each by both save strategies, with the form check clean on the output.
+//! A page keeps its form through the page tools (M10 slice 3). A crop is
+//! the page's box, and a watermark or a header and footer is drawn on the
+//! page as a save writes it, Acrobat's taken off it as it's written, so
+//! each keeps the page's own fields, and nothing is made of the page
+//! (M10.5 slices 15–17); the page shows them, and a save writes them back
+//! as they were (bug 1). A
+//! removed page's widgets leave the file, values and all, even ones only
+//! the structure tree's parent tree reaches (bug 5). A form left with no
+//! fields goes, and direct-object fields are pruned too (bug 10). Each by
+//! both save strategies, with the form check clean on the output.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use std::collections::BTreeMap;
 
+use futures::executor::block_on;
 use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
+use sheaf_doc::content::PagOrigin;
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::corpus::Corpus;
-use sheaf_doc::forms::fixture::Form;
-use sheaf_doc::tx::fixture::{delete, set_header};
-use sheaf_doc::{Actor, CommitOpts, Derive, Document, PageId};
-use sheaf_edit::{Op, PageSel};
+use sheaf_doc::forms::fixture::{Form, source};
+use sheaf_doc::realize::ViewInputs;
+use sheaf_doc::tx::fixture::{
+    delete, header, remove_watermark, set_header, set_watermark, watermark,
+};
+use sheaf_doc::{Document, PageId};
+use sheaf_edit::{Margins, Op, PageSel, Rotation, Z};
 use sheaf_image::raster::PixelFormat;
-use sheaf_ops::crop::{CropSpec, Margins};
-use sheaf_render::PageIndex;
-use sheaf_render::Renderer;
-use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
+use sheaf_render::pdfium::render_appearances;
+use sheaf_render::{Budget, Job, PageIndex};
 
 mod common;
 use common::*;
@@ -41,40 +47,30 @@ fn crop_box(bytes: &[u8], page: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Two pages: on the first, text fields `a` (blue) and `c` and a check
-/// box; on the second, `b` (blue).
-fn two_page_form() -> Form {
-    let mut f = Form::new(2);
-    blue(&mut f, "a", 0, 0, "Alpha");
-    f.text("c", 0, row(1));
-    f.check_box("box", 0, row(2), true);
-    blue(&mut f, "b", 1, 0, "Beta");
-    f
-}
-
-/// Move `pages` of `doc` onto derived copies, as the app does.
-fn rebase(
-    doc: &mut Document,
-    derived: Vec<sheaf_ops::derive::DerivedSource>,
-    why: Derive,
-    what: &str,
-) {
-    assert!(!derived.is_empty(), "{what} made no copy");
-    for d in derived {
-        d.note(doc);
-        let pages = d.bases().collect();
-        doc.commit_page_base(pages, why, what).unwrap();
-    }
-}
-
 sheaf_doc::both_ways!(
     a_cropped_form_page_keeps_its_fields,
     a_cropped_form_page_keeps_its_fields_appended: a_cropped_form_page_keeps_its_fields_by
 );
 
+/// A cropped form page keeps its widgets and shows its value, with no copy
+/// and no cache file: the page is still its file's, cropped, and on screen
+/// the document's views draw its field (a copy once had no `/AcroForm`, and
+/// the field was blank); nothing is made of it, in the store or the cache
+/// ([`own_cache`]); and saved `how`, the file has the form, its values,
+/// the crop, the value drawn, and the page's annotations as they were.
 fn a_cropped_form_page_keeps_its_fields_by(how: How) {
+    let test = match how {
+        How::Rewritten => "a_cropped_form_page_keeps_its_fields",
+        How::Appended => "a_cropped_form_page_keeps_its_fields_appended",
+    };
+    own_cache(test, || cropped_form_page(how));
+}
+
+/// [`a_cropped_form_page_keeps_its_fields_by`]'s case, in its process.
+fn cropped_form_page(how: How) {
     let dir = scratch(&format!("crop-{how:?}"));
     let path = write(&dir, "form.pdf", &mut two_page_form());
+    let input = std::fs::read(&path).unwrap();
     let mut doc = open(&path);
     let page: PageId = doc.state().order()[0];
     // 100 pt off the bottom: the fields stay in view.
@@ -84,35 +80,25 @@ fn a_cropped_form_page_keeps_its_fields_by(how: How) {
         right: 0.0,
         bottom: 100.0,
     };
-    let plan = sheaf_ops::crop::plan(
-        doc.store(),
-        &doc.snapshot(),
-        &[page],
-        CropSpec::Margins(margins),
-        &sheaf_ops::NoProgress,
-    )
-    .unwrap();
-    // On screen: the copy is a form, so PDFium draws its widgets (before,
-    // it had no /AcroForm and the field was blank).
-    let copy = plan[0].src.bytes().clone();
-    let shown = PdfiumEngine::open_bytes(copy.clone(), None).unwrap();
-    let r = shown
-        .render_page(PageIndex(0), 612, PixelFormat::Rgba)
-        .unwrap();
+    crop(&mut doc, &[page], margins);
+    let base = &doc.state().def(page).unwrap().base;
+    assert_eq!(base.src, *doc.primary());
+    assert!(nothing_made(&doc), "no copy in the store");
+    let job = Job::Page {
+        width: 612,
+        rotation: Rotation::R0,
+    };
+    let (format, budget) = (PixelFormat::Rgba, Budget::Screen);
+    let screen = ViewInputs::screen();
+    let rx = views().render(doc.state(), page, &screen, job, format, 0, budget);
+    let r = block_on(rx).unwrap().unwrap().raster;
     assert!(
         blue_in(&r, 0, 792.0) > HALF_A_ROW,
-        "the copy draws the field"
+        "the page draws the field"
     );
-    assert_eq!(values(&copy)["a"], "Alpha");
-    // Only the copied page's fields came along.
-    assert!(!values(&copy).contains_key("b"));
-    clean(&copy, "the cropped copy");
-
-    plan[0].note(&mut doc);
-    let pages = plan[0].bases().collect();
-    doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
-    let (strategy, bytes) = (how.strategy(), written(&doc, how));
+    let (strategy, bytes) = saved(&mut doc, &path, how);
     let what = format!("{strategy:?}");
+    assert_eq!(strategy, how.strategy());
     let report = clean(&bytes, &what);
     assert_eq!((report.fields, report.widgets), (4, 4), "{what}");
     let v = values(&bytes);
@@ -132,66 +118,85 @@ fn a_cropped_form_page_keeps_its_fields_by(how: How) {
         blue_in(&r, 0, 792.0) > HALF_A_ROW,
         "{what}: the value shows"
     );
-    // The copy's own widgets didn't come along: the page has its own.
-    let pdf = Pdf::load_mem(&bytes).unwrap();
-    let first = pdf.get_pages()[&1];
-    let annots = pdf.get_dictionary(first).unwrap().get(b"Annots").unwrap();
-    let annots = pdf.dereference(annots).unwrap().1.as_array().unwrap().len();
-    assert_eq!(annots, 3, "{what}");
+    // The page's annotations are its own widgets, as they were: the same
+    // objects after an Append, the same fields at the same places after a
+    // Rewrite.
+    let [was, now] = [&input, &bytes].map(|b| annots_of(b, 0));
+    assert_eq!(now.len(), 3, "{what}");
+    let what_each = |a: &[(ObjectId, String)]| a.iter().map(|(_, a)| a.clone()).collect::<Vec<_>>();
+    assert_eq!(what_each(&now), what_each(&was), "{what}");
+    if how == How::Appended {
+        assert_eq!(now, was, "{what}: the same objects");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A watermark on both pages, and with `remove`, taken off again (a
-/// copy of a copy), written `how`.
-fn watermarked(remove: bool, how: How) {
-    let name = if remove { "unmarked" } else { "marked" };
-    let dir = scratch(&format!("{name}-{how:?}"));
-    let path = write(&dir, "form.pdf", &mut two_page_form());
-    let mut doc = open(&path);
-    let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
-    let wm = sheaf_doc::watermark::Watermark::default();
-    let snap = doc.snapshot();
-    let derived = sheaf_ops::derive::watermark(
-        doc.store(),
-        &snap,
-        false,
-        Some(&wm),
-        &pages,
-        &sheaf_ops::NoProgress,
-    )
-    .unwrap();
-    let copy = derived[0].src.bytes().clone();
-    let shown = PdfiumEngine::open_bytes(copy.clone(), None).unwrap();
-    let r = shown
-        .render_page(PageIndex(1), 612, PixelFormat::Rgba)
-        .unwrap();
-    assert!(
-        blue_in(&r, 0, 792.0) > HALF_A_ROW,
-        "the copy draws the field"
-    );
-    clean(&copy, "the watermarked copy");
-    let drawn = Derive::Watermark {
-        behind: false,
-        unencodable: false,
+/// Page `page`'s annotations in `bytes`: each object, and what it is: its
+/// subtype, field name and `/Rect`.
+fn annots_of(bytes: &[u8], page: usize) -> Vec<(ObjectId, String)> {
+    let pdf = Pdf::load_mem(bytes).unwrap();
+    let id = pdf.get_pages()[&(page as u32 + 1)];
+    let annots = pdf.get_dictionary(id).unwrap().get(b"Annots").unwrap();
+    let annots = pdf.dereference(annots).unwrap().1.as_array().unwrap();
+    (annots.iter())
+        .map(|a| {
+            let at = a.as_reference().unwrap();
+            let d = pdf.get_dictionary(at).unwrap();
+            let subtype = String::from_utf8_lossy(d.get(b"Subtype").unwrap().as_name().unwrap());
+            let name = d.get(b"T").and_then(|t| t.as_str()).unwrap_or_default();
+            let rect = d.get(b"Rect").unwrap().as_array().unwrap();
+            let rect: Vec<f64> = rect.iter().map(|v| v.as_float().unwrap()).collect();
+            let name = String::from_utf8_lossy(name);
+            (at, format!("{subtype} {name:?} {rect:?}"))
+        })
+        .collect()
+}
+
+/// Each widget on `bytes`' pages has its page as its `/P`.
+fn on_their_pages(bytes: &[u8]) -> bool {
+    let pdf = Pdf::load_mem(bytes).unwrap();
+    pdf.get_pages().into_values().all(|page| {
+        let annots = pdf.get_dictionary(page).unwrap().get(b"Annots");
+        let annots = annots
+            .and_then(|a| pdf.dereference(a))
+            .map(|(_, a)| a.clone());
+        let annots = annots.ok().and_then(|a| a.as_array().ok().cloned());
+        (annots.unwrap_or_default().iter()).all(|a| {
+            let d = pdf.get_dictionary(a.as_reference().unwrap()).unwrap();
+            d.get(b"Subtype").unwrap().as_name().unwrap() != b"Widget"
+                || d.get(b"P").and_then(Object::as_reference).ok() == Some(page)
+        })
+    })
+}
+
+/// Whether `doc`'s store holds no source but the file it opened: nothing
+/// was made of its pages.
+fn nothing_made(doc: &Document) -> bool {
+    (doc.store().sources().iter()).all(|src| src == doc.primary())
+}
+
+/// [`two_page_form`]'s edits kept its fields, `doc` written `how`: nothing
+/// is made of the pages, in the store or the cache ([`own_cache`]); on
+/// screen the document's views draw the fields; and the file has the
+/// form, its values, each widget on its page and the values drawn, the
+/// form check clean. The file.
+fn kept_its_fields(doc: &Document, how: How, what: &str) -> Vec<u8> {
+    assert!(nothing_made(doc), "{what}: no copy in the store");
+    let job = Job::Page {
+        width: 612,
+        rotation: Rotation::R0,
     };
-    rebase(&mut doc, derived, drawn, "Watermark");
-    if remove {
-        let snap = doc.snapshot();
-        let derived = sheaf_ops::derive::watermark(
-            doc.store(),
-            &snap,
-            false,
-            None,
-            &pages,
-            &sheaf_ops::NoProgress,
-        )
-        .unwrap();
-        let removed = Derive::RemoveWatermark { behind: false };
-        rebase(&mut doc, derived, removed, "Remove Watermark");
+    let (format, budget, screen) = (PixelFormat::Rgba, Budget::Screen, ViewInputs::screen());
+    for &page in doc.state().order() {
+        let rx = views().render(doc.state(), page, &screen, job, format, 0, budget);
+        let r = block_on(rx).unwrap().unwrap().raster;
+        assert!(
+            blue_in(&r, 0, 792.0) > HALF_A_ROW,
+            "{what}: {page:?} draws its field"
+        );
     }
-    let bytes = written(&doc, how);
-    let what = format!("{name}, {how:?}");
-    let report = clean(&bytes, &what);
+    let bytes = written(doc, how);
+    let report = clean(&bytes, what);
     assert_eq!((report.fields, report.widgets), (4, 4), "{what}");
     let v = values(&bytes);
     assert_eq!(
@@ -199,10 +204,31 @@ fn watermarked(remove: bool, how: How) {
         ("Alpha", "Beta"),
         "{what}"
     );
+    assert!(on_their_pages(&bytes), "{what}");
     for page in 0..2 {
         let r = render_appearances(&bytes, None, PageIndex(page), 612).unwrap();
         assert!(blue_in(&r, 0, 792.0) > HALF_A_ROW, "{what}: page {page}");
     }
+    bytes
+}
+
+/// A watermark on both pages, and with `remove`, taken off again, written
+/// `how`: edits of the document, which keep its fields
+/// ([`kept_its_fields`]), and the file has the mark, or not.
+fn watermarked(remove: bool, how: How) {
+    let name = if remove { "unmarked" } else { "marked" };
+    let dir = scratch(&format!("{name}-{how:?}"));
+    let path = write(&dir, "form.pdf", &mut two_page_form());
+    let mut doc = open(&path);
+    let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
+    let set = set_watermark(watermark("DRAFT"), Z::Over, None);
+    doc.commit_ops(vec![set], "Watermark").unwrap();
+    if remove {
+        let removed = remove_watermark(Some(Z::Over), &pages);
+        doc.commit_ops(vec![removed], "Remove watermark").unwrap();
+    }
+    let what = format!("{name}, {how:?}");
+    let bytes = kept_its_fields(&doc, how, &what);
     assert_eq!(holds(&bytes, b"DRAFT"), !remove, "{what}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -213,7 +239,11 @@ sheaf_doc::both_ways!(
 );
 
 fn marked_by(how: How) {
-    watermarked(false, how);
+    let test = match how {
+        How::Rewritten => "a_watermarked_form_keeps_its_fields",
+        How::Appended => "a_watermarked_form_keeps_its_fields_appended",
+    };
+    own_cache(test, || watermarked(false, how));
 }
 
 sheaf_doc::both_ways!(
@@ -222,7 +252,11 @@ sheaf_doc::both_ways!(
 );
 
 fn unmarked_by(how: How) {
-    watermarked(true, how);
+    let test = match how {
+        How::Rewritten => "a_form_with_its_watermark_removed_keeps_its_fields",
+        How::Appended => "a_form_with_its_watermark_removed_keeps_its_fields_appended",
+    };
+    own_cache(test, || watermarked(true, how));
 }
 
 /// Tag `form` as Acrobat tags some forms: beside each widget's `/Form`
@@ -264,63 +298,70 @@ fn tag_with_strays(form: &mut Form) {
         .set("ParentTree", dictionary! { "Nums" => strays });
 }
 
-#[test]
-fn a_form_with_its_header_and_footer_removed_keeps_its_fields() {
-    let dir = scratch("header-footer");
-    let path = write(&dir, "form.pdf", &mut two_page_form());
-    // A footer, saved into the file.
-    let mut doc = open(&path);
-    let hf = sheaf_doc::stamps::HeaderFooter {
-        texts: [
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            "SHEAFFOOTER <<1>>".into(),
-            String::new(),
-        ],
-        ..Default::default()
-    };
-    doc.commit_ops(vec![set_header(hf.spec(), None)], "Header & footer")
-        .unwrap();
-    let footed = dir.join("footed.pdf");
-    sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &footed).unwrap();
-    assert!(holds(&std::fs::read(&footed).unwrap(), b"SHEAFFOOTER"));
+sheaf_doc::both_ways!(
+    a_form_with_acrobat_s_header_replaced_keeps_its_fields,
+    a_form_with_acrobat_s_header_replaced_keeps_its_fields_appended: replaced_by
+);
 
-    // Removed, as the app does it.
-    let mut doc = open(&footed);
-    let derived =
-        sheaf_ops::derive::strip_stamps(doc.store(), &doc.snapshot(), &sheaf_ops::NoProgress)
-            .unwrap();
-    assert_eq!(derived.len(), 1);
-    derived[0].note(&mut doc);
-    let mut tx = doc.tx(Actor::User);
-    let pages = derived[0].bases().collect();
-    tx.set_page_base(pages, Derive::StripHeaderFooter).unwrap();
-    let remove = Op::RemoveHeaderFooter {
-        pages: PageSel::All,
+fn replaced_by(how: How) {
+    let test = match how {
+        How::Rewritten => "a_form_with_acrobat_s_header_replaced_keeps_its_fields",
+        How::Appended => "a_form_with_acrobat_s_header_replaced_keeps_its_fields_appended",
     };
-    tx.apply(remove, &sheaf_ops::NoProgress).unwrap();
-    doc.commit(tx, CommitOpts::labelled("Remove header & footer"))
-        .unwrap();
-    // The footer's gone from the file: a save is a Rewrite.
-    let saved = rewritten_and_saved(&mut doc, &footed);
-    assert_eq!(saved[1].0, StrategyKind::Rewrite);
-    for (strategy, bytes) in saved {
-        let what = format!("{strategy:?}");
-        assert!(!holds(&bytes, b"SHEAFFOOTER"), "{what}");
-        let report = clean(&bytes, &what);
-        assert_eq!((report.fields, report.widgets), (4, 4), "{what}");
-        let v = values(&bytes);
-        assert_eq!(
-            (v["a"].as_str(), v["b"].as_str()),
-            ("Alpha", "Beta"),
-            "{what}"
-        );
-        for page in 0..2 {
-            let r = render_appearances(&bytes, None, PageIndex(page), 612).unwrap();
-            assert!(blue_in(&r, 0, 792.0) > HALF_A_ROW, "{what}: page {page}");
+    own_cache(test, || headed(false, how));
+}
+
+sheaf_doc::both_ways!(
+    a_form_with_its_header_and_footer_removed_keeps_its_fields,
+    a_form_with_its_header_and_footer_removed_keeps_its_fields_appended: removed_by
+);
+
+fn removed_by(how: How) {
+    let test = match how {
+        How::Rewritten => "a_form_with_its_header_and_footer_removed_keeps_its_fields",
+        How::Appended => "a_form_with_its_header_and_footer_removed_keeps_its_fields_appended",
+    };
+    own_cache(test, || headed(true, how));
+}
+
+/// Acrobat's header on both pages, a footer of the document's set over it,
+/// or with `remove`, the header and footer taken off, written `how`: edits
+/// of the document, which keep its fields ([`kept_its_fields`]); Acrobat's
+/// header is off every page the file draws, and the document's footer on
+/// them, or not.
+fn headed(remove: bool, how: How) {
+    let name = if remove { "unheaded" } else { "headed" };
+    let dir = scratch(&format!("{name}-{how:?}"));
+    let path = write(&dir, "form.pdf", &mut acrobat_headed_form());
+    let mut doc = open(&path);
+    let op = match remove {
+        true => Op::RemoveHeaderFooter {
+            pages: PageSel::All,
+            include_authored: false,
+        },
+        false => {
+            let mut spec = header("");
+            spec.texts[4] = "SHEAFFOOTER <<1>>".into();
+            set_header(spec, None)
         }
+    };
+    doc.commit_ops(vec![op], "Header & footer").unwrap();
+    let what = format!("{name}, {how:?}");
+    let bytes = kept_its_fields(&doc, how, &what);
+    let file = source(bytes.clone());
+    for page in 0..file.page_count() {
+        let blocks = file.blocks(page).unwrap();
+        let origins: Vec<PagOrigin> = blocks.pagination.iter().map(|p| p.origin).collect();
+        let want = if remove {
+            vec![]
+        } else {
+            vec![PagOrigin::Sheaf]
+        };
+        assert_eq!(origins, want, "{what}: page {page}");
+    }
+    assert_eq!(holds(&bytes, b"SHEAFFOOTER"), !remove, "{what}");
+    if how == How::Rewritten {
+        assert!(!holds(&bytes, b"ACROBATHEADER"), "{what}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -649,18 +690,7 @@ fn corpus_cropped_forms_keep_their_fields_by(how: How) {
             right: 10.0,
             bottom: 10.0,
         };
-        let snap = doc.snapshot();
-        let plan = sheaf_ops::crop::plan(
-            doc.store(),
-            &snap,
-            &[page],
-            CropSpec::Margins(margins),
-            &sheaf_ops::NoProgress,
-        )
-        .unwrap();
-        plan[0].note(&mut doc);
-        let pages = plan[0].bases().collect();
-        doc.commit_page_base(pages, Derive::Crop, "Crop").unwrap();
+        crop(&mut doc, &[page], margins);
         let (strategy, bytes) = (how.strategy(), written(&doc, how));
         let what = format!("{file}, {strategy:?}");
         let report = check(&bytes, None).unwrap();
@@ -685,7 +715,7 @@ fn corpus_deleted_pages_leave_no_values() {
     };
     let dir = scratch("corpus-delete");
     let (mut tried, mut failed) = (0, Vec::new());
-    for entry in corpus.manifest().unwrap() {
+    for entry in corpus.forms().unwrap() {
         if entry.path.starts_with("forms/safedocs/") || entry.pages < 2 {
             continue;
         }

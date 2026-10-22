@@ -371,12 +371,12 @@ pub fn info(id: &str) -> Option<Info> {
         ),
         "workspace::HeaderFooter" => (
             "header-footer",
-            "Add, update or remove a header and footer: text with the page number, page count, date and file name.",
+            "Add, update or remove a header and footer: text with the page number, page count, page label, date and file name. It replaces one Acrobat or an older sheaf drew, and keeps the author's own running heads unless you remove them too.",
             &["page numbers", "running head", "footer", "stamp"],
         ),
         "workspace::BatesNumbering" => (
             "bates",
-            "Number every page with a Bates number, like ABC000123, in the header or footer.",
+            "Number every page with a Bates number, like ABC000123, in the header or footer: fixed as you apply it, so moving pages keeps their numbers.",
             &[
                 "legal",
                 "discovery",
@@ -387,12 +387,12 @@ pub fn info(id: &str) -> Option<Info> {
         ),
         "workspace::AddWatermark" => (
             "watermark",
-            "Add, update or remove a watermark: text like DRAFT, or an image, across the pages in front of their content.",
+            "Add, update or remove a watermark: text like DRAFT, an image or a PDF's page, across the pages in front of their content.",
             &["draft", "confidential", "stamp", "copy", "overlay"],
         ),
         "workspace::AddBackground" => (
             "background",
-            "Add, update or remove a background: text or an image behind the pages' content.",
+            "Add, update or remove a background: text, an image or a PDF's page behind the pages' content.",
             &["letterhead", "underlay", "behind", "stationery"],
         ),
         "workspace::BookmarksFromPages" => (

@@ -541,7 +541,8 @@ fn with_xmp(xml: &str, deflate: bool) -> Result<Src, OpenError> {
     ])
 }
 
-fn xmp(description: &str) -> String {
+/// XMP metadata holding `description`, its `rdf:Description`s.
+pub(crate) fn xmp(description: &str) -> String {
     format!(
         "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\
          <x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
@@ -566,6 +567,7 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
     };
     assert_eq!(claims(attributes, false).unwrap(), pdfa_2b);
     assert_eq!(claims(attributes, true).unwrap(), pdfa_2b);
+    assert_eq!(pdfa_2b.pdfa.unwrap().to_string(), "PDF/A-2b");
     // Elements, under any prefix, and PDF/UA beside PDF/A.
     let elements = "<rdf:Description rdf:about=\"\" xmlns:a=\"http://www.aiim.org/pdfa/ns/id/\">\
          <a:part>3</a:part><a:conformance>A</a:conformance></rdf:Description>\
@@ -595,6 +597,11 @@ fn conformance_reads_pdfa_and_pdfua_claims() {
             pdfua: None,
         }
     );
+    let named = PdfA {
+        part: 4,
+        level: None,
+    };
+    assert_eq!(named.to_string(), "PDF/A-4");
     assert_eq!(claims("", false).unwrap(), Conformance::default());
     let unreadable =
         "<rdf:Description xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\" pdfaid:part=\"two\"/>";

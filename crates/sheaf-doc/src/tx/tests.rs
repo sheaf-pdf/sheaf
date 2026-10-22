@@ -101,11 +101,15 @@ pub(super) fn note(contents: &str) -> NewMark {
     )
 }
 
-/// Recognized text of no words.
+/// Recognized text of one word.
 fn layer() -> Arc<crate::text_layer::TextLayer> {
     Arc::new(crate::text_layer::TextLayer {
-        words: Vec::new(),
-        lines: Vec::new(),
+        words: vec![crate::text_layer::OcrWord {
+            text: "word".into(),
+            rect: rect(40.0),
+            confidence: 0.9,
+        }],
+        lines: std::iter::once(0..1).collect(),
         upright: Rotation::R0,
         engine: "test".into(),
     })
@@ -365,10 +369,17 @@ fn every_op(d: &Document) -> Vec<ResolvedOp> {
         },
         R::ReplacePages {
             pages: pages.clone(),
-            from: src.clone(),
+            from: src,
             name: "a.pdf".into(),
             with: vec![0],
             bring: Default::default(),
+        },
+        R::SetPageBoxes {
+            pages: pages.clone(),
+            crop: sheaf_edit::Patch::Clear,
+            trim: sheaf_edit::Patch::Keep,
+            bleed: sheaf_edit::Patch::Keep,
+            art: sheaf_edit::Patch::Keep,
         },
         R::SetPageLabels { ranges: None },
         R::AddBookmark {
@@ -428,11 +439,30 @@ fn every_op(d: &Document) -> Vec<ResolvedOp> {
         R::ClearOcrText {
             pages: pages.clone(),
         },
+        R::SetWatermark {
+            content: crate::model::WatermarkContent::Text {
+                text: "DRAFT".into(),
+                font: Default::default(),
+                size: 72.0,
+                color: [0, 0, 0],
+                opacity: 0.3,
+                angle: 45.0,
+            },
+            position: Default::default(),
+            z: sheaf_edit::Z::Over,
+            scope: None,
+        },
+        R::RemoveWatermark {
+            z: None,
+            pages: pages.clone(),
+            include_authored: true,
+            others: Default::default(),
+        },
         R::SetHeaderFooter { spec, scope: None },
-        R::RemoveHeaderFooter { pages },
-        R::SetPageBase {
-            pages: vec![(page, src, 0)],
-            why: Derive::Crop,
+        R::RemoveHeaderFooter {
+            pages,
+            include_authored: true,
+            others: Default::default(),
         },
         R::Revert {
             label: "Recognize text".into(),
@@ -451,11 +481,12 @@ fn caps_cover_every_op_target_and_actor() {
     let ops = every_op(&d);
     let names: std::collections::BTreeSet<&str> = ops.iter().map(ResolvedOp::name).collect();
     assert_eq!(names.len(), ops.len(), "one op of each kind");
-    assert_eq!(names.len(), 23, "every kind there is");
+    assert_eq!(names.len(), 25, "every kind there is");
     let actors = [
         Actor::User,
         Actor::Cli,
         Actor::Job(JobKind::Ocr),
+        Actor::Job(JobKind::Trim),
         Actor::Job(JobKind::Import),
         Actor::Job(JobKind::Insert),
         plugin(),
@@ -467,8 +498,11 @@ fn caps_cover_every_op_target_and_actor() {
                 (R::DeleteAnnotations { .. }, Target::Mark) => Cap::Plugin,
                 (
                     R::DeleteAnnotations { .. }
+                    | R::SetPageBoxes { .. }
                     | R::AdoptAnnotations { .. }
                     | R::ClearOcrText { .. }
+                    | R::SetWatermark { .. }
+                    | R::RemoveWatermark { .. }
                     | R::SetHeaderFooter { .. }
                     | R::RemoveHeaderFooter { .. },
                     _,
@@ -477,7 +511,6 @@ fn caps_cover_every_op_target_and_actor() {
                     R::InsertPages { .. }
                     | R::ReplacePages { .. }
                     | R::SetOcrText { .. }
-                    | R::SetPageBase { .. }
                     | R::Revert { .. },
                     _,
                 ) => Cap::User,
@@ -489,6 +522,7 @@ fn caps_cover_every_op_target_and_actor() {
                     Actor::Job(JobKind::Ocr) => {
                         matches!(op, R::SetOcrText { .. } | R::ClearOcrText { .. })
                     }
+                    Actor::Job(JobKind::Trim) => matches!(op, R::SetPageBoxes { .. }),
                     Actor::Plugin { .. } => cap == Cap::Plugin,
                     _ => true,
                 };
@@ -517,6 +551,36 @@ fn caps_cover_every_op_target_and_actor() {
         assert_eq!(cap_of(&op, &[]), Cap::User);
         assert!(!actor_allows(&plugin(), Cap::User, &op));
     }
+}
+
+/// Trim White's job sets page boxes, and is refused anything else before
+/// it's lowered; a plugin needs the user's approval to set them.
+#[test]
+fn trim_white_sets_page_boxes_alone() {
+    let mut d = doc_of(2, &[]);
+    let p = d.page(0).unwrap();
+    let trim = Actor::Job(JobKind::Trim);
+    let margins = sheaf_edit::Margins {
+        top: 36.0,
+        bottom: 36.0,
+        left: 36.0,
+        right: 36.0,
+    };
+    let crop = fx::crop(&[p], margins);
+    assert_eq!(
+        d.tx(plugin()).check(&crop),
+        Err(EditError::Refused(Cap::Approval))
+    );
+    let c = commit(&mut d, trim.clone(), vec![crop]).unwrap();
+    assert_eq!(c.change.actor, trim);
+    assert_eq!(c.lines[0].text, "Crop page 1");
+    let ids = d.ids_next();
+    let rotate = fx::rotate(&[p], Turn::Quarter);
+    let refused = Err(EditError::Refused(Cap::Plugin));
+    assert_eq!(d.tx(trim.clone()).check(&rotate), refused);
+    assert_eq!(commit(&mut d, trim, vec![rotate]).map(|_| ()), refused);
+    assert_eq!(d.ids_next(), ids, "nothing was lowered");
+    assert_eq!(d.geom(p).rotate, Rotation::R0);
 }
 
 /// A plugin deletes the marks it made, never another tool's comment, and
@@ -649,9 +713,10 @@ fn a_check_lowers_nothing() {
     assert_eq!(tx.state().annot_count(), d.state().annot_count());
 }
 
-/// A batch of 7,000 ops of one kind is one line, and a derived flow's
-/// rebase names what it did. 700 in a debug build, which checks every
-/// invariant after each op.
+/// A batch of 7,000 ops of one kind is one line, a crop of pages names
+/// them, and a removal of the header and footer says what it did (M10.5
+/// bug 8). 700 in a debug build, which checks every invariant after each
+/// op.
 #[test]
 fn a_run_of_one_kind_is_one_line() {
     let n = if cfg!(debug_assertions) { 700 } else { 7_000 };
@@ -668,12 +733,20 @@ fn a_run_of_one_kind_is_one_line() {
     assert_eq!(lines, [format!("Recognize text on {n} pages")]);
     let view = d.timeline().pop().unwrap();
     assert_eq!(view.edits, c.lines);
-    let copy = d.primary().clone();
-    let pages = (0..3).map(|i| (d.page(i).unwrap(), copy.clone(), 3 - i as u32));
-    let mut tx = d.tx(Actor::User);
-    tx.set_page_base(pages.collect(), Derive::Crop).unwrap();
-    let c = d.commit(tx, CommitOpts::default()).unwrap();
+    let first = [0, 1, 2].map(|i| d.page(i).unwrap());
+    let m = sheaf_edit::Margins {
+        top: 36.0,
+        bottom: 36.0,
+        left: 36.0,
+        right: 36.0,
+    };
+    let c = commit(&mut d, Actor::User, vec![fx::crop(&first, m)]).unwrap();
     assert_eq!(c.lines[0].text, "Crop pages 1–3");
+    let c = commit(&mut d, Actor::User, vec![fx::remove_header(&first)]).unwrap();
+    assert_eq!(
+        c.lines[0].text,
+        "Remove the header and footer from pages 1–3"
+    );
 }
 
 /// A run's line sums what its steps name, or is the last's when each
@@ -789,7 +862,7 @@ fn a_header_names_the_file_the_document_is_in() {
         scope: sheaf_edit::ScopeSel::All,
     };
     commit(&mut d, Actor::User, vec![set]).unwrap();
-    assert_eq!(d.state().header_footer().unwrap().file, "b.pdf");
+    assert_eq!(&*d.state().header_footer().unwrap().frozen.file, "b.pdf");
 }
 
 /// The same bytes inserted under another name are one blob, and their

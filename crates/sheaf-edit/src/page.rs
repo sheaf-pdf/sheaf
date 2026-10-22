@@ -1,8 +1,10 @@
-//! A page's size and rotation, where a bookmark lands on it, and how a
-//! bookmark's title is drawn.
+//! A page's size, rotation and boxes, where a bookmark lands on it, and
+//! how a bookmark's title is drawn.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::geom::Box2;
 
 /// A size in PDF points (1/72 inch).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -75,6 +77,28 @@ impl Rotation {
     pub fn is_quarter(self) -> bool {
         matches!(self, Self::R90 | Self::R270)
     }
+}
+
+/// Distances in points from each side of a page as it shows, turned by its
+/// `/Rotate`: what a crop takes off, what a header and footer keep clear.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Margins {
+    pub top: f32,
+    pub bottom: f32,
+    pub left: f32,
+    pub right: f32,
+}
+
+/// One of a page's boxes, as an op sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BoxSpec {
+    /// Points off each side of the box the page shows, as it shows after
+    /// its `/Rotate`.
+    Margins(Margins),
+    /// A box in PageSpace, within the page's media box.
+    Rect(Box2),
 }
 
 /// Where a bookmark lands on its page.
