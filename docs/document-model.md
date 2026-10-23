@@ -1141,7 +1141,7 @@ targets to sit after the preceding bookmark's pages.
   canceled op leaves the transaction as it was; inserts, replaces,
   duplicates and deletes report progress by page.
 - **Actors and caps** (§6.7). `Actor::{User, Plugin { id, version },
-  Cli, Job(Ocr | Trim | Import | Insert)}`, bound by
+  Cli, Job(Ocr | Trim | Import | Insert | Scan)}`, bound by
   `Document::lower_cx`, the only way to make a lowering context.
   `Cap::Plugin` is what any plugin may do (pages moved, turned, deleted
   or copied, labels, bookmarks, sheaf's own marks); `Approval` changes or
@@ -1153,7 +1153,8 @@ targets to sit after the preceding bookmark's pages.
   dates). A plugin gets `Plugin` only, until
   plugin API 0.4's permissions; an OCR job sets and clears OCR text and
   nothing else, and Trim White (`Job(Trim)`, slice 15) sets page boxes
-  and nothing else.
+  and nothing else. A scan (`Job(Scan)`, M5 slice 1) inserts its pages
+  and sets their recognized text, and nothing else.
 - **What the host owns** (§6.8). Ids and `/NM`s, a new mark's dates (one
   `HostAttrs.now` a transaction), its author (the user's name, or a
   plugin's id for its marks), the identity tokens in its text
@@ -1272,16 +1273,16 @@ A transaction can be made on one version and committed on another, so
 the work that plans an edit runs off the UI thread and a dialog commits
 on the version it opened on. Every transition between versions says
 what it changed, as a `ChangeSet`, which is how the app (one door, one
-refresh), its panels and plugins follow the document. An OCR run and a
-plugin call are each a group of versions that undo as one step. History
-is kept to a byte budget, pruning the oldest versions, the saved one
-too (§8 and §14 of `todos/m10.5-edit-api.md`).
+refresh), its panels and plugins follow the document. An OCR run, a
+scan and a plugin call are each a group of versions that undo as one
+step. History is kept to a byte budget, pruning the oldest versions, the
+saved one too (§8 and §14 of `todos/m10.5-edit-api.md`).
 
 ```rust
 pub enum Base { Current, At(VersionId) }          // the version a Tx was made on
 pub enum Stale { Validate, Relower }              // how it lands on another
 pub struct CommitOpts { label, base: Base, stale: Stale, group: Option<GroupId> }
-pub enum GroupKind { Ocr, PluginCall { plugin: Arc<str> } }
+pub enum GroupKind { Ocr, Scan, PluginCall { plugin: Arc<str> } }
 
 impl Document {
     pub fn tx_at(snap: &Snapshot, cx: Arc<LowerCx>) -> Tx;   // on snap's version, off the UI thread
@@ -1365,10 +1366,12 @@ impl DocView {
   changed the same data"); none when an undo did. `Tx::preview()` says
   what a commit on its own version would do (`Preview { lines, effects,
   created }`).
-- **Groups** (§8.4). `begin_group(GroupKind::Ocr | PluginCall { plugin
-  })` starts a group of versions that undo as one step. It takes commits
-  (`CommitOpts.group`) from the actor its kind names, the OCR job or the
-  plugin called (another's is a bug), until `end_group`. A commit joins
+- **Groups** (§8.4). `begin_group(GroupKind::Ocr | Scan | PluginCall {
+  plugin })` starts a group of versions that undo as one step: an OCR
+  run's flushes, an intake's batches (M5 slice 1), a plugin call's
+  edits. It takes commits (`CommitOpts.group`) from the actor its kind
+  names, the OCR job, the scan job or the plugin called (another's is a
+  bug), until `end_group`. A commit joins
   the group's version, an amend (steps added and coalesced, a new id in
   its place, `Cause::Amend` with the commit's own keys), when that's
   the current version, has nothing after it, was never saved, isn't
@@ -4972,10 +4975,16 @@ directory, `SHEAF_CACHE_DIR`) is gone.
   that origin only, and a user's file with none is still `NoPages`.
   `memory::titled` is the same with an `/Info` (its title, `/Producer`
   sheaf, `/CreationDate` now), which `Session::new_titled` starts from.
-- **A scan and Images to PDF** insert one `Memory(Images)` blob made by
-  `images::to_pdf` (`scan::made_pages`; `--dpi` overrides the images'
-  resolution, which no op field says), into a new session, with the OCR
-  run's text set as `Actor::Job(Ocr)`, then saved: `scan::add_text`, its
+- **Images to PDF** inserts one `Memory(Images)` blob made by
+  `images::to_pdf` (`intake::made_pages`; `--dpi` overrides the images'
+  resolution, which no op field says) into a new session, then saves it.
+  **A scan** goes through the intake (`sheaf_ops::intake`, M5 slice 1),
+  a page at a time, each encoded once it's cleaned: every batch of pages
+  is such a blob, inserted with its pages' recognized text in one commit
+  of `Actor::Job(Scan)`, the batches one `GroupKind::Scan` group, so one
+  undo step. A black and white page is held as its CCITT G4 bytes from
+  the moment it's made (`Pixels::G4`, encoded by `PageImage::from_image`
+  and written as they are), not as 8-bit pixels. `scan::add_text`, its
   throwaway Document and the `.images.part` file went.
 - **The comment summary** is a session: `new_titled`, then an insert of
   its pages, a `Memory(Summary)` blob written by `write_built`. Its Pages

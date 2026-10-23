@@ -456,6 +456,82 @@ phase; they're triaged between phases.
   --nocapture` (all 5 under `signatures/safedocs/`).
 - **Notes:** `qpdf --json` on each shows its fields by revision.
 
+### B14: A TIFF's Orientation tag is ignored by images-to-pdf, Combine and image inserts
+
+- **Found:** 2026-10-23, M5 slice 1
+- **Where:** `sheaf_image::io::tiff_pages`
+  (`crates/sheaf-image/src/io.rs`), behind `sheaf images-to-pdf`,
+  Combine's images and `PageSource::Images`
+- **Severity:** wrong output
+- **What happens:** a TIFF whose Orientation tag says the image is
+  turned or mirrored comes out unturned. `io::load`, `decoded` and slice
+  1's `frames` (what `sheaf scan` reads) do turn it, so the same file
+  looks different scanned and inserted.
+- **Expected:** every reader honors the tag, as `load` does.
+- **Repro:** a TIFF with Orientation 6 (turned 90°); `sheaf
+  images-to-pdf` it, and `sheaf scan` it; compare.
+- **Notes:** `tiff_pages` must keep its output byte for byte otherwise
+  (its CMYK conversion is pinned); apply the tag after decoding, as
+  `frames` does for later pages.
+
+### B15: Some TIFF kinds are refused: CMYK16, float RGB/RGBA, planar
+
+- **Found:** 2026-10-23, M5 slice 1
+- **Where:** `sheaf_image::io::tiff_image`, behind images-to-pdf,
+  Combine's images, `PageSource::Images`, and a scan's TIFF pages after
+  the first
+- **Severity:** annoyance
+- **What happens:** these kinds fail with an error. The image crate's
+  `load` reads them, so `sheaf scan` reads such a TIFF's first page (it
+  uses `load` for it) but refuses its later pages.
+- **Expected:** read them, or say which kind isn't supported.
+- **Repro:** a planar RGB TIFF in `sheaf images-to-pdf`.
+- **Notes:** rare from scanners and fax software. Two-sample gray
+  (tiff 0.11's `Multiband`) is refused by both paths; `tiff_image`'s
+  `GrayA` arms are unreachable.
+
+### B16: The command line hangs if its work panics
+
+- **Found:** 2026-10-23, M5 slice 1's review
+- **Where:** `sheaf-cli`'s `progress::run`
+- **Severity:** crash (shows as a hang)
+- **What happens:** a panic in the work unwinds before
+  `done.store(true)`, so `thread::scope` waits forever for the progress
+  drawing thread, at 0% CPU. A debug build's overflow on a huge TIFF
+  header found it (that overflow is fixed).
+- **Expected:** the panic ends the command with its message and a
+  failing exit code.
+- **Repro:** any subcommand whose work panics, run through
+  `progress::run`.
+- **Notes:** set `done` from a drop guard.
+
+### B17: The Combine dialog decodes every image just to count its pages
+
+- **Found:** 2026-10-23, M5 slice 1
+- **Where:** `combine_dialog.rs` (the background `inspect`, around line
+  119)
+- **Severity:** annoyance (slow)
+- **What happens:** to show each item's page count, it decodes every
+  image in full, and since slice 1 G4-encodes the black and white ones
+  too. A folder of large scans takes a long time to list.
+- **Expected:** count a TIFF's images from its headers (slice 1's
+  `count_frames`) and treat other images as one page, without decoding.
+
+### B18: images-to-pdf holds every gray and color page's pixels until it writes
+
+- **Found:** 2026-10-23, M5 slice 1
+- **Where:** `sheaf_ops::images::images_to_pdf` (`read` collects a
+  `Vec<PageImage>`)
+- **Severity:** annoyance (memory)
+- **What happens:** every image is read before anything is written.
+  Black and white pages are G4 bytes from slice 1 on, but gray and color
+  pages (a PNG's pixels) are held raw: 100 color Letter pages at 300 dpi
+  are about 2.5 GB.
+- **Expected:** a page at a time, as `sheaf scan` now runs (M5's
+  intake), or each page encoded as it's read.
+- **Notes:** images-to-pdf doesn't clean pages, so it could run on the
+  intake with no cleanup step.
+
 ## Features
 
 ### F1: Basic calculator
@@ -815,21 +891,6 @@ phase; they're triaged between phases.
 - **Deferred** (Greg, 2026-10-22): revisit after more milestones, since
   what sheaf needs from this layer may change as later scopes dig in.
   Upstream fixes go ahead meanwhile.
-
-### F14: An automated test of `sheaf scan --ocr`
-
-- **Found:** 2026-10-22, M10.5 slice 19 (step 5, scan as a Session)
-- **What:** a CLI test that runs `sheaf scan --ocr` on a few images and
-  checks the output's text layer: the words found, one OCR block a page,
-  one font.
-- **Why:** slice 19 moved scan onto a Session (an empty session plus an
-  insert of the images, then OCR). Only a hand run checks the `--ocr`
-  path; the OCR op itself is tested in sheaf-doc and the corpus tiers.
-- **Overlap:** M5's scanner intake (ROADMAP), which reworks scan.
-- **Notes:** the worry was that Tesseract may be missing in CI. Check
-  what `--ocr` needs (sheaf-ocr's default engine vs the `tesseract`
-  feature, used only for orientation) and either run it everywhere or
-  install what it needs in CI. Don't make it skip silently.
 
 ### F15: A Rewrite that doesn't load the whole file (the flatten export's memory gate)
 
@@ -1492,6 +1553,25 @@ phase; they're triaged between phases.
   free.
 - **Notes:** small: a command and a confirmation. The op, its Notes
   and the Rewrite it plans exist.
+
+### F14: An automated test of `sheaf scan --ocr`
+
+- **Closed:** 2026-10-23. Fixed in M5 slice 1:
+  `crates/sheaf-cli/tests/scan.rs`. It runs in `cargo test --workspace`
+  on every CI runner (sheaf-cli's default features build Tesseract, and
+  CI fetches the OCR data); without them the scan fails, never skips.
+- **Found:** 2026-10-22, M10.5 slice 19 (step 5, scan as a Session)
+- **What:** a CLI test that runs `sheaf scan --ocr` on a few images and
+  checks the output's text layer: the words found, one OCR block a page,
+  one font.
+- **Why:** slice 19 moved scan onto a Session (an empty session plus an
+  insert of the images, then OCR). Only a hand run checks the `--ocr`
+  path; the OCR op itself is tested in sheaf-doc and the corpus tiers.
+- **Overlap:** M5's scanner intake (ROADMAP), which reworks scan.
+- **Notes:** the worry was that Tesseract may be missing in CI. Check
+  what `--ocr` needs (sheaf-ocr's default engine vs the `tesseract`
+  feature, used only for orientation) and either run it everywhere or
+  install what it needs in CI. Don't make it skip silently.
 
 ## Sources checked
 

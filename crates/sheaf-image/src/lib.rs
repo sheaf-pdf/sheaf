@@ -8,7 +8,8 @@
 //! - [`clean`]: scans and phone photos of paper made into clean pages.
 //! - [`blank`]: whether a page image is blank.
 //! - [`raster`]: rendered pages as pixels, and their conversions.
-//! - [`io`]: image files in, as [`io::PageImage`]s or upright RGB.
+//! - [`io`]: image files in, as [`io::PageImage`]s or upright RGB (a
+//!   TIFF's pages one at a time, [`io::frames`]).
 //! - [`encode`]: images out: PNG, JPEG and TIFF with their resolution, and
 //!   CCITT G4.
 

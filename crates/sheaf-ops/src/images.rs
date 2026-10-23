@@ -89,7 +89,7 @@ pub fn images_to_pdf(
     progress.check()?;
     let mut session = Session::new_empty();
     let fit = params.page.fit(params.margin);
-    let insert = crate::scan::made_pages(&mut session, &pages, fit, "images")?;
+    let insert = crate::intake::made_pages(&mut session, &pages, fit, "images")?;
     session.commit(vec![insert], "Images to PDF")?;
     let to = SaveTo::File {
         path: out.to_path_buf(),

@@ -1241,20 +1241,29 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (opts, ocr) = (
+        let (choices, ocr) = (
             crate::state::get(cx).scan.clone(),
             crate::prefs::ocr_config(cx),
         );
-        let dialog = cx.new(|cx| crate::scan_dialog::ScanDialog::new(files, opts, ocr, window, cx));
+        let dialog =
+            cx.new(|cx| crate::scan_dialog::ScanDialog::new(files, choices, ocr, window, cx));
         let sub = cx.subscribe_in(
             &dialog,
             window,
             |ws, _, ev: &crate::scan_dialog::ScanEvent, window, cx| {
                 ws.scan = None;
                 ws.focus_active(window, cx);
-                if let crate::scan_dialog::ScanEvent::Created { path, opts } = ev {
-                    let opts = opts.clone();
-                    crate::state::update(cx, |s| s.scan = opts);
+                if let crate::scan_dialog::ScanEvent::Created {
+                    path,
+                    profile,
+                    opts,
+                } = ev
+                {
+                    let (profile, opts) = (*profile, opts.clone());
+                    crate::state::update(cx, |s| {
+                        s.scan.profile = profile;
+                        s.scan.set(profile, opts);
+                    });
                     let origin = window.window_handle().downcast::<Workspace>();
                     let path = path.clone();
                     if let Some(origin) = origin {

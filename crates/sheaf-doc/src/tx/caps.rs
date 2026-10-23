@@ -44,6 +44,9 @@ pub enum JobKind {
     Import,
     /// Pages inserted from a file.
     Insert,
+    /// Scanner and file intake (sheaf-ops' `intake`): it inserts the pages
+    /// it made and sets their recognized text, nothing else.
+    Scan,
 }
 
 /// The kind of annotation an op acts on.
@@ -150,7 +153,7 @@ pub fn transform_cap(transform: &Transform) -> Option<Cap> {
 pub fn actor_exports(actor: &Actor, cap: Cap) -> bool {
     match actor {
         Actor::User | Actor::Cli | Actor::Job(JobKind::Import | JobKind::Insert) => true,
-        Actor::Job(JobKind::Ocr | JobKind::Trim) => false,
+        Actor::Job(JobKind::Ocr | JobKind::Trim | JobKind::Scan) => false,
         Actor::Plugin { .. } => cap == Cap::Plugin,
     }
 }
@@ -164,6 +167,10 @@ pub fn actor_allows(actor: &Actor, cap: Cap, op: &ResolvedOp) -> bool {
             ResolvedOp::SetOcrText { .. } | ResolvedOp::ClearOcrText { .. }
         ),
         Actor::Job(JobKind::Trim) => matches!(op, ResolvedOp::SetPageBoxes { .. }),
+        Actor::Job(JobKind::Scan) => matches!(
+            op,
+            ResolvedOp::InsertPages { .. } | ResolvedOp::SetOcrText { .. }
+        ),
         // A manifest grants nothing beyond `Plugin` in plugin API 0.4:
         // its `identity` permission changes what lowering fills in
         // (`LowerCx::identity`), never what a plugin may do.

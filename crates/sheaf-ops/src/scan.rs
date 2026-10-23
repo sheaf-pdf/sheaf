@@ -1,29 +1,106 @@
 //! Photos and scans of paper to a clean PDF (`sheaf scan`, File > Create >
-//! From Scans/Photos): each image is cleaned up (`sheaf_image::clean`), becomes a
-//! page, and can be OCRed so the text is searchable. OCR reads the very
-//! image that becomes the page, so the text lines up with it.
+//! From Scans/Photos): the image files' pages through the intake
+//! ([`crate::intake`]) into a document of no pages, then written whole.
+//! Each page is cleaned up (`sheaf_image::clean`), its steps as its
+//! [`Profile`] starts them, and can be OCRed so the text is searchable;
+//! OCR reads the very image that becomes the page, so the text lines up
+//! with it.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use in_progress::{Level, Progress};
+use anyhow::Result;
+use in_progress::Progress;
 use serde::{Deserialize, Serialize};
-use sheaf_doc::images::placement;
 use sheaf_doc::materialize::AskAnswers;
-use sheaf_doc::store::{BlobKind, MemoryKind};
-use sheaf_doc::{Actor, Box2, JobKind, PAGES};
-use sheaf_edit::{BlobSel, Bring, Op, PageRef, PageSource};
 use sheaf_image::clean::ScanParams;
-use sheaf_image::io::PageImage;
-use sheaf_ocr::{OcrConfig, OcrImage, OcrWord};
+use sheaf_ocr::{OcrConfig, OcrEngine};
 
 use crate::images::Paper;
+use crate::intake::{Batching, Files, SessionLanding, intake};
 use crate::session::{Decided, SaveTo, Session};
 
-/// Color and gray pages are stored as JPEG at this quality.
-const JPEG_QUALITY: u8 = 80;
+/// Where the pages come from, which sets cleanup's steps (M5 proposal 3);
+/// each can still be switched:
+///
+/// | Step | Photo | Scanner |
+/// |---|---|---|
+/// | Find the page, clear its edges | on | off |
+/// | Flatten curl (UVDoc) | off | off |
+/// | Even out lighting, white paper | on | off |
+/// | Turn upright | on | on |
+/// | Straighten | on | on |
+/// | Leave out blank pages | off | off |
+///
+/// Black and white is Sauvola's on the cleaned page in both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Profile {
+    /// Photos of paper: the page is found in the frame and cut out, and
+    /// the light evened out.
+    #[default]
+    Photo,
+    /// A scanner's or copier's pages (a scan-to-folder's files included):
+    /// the image is the page and its light is even already, and a white
+    /// page on a flatbed's white lid has no edge to find.
+    Scanner,
+}
 
+impl Profile {
+    /// The profile's options: Letter at 300 dpi in color, its steps as
+    /// the table says. Files have no duplex backs, so neither leaves out
+    /// blank pages; a device's duplex scan may (slice 6).
+    pub fn options(self) -> ScanOptions {
+        match self {
+            Profile::Photo => ScanOptions::default(),
+            Profile::Scanner => ScanOptions {
+                clean: ScanParams {
+                    crop: false,
+                    flatten: false,
+                    ..ScanParams::default()
+                },
+                ..ScanOptions::default()
+            },
+        }
+    }
+}
+
+/// Each profile's last choices, and the profile used last: what Create
+/// from Scans remembers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScanChoices {
+    pub profile: Profile,
+    pub photo: ScanOptions,
+    pub scanner: ScanOptions,
+}
+
+impl Default for ScanChoices {
+    fn default() -> Self {
+        Self {
+            profile: Profile::Photo,
+            photo: Profile::Photo.options(),
+            scanner: Profile::Scanner.options(),
+        }
+    }
+}
+
+impl ScanChoices {
+    pub fn get(&self, profile: Profile) -> &ScanOptions {
+        match profile {
+            Profile::Photo => &self.photo,
+            Profile::Scanner => &self.scanner,
+        }
+    }
+
+    pub fn set(&mut self, profile: Profile, opts: ScanOptions) {
+        match profile {
+            Profile::Photo => self.photo = opts,
+            Profile::Scanner => self.scanner = opts,
+        }
+    }
+}
+
+/// What a scan does. The default is the photo profile's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct ScanOptions {
@@ -82,17 +159,6 @@ pub struct ScanReport {
     pub words: usize,
     /// Blank pages left out.
     pub dropped: usize,
-}
-
-/// Clean up one photo.
-pub fn clean_one(
-    path: &Path,
-    params: &ScanParams,
-    progress: &dyn Progress,
-) -> Result<sheaf_image::clean::Cleaned> {
-    let image = sheaf_image::io::load(path)?;
-    clean_image(image, params, progress, &mut |_, _| {})
-        .with_context(|| format!("cleaning up {}", path.display()))
 }
 
 /// Clean up an image, with the orientation model when it's there,
@@ -156,8 +222,19 @@ pub fn orientation_votes(img: &image::RgbImage) -> Option<[f32; 4]> {
     any.then_some(votes)
 }
 
-/// Clean up `inputs` and write them to `out` as a PDF, a page each.
-/// `ocr` is the engine setup to use when `opts.ocr` is on.
+/// How the command line lands its pages: 8 at a time, never by the
+/// clock, so the same images make the same file (recognized text's block
+/// ids aside, which are drawn at random). A Rewrite numbers what an insert
+/// brought by its source, each batch's own, so batches cut where a clock
+/// says would write the same pages in another order.
+pub const BATCHING: Batching = Batching {
+    pages: 8,
+    wait: None,
+};
+
+/// Clean up `inputs` and write them to `out` as a PDF, a page each (a
+/// TIFF's pages each a page). `ocr` is the engine setup to use when
+/// `opts.ocr` is on.
 pub fn scan(
     inputs: &[PathBuf],
     opts: &ScanOptions,
@@ -165,87 +242,29 @@ pub fn scan(
     out: &Path,
     progress: &dyn Progress,
 ) -> Result<ScanReport> {
-    if inputs.is_empty() {
-        anyhow::bail!("no images given");
-    }
+    let mut files = Files::new(inputs)?;
     let mut engine = if opts.ocr {
         sheaf_ocr::check_engine(ocr.engine, ocr)?;
         Some(sheaf_ocr::build_engine(ocr.engine, ocr)?)
     } else {
         None
     };
-    let engine_name = engine
-        .as_ref()
-        .map(|e| e.describe().name)
-        .unwrap_or_default();
-    let params = opts.params();
-    let fit = opts.page.fit(0.0);
-    let mut report = ScanReport::default();
-    let mut pages = Vec::with_capacity(inputs.len());
-    let mut words: Vec<Vec<sheaf_doc::OcrWord>> = Vec::new();
-    progress.set_total(Some(inputs.len() as u64), PAGES);
-    for (i, path) in inputs.iter().enumerate() {
-        progress.check()?;
-        let share = 1.0 / inputs.len() as f64;
-        let step = progress.child(&format!("page {}", i + 1), share);
-        let cleaned = clean_one(path, &params, &*step.child("cleaning", 0.6))?;
-        if cleaned.quad.is_some() {
-            report.cropped += 1;
-        }
-        if cleaned.turns != 0 {
-            step.message(
-                Level::Info,
-                &format!("{}: turned {}°", path.display(), cleaned.turns * 90),
-            );
-        }
-        if opts.drop_blanks && is_blank_page(&cleaned.image) {
-            step.message(Level::Info, &format!("{}: blank, left out", path.display()));
-            report.dropped += 1;
-            progress.set(i as u64 + 1);
-            continue;
-        }
-        let page = match opts.clean.mode {
-            // Black and white goes in as CCITT G4.
-            sheaf_image::clean::Mode::Bw => {
-                PageImage::from_image(cleaned.image.clone(), opts.dpi as f32)
-            }
-            _ => PageImage::jpeg(&cleaned.image, opts.dpi as f32, JPEG_QUALITY)?,
-        };
-        if let Some(engine) = engine.as_mut() {
-            step.check()?;
-            let img = match engine.input() {
-                sheaf_ocr::InputKind::Gray => OcrImage::Gray(cleaned.image.to_luma8()),
-                sheaf_ocr::InputKind::Rgb => OcrImage::Rgb(cleaned.image.to_rgb8()),
-            };
-            let found = engine
-                .recognize(img, opts.dpi)
-                .with_context(|| format!("recognizing {}", path.display()))?;
-            report.words += found.len();
-            words.push(to_page(&found, &page, fit));
-        }
-        pages.push(page);
-        report.pages += 1;
-        progress.set(i as u64 + 1);
-    }
-    progress.check()?;
-    if pages.is_empty() {
-        anyhow::bail!("every page came out blank");
-    }
-    // The pages made in memory, one file of them, which a document of no
-    // pages takes in, the recognized text its own (M10.5 §3.9).
+    // The pages made in memory, which a document of no pages takes in, the
+    // recognized text its own (M10.5 §3.9).
     let mut session = Session::new_empty();
-    let insert = made_pages(&mut session, &pages, fit, "scan")?;
-    session.commit(vec![insert], "Scan")?;
-    if engine.is_some() {
-        // As the app's OCR gives a page its text.
-        let ops = (session.doc.state().pages())
-            .zip(words)
-            .map(|((id, _, geom), w)| Op::SetOcrText {
-                page: PageRef::Id(id),
-                layer: Arc::new(sheaf_doc::text_layer::from_engine(w, geom, &engine_name)),
-            })
-            .collect();
-        session.commit_as(Actor::Job(JobKind::Ocr), ops, "Recognize Text")?;
+    let mut landing = SessionLanding::new(&mut session, "Scan");
+    let report = intake(
+        &mut files,
+        opts,
+        engine.as_deref_mut().map(|e| e as &mut dyn OcrEngine),
+        &mut landing,
+        BATCHING,
+        progress,
+    )?;
+    landing.finish();
+    progress.check()?;
+    if report.pages == 0 {
+        anyhow::bail!("every page came out blank");
     }
     let to = SaveTo::File {
         path: out.to_path_buf(),
@@ -259,63 +278,12 @@ pub fn scan(
     Ok(report)
 }
 
-/// `pages` made one PDF in memory ([`sheaf_doc::images::to_pdf`], each as
-/// `fit` says), interned as a [`MemoryKind::Images`] source held by
-/// `session`: the insert of all its pages at the end, under `name`. The
-/// pages are made from images already read, decoded and cleaned, so they
-/// go in as they're made, rather than as image files the insert reads
-/// again.
-pub(crate) fn made_pages(
-    session: &mut Session,
-    pages: &[PageImage],
-    fit: sheaf_edit::Fit,
-    name: &str,
-) -> Result<Op> {
-    let bytes = sheaf_doc::images::to_pdf(pages, fit)?;
-    let kind = BlobKind::memory(MemoryKind::Images);
-    let src = session.doc.store().open(bytes.into(), kind)?;
-    session.hold(src.blob().clone());
-    Ok(Op::InsertPages {
-        from: PageSource::File {
-            file: BlobSel::Id(src.id()),
-            name: name.to_string(),
-        },
-        pages: None,
-        before: None,
-        bring: Bring::default(),
-        locals: Vec::new(),
-    })
-}
-
 /// Whether a cleaned page is blank enough to leave out.
 pub fn is_blank_page(image: &image::DynamicImage) -> bool {
     matches!(
         sheaf_image::blank::judge_image(image, sheaf_image::blank::Sensitivity::Normal),
         sheaf_image::blank::Verdict::Blank { .. }
     )
-}
-
-/// An engine's words on a cleaned image, in points on its page.
-fn to_page(found: &[OcrWord], page: &PageImage, fit: sheaf_edit::Fit) -> Vec<sheaf_doc::OcrWord> {
-    let place = placement(page, fit).image;
-    let sx = place.w / page.width as f32;
-    let sy = place.h / page.height as f32;
-    found
-        .iter()
-        .map(|w| {
-            let [l, t, r, b] = w.bbox_px;
-            sheaf_doc::OcrWord {
-                text: w.text.clone(),
-                rect: Box2 {
-                    x: place.x + l.min(r) * sx,
-                    y: place.y + t.min(b) * sy,
-                    w: (r - l).abs() * sx,
-                    h: (b - t).abs() * sy,
-                },
-                confidence: w.confidence,
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -331,5 +299,44 @@ mod tests {
         assert_eq!(opts.params().fit, None);
         assert_eq!(opts.clean.mode, sheaf_image::clean::Mode::Bw);
         assert!(opts.ocr && opts.clean.deskew);
+    }
+
+    #[test]
+    fn the_scanner_profile_neither_crops_nor_evens_the_light() {
+        assert_eq!(Profile::Photo.options(), ScanOptions::default());
+        let s = Profile::Scanner.options();
+        let c = &s.clean;
+        assert!(!c.crop && !c.flatten && !c.flatten_curl);
+        assert!(c.orient && c.deskew);
+        assert!(!s.drop_blanks && !s.ocr);
+        assert_eq!(
+            (c.mode, s.page, s.dpi),
+            (sheaf_image::clean::Mode::Color, Paper::Letter, 300)
+        );
+        // The rest is the photo profile's.
+        let mut p = s.clone();
+        (p.clean.crop, p.clean.flatten) = (true, true);
+        assert_eq!(p, ScanOptions::default());
+    }
+
+    #[test]
+    fn each_profile_keeps_its_own_choices() {
+        let mut choices = ScanChoices::default();
+        assert_eq!(choices.get(Profile::Photo), &Profile::Photo.options());
+        assert_eq!(choices.get(Profile::Scanner), &Profile::Scanner.options());
+        let mut bw = Profile::Scanner.options();
+        bw.clean.mode = sheaf_image::clean::Mode::Bw;
+        bw.dpi = 200;
+        choices.set(Profile::Scanner, bw.clone());
+        choices.profile = Profile::Scanner;
+        assert_eq!(choices.get(Profile::Scanner), &bw);
+        assert_eq!(choices.get(Profile::Photo), &Profile::Photo.options());
+        let json = serde_json::to_string(&choices).unwrap();
+        assert_eq!(serde_json::from_str::<ScanChoices>(&json).unwrap(), choices);
+        // Nothing remembered is each profile's own defaults.
+        assert_eq!(
+            serde_json::from_str::<ScanChoices>("{}").unwrap(),
+            ScanChoices::default()
+        );
     }
 }

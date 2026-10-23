@@ -46,11 +46,11 @@ pub use state::{Builder, DocState, Invariant};
 pub(crate) use state::{LaidKey, RenderTables};
 
 /// A group of versions that undo as one step (M10.5 §8.4): an OCR run's
-/// flushes, a plugin call's batches. A commit in the group joins its
-/// version when that's the current one and nothing came after it, and
-/// makes another of the group's otherwise, so edits made in between leave
-/// the group in fragments, undone one at a time or all at once
-/// ([`Document::revert_group`]).
+/// flushes, an intake's batches, a plugin call's. A commit in the group
+/// joins its version when that's the current one and nothing came after
+/// it, and makes another of the group's otherwise, so edits made in
+/// between leave the group in fragments, undone one at a time or all at
+/// once ([`Document::revert_group`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GroupId(u64);
 
@@ -59,6 +59,8 @@ pub struct GroupId(u64);
 pub enum GroupKind {
     /// An OCR run's flushes, the OCR job's.
     Ocr,
+    /// An intake's batches, the scan job's.
+    Scan,
     /// A call of plugin `plugin`'s, its batches.
     PluginCall { plugin: Arc<str> },
 }
@@ -69,6 +71,7 @@ impl GroupKind {
     fn takes(&self, actor: &Actor) -> bool {
         match (self, actor) {
             (GroupKind::Ocr, Actor::Job(crate::tx::JobKind::Ocr)) => true,
+            (GroupKind::Scan, Actor::Job(crate::tx::JobKind::Scan)) => true,
             (GroupKind::PluginCall { plugin }, Actor::Plugin { id, .. }) => id == plugin,
             _ => false,
         }
@@ -1395,7 +1398,7 @@ impl Document {
     }
 
     /// Start a group of `kind`, whose versions undo as one step: an OCR
-    /// run, a plugin call. It takes commits until
+    /// run, an intake, a plugin call. It takes commits until
     /// [`end_group`](Self::end_group).
     pub fn begin_group(&mut self, kind: GroupKind) -> GroupId {
         let id = GroupId(self.next_group);

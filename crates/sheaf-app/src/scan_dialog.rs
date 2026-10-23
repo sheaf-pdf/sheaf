@@ -1,8 +1,11 @@
 //! File > Create > From Scans/Photos…: photos or scans of paper to a
 //! clean PDF (`sheaf_ops::scan`, as `sheaf scan` does). The images are
 //! picked first; the dialog sets the options and previews each cleanup
-//! step on one image at a time. Create asks where to save, runs with
-//! progress (Escape stops it), and opens the result.
+//! step on one image at a time. Its first row says where the pages come
+//! from, photos or a scanner or copier, which starts the cleanup steps as
+//! that profile does (`sheaf_ops::scan::Profile`); each profile's choices
+//! are kept apart. Create asks where to save, runs with progress (Escape
+//! stops it), and opens the result.
 //!
 //! Tab moves between rows, Left/Right change, Enter creates, Escape
 //! cancels.
@@ -19,7 +22,7 @@ use image::RgbImage;
 use sheaf_image::clean::{Mode, Stage};
 use sheaf_ocr::OcrConfig;
 use sheaf_ops::images::Paper;
-use sheaf_ops::scan::ScanOptions;
+use sheaf_ops::scan::{Profile, ScanChoices, ScanOptions};
 use sheaf_ops::{NoProgress, Tracker, was_cancelled};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::{dialog, theme};
@@ -30,6 +33,10 @@ pub const KEY_CONTEXT: &str = "ScanDialog";
 
 /// Previews are computed at this many pixels on the long side.
 const PREVIEW_SIZE: u32 = 1200;
+const PROFILES: [(Profile, &str); 2] = [
+    (Profile::Photo, "Photos"),
+    (Profile::Scanner, "A scanner or copier"),
+];
 const DPIS: [u32; 4] = [150, 200, 300, 400];
 const MODES: [(Mode, &str); 3] = [
     (Mode::Color, "Color"),
@@ -43,9 +50,11 @@ const PAPERS: [(Paper, &str); 3] = [
 ];
 
 pub enum ScanEvent {
-    /// The PDF is written; `opts` are worth remembering.
+    /// The PDF is written; `profile` and its `opts` are worth
+    /// remembering.
     Created {
         path: PathBuf,
+        profile: Profile,
         opts: ScanOptions,
     },
     Dismiss,
@@ -74,22 +83,26 @@ impl View {
     }
 }
 
-const ROW_MODE: usize = 0;
-const ROW_PAGE: usize = 1;
-const ROW_DPI: usize = 2;
-const ROW_CROP: usize = 3;
-const ROW_ORIENT: usize = 4;
-const ROW_DESKEW: usize = 5;
-const ROW_FLATTEN: usize = 6;
-const ROW_OCR: usize = 7;
-const ROW_IMAGE: usize = 8;
-const ROW_VIEW: usize = 9;
-const ROW_CURL: usize = 10;
-const ROW_BLANKS: usize = 11;
+const ROW_PROFILE: usize = 0;
+const ROW_MODE: usize = 1;
+const ROW_PAGE: usize = 2;
+const ROW_DPI: usize = 3;
+const ROW_CROP: usize = 4;
+const ROW_ORIENT: usize = 5;
+const ROW_DESKEW: usize = 6;
+const ROW_FLATTEN: usize = 7;
+const ROW_OCR: usize = 8;
+const ROW_IMAGE: usize = 9;
+const ROW_VIEW: usize = 10;
+const ROW_CURL: usize = 11;
+const ROW_BLANKS: usize = 12;
 
 pub struct ScanDialog {
     focus: FocusHandle,
     files: Vec<PathBuf>,
+    /// Each profile's options as they stand, and the profile shown.
+    choices: ScanChoices,
+    /// The shown profile's options, being changed.
     opts: ScanOptions,
     ocr: OcrConfig,
     /// Why OCR can't run, when it can't.
@@ -124,7 +137,7 @@ impl Focusable for ScanDialog {
 impl ScanDialog {
     pub fn new(
         files: Vec<PathBuf>,
-        opts: ScanOptions,
+        choices: ScanChoices,
         ocr: OcrConfig,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -135,21 +148,15 @@ impl ScanDialog {
             .err()
             .map(|e| e.to_string());
         let curl_unavailable = sheaf_ocr::rectify::unavailable_reason();
-        let mut opts = opts;
-        if ocr_unavailable.is_some() {
-            opts.ocr = false;
-        }
-        if curl_unavailable.is_some() {
-            opts.clean.flatten_curl = false;
-        }
         let mut d = Self {
             focus,
             files,
-            opts,
+            opts: choices.get(choices.profile).clone(),
+            choices,
             ocr,
             ocr_unavailable,
             curl_unavailable,
-            row: ROW_MODE,
+            row: ROW_PROFILE,
             index: 0,
             view: View::Result,
             loaded: None,
@@ -162,12 +169,38 @@ impl ScanDialog {
             status: None,
             error: None,
         };
+        d.opts = d.usable(d.opts.clone());
         d.refresh_preview(cx);
         d
     }
 
+    /// `opts` without the steps that can't run here.
+    fn usable(&self, mut opts: ScanOptions) -> ScanOptions {
+        if self.ocr_unavailable.is_some() {
+            opts.ocr = false;
+        }
+        if self.curl_unavailable.is_some() {
+            opts.clean.flatten_curl = false;
+        }
+        opts
+    }
+
+    /// Show `profile`'s options, keeping the ones shown till now for a
+    /// switch back.
+    fn set_profile(&mut self, profile: Profile) {
+        let shown = self.choices.profile;
+        if profile == shown {
+            return;
+        }
+        let next = self.usable(self.choices.get(profile).clone());
+        self.choices
+            .set(shown, std::mem::replace(&mut self.opts, next));
+        self.choices.profile = profile;
+    }
+
     fn rows(&self) -> Vec<usize> {
         let mut rows = vec![
+            ROW_PROFILE,
             ROW_MODE,
             ROW_PAGE,
             ROW_DPI,
@@ -212,6 +245,10 @@ impl ScanDialog {
         }
         let o = &mut self.opts;
         match self.row {
+            ROW_PROFILE => {
+                let all: Vec<Profile> = PROFILES.iter().map(|p| p.0).collect();
+                self.set_profile(cycle(&all, self.choices.profile, by));
+            }
             ROW_MODE => {
                 let all: Vec<Mode> = MODES.iter().map(|m| m.0).collect();
                 o.clean.mode = cycle(&all, o.clean.mode, by);
@@ -393,6 +430,7 @@ impl ScanDialog {
                 match result {
                     Ok(_) => cx.emit(ScanEvent::Created {
                         path: out,
+                        profile: d.choices.profile,
                         opts: d.opts.clone(),
                     }),
                     Err(e) if was_cancelled(&e) => d.error = Some("Stopped".into()),
@@ -549,6 +587,14 @@ impl Render for ScanDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let o = self.opts.clone();
         let running = self.running.is_some();
+        let profile = self.chips(
+            "profile",
+            ROW_PROFILE,
+            PROFILES.iter().map(|(p, l)| (*p, l.to_string())).collect(),
+            self.choices.profile,
+            |d, v| d.set_profile(v),
+            cx,
+        );
         let mode = self.chips(
             "mode",
             ROW_MODE,
@@ -710,6 +756,7 @@ impl Render for ScanDialog {
             .flex_col()
             .gap_1()
             .w(px(420.0))
+            .child(self.row_el(ROW_PROFILE, "Pages from", profile))
             .child(self.row_el(ROW_MODE, "Output", mode))
             .child(self.row_el(ROW_PAGE, "Page size", page))
             .child(self.row_el(ROW_DPI, "Resolution", dpi))

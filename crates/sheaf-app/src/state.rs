@@ -31,8 +31,9 @@ pub struct State {
     pub ocr: sheaf_ocr::OcrConfig,
     /// File > Print's last choices.
     pub print: crate::print_dialog::PrintPrefs,
-    /// File > Create > From Scans/Photos' last choices.
-    pub scan: sheaf_ops::scan::ScanOptions,
+    /// File > Create > From Scans/Photos' last choices, each profile's
+    /// (photos, or a scanner's pages), and the profile used last.
+    pub scan: sheaf_ops::scan::ScanChoices,
     /// File > Create > Combine Files' last choices.
     pub combine: sheaf_ops::combine::CombineParams,
     /// Document > Find Blank Pages' last choices.
@@ -365,8 +366,12 @@ mod tests {
                 markup: false,
                 ..Default::default()
             },
-            scan: sheaf_ops::scan::ScanOptions {
-                dpi: 200,
+            scan: sheaf_ops::scan::ScanChoices {
+                profile: sheaf_ops::scan::Profile::Scanner,
+                photo: sheaf_ops::scan::ScanOptions {
+                    dpi: 200,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             combine: sheaf_ops::combine::CombineParams {
@@ -467,7 +472,7 @@ mod tests {
         assert_eq!(load_from(&path, &path, true), sample());
         // And a lone change is written after the batch delay.
         let mut b = sample();
-        b.scan.dpi = 300;
+        b.scan.photo.dpi = 300;
         writer.send(Job::Write(Arc::new(b.clone()))).unwrap();
         std::thread::sleep(BATCH * 3);
         assert_eq!(load_from(&path, &path, true), b);

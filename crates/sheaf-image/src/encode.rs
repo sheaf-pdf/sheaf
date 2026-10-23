@@ -211,9 +211,10 @@ mod tests {
         for p in &pages {
             assert_eq!((p.width, p.height, p.dpi), (40, 30, (200.0, 200.0)));
         }
-        let crate::io::Pixels::Bilevel(px) = &pages[2].pixels else {
+        let crate::io::Pixels::G4(b) = &pages[2].pixels else {
             panic!("the G4 page should read back black and white");
         };
-        assert_eq!(px, gray.as_raw());
+        // G4 is lossless on black and white: the same codes, the same pixels.
+        assert_eq!(*b, g4(gray.as_raw(), 40, 30));
     }
 }
