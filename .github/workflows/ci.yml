@@ -3,7 +3,18 @@ name: CI
 on:
   push:
     branches: [main]
+    # A change only to docs runs nothing. Two docs hold examples that tests
+    # read (sheaf-cli's tests/edit.rs, sheaf-plugin's tests/docs_examples.rs),
+    # so they count as code: add any other doc a test reads here too.
+    paths: &code
+      - "**"
+      - "!*.md"
+      - "!docs/**"
+      - "!todos/**"
+      - "docs/document-model.md"
+      - "docs/plugins.md"
   pull_request:
+    paths: *code
 
 env:
   CARGO_TERM_COLOR: always
