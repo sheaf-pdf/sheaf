@@ -34,7 +34,7 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 | M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | Planned | M10.5; M10 slice 15, for flattening in Remove Hidden Information; M10 slices 23–26 if sanitize removes field scripts rather than whole fields (open) |
 | M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | Sketched | M10.5; M10 slices 23–26 if signing creates new signature fields (open) |
 | M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | Sketched | M10.5; M11 (content interpreter, image editing) |
-| M14 | **Document processing**: compare, optimize, PDF/A, accessibility | Archival and output parity | Sketched | M10.5; M11 (content interpreter), for optimize |
+| M14 | **Document processing**: compare, optimize, PDF/A, accessibility and PDF/UA | Archival and output parity | Sketched | M10.5; M11 (content interpreter), for optimize |
 | M15 | **Automation**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | Sketched; CLI groundwork shipped | Batch: M10.5, plus each step's milestone (M10's `sheaf form` for fill and flatten, M11 for redact by pattern, M14 for optimize). Parity audit and stabilization: last, after everything else |
 | M16 | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from any combination of ops, with approval | Agents work on documents through sheaf's own ops | Sketched | M10.5 |
 
@@ -447,11 +447,34 @@ Builds on M11's content interpreter.
     signatures.
   - **Checked** with `qpdf --check-linearization`.
 - PDF/A convert and validate ❓.
-- Accessibility: tags tree, reading order, alt text, accessibility checker ❓.
+- Accessibility, with PDF/UA (ISO 14289: UA-1 on PDF 1.7, UA-2 on PDF
+  2.0) as the target, beside PDF/A ❓:
+  - **Structure:** the tags tree in the model (`Key::StructElem` and
+    `/ParentTree`, the M10.5 plan's §20), alt text, reading order, table
+    headers, the document's language and its title shown.
+  - **Validate** PDF/UA's rules that software can check, as PDF/A's are.
+    The Matterhorn Protocol lists PDF/UA's failure conditions; veraPDF
+    validates both standards, and is the reference to compare against.
+  - **Review what only a person can judge:** whether alt text says what
+    the figure shows, whether the reading order makes sense, whether a
+    heading is tagged as one. Software can't check these, so they need a
+    view of their own: the tags tree beside the page, the reading order
+    drawn over it, the text as a screen reader would read it, and the
+    manual checks to tick off. Acrobat has its Reading Order tool and
+    Tags panel; PAC has a screen-reader preview.
+  - **Keep a tagged file tagged:** what sheaf writes into a PDF/UA file
+    (marks, headers and footers, watermarks, OCR text, form fields) is
+    tagged or marked as an artifact, so an edit keeps the claim. Today
+    M10.5 adds a Note when a change breaks a PDF/A or PDF/UA claim
+    (proposal 39).
+  - **Tests:** `../pdf-corpus/conformance/` has PDF/UA claims (backlog
+    F9).
+  - **Open:** the review as a panel in the main window, or a review mode
+    of its own, as Acrobat's Reading Order tool is.
 - Preflight-lite (font embedding, color spaces, transparency checks) ❓.
 
 **Decide at kickoff:** how far to go on the ❓ items. They matter for
-archival requirements but not for daily binder work.
+archival and accessibility requirements but not for daily binder work.
 
 ### M15: Automation
 
@@ -585,6 +608,7 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | Optimize / reduce file size | M14 |
 | Fast Web View (linearize on save) | M14 |
 | Preflight / accessibility checker ❓ | M14 |
+| PDF/UA validate, and a review view for the manual checks ❓ | M14 |
 | Batch actions / scripting | M15 |
 
 ## Pending
