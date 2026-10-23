@@ -28,6 +28,7 @@ use crate::memory;
 use crate::model::{DocState, Foreign, ImageRef, OutlineId, PageForm, PageId, WatermarkContent};
 use crate::open::FileBody;
 use crate::prim::Key;
+use crate::source::ObjRef;
 use crate::store::{Blob, BlobId, BlobKind, BlobRef, Src, Store};
 use crate::text_layer::TextLayer;
 
@@ -1291,8 +1292,12 @@ pub fn incoming(store: &Store, primary: &Src, src: &Src, pages: &[u32]) -> Vec<B
                 continue;
             };
             let found = match (&annot.kind, held) {
-                (AnnotKind::FileAttachment { name, size, .. }, Some(stream)) => {
-                    crate::model::file_in(store, src, *stream, *size)
+                (AnnotKind::FileAttachment { name, size, .. }, Some(id)) => {
+                    let stream = ObjRef {
+                        src: src.clone(),
+                        id: *id,
+                    };
+                    crate::model::file_in(store, &stream, *size)
                         .inspect_err(|e| log::warn!("attachment {name}: {e:#}"))
                         .ok()
                 }

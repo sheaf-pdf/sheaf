@@ -683,7 +683,7 @@ fn everything() -> Form {
     let a = blue(&mut f, "a", 0, 0, "Alpha");
     let b = blue(&mut f, "b", 1, 0, "Beta");
     f.group("top", &[a, b]);
-    let mark = sheaf_doc::annot::to_pdf(&note(), &mut f.pdf).main;
+    let mark = sheaf_doc::serialize::built::to_pdf(&note(), &mut f.pdf).main;
     let mark = f.pdf.add_object(mark);
     let theirs = f.pdf.add_object(dictionary! {
         "Type" => "Annot", "Subtype" => "Text",

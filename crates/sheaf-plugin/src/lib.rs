@@ -1,7 +1,9 @@
 //! Plugin host: loads WebAssembly components that target the `plugin`
 //! world in `wit/sheaf.wit`, and runs their commands against the document
-//! as it is when a call first reads it. No GPUI here; the app connects
-//! results to the UI.
+//! as it is when a call first reads it. A call's edits are ops lowered into
+//! one transaction of the plugin's ([`CallOutput::tx`]), which lands as one
+//! undo step ([`Landing`]). No GPUI here; the app connects results to the
+//! UI.
 //!
 //! Each plugin runs on its own thread with its own wasmtime `Store`, so a
 //! slow plugin never blocks the UI and a crash (a trap) is an error the app
@@ -13,6 +15,8 @@
 //! the hosts named (no raw sockets).
 
 mod api;
+pub mod change;
+pub mod landing;
 pub mod manifest;
 pub mod progress;
 pub mod render;
@@ -22,17 +26,18 @@ pub mod ui;
 
 use std::path::{Path, PathBuf};
 
+pub use api::MAX_UPLOAD_BYTES;
+pub use change::{ActorKind, ChangeCause, ChangeInfo, Scopes};
+pub use landing::{Committed, Committer, Door, Landed, Landing, follow_ups};
 pub use manifest::{EventKind, Grants, Manifest, Permissions};
 pub use runtime::{
-    Call, CallContext, CallOutput, DocContext, DocEvent, EditBatch, Held, Limits, LoadOptions,
-    OcrSource, Plugin, PluginError, Preset, Runtime, Status,
+    Call, CallContext, CallOutput, DocContext, DocEvent, Limits, LoadOptions, OcrSource, Plugin,
+    PluginError, Preset, Runtime, Status,
 };
 
-/// The version of `sheaf:plugin` this host provides.
-pub const API_VERSION: semver::Version = semver::Version::new(0, 3, 0);
-/// The one before, which it still serves (N−1): a plugin built against it
-/// keeps loading.
-pub const API_PREVIOUS: semver::Version = semver::Version::new(0, 2, 1);
+/// The version of `sheaf:plugin` this host provides, the one world it
+/// serves: a plugin built for another minor doesn't load.
+pub const API_VERSION: semver::Version = semver::Version::new(0, 4, 0);
 
 /// A plugin directory found on disk.
 pub struct Found {

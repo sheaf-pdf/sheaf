@@ -1,6 +1,9 @@
 # Document model and edit history
 
 Status: accepted 2026-10-11. Decides the shape of `sheaf-doc` for M2+.
+M10.5 (the edit API, `todos/m10.5-edit-api.md`) rebuilt it in twenty
+slices, each of which wrote its section below; slice 20 made the last
+pass, with the invariants and the tests that hold them.
 
 ## The problem
 
@@ -9,10 +12,12 @@ Three things want to look at "the document" and they disagree about what it is:
 - **PDFium** (rendering, text, search) sees a *file*: bytes it parsed once.
   Reparsing is cheap for small files and ~100 ms for a 7,000-page one, so we
   don't want every edit to reserialize.
-- **lopdf** (writing) sees an *object graph*: dictionaries and streams with
-  numbers. Mutating it is how a PDF gets written, but it is a terrible
-  structure to edit interactively — nothing has stable identity, and inverse
-  operations are hard to get right.
+- **lopdf** sees an *object graph*: dictionaries and streams with
+  numbers. It's what a file is read as (lazily, a source at a time: M10.5
+  slice 3) and what sheaf's own serializer writes (slice 7; lopdf's
+  writer writes nothing outside tests from slice 20), but it is a
+  terrible structure to edit interactively: nothing has stable identity,
+  and inverse operations are hard to get right.
 - **The user** sees a *sequence of pages* with bookmarks and markup, and
   expects reorder/rotate/delete/insert to be instant and undoable.
 
@@ -240,6 +245,115 @@ harness, `crates/sheaf-ops/tests/gate_7k.rs`) takes 48 ms on the
 synthetic fixture and 72–80 ms on the heavy one, against gates of 100 and
 250 ms.
 
+## Invariants, and the tests that hold them (M10.5)
+
+The design's twelve rules (§2 of `todos/m10.5-edit-api.md`), its
+registry rule and "nothing ships unproduced", as M10.5 left them, each
+with what holds it. "Corpus" tiers read `../pdf-corpus` (or
+`$SHEAF_CORPUS`) and skip without it; "ignored" ones run before a merge.
+
+1. **DocState is the document's definition**, and one emitter derives
+   every object from it; it holds no object number that can go stale,
+   and provenance (`ObjRef`) points only into immutable sources. Held by
+   Append ≡ Rewrite (`materialize::append_rewrite_tests`'
+   `append_rewrite_reopen_alike`, 32 cases by default and 1,024 in the
+   release property `append_rewrite_reopen_alike_1024`, and its named
+   cases), `DocState::check_invariants` (asserted after every edit, at
+   open and after a save in a debug build, and after every action of the
+   replay property), and sheaf-doc's `tests/object_ids.rs` (rule 7).
+2. **Sources are immutable, lazily read and content-addressed**, facts a
+   memoized function of a source's bytes, and records hold liveness
+   handles. Held by `source::lazy_tests`' `lazy_objects_equal_the_eager_load`
+   and the corpus's `every_corpus_page_s_geom_is_pdfium_s_size`
+   (sheaf-ops' `source_corpus`), `store`'s
+   `interning_the_same_bytes_twice_gives_one_blob`, and history's
+   `pruning_an_undone_400_page_scan_frees_its_bytes` (a blob goes with
+   the last record holding it).
+3. **Two layers and one primitive:** ops lower to `Put { key, before,
+   after }` over eleven key kinds. Held by the type (`Prim` has one
+   variant) and by the replay property, which applies only prims.
+4. **History stores resolved prims with before-values; a `VersionId`
+   names one immutable state; a commit onto a moved cursor validates by
+   value what it read or overwrites.** Held by `model::history_tests`'
+   replay property, `prims_rebuild_every_version` (64 cases;
+   `prims_rebuild_every_version_4096` in release; every version rebuilt
+   from its prims equals the state it was made as, `Mismatch` on a wrong
+   before), `each_kind_s_no_op_pushes_nothing`, and `tx::stale_tests`
+   (`Validate` and `Relower`, and from slice 20 handed-out ids:
+   `a_handed_out_relowering_that_makes_more_conflicts`).
+5. **Effects are a pure function of `(key, before, after)`.** Held by
+   `effects/tests.rs`, which classifies puts by their values alone
+   (`changed_is_by_value`, `what_differs_means_something`,
+   `a_misfit_is_everything`), and `model::change_tests`
+   (`a_save_changes_nothing`).
+6. **One frame below the page: PageSpace;** box and rotate edits never
+   rewrite a stored coordinate, and rotation is absolute. Held by
+   `open::tests`' `every_mark_kind_round_trips_on_every_rotate`,
+   `model`'s `a_mark_on_a_rotated_page_stays_put_through_a_save` (both
+   ways), `tx::boxes_tests`' `a_crop_writes_the_boxes_it_changes_alone`,
+   and, for plugins, host.rs's PageSpace tests on `turned_doc`
+   (`a_plugin_places_through_the_page_s_view_matrices`).
+7. **No id is an ObjectId, a slot or an index;** ids written to files
+   are random below 2^53, session ids are counters never reused. Held by
+   `tests/object_ids.rs` (slice 20: no lopdf `ObjectId` in model-level
+   code, outside a reasoned allowlist), `model`'s
+   `mark_ids_are_random_and_distinct`, `open::tests`'
+   `a_copied_page_gets_fresh_ids`, `tx::tests`'
+   `ids_mean_nothing_in_ops_read_from_a_file`, and the replay property
+   (a replay draws no id).
+8. **A save is an output:** the model never re-expresses a version, a
+   `SaveRecord` drives the next save, and the version being saved is
+   sealed. Held by `change_tests`' `a_save_changes_nothing`, `model`'s
+   `an_amend_on_a_sealed_version_makes_a_child` and
+   `record_save_and_abandon_save_unseal`, and `saving_tests`'
+   `an_unchanged_plan_writes_nothing`.
+9. **One emitter** feeds the Rewrite, the Append, the recovery section
+   and the render overlay. Held by Append ≡ Rewrite, the determinism
+   tests (`materialize::tests`' `a_rewrite_is_the_same_bytes_every_time`,
+   `append_tests`' `the_same_section_twice_is_the_same_bytes`,
+   `serialize::tests`' `full_writes_are_deterministic`, and the corpus's
+   `the_same_document_writes_the_same_bytes_twice_and_from_two_threads`),
+   `recovery`'s `sidecar_round_trips_and_detects_staleness`, and
+   `materialize::overlay_tests`.
+10. **The screen equals the file** (GPUI draws sheaf's marks until M10
+    slice 12). Held by sheaf-ops' `tests/realize.rs` (`…_render_as_saved`,
+    `print_preview_draws_what_prints`) and the ignored corpus tiers
+    `realizations_render_as_saved`, `scans_render_as_saved` and the
+    untouched predicate's
+    (`the_predicate_agrees_with_the_emission_on_every_page`).
+11. **Nothing touches disk** but the user's files, their temp files, the
+    sidecar and the journal. Held by sheaf-ops' `tests/exports.rs`
+    (`every_way_out`, in a child process whose temp, cache and home
+    directories are empty and must stay so), sheaf-cli's
+    `the_command_line_writes_nothing_but_its_outputs`, and the
+    `std::env::temp_dir` clippy ban (Lint ledgers).
+12. **Fail, never repair, and fail closed on removal.** Held by
+    `source::tests` (`cyclic_kids_are_a_typed_error` and the limits),
+    the fuzz targets (nightly), `removal_tests`
+    (`a_forced_misclassification_is_vetoed_and_counted`), and the corpus's
+    `deleted_means_deleted_both_ways` (ignored) and
+    `the_removal_check_finds_what_a_page_delete_rewrite_took_out`.
+
+- **The registry rule** (every cross-cutting function destructures
+  `DocState` with no `..`, or matches `Key` exhaustively) is held by the
+  compiler: a new table or key kind fails to build until each of them
+  handles it (the plan's names were sketches; the code's are a put's
+  effects, `effects::judged`; the cascades' triggers; `ChangeSet::of`;
+  an Append's closure, `materialize::deps::closure`; `step_bytes` and
+  `DocState::snapshot_bytes`; `DocState::{get, set}`;
+  `check_invariants`; and `render_tables`, which the render key reads).
+- **Nothing ships unproduced** (no key, variant, field or public type
+  without a producer and a consumer in M10.5): held by review and by
+  clippy's `-D warnings` for what's private (a helper whose last caller
+  goes fails it), and §19 of the plan lists each public type with its
+  producer. What a slice deletes stays deleted: `tests/retired.rs`'
+  `nothing_retired_is_back`, a `syn` walk of every crate against the
+  retired names.
+- **sheaf's private data is a table** (§15, slice 19): an output
+  written without it holds none (`private_tests`'
+  `no_sheaf_name_but_the_private_keys_is_written`, and `private::found`
+  run over every Strip output), and an output that would is refused.
+
 ## Opening a file (M10.5 slice 4)
 
 A file opens once, the same way in the app, on the command line and in
@@ -383,8 +497,9 @@ not what's stored.
   page as it shows without rotate view: the pointer goes through the
   pane's `from_view` and the edit frame's `to_view`, a tool builds its
   mark there, and `Annot::to_page` maps it into PageSpace, the one way a
-  mark made on a page as it shows reaches the model (the plugin adapter's
-  too); `Annot::to_frame` is its inverse, what a drag moves, a handle
+  mark made on a page as it shows reaches the model (a plugin maps its
+  own through `page-info`'s `from-view` from API 0.4, slice 20; 0.3's
+  adapter did it with this); `Annot::to_frame` is its inverse, what a drag moves, a handle
   reshapes and the clipboard holds. Find and pattern hits, the
   text selection, handles, other tools' comment outlines, regions and the
   print preview draw through the pane frame, and `Doc::reveal` scrolls a
@@ -465,21 +580,21 @@ not what's stored.
   missing.
 - **Regions** (Shift+drag) are held in PageSpace, and the plugin host
   gets them so.
-- **Plugins under API 0.3 keep their frame:** a page's coordinates are
-  its source page as the file displays it, after the file's own
-  `/Rotate` and before any turn sheaf adds. The adapter (`sheaf-plugin`'s
-  `api/shared.rs`) maps marks, OCR text, bookmark positions and region
-  events into that frame on the way out, and back into PageSpace on the
-  way in, a mark's `turn` the frame's rotation. `page-info`'s size is the
-  page as shown, sheaf's turn included, while its coordinates aren't;
-  API 0.4's to-view and from-view matrices end that (slice 20).
+- **Plugins under API 0.3 kept their frame** until slice 20: a page's
+  coordinates were its source page as the file displays it, after the
+  file's own `/Rotate` and before any turn sheaf adds, through an
+  adapter (`sheaf-plugin`'s `api/shared.rs`) in both directions. API 0.4
+  (slice 20), the only API served since, is PageSpace throughout, each
+  `page-info` carrying its `to-view` and `from-view` maps, and the
+  adapter is gone.
 - **PDFium's text is PageSpace** (slice 14): `page_chars` gives each
   character's loose box as PDFium has it, in the page's user space, with
   the angle it's drawn at, and `PageChars` finds lines in the frame most
   of the page's characters are drawn upright in, not by its `/Rotate`
   (Text and printing). The device 16 times the page's size that mapped
-  text into the displayed space is gone; plugins' text is mapped into
-  0.3's frame at the API's edge, as marks are.
+  text into the displayed space is gone; plugins' text was mapped into
+  0.3's frame at the API's edge, as marks were, until API 0.4 gave it in
+  PageSpace (slice 20).
 - **The clipboard** (version 2) holds marks in the edit frame of the page
   they were copied from, each turned relative to it. A paste maps them
   through the target page's frame, so they land where they were seen and
@@ -642,9 +757,10 @@ lint ledger) keeps them out of everything but tests.
   older sheaf's artifacts, and `/SheafOcr` with the legacy OCR layer in
   slice 18, whose stream `/SheafOcrLayer` tells it. The emitter writes a
   content's resources by digest,
-  one object a resource a file; `content::ResObjects` writes them into a
-  lopdf document (exchange's Comments.pdf, the comment summary's pages),
-  one object a resource a document.
+  one object a resource a file; `ResObjects` (`serialize::built` from
+  slice 20, `content::to_lopdf` before) writes them into a PDF sheaf
+  builds in memory (exchange's comments, the comment summary's sheets, a
+  tape's picture), one object a resource a document.
 - **Fonts** (`content::Font`: `encode`, `advance`, `wrap`, `covers`,
   `resource`). `Std14` is the 14 standard fonts with Adobe's Core 14 AFM
   widths (`crates/sheaf-doc/assets/afm`, with Adobe's notice) and exact
@@ -1133,12 +1249,14 @@ targets to sit after the preceding bookmark's pages.
   pages left out deleted, one `InsertPages` a further file, its
   bookmarks added; it was written and reopened until slice 19, which
   hands the combined session to a window (see Exports, memory sources,
-  Session and `sheaf edit`). Plugins speak WIT 0.2 and 0.3 until 0.4:
-  `api::shared::Adapter` says each edit as ops (an update a `PatchMarks`
-  naming only the record's fields, so what the API doesn't show stays),
-  the host resolves a mark's stamp or file stem into a grant, and the
-  batch is one transaction of `Actor::Plugin` (from slice 12 a call's
-  batches are one group, the first landed on what the call read). A
+  Session and `sheaf edit`). Plugins spoke WIT 0.2 and 0.3 until slice
+  20: `api::shared::Adapter` said each edit as ops (an update a
+  `PatchMarks` naming only the record's fields, so what the API didn't
+  show stayed), the host resolved a mark's stamp or file stem into a
+  grant, and the batch was one transaction of `Actor::Plugin` (from slice
+  12 a call's batches were one group, the first landed on what the call
+  read). API 0.4 submits Op JSON, lowered into the call's one
+  transaction (Plugin API 0.4). A
   comment import is `PatchMarks`, `AdoptAnnotations` and `AddMark` with
   `Imported` (`Actor::Job(Import)`; `Actor::Cli` on the command line).
 
@@ -1324,12 +1442,15 @@ impl DocView {
   one until its new one lands. The panes lay the pages out again
   (`Doc.layout`) only on an order or a geometry, so a mark's edit, or a
   page shown from another source page of its size, lays nothing out.
-  Then the plugin cell takes the new snapshot, autosave is scheduled (not
-  for a save or the opening), and
+  Then the plugin cell takes the new snapshot (from slice 20 what
+  `Document::published()` publishes), autosave is scheduled (not for a
+  save or the opening), and
   listeners hear once: `DocEvent::Opened` when the file opened, else
-  `DocEvent::Changed { change }`. Plugins hear it as `edited` ("Undo:
-  …", "Redo: …", "Go to: …" or the label), never of their own edits (by
-  the change's actor) or of saves. A recovery sidecar is keyed by its
+  `DocEvent::Changed { change }`. Plugins heard it as `edited` ("Undo:
+  …", "Redo: …", "Go to: …" or the label) until slice 20, and from it as
+  `changed(change-info)`, its scopes, merged while the plugin is busy
+  (Plugin API 0.4); never of their own edits (by the change's actor) or
+  of saves. A recovery sidecar is keyed by its
   `VersionId` alone. The `--script` harness's `dump` gains `"version"`
   (the version, the change and layout counts, whether it's dirty) and
   `"changes"` (the count, and the last change).
@@ -1387,25 +1508,27 @@ impl DocView {
   their round began on (the run's first; from slice 18, a later round's
   for pages read again), deciding by each page as it was rendered,
   landed with `Validate`.
-- **Plugins** (§14.3; WIT 0.2 and 0.3 until 0.4). Each document has a
-  cell (`Doc.plugin_cell`, an `ArcSwap<Snapshot>`) that `on_change`
-  stores the new snapshot in. A call loads its base from it at its first
-  read or submit (`HostState::base`), so a queued call, or one that
-  showed a form first, starts from the document as it is then, and its
-  reads record the slots it decided by (`HostState::read`,
-  `CallOutput.reads`): `pages()` the order and each page's `Page` and
+- **Plugins** (§14.3), as slice 12 left WIT 0.2 and 0.3; slice 20
+  replaced the batches with one transaction a call (Plugin API 0.4).
+  Each document has a cell (`Doc.plugin_cell`, an `ArcSwap<Snapshot>`,
+  from slice 20 an `ArcSwap<Published>`) that `on_change` stores the new
+  snapshot in. A call loads its base from it at its first read or
+  submit, so a queued call, or one that showed a form first, starts from
+  the document as it is then, and its reads record the slots it decided
+  by (until slice 20 `HostState::read` into `CallOutput.reads`, from it
+  the call's transaction): `pages()` the order and each page's `Page` and
   `Geom`; `annotations(p)` `PageAnnots(p)` and each mark shown; the
   outline its roots and each bookmark; text, search, words and
   recognition `Page(p)` (from slice 13 `render_reads` under
   `content_only`, which is that), and a render what it drew under its
   inputs (`render_reads`: the page, its drawn annotations and fields, the
   form, the generators on it, and the order or the labels when their
-  live tokens read them); an
-  update the mark it keeps parts of. When the
-  call returns, `plugins::land` begins a `GroupKind::PluginCall` group
-  and commits the first batch on the base (`tx_at`, each read,
+  live tokens read them); an update the mark it kept parts of. When the
+  call returned, `plugins::land` began a `GroupKind::PluginCall` group
+  and committed the first batch on the base (`tx_at`, each read,
   `Relower`) and later ones at the current version in the group
-  (`EditBatch::lowered(tx, doc)`). The first failure rolls the group
+  (`EditBatch::lowered(tx, doc)`); from slice 20 `sheaf_plugin::Landing`
+  commits the call's one transaction. The first failure rolls the group
   back; if the user changed meanwhile what the call wrote (a Conflict),
   its edits stay, and the notice says "its partial edits were kept". A
   call whose cell is no longer its view's (the view opened another file)
@@ -1522,7 +1645,9 @@ recovery sidecars reach their bytes through `serialize/` (§11.7 of
   API (§15), until slice 19;
 - pictures PDFium draws from memory (a tape), the only one from slice
   19, whose memory sources and exports write the rest through
-  `serialize::full::write_built` and `materialize`.
+  `serialize::full::write_built` and `materialize`, until slice 20 built
+  it with `serialize::built` too. From slice 20 lopdf's writer writes
+  nothing outside tests.
 
 - **Objects** (`object`): a direct object as PDF syntax, and an indirect
   object's `n g obj` frame. Reals are f64 in their shortest round-trip
@@ -3383,14 +3508,14 @@ selection and plugin text read its pages from their groups.
   that page's `render_reads` under it (the page, every generator, and the
   order where a page-numbering header calls for it), so an unsaved
   header's edit conflicts with a call that read the page's text and a
-  comment's doesn't; `recognize` still reads `content_only()`. Matches go out through the
-  page's 0.3 frame (`to_frame`), a rect a plugin passes to `text-boxes`
-  coming back through its inverse. The OCR layer's own special cases
+  comment's doesn't; `recognize` still reads `content_only()`. Matches
+  went out through the page's 0.3 frame (`to_frame`) until API 0.4 made
+  them PageSpace (slice 20). The OCR layer's own special cases
   (searching an unsaved layer beside PDFium, `ocr_text` branches) are
-  gone: the realization draws the layer. From slice 18 API 0.3 has no
+  gone: the realization draws the layer. From slice 18 API 0.3 had no
   `ocr.page-text-layer` either: recognized text, saved or not, is the
   page's content, which `text` reads as the file will draw it now; 0.2's
-  answers none until 0.2 goes (slice 20).
+  answered none until slice 20 deleted 0.2.
 - **Blank detection** (`blank::find`, Find Blank Pages and `sheaf
   remove-blanks`) walks the wanted pages in the document's order through
   the document's views: annotations first as before, then the page's text
@@ -4452,13 +4577,13 @@ starts each round's job and follows the commits.
 
 ### The plugin API
 
-API 0.3 has no `ocr.page-text-layer`: recognized text, saved or not, is
+API 0.3 had no `ocr.page-text-layer`: recognized text, saved or not, is
 the page's content, which `text` reads as the file will draw it now.
-0.2's, which the frozen 0.2 fixture imports, answers none until 0.2 goes
-(slice 20): `impl ocr::Host` is in `api::v02` and `api::v03`, their
-`recognize` one helper (`api::shared::recognized`). 0.3.0 lost the
-function without a version bump: it's unreleased, and no plugin in the
-repository imports it.
+0.2's, which the frozen 0.2 fixture imported, answered none until slice
+20 deleted 0.2 with its fixture (and `api::v02`, `api::v03` and
+`api::shared` with it); API 0.4 has only `ocr.recognize`. 0.3.0 lost the
+function without a version bump: it was unreleased, and no plugin in the
+repository imported it.
 
 **Deleted:** `text_layer::{install, strip, has_layer, layer_entries,
 to_content, MARKER, FONT_NAME}`; `ContentStack::with_ocr_text` (now
@@ -4811,10 +4936,13 @@ directory, `SHEAF_CACHE_DIR`) is gone.
   throwaway Document and the `.images.part` file went.
 - **The comment summary** is a session: `new_empty`, then an insert of
   its pages, a `Memory(Summary)` blob written by `write_built`. Its Pages
-  layout still builds its pages as an eager lopdf graph (it binds
-  resources through `ResObjects` and copies the printed pages with
-  `stamp_lib::page_forms`, which trims a clone of an eager document), and
-  its `/Info` is the empty primary's: no Title, Producer or CreationDate.
+  layout built its pages as an eager lopdf graph until slice 20 (it bound
+  resources through `ResObjects` and copied the printed pages with
+  `stamp_lib::page_forms`, which trimmed a clone of an eager document);
+  from slice 20 it opens its printed bytes as a source and builds its
+  sheets with `serialize::built::Built`, each page form copied from the
+  source (PDFs made in memory, in Plugin API 0.4). Its `/Info` is the
+  empty primary's: no Title, Producer or CreationDate.
 
 ### Sessions and saves
 
@@ -4855,8 +4983,8 @@ takes it.
   name, so importing the same XFDF twice updates them, keeping `/NM`,
   dates and authors. A comment export writes sheaf's marks through
   `annot::emission` (`WriteCx::held` and `form`), and an FDF through
-  `write_built`; `annot::to_pdf`, `to_pdf_in` and `Written` are fixtures
-  only.
+  `write_built`; `to_pdf`, `to_pdf_in` and `Written` are fixtures only
+  (`serialize::built`'s from slice 20).
 - **`Document::forget_before_cursor()`** advances history's root to the
   current version (`advance_root`): nothing to undo, the saved version
   kept as an anchor so the document still knows its file. It stops at a
@@ -5119,10 +5247,11 @@ write and reopen, `comments::summary_pdf`; the app's
 `export_clean_copy_prompt` and `PrintContext::snapshot`.
 `tests/retired.rs` lists them.
 
-Outside tests, lopdf's writer writes only a tape's picture
-(`annot::tape_pdf`); `ResObjects` and `WriteCx` stay for the PDFs sheaf
-builds in memory and writes with `write_built` (the summary's pages, an
-exchange's marks, a pinned mark's one-page PDF).
+Outside tests, lopdf's writer wrote only a tape's picture
+(`annot::tape_pdf`) until slice 20, which builds it with
+`serialize::built` and writes it with `write_built`; `ResObjects` and
+`WriteCx` moved there, for the PDFs sheaf builds in memory (the
+summary's pages, an exchange's marks, a pinned mark's one-page PDF).
 
 **Numbers** (AMD EPYC 7302P, release; the 7k gate harness, each
 measurement in a process of its own on a quiet machine):
@@ -5142,6 +5271,376 @@ ledger has the row). Slice 2's flatten, which kept the heavy's 7,000
 widgets, took 3.49 s and peaked at 420 MB. Every other gate holds where
 slice 18 left it, proposal 8's accepted misses included.
 
+## Plugin API 0.4 (M10.5 slice 20)
+
+A plugin speaks one world, `sheaf:plugin@0.4.0` (`wit/sheaf.wit`): it
+reads the document in PageSpace, a page's `to-view` and `from-view` maps
+beside it, and edits with sheaf's own ops, Op JSON in the envelope,
+lowered at once into the call's one transaction, which lands when the
+call returns (or when it commits) as one undo step, or is taken back.
+What it reads is what it decides by; it never learns the user's name
+unless the user lets it; it never names a blob by id, and uploads what
+its edits hold. WIT 0.2 and 0.3, their adapter and their fixture are gone
+with no shim. The PDFs sheaf makes in memory have one builder,
+`serialize::built`, and model-level code names no lopdf `ObjectId`
+(§2 rule 7, §6.3, §6.6 to §6.8, §8.4, §8.5, §14.1, §14.3, proposals 11,
+18, 19 and 20 and bugs 27 and 30 of `todos/m10.5-edit-api.md`).
+
+```rust
+pub struct Published { pub snap: Snapshot, lowering: Lowering }      // sheaf_doc
+impl Document { pub fn published(&self) -> Published; pub fn instance(&self) -> u64; }
+impl Published { pub fn plugin_tx(&self, id: Arc<str>, version: Arc<str>, identity: bool) -> Tx;
+                 pub fn store(&self) -> &Arc<Store>; pub fn is_user(&self, author: &str) -> bool; }
+impl Tx { pub fn apply_said(&mut self, ops: Vec<Op>, p) -> Result<Preview, EditError>;
+          pub fn preview_batch(&mut self, ops: Vec<Op>, p) -> Result<Preview, EditError>;
+          pub fn mark_handed_out(&mut self); pub fn base(&self) -> VersionId;
+          pub fn is_empty(&self) -> bool; }
+pub struct CommitOpts { .., pub depth: u8 }   pub struct ChangeSet { .., pub depth: u8 }
+pub struct LowerCx { .., pub identity: bool }
+pub struct Applied { created, locals: BTreeMap<Local, Made>, lines }  // sheaf_edit::reply
+pub struct Previewed { lines, created, locals, caps: Vec<Cap>, removes: bool }
+pub struct Failure { kind: FailureKind, message: String }    pub enum Cap { Plugin, Approval, User }
+pub trait Door { fn model(&mut self) -> &mut Document; fn commit(..); fn follow(..); }  // sheaf_plugin
+pub trait Committer: Send + Sync { fn commit(&self, tx: Tx, label: &str, depth: u8)
+                                       -> Result<Committed, EditError>; }
+pub struct Landing { .. }   // commit, finish, end_group
+pub struct Landed { pub failed: Option<(String, EditError)>, pub kept: bool, pub refused: Vec<String> }
+pub fn follow_ups(landed: &Landed) -> Vec<DocEvent>;
+pub struct ChangeInfo { version, parent, instance, cause, actor_kind, scopes: Scopes, depth, undone }
+pub enum DocEvent { .., Changed(ChangeInfo), EditRefused(String) }
+pub struct PageObj { pub blob: BlobId, pub id: ObjectId }  // sheaf_doc::source; Source::page_obj
+pub struct Built { .. }    // sheaf_doc::serialize::built: new, pdf, page, form_page, finish
+```
+
+### One world
+
+`sheaf-plugin` has one `bindgen!` and `sheaf-plugin-api` one
+`generate!`, both of `wit/sheaf.wit`, the only file under `wit/`
+(sheaf-plugin's `tests/one_world.rs` counts them). The host is split by
+interface (`api/{convert, document, text, render, edits, assets, ui,
+progress, storage}.rs`). A manifest names the API it was built for
+(`api = "^0.4"`), which must match `API_VERSION` exactly to the minor
+until sheaf's first release (`API_PREVIOUS` and the N-1 policy went),
+and the version of Op JSON its edits are written in (`edit-schema =
+"1.0"`): optional, since a plugin that only reads has no edits, and one
+that leaves it out has every `submit` answered `invalid`; a newer minor
+than sheaf reads is refused when the manifest is read ("built for edits
+1.1; this sheaf reads up to 1.0"), so `discover` lists it as an error and
+no plugin is made. `permissions.identity` is the one new permission
+(below).
+
+The SDK, `sheaf-plugin-api` 0.4.0, re-exports `sheaf_edit` (`Op`,
+`Applied`, `Previewed`, `Failure` and everything an op holds) and adds
+`Ops` (a builder: `push`, `bookmark`, `bookmark_in`, `mark`, `stamp`,
+`page_stamp`, `connector`, `delete_pages`, `to_json`, `submit`,
+`preview`; and `commit`, `upload`, `style`, `page`, `at`, `BLUE`) and
+`view` (`to_view`, `from_view`, `box_to_view`, `box_from_view`,
+`dest_from_view`, one axis at a time as `Affine::apply_axes` maps,
+`shown_size`). `Batch` went. The six bundled plugins are ported, at
+0.3.0 (tax-form-bookmarks appends its bookmarks; bookmark-from-pattern
+names a new heading by a local; amount-crossref and duplicate-pages key
+what waits between calls by path and `version.instance`; subtotal forgets
+a page's numbers when `scopes.content` names it, and all of them on a
+change to generators, order or labels, since 0.4's text leaves
+annotations out).
+
+### The call's transaction
+
+The app publishes, at every change and when who the user is changes,
+`Document::published()` into the view's cell (`Doc.plugin_cell`, an
+`ArcSwap<Published>`): the snapshot and what lowering needs (the store,
+the allocator, the identity, the file's name, whether the file is
+ready). A call makes its transaction at its first read or submit
+(`HostState::tx`) with `Published::plugin_tx(id, version, identity)`,
+which binds `Actor::Plugin` alone; `Document::lower_cx` binds every
+other actor, and never grants identity. So a call that waited in the
+queue, or on a form, reads the document as it is by then, and the
+transaction is on that version (`Tx::base`).
+
+- **`submit(label, ops)`** parses the envelope (`sheaf_edit::Envelope`:
+  a `label` of its own, another `v` than the manifest's `edit-schema`, or
+  no `edit-schema`, is `Failure { invalid }`), lowers its ops with
+  `Tx::apply_said` (all or none, on the plugin's thread), marks the
+  transaction's ids handed out (`Tx::mark_handed_out`) and answers
+  `Applied` as JSON: each op's `created` ids, the `locals` it named and
+  its `lines`. The first submit's label names the call's edits.
+- **`preview(ops)`** is `Tx::preview_batch`: a checkpoint, `apply_said`,
+  and a rewind, answering `Previewed` (the batch's lines, ids, locals,
+  each op's `Cap`, and `removes`, its `Flags::REMOVES`). The ids it drew
+  stay drawn. Since `Tx::allowed` refuses an op the actor may not make, a
+  plugin's preview of one fails as its submit would.
+- **Failures** are `Failure::from(&EditError)`, whose `FailureKind`
+  mirrors `EditError`'s variants. `Made`, the reply types and `Cap` (with
+  its Display words) live in sheaf-edit (`reply.rs`), re-exported at
+  `sheaf_doc::tx`, so a reply names a cap as sheaf does; ops-1.0.json is
+  unchanged, since none of them is in the envelope.
+- **Reads** go through the transaction (`tx.reader()`, `read_render`),
+  so each is a decision read of the call's (§6.3), and they read the
+  transaction's own state (`Snapshot { state: tx.state().clone(), .. }`
+  for text and renders, keyed by render key, not version): a call sees
+  its own edits, and `Reader::note` records no read of a slot the
+  transaction wrote, so its own edits never refuse it.
+- **The end of a call** lands what's left (`CallOutput.tx`, none when it
+  applied nothing) through `sheaf_plugin::Landing`: `CommitOpts::based(
+  tx.base(), Stale::Relower, label)` in a `GroupKind::PluginCall` group
+  of the call's, at the call's depth. A relowered transaction whose ids
+  were handed out must make what it made: `Document::relower` compares
+  the original `created` (each op's ids and the locals) with the new,
+  and a difference is a `Conflict` over the first lowering read whose
+  value changed (`by` the edit that changed it), or, when none did, over
+  the first slot the new steps wrote (`by: None`). So a user's edit
+  elsewhere lands beside the call's, its marks keeping the ids `submit`
+  gave, and an edit to what the call read, or one that makes its ops
+  make something else, refuses it.
+- **`commit()`** lands the call's edits so far now, through
+  `DocContext.committer`. The app's `AppCommitter` sends a
+  `CommitRequest { tx, label, depth, reply }` to the call's task on the
+  UI thread, which lands it (`CommitRequest::land`, `DocView::commit_call`,
+  only while the view shows the call's cell) through the call's own
+  `Landing`, so a call's commits and its end are one group; the plugin's
+  thread waits on the reply, and the time is credited to its deadline.
+  The reply carries the version, the instance and the cell `on_change`
+  published, which the call's next transaction is made on, its uploads
+  granted again. A closed view or a dropped channel answers
+  `EditError::Invalid { op: "commit", why: "its document was closed" }`.
+  The UI thread never waits on a plugin's.
+- **Rollback.** `Landing::finish` ends the group when the call returned
+  `Ok` and its last commit landed. An `Err`, a trap, a stop (a stopped
+  call that returned `Ok` too: its edits are dropped, "… was stopped, so
+  it changed nothing") or a last commit that fails drops what's
+  uncommitted and takes back what the call committed with
+  `Document::rollback_group`: its only version truncated, with no redo
+  entry, or, when the user edited in between, a version that reverts the
+  call's alone. When the user has since changed what it committed, its
+  edits stay, and the notice says so ("… its partial edits were kept").
+
+### What a plugin may do, and see
+
+**Caps** are per resolved target (slice 11's `cap_of` and
+`actor_allows`); 0.4 adds no row and grants nothing beyond `Cap::Plugin`.
+A plugin's `InsertPages` and `ReplacePages` are `Refused(User)`, deleting
+another tool's comment and `FlattenAnnotations` are `Refused(Approval)`,
+and a raw `{"blob": …}` is `Refused(User)` (resolve.rs). There is no
+clipboard or export function in 0.4: exports stay out of plugins' reach
+(D46), a `Transform` is outside the envelope, and `actor_exports`' plugin
+arm has no WIT producer.
+
+**Reads in PageSpace.** `page-info` gives each page's id, boxes,
+`rotate` as it shows, its label and its `to-view` and `from-view`
+matrices; `pages()` reads the order, each page's `Page` and `Geom`, and
+`Labels`. `annotations(p)` lists sheaf's marks whole and other tools'
+comments as read-only summaries (`comment-summary`), never a widget, a
+link or an annotation the file hides. Text is the page as the file will
+draw it now and leaves fields out (`TextOpts` has no `fields` until M10
+slice 14, and PDFium never reads a widget's value as text). A render
+draws the page as it shows (`RenderSource::render(&ViewInputs)`,
+`render_delta`), its `to-page` and `region` in PageSpace; `without-markup`
+is `ViewInputs::print(false)`, `plugin()` with no marks and no other
+tool's comments, form fields still drawn. `ocr.recognize` gives PageSpace
+words; 0.2's `page-text-layer` went with 0.2.
+
+**Who made what** (§6.8). Authors are roles (`Roles::of`): `you`,
+`plugin <id>` for an installed plugin and `other`. A plugin's marks are
+authored by its id (§6.8 says its name; the id is stable, is what
+History shows, and matches the role), and `<<name>>` and `<<initials>>`
+in them stay literal (`<<date>>` and `<<time>>` are filled). With the
+`identity` permission (the consent prompt's "Know your name",
+`Grants::identity`), `LowerCx.identity` fills them, and authors are told
+by name, an installed plugin's still as `plugin <id>`.
+
+**Assets.** `assets.upload(bytes, kind)` interns into the document's
+store (`Published::store`) as a paste interns the clipboard's blobs: an
+image as a one-page stamp PDF (`stamp_lib::image_stamp_bytes`), a PDF
+with pages as a stamp's page, a file as an attachment. It grants it in
+the call's transaction (`Tx::grant`, `BlobSel::Asset(n)`, a
+`Grant::Stamp` or `Grant::Blob`), pins it (`Tx::pin`), and grants it
+again, in order, in each transaction a commit starts, so a handle holds
+until the call returns. A call's uploads hold at most 64 MiB
+(`MAX_UPLOAD_BYTES`), an image's pixels counted at four bytes each:
+`image_stamp_bytes` reads the header, refuses what passes the budget
+left, and decodes under `image::Limits` of those dimensions, since a
+host call runs past the plugin's memory limit and deadline.
+
+### Events and depth
+
+A change reaches a plugin as `changed(change-info)`: `ChangeInfo::of(
+&ChangeSet, instance)`, its cause, its actor's kind (user, plugin, job,
+mixed; never a name), `parent` and `version`, and its scopes (`order`;
+the pages whose `geometry`, `content` or `annots` changed, pages added
+and removed among the content; `outline`, `labels`, `form`, and
+`generators`, which no page set says). `edited` and its label went.
+
+- **Merged while busy.** `PluginHost.changes`, a `Coalescer` keyed by
+  (plugin, view), queues what waits and merges a change into the last
+  waiting with `ChangeInfo::merge` (the earliest parent, the latest
+  version, the union of scopes, `Coalesced` and `Mixed` where they
+  differ) only when the two are alike to answer
+  (`ChangeInfo::answerable`: depth 0 and not undone), else queues it
+  after, so a merged change is refused an answer only when each of its
+  parts would be; the unanswerable keep the deeper depth and undone if
+  either. It sends the first waiting when the plugin's call ends
+  (`queue_done`); a change of another instance drops what waited for
+  the old one. Regions stay latest-wins per plugin in the same kind of
+  queue (`Latest` and `region_done` went).
+- **No echoes.** `recipients(plugins, kind, from)` leaves out the
+  plugin whose call made the change.
+- **Depth.** `ChangeSet.depth` is its commit's (`CommitOpts.depth`; an
+  amend and a commit that changed nothing carry it; every other cause is
+  0). An answer to a `changed` is one deeper (`runtime::answering`), and
+  refused when the change was already an answer ("it answers a plugin's
+  answer to a change, and those stop there"), so the user's edits and a
+  command's are answered once and the answer isn't; or when it was an
+  undo, redo, jump, rollback or revert (`ChangeInfo.undone`: "the user
+  undid this"), so a plugin can't fight undo. A refused call's `submit`,
+  `preview` and `commit` all answer `Failure { refused }`.
+- **`edit-refused`.** `follow_ups(&Landed)` makes an
+  `EditRefused(why)` of each refusal and of a last commit that failed,
+  and the app sends them only to a plugin that subscribes
+  (`follow_up_calls`). Edits answering one are refused ("it answers a
+  refusal of its edits") and not told again, which closes a two-step
+  fight with undo.
+- **`opened`** comes once the file is ready, as before (`plugins::
+  Waiting`, `release_plugin_calls`).
+
+### PDFs made in memory
+
+`content/to_lopdf.rs` is gone, and `serialize/built.rs` is the permanent
+builder of every PDF sheaf makes in memory: `ResObjects` (one object a
+resource a document, bound through `content::sink::bind`), `WriteCx`,
+`StampForm` (with `resource()`) and `Held` (the marks as the writer
+makes them, moved from annot.rs), the tests' `Written`, `to_pdf`,
+`to_pdf_in` and `write`, a private `Graph` sink in place of
+`sink::Lopdf`, `as_form` in place of `Appearance::write`, and `Built`,
+the page builder (`new`, which numbers the page tree first, or `From<
+lopdf::Document>` for a graph already parsed; `pdf()`, `page(media,
+content, needs)`, `form_page(StampForm)` drawing a form as `/Stamp`, and
+`finish()`, written by `write_built`). annot.rs builds dictionaries and
+content alone: `emission` takes the digest of what it wrote from direct
+values (`written_staleness`, `NoObjects` gone); `tape_pdf`'s picture is
+built with `Built` and written by `write_built`, not lopdf's `save_to`;
+`pinned_pdf` draws through `WriteCx::stamp` and `Built::form_page`; and
+`WriteCx::stamp` takes a copied form's frame from its source, a pinned
+one's from its appearance, a blob's from `page_form`, never reading back
+the graph it built. lopdf's writer writes nothing outside tests.
+
+- **Exchange's comments are a source.** `Comments { src, annots, file }`:
+  `Comments::built(Built, annots, file)` writes the FDF or XFDF graph as
+  a file of no pages and opens it as a memory source
+  (`MemoryKind::Comments`, which `Source::open` lets have none, as
+  Blank), and `from_pdf` opens another PDF lazily, decrypted with its
+  password (`BlobKind::comments(password)`). `gather` builds through
+  `WriteCx` into a `Built` too, and `fdf::write` copies each comment out
+  of the source (`copy_object`), so an FDF holds only what its comments
+  reach.
+- **Page forms come from a source.** `stamp_lib::page_forms(&Src,
+  &[u32], dst)` copies each page's content, as one stream, and its own or
+  inherited resources (`remap`), where it trimmed a clone of an eager
+  document and copied every other page key as orphans. The summary opens
+  its printed bytes as a `Memory(Summary)` source and builds its sheets
+  with `Built`; `form_to_pdf` builds through `Built` and writes the
+  bytes it wrote; `Blob::source(&Limits)` opens a stamp's or a
+  watermark's blob where no store is at hand (`Store::source` calls it).
+  `copy_page_dict` moved from `materialize::copy` to stamp_lib, its only
+  user.
+- **The `Objects` trait stays** for what still loads a file whole: a
+  Rewrite's graph (`materialize::record`'s `RootValues::of` and
+  `TreeShape::of`, `keep_only`'s `is_page_node`; backlog F15), the form
+  check's file and revisions (`forms::check`), the stamp library's
+  collections and the user's PDF a stamp is made from (proposal 29), and
+  tests. Every file a document reads, and every PDF sheaf builds in
+  memory, is read as a source.
+
+### No lopdf ids in the model
+
+Rule 7's "no id is an ObjectId" is held by sheaf-doc's
+`tests/object_ids.rs`: a `syn` walk from lib.rs that follows `mod`
+declarations as the compiler does, leaving out what's built only for
+tests or the `fixtures` feature, and fails on any path or type ending in
+`ObjectId`, a `use` of it (renamed too) and the name in a macro's
+tokens, outside an allowlist with a reason for each entry. The
+allowlist is the plan's directories (`source/`, `materialize/`,
+`serialize/`, `content/`, `forms/`) and the file-level readers that read
+a file's objects by number: the open's fact readers (`open/annots.rs`,
+`open/outline.rs`, `attachments.rs`, `labels.rs`, `layers.rs`,
+`portfolio.rs`, `properties.rs`, `file.rs`, `import.rs`), `realize/`'s
+`alloc.rs`, `assemble.rs` and `untouched.rs`, `private.rs`,
+`stamp_lib.rs`, `exchange/mod.rs` and `generate/saved.rs`. Three more
+tests check that every `.rs` file is walked or built only for tests,
+that each entry still names `ObjectId` and none covers `model.rs`,
+`model/`, `tx/` or annot.rs, and, on a probe crate in memory, that a hit
+is caught where it should be and nowhere else. To pass it:
+
+- **`source::PageObj { blob, id }`** (`Source::page_obj(index)`) keys a
+  page's object: `DocState::page_showing(PageObj, copy)`,
+  `page_named` and `pages_showing`, and the save's maps
+  (`emit::written_pages`, `copy::Pages::Written`, `copy::page_named`,
+  deps.rs's `Written`), in the order they had.
+- **`open::FlatOutlineItem`** moved from model.rs (still
+  `sheaf_doc::FlatOutlineItem`): cached in the `Source`, it can't hold an
+  `ObjRef`, which would hold its source. `holding` and `file_in` take
+  `ObjRef`s.
+- **`source::appearance`** (`Shows::read`, `Shows::in_slot`,
+  `Shows::form`, `frame`) is what a flatten reads of an annotation, moved
+  from tx/flatten.rs, which keeps `placed` and imports nothing from
+  lopdf.
+- **`generate::saved`** holds the reader of a file's saved generators
+  (`Saved`, `read`, `Block`, `rebind`), moved as it was, re-exported at
+  `generate::{Saved, read}`; generate.rs itself is checked.
+- **`materialize::kept`** is `keep_only`, moved from the crate root.
+
+`layers::LayerId` is an alias of `ObjectId` (`ViewInputs::off`, the
+layers panel), which the walk can't see through.
+
+### Docs and tests
+
+`docs/plugins.md` is rewritten for 0.4: PageSpace and the maps, reads as
+decision reads, marks and summaries, roles and identity, one transaction
+per call, "What a plugin may do" (the `Cap::Plugin` ops, and what's
+refused), assets, events and answers, and the edits schema, linking
+`crates/sheaf-edit/schema/ops-1.0.json` and `sheaf edit --schema`. Its
+three `<!-- plugin-ops example -->` blocks are run by sheaf-plugin's
+`tests/docs_examples.rs` (`EXAMPLES = 3`): parsed as an envelope with no
+label at `sheaf_edit::VERSION`, lowered through `plugin_tx`,
+`apply_said` and `mark_handed_out` on four blank pages, and committed
+with `Relower`. host.rs's `Shared` harness (the document and its
+`Landing` behind a mutex, the cell, a `Committer`) and `FakeUi::editing`
+(a user's edit committed and published while a form is open) run the
+fixture's commands: a thread named by a local, an envelope with a label,
+traps after two submits, after a commit and after a user's edit, the
+tape a total read changed meanwhile, an edit beside one, the refusals,
+the roles, an uploaded stamp after a commit, reads of the call's own
+edits, answers to answers, an answer to an undo, and time spent waiting
+on a commit.
+
+**Deleted:** `wit/0.2`; sheaf-plugin's `api::{v02, v03, shared}`
+(`Adapter`, `Said`, `More`, `page_frame`, `to_frame`, `dest_from_wit`,
+`rotation_from_wit`, `pt_from_wit`, `rgb_from_wit`), `bindings_v02` and
+`bindings_v03`, `API_PREVIOUS`, `runtime::{World, EditBatch, Held}`,
+`CallOutput::{batches, reads, base}` and `HostState::{batches, reads,
+read, page_base}`, the 0.2 fixture and its tests,
+`DocEvent::Edited` and `EventKind::Edited`; sheaf-plugin-api's
+`batch.rs` (`Batch`, `annot`, `at`, `BLUE`; `at` and `BLUE` are `Ops`'
+now); the app's `plugins::{land, Landed, edited_label, Latest,
+region_done}`; `content::{to_lopdf, ResObjects}`, `content::sink::
+Lopdf`, `annot::{WriteCx, StampForm, Held, Written, to_pdf, to_pdf_in,
+NoObjects}` and `Appearance::write` (moved or replaced in
+`serialize::built`), `materialize::copy::copy_page_dict`,
+`exchange::Comments::{pdf, new}`; `model::FlatOutlineItem` and
+`tx::flatten::{Shows, read, shown, frame, unkept}` (moved). Slice 11
+had retired `edit_from_wit`, `sign_marks` and `keep_unseen`, and slice
+12 docview's `edit_source` and `DocContext`'s per-call snapshot.
+`tests/retired.rs` lists them.
+
+**Numbers** (AMD EPYC 7302P, release; the 7k gate harness on a quiet
+machine). What the app publishes at every change, `Document::published()`,
+takes 0.36–0.39 µs on the synthetic, heavy and scanned 7k (a snapshot
+0.24–0.28 µs), asserted under the snapshot's 50 µs. The slice's paths
+reach no other gate, and every one holds where slice 19 left it: the
+geometry walk 50.0 and 77.2 ms, ready 379 ms on the heavy, realize +
+open + render an edited page 12.0 and 21.5 ms, the thumbnail strip 425
+and 352 pages/s, the scanned's one-mark Append 30.0 ms, and the Rewrite
+1.09× and 1.12× slice 8's writer.
+
 ## Non-goals of this design
 
 - Collaborative / concurrent editing. Single writer, single history.
@@ -5149,8 +5648,9 @@ slice 18 left it, proposal 8's accepted misses included.
   content stream becomes another per-`PageId` persistent map entry and
   rendering of that page goes through a scratch PDF; the history model is
   unchanged.
-- Making lopdf's object graph the live model. It stays a serialization
-  backend.
+- Making lopdf's object graph the live model. It stays what sources are
+  read through and the objects sheaf's serializer writes; a Rewrite's
+  graph is the one document still loaded whole (backlog F15).
 
 ## Decisions (2026-10-11)
 

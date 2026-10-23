@@ -568,6 +568,84 @@ fn a_relowered_position_conflicts_once_the_order_moved() {
     assert_eq!(e, conflict(Key::Order, "Move page 1"));
 }
 
+/// Copies of the pages a bookmark spans, lowered again once another
+/// bookmark moved so it spans one more: a planner's transaction makes the
+/// copy more, but one whose copies were handed out must make what it
+/// handed out, so its commit is a Conflict and changes nothing.
+#[test]
+fn a_handed_out_relowering_that_makes_more_conflicts() {
+    let mut d = doc_of(5, &[]);
+    let [p0, p1, _, p3, p4] = pages(&d);
+    let mark = |title: &str, page: PageId| Op::AddBookmark {
+        parent: None,
+        at: sheaf_edit::Sibling::Last,
+        title: title.into(),
+        target: Some(PageRef::Id(page)),
+        view: None,
+        color: None,
+        style: Default::default(),
+        local: None,
+    };
+    let ops = vec![mark("A", p0), mark("B", p1), mark("C", p3)];
+    let made = d.commit_ops(ops, "Bookmarks").unwrap().created;
+    let [_, b, c] = <[OutlineId; 3]>::try_from(made.bookmarks().collect::<Vec<_>>()).unwrap();
+    // B's pages copied, then C moved from page 4 to page 5.
+    let copied_then_moved = |d: &mut Document, handed_out: bool| {
+        let (v, mut tx) = planned(d);
+        let copies = Op::DuplicatePages {
+            pages: PageSel::Bookmark(sheaf_edit::BookmarkRef::Id(b)),
+            locals: Vec::new(),
+        };
+        let said = tx.apply_said(vec![copies], &NoProgress).unwrap();
+        assert_eq!(said.created.pages().count(), 2, "pages 2 and 3");
+        if handed_out {
+            tx.mark_handed_out();
+        }
+        let to_p4 = sheaf_edit::BookmarkPatch {
+            target: sheaf_edit::Patch::Set(PageRef::Id(p4)),
+            ..Default::default()
+        };
+        d.commit_ops(vec![fx::patch_bookmark(c, to_p4)], "Move C")
+            .unwrap();
+        (v, tx)
+    };
+    let (v, tx) = copied_then_moved(&mut d, false);
+    let landed = d.commit(tx, on(v, Stale::Relower)).unwrap();
+    assert_eq!(landed.created.pages().count(), 3, "pages 2 to 4");
+    d.undo().unwrap();
+    d.undo().unwrap();
+    let (v, tx) = copied_then_moved(&mut d, true);
+    let e = refused(&mut d, |d| d.commit(tx, on(v, Stale::Relower)));
+    assert!(matches!(e, EditError::Conflict { by: None, .. }), "{e}");
+}
+
+/// A plugin's mark, its id handed out, lowered again beside the user's
+/// turn of another page: both land, and the mark keeps the id it was
+/// handed out with.
+#[test]
+fn a_handed_out_mark_lands_beside_an_unrelated_edit_with_its_id() {
+    let mut d = doc_of(3, &[]);
+    let [p0, _, p2] = pages(&d);
+    let v = d.current_version();
+    let mut tx = d.published().plugin_tx("tax".into(), "1.0".into(), false);
+    let add = Op::AddMark {
+        page: PageRef::Id(p0),
+        mark: note("Tie out"),
+        reply_to: None,
+        local: Some(sheaf_edit::Local(1)),
+        imported: None,
+    };
+    let said = tx.apply_said(vec![add], &NoProgress).unwrap();
+    tx.mark_handed_out();
+    let mark = said.created.annots().next().unwrap();
+    d.commit_ops(vec![fx::rotate(&[p2], Turn::Quarter)], "Rotate page 3")
+        .unwrap();
+    let c = d.commit(tx, on(v, Stale::Relower)).unwrap();
+    assert_eq!(c.created, said.created, "what was handed out");
+    assert!(d.state().annot(mark).is_some_and(|a| a.page == p0));
+    assert_eq!(d.geom(p2).rotate, Rotation::R90);
+}
+
 #[test]
 fn a_preview_says_what_its_commit_does() {
     let mut d = doc_of(3, &[]);

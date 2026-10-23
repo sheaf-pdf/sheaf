@@ -5,20 +5,34 @@ use crate::prim::Key;
 use crate::tx::fixture::add;
 use crate::tx::{Actor, CommitOpts, EditError, JobKind, Stale};
 use in_progress::NoProgress;
-use lopdf::{Stream, dictionary};
+use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_edit::Rotation;
+
+/// Comments a test makes, each on its page, as a data file holds them.
+#[derive(Default)]
+struct Making {
+    built: Built,
+    annots: Vec<(u32, ObjectId)>,
+}
+
+impl Making {
+    fn add(&mut self, page: u32, d: Dictionary) -> ObjectId {
+        let id = self.built.pdf().add_object(Object::Dictionary(d));
+        self.annots.push((page, id));
+        id
+    }
+
+    /// The comments made, on `file`.
+    fn comments(self, file: Option<&str>) -> Comments {
+        Comments::built(self.built, self.annots, file.map(str::to_string)).unwrap()
+    }
+}
 
 /// Comments of most kinds, as another tool writes them.
 fn sample() -> Comments {
-    let mut c = Comments::new();
-    let add = |c: &mut Comments, page: u32, d: Dictionary| {
-        let id = c.pdf.add_object(Object::Dictionary(d));
-        c.annots.push((page, id));
-        id
-    };
+    let mut c = Making::default();
     let r = |x: i64, y: i64| vec![x.into(), y.into(), (x + 20).into(), (y + 20).into()];
-    let note = add(
-        &mut c,
+    let note = c.add(
         0,
         dictionary! {
             "Type" => "Annot", "Subtype" => "Text", "Rect" => r(100, 600), "NM" => Object::string_literal("n1"),
@@ -27,16 +41,14 @@ fn sample() -> Comments {
             "F" => 28, "Name" => "Comment", "Open" => false,
         },
     );
-    add(
-        &mut c,
+    c.add(
         0,
         dictionary! {
             "Type" => "Annot", "Subtype" => "Text", "Rect" => r(100, 600), "NM" => Object::string_literal("r1"),
             "IRT" => note, "T" => Object::string_literal("Bo"), "Contents" => Object::string_literal("Done"),
         },
     );
-    add(
-        &mut c,
+    c.add(
         0,
         dictionary! {
             "Type" => "Annot", "Subtype" => "Text", "Rect" => r(100, 600), "NM" => Object::string_literal("s1"),
@@ -44,8 +56,7 @@ fn sample() -> Comments {
             "StateModel" => Object::string_literal("Review"),
         },
     );
-    add(
-        &mut c,
+    c.add(
         0,
         dictionary! {
             "Type" => "Annot", "Subtype" => "Highlight", "Rect" => r(100, 680),
@@ -53,8 +64,7 @@ fn sample() -> Comments {
             "QuadPoints" => vec![100.into(), 700.into(), 200.into(), 700.into(), 100.into(), 688.into(), 200.into(), 688.into()],
         },
     );
-    add(
-        &mut c,
+    c.add(
         1,
         dictionary! {
             "Type" => "Annot", "Subtype" => "Line", "Rect" => r(10, 10), "NM" => Object::string_literal("l1"),
@@ -63,16 +73,14 @@ fn sample() -> Comments {
             "C" => vec![1.into(), 0.into(), 0.into()], "BS" => dictionary! { "W" => 3, "S" => "D", "D" => vec![3.into(), 3.into()] },
         },
     );
-    add(
-        &mut c,
+    c.add(
         1,
         dictionary! {
             "Type" => "Annot", "Subtype" => "Ink", "Rect" => r(10, 10), "NM" => Object::string_literal("i1"),
             "InkList" => vec![Object::Array(vec![10.into(), 10.into(), 20.into(), 25.into(), 40.into(), 30.into()])],
         },
     );
-    add(
-        &mut c,
+    c.add(
         1,
         dictionary! {
             "Type" => "Annot", "Subtype" => "Polygon", "Rect" => r(300, 300), "NM" => Object::string_literal("p1"),
@@ -80,8 +88,7 @@ fn sample() -> Comments {
             "BE" => dictionary! { "S" => "C", "I" => 1 }, "IC" => vec![0.into(), 0.into(), 1.into()],
         },
     );
-    add(
-        &mut c,
+    c.add(
         1,
         dictionary! {
             "Type" => "Annot", "Subtype" => "FreeText", "IT" => "FreeTextCallout",
@@ -92,8 +99,7 @@ fn sample() -> Comments {
             "NM" => Object::string_literal("f1"), "Contents" => Object::string_literal("Why?"),
         },
     );
-    c.file = Some("review.pdf".into());
-    c
+    c.comments(Some("review.pdf"))
 }
 
 /// Each comment in `c` as the converter makes it, by name.
@@ -101,7 +107,7 @@ fn marks(c: &Comments) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for i in 0..c.len() {
         let d = c.dict(i).unwrap();
-        let a = crate::import::convert(&c.pdf, d, Rotation::R0, Default::default()).unwrap();
+        let a = crate::import::convert(c.src.pdf(), d, Rotation::R0, Default::default()).unwrap();
         out.push((c.annots[i].0, serde_json::to_string(&a).unwrap()));
     }
     out
@@ -141,21 +147,90 @@ fn acrobat_xfdf_reads() {
     let c = read(xml.as_bytes(), None).unwrap();
     assert_eq!(c.len(), 3);
     assert_eq!(c.file.as_deref(), Some("workpapers.pdf"));
-    let note = crate::import::convert(&c.pdf, c.dict(0).unwrap(), Rotation::R0, Default::default())
-        .unwrap();
+    let note = crate::import::convert(
+        c.src.pdf(),
+        c.dict(0).unwrap(),
+        Rotation::R0,
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(note.contents, "Tie & foot—now");
     assert_eq!((note.name.as_str(), note.author.as_str()), ("a1b2", "Ann"));
     assert_eq!(note.color, [255, 255, 0]);
     assert_eq!(note.created, "D:20261001120000-07'00'");
-    let reply =
-        crate::import::convert(&c.pdf, c.dict(1).unwrap(), Rotation::R0, Default::default())
-            .unwrap();
+    let reply = crate::import::convert(
+        c.src.pdf(),
+        c.dict(1).unwrap(),
+        Rotation::R0,
+        Default::default(),
+    )
+    .unwrap();
     assert!(matches!(reply.kind, AnnotKind::Reply { ref parent } if parent == "a1b2"));
-    let ink = crate::import::convert(&c.pdf, c.dict(2).unwrap(), Rotation::R0, Default::default())
-        .unwrap();
+    let ink = crate::import::convert(
+        c.src.pdf(),
+        c.dict(2).unwrap(),
+        Rotation::R0,
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(c.annots[2].0, 1);
     assert!(matches!(&ink.kind, AnnotKind::Ink { paths } if paths[0].len() == 3));
     assert_eq!(ink.stroke, 2.0);
+}
+
+/// Another PDF's comments come in from the file read as a source: every
+/// annotation but links, widgets and popups, by page, sheaf's own as it
+/// wrote it; an encrypted file's only with its password.
+#[test]
+fn another_pdf_s_comments_are_read_from_it() {
+    use crate::serialize::fixture::{USER, encrypted, rc4_aes_128_and_aes_256};
+    let mut f = crate::forms::fixture::Form::new(2);
+    let r = || vec![100.into(), 600.into(), 120.into(), 620.into()];
+    let note = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("ann-1"),
+        "T" => Object::string_literal("Ann"), "Contents" => Object::string_literal("Look"),
+    });
+    let reply = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("bo-1"),
+        "IRT" => note, "T" => Object::string_literal("Bo"), "Contents" => Object::string_literal("Done"),
+    });
+    let others = ["Popup", "Link", "Widget"].map(|subtype| {
+        f.pdf
+            .add_object(dictionary! { "Type" => "Annot", "Subtype" => subtype, "Rect" => r() })
+    });
+    let ours = crate::forms::fixture::note();
+    let main = crate::serialize::built::to_pdf(&ours, &mut f.pdf).main;
+    let ours_id = f.pdf.add_object(Object::Dictionary(main));
+    let free = f.pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "FreeText", "Rect" => r(), "NM" => Object::string_literal("ft-1"),
+        "Contents" => Object::string_literal("On two"), "DA" => Object::string_literal("/Helv 10 Tf"),
+    });
+    f.set_annots(0, &[note, others[0], reply, others[1], others[2], ours_id]);
+    f.set_annots(1, &[free]);
+    let id = Object::string_literal("0123456789abcdef");
+    f.pdf.trailer.set("ID", vec![id.clone(), id]);
+    let plain = f.bytes();
+    let [_, (_, aes), _] = rc4_aes_128_and_aes_256(&f.pdf);
+    let [locked, _] = encrypted(&f.pdf, &aes, |_| {});
+    let e = read(&locked, None).err().expect("it needs its password");
+    assert!(crate::source::OpenError::is_password(&e), "{e:#}");
+    for (bytes, password) in [(&plain, None), (&locked, Some(USER))] {
+        let c = read(bytes, password).unwrap();
+        let names: Vec<(u32, String)> = (0..c.len())
+            .map(|i| (c.annots[i].0, thread_name(c.dict(i).unwrap())))
+            .collect();
+        let want = [(0, "ann-1"), (0, "bo-1"), (0, &*ours.name()), (1, "ft-1")];
+        assert_eq!(names, want.map(|(page, nm)| (page, nm.to_string())));
+        assert_eq!(c.parent_of(c.dict(1).unwrap()).as_deref(), Some("ann-1"));
+        let entry = Object::Reference(c.annots[2].1);
+        let entries = [entry.clone()];
+        let annots = crate::file::PageAnnots::new(&entries);
+        let back = crate::file::sheaf_mark(c.src.pdf(), &entry, Rotation::R0, &annots).unwrap();
+        assert_eq!(
+            (back.id, back.kind, back.contents),
+            (ours.id, ours.kind.clone(), ours.contents.clone())
+        );
+    }
 }
 
 #[test]
@@ -247,13 +322,15 @@ fn imports_planned_together_conflict_over_what_they_matched_by() {
     let path = pdf_with_square(&dir);
     let (mut doc, _) = opened(&path);
     let (p0, p1) = (doc.page(0).unwrap(), doc.page(1).unwrap());
-    let mut c = Comments::new();
-    let new = dictionary! {
-        "Subtype" => "Text", "Rect" => vec![100.into(), 100.into(), 120.into(), 120.into()],
-        "NM" => Object::string_literal("new"), "Contents" => Object::string_literal("Hello"),
-    };
-    let id = c.pdf.add_object(Object::Dictionary(new));
-    c.annots.push((1, id));
+    let mut c = Making::default();
+    c.add(
+        1,
+        dictionary! {
+            "Subtype" => "Text", "Rect" => vec![100.into(), 100.into(), 120.into(), 120.into()],
+            "NM" => Object::string_literal("new"), "Contents" => Object::string_literal("Hello"),
+        },
+    );
+    let c = c.comments(None);
     let snap = doc.snapshot();
     let planned = || {
         let mut tx = Document::tx_at(&snap, doc.lower_cx(Actor::Job(JobKind::Import)));
@@ -293,30 +370,26 @@ fn imports_match_by_name_and_report_the_rest() {
     let p0 = doc.page(0).unwrap();
     let ours = doc.state().marks_on(p0).next().unwrap().clone();
 
-    let mut c = Comments::new();
-    let mut add = |page: u32, d: Dictionary| {
-        let id = c.pdf.add_object(Object::Dictionary(d));
-        c.annots.push((page, id));
-    };
+    let mut c = Making::default();
     let r = || vec![100.into(), 100.into(), 120.into(), 120.into()];
     // Ours, changed elsewhere; theirs, changed elsewhere; a new one; one
     // sheaf can't hold; one past the last page.
-    add(
+    c.add(
         0,
         dictionary! { "Subtype" => "Text", "Rect" => r(), "NM" => crate::save::text_string(&ours.name()), "Contents" => Object::string_literal("ours, edited") },
     );
-    add(
+    c.add(
         0,
         dictionary! { "Subtype" => "Square", "Rect" => r(), "NM" => Object::string_literal("sq"), "Contents" => Object::string_literal("Box, edited") },
     );
-    add(
+    c.add(
         1,
         dictionary! { "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("new"), "Contents" => Object::string_literal("Hello") },
     );
-    add(1, dictionary! { "Subtype" => "Sound", "Rect" => r() });
-    add(1, dictionary! { "Subtype" => "Popup", "Rect" => r() });
-    add(5, dictionary! { "Subtype" => "Text", "Rect" => r() });
-    let got = import(&snap, doc.store(), &c);
+    c.add(1, dictionary! { "Subtype" => "Sound", "Rect" => r() });
+    c.add(1, dictionary! { "Subtype" => "Popup", "Rect" => r() });
+    c.add(5, dictionary! { "Subtype" => "Text", "Rect" => r() });
+    let got = import(&snap, doc.store(), &c.comments(None));
     assert_eq!((got.added, got.updated, got.off_the_end), (1, 2, 1));
     assert_eq!(got.skipped, BTreeMap::from([("Sound".to_string(), 1)]));
     assert_eq!(
@@ -445,11 +518,10 @@ fn replies_come_in_after_their_comments() {
     let path = pdf_with_square(&dir);
     let (mut doc, _) = opened(&path);
     let p0 = doc.page(0).unwrap();
-    let mut c = Comments::new();
+    let mut c = Making::default();
     let r = || vec![100.into(), 100.into(), 120.into(), 120.into()];
     let mut add = |d: Dictionary| {
-        let id = c.pdf.add_object(Object::Dictionary(d));
-        c.annots.push((0, id));
+        c.add(0, d);
     };
     // By name, as XFDF says what a reply is to: the reply first, then its
     // comment; a reply to the square here; one to nothing.
@@ -469,7 +541,7 @@ fn replies_come_in_after_their_comments() {
         "Subtype" => "Text", "Rect" => r(), "NM" => Object::string_literal("lost"),
         "IRT" => Object::string_literal("gone"), "Contents" => Object::string_literal("?"),
     });
-    let got = import(&doc.snapshot(), doc.store(), &c);
+    let got = import(&doc.snapshot(), doc.store(), &c.comments(None));
     assert_eq!((got.added, got.updated, got.orphans), (3, 0, 1));
     assert_eq!(
         got.summary(),

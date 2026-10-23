@@ -466,8 +466,8 @@ fn copies_hold_only_the_pages_copied() {
     let stamp = crate::stamp_lib::one_page(&pdf, 0).unwrap();
     assert!(!says(&stamp, "MARK A 1") && !says(&stamp, "MARK A 2"));
     let mut dst = Pdf::with_version("1.5");
-    let first = pdf.get_pages()[&1];
-    crate::stamp_lib::page_forms(&pdf, &[first], &mut dst).unwrap();
+    let src = crate::forms::fixture::source(std::fs::read(&path).unwrap());
+    crate::stamp_lib::page_forms(&src, &[0], &mut dst).unwrap();
     let mut out = Vec::new();
     dst.save_to(&mut out).unwrap();
     assert!(says(&out, "MARK A 0") && !says(&out, "MARK A 2"));

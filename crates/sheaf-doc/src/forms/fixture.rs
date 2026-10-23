@@ -716,7 +716,7 @@ pub fn every_kind_in(pages: usize) -> Form {
 pub fn every_fact() -> Form {
     let mut f = Form::new(3);
     f.text("name", 0, row(0));
-    let main = crate::annot::to_pdf(&note(), &mut f.pdf).main;
+    let main = crate::serialize::built::to_pdf(&note(), &mut f.pdf).main;
     let main = f.pdf.add_object(main);
     f.set_annots(1, &[main]);
     let catalog = f.catalog;
@@ -920,13 +920,14 @@ pub fn mark_blobs(store: &Store) -> [Blob; 2] {
 }
 
 /// `marks` written onto `page`, a page dictionary of `pdf`, after what its
-/// `/Annots` has, each as a save writes it ([`crate::annot::to_pdf_in`],
-/// over [`crate::annot::emission`]): its companions grouped under it
+/// `/Annots` has, each as a save writes it
+/// ([`crate::serialize::built::to_pdf_in`], over
+/// [`crate::annot::emission`]): its companions grouped under it
 /// (`/IRT`, `/RT /Group`), and a reply after what it replies to, with
 /// `/IRT` to it and its `/Rect` (one whose parent isn't on the page last,
 /// unthreaded). What they draw with is in `pdf` once.
 pub fn write_marks(pdf: &mut Pdf, page: &mut Dictionary, marks: &[Mark]) {
-    use crate::annot::{WriteCx, to_pdf_in};
+    use crate::serialize::built::{WriteCx, to_pdf_in};
     let mut cx = WriteCx::new();
     let mut list: Vec<Object> = (page.get(b"Annots").and_then(Object::as_array))
         .cloned()

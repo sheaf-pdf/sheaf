@@ -160,7 +160,9 @@
 //! its RSS is asserted only when [`FLATTEN`] is set. Beside it, in a
 //! process of its own, Export Clean Copy, whose post-condition reads every
 //! page's content for sheaf's private data, and that read alone, with
-//! neither a baseline nor a gate.
+//! neither a baseline nor a gate. From slice 20 the snapshot gate holds
+//! for `Document::published` too, which the app publishes for plugin calls
+//! at every change.
 
 // A test crate of its own, whose scratch files go in the temp directory
 // clippy.toml bans outside tests.
@@ -220,7 +222,8 @@ const INCREMENTAL_GATE_MS: f64 = 50.0;
 const CHECK_RUNS: usize = 21;
 const CHECK_GATE: Duration = Duration::from_millis(1);
 /// What a snapshot of the document may take, the median of
-/// [`CHECK_RUNS`] (slice 12): O(1), its state shared.
+/// [`CHECK_RUNS`] (slice 12): O(1), its state shared. What it publishes
+/// for plugins (`Document::published`) is held to it too (slice 20).
 const SNAPSHOT_GATE: Duration = Duration::from_micros(50);
 /// Previews rendered in a row from one engine.
 const FILL: u32 = 200;
@@ -819,6 +822,16 @@ fn gates(kind: Kind) {
     rows.push(Row {
         what: "snapshot".into(),
         now: Some(snapshot.as_secs_f64() * 1e6),
+        unit: "µs",
+        baseline: f64::NAN,
+        gate: format!("< {} µs, asserted", SNAPSHOT_GATE.as_micros()),
+    });
+    // What the app publishes for plugin calls at every change (slice 20): a
+    // snapshot and what lowering a plugin's transaction needs.
+    let (published, _) = measure(CHECK_RUNS, || timed(|| doc.published()).0);
+    rows.push(Row {
+        what: "published".into(),
+        now: Some(published.as_secs_f64() * 1e6),
         unit: "µs",
         baseline: f64::NAN,
         gate: format!("< {} µs, asserted", SNAPSHOT_GATE.as_micros()),
@@ -1593,6 +1606,10 @@ fn gates(kind: Kind) {
     assert!(
         snapshot < SNAPSHOT_GATE,
         "a snapshot took {snapshot:?}, over {SNAPSHOT_GATE:?}"
+    );
+    assert!(
+        published < SNAPSHOT_GATE,
+        "publishing for plugins took {published:?}, over {SNAPSHOT_GATE:?}"
     );
     if kind == Kind::Scanned {
         assert!(
@@ -2921,7 +2938,7 @@ fn sheaf_marks(mark: impl Fn(u64) -> Annot) -> Vec<u8> {
     let mut annots: HashMap<lopdf::ObjectId, Vec<Object>> = HashMap::new();
     for i in 0..SHEAF_MARKS {
         let id = i % (SHEAF_MARKS - SHEAF_COPIES);
-        let written = sheaf_doc::annot::to_pdf(&mark(u64::from(id) + 1), &mut pdf);
+        let written = sheaf_doc::serialize::built::to_pdf(&mark(u64::from(id) + 1), &mut pdf);
         let main = pdf.add_object(written.main);
         let page = pages[(i % PAGES) as usize];
         annots.entry(page).or_default().push(main.into());

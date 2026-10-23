@@ -383,8 +383,8 @@ mod tests {
     /// holds, and writes them, and every mark reopens as sheaf's.
     #[test]
     fn marks_bring_what_they_hold() {
-        use sheaf_doc::annot::{WriteCx, to_pdf_in};
         use sheaf_doc::forms::fixture::{self, Form};
+        use sheaf_doc::serialize::built::{WriteCx, to_pdf_in};
         use sheaf_doc::store::blob_id;
         use sheaf_doc::{AnnotKind, FormRef, Mark};
         let dir = std::env::temp_dir().join(format!(

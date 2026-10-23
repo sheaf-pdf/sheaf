@@ -15,7 +15,8 @@
 //! `<config dir>/plugins.json` ([`PluginState`]). A plugin asking for files
 //! or the network runs without them until the user says yes.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::hash::Hash;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -25,19 +26,22 @@ use anyhow::{Context as _, Result};
 use arc_swap::ArcSwap;
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
-use gpui::{App, Context, Entity, Global, KeyBinding, KeyBindingContextPredicate, Window};
+use gpui::{
+    App, Context, Entity, EntityId, Global, KeyBinding, KeyBindingContextPredicate, WeakEntity,
+    Window,
+};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::realize::ViewInputs;
 use sheaf_doc::{
-    Actor, Cause, ChangeSet, Commit, CommitOpts, Document, EditError, GroupKind, PageId, Snapshot,
-    Stale, TextService, Tx,
+    Actor, Cause, ChangeSet, Commit, CommitOpts, Document, EditError, PageId, Published, Snapshot,
+    TextService, Tx,
 };
 use sheaf_ops::text::Text;
 use sheaf_ops::views::{ViewPages, Views};
 use sheaf_plugin::ui::{FieldAnswer, Form, PanelRow, ShowPanel, Ui};
 use sheaf_plugin::{
-    Call, CallContext, CallOutput, Limits, LoadOptions, Manifest, Permissions, Plugin, PluginError,
-    Runtime, Status,
+    Call, CallContext, CallOutput, ChangeInfo, Committed, Committer, Door, EventKind, Landed,
+    Landing, Limits, LoadOptions, Manifest, Permissions, Plugin, PluginError, Runtime, Status,
 };
 use sheaf_render::{Budget, Job};
 
@@ -63,8 +67,11 @@ pub struct PluginHost {
     pub state: PluginState,
     /// Plugins whose permissions the user hasn't been asked about yet.
     pending_consent: Vec<String>,
-    /// Region events, latest wins per plugin (see `dispatch_event`).
-    regions: Latest<(gpui::WeakEntity<DocView>, sheaf_plugin::DocEvent)>,
+    /// Region events, latest wins per plugin (see [`PluginHost::send_now`]).
+    regions: Coalescer<String, (WeakEntity<DocView>, sheaf_plugin::DocEvent)>,
+    /// Changes, merged per plugin and document's view (see
+    /// [`PluginHost::send_now`]).
+    changes: Coalescer<(String, EntityId), (WeakEntity<DocView>, ChangeInfo)>,
     runtime: Option<Arc<Runtime>>,
 }
 
@@ -214,6 +221,7 @@ fn covers(have: &Permissions, want: &Permissions) -> bool {
     want.read.iter().all(|d| have.read.contains(d))
         && want.write.iter().all(|d| have.write.contains(d))
         && want.network.iter().all(|h| have.network.contains(h))
+        && (!want.identity || have.identity)
 }
 
 fn intersect(a: &Permissions, b: &Permissions) -> Permissions {
@@ -236,11 +244,12 @@ fn intersect(a: &Permissions, b: &Permissions) -> Permissions {
             .filter(|h| b.network.contains(h))
             .cloned()
             .collect(),
+        identity: a.identity && b.identity,
     }
 }
 
 fn is_empty(p: &Permissions) -> bool {
-    p.read.is_empty() && p.write.is_empty() && p.network.is_empty()
+    p.read.is_empty() && p.write.is_empty() && p.network.is_empty() && !p.identity
 }
 
 impl PluginState {
@@ -658,37 +667,28 @@ pub fn ask_consent(window: &mut Window, cx: &mut Context<Workspace>) {
     .detach();
 }
 
-/// What a plugin's `edited` event says of `change`: its undo label, as
-/// "Undo: …", "Redo: …" or "Go to: …" for those. None for a save, which
-/// `saved` tells, and for the file opening, which `opened` does.
-fn edited_label(change: &ChangeSet) -> Option<String> {
-    let label = &change.label;
-    Some(match change.cause {
-        Cause::Opened | Cause::Saved => return None,
-        Cause::Undo => format!("Undo: {label}"),
-        Cause::Redo => format!("Redo: {label}"),
-        Cause::Jump => format!("Go to: {label}"),
-        Cause::Commit | Cause::Amend | Cause::Rollback | Cause::Revert => label.to_string(),
-    })
-}
-
-/// What plugins are told of `event`, and the plugin whose own edit it was,
-/// which isn't: None when they're told nothing.
+/// What plugins are told of `event`, a change to document `instance` or
+/// some other event, and the plugin whose own change it was, which isn't:
+/// None when they're told nothing.
 fn plugin_event(
     event: &crate::docview::DocEvent,
+    instance: u64,
 ) -> Option<(sheaf_plugin::DocEvent, Option<String>)> {
     use crate::docview::DocEvent as E;
     use sheaf_plugin::DocEvent as P;
     Some(match event {
         E::Opened => (P::Opened, None),
+        // A save is told by `saved`, and the file opening by `opened`.
+        E::Changed { change } if matches!(change.cause, Cause::Saved | Cause::Opened) => {
+            return None;
+        }
         E::Changed { change } => {
-            let label = edited_label(change)?;
-            // A plugin isn't told of its own edits.
+            // A plugin isn't told of its own changes.
             let from = match &change.actor {
                 Actor::Plugin { id, .. } => Some(id.to_string()),
                 _ => None,
             };
-            (P::Edited(label), from)
+            (P::Changed(ChangeInfo::of(change, instance)), from)
         }
         E::Saved { path } => (P::Saved(path.display().to_string()), None),
         E::SelectionChanged => (P::SelectionChanged, None),
@@ -704,6 +704,19 @@ fn plugin_event(
     })
 }
 
+/// Who of `plugins`, by id, is told of an event of `kind`: those that
+/// subscribe to it, but for `from`, the plugin whose own change it was.
+fn recipients<'a>(
+    plugins: impl IntoIterator<Item = (&'a str, &'a Manifest)>,
+    kind: EventKind,
+    from: Option<&str>,
+) -> Vec<String> {
+    (plugins.into_iter())
+        .filter(|(id, m)| m.events.contains(&kind) && from != Some(*id))
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
 /// Send a document event to the plugins that subscribe to it.
 pub fn dispatch_event(
     doc: &Entity<DocView>,
@@ -711,22 +724,20 @@ pub fn dispatch_event(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let Some((event, from)) = plugin_event(event) else {
+    let instance = match &doc.read(cx).state {
+        State::Ready(d) => d.model.instance(),
+        _ => 0,
+    };
+    let Some((event, from)) = plugin_event(event, instance) else {
         return;
     };
     let Some(host) = cx.try_global::<PluginHost>() else {
         return;
     };
     let kind = event.kind();
-    let to: Vec<String> = host
-        .plugins
-        .iter()
-        .filter(|(id, p)| {
-            p.manifest().events.contains(&kind) && from.as_deref() != Some(id.as_str())
-        })
-        .map(|(id, _)| id.clone())
-        .collect();
-    let calls: Vec<(String, Call)> = if kind == sheaf_plugin::EventKind::Opened {
+    let plugins = (host.plugins.iter()).map(|(id, p)| (id.as_str(), p.manifest()));
+    let to = recipients(plugins, kind, from.as_deref());
+    let calls: Vec<(String, Call)> = if kind == EventKind::Opened {
         // `opened` first, then the calls that waited for the file.
         doc.update(cx, |d, _| d.release_plugin_calls(to))
     } else {
@@ -735,26 +746,105 @@ pub fn dispatch_event(
             .collect()
     };
     for (id, call) in calls {
-        // Live while dragging: a plugin still busy with one region gets
-        // only the newest next, not every mouse move.
-        if let Call::Event(region) = &call
-            && is_region(&call)
-            && cx
-                .global_mut::<PluginHost>()
-                .regions
-                .offer(&id, (doc.downgrade(), region.clone()))
-                .is_none()
-        {
-            continue;
+        if cx.global_mut::<PluginHost>().send_now(&id, &call, doc) {
+            run(&id, call, Some(doc.clone()), window, cx);
         }
-        run(&id, call, Some(doc.clone()), window, cx);
     }
 }
 
 /// Whether `call` is a region event (a region, or its clearing), which
 /// the host's `regions` coalesces.
 fn is_region(call: &Call) -> bool {
-    matches!(call, Call::Event(e) if e.kind() == sheaf_plugin::EventKind::Region)
+    matches!(call, Call::Event(e) if e.kind() == EventKind::Region)
+}
+
+/// Which of the host's queues an event call waits in while its plugin is
+/// busy with another like it (see [`PluginHost::send_now`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Queue {
+    Regions,
+    /// A change to the document the view of this id shows.
+    Changes(EntityId),
+}
+
+impl Queue {
+    /// `call`'s, made on `doc`, if the host coalesces it.
+    fn of(call: &Call, doc: Option<&Entity<DocView>>) -> Option<Queue> {
+        match call {
+            Call::Event(sheaf_plugin::DocEvent::Changed(_)) => {
+                doc.map(|d| Queue::Changes(d.entity_id()))
+            }
+            call if is_region(call) => Some(Queue::Regions),
+            _ => None,
+        }
+    }
+}
+
+/// `later`, a change made while a plugin was busy, added to `waiting`,
+/// those waiting for it to be free: merged into the last when they're
+/// alike to answer ([`ChangeInfo::merge`]), else after it. A change to
+/// another document (one a reopen replaced) leaves nothing of the old
+/// one's: what they changed is of a document the plugin no longer reads.
+fn merged<D>(waiting: &mut VecDeque<(D, ChangeInfo)>, (doc, later): (D, ChangeInfo)) {
+    waiting.retain(|(_, w)| w.instance == later.instance);
+    let apart = match waiting.back_mut() {
+        Some((_, last)) => last.merge(later),
+        None => Some(later),
+    };
+    if let Some(later) = apart {
+        waiting.push_back((doc, later));
+    }
+}
+
+/// `newest`, a region event made while a plugin was busy, in place of
+/// those waiting: only the newest is sent.
+fn newest<T>(waiting: &mut VecDeque<T>, newest: T) {
+    waiting.clear();
+    waiting.push_back(newest);
+}
+
+impl PluginHost {
+    /// Whether `call`, an event for plugin `id` on `doc`, goes out now. A
+    /// region waits while the plugin is busy with one, live while the user
+    /// drags, and only the newest is sent next, not every mouse move; a
+    /// change to a document waits while it's busy with one to that
+    /// document, and the changes made meanwhile are sent next, merged
+    /// where alike to answer ([`merged`]), so it's told of each once it's
+    /// free.
+    fn send_now(&mut self, id: &str, call: &Call, doc: &Entity<DocView>) -> bool {
+        let Call::Event(event) = call else {
+            return true;
+        };
+        let weak = doc.downgrade();
+        match (Queue::of(call, Some(doc)), event) {
+            (Some(Queue::Changes(view)), sheaf_plugin::DocEvent::Changed(info)) => {
+                let item = (weak, info.clone());
+                self.changes
+                    .offer((id.to_string(), view), item, merged)
+                    .is_some()
+            }
+            (Some(Queue::Regions), event) => {
+                let item = (weak, event.clone());
+                (self.regions.offer(id.to_string(), item, newest)).is_some()
+            }
+            _ => true,
+        }
+    }
+
+    /// Plugin `id`'s call from `queue` ended: the event that waited for
+    /// it, and the view of the document it's for, to send next; None once
+    /// none waits, the plugin then free for the next.
+    fn next_from(
+        &mut self,
+        id: &str,
+        queue: Queue,
+    ) -> Option<(WeakEntity<DocView>, sheaf_plugin::DocEvent)> {
+        match queue {
+            Queue::Regions => self.regions.done(&id.to_string()),
+            Queue::Changes(view) => (self.changes.done(&(id.to_string(), view)))
+                .map(|(doc, info)| (doc, sheaf_plugin::DocEvent::Changed(info))),
+        }
+    }
 }
 
 /// Add a manifest's static contributions, reading command icons from the
@@ -921,8 +1011,9 @@ impl sheaf_plugin::OcrSource for EngineOcr {
 }
 
 /// Page images for plugins, from the pages' realizations as the file will
-/// draw them, sheaf's marks and the header, footer, watermarks and
-/// backgrounds it draws, saved or not, included (M10.5 §14.3), in the
+/// draw them under the plugin's inputs (sheaf's marks and the header,
+/// footer, watermarks and backgrounds it draws, saved or not, included, or
+/// the page without markup; M10.5 §14.3), each page as it shows, in the
 /// pool's background budget at the lowest priority (behind on-screen
 /// tiles).
 struct EngineRender(Views);
@@ -932,16 +1023,15 @@ impl sheaf_plugin::render::RenderSource for EngineRender {
         &self,
         snap: &Snapshot,
         page: PageId,
+        inputs: &ViewInputs,
         page_w: u32,
         page_h: u32,
         (x, y, w, h): (u32, u32, u32, u32),
     ) -> Result<Vec<u8>> {
         use sheaf_image::raster::PixelFormat;
-        let inputs = ViewInputs::plugin();
         let st = &snap.state;
-        let view = self.0.view(st, page, &inputs)?;
-        // In the file's own orientation: the engine's page, not turned by
-        // the view.
+        let view = self.0.view(st, page, inputs)?;
+        // As the page shows: its engine's page turned as sheaf turned it.
         let job = Job::Tile {
             page_width: page_w,
             page_height: page_h,
@@ -949,10 +1039,10 @@ impl sheaf_plugin::render::RenderSource for EngineRender {
             y,
             w,
             h,
-            rotation: sheaf_edit::Rotation::R0,
+            rotation: snap.render_delta(page),
         };
         let (format, budget) = (PixelFormat::Rgba, Budget::Background);
-        let rx = (self.0).draw(st, page, &view, &inputs, job, format, u8::MAX, budget)?;
+        let rx = (self.0).draw(st, page, &view, inputs, job, format, u8::MAX, budget)?;
         let rendered = futures::executor::block_on(rx).context("render thread is gone")??;
         let r = rendered.raster;
         anyhow::ensure!(
@@ -975,18 +1065,9 @@ pub(crate) fn name_of(id: &str, cx: &App) -> Option<String> {
     Some(cx.try_global::<PluginHost>()?.manifest(id)?.name.clone())
 }
 
-/// Where a plugin call's batches land: a document, and the door its
-/// changes go through. A view's is its own ([`DocView::commit`],
-/// [`DocView::on_change`]), which tells the reader of each and follows it.
-trait Door {
-    fn model(&mut self) -> &mut Document;
-    fn commit(&mut self, tx: Tx, opts: CommitOpts) -> Result<Commit, EditError>;
-    /// The document went through `change`, which no commit made: a
-    /// rollback's.
-    fn follow(&mut self, change: &ChangeSet);
-}
-
-/// A view showing a document, as the door to it.
+/// A view showing a document, as the door a plugin call's edits land
+/// through: its own ([`DocView::commit`], [`DocView::on_change`]), which
+/// tells the reader of each and follows it.
 struct View<'a, 'b> {
     view: &'a mut DocView,
     cx: &'a mut Context<'b, DocView>,
@@ -1009,98 +1090,62 @@ impl Door for View<'_, '_> {
     }
 }
 
-/// How a plugin call's batches landed ([`land`]).
-#[derive(Debug, Default)]
-struct Landed {
-    /// The batch that failed, and why: the call's edits were taken back.
-    failed: Option<(String, EditError)>,
-    /// Taking them back failed too, so they stay.
-    kept: bool,
-}
-
-/// The batches of a call of plugin `id`'s (at `version`), `out`, landed
-/// through `door` as one undo step of the plugin's (M10.5 §14.3, proposal
-/// 19): commits in a group of the call's, lowered as the plugin's, so the
-/// host fills its marks in as the plugin's, never naming the user (§6.7).
-/// The first is made on the version the call read, deciding by what it
-/// read there, and lowered again on the current one: an edit since to
-/// what the call read refuses it, and one elsewhere doesn't. Each after it
-/// is made on the version the one before made, which it joins. When one
-/// fails, the call's versions go ([`Document::rollback_group`]), so all
-/// of it lands or none.
-fn land(door: &mut impl Door, id: &str, version: &str, out: CallOutput) -> Landed {
-    let actor = Actor::Plugin {
-        id: id.into(),
-        version: version.into(),
-    };
-    let plugin = id.into();
-    let g = door.model().begin_group(GroupKind::PluginCall { plugin });
-    // A call that read nothing decided by nothing: its first batch is made
-    // on the current version, as the rest are.
-    let mut base = out.base.filter(|_| !out.reads.is_empty());
-    for b in out.batches {
-        let label = b.label.clone();
-        let model = door.model();
-        let (mut tx, opts) = match base.take() {
-            Some(base) => {
-                let mut tx = Document::tx_at(&base, model.lower_cx(actor.clone()));
-                for &key in &out.reads {
-                    tx.read(key);
-                }
-                let v = base.version;
-                (tx, CommitOpts::based(v, Stale::Relower, label.as_str()))
-            }
-            None => (
-                model.tx(actor.clone()),
-                CommitOpts::labelled(label.as_str()),
-            ),
-        };
-        let opts = CommitOpts {
-            group: Some(g),
-            ..opts
-        };
-        let lowered = b.lowered(&mut tx, model);
-        if let Err(e) = lowered.and_then(|()| door.commit(tx, opts)) {
-            let kept = match door.model().rollback_group(g) {
-                Ok(change) => {
-                    change.iter().for_each(|ch| door.follow(ch));
-                    false
-                }
-                Err(why) => {
-                    log::warn!("plugin {id}: taking back its edits: {why}");
-                    door.model().end_group(g);
-                    true
-                }
-            };
-            return Landed {
-                failed: Some((label, e)),
-                kept,
-            };
+impl DocView {
+    /// Whether the view shows the document a call read, `cell`'s: not once
+    /// it was closed or reopened since.
+    fn shows(&self, cell: Option<&Arc<ArcSwap<Published>>>) -> bool {
+        match &self.state {
+            State::Ready(doc) => cell.is_some_and(|c| Arc::ptr_eq(c, &doc.plugin_cell)),
+            _ => false,
         }
     }
-    door.model().end_group(g);
-    Landed::default()
-}
 
-impl DocView {
-    /// A call's batches landed ([`land`]) while the view still shows the
-    /// document the call read, `cell`'s: None once it doesn't, as when it
-    /// was reopened meanwhile, or when the call had none.
+    /// A running call's edits so far, `tx`, committed through the view as
+    /// `label`, `depth` down a chain of answers, in the call's group
+    /// (`landing`; [`Landing::commit`]), while the view shows the document
+    /// the call read, `cell`'s: the version they made, and the document as
+    /// published then, which the call's next edits are made on.
+    fn commit_call(
+        &mut self,
+        cell: Option<&Arc<ArcSwap<Published>>>,
+        landing: &mut Landing,
+        tx: Tx,
+        label: &str,
+        depth: u8,
+        cx: &mut Context<Self>,
+    ) -> Result<Committed, EditError> {
+        if !self.shows(cell) {
+            return Err(closed());
+        }
+        landing.commit(&mut View { view: self, cx }, tx, label, depth)?;
+        let State::Ready(doc) = &self.state else {
+            unreachable!("a view that took a commit shows its document")
+        };
+        Ok(Committed {
+            version: doc.model.current_version(),
+            instance: doc.model.instance(),
+            base: doc.plugin_cell.load_full(),
+        })
+    }
+
+    /// A call, as it ended (`result`, and whether the user stopped it),
+    /// landed through the view in its group (`landing`;
+    /// [`Landing::finish`]) while the view shows the document the call
+    /// read, `cell`'s: None once it doesn't, as when it was reopened
+    /// meanwhile.
     fn land_call(
         &mut self,
-        cell: Option<&Arc<ArcSwap<Snapshot>>>,
-        id: &str,
-        version: &str,
-        out: CallOutput,
+        cell: Option<&Arc<ArcSwap<Published>>>,
+        landing: Landing,
+        result: Result<CallOutput, PluginError>,
+        cancelled: bool,
         cx: &mut Context<Self>,
     ) -> Option<Landed> {
-        let State::Ready(doc) = &self.state else {
-            return None;
-        };
-        if !cell.is_some_and(|c| Arc::ptr_eq(c, &doc.plugin_cell)) {
+        if !self.shows(cell) {
             return None;
         }
-        Some(land(&mut View { view: self, cx }, id, version, out))
+        let door = &mut View { view: self, cx };
+        Some(landing.finish(door, result, cancelled))
     }
 }
 
@@ -1182,10 +1227,19 @@ pub fn plugin_name(id: &str, cx: &App) -> String {
         .unwrap_or_else(|| id.to_string())
 }
 
+/// Every installed plugin's id, as a call tells marks of theirs by.
+fn installed_ids(cx: &App) -> Arc<[String]> {
+    let host = cx.try_global::<PluginHost>();
+    let installed = host.map(|h| &h.installed[..]).unwrap_or_default();
+    installed.iter().map(|i| i.manifest.id.clone()).collect()
+}
+
 /// Run a plugin call against `doc` (the active document, if any): its UI
-/// requests go to the workspace, and the edits it submits land when it
-/// returns, as one undo step ([`land`]). While `doc` is still opening, the
-/// call waits for it (see [`Waiting`]).
+/// requests go to the workspace, what it commits while it runs lands
+/// through the view as it asks ([`AppCommitter`]), and what it leaves lands
+/// when it returns, all one undo step ([`Landing`]); it's then told of what
+/// didn't land, if it asks to be ([`follow_up_calls`]). While `doc` is
+/// still opening, the call waits for it (see [`Waiting`]).
 pub fn run(
     plugin_id: &str,
     call: Call,
@@ -1236,6 +1290,7 @@ pub fn run(
         );
         return;
     }
+    let queue = Queue::of(&call, doc.as_ref());
     if let Some(d) = &doc
         && d.read(cx).is_opening()
     {
@@ -1250,36 +1305,38 @@ pub fn run(
             if !matches!(call, Call::Event(_)) {
                 notice(&doc, format!("{label} runs once the file is open"), cx);
             }
-            let region = is_region(&call);
             d.update(cx, |d, _| d.plugin_calls.hold(plugin_id, call));
-            // Held, not running: the plugin is free for the next region,
-            // here or in another document.
-            if region {
-                region_done(plugin_id, window, cx);
+            // Held, not running: the plugin is free for the next region or
+            // change, here or in another document.
+            if let Some(queue) = queue {
+                queue_done(plugin_id, queue, window, cx);
             }
             return;
         }
     }
     let (ui_tx, mut ui_rx) = mpsc::unbounded();
+    let (commit_tx, mut commits) = mpsc::unbounded();
     // Commands the user ran report progress to the document's status bar,
     // and Escape there stops them.
     let tracker = matches!(call, Call::Command { .. } | Call::PanelAction { .. })
         .then(sheaf_ops::Tracker::new);
+    let committer: Arc<dyn Committer> = Arc::new(AppCommitter(commit_tx));
     let ctx = CallContext {
-        doc: doc
-            .as_ref()
-            .and_then(|d| d.read(cx).plugin_context(crate::prefs::ocr_config(cx))),
+        doc: doc.as_ref().and_then(|d| {
+            let ocr = crate::prefs::ocr_config(cx);
+            d.read(cx).plugin_context(ocr, committer)
+        }),
         ui: Some(Arc::new(AppUi(ui_tx))),
         presets: presets(cx),
         progress: tracker.clone(),
         // Its own settings, as they are now, for the whole call.
         preferences: crate::prefs::get(cx).plugin_json(plugin_id),
+        plugins: installed_ids(cx),
     };
     // The document the call reads, which its edits land on only while the
     // view shows it.
     let cell = ctx.doc.as_ref().map(|d| d.cell.clone());
     let what = call.to_string();
-    let region_call = is_region(&call);
     let call_kind = match &call {
         Call::Event(_) => CallKind::Event,
         _ => CallKind::User,
@@ -1312,6 +1369,10 @@ pub fn run(
     cx.spawn_in(window, async move |ws, cx| {
         use futures::FutureExt;
         let mut rx = rx.fuse();
+        // What the call commits as it runs lands in its group, which what
+        // it leaves joins when it returns.
+        let mut landing = Landing::new(plugin_id.as_str());
+        let mut committed = false;
         // The last progress line shown, to clear when the call ends: by
         // then its tasks are gone, and the snapshot no longer makes it.
         // The final snapshot still makes "stopping…", which Escape may
@@ -1324,6 +1385,14 @@ pub fn run(
                 .fuse();
             futures::select_biased! {
                 r = rx => break r,
+                req = commits.next() => {
+                    // The call waits while its commit lands here, on the
+                    // UI thread, which never waits on it.
+                    if let Some(req) = req {
+                        let view = weak.as_ref().and_then(|w| w.upgrade());
+                        committed |= req.land(view, cell.as_ref(), &mut landing, cx);
+                    }
+                }
                 _ = tick => {}
             }
             if let (Some(t), Some(d)) = (&tracker, weak.as_ref().and_then(|w| w.upgrade())) {
@@ -1349,62 +1418,167 @@ pub fn run(
                     }
                 });
             }
-            match result {
-                Ok(out) if out.batches.is_empty() && quiet => {}
-                Ok(out) if out.batches.is_empty() => {
-                    // Leave any notice the plugin set; just clear "Running…".
-                    if let Some(d) = &doc {
-                        d.update(cx, |d, cx| d.clear_notice_if(&format!("{label}…"), cx));
-                    }
-                }
-                Ok(out) => match &doc {
-                    Some(d) => d.update(cx, |d, cx| {
-                        // A message the plugin left outlasts the undo label
-                        // landing shows, but not a failure or a warning.
-                        let running = format!("{label}…");
-                        let left = d.notice().filter(|n| *n != running).map(str::to_string);
-                        let version = (cx.global::<PluginHost>().manifest(&plugin_id))
-                            .map_or_else(String::new, |m| m.version.to_string());
-                        // Its version is called as its first batch is.
-                        let called = out.batches[0].label.clone();
-                        let landed = d.land_call(cell.as_ref(), &plugin_id, &version, out, cx);
-                        let msg = match landed {
-                            None => Some(format!(
-                                "{label}: its document was closed, so it changed nothing"
-                            )),
-                            Some(Landed {
-                                failed: Some((batch, e)),
-                                kept,
-                            }) => {
-                                log::warn!("{plugin_id} {what}: “{batch}”: {e}");
-                                Some(match kept {
-                                    true => format!(
-                                        "Plugin “{}” failed; its partial edits were kept",
-                                        plugin_name(&plugin_id, cx)
-                                    ),
-                                    false => crate::docview::failed(&batch, &e),
-                                })
-                            }
-                            Some(_) => left.filter(|_| d.notice() == Some(called.as_str())),
-                        };
-                        if let Some(msg) = msg {
-                            d.set_notice(msg, cx);
+            let cancelled = tracker.as_ref().is_some_and(|t| t.snapshot().cancelled);
+            let landed = match &doc {
+                Some(d) => d.update(cx, |d, cx| {
+                    // A message the plugin left outlasts the undo label its
+                    // edits landing show, but not a failure or a warning.
+                    let running = format!("{label}…");
+                    let left = d.notice().filter(|n| *n != running).map(str::to_string);
+                    let (failed, called) = match &result {
+                        // What its edits are called, when it made any.
+                        Ok(out) => (
+                            None,
+                            out.label.clone().filter(|_| committed || out.tx.is_some()),
+                        ),
+                        Err(e) => (Some(e.clone()), None),
+                    };
+                    let landed = d.land_call(cell.as_ref(), landing, result, cancelled, cx);
+                    let kept = |cx: &App| match cancelled {
+                        true => format!("{label} was stopped; its partial edits were kept"),
+                        false => {
+                            let name = plugin_name(&plugin_id, cx);
+                            format!("Plugin “{name}” failed; its partial edits were kept")
                         }
-                    }),
-                    None => notice(&doc, format!("{label}: no document to edit"), cx),
-                },
-                Err(e) => {
-                    log::warn!("{plugin_id} {what}: {e}");
-                    notice(&doc, format!("{label}: {e}"), cx);
+                    };
+                    if let Some(e) = &failed {
+                        log::warn!("{plugin_id} {what}: {e}");
+                    }
+                    let msg = match (failed, called, &landed) {
+                        // Taking its edits back failed: the user changed
+                        // them since.
+                        (_, _, Some(Landed { kept: true, .. })) => Some(kept(cx)),
+                        (Some(e), ..) => Some(format!("{label}: {e}")),
+                        (None, None, _) if quiet => None,
+                        (None, None, _) => {
+                            // Leave any notice the plugin set; just clear
+                            // "Running…".
+                            d.clear_notice_if(&running, cx);
+                            None
+                        }
+                        (None, Some(_), None) => Some(format!(
+                            "{label}: its document was closed, so it changed nothing"
+                        )),
+                        (
+                            None,
+                            Some(_),
+                            Some(Landed {
+                                failed: Some((called, e)),
+                                ..
+                            }),
+                        ) => {
+                            log::warn!("{plugin_id} {what}: “{called}”: {e}");
+                            Some(crate::docview::failed(called, e))
+                        }
+                        (None, Some(_), Some(_)) if cancelled => {
+                            Some(format!("{label} was stopped, so it changed nothing"))
+                        }
+                        (None, Some(called), Some(_)) => {
+                            left.filter(|_| d.notice() == Some(called.as_str()))
+                        }
+                    };
+                    if let Some(msg) = msg {
+                        d.set_notice(msg, cx);
+                    }
+                    landed
+                }),
+                None => {
+                    if let Err(e) = &result {
+                        log::warn!("{plugin_id} {what}: {e}");
+                        notice(&doc, format!("{label}: {e}"), cx);
+                    }
+                    None
                 }
+            };
+            // What didn't land, told to the plugin, if it asks to be.
+            let plugin = cx.global::<PluginHost>().plugins.get(&plugin_id);
+            let told = match (plugin, &landed) {
+                (Some(p), Some(landed)) => follow_up_calls(p.manifest(), landed),
+                _ => Vec::new(),
+            };
+            for call in told {
+                run(&plugin_id, call, doc.clone(), window, cx);
             }
-            if region_call {
-                region_done(&plugin_id, window, cx);
+            if let Some(queue) = queue {
+                queue_done(&plugin_id, queue, window, cx);
             }
         })
         .ok();
     })
     .detach();
+}
+
+/// The calls that tell plugin `m` how its call's edits landed
+/// ([`sheaf_plugin::follow_ups`]): an `edit-refused` for each refusal,
+/// and for its last commit, when it failed; none unless it subscribes.
+fn follow_up_calls(m: &Manifest, landed: &Landed) -> Vec<Call> {
+    if !m.events.contains(&EventKind::EditRefused) {
+        return Vec::new();
+    }
+    (sheaf_plugin::follow_ups(landed).into_iter())
+        .map(Call::Event)
+        .collect()
+}
+
+/// A running call's commit (`edits.commit`), for the UI thread to land.
+struct CommitRequest {
+    tx: Tx,
+    label: String,
+    depth: u8,
+    reply: oneshot::Sender<Result<Committed, EditError>>,
+}
+
+impl CommitRequest {
+    /// The call's edits landed in its group (`landing`) through `view`,
+    /// while it shows the document the call read, `cell`'s
+    /// ([`DocView::commit_call`]), and the call told how: whether they
+    /// did.
+    fn land(
+        self,
+        view: Option<Entity<DocView>>,
+        cell: Option<&Arc<ArcSwap<Published>>>,
+        landing: &mut Landing,
+        cx: &mut gpui::AsyncWindowContext,
+    ) -> bool {
+        let made = match view {
+            Some(d) => d.update(cx, |d, cx| {
+                d.commit_call(cell, landing, self.tx, &self.label, self.depth, cx)
+            }),
+            None => Err(closed()),
+        };
+        let landed = made.is_ok();
+        let _ = self.reply.send(made);
+        landed
+    }
+}
+
+/// Sends a call's commits to the UI thread that started it, and waits for
+/// each to land there ([`DocView::commit_call`]): the time the call waits
+/// isn't counted against it.
+struct AppCommitter(mpsc::UnboundedSender<CommitRequest>);
+
+impl Committer for AppCommitter {
+    fn commit(&self, tx: Tx, label: &str, depth: u8) -> Result<Committed, EditError> {
+        let (reply, landed) = oneshot::channel();
+        let label = label.to_string();
+        let req = CommitRequest {
+            tx,
+            label,
+            depth,
+            reply,
+        };
+        self.0.unbounded_send(req).map_err(|_| closed())?;
+        futures::executor::block_on(landed).unwrap_or_else(|_| Err(closed()))
+    }
+}
+
+/// Why a call's commit didn't land: the document it read is no longer
+/// shown, closed or reopened since.
+fn closed() -> EditError {
+    EditError::Invalid {
+        op: "commit",
+        why: "its document was closed".into(),
+    }
 }
 
 /// The status line for a running command's progress, once it has any.
@@ -1424,17 +1598,17 @@ fn progress_line(label: &str, s: &sheaf_ops::ProgressSnapshot) -> Option<String>
     ))
 }
 
-/// A plugin finished a region call: send it the newest region event that
-/// arrived meanwhile, if any.
-fn region_done(plugin: &str, window: &mut Window, cx: &mut Context<Workspace>) {
-    let Some((doc, event)) = cx.global_mut::<PluginHost>().regions.done(plugin) else {
+/// A plugin finished an event call from `queue`: send it the event that
+/// waited meanwhile, if any.
+fn queue_done(plugin: &str, queue: Queue, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some((doc, event)) = cx.global_mut::<PluginHost>().next_from(plugin, queue) else {
         return;
     };
     match doc.upgrade() {
         Some(doc) => run(plugin, Call::Event(event), Some(doc), window, cx),
         // The document is gone: nothing more to send.
         None => {
-            cx.global_mut::<PluginHost>().regions.done(plugin);
+            cx.global_mut::<PluginHost>().next_from(plugin, queue);
         }
     }
 }
@@ -1486,14 +1660,14 @@ impl Waiting {
     }
 }
 
-/// Per-key "latest wins" queue: while a key is busy, newer items replace
-/// the one waiting instead of piling up.
-pub struct Latest<T> {
-    busy: HashSet<String>,
-    waiting: HashMap<String, T>,
+/// Per-key coalescing: while a key is busy, what's offered waits, folded
+/// into what was waiting, instead of piling up.
+pub struct Coalescer<K, T> {
+    busy: HashSet<K>,
+    waiting: HashMap<K, VecDeque<T>>,
 }
 
-impl<T> Default for Latest<T> {
+impl<K, T> Default for Coalescer<K, T> {
     fn default() -> Self {
         Self {
             busy: HashSet::new(),
@@ -1502,25 +1676,28 @@ impl<T> Default for Latest<T> {
     }
 }
 
-impl<T> Latest<T> {
+impl<K: Hash + Eq, T> Coalescer<K, T> {
     /// Offer an item: Some(item) to send now (the key is now busy), or
-    /// None if it's waiting behind a call in progress.
-    pub fn offer(&mut self, key: &str, item: T) -> Option<T> {
-        if self.busy.contains(key) {
-            self.waiting.insert(key.to_string(), item);
+    /// None if it waits behind a call in progress, folded into those
+    /// waiting already (`fold(waiting, item)`).
+    pub fn offer(&mut self, key: K, item: T, fold: impl FnOnce(&mut VecDeque<T>, T)) -> Option<T> {
+        if self.busy.contains(&key) {
+            fold(self.waiting.entry(key).or_default(), item);
             None
         } else {
-            self.busy.insert(key.to_string());
+            self.busy.insert(key);
             Some(item)
         }
     }
 
-    /// The key's call finished: the waiting item to send next (the key
-    /// stays busy), or None (the key is free).
-    pub fn done(&mut self, key: &str) -> Option<T> {
-        match self.waiting.remove(key) {
+    /// The key's call finished: the first waiting item to send next (the
+    /// key stays busy), or None (the key is free).
+    pub fn done(&mut self, key: &K) -> Option<T> {
+        let waiting = self.waiting.get_mut(key);
+        match waiting.and_then(|w| w.pop_front()) {
             Some(item) => Some(item),
             None => {
+                self.waiting.remove(key);
                 self.busy.remove(key);
                 None
             }
@@ -1531,15 +1708,12 @@ impl<T> Latest<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_doc::PageId;
-    use sheaf_doc::prim::Key;
-    use sheaf_plugin::EditBatch;
 
     fn plugin(dir: &Path, id: &str, version: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("sheaf-plugin.toml"),
-            format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"{version}\"\napi = \"^0.2\"\n"),
+            format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"{version}\"\napi = \"^0.4\"\n"),
         )
         .unwrap();
         std::fs::write(dir.join("plugin.wasm"), version).unwrap();
@@ -1551,7 +1725,16 @@ mod tests {
 
     fn manifest(perms: &str) -> Manifest {
         Manifest::parse(&format!(
-            "id = \"p\"\nname = \"P\"\nversion = \"1.0.0\"\napi = \"^0.2\"\n[permissions]\n{perms}"
+            "id = \"p\"\nname = \"P\"\nversion = \"1.0.0\"\napi = \"^0.4\"\n[permissions]\n{perms}"
+        ))
+        .unwrap()
+    }
+
+    /// Plugin `id`'s manifest, subscribing to `events` (`"changed"`).
+    fn subscribed(id: &str, events: &str) -> Manifest {
+        Manifest::parse(&format!(
+            "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\napi = \"^0.4\"\n\
+             events = [{events}]\n"
         ))
         .unwrap()
     }
@@ -1577,9 +1760,9 @@ mod tests {
     }
 
     /// A plugin's render draws the page as the file will (M10.5 §14.3),
-    /// in the file's own orientation: sheaf's unsaved mark and header with
-    /// it, on a page turned a quarter, as the Rewrite's page drawn turned
-    /// back shows them; and a page with neither, from its base engine, as
+    /// as it shows: sheaf's unsaved mark and header with it, on a page
+    /// turned a quarter, as the Rewrite's page shows them; without markup,
+    /// the header alone; and a page with neither, from its base engine, as
     /// the file draws it.
     #[test]
     fn a_plugin_render_draws_sheaf_marks_and_the_unsaved_header() {
@@ -1603,31 +1786,35 @@ mod tests {
         let views = Views::new(EnginePool::new().unwrap());
         let source = render_source(&views);
         let snap = d.snapshot();
-        let whole = (0, 0, 612, 792);
-        let ours = |page| source.render(&snap, page, 612, 792, whole).unwrap();
+        let ours = |page, inputs: &ViewInputs, (w, h)| {
+            source
+                .render(&snap, page, inputs, w, h, (0, 0, w, h))
+                .unwrap()
+        };
         let saved = sheaf_doc::save::rewrite(&d).unwrap();
         let engine = PdfiumEngine::open_bytes(saved.into(), None).unwrap();
-        let theirs = |index, rotation| {
+        let theirs = |index, (w, h)| {
             let job = Job::Tile {
-                page_width: 612,
-                page_height: 792,
+                page_width: w,
+                page_height: h,
                 x: 0,
                 y: 0,
-                w: 612,
-                h: 792,
-                rotation,
+                w,
+                h,
+                rotation: Rotation::R0,
             };
             let page = PageIndex(index);
             engine.render(page, job, PixelFormat::Rgba).unwrap().data
         };
-        let drawn = ours(edited);
-        assert!(
-            drawn == theirs(0, Rotation::R270),
-            "as the file will draw it"
-        );
+        let shown = (792, 612);
+        let drawn = ours(edited, &ViewInputs::plugin(), shown);
+        assert!(drawn == theirs(0, shown), "as the file will draw it");
         assert!(drawn.iter().any(|&v| v != 255), "the mark and header show");
-        let blank = ours(alone);
-        assert!(blank == theirs(1, Rotation::R0));
+        let bare = ours(edited, &ViewInputs::print(false), shown);
+        assert!(bare != drawn, "no mark");
+        assert!(bare.iter().any(|&v| v != 255), "the header shows");
+        let blank = ours(alone, &ViewInputs::plugin(), (612, 792));
+        assert!(blank == theirs(1, (612, 792)));
         assert!(blank.iter().all(|&v| v == 255));
     }
 
@@ -1770,14 +1957,163 @@ mod tests {
 
     #[test]
     fn latest_wins_while_busy() {
-        let mut q = Latest::default();
-        assert_eq!(q.offer("p", 1), Some(1), "idle: send now");
-        assert_eq!(q.offer("p", 2), None, "busy: wait");
-        assert_eq!(q.offer("p", 3), None, "replaces 2");
-        assert_eq!(q.offer("other", 9), Some(9), "keys are independent");
-        assert_eq!(q.done("p"), Some(3), "only the newest");
-        assert_eq!(q.done("p"), None, "now idle");
-        assert_eq!(q.offer("p", 4), Some(4));
+        let mut q = Coalescer::default();
+        assert_eq!(q.offer("p", 1, newest), Some(1), "idle: send now");
+        assert_eq!(q.offer("p", 2, newest), None, "busy: wait");
+        assert_eq!(q.offer("p", 3, newest), None, "replaces 2");
+        assert_eq!(q.offer("other", 9, newest), Some(9), "keys are independent");
+        assert_eq!(q.done(&"p"), Some(3), "only the newest");
+        assert_eq!(q.done(&"p"), None, "now idle");
+        assert_eq!(q.offer("p", 4, newest), Some(4));
+    }
+
+    /// A plugin busy with a change is told of the changes made meanwhile
+    /// once it's free, as one: from the first one's parent to the last
+    /// one's version, with the pages of each. Another plugin isn't held up
+    /// by it, nor is the plugin when told of a change to another document.
+    #[test]
+    fn changes_made_while_a_plugin_is_busy_wait_merged() {
+        use sheaf_doc::tx::fixture::{add, rotate};
+        use sheaf_edit::Turn;
+        let mut d = blank(3);
+        let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap());
+        let mark = &sheaf_doc::forms::fixture::every_mark_kind()[3];
+        let mut told = |op, label: &str| {
+            let ch = d.commit_ops(vec![op], label).unwrap().change;
+            ((), ChangeInfo::of(&ch, d.instance()))
+        };
+        let first = told(add(p0, mark), "Square");
+        let turned = told(rotate(&[p1], Turn::Quarter), "Turn");
+        let noted = told(add(p2, mark), "Square");
+        let mut q = Coalescer::default();
+        assert!(q.offer(("p", 1), first.clone(), merged).is_some(), "free");
+        assert!(q.offer(("p", 1), turned.clone(), merged).is_none(), "busy");
+        assert!(q.offer(("p", 1), noted.clone(), merged).is_none(), "merged");
+        assert!(
+            q.offer(("q", 1), noted.clone(), merged).is_some(),
+            "another plugin"
+        );
+        assert!(
+            q.offer(("p", 2), noted.clone(), merged).is_some(),
+            "another document"
+        );
+        let ((), next) = q.done(&("p", 1)).unwrap();
+        assert_eq!(
+            (next.parent, next.version),
+            (turned.1.parent, noted.1.version)
+        );
+        assert_eq!(next.scopes.geometry, BTreeSet::from([p1]));
+        assert_eq!(next.scopes.annots, BTreeSet::from([p2]));
+        assert_eq!(q.done(&("p", 1)), None, "free again");
+        assert_eq!(q.offer(("p", 1), first.clone(), merged), Some(first));
+    }
+
+    /// A user's edit made while a plugin is busy, after another plugin's
+    /// answer or an undo, is told on its own, and the plugin may answer
+    /// it; the answer and the undo, neither answerable, are told as one.
+    /// A change to the document a reopen made drops those of the old one.
+    #[test]
+    fn a_users_edit_waits_apart_from_changes_it_may_not_answer() {
+        use sheaf_doc::tx::fixture::rotate;
+        use sheaf_edit::Turn;
+        let mut d = blank(3);
+        let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap());
+        let busy = (
+            (),
+            ChangeInfo::of(&d.commit_ops(vec![square(p0)], "Square").unwrap().change, 1),
+        );
+        let plugin = Actor::Plugin {
+            id: "tax".into(),
+            version: "1.0".into(),
+        };
+        let mut tx = d.tx(plugin);
+        tx.apply_batch(vec![rotate(&[p1], Turn::Quarter)], &sheaf_ops::NoProgress)
+            .unwrap();
+        let opts = CommitOpts {
+            depth: 1,
+            ..CommitOpts::labelled("Tax")
+        };
+        let answer = ((), ChangeInfo::of(&d.commit(tx, opts).unwrap().change, 1));
+        let undone = ((), ChangeInfo::of(&d.undo().unwrap().unwrap(), 1));
+        let user = (
+            (),
+            ChangeInfo::of(&d.commit_ops(vec![square(p2)], "Square").unwrap().change, 1),
+        );
+        let mut q = Coalescer::default();
+        assert!(q.offer("p", busy, merged).is_some(), "free");
+        assert!(q.offer("p", answer.clone(), merged).is_none());
+        assert!(q.offer("p", undone.clone(), merged).is_none());
+        assert!(q.offer("p", user.clone(), merged).is_none());
+        let ((), first) = q.done(&"p").unwrap();
+        assert!(!first.answerable());
+        assert_eq!(
+            (first.parent, first.version),
+            (answer.1.parent, undone.1.version)
+        );
+        assert_eq!(q.done(&"p"), Some(user.clone()), "apart, and answerable");
+        assert!(user.1.answerable());
+        assert_eq!(q.done(&"p"), None, "free again");
+        assert!(q.offer("p", answer.clone(), merged).is_some());
+        assert!(q.offer("p", undone, merged).is_none());
+        assert!(q.offer("p", user.clone(), merged).is_none());
+        let reopened = (
+            (),
+            ChangeInfo {
+                instance: 2,
+                ..user.1
+            },
+        );
+        assert!(q.offer("p", reopened.clone(), merged).is_none());
+        assert_eq!(q.done(&"p"), Some(reopened), "only the new document's");
+        assert_eq!(q.done(&"p"), None);
+    }
+
+    /// Who's told of an event: the plugins that subscribe to its kind,
+    /// but never one of its own change.
+    #[test]
+    fn a_plugin_isn_t_sent_its_own_changes() {
+        use crate::docview::DocEvent;
+        let turner = subscribed("turner", "\"changed\"");
+        let other = subscribed("other", "\"changed\"");
+        let deaf = subscribed("deaf", "\"saved\"");
+        let plugins = [("turner", &turner), ("other", &other), ("deaf", &deaf)];
+        let told = |actor: Actor| {
+            let change = Arc::new(change(Cause::Commit, actor));
+            let (event, from) = plugin_event(&DocEvent::Changed { change }, 7).unwrap();
+            recipients(plugins, event.kind(), from.as_deref())
+        };
+        let plugin = Actor::Plugin {
+            id: "turner".into(),
+            version: "1.0".into(),
+        };
+        assert_eq!(told(plugin), ["other"]);
+        assert_eq!(told(Actor::User), ["turner", "other"]);
+    }
+
+    /// What didn't land is told to the plugin when it subscribes to
+    /// `edit-refused`, and only then: each refusal, then why its last
+    /// commit failed.
+    #[test]
+    fn a_refused_call_is_told_why_only_when_it_asks_to_be() {
+        let asks = subscribed("p", "\"edit-refused\"");
+        let conflict = EditError::Conflict {
+            key: sheaf_doc::prim::Key::Order,
+            by: Some("Recheck".into()),
+        };
+        let landed = Landed {
+            failed: Some(("Total".into(), conflict)),
+            kept: false,
+            refused: vec!["the user undid this".into()],
+        };
+        let refused = |why: &str| Call::Event(sheaf_plugin::DocEvent::EditRefused(why.into()));
+        assert_eq!(
+            follow_up_calls(&asks, &landed),
+            [
+                refused("the user undid this"),
+                refused("“Recheck” changed the same data")
+            ]
+        );
+        assert!(follow_up_calls(&manifest(""), &landed).is_empty());
     }
 
     #[test]
@@ -1805,8 +2141,7 @@ mod tests {
             st.granted(&more),
             Permissions {
                 read: vec!["~/data".into()],
-                write: vec![],
-                network: vec![],
+                ..Permissions::default()
             }
         );
         // "Don't allow" is an answer too.
@@ -1819,6 +2154,36 @@ mod tests {
         );
         assert!(!st.needs_consent(&more));
         assert_eq!(st.granted(&more), Permissions::default());
+        // Knowing who the user is, is asked for like the rest.
+        let who = manifest("read = [\"~/data\", \"~/other\"]\nidentity = true");
+        assert!(st.needs_consent(&who));
+        assert!(!st.granted(&who).identity, "until it's allowed");
+    }
+
+    /// Knowing the user's name is a permission like the rest (M10.5 §6.8):
+    /// asked for in those words, kept in plugins.json once allowed, and
+    /// granted to the plugin when it loads only then. An answer given
+    /// before a plugin asked for it isn't one.
+    #[test]
+    fn a_plugin_knows_the_user_s_name_only_once_allowed() {
+        let m = manifest("identity = true");
+        assert_eq!(m.permissions.grants().describe(), ["Know your name"]);
+        let mut st = PluginState::default();
+        assert!(st.needs_consent(&m));
+        assert!(!st.granted(&m).grants().identity);
+        let allowed = Consent {
+            asked: m.permissions.clone(),
+            allowed: m.permissions.clone(),
+        };
+        st.consent.insert("p".into(), allowed);
+        let saved: PluginState = serde_json::from_slice(&serde_json::to_vec(&st).unwrap()).unwrap();
+        assert_eq!(saved, st);
+        assert!(!saved.needs_consent(&m));
+        assert!(saved.granted(&m).grants().identity, "its load options");
+        let before = r#"{"consent": {"p": {"asked": {"read": []}, "allowed": {"read": []}}}}"#;
+        let before: PluginState = serde_json::from_str(before).unwrap();
+        assert!(before.needs_consent(&m), "asked again");
+        assert!(!before.granted(&m).grants().identity);
     }
 
     #[test]
@@ -1953,114 +2318,12 @@ mod tests {
         install_bundled(&from, &dest);
         let old = dest.join("e").join("sheaf-plugin.toml");
         let text = std::fs::read_to_string(&old).unwrap();
-        std::fs::write(&old, text.replace("^0.2", "^0.1")).unwrap();
+        std::fs::write(&old, text.replace("^0.4", "^0.3")).unwrap();
         assert!(Manifest::load(&dest.join("e")).is_err());
         plugin(&from.join("e"), "e", "1.1.0");
         assert!(install_bundled(&from, &dest).is_empty());
         assert_eq!(installed(&dest, "e").as_deref(), Some("1.1.0"));
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// A plugin's marks are its own: by the plugin, whatever it says, and
-    /// with `<<name>>` and `<<initials>>` as it wrote them, since a plugin
-    /// never learns who the user is; the date and time are filled in, as
-    /// dynamic stamps are (M10.5 §6.8). Its update keeps what its API
-    /// can't show: `sheaf_plugin`'s `a_plugin_update_keeps_what_it_cant_see`.
-    #[test]
-    fn a_plugins_marks_are_its_own_and_never_name_the_user() {
-        use sheaf_doc::{FixedCount, Identity, Store};
-        use sheaf_edit::{Box2, MarkKind, NewMark, Op, Style};
-        let store = Store::new();
-        let primary = sheaf_doc::store::blank(&store, 1);
-        let policy = Box::new(FixedCount(10));
-        let mut d = Document::new(store, primary, "a.pdf".into(), None, &[], policy);
-        d.set_identity(Identity {
-            person: "Pat Q. Smith".into(),
-            initials: "PQS".into(),
-            ..Identity::default()
-        });
-        let stamp = NewMark {
-            kind: MarkKind::TextStamp {
-                rect: Box2 {
-                    x: 0.0,
-                    y: 0.0,
-                    w: 9.0,
-                    h: 9.0,
-                },
-                text: "REVIEWED\n<<initials>> <<date>>".into(),
-                status: false,
-            },
-            style: Style {
-                color: [0, 0, 0],
-                opacity: 1.0,
-                stroke: 1.0,
-                fill: None,
-                dashed: false,
-                cloudy: false,
-            },
-            contents: "Checked by <<name>> at <<time>>".into(),
-            author: Some("Someone Else".into()),
-            turn: Default::default(),
-            asset: None,
-        };
-        let page = d.page(0).unwrap();
-        let add = Op::AddMark {
-            page: page.into(),
-            mark: stamp,
-            reply_to: None,
-            local: None,
-            imported: None,
-        };
-        let out = called(None, [], vec![batch("Check", vec![add])]);
-        let landed = land(&mut d, "checker", "1.0.0", out);
-        assert!(landed.failed.is_none(), "{landed:?}");
-        let a = d.state().marks_on(page).next().unwrap();
-        assert_eq!(a.author, "checker", "the plugin's, not who it says");
-        let (said, time) = a.contents.split_at("Checked by <<name>> at ".len());
-        assert_eq!(said, "Checked by <<name>> at ");
-        assert!(!time.is_empty() && !time.contains("<<"), "{time}");
-        let sheaf_doc::AnnotKind::TextStamp { text, .. } = &a.kind else {
-            panic!("{:?}", a.kind)
-        };
-        assert!(text.starts_with("REVIEWED\n<<initials>> "), "{text}");
-        assert!(!text.contains("<<date>>"), "{text}");
-        let version = &d.timeline()[1];
-        assert_eq!(version.author, "checker");
-    }
-
-    impl Door for Document {
-        fn model(&mut self) -> &mut Document {
-            self
-        }
-
-        fn commit(&mut self, tx: Tx, opts: CommitOpts) -> Result<Commit, EditError> {
-            Document::commit(self, tx, opts)
-        }
-
-        fn follow(&mut self, _: &ChangeSet) {}
-    }
-
-    /// `ops`, submitted as `label`.
-    fn batch(label: &str, ops: Vec<sheaf_edit::Op>) -> EditBatch {
-        EditBatch {
-            label: label.into(),
-            ops,
-            held: Vec::new(),
-            invalid: None,
-        }
-    }
-
-    /// A call that read `reads` on `base` and submitted `batches`.
-    fn called(
-        base: Option<Snapshot>,
-        reads: impl IntoIterator<Item = Key>,
-        batches: Vec<EditBatch>,
-    ) -> CallOutput {
-        CallOutput {
-            batches,
-            base: base.map(Arc::new),
-            reads: reads.into_iter().collect(),
-        }
     }
 
     /// `n` blank pages.
@@ -2103,150 +2366,64 @@ mod tests {
         }
     }
 
-    /// A call's first batch decides by what the call read (M10.5 §14.3):
-    /// the user changed the page's annotations it read since, so its mark
-    /// on another page is a Conflict naming that edit, and the document is
-    /// as the user left it.
-    #[test]
-    fn a_call_on_a_page_changed_since_conflicts_and_changes_nothing() {
-        let mut d = blank(2);
-        let (first, second) = (d.page(0).unwrap(), d.page(1).unwrap());
-        let base = d.snapshot();
-        d.commit_ops(vec![square(first)], "Square").unwrap();
-        let (at, versions) = (d.current_version(), d.timeline().len());
-        let reads = [Key::Page(first), Key::PageAnnots(first)];
-        let out = called(
-            Some(base),
-            reads,
-            vec![batch("Total", vec![square(second)])],
-        );
-        let landed = land(&mut d, "p", "1.0", out);
-        let Some((label, EditError::Conflict { key, by })) = landed.failed else {
-            panic!("{landed:?}")
-        };
-        assert_eq!((label.as_str(), key), ("Total", Key::PageAnnots(first)));
-        assert_eq!(by.as_deref(), Some("Square"));
-        assert!(!landed.kept);
-        assert_eq!((d.current_version(), d.timeline().len()), (at, versions));
-        assert_eq!(d.state().marks_on(second).count(), 0);
+    /// Plugin "p"'s transaction on what `cell` holds, a square submitted to
+    /// `page` in it, as its call does: the square's id handed out.
+    fn squared(cell: &ArcSwap<Published>, page: PageId) -> Tx {
+        let mut tx = cell.load().plugin_tx("p".into(), "1.0".into(), false);
+        (tx.apply_said(vec![square(page)], &sheaf_ops::NoProgress)).unwrap();
+        tx.mark_handed_out();
+        tx
     }
 
-    /// An edit elsewhere doesn't refuse it: its ops are lowered again on
-    /// the current version, and both edits stay.
-    #[test]
-    fn a_call_lands_after_an_edit_to_a_page_it_didn_t_read() {
-        let mut d = blank(2);
-        let (first, second) = (d.page(0).unwrap(), d.page(1).unwrap());
-        let base = d.snapshot();
-        d.commit_ops(vec![square(second)], "Square").unwrap();
-        let reads = [Key::Page(first), Key::PageAnnots(first)];
-        let out = called(Some(base), reads, vec![batch("Total", vec![square(first)])]);
-        let landed = land(&mut d, "p", "1.0", out);
-        assert!(landed.failed.is_none(), "{landed:?}");
-        let st = d.state();
-        assert_eq!(
-            (st.marks_on(first).count(), st.marks_on(second).count()),
-            (1, 1)
-        );
-        assert_eq!(d.undo_label(), Some("Total"));
+    /// A call that returned leaving `tx`, its edits called "Check".
+    #[cfg(target_os = "linux")]
+    fn left(tx: Tx) -> Result<CallOutput, PluginError> {
+        Ok(CallOutput {
+            tx: Some(tx),
+            label: Some("Check".into()),
+            ..CallOutput::default()
+        })
     }
 
-    /// A call's batches are one undo step (proposal 19): the second is made
-    /// on the version the first made, so the first's mark on the page the
-    /// call read is no conflict, and the second joins its version.
-    #[test]
-    fn a_call_s_two_batches_on_a_page_it_read_are_one_undo_step() {
-        let mut d = blank(1);
-        let first = d.page(0).unwrap();
-        let (at, versions) = (d.current_version(), d.timeline().len());
-        let reads = [Key::Page(first), Key::PageAnnots(first)];
-        let batches = vec![
-            batch("Check", vec![square(first)]),
-            batch("Total", vec![square(first)]),
-        ];
-        let out = called(Some(d.snapshot()), reads, batches);
-        let landed = land(&mut d, "p", "1.0", out);
-        assert!(landed.failed.is_none(), "{landed:?}");
-        assert_eq!(d.state().marks_on(first).count(), 2);
-        assert_eq!(d.timeline().len(), versions + 1, "one version");
-        assert_eq!(d.undo_label(), Some("Check"), "called as its first batch");
-        d.undo().unwrap();
-        assert_eq!(d.current_version(), at);
-        assert_eq!(d.state().marks_on(first).count(), 0);
+    /// `f` on a view showing `doc`, in an app with no windows.
+    #[cfg(target_os = "linux")]
+    fn in_view(doc: Document, f: impl FnOnce(&mut DocView, &mut Context<DocView>) + 'static) {
+        use crate::docview::Doc;
+        use gpui::AppContext as _;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = cx.new(|cx| {
+                    let launched = std::time::Instant::now();
+                    let mut view = DocView::unopened("a.pdf".into(), None, false, launched, cx);
+                    let doc = Doc::new(doc, cx.focus_handle(), Default::default());
+                    view.state = State::Ready(Box::new(doc));
+                    view
+                });
+                view.update(cx, f);
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
     }
 
-    /// When a batch fails, the call's edits go: its only version is taken
-    /// out, with nothing to redo to it.
-    #[test]
-    fn a_failing_second_batch_takes_the_first_back() {
-        let mut d = blank(1);
-        let first = d.page(0).unwrap();
-        let (at, versions) = (d.current_version(), d.timeline().len());
-        let gone = PageId(u64::MAX);
-        let batches = vec![
-            batch("Check", vec![square(first)]),
-            batch("Tidy", vec![sheaf_doc::tx::fixture::delete(&[gone])]),
-        ];
-        let reads = [Key::PageAnnots(first)];
-        let out = called(Some(d.snapshot()), reads, batches);
-        let landed = land(&mut d, "p", "1.0", out);
-        let Some((label, EditError::NotFound { .. })) = &landed.failed else {
-            panic!("{landed:?}")
-        };
-        assert_eq!((label.as_str(), landed.kept), ("Tidy", false));
-        assert_eq!((d.current_version(), d.timeline().len()), (at, versions));
-        assert!(!d.can_redo(), "nothing to redo to it");
-        assert_eq!(d.state().marks_on(first).count(), 0);
-    }
-
-    /// A document the user edits right after a call's first commit, as the
-    /// call's own `commit()` will let them (API 0.4): they write over the
-    /// call's mark.
-    struct EditedBetween(Document);
-
-    impl Door for EditedBetween {
-        fn model(&mut self) -> &mut Document {
-            &mut self.0
+    /// The document `v` shows.
+    #[cfg(target_os = "linux")]
+    fn ready(v: &DocView) -> &crate::docview::Doc {
+        match &v.state {
+            State::Ready(doc) => doc,
+            _ => panic!("ready"),
         }
-
-        fn commit(&mut self, tx: Tx, opts: CommitOpts) -> Result<Commit, EditError> {
-            let made = self.0.commit(tx, opts)?;
-            let page = self.0.page(0).unwrap();
-            let mut mark = self.0.state().marks_on(page).next().unwrap().clone();
-            mark.contents = "Mine now".into();
-            let retell = sheaf_doc::tx::fixture::update(&mark);
-            self.0.commit_ops(vec![retell], "Retell").unwrap();
-            Ok(made)
-        }
-
-        fn follow(&mut self, _: &ChangeSet) {}
     }
 
-    /// A failed call whose edits can't be taken back, since the user wrote
-    /// over them meanwhile, keeps them: the rollback's Conflict changes
-    /// nothing, and the call's group ends.
-    #[test]
-    fn a_call_whose_edits_were_written_over_keeps_them_when_it_fails() {
-        let mut door = EditedBetween(blank(1));
-        let first = door.0.page(0).unwrap();
-        let batches = vec![
-            batch("Check", vec![square(first)]),
-            batch(
-                "Tidy",
-                vec![sheaf_doc::tx::fixture::delete(&[PageId(u64::MAX)])],
-            ),
-        ];
-        let out = called(None, [], batches);
-        let landed = land(&mut door, "p", "1.0", out);
-        assert!(matches!(
-            landed.failed,
-            Some((_, EditError::NotFound { .. }))
-        ));
-        assert!(landed.kept);
-        let d = &door.0;
-        assert_eq!(d.undo_label(), Some("Retell"));
-        let mark = d.state().marks_on(first).next().unwrap();
-        assert_eq!(mark.contents, "Mine now");
+    /// `v` showing another document, of one blank page.
+    #[cfg(target_os = "linux")]
+    fn reopened(v: &mut DocView, cx: &mut Context<DocView>) {
+        let doc = crate::docview::Doc::new(blank(1), cx.focus_handle(), Default::default());
+        v.state = State::Ready(Box::new(doc));
     }
 
     /// A call's edits land through the view's door, which tells the reader
@@ -2256,55 +2433,153 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn a_call_lands_only_on_the_document_it_read() {
-        use crate::docview::Doc;
-        use gpui::AppContext as _;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let ran = Arc::new(AtomicBool::new(false));
-        gpui_platform::headless().run({
-            let ran = ran.clone();
-            move |cx| {
-                let blank_doc =
-                    |cx: &mut App| Doc::new(blank(1), cx.focus_handle(), Default::default());
-                let view = cx.new(|cx| {
-                    let launched = std::time::Instant::now();
-                    let mut view = DocView::unopened("a.pdf".into(), None, false, launched, cx);
-                    view.state = State::Ready(Box::new(blank_doc(cx)));
-                    view
-                });
-                view.update(cx, |v, cx| {
-                    let shown = |v: &DocView| match &v.state {
-                        State::Ready(doc) => (doc.plugin_cell.clone(), doc.model.page(0).unwrap()),
-                        _ => panic!("ready"),
-                    };
-                    let (cell, page) = shown(v);
-                    let call = || {
-                        let base = Snapshot::clone(&cell.load());
-                        let batches = vec![batch("Check", vec![square(page)])];
-                        called(Some(base), [Key::PageAnnots(page)], batches)
-                    };
-                    let landed = v.land_call(Some(&cell), "p", "1.0", call(), cx);
-                    assert!(landed.is_some_and(|l| l.failed.is_none()));
-                    let State::Ready(doc) = &v.state else {
-                        panic!("ready")
-                    };
-                    assert_eq!(doc.notice.as_deref(), Some("Check"));
-                    assert_eq!(doc.model.undo_label(), Some("Check"));
-                    assert_eq!(cell.load().version, doc.model.current_version());
-                    v.state = State::Ready(Box::new(blank_doc(cx)));
-                    let (other, _) = shown(v);
-                    assert!(!Arc::ptr_eq(&cell, &other), "a cell of its own");
-                    assert!(v.land_call(Some(&cell), "p", "1.0", call(), cx).is_none());
-                    assert!(v.land_call(None, "p", "1.0", call(), cx).is_none());
-                    let State::Ready(doc) = &v.state else {
-                        panic!("ready")
-                    };
-                    assert_eq!(doc.model.undo_label(), None, "nothing landed");
-                });
-                ran.store(true, Ordering::Relaxed);
-                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
-            }
+        use sheaf_doc::prim::Key;
+        in_view(blank(1), |v, cx| {
+            let (cell, page) = (
+                ready(v).plugin_cell.clone(),
+                ready(v).model.page(0).unwrap(),
+            );
+            // A call that read the page's annotations and added a square
+            // there.
+            let call = || {
+                let mut tx = squared(&cell, page);
+                tx.read(Key::PageAnnots(page));
+                left(tx)
+            };
+            let landed = v.land_call(Some(&cell), Landing::new("p"), call(), false, cx);
+            assert!(landed.is_some_and(|l| l.failed.is_none()));
+            let doc = ready(v);
+            assert_eq!(doc.notice.as_deref(), Some("Check"));
+            assert_eq!(doc.model.undo_label(), Some("Check"));
+            assert_eq!(cell.load().snap.version, doc.model.current_version());
+            reopened(v, cx);
+            assert!(
+                !Arc::ptr_eq(&cell, &ready(v).plugin_cell),
+                "a cell of its own"
+            );
+            let landing = || Landing::new("p");
+            assert!(
+                v.land_call(Some(&cell), landing(), call(), false, cx)
+                    .is_none()
+            );
+            assert!(v.land_call(None, landing(), call(), false, cx).is_none());
+            assert_eq!(ready(v).model.undo_label(), None, "nothing landed");
         });
-        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// What a call commits as it runs lands through the view's door, in
+    /// the call's group, as deep as the call's edits are: the call's next
+    /// edits are made on the version it made, published to the call's
+    /// cell, and what the call leaves joins it, one undo step. A view
+    /// showing another document takes none.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_call_s_commit_lands_through_the_view_and_its_next_edits_follow_it() {
+        in_view(blank(1), |v, cx| {
+            let (cell, page) = (
+                ready(v).plugin_cell.clone(),
+                ready(v).model.page(0).unwrap(),
+            );
+            let versions = ready(v).model.timeline().len();
+            let mut landing = Landing::new("p");
+            let tx = squared(&cell, page);
+            let committed = v.commit_call(Some(&cell), &mut landing, tx, "Check", 1, cx);
+            let committed = committed.unwrap();
+            let doc = ready(v);
+            assert_eq!(committed.version, doc.model.current_version());
+            assert_eq!(committed.instance, doc.model.instance());
+            assert!(
+                Arc::ptr_eq(&committed.base, &cell.load_full()),
+                "as published"
+            );
+            assert_eq!(doc.last_change.as_ref().map(|c| c.depth), Some(1));
+            assert_eq!(doc.notice.as_deref(), Some("Check"));
+            let tx = squared(&cell, page);
+            assert_eq!(tx.base(), committed.version, "made on it");
+            let landed = v.land_call(Some(&cell), landing, left(tx), false, cx);
+            assert!(landed.is_some_and(|l| l.failed.is_none()));
+            let doc = ready(v);
+            assert_eq!(doc.model.state().marks_on(page).count(), 2);
+            assert_eq!(doc.model.timeline().len(), versions + 1, "one version");
+            assert_eq!(doc.model.undo_label(), Some("Check"));
+            let tx = squared(&cell, page);
+            reopened(v, cx);
+            let refused = v.commit_call(Some(&cell), &mut Landing::new("p"), tx, "Check", 0, cx);
+            assert_eq!(refused.err(), Some(closed()));
+            assert_eq!(ready(v).model.undo_label(), None);
+        });
+    }
+
+    /// A call that fails after it committed, the user having edited since,
+    /// takes back only its own edits, through the view: a version of its
+    /// own undoes them, and the user's stay (M10.5 §8.4).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_failed_call_takes_back_only_its_own_commits_through_the_view() {
+        in_view(blank(2), |v, cx| {
+            let (cell, first) = (
+                ready(v).plugin_cell.clone(),
+                ready(v).model.page(0).unwrap(),
+            );
+            let second = ready(v).model.page(1).unwrap();
+            let versions = ready(v).model.timeline().len();
+            let mut landing = Landing::new("p");
+            let tx = squared(&cell, first);
+            v.commit_call(Some(&cell), &mut landing, tx, "Check", 0, cx)
+                .unwrap();
+            let mine = v.lower(vec![square(second)], "Mine", cx).unwrap();
+            v.commit(mine, CommitOpts::labelled("Mine"), cx).unwrap();
+            let failed = Err(PluginError::Failed("nope".into()));
+            let landed = v
+                .land_call(Some(&cell), landing, failed, false, cx)
+                .unwrap();
+            assert!(landed.failed.is_none() && !landed.kept, "{landed:?}");
+            let doc = ready(v);
+            let st = doc.model.state();
+            assert_eq!(st.marks_on(first).count(), 0, "the call's, taken back");
+            assert_eq!(st.marks_on(second).count(), 1, "the user's");
+            assert_eq!(doc.model.timeline().len(), versions + 3, "and the revert");
+            let followed = doc.last_change.as_ref().map(|c| c.cause);
+            assert_eq!(followed, Some(Cause::Rollback), "the view followed it");
+            assert_eq!(cell.load().snap.version, doc.model.current_version());
+        });
+    }
+
+    /// A call's commit waits for the UI thread to land it, and is told when
+    /// no one will: the view's end of the channel gone, or its answer
+    /// dropped unanswered.
+    #[test]
+    fn a_call_s_commit_waits_for_the_ui_thread_or_is_told_its_document_closed() {
+        let d = blank(1);
+        let page = d.page(0).unwrap();
+        let cell = ArcSwap::from_pointee(d.published());
+        let (requests, mut ui) = mpsc::unbounded::<CommitRequest>();
+        let landed = std::thread::spawn(move || {
+            let mut d = d;
+            let req = futures::executor::block_on(ui.next()).unwrap();
+            let mut landing = Landing::new("p");
+            let made = (landing.commit(&mut d, req.tx, &req.label, req.depth)).map(|_| Committed {
+                version: d.current_version(),
+                instance: d.instance(),
+                base: Arc::new(d.published()),
+            });
+            let _ = req.reply.send(made);
+            (d, req.depth)
+        });
+        let committed = AppCommitter(requests).commit(squared(&cell, page), "Check", 1);
+        let (d, depth) = landed.join().unwrap();
+        assert_eq!(committed.unwrap().version, d.current_version());
+        assert_eq!((d.undo_label(), depth), (Some("Check"), 1));
+        let (requests, ui) = mpsc::unbounded();
+        drop(ui);
+        let gone = AppCommitter(requests).commit(squared(&cell, page), "Check", 0);
+        assert_eq!(gone.err(), Some(closed()));
+        let (requests, mut ui) = mpsc::unbounded::<CommitRequest>();
+        let dropped = std::thread::spawn(move || drop(futures::executor::block_on(ui.next())));
+        let unanswered = AppCommitter(requests).commit(squared(&cell, page), "Check", 0);
+        dropped.join().unwrap();
+        assert_eq!(unanswered.err(), Some(closed()));
+        assert_eq!(closed().to_string(), "commit: its document was closed");
     }
 
     /// A step's line goes with it: the snapshot's step goes back to the
@@ -2336,37 +2611,29 @@ mod tests {
         ChangeSet::empty(sheaf_doc::VersionId(1), cause, actor, "Rotate page".into())
     }
 
-    /// `edited` says a change by its label, an undo, a redo or a jump as
-    /// one, and nothing of a save or the file opening.
-    #[test]
-    fn an_edit_is_told_by_its_label() {
-        let said = |cause| edited_label(&change(cause, Actor::User));
-        for cause in [Cause::Commit, Cause::Amend, Cause::Rollback, Cause::Revert] {
-            assert_eq!(said(cause).as_deref(), Some("Rotate page"), "{cause:?}");
-        }
-        assert_eq!(said(Cause::Undo).as_deref(), Some("Undo: Rotate page"));
-        assert_eq!(said(Cause::Redo).as_deref(), Some("Redo: Rotate page"));
-        assert_eq!(said(Cause::Jump).as_deref(), Some("Go to: Rotate page"));
-        assert_eq!((said(Cause::Saved), said(Cause::Opened)), (None, None));
-    }
-
-    /// A plugin isn't told of its own edits: an edit names the plugin
-    /// whose it was, and no other's or the user's names one.
+    /// A plugin isn't told of its own changes: a change names the plugin
+    /// whose it was, and no other's or the user's names one. It's told by
+    /// what it changed, in the document it was made to; a save isn't told
+    /// as a change.
     #[test]
     fn a_plugin_s_own_edit_names_it() {
         use crate::docview::DocEvent;
-        let told = |actor| {
-            let change = Arc::new(change(Cause::Commit, actor));
-            plugin_event(&DocEvent::Changed { change })
+        let told = |actor: &Actor| {
+            let change = Arc::new(change(Cause::Commit, actor.clone()));
+            plugin_event(&DocEvent::Changed { change }, 7)
         };
-        let edited = sheaf_plugin::DocEvent::Edited("Rotate page".into());
+        let changed = |actor: &Actor| {
+            let info = ChangeInfo::of(&change(Cause::Commit, actor.clone()), 7);
+            sheaf_plugin::DocEvent::Changed(info)
+        };
         let plugin = Actor::Plugin {
             id: "turner".into(),
             version: "1.0".into(),
         };
-        assert_eq!(told(plugin), Some((edited.clone(), Some("turner".into()))));
-        assert_eq!(told(Actor::User), Some((edited, None)));
+        let from = Some("turner".to_string());
+        assert_eq!(told(&plugin), Some((changed(&plugin), from)));
+        assert_eq!(told(&Actor::User), Some((changed(&Actor::User), None)));
         let saved = Arc::new(change(Cause::Saved, Actor::User));
-        assert_eq!(plugin_event(&DocEvent::Changed { change: saved }), None);
+        assert_eq!(plugin_event(&DocEvent::Changed { change: saved }, 7), None);
     }
 }

@@ -24,7 +24,7 @@ pub struct Prefs {
     pub stamps: StampPrefs,
     pub forms: FormPrefs,
     /// `[plugins.<id>]`: each plugin's own section, which only that plugin
-    /// reads (API 0.3's `storage.preferences`). Whatever it holds is the
+    /// reads (`storage.preferences`). Whatever it holds is the
     /// plugin's business; its manifest can name the keys it knows.
     pub plugins: BTreeMap<String, toml::Table>,
 }

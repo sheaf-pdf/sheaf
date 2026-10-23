@@ -69,7 +69,11 @@ impl ViewInputs {
     /// A plugin's render, and the reads it records: the screen's, with
     /// sheaf's marks drawn by PDFium, as the saved file will draw them
     /// (§14.3). One constructor for both, so a plugin's reads are of what
-    /// it was shown.
+    /// it was shown. Without markup (plugin API 0.4's `without-markup`),
+    /// it's [`print(false)`](Self::print): the same, but with no mark or
+    /// other tool's comment, the widgets, generators and recognized text
+    /// still drawn; those inputs are print preview's without markup, so
+    /// the two share their realizations.
     pub fn plugin() -> ViewInputs {
         ViewInputs {
             marks: MarkDraw::ByEngine,
@@ -92,7 +96,8 @@ impl ViewInputs {
     }
 
     /// Print preview's: with `markup` its comments and marks, and without,
-    /// neither; the form's widgets either way.
+    /// neither; the form's widgets either way. A plugin's render without
+    /// markup is print preview's ([`plugin`](Self::plugin)).
     pub fn print(markup: bool) -> ViewInputs {
         ViewInputs {
             marks: match markup {
@@ -126,5 +131,23 @@ impl ViewInputs {
     /// and links, or sheaf's marks.
     pub fn draws_annots(&self) -> bool {
         self.foreign || self.marks == MarkDraw::ByEngine
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A plugin's render without markup is print preview's: what it draws
+    /// with markup, less sheaf's marks and other tools' comments.
+    #[test]
+    fn a_plugin_render_without_markup_is_print_preview_s() {
+        let bare = ViewInputs {
+            marks: MarkDraw::Off,
+            foreign: false,
+            ..ViewInputs::plugin()
+        };
+        assert_eq!(ViewInputs::print(false), bare);
+        assert!(!bare.draws_annots() && bare.widgets && bare.generators && bare.ocr_over);
     }
 }

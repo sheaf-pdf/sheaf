@@ -193,7 +193,7 @@ fn a_replacement_saves_with_no_sheaf_part_and_reopens_as_one_mark() {
 
     // As sheaf wrote it before: the StrikeOut marked as the Caret's part.
     let mut f = Form::new(1);
-    let written = crate::annot::to_pdf(&replace, &mut f.pdf);
+    let written = crate::serialize::built::to_pdf(&replace, &mut f.pdf);
     let caret = f.pdf.add_object(written.main);
     let mut strike = written.companions.into_iter().next().unwrap();
     strike.set("IRT", caret);
@@ -267,7 +267,7 @@ fn replied() -> Vec<u8> {
         },
     );
     let mut f = Form::new(1);
-    let main = crate::annot::to_pdf(&note, &mut f.pdf).main;
+    let main = crate::serialize::built::to_pdf(&note, &mut f.pdf).main;
     let main = f.pdf.add_object(main);
     let reply = f.pdf.add_object(dictionary! {
         "Type" => "Annot", "Subtype" => "Text", "IRT" => main, "NM" => Object::string_literal("r1"),

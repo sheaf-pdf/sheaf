@@ -4,18 +4,22 @@
 //! tool's comment needs the user's approval. Both tables are total
 //! matches, so a new op or actor doesn't compile until it has a row.
 
-use std::fmt;
 use std::sync::Arc;
 
+/// What a change needs of whoever makes it: sheaf-edit's, so a plugin's
+/// preview says it in the same words.
+pub use sheaf_edit::Cap;
 use sheaf_edit::Transform;
 
 use super::resolve::ResolvedOp;
 use crate::model::{AnnotBody, DocState};
 
 /// Who submits a transaction. Only [`Document::lower_cx`] binds one to
-/// it, so a caller can't claim to be another.
+/// it, and [`Published::plugin_tx`] a plugin, so a caller can't claim to
+/// be another.
 ///
 /// [`Document::lower_cx`]: crate::model::Document::lower_cx
+/// [`Published::plugin_tx`]: crate::model::Published::plugin_tx
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Actor {
@@ -40,30 +44,6 @@ pub enum JobKind {
     Import,
     /// Pages inserted from a file.
     Insert,
-}
-
-/// What a change needs of whoever makes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Cap {
-    /// What any plugin may do: pages moved, turned, deleted or copied,
-    /// labels, bookmarks, sheaf's own marks.
-    Plugin,
-    /// What changes or removes content the user didn't make in sheaf: the
-    /// user approves it.
-    Approval,
-    /// What only the user and the host's own jobs do: content from files,
-    /// recognized text, imported comments' names and dates.
-    User,
-}
-
-impl fmt::Display for Cap {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Cap::Plugin => "refused: a plugin's edits are its own to make",
-            Cap::Approval => "refused: that needs your approval",
-            Cap::User => "refused: only you can make that change",
-        })
-    }
 }
 
 /// The kind of annotation an op acts on.
@@ -184,8 +164,9 @@ pub fn actor_allows(actor: &Actor, cap: Cap, op: &ResolvedOp) -> bool {
             ResolvedOp::SetOcrText { .. } | ResolvedOp::ClearOcrText { .. }
         ),
         Actor::Job(JobKind::Trim) => matches!(op, ResolvedOp::SetPageBoxes { .. }),
-        // A manifest grants nothing more until plugin API 0.4's
-        // permissions (slice 20).
+        // A manifest grants nothing beyond `Plugin` in plugin API 0.4:
+        // its `identity` permission changes what lowering fills in
+        // (`LowerCx::identity`), never what a plugin may do.
         Actor::Plugin { .. } => cap == Cap::Plugin,
     }
 }

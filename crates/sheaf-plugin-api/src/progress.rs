@@ -1,5 +1,5 @@
 //! Progress for long commands: shown in sheaf's status bar while the call
-//! runs, with Escape to stop it. (API 0.2.1; declare `api = "^0.2.1"`.)
+//! runs, with Escape to stop it.
 //!
 //! ```ignore
 //! use sheaf_plugin_api::{document, progress};

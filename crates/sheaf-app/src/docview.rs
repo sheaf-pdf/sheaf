@@ -136,12 +136,13 @@ pub(crate) struct Doc {
     pub(crate) changes: u64,
     /// The last change, for the `--script` dump.
     pub(crate) last_change: Option<Arc<ChangeSet>>,
-    /// The document as plugin calls read it, swapped at every change
-    /// ([`DocView::on_change`]): a call takes its base from it at its first
-    /// read (M10.5 §14.3). Each document has its own, so a call can tell
-    /// when the view was reopened on another meanwhile.
+    /// The document as plugin calls read it, published again at every
+    /// change ([`DocView::on_change`]) and when who the user is changes: a
+    /// call makes its transaction on it at its first read or submit (M10.5
+    /// §14.3). Each document has its own, so a call can tell when the view
+    /// was reopened on another meanwhile.
     #[cfg(feature = "plugins")]
-    pub(crate) plugin_cell: Arc<arc_swap::ArcSwap<sheaf_doc::Snapshot>>,
+    pub(crate) plugin_cell: Arc<arc_swap::ArcSwap<sheaf_doc::Published>>,
     /// Bumped when where the pages go changed: their order or their
     /// boxes. The panes' layouts are built at one count, and again at the
     /// next.
@@ -269,7 +270,7 @@ impl Doc {
         measure_scale: sheaf_doc::measure::Scale,
     ) -> Doc {
         #[cfg(feature = "plugins")]
-        let plugin_cell = Arc::new(arc_swap::ArcSwap::from_pointee(model.snapshot()));
+        let plugin_cell = Arc::new(arc_swap::ArcSwap::from_pointee(model.published()));
         let views = Views::new(engines());
         let text = Text::new(views.clone(), Budget::Screen);
         let strip_pins = Pins::new(views.pool());
@@ -1719,7 +1720,7 @@ impl DocView {
         };
         let selection = doc.follow(ch);
         #[cfg(feature = "plugins")]
-        doc.plugin_cell.store(Arc::new(doc.model.snapshot()));
+        doc.plugin_cell.store(Arc::new(doc.model.published()));
         let change = Arc::new(ch.clone());
         doc.last_change = Some(change.clone());
         if selection {
@@ -1752,11 +1753,13 @@ impl DocView {
     }
 
     /// What a plugin command sees of this document; `ocr` is the OCR
-    /// choices it runs with.
+    /// choices it runs with, and `committer` where what it commits as it
+    /// runs lands.
     #[cfg(feature = "plugins")]
     pub(crate) fn plugin_context(
         &self,
         ocr: sheaf_ocr::OcrConfig,
+        committer: Arc<dyn sheaf_plugin::Committer>,
     ) -> Option<sheaf_plugin::DocContext> {
         let State::Ready(doc) = &self.state else {
             return None;
@@ -1777,6 +1780,7 @@ impl DocView {
             text: crate::plugins::text_source(&doc.views),
             ocr: Some(crate::plugins::ocr_source(&doc.views, ocr)),
             render: Some(crate::plugins::render_source(&doc.views)),
+            committer: Some(committer),
         })
     }
 
@@ -1931,6 +1935,9 @@ impl DocView {
     pub(crate) fn sync_author(&mut self, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state {
             doc.model.set_identity(crate::prefs::get(cx).doc_identity());
+            // What a plugin's call lowers with knows who the user is.
+            #[cfg(feature = "plugins")]
+            doc.plugin_cell.store(Arc::new(doc.model.published()));
         }
     }
 
@@ -6866,7 +6873,7 @@ mod tests {
             cx.update(|cx| {
                 view.update(cx, |v, _| {
                     let doc = shown(v);
-                    let read = doc.plugin_cell.load().version;
+                    let read = doc.plugin_cell.load().snap.version;
                     assert_eq!(read, doc.model.current_version());
                 })
             });

@@ -1528,7 +1528,7 @@ fn art(cx: &mut Cx, content: &WatermarkContent) -> Option<Art> {
             page: PageForm::Blob { pdf, index },
             ..
         } => made(cx, (pdf.id(), Some(*index)), || {
-            super::annots::blob_form(pdf.bytes(), *index)
+            super::annots::blob_form(pdf.blob(), *index)
                 .map(|(objects, bbox, matrix)| Art::Form {
                     res: Res::of(objects),
                     bbox,

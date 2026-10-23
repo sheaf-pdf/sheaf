@@ -34,7 +34,7 @@ use crate::history::HistoryPolicy;
 use crate::labels::LabelRange;
 use crate::layers::Layer;
 use crate::materialize::Came;
-use crate::model::{FlatOutlineItem, PageId};
+use crate::model::PageId;
 use crate::portfolio::Collection;
 use crate::serialize::append::Torn;
 use crate::{Document, PAGES, Source, Src, Store};
@@ -46,7 +46,7 @@ pub(crate) mod tests;
 
 pub use annots::{FileAnnot, FileAnnots, FileBody};
 pub(crate) use outline::Dests;
-pub use outline::outline;
+pub use outline::{FlatOutlineItem, outline};
 
 /// What a file says about itself when it opens, every page by its index
 /// in the source's page table.

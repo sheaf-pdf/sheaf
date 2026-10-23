@@ -17,8 +17,9 @@ use sheaf_edit::OcrWord;
 
 use super::TextLayer;
 use crate::annot::Box2;
-use crate::content::{Font, Glyphless, ResObjects};
+use crate::content::{Font, Glyphless};
 use crate::geom::Geom;
+use crate::serialize::built::ResObjects;
 
 /// The page's own content: text in Helvetica named `/F1`, moved by a
 /// `cm` in a `q` it leaves open, as a careless writer leaves it.

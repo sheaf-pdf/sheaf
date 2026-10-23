@@ -40,9 +40,10 @@ impl Envelope {
     }
 }
 
-/// Whether this build reads Op JSON of version `v`: its major and an
-/// earlier or the same minor.
-fn readable(v: &str) -> Result<(), String> {
+/// Whether this build reads Op JSON of version `v`, as `"1.0"`: its major
+/// and an earlier or the same minor. None when `v` isn't a version: a
+/// plugin's manifest says which it's built for (`edit-schema`).
+pub fn reads(v: &str) -> Option<bool> {
     let parse = |v: &str| {
         let (major, minor) = v.split_once('.')?;
         let number = |n: &str| {
@@ -52,10 +53,16 @@ fn readable(v: &str) -> Result<(), String> {
         number(major).zip(number(minor))
     };
     let ours = parse(VERSION).expect("VERSION is major.minor");
-    match parse(v) {
+    let (major, minor) = parse(v)?;
+    Some(major == ours.0 && minor <= ours.1)
+}
+
+/// [`reads`], as an envelope's error says it.
+fn readable(v: &str) -> Result<(), String> {
+    match reads(v) {
         None => Err(format!("{v:?} isn't an Op JSON version, as \"{VERSION}\"")),
-        Some((major, minor)) if major == ours.0 && minor <= ours.1 => Ok(()),
-        Some(_) => Err(format!(
+        Some(true) => Ok(()),
+        Some(false) => Err(format!(
             "these ops are written in version {v}, and this sheaf reads up to {VERSION}"
         )),
     }

@@ -974,7 +974,7 @@ mod tests {
             turn: Rotation::R0,
             name: String::new(),
         };
-        let main = crate::annot::to_pdf(&ours, &mut pdf).main;
+        let main = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
         let main = pdf.add_object(main);
         let part = pdf.add_object(dictionary! {
             "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
@@ -1061,7 +1061,7 @@ mod tests {
                 at,
             },
         );
-        let written = crate::annot::to_pdf(&replace, &mut pdf);
+        let written = crate::serialize::built::to_pdf(&replace, &mut pdf);
         let caret = pdf.add_object(written.main);
         let [mut strike] = <[_; 1]>::try_from(written.companions).ok().unwrap();
         strike.set("IRT", caret);
@@ -1074,7 +1074,7 @@ mod tests {
                 pos: Pt { x: 1.0, y: 2.0 },
             },
         );
-        let note = crate::annot::to_pdf(&note, &mut pdf).main;
+        let note = crate::serialize::built::to_pdf(&note, &mut pdf).main;
         let note = pdf.add_object(note);
         let grouped = |pdf: &mut lopdf::Document, under| {
             pdf.add_object(dictionary! {
@@ -1160,7 +1160,7 @@ mod tests {
             turn: Rotation::R0,
             name: String::new(),
         };
-        let dict = crate::annot::to_pdf(&ours, &mut pdf).main;
+        let dict = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
         let mine = pdf.add_object(dict);
         let page = pdf.add_object(dictionary! {
             "Type" => "Page",
@@ -1226,7 +1226,7 @@ mod tests {
             turn: Rotation::R0,
             name: String::new(),
         };
-        let main = crate::annot::to_pdf(&ours, &mut pdf).main;
+        let main = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
         let main = pdf.add_object(main);
         let part = pdf.add_object(dictionary! {
             "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),

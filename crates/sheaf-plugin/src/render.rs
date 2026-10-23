@@ -3,7 +3,8 @@
 //! when the call that made it returns.
 
 use anyhow::Result;
-use sheaf_doc::{PageId, Snapshot};
+use sheaf_doc::geom::Affine;
+use sheaf_doc::{PageId, Snapshot, ViewInputs};
 use wasmtime::component::Resource;
 
 use crate::runtime::HostState;
@@ -15,28 +16,28 @@ pub const MAX_LIVE_IMAGES: usize = 16;
 pub const MAX_DPI: u32 = 600;
 
 /// Renders pages for plugins. The app implements it over its engines:
-/// `rect` is a pixel tile of page `page` of `snap`, the call's base, drawn
-/// `page_w`×`page_h` in its file's own orientation as the file will draw
-/// it, sheaf's marks and the header, footer, watermarks and backgrounds it
-/// draws, saved or not, included (M10.5 §14.3); the result is RGBA,
-/// `w`×`h`.
+/// `rect` is a pixel tile of page `page` of `snap`, as the call reads the
+/// document, drawn `page_w`×`page_h` as the page shows, turned as it
+/// shows, as the file will draw it under `inputs` (M10.5 §14.3): sheaf's
+/// marks and the header, footer, watermarks and backgrounds it draws, saved
+/// or not, included ([`ViewInputs::plugin`]), or the page without markup
+/// ([`ViewInputs::print`]). The result is RGBA, `w`×`h`.
 pub trait RenderSource: Send + Sync {
     fn render(
         &self,
         snap: &Snapshot,
         page: PageId,
+        inputs: &ViewInputs,
         page_w: u32,
         page_h: u32,
         rect: (u32, u32, u32, u32),
     ) -> Result<Vec<u8>>;
 }
 
-/// A `page-renderer` handle.
+/// A `page-renderer` handle: the page, as the call's transaction shows it
+/// when it renders.
 pub struct PageRenderer {
     pub(crate) page: PageId,
-    /// Points, as the file draws it; (0, 0) for a page the document hasn't
-    /// got.
-    pub(crate) size: (f32, f32),
 }
 
 /// An `image` handle.
@@ -45,9 +46,11 @@ pub struct RenderedImage {
     pub(crate) height: u32,
     pub(crate) gray: bool,
     pub(crate) data: Vec<u8>,
-    /// Page point of pixel (0, 0), and pixels per point.
+    /// The point of the page as shown at pixel (0, 0), pixels per point,
+    /// and the page as shown to PageSpace.
     pub(crate) origin: (f32, f32),
     pub(crate) scale: f32,
+    pub(crate) from_view: Affine,
 }
 
 impl RenderedImage {

@@ -23,20 +23,20 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
 use sheaf_edit::FlattenSet;
 
 use super::marks::drop_annots;
 use super::{EditError, Lower};
 use crate::annot::{Box2, Pt};
 use crate::forms::field::annot_flags::{HIDDEN, NO_VIEW, PRINT};
-use crate::geom::{Affine, Rect};
+use crate::geom::Affine;
 use crate::model::{
     AnnotBody, AnnotRec, FormRef, Layer, MarkAp, PageDef, PageId, PinnedAp, PlaceTag, Placement,
     Static,
 };
 use crate::prim::{Key, Val};
 use crate::source::ObjRef;
+use crate::source::appearance::{Shows, frame};
 use crate::store::Src;
 
 /// The annotations on `pages` that `which` says flattened, a page at a
@@ -121,168 +121,42 @@ fn drawn(rec: &AnnotRec, def: &PageDef, which: FlattenSet) -> Option<Vec<(FormRe
         AnnotBody::Foreign(f) if f.summary.is_link() => None,
         AnnotBody::Foreign(f) => {
             let (src, read) = match &f.src {
-                Some(r) => (&r.src, read(r.src.pdf(), r.id)?),
+                Some(r) => (&r.src, Shows::read(r)?),
                 None => {
-                    let facts = def.base.src.page(def.base.index)?;
-                    let Object::Dictionary(dict) = facts.annots.get(f.summary.slot)? else {
-                        return None;
-                    };
-                    (&def.base.src, Shows::of(def.base.src.pdf(), dict))
+                    let (src, index) = (&def.base.src, def.base.index);
+                    (src, Shows::in_slot(src, index, f.summary.slot)?)
                 }
             };
             if !flattens(read.flags) {
                 return None;
             }
-            let state = read.state.as_deref();
-            let form = read.normal.and_then(|n| shown(src, &n, state, true));
-            Some(placed(src, form, f.summary.rect))
+            let form = read.form(src, read.state.as_deref(), true);
+            Some(placed(form, f.summary.rect))
         }
         AnnotBody::Widget(w) => {
             if !flattens(w.flags) {
                 return None;
             }
-            let form = (w.src.as_ref()).and_then(|r| {
-                let read = read(r.src.pdf(), r.id)?;
-                Some((&r.src, read.normal?))
-            });
-            let form = form.and_then(|(src, n)| {
-                let at = shown(src, &n, w.state.as_deref().map(str::as_bytes), false)?;
-                Some((src, at))
-            });
+            let state = w.state.as_deref().map(str::as_bytes);
+            let form = (w.src.as_ref()).and_then(|r| Shows::read(r)?.form(&r.src, state, false));
             let [l, b, r, t] = w.rect;
             let rect = Box2::from_corners(Pt { x: l, y: b }, Pt { x: r, y: t });
-            Some(match form {
-                Some((src, at)) => placed(src, Some(at), rect),
-                None => Vec::new(),
-            })
+            Some(placed(form, rect))
         }
     }
 }
 
-/// Form `form` of `src`, when there's one, placed on `rect`: none when it
-/// can't be read, or its box has no area, which draws nothing.
-fn placed(src: &Src, form: Option<ObjectId>, rect: Box2) -> Vec<(FormRef, Affine)> {
+/// Form `form`, when there's one, placed on `rect`: none when it can't
+/// be read, or its box has no area, which draws nothing.
+fn placed(form: Option<ObjRef>, rect: Box2) -> Vec<(FormRef, Affine)> {
     let Some(form) = form else {
         return Vec::new();
     };
-    let Some((bbox, matrix)) = frame(src.pdf(), form) else {
+    let Some((bbox, matrix)) = frame(&form) else {
         return Vec::new();
     };
     let Some(onto) = Affine::onto(matrix.bounds(bbox), rect) else {
         return Vec::new();
     };
-    let at = ObjRef {
-        src: src.clone(),
-        id: form,
-    };
-    vec![(FormRef::Base(at), onto)]
-}
-
-/// What an annotation's dictionary says that a flatten reads: its flags
-/// (`/F`), the state it shows (`/AS`) and its normal appearance (`/AP
-/// /N`), as written.
-struct Shows {
-    flags: u32,
-    state: Option<Vec<u8>>,
-    normal: Option<Object>,
-}
-
-impl Shows {
-    /// What `dict`, an annotation of `pdf`, says.
-    fn of(pdf: &LazyPdf, dict: &Dictionary) -> Shows {
-        let value = |key: &[u8]| -> Option<Object> {
-            match dict.get(key).ok()? {
-                Object::Reference(r) => Some((*unkept(pdf, *r)?.1).clone()),
-                direct => Some(direct.clone()),
-            }
-        };
-        let flags = value(b"F").and_then(|f| f.as_i64().ok()).unwrap_or(0);
-        // `/N` alone, the appearance dictionary read in place.
-        let n = |ap: &Object| ap.as_dict().ok()?.get(b"N").ok().cloned();
-        let normal = match dict.get(b"AP").ok() {
-            Some(Object::Reference(r)) => unkept(pdf, *r).and_then(|(_, ap)| n(&ap)),
-            Some(direct) => n(direct),
-            None => None,
-        };
-        Shows {
-            flags: u32::try_from(flags).unwrap_or(0),
-            state: value(b"AS").and_then(|s| s.as_name().ok().map(<[u8]>::to_vec)),
-            normal,
-        }
-    }
-}
-
-/// What annotation `id` of `pdf` says ([`Shows`]), read without keeping
-/// it: None when it isn't a dictionary.
-fn read(pdf: &LazyPdf, id: ObjectId) -> Option<Shows> {
-    let (_, obj) = unkept(pdf, id)?;
-    Some(Shows::of(pdf, obj.as_dict().ok()?))
-}
-
-/// The form an annotation's normal appearance `normal`, of `src`, shows:
-/// the stream it names, or of a dictionary of states, the one `state`
-/// names; with none named, the first when `first` says so (another tool's
-/// comment, never a widget, M10 bug 10). None when there's none.
-fn shown(src: &Src, normal: &Object, state: Option<&[u8]>, first: bool) -> Option<ObjectId> {
-    let pdf = src.pdf();
-    // A dictionary of states, read in place.
-    let held;
-    let states = match normal {
-        Object::Reference(r) => {
-            let (at, obj) = unkept(pdf, *r)?;
-            if obj.as_stream().is_ok() {
-                return Some(at);
-            }
-            held = obj;
-            held.as_dict().ok()?
-        }
-        Object::Dictionary(states) => states,
-        _ => return None,
-    };
-    let state = match state {
-        Some(state) => state,
-        None if first => states.iter().next()?.0.as_slice(),
-        None => return None,
-    };
-    let at = states.get(state).ok()?.as_reference().ok()?;
-    let (at, obj) = unkept(pdf, at)?;
-    obj.as_stream().is_ok().then_some(at)
-}
-
-/// Form `form` of `pdf`'s `/BBox` and `/Matrix` (the identity when it has
-/// none), read without keeping it: None when it isn't a form with a box.
-fn frame(pdf: &LazyPdf, form: ObjectId) -> Option<(Rect, Affine)> {
-    let (_, obj) = unkept(pdf, form)?;
-    let dict = &obj.as_stream().ok()?.dict;
-    let numbers = |key: &[u8], n: usize| -> Option<Vec<f32>> {
-        let array = match dict.get(key).ok()? {
-            Object::Reference(r) => (*unkept(pdf, *r)?.1).clone(),
-            direct => direct.clone(),
-        };
-        let values: Vec<f32> = (array.as_array().ok()?.iter())
-            .map(|v| v.as_float().unwrap_or(0.0) as f32)
-            .collect();
-        (values.len() == n).then_some(values)
-    };
-    let bbox = numbers(b"BBox", 4)?;
-    let matrix = match numbers(b"Matrix", 6).as_deref() {
-        Some(&[a, b, c, d, e, f]) => Affine { a, b, c, d, e, f },
-        _ => Affine::IDENTITY,
-    };
-    Some((Rect::new(bbox[0], bbox[1], bbox[2], bbox[3]), matrix))
-}
-
-/// Object `id` of `pdf`, its references followed, read without keeping
-/// it, and the object it is: what a flatten of thousands of widgets reads
-/// once each.
-fn unkept(pdf: &LazyPdf, id: ObjectId) -> Option<(ObjectId, Arc<Object>)> {
-    let mut at = id;
-    for _ in 0..crate::source::Limits::DEFAULT.reader.max_depth {
-        let obj = pdf.object_unkept(at).ok()?;
-        match *obj {
-            Object::Reference(next) => at = next,
-            _ => return Some((at, obj)),
-        }
-    }
-    None
+    vec![(FormRef::Base(form), onto)]
 }

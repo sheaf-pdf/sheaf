@@ -65,7 +65,7 @@ use std::sync::Arc;
 use lopdf::{Dictionary, Object, ObjectId, Stream, dictionary};
 
 use super::{Cx, Shown};
-use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted, Held, StampForm};
+use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted};
 use crate::content::{Res, ResId};
 use crate::file::PageAnnots;
 use crate::geom::{Affine, Rect};
@@ -74,6 +74,7 @@ use crate::materialize::key::{ObjKey, Part};
 use crate::model::{AnnotBody, DocState, Foreign, FormRef, Mark, PageId, PinnedAp};
 use crate::open::FileBody;
 use crate::private;
+use crate::serialize::built::{Held, StampForm};
 use crate::source::ObjRef;
 use crate::store::Src;
 
@@ -836,7 +837,7 @@ impl Cx<'_> {
                     .map(|(bbox, matrix)| (id, bbox, matrix))
                     .ok_or_else(|| anyhow::anyhow!("a form with no box"))
             }
-            FormRef::Blob(page) => blob_form(page.bytes(), 0).map(|(objects, bbox, matrix)| {
+            FormRef::Blob(page) => blob_form(page.blob(), 0).map(|(objects, bbox, matrix)| {
                 let id = self.resource_of(objects);
                 (Object::Reference(id), bbox, matrix)
             }),
@@ -996,18 +997,17 @@ impl Cx<'_> {
     }
 }
 
-/// Page `index` (from 0) of the PDF `bytes` made a form, as a resource's
-/// objects (the form first, a reference `(i, 0)` to the `i`th), with its
-/// `/BBox` and `/Matrix`: a page stamp's one page, or a watermark's page.
+/// Page `index` (from 0) of the PDF `blob`, read as a source, made a
+/// form, as a resource's objects (the form first, a reference `(i, 0)` to
+/// the `i`th), with its `/BBox` and `/Matrix`: a page stamp's one page, or
+/// a watermark's page.
 pub(crate) fn blob_form(
-    bytes: &[u8],
+    blob: &crate::store::Blob,
     index: u32,
 ) -> anyhow::Result<(Vec<Object>, crate::geom::Rect, crate::geom::Affine)> {
-    let src = lopdf::Document::load_mem(bytes)?;
+    let src = blob.source(&crate::source::Limits::DEFAULT)?;
     let mut dst = lopdf::Document::new();
-    let page = (src.get_pages().get(&(index + 1)).copied())
-        .ok_or_else(|| anyhow::anyhow!("the file has no page {}", index + 1))?;
-    let form = (crate::stamp_lib::page_forms(&src, &[page], &mut dst)?).remove(0);
+    let form = (crate::stamp_lib::page_forms(&src, &[index], &mut dst)?).remove(0);
     let order: Vec<ObjectId> = std::iter::once(form.id)
         .chain(dst.objects.keys().copied().filter(|&id| id != form.id))
         .collect();

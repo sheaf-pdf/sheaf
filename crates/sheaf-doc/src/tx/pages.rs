@@ -479,7 +479,7 @@ fn annots_in(
                 src: object.filter(|_| copy == 0).map(at),
                 ..Mark::from(a)
             };
-            let mark = holding(lw, mark, src, held)?;
+            let mark = holding(lw, mark, held.map(at))?;
             let body = AnnotBody::Mark(Arc::new(mark));
             (lw.rec).put(Key::Annot(id), Some(Val::Annot(AnnotRec { page, body })));
             on_page.push_back(id);
@@ -489,25 +489,17 @@ fn annots_in(
     Ok(unencodable)
 }
 
-/// `mark`, which came in from `src`, holding what it holds there (`held`,
-/// its page stamp's page form or its attachment's file object), else
-/// what its stems name: an attachment's file the store has under its stem
-/// (decoded there before lowering), a stamp's page the store or a source
-/// has. A stem that names nothing is an error; a file that couldn't be
-/// decoded, the mark holds none.
-fn holding(
-    lw: &Lower,
-    mut mark: Mark,
-    src: &Src,
-    held: Option<lopdf::ObjectId>,
-) -> Result<Mark, EditError> {
+/// `mark`, which came in from a source, holding what it holds there
+/// (`held`, its page stamp's page form or its attachment's file object),
+/// else what its stems name: an attachment's file the store has under its
+/// stem (decoded there before lowering), a stamp's page the store or a
+/// source has. A stem that names nothing is an error; a file that couldn't
+/// be decoded, the mark holds none.
+fn holding(lw: &Lower, mut mark: Mark, held: Option<ObjRef>) -> Result<Mark, EditError> {
     let store = &lw.cx.store;
     match (&mark.annot.kind, held) {
-        (AnnotKind::PageStamp { .. }, Some(id)) => {
-            mark.stamp = Some(FormRef::Base(ObjRef {
-                src: src.clone(),
-                id,
-            }));
+        (AnnotKind::PageStamp { .. }, Some(at)) => {
+            mark.stamp = Some(FormRef::Base(at));
         }
         (AnnotKind::FileAttachment { file, .. }, Some(_)) => {
             mark.file = file_named(store, file);

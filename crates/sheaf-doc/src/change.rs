@@ -48,6 +48,14 @@ pub struct ChangeSet {
     /// Who made it: a commit's or an amend's transaction's actor, a
     /// rollback's group's; the user's otherwise.
     pub actor: Actor,
+    /// How far down a chain of answers a commit or an amend is
+    /// ([`CommitOpts::depth`]): a plugin's edit answering a change of
+    /// depth 1 is of depth 2, which the plugin host refuses (§14.3). 0 for
+    /// any other cause: an undo, a redo, a jump, a save, a rollback, a
+    /// revert and the file opening are the user's, answering nothing.
+    ///
+    /// [`CommitOpts::depth`]: crate::tx::CommitOpts::depth
+    pub depth: u8,
     /// What it was, in words: the version's label, the one undone for an
     /// undo.
     pub label: Arc<str>,
@@ -147,6 +155,7 @@ impl ChangeSet {
             to: at,
             cause,
             actor,
+            depth: 0,
             label,
             keys: Arc::default(),
             order: false,

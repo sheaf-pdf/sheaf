@@ -350,7 +350,7 @@ fn commented() -> Vec<u8> {
     let bytes = file(&[2, 2], XrefType::CrossReferenceStream, "1.7");
     let mut pdf = Pdf::load_mem(&bytes).unwrap();
     let first = pdf.get_pages()[&1];
-    let mark = crate::annot::to_pdf(&square(3), &mut pdf).main;
+    let mark = crate::serialize::built::to_pdf(&square(3), &mut pdf).main;
     let mark = pdf.add_object(mark);
     let theirs = pdf.add_object(dictionary! {
         "Type" => "Annot", "Subtype" => "Text", "NM" => Object::string_literal("theirs"),
@@ -664,7 +664,7 @@ fn an_insert_leaves_the_catalog_and_keeps_the_nodes_keys() {
 /// another tool's damage, which a save keeps. With its `/Size`.
 fn dangling(page: &[u32], reply: &[u32]) -> (Vec<u8>, u32) {
     let mut f = crate::forms::fixture::Form::new(1);
-    let main = crate::annot::to_pdf(&square(3), &mut f.pdf).main;
+    let main = crate::serialize::built::to_pdf(&square(3), &mut f.pdf).main;
     let main = f.pdf.add_object(main);
     let theirs = f.pdf.add_object(dictionary! {
         "Type" => "Annot", "Subtype" => "Text", "IRT" => main,

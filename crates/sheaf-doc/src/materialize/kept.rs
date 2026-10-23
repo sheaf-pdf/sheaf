@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use lopdf::{Document as Pdf, Object, ObjectId};
 
-use crate::materialize::copy::is_page_node;
+use super::copy::is_page_node;
 
 /// What [`keep_only`] did to a file.
 #[derive(Debug, Default)]

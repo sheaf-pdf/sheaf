@@ -96,7 +96,12 @@ fn a_stamp_of_several_streams_draws_as_its_page() {
     let page = one_page(&mut collection, BOX, streams.into(), dictionary! {});
     let collection = Pdf::load_mem(&page).unwrap();
 
-    let stamp = Pdf::load_mem(&stamp_lib::one_page(&collection, 0).unwrap()).unwrap();
+    let stamp = Store::new()
+        .open(
+            stamp_lib::one_page(&collection, 0).unwrap().into(),
+            BlobKind::stamp(),
+        )
+        .unwrap();
     let mut placed = Pdf::with_version("1.7");
     let form = stamp_lib::page_form(&stamp, &mut placed).unwrap();
     let size = form.geom.shown();

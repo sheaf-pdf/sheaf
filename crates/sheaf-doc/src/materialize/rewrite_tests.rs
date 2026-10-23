@@ -16,7 +16,8 @@ use sheaf_edit::{AnnotRef, BookmarkPatch, DestView, Op, PageRef, Patch, Rotation
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::FixedCount;
 use crate::materialize::{self, AskAnswers, Came, How, SaveHow, StrategyKind, Why};
-use crate::model::{Document, FlatOutlineItem, Mark, PageId};
+use crate::model::{Document, Mark, PageId};
+use crate::open::FlatOutlineItem;
 use crate::save::{rewrite, rewrite_to_path, text_string};
 use crate::serialize::crypt::Crypt;
 use crate::store::{BlobKind, Src, Store};

@@ -3,8 +3,7 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use sheaf_plugin_api::types::{Edit, OutlineInsert};
-use sheaf_plugin_api::{Batch, Plugin, document, progress, text};
+use sheaf_plugin_api::{Ops, Plugin, document, progress, text};
 
 /// Form headers, most specific first. Group 1 is the form's name.
 static FORMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -148,23 +147,13 @@ impl Plugin for TaxFormBookmarks {
         if new.is_empty() {
             return Err("no new tax forms found".into());
         }
-        // Append after the last top-level bookmark. Every insert names the
-        // same sibling, so insert in reverse to end up in page order.
-        let last_top = outline.iter().rfind(|o| o.depth == 0).map(|o| o.id);
+        // Each goes at the end of the top level, after the one before it.
         let n = new.len();
         let label = format!("Bookmark {n} tax form{}", if n == 1 { "" } else { "s" });
-        new.into_iter()
-            .rev()
-            .fold(Batch::new(label), |b, (page, title)| {
-                b.push(Edit::OutlineInsert(OutlineInsert {
-                    parent: None,
-                    after: last_top,
-                    title,
-                    target: Some(page),
-                    view: None,
-                }))
-            })
-            .submit();
+        let ops = new.into_iter().fold(Ops::new(), |ops, (page, title)| {
+            ops.bookmark(&title, Some(page))
+        });
+        ops.submit(&label).map_err(|f| f.message)?;
         Ok(())
     }
 }

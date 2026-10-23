@@ -2,18 +2,19 @@
 //!
 //! A plugin is a `cdylib` built for `wasm32-wasip2`, plus a
 //! `sheaf-plugin.toml` manifest declaring its commands, panels, events and
-//! permissions. Implement [`Plugin`] (only `run_command` is required) and
-//! export it:
+//! permissions, and `edit-schema = "1.0"` when it edits. Implement
+//! [`Plugin`] (only `run_command` is required) and export it:
 //!
 //! ```ignore
-//! use sheaf_plugin_api::{Batch, Plugin, document};
+//! use sheaf_plugin_api::{Ops, Plugin, document};
 //!
 //! struct Hello;
 //!
 //! impl Plugin for Hello {
 //!     fn run_command(id: String, _args: Option<String>) -> Result<(), String> {
 //!         let first = document::pages().first().map(|p| p.id).ok_or("no pages")?;
-//!         Batch::new("Say hello").bookmark(&id, Some(first)).submit();
+//!         let applied = Ops::new().bookmark(&id, Some(first)).submit("Say hello");
+//!         applied.map_err(|f| f.message)?;
 //!         Ok(())
 //!     }
 //! }
@@ -21,12 +22,18 @@
 //! sheaf_plugin_api::export!(Hello);
 //! ```
 //!
+//! Edits are sheaf's own ops ([`Op`], from [`sheaf_edit`], re-exported):
+//! build them with [`Ops`] and submit them, and they're lowered into the
+//! call's edits at once, answered with what they made ([`Applied`]) or why
+//! not ([`Failure`]). Geometry is PageSpace (points, y up, before the
+//! page's turn); [`view`] maps it to and from the page as it shows.
+//!
 //! The raw interfaces generated from `wit/sheaf.wit` are re-exported as
-//! modules ([`document`], [`text`], [`edits`], [`ui`], [`storage`],
-//! [`patterns`], [`ocr`], [`log`], [`types`]); [`FormBuilder`] and [`Batch`] cover the
-//! common cases with less ceremony, and [`progress`] adds helpers to its
-//! interface. See `docs/plugins.md` in the sheaf
-//! repository for the whole guide.
+//! modules ([`document`], [`text`], [`edits`], [`assets`], [`ui`],
+//! [`storage`], [`patterns`], [`render`], [`ocr`], [`log`], [`types`]);
+//! [`FormBuilder`] and [`Ops`] cover the common cases with less ceremony,
+//! and [`progress`] adds helpers to its interface. See `docs/plugins.md`
+//! in the sheaf repository for the whole guide.
 //!
 //! The version of this crate is the version of the WIT package it binds.
 
@@ -42,17 +49,20 @@ pub mod bindings {
     });
 }
 
-mod batch;
 mod form;
 pub mod http;
+pub mod ops;
 pub mod progress;
+pub mod view;
 
-pub use batch::{Batch, annot, at};
 pub use bindings::sheaf::plugin::{
-    document, edits, log, ocr, patterns, render, storage, text, types, ui,
+    assets, document, edits, log, ocr, patterns, render, storage, text, types, ui,
 };
 pub use bindings::{Guest, export};
 pub use form::{Answers, FormBuilder};
+pub use ops::{Ops, commit, upload};
+pub use sheaf_edit;
+pub use sheaf_edit::{Applied, Failure, Op, Previewed};
 
 use types::DocEvent;
 

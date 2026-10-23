@@ -191,8 +191,9 @@ mod tests {
     use sheaf_edit::Rotation;
 
     use super::*;
-    use crate::content::{Font, Need, Res, ResKind, ResObjects};
+    use crate::content::{Font, Need, Res, ResKind};
     use crate::geom::Rect;
+    use crate::serialize::built::ResObjects;
 
     const ROTATIONS: [Rotation; 4] = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
 

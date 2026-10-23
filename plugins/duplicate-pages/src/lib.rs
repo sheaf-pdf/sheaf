@@ -4,15 +4,17 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use sheaf_plugin_api::render::{PageRenderer, PixelFormat, RenderOptions};
-use sheaf_plugin_api::types::Edit;
 use sheaf_plugin_api::ui::{self, PanelRow, RowAction};
-use sheaf_plugin_api::{Batch, FormBuilder, Plugin, document, storage, text};
+use sheaf_plugin_api::{FormBuilder, Ops, Plugin, document, storage, text};
 
 const PANEL: &str = "duplicates";
 /// Fingerprint render resolution: a letter page is 204×264 px.
 const DPI: u32 = 24;
 /// Fingerprint grid: 16×16 cells, one bit each.
 const GRID: usize = 16;
+/// Why groups found before the document was opened again aren't acted on:
+/// its pages' ids aren't theirs.
+const REOPENED: &str = "the document was opened again; find again";
 
 /// What a page looks like and says, for comparing.
 #[derive(Debug, Clone, PartialEq)]
@@ -165,7 +167,20 @@ struct Group {
     key: String,
 }
 
-static PENDING: Mutex<Option<(Option<String>, Vec<Group>)>> = Mutex::new(None);
+/// Groups waiting in the panel, and the document they were found in: its
+/// path, and the instance of it open then, whose pages their ids name.
+struct Waiting {
+    path: Option<String>,
+    instance: Option<u64>,
+    groups: Vec<Group>,
+}
+
+static PENDING: Mutex<Option<Waiting>> = Mutex::new(None);
+
+/// The document the call reads: its path and instance.
+fn this_document() -> (Option<String>, Option<u64>) {
+    (document::path(), document::version().map(|v| v.instance))
+}
 
 fn show(groups: Vec<Group>) {
     let mut rows = Vec::new();
@@ -204,7 +219,12 @@ fn show(groups: Vec<Group>) {
         }
     }
     ui::set_panel(PANEL, &rows);
-    *PENDING.lock().unwrap() = Some((document::path(), groups));
+    let (path, instance) = this_document();
+    *PENDING.lock().unwrap() = Some(Waiting {
+        path,
+        instance,
+        groups,
+    });
 }
 
 fn fingerprint(page: u64) -> Result<Fingerprint, String> {
@@ -212,6 +232,7 @@ fn fingerprint(page: u64) -> Result<Fingerprint, String> {
         dpi: DPI,
         region: None,
         format: PixelFormat::Gray8,
+        without_markup: false,
     })?;
     let (w, h) = (img.width() as usize, img.height() as usize);
     let gray = img.read_rows(0, h as u32);
@@ -315,9 +336,10 @@ impl Plugin for DuplicatePages {
         if panel != PANEL {
             return Err(format!("unknown panel {panel}"));
         }
-        let path = document::path();
+        let (path, instance) = this_document();
         let mut groups = match PENDING.lock().unwrap().take() {
-            Some((p, g)) if p == path => g,
+            Some(w) if w.path == path && w.instance == instance => w.groups,
+            Some(w) if w.path == path => return Err(REOPENED.into()),
             _ => return Err("run Find Duplicate Pages again".into()),
         };
         let gi: usize = row
@@ -331,12 +353,13 @@ impl Plugin for DuplicatePages {
             "keep-first" => {
                 let extra: Vec<u64> = g.pages[1..].iter().map(|(id, _)| *id).collect();
                 let n = extra.len();
-                Batch::new(format!(
-                    "Delete {n} duplicate page{}",
-                    if n == 1 { "" } else { "s" }
-                ))
-                .push(Edit::DeletePages(extra))
-                .submit();
+                let label = format!("Delete {n} duplicate page{}", if n == 1 { "" } else { "s" });
+                if let Err(f) = Ops::new().delete_pages(extra).submit(&label) {
+                    // Still to decide: the group stays in the panel.
+                    groups.insert(gi, g);
+                    show(groups);
+                    return Err(f.message);
+                }
             }
             "not-duplicates" => {
                 storage::set(&g.key, "1")?;

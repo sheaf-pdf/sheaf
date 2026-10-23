@@ -25,9 +25,9 @@ use lopdf::{Object, ObjectId, dictionary};
 use proptest::prelude::*;
 use sheaf_edit::{
     Anchor, AnnotRef, BatesSpec, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Delta,
-    FlattenSet, GridPos, Imported, LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, Op,
-    OutlineBring, PageRef, PageSel, PageSource, Patch, RangeSet, ScopeSel, Sibling, Style, Turn,
-    Vec2, WatermarkContent, WatermarkSpec, Z,
+    DestView, FlattenSet, GridPos, Imported, LabelStyle, Local, Margins, MarkKind, MarkPatch,
+    NewMark, Op, OutlineBring, PageRef, PageSel, PageSource, Patch, RangeSet, ScopeSel, Sibling,
+    Style, Turn, Vec2, WatermarkContent, WatermarkSpec, Z,
 };
 
 use super::tests::{flat, opened_doc, square, tl};

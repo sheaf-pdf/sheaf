@@ -339,16 +339,27 @@ tools translate them.
 | Document: path, pages, outline, marks per page, selection, current page | WIT `document` |
 | Text: page text, search, pattern search, words, text boxes | WIT `text` (unsaved OCR layers included) |
 | Page images, as PNG for models that can see | WIT `render`, with caps on size and count |
-| History: versions with id, parent, label, author, time and edits in words; the branches | `VersionView`, `describe.rs`, `Document::edge` (M9 slice 4, done) |
+| History: versions with id, parent, label, author, time and edits in words; the branches | `VersionView`, with the lines each version stored when it was made, not `describe.rs` at read time; `Document::edge` gives a version's steps, its source list gone (M10.5) |
 | Commands: id, label, category, help, keywords, whether it can run now | `CommandRegistry`. Built-ins can't register without help (`command_info.rs`), nor can plugin commands (manifest loader). |
-| Submit edits | `sheaf_doc::Edit` (serde) through `apply_batch`, one version. The same as the plugin `edits` interface. |
+| Submit edits | sheaf-edit `Op` JSON in a versioned envelope (as the plugin `edits` interface and `sheaf edit` take it), through `Document::plan(actor, base, ops) -> PlanHandle` (a lowered transaction and its preview) and `commit(plan)`, both M16's, so the approval card commits exactly what it showed (M10.5 §20). |
 | Run a command | The registry's target: a built-in action or `plugin::Run` |
 | Go to a version | `Document::jump` |
 
 **Versions keep reads and writes honest.** Every tool returns the current
-`VersionId`. Writes take the version they were based on and are refused
-when the document has moved since, because the user edited in the
-meantime. The agent then reads again.
+version token, `{ instance, version }`: a version names a state of one
+opened document, and a document opened again is another instance. The
+agent's reads are decision reads, kept per agent session (the handle
+sheaf issues, as Transport's amendments have it), and its writes
+commit `Validate` (M10.5 §8.5): a write lands when what the agent read
+still holds, so a user edit elsewhere doesn't refuse it and it can write
+while OCR runs. When something it read has changed, the write is
+refused and the agent reads again; a plan expires on conflict.
+
+**From the edit API** (M10.5 §20): the agent comes with its own
+transport and approval UI, not the sheaf-instance socket (M10.5 proposal
+36; [Transport](#transport-researched-2026-10-20) above); semantic ops
+only at first (M10.5 decision 6); and field values behind its
+per-document consent ([Permissions](#permissions)).
 
 ## Running commands live
 
@@ -378,12 +389,15 @@ meantime. The agent then reads again.
 **History.**
 - Each approved call becomes one version, labeled "<agent>: <command or
   edits in words>".
-- Its author is the agent on the user's behalf ("Claude for GE").
-  `apply_batch` needs an author parameter for this; today every version
-  takes the identity from `settings.toml`.
-- **Revert this turn:** a button on each agent turn that jumps to the
-  version before the turn's first edit. A jump isn't an edit, so it costs
-  nothing and can be redone.
+- Its author is the agent on the user's behalf ("Claude for GE"):
+  `Actor::Agent` (M16's; M10.5 left `Actor` open for it) is session
+  provenance, which History shows. Nothing goes into the file but a
+  mark's `/T`, which the host sets, as it does for every actor (M10.5
+  §6.7–6.8).
+- **Revert this turn:** a button on each agent turn that reverts the
+  turn's versions, keeping what the user did in between (M10.5's
+  `revert_group`). A jump to the version before the turn's first edit is
+  offered only when nothing came after the turn.
 
 ## Permissions
 

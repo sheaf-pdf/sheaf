@@ -536,7 +536,7 @@ fn what_cant_be_done_is_invalid() {
 /// [`note`]: crate::forms::fixture::note
 fn replied_to() -> Vec<u8> {
     let mut f = crate::forms::fixture::Form::new(3);
-    let written = crate::annot::to_pdf(&crate::forms::fixture::note(), &mut f.pdf).main;
+    let written = crate::serialize::built::to_pdf(&crate::forms::fixture::note(), &mut f.pdf).main;
     let note = f.pdf.add_object(written);
     let reply = f.pdf.add_object(dictionary! {
         "Type" => "Annot", "Subtype" => "Text", "IRT" => note, "NM" => Object::string_literal("theirs"),

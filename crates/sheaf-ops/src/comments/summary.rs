@@ -5,23 +5,23 @@
 //! and text exports. Text is Helvetica in WinAnsi, as all of sheaf's
 //! generated text is (decision 11), a tickmark's check or cross in
 //! ZapfDingbats; each sheet is written with the content toolkit's
-//! [`ContentWriter`]. The sheets are made in memory, written through
-//! sheaf's serializer, and inserted into a document of no pages
-//! ([`summary`]), which the caller saves ([`summary_to`]).
+//! [`ContentWriter`]. The sheets are made in memory ([`Built`]), each page
+//! drawn as a form of the pages as they print, read back as a source,
+//! written through sheaf's serializer, and inserted into a document of no
+//! pages ([`summary`]), which the caller saves ([`summary_to`]).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_doc::content::{
-    Color, ContentWriter, Font, Paint, Res, ResObjects, Reserved, Std14, wrap_with,
-};
+use sheaf_doc::content::{Color, ContentWriter, Font, Paint, Res, Reserved, Std14, wrap_with};
 use sheaf_doc::export::ExportFrom;
+use sheaf_doc::geom::Rect;
 use sheaf_doc::materialize::AskAnswers;
+use sheaf_doc::serialize::built::Built;
 use sheaf_doc::stamp_lib::PageForm;
-use sheaf_doc::store::{BlobKind, MemoryKind};
+use sheaf_doc::store::{BlobKind, MemoryKind, Store};
 use sheaf_doc::{Box2, Pt};
 use sheaf_edit::{BlobSel, Bring, Op, PageSize, PageSource};
 
@@ -244,18 +244,19 @@ fn pages(
     }
     let st = &from.snap.state;
     let ids: Vec<_> = by_page.keys().map(|&p| st.order()[p]).collect();
-    // The pages as they print, every mark drawn in.
+    // The pages as they print, every mark drawn in, read back as a source.
     let printed = sheaf_doc::export::printed(from.clone(), &ids, true, &NoProgress)?;
-    let printed = Pdf::load_mem(&printed).context("reading the pages back")?;
-    let printed_pages: Vec<ObjectId> = printed.get_pages().values().copied().collect();
-    if printed_pages.len() != ids.len() {
+    let kind = BlobKind::memory(MemoryKind::Summary);
+    let printed = Store::new().open(printed.into(), kind)?;
+    if printed.page_count() as usize != ids.len() {
         bail!(
             "{} pages to summarize, {} printed",
             ids.len(),
-            printed_pages.len()
+            printed.page_count()
         );
     }
-    let forms = sheaf_doc::stamp_lib::page_forms(&printed, &printed_pages, &mut w.pdf)?;
+    let pages: Vec<u32> = (0..printed.page_count()).collect();
+    let forms = sheaf_doc::stamp_lib::page_forms(&printed, &pages, w.built.pdf())?;
     let (width, height, margin) = (w.size.width, w.size.height, w.margin);
     let mid = width / 2.0;
     for ((&page, threads), form) in by_page.iter().zip(forms) {
@@ -506,7 +507,7 @@ impl Draw for ContentWriter<'static> {
 
 /// The summary being made: its file, and its sheets so far.
 struct Writer {
-    pdf: Pdf,
+    built: Built,
     size: PageSize,
     margin: f32,
     sheets: Vec<ContentWriter<'static>>,
@@ -531,7 +532,7 @@ impl Writer {
             ),
         };
         Writer {
-            pdf: Pdf::with_version("1.5"),
+            built: Built::new(),
             size,
             margin,
             sheets: Vec::new(),
@@ -554,12 +555,8 @@ impl Writer {
         if self.sheets.is_empty() {
             self.new_sheet();
         }
-        // Each font once in the file, however many sheets draw in it.
-        let mut res = ResObjects::default();
-        let pages_id = self.pdf.new_object_id();
         let total = self.sheets.len();
         let (w, h, margin) = (self.size.width, self.size.height, self.margin);
-        let mut kids = Vec::new();
         for (i, mut sheet) in std::mem::take(&mut self.sheets).into_iter().enumerate() {
             let number = format!("Page {} of {total}", i + 1);
             let number_w = measure(&number, 8.0, false);
@@ -573,34 +570,11 @@ impl Writer {
                 GRAY,
                 &number,
             );
+            // Each font once in the file, however many sheets draw in it.
             let (ops, needs) = sheet.finish(&Reserved::default());
-            let mut content = Stream::new(dictionary! {}, ops);
-            let _ = content.compress();
-            let content = self.pdf.add_object(content);
-            let mut resources = Dictionary::new();
-            res.bind(&mut self.pdf, &needs, &mut resources);
-            kids.push(Object::Reference(self.pdf.add_object(dictionary! {
-                "Type" => "Page",
-                "Parent" => pages_id,
-                "MediaBox" => vec![0.into(), 0.into(), Object::from(w), Object::from(h)],
-                "Resources" => resources,
-                "Contents" => content,
-            })));
+            self.built.page(Rect::new(0.0, 0.0, w, h), ops, &needs);
         }
-        self.pdf.objects.insert(
-            pages_id,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages",
-                "Count" => total as i64,
-                "Kids" => kids,
-            }),
-        );
-        let catalog = self.pdf.add_object(dictionary! {
-            "Type" => "Catalog",
-            "Pages" => pages_id,
-        });
-        self.pdf.trailer.set("Root", catalog);
-        sheaf_doc::serialize::full::write_built(&self.pdf)
+        self.built.finish()
     }
 }
 

@@ -6,7 +6,9 @@ use lopdf::dictionary;
 use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Rotation, Z};
 
 use super::*;
-use crate::content::{Need, ResBody, ResKind};
+use crate::content::{GenId, Need, ResBody, ResKind};
+use crate::model::{Frozen, ImageRef};
+use crate::source::ObjRef;
 
 /// A watermark of `text`, `angle` degrees, at `position`.
 fn text(text: &str, angle: f32, position: GridPos) -> WatermarkGen {

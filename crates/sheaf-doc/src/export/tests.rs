@@ -15,7 +15,7 @@ use crate::forms::fixture::Form;
 use crate::history::FixedCount;
 use crate::materialize::ocr_tests::{HELLO_HEX, fonts_of, is_glyphless, set_layer};
 use crate::materialize::rewrite_tests::{annots_read, make_pdf, open, read_outline, tempdir};
-use crate::model::FlatOutlineItem;
+use crate::open::FlatOutlineItem;
 use crate::tx::fixture as fx;
 
 /// A mark of `kind`, `color`, by "t".

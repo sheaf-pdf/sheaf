@@ -10,7 +10,6 @@ use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use im::Vector;
-use lopdf::ObjectId;
 use sheaf_edit::{Rotation, Z};
 
 use super::{
@@ -22,6 +21,7 @@ use crate::forms::{FieldId, full_name_of};
 use crate::geom::Geom;
 use crate::labels::{LabelRange, LabelSpec};
 use crate::prim::{Key, Mismatch, Val};
+use crate::source::PageObj;
 use crate::store::BlobId;
 use crate::text_layer::TextLayer;
 
@@ -147,8 +147,8 @@ impl Laid {
 }
 
 /// A copy of a source page, as [`DocState::page_showing`] finds the page
-/// showing it: the source, the page's object and the copy.
-type Shown = (BlobId, ObjectId, u32);
+/// showing it: the page and the copy.
+type Shown = (PageObj, u32);
 
 /// The hash the indexes key a name by: the same in every state.
 fn name_hash(name: &str) -> u64 {
@@ -607,34 +607,28 @@ impl DocState {
             .collect()
     }
 
-    /// The page showing copy `copy` of the page whose object is `object` in
-    /// source `blob`: of two that do, the first in order. O(1) once a state
-    /// of this order and these pages has found one.
-    pub fn page_showing(&self, blob: BlobId, object: ObjectId, copy: u32) -> Option<PageId> {
-        self.shown_pages().get(&(blob, object, copy)).copied()
+    /// The page showing copy `copy` of source page `page`: of two that do,
+    /// the first in order. O(1) once a state of this order and these pages
+    /// has found one.
+    pub fn page_showing(&self, page: PageObj, copy: u32) -> Option<PageId> {
+        self.shown_pages().get(&(page, copy)).copied()
     }
 
-    /// The page a reference to the page whose object is `object` in source
-    /// `blob`, read as copy `copy` of it, names: the page showing that copy,
-    /// else the lowest copy any page shows; None when none does. What a
-    /// copied reference to a page is written as
-    /// ([`page_named`](crate::materialize::copy::page_named)), found as
-    /// [`page_showing`](Self::page_showing) finds a page.
-    pub(crate) fn page_named(&self, blob: BlobId, object: ObjectId, copy: u32) -> Option<PageId> {
-        crate::materialize::copy::page_named(self.shown_pages(), blob, object, copy)
+    /// The page a reference to source page `page`, read as copy `copy` of
+    /// it, names: the page showing that copy, else the lowest copy any page
+    /// shows; None when none does. What a copied reference to a page is
+    /// written as ([`page_named`](crate::materialize::copy::page_named)),
+    /// found as [`page_showing`](Self::page_showing) finds a page.
+    pub(crate) fn page_named(&self, page: PageObj, copy: u32) -> Option<PageId> {
+        crate::materialize::copy::page_named(self.shown_pages(), page, copy)
     }
 
-    /// The pages showing copies of the page whose object is `object` in
-    /// source `blob`, by copy: what a group of the realizer finds its
-    /// pages by (M10.5 §10.1). O(log n) and those, once the page map is
-    /// built.
-    pub(crate) fn pages_showing(
-        &self,
-        blob: BlobId,
-        object: ObjectId,
-    ) -> impl Iterator<Item = PageId> + '_ {
-        let copies = (blob, object, 0)..=(blob, object, u32::MAX);
-        self.shown_pages().range(copies).map(|(_, &page)| page)
+    /// The pages showing copies of source page `page`, by copy: what a
+    /// group of the realizer finds its pages by (M10.5 §10.1). O(log n) and
+    /// those, once the page map is built.
+    pub(crate) fn pages_showing(&self, page: PageObj) -> impl Iterator<Item = PageId> + '_ {
+        let copies = (page, 0)..=(page, u32::MAX);
+        self.shown_pages().range(copies).map(|(_, &id)| id)
     }
 
     fn shown_pages(&self) -> &BTreeMap<Shown, PageId> {
@@ -645,9 +639,8 @@ impl DocState {
     fn map_shown(&self) -> BTreeMap<Shown, PageId> {
         let mut shows = BTreeMap::new();
         for (id, def, _) in self.pages() {
-            if let Some(facts) = def.base.src.page(def.base.index) {
-                let shown = (def.base.src.id(), facts.id, def.copy);
-                shows.entry(shown).or_insert(id);
+            if let Some(page) = def.base.src.page_obj(def.base.index) {
+                shows.entry((page, def.copy)).or_insert(id);
             }
         }
         shows
@@ -1703,8 +1696,8 @@ mod tests {
         let header = st.header_footer().unwrap();
         assert_eq!(header.frozen.bates_number(p0), Some(100));
         let def = st.def(p0).unwrap();
-        let object = def.base.src.page(def.base.index).unwrap().id;
-        assert_eq!(st.page_showing(def.base.src.id(), object, 0), Some(p0));
+        let page = def.base.src.page_obj(def.base.index).unwrap();
+        assert_eq!(st.page_showing(page, 0), Some(p0));
         assert_eq!(st.check_invariants(), Ok(()));
         let (mark, rec) = st.annots_on(p0).find(|(_, a)| a.mark().is_some()).unwrap();
         let named = nm_key(mark, rec).unwrap();
@@ -1814,11 +1807,10 @@ mod tests {
             .unwrap();
         let st = d.state();
         let copy = st.page_at(st.pos_of(ids[2]).unwrap() + 1).unwrap();
-        let def = st.def(ids[2]).unwrap();
-        let (blob, object) = (def.base.src.id(), def.base.src.page(2).unwrap().id);
-        assert_eq!(st.page_showing(blob, object, 0), Some(ids[2]));
-        assert_eq!(st.page_showing(blob, object, 1), Some(copy));
-        assert_eq!(st.page_showing(blob, object, 2), None);
+        let page = st.def(ids[2]).unwrap().base.src.page_obj(2).unwrap();
+        assert_eq!(st.page_showing(page, 0), Some(ids[2]));
+        assert_eq!(st.page_showing(page, 1), Some(copy));
+        assert_eq!(st.page_showing(page, 2), None);
         // A tree that lists its first page again, as copy 1 of it, and a
         // duplicate of the first, copy 1 too: of the two, the first in
         // order is found, before a move and after; a page shown from
@@ -1840,21 +1832,25 @@ mod tests {
         let copy = d.page(1).unwrap();
         let st = d.state();
         let blob = d.primary().id();
+        let first = PageObj { blob, id: first };
         assert_eq!(st.def(again).unwrap().copy, 1);
-        assert_eq!(st.page_showing(blob, first, 0), Some(p0));
-        assert_eq!(st.page_showing(blob, first, 1), Some(copy));
+        assert_eq!(st.page_showing(first, 0), Some(p0));
+        assert_eq!(st.page_showing(first, 1), Some(copy));
         d.commit_ops(vec![move_pages(&[again], Some(p0))], "Move")
             .unwrap();
-        assert_eq!(d.state().page_showing(blob, first, 1), Some(again));
-        let second = f.pages[1];
-        assert_eq!(d.state().page_showing(blob, second, 0), Some(p1));
+        assert_eq!(d.state().page_showing(first, 1), Some(again));
+        let second = PageObj {
+            blob,
+            id: f.pages[1],
+        };
+        assert_eq!(d.state().page_showing(second, 0), Some(p1));
         let other = crate::store::blank(d.store(), 1);
         let replace = crate::tx::fixture::replace(&[p1], &other, [0], "b.pdf");
         d.commit_ops(vec![replace], "Replace").unwrap();
         let st = d.state();
-        assert_eq!(st.page_showing(blob, second, 0), None);
-        let shown = other.page(0).unwrap().id;
-        assert_eq!(st.page_showing(other.id(), shown, 0), Some(p1));
+        assert_eq!(st.page_showing(second, 0), None);
+        let shown = other.page_obj(0).unwrap();
+        assert_eq!(st.page_showing(shown, 0), Some(p1));
         assert_eq!(st.check_invariants(), Ok(()));
     }
 }

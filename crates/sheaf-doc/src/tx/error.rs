@@ -106,6 +106,31 @@ impl EditError {
     }
 }
 
+impl From<&EditError> for sheaf_edit::Failure {
+    /// What a plugin is told of it: its kind, and why, as the user is
+    /// told.
+    fn from(e: &EditError) -> sheaf_edit::Failure {
+        use sheaf_edit::FailureKind as K;
+        let kind = match e {
+            EditError::NotFound { .. } => K::NotFound,
+            EditError::Invalid { .. } => K::Invalid,
+            EditError::Ambiguous { .. } => K::Ambiguous,
+            EditError::Content { .. } => K::Content,
+            EditError::Refused(_) => K::Refused,
+            EditError::NotReady => K::NotReady,
+            EditError::Cancelled => K::Cancelled,
+            EditError::Conflict { .. } => K::Conflict,
+            EditError::GroupEnded => K::GroupEnded,
+            EditError::Mismatch { .. } => K::Mismatch,
+            EditError::Internal { .. } => K::Internal,
+        };
+        sheaf_edit::Failure {
+            kind,
+            message: e.to_string(),
+        }
+    }
+}
+
 /// What a commit tells the reader beside its lines (§6.5): the texts M10
 /// slices 4–5 pinned, and text the built-in fonts can't draw.
 #[derive(Debug, Clone, PartialEq, Eq)]

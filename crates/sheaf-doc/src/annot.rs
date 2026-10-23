@@ -28,11 +28,13 @@
 //! draws `?`, which [`Annot::unencodable`] tells without drawing anything.
 //! A save writes marks as [`emission`] makes them, through the emitter.
 //! What a PDF sheaf builds in memory holds of them (the comments a data
-//! file exports, a flattened mark's page) is written through a
-//! [`WriteCx`], which writes what they draw with in common, and the
-//! stamps' pages and attachments' files the marks hold ([`Mark`]), once.
+//! file exports, a flattened mark's page) is written through
+//! [`serialize::built`](crate::serialize::built)'s `WriteCx`, which writes
+//! what they draw with in common, and the stamps' pages and attachments'
+//! files the marks hold ([`Mark`](crate::model::Mark)), once. Here they're
+//! dictionaries and content alone: where a file holds what a mark draws
+//! and embeds is the writer's to say ([`Held`]).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -42,14 +44,14 @@ use sheaf_edit::Rotation;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::attachments::{Objects, resolve};
-use crate::content::sink::{Lopdf, Sink};
+use crate::content::sink::Sink;
 use crate::content::{
-    Blend, Color, ContentWriter, FillRule, Font, GState, LineCap, LineJoin, Paint, Res, ResBody,
-    ResId, ResObjects, Reserved, ResourceNeeds, Std14,
+    Blend, Color, ContentWriter, FillRule, Font, GState, LineCap, LineJoin, Paint, Reserved,
+    ResourceNeeds, Std14,
 };
 use crate::geom::{Affine, Geom, Rect};
-use crate::model::{FormRef, Mark, PinnedAp};
-use crate::store::{BlobId, BlobRef};
+use crate::model::{FormRef, PinnedAp};
+use crate::serialize::built::{Built, Held, StampForm, WriteCx};
 
 pub use sheaf_edit::{AnnotId, Box2, Pt};
 
@@ -158,9 +160,9 @@ pub enum AnnotKind {
     },
     /// A stamp from the library: a PDF page drawn in `rect`. `stamp` names
     /// its one-page PDF by its stem (`BlobId::stem`), and the mark holds
-    /// the page ([`Mark::stamp`]; a saved file holds it as a form), `name`
-    /// is what the library calls it, and `text` (a dynamic stamp's, filled
-    /// in when placed) is drawn over it.
+    /// the page ([`Mark::stamp`](crate::model::Mark::stamp); a saved file
+    /// holds it as a form), `name` is what the library calls it, and
+    /// `text` (a dynamic stamp's, filled in when placed) is drawn over it.
     PageStamp {
         rect: Box2,
         stamp: String,
@@ -203,9 +205,10 @@ pub enum AnnotKind {
     },
     /// A file attached at `pos` (Acrobat's Attach File), its icon's box's
     /// low corner as a note's is. `file` names its bytes by their stem
-    /// (`BlobId::stem`), and the mark holds them ([`Mark::file`]; a saved
-    /// file embeds them); `name` and `size` are the file's. `icon` is one
-    /// of [`ATTACHMENT_ICONS`].
+    /// (`BlobId::stem`), and the mark holds them
+    /// ([`Mark::file`](crate::model::Mark::file); a saved file embeds
+    /// them); `name` and `size` are the file's. `icon` is one of
+    /// [`ATTACHMENT_ICONS`].
     FileAttachment {
         pos: Pt,
         icon: String,
@@ -1164,67 +1167,6 @@ impl Annot {
 /// (`file::is_ours`), and none is written with it.
 pub const PART: &str = "SheafPart";
 
-/// A mark as PDF objects: its annotation dictionary, with `/AP` set, and
-/// any companions. Objects they point at (appearance streams, images,
-/// embedded files) are already in the document. The writer gives each
-/// companion `/IRT` to the main annotation and `/RT /Group`.
-#[cfg(any(test, feature = "fixtures"))]
-pub struct Written {
-    pub main: Dictionary,
-    pub companions: Vec<Dictionary>,
-}
-
-/// What the marks written into one PDF built in memory share: the fonts
-/// and ExtGStates their appearances draw with, each one object a file,
-/// and the stamps' pages and attachments' files the marks hold, each
-/// written once.
-pub struct WriteCx {
-    pub(crate) res: ResObjects,
-    /// Each stamp's page as a form in the file, by the form a mark holds:
-    /// None when it can't be had.
-    stamps: HashMap<FormRef, Option<StampForm>>,
-    /// Each attachment's file in the file, by its blob.
-    files: HashMap<BlobId, lopdf::ObjectId>,
-    /// What's been copied from each source: its objects' numbers in the
-    /// file.
-    copied: HashMap<BlobId, HashMap<lopdf::ObjectId, lopdf::ObjectId>>,
-}
-
-/// A stamp's page as a form in the file: its number (or the emitter's
-/// placeholder for it), what the content that draws it names it by,
-/// `/BBox` and `/Matrix`.
-#[derive(Debug, Clone, Copy)]
-pub struct StampForm {
-    pub id: lopdf::ObjectId,
-    /// Its number's digest ([`Res::written`]), or in a pinned appearance
-    /// its form's, which no save's numbering moves.
-    pub res: ResId,
-    pub bbox: Rect,
-    pub matrix: Affine,
-}
-
-impl StampForm {
-    /// Form `id`, named by its number.
-    pub fn written(id: lopdf::ObjectId, bbox: Rect, matrix: Affine) -> StampForm {
-        StampForm {
-            id,
-            res: Res::written(id).id,
-            bbox,
-            matrix,
-        }
-    }
-}
-
-/// What a mark draws and embeds that isn't its own, where the file being
-/// written holds it: a page stamp's page as a form, an attachment's
-/// embedded file stream. None draws a stamp without its page and writes
-/// an attachment without its file.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Held {
-    pub stamp: Option<StampForm>,
-    pub file: Option<lopdf::ObjectId>,
-}
-
 /// A mark as the writer makes it, before anything of it is in a file
 /// ([`emission`]).
 pub struct Emitted {
@@ -1236,181 +1178,6 @@ pub struct Emitted {
     /// replacement's StrikeOut, its `/NM` set. The writer gives each
     /// `/AP`, `/IRT` to the main annotation and `/RT /Group`.
     pub companions: Vec<(Dictionary, Appearance)>,
-}
-
-impl Default for WriteCx {
-    fn default() -> WriteCx {
-        WriteCx::new()
-    }
-}
-
-impl WriteCx {
-    /// For marks written into a file of their own.
-    pub fn new() -> WriteCx {
-        WriteCx {
-            res: ResObjects::default(),
-            stamps: HashMap::new(),
-            files: HashMap::new(),
-            copied: HashMap::new(),
-        }
-    }
-
-    /// Stamp `stem`'s page, the library's `name`, held as `form`, as a form
-    /// in `pdf`: copied from the source that holds it, imported from its
-    /// one-page PDF, or drawn from what it's pinned to. None, said once,
-    /// when it can't be had.
-    fn stamp(
-        &mut self,
-        form: &FormRef,
-        stem: &str,
-        name: &str,
-        pdf: &mut lopdf::Document,
-    ) -> Option<StampForm> {
-        if let Some(&made) = self.stamps.get(form) {
-            return made;
-        }
-        let made = match form {
-            FormRef::Base(at) => {
-                let copied = self.copied.entry(at.src.id()).or_default();
-                crate::materialize::copy::copy_object(at.src.pdf(), at.id, pdf, copied)
-            }
-            FormRef::Blob(page) => lopdf::Document::load_mem(page.bytes())
-                .map_err(anyhow::Error::from)
-                .and_then(|src| crate::stamp_lib::page_form(&src, pdf))
-                .map(|f| Some(f.id)),
-            FormRef::Pinned(ap) => {
-                let page = match (&ap.inputs.kind, &ap.inputs.stamp) {
-                    (AnnotKind::PageStamp { stamp, name, .. }, Some(page)) => {
-                        self.stamp(page, stamp, name, pdf)
-                    }
-                    _ => None,
-                };
-                let drawn = appearance(&ap.inputs.annot(), page);
-                Ok(Some(drawn.write(pdf, &mut self.res)))
-            }
-        };
-        let made = made
-            .and_then(|id| {
-                let id = id.context("a page, not a form")?;
-                let (bbox, matrix) =
-                    crate::stamp_lib::form_frame(&*pdf, id).context("a form with no box")?;
-                Ok(StampForm::written(id, bbox, matrix))
-            })
-            .inspect_err(|e| log::warn!("stamp {name} ({stem}) is drawn without its page: {e:#}"))
-            .ok();
-        self.stamps.insert(form.clone(), made);
-        made
-    }
-
-    /// What mark `m` holds, in `pdf`: its stamp's page as a form, its
-    /// file as an embedded file stream, each written once. What it can't
-    /// have is said, and it's drawn without it.
-    pub fn held(&mut self, m: &Mark, pdf: &mut lopdf::Document) -> Held {
-        held(&m.annot, m.stamp.as_ref(), m.file.as_ref(), pdf, self)
-    }
-
-    /// `appearance` as a form in `pdf`, what it draws with written once.
-    pub fn form(&mut self, appearance: Appearance, pdf: &mut lopdf::Document) -> lopdf::ObjectId {
-        appearance.write(pdf, &mut self.res)
-    }
-
-    /// The attachment's file `file` as an embedded file stream in `pdf`,
-    /// made from its bytes once.
-    fn file(&mut self, file: &BlobRef, pdf: &mut lopdf::Document) -> lopdf::ObjectId {
-        *self.files.entry(file.id()).or_insert_with(|| {
-            let mut stream = Stream::new(
-                dictionary! {
-                    "Type" => "EmbeddedFile",
-                    "Params" => dictionary! { "Size" => file.bytes().len() as i64 },
-                },
-                file.bytes().to_vec(),
-            );
-            let _ = stream.compress();
-            pdf.add_object(Object::Stream(stream))
-        })
-    }
-}
-
-/// Write `a`, a mark that holds no stamp's page or file, into `pdf`. Its
-/// geometry is PageSpace, which is the page's user space, so it needs
-/// nothing of the page. The caller adds [`Written::main`] (and the
-/// companions) to the page's `/Annots`. A page stamp is drawn without its
-/// page, an attachment without its file. What tests build their files
-/// with.
-#[cfg(any(test, feature = "fixtures"))]
-pub fn to_pdf(a: &Annot, pdf: &mut lopdf::Document) -> Written {
-    write(a, None, None, pdf, &mut WriteCx::new())
-}
-
-/// [`to_pdf`], for one of the marks written into `pdf` through `cx`, with
-/// what it holds: what they draw with in common is in the file once, and
-/// so is each stamp's page and file.
-#[cfg(any(test, feature = "fixtures"))]
-pub fn to_pdf_in(m: &Mark, pdf: &mut lopdf::Document, cx: &mut WriteCx) -> Written {
-    write(&m.annot, m.stamp.as_ref(), m.file.as_ref(), pdf, cx)
-}
-
-/// What `a` holds, as `stamp` and `file`, written into `pdf` through
-/// `cx` where `a` names them: its stamp's page as a form, its file as an
-/// embedded file stream. What it can't have is said.
-fn held(
-    a: &Annot,
-    stamp: Option<&FormRef>,
-    file: Option<&BlobRef>,
-    pdf: &mut lopdf::Document,
-    cx: &mut WriteCx,
-) -> Held {
-    let stamp = match (&a.kind, stamp) {
-        (AnnotKind::PageStamp { stamp, name, .. }, Some(form)) => cx.stamp(form, stamp, name, pdf),
-        (AnnotKind::PageStamp { stamp, name, .. }, None) => {
-            log::warn!("stamp {name} ({stamp}) is drawn without its page: it holds none");
-            None
-        }
-        _ => None,
-    };
-    let file = match (&a.kind, file) {
-        (AnnotKind::FileAttachment { .. }, Some(file)) => Some(cx.file(file, pdf)),
-        (
-            AnnotKind::FileAttachment {
-                file: stem, name, ..
-            },
-            None,
-        ) => {
-            log::warn!("attachment {name} ({stem}) is written without its file: it holds none");
-            None
-        }
-        _ => None,
-    };
-    Held { stamp, file }
-}
-
-/// `a` written into `pdf` through `cx`, drawing the page `stamp` and
-/// embedding `file` where it names them.
-#[cfg(any(test, feature = "fixtures"))]
-fn write(
-    a: &Annot,
-    stamp: Option<&FormRef>,
-    file: Option<&BlobRef>,
-    pdf: &mut lopdf::Document,
-    cx: &mut WriteCx,
-) -> Written {
-    let held = held(a, stamp, file, pdf, cx);
-    let Emitted {
-        mut main,
-        appearance,
-        companions,
-    } = emission(a, held);
-    let ap = cx.form(appearance, pdf);
-    main.set("AP", dictionary! { "N" => ap });
-    let companions = companions
-        .into_iter()
-        .map(|(mut dict, appearance)| {
-            let ap = cx.form(appearance, pdf);
-            dict.set("AP", dictionary! { "N" => ap });
-            dict
-        })
-        .collect();
-    Written { main, companions }
 }
 
 /// Mark `a` as the writer makes it, drawing and embedding what `held`
@@ -1435,7 +1202,7 @@ pub fn emission(a: &Annot, held: Held) -> Emitted {
     on_grid(&mut main);
     let payload = Payload {
         v: Some(VERSION),
-        std: staleness(&NoObjects, &main, a.thread_parent().is_some()),
+        std: written_staleness(&main, a.thread_parent().is_some()),
         mark: a,
     };
     main.set(
@@ -1481,39 +1248,11 @@ pub(crate) fn appearance(a: &Annot, stamp: Option<StampForm>) -> Appearance {
 
 /// The pinned appearance `ap` as a one-page PDF, its page its form.
 pub(crate) fn pinned_pdf(ap: &Arc<PinnedAp>) -> anyhow::Result<Vec<u8>> {
-    let mut pdf = lopdf::Document::with_version("1.5");
+    let mut built = Built::new();
     let form = FormRef::Pinned(ap.clone());
-    let made = WriteCx::new().stamp(&form, "", "a flattened mark", &mut pdf);
-    let made = made.context("its appearance couldn't be drawn")?;
-    crate::stamp_lib::form_to_pdf(&pdf, made.id)
-}
-
-/// No objects at all: what [`staleness`] reads a dictionary of direct
-/// values through.
-struct NoObjects;
-
-impl Objects for NoObjects {
-    fn get_object(&self, id: lopdf::ObjectId) -> lopdf::Result<&Object> {
-        Err(lopdf::Error::ObjectNotFound(id))
-    }
-
-    fn get_dictionary(&self, id: lopdf::ObjectId) -> lopdf::Result<&Dictionary> {
-        Err(lopdf::Error::ObjectNotFound(id))
-    }
-
-    fn dereference<'a>(
-        &'a self,
-        object: &'a Object,
-    ) -> lopdf::Result<(Option<lopdf::ObjectId>, &'a Object)> {
-        match object {
-            Object::Reference(id) => Err(lopdf::Error::ObjectNotFound(*id)),
-            direct => Ok((None, direct)),
-        }
-    }
-
-    fn catalog(&self) -> lopdf::Result<&Dictionary> {
-        Err(lopdf::Error::DictKey("Root".into()))
-    }
+    let made = WriteCx::new().stamp(&form, "", "a flattened mark", built.pdf());
+    built.form_page(made.context("its appearance couldn't be drawn")?);
+    built.finish()
 }
 
 /// A caret's box at a point between characters `h` points tall: centred
@@ -1990,13 +1729,6 @@ impl Appearance {
     pub(crate) fn into_content(self) -> Vec<u8> {
         self.content
     }
-
-    /// It as a form in `pdf`, the resources written through `res`, once a
-    /// save each.
-    fn write(self, pdf: &mut lopdf::Document, res: &mut ResObjects) -> lopdf::ObjectId {
-        let form = self.form(&mut Lopdf { pdf, res });
-        pdf.add_object(form)
-    }
 }
 
 /// The main annotation dictionary (without `/AP`, `/P` or `/SheafAnnot`)
@@ -2040,11 +1772,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             y: -rect.bottom(),
             ..*rect
         };
-        let res = Res {
-            id: form.res,
-            body: ResBody::Written(form.id),
-        };
-        w.place_form(res, form.bbox, form.matrix, target);
+        w.place_form(form.resource(), form.bbox, form.matrix, target);
         if turned {
             w.restore();
         }
@@ -2869,27 +2597,12 @@ pub fn tape_pdf(a: &Annot) -> Option<Vec<u8>> {
     let mut w = ContentWriter::new();
     tape_content(&mut w, at, *size, look, &tape, a.color, &page.from_view());
     let (content, needs) = w.finish(&Reserved::default());
-    let mut pdf = lopdf::Document::with_version("1.5");
-    let mut resources = Dictionary::new();
-    ResObjects::default().bind(&mut pdf, &needs, &mut resources);
-    let pages_id = pdf.new_object_id();
-    let content = pdf.add_object(Stream::new(dictionary! {}, content));
-    let page = pdf.add_object(dictionary! {
-        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
-        "MediaBox" => vec![0.into(), 0.into(), Object::from(rect.w), Object::from(rect.h)],
-        "Resources" => resources,
-    });
-    pdf.objects.insert(
-        pages_id,
-        Object::Dictionary(
-            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
-        ),
-    );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
-    pdf.trailer.set("Root", catalog);
-    let mut bytes = Vec::new();
-    pdf.save_to(&mut bytes).ok()?;
-    Some(bytes)
+    let mut built = Built::new();
+    built.page(page.media, content, &needs);
+    built
+        .finish()
+        .inspect_err(|e| log::warn!("a tape's picture: {e:#}"))
+        .ok()
 }
 
 /// The `/SheafAnnot` version this build writes.
@@ -3003,8 +2716,31 @@ fn on_grid(dict: &mut Dictionary) {
 /// ([`on_grid`]); text strings decode as PDFium decodes them, then NFC. A
 /// reply's or a status's `/Rect` (`threaded`) is its parent's, which the
 /// writer sets later, and `/IRT`, `/RT` and `/AP` aren't the mark's: none
-/// of them counts.
-pub fn staleness<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, threaded: bool) -> String {
+/// of them counts. References are followed in `pdf`.
+pub fn staleness<'a, P: Objects + ?Sized>(
+    pdf: &'a P,
+    dict: &'a Dictionary,
+    threaded: bool,
+) -> String {
+    digest(dict, threaded, |o| resolve(pdf, o))
+}
+
+/// [`staleness`] of a dictionary as the writer makes it: every key the
+/// digest reads is direct, so it's read with no file, and a reference
+/// reads as nothing.
+fn written_staleness(dict: &Dictionary, threaded: bool) -> String {
+    digest(dict, threaded, |o| match o {
+        Object::Reference(_) => None,
+        direct => Some(direct),
+    })
+}
+
+/// [`staleness`], each value read through `resolve`.
+fn digest<'a>(
+    dict: &'a Dictionary,
+    threaded: bool,
+    resolve: impl Fn(&'a Object) -> Option<&'a Object>,
+) -> String {
     use std::io::Write as _;
     const KEYS: [&[u8]; 15] = [
         b"Subtype",
@@ -3023,7 +2759,7 @@ pub fn staleness<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, threaded: bool
         b"CL",
         b"RD",
     ];
-    let number = |o| resolve(pdf, o).and_then(|o| o.as_float().ok());
+    let number = |o| resolve(o).and_then(|o| o.as_float().ok());
     // In steps of 1/`scale`.
     let numbers = |out: &mut Vec<u8>, items: &mut dyn Iterator<Item = Option<f64>>, scale: f64| {
         for v in items {
@@ -3038,7 +2774,7 @@ pub fn staleness<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, threaded: bool
     let mut out = Vec::new();
     for key in KEYS {
         let scale = steps_per_unit(key);
-        match (key, dict.get(key).ok().and_then(|o| resolve(pdf, o))) {
+        match (key, dict.get(key).ok().and_then(&resolve)) {
             (b"Rect", _) if threaded => {}
             (b"Subtype", Some(Object::Name(n))) => out.extend_from_slice(n),
             (b"Rect", Some(Object::Array(r))) => {
@@ -3064,7 +2800,7 @@ pub fn staleness<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, threaded: bool
             }
             (b"InkList", Some(Object::Array(paths))) => {
                 for path in paths {
-                    if let Some(Object::Array(p)) = resolve(pdf, path) {
+                    if let Some(Object::Array(p)) = resolve(path) {
                         numbers(&mut out, &mut p.iter().map(number), scale);
                     }
                     out.push(b';');
@@ -3082,6 +2818,7 @@ pub fn staleness<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, threaded: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::serialize::built::{Written, to_pdf, to_pdf_in};
 
     /// A text stamp is as wide as its widest line in Helvetica-Bold, by
     /// Adobe's widths, with room either side.

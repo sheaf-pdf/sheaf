@@ -9,6 +9,9 @@ Pages** panel. Each group has two actions:
 - **Not duplicates** tells it to stop suggesting that group. The answer is
   remembered, so later runs skip it.
 
+The groups it lists are the document's as it was open then: after it's
+opened again, run Find Duplicate Pages again.
+
 How it decides:
 
 - Each page gets a visual fingerprint from a small grayscale render. The

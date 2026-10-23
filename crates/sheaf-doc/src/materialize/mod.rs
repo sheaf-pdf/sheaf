@@ -15,7 +15,7 @@
 //!    keeps its number;
 //! 3. builds the [`graph`]: the primary loaded eagerly, the emitted objects
 //!    put in at their numbers;
-//! 4. runs [`keep_only`](crate::kept::keep_only), unchanged, against the
+//! 4. runs [`keep_only`](kept::keep_only), unchanged, against the
 //!    pages kept, and prunes what nothing reaches;
 //! 5. checks the graph ([`verify::graph`], [`verify::copied`]):
 //!    copy-on-write, every reference resolved, the pages reached the
@@ -48,6 +48,7 @@
 //! - [`number`]: where they're written.
 //! - [`copy`]: copying a closure of objects from one file into another.
 //! - [`graph`]: a source loaded whole, for a Rewrite.
+//! - [`kept`]: that graph pruned to the pages it keeps.
 //! - [`verify`]: what every written file is checked for (§11.9).
 //! - [`deps`]: what an Append writes.
 //! - [`append`]: an Append's section.
@@ -71,6 +72,7 @@ mod flatten_tests;
 pub mod graph;
 #[cfg(test)]
 pub(crate) mod header_tests;
+pub mod kept;
 pub mod key;
 pub mod number;
 #[cfg(test)]
@@ -321,7 +323,7 @@ fn rewrite(
     }
     p.check()?;
     let released = graph::release_written(&mut graph.pdf, src, &tree, &owned);
-    let kept = crate::kept::keep_only(&mut graph.pdf, &tree, &removed);
+    let kept = kept::keep_only(&mut graph.pdf, &tree, &removed);
     notes.extend(kept.notes.into_iter().map(Note));
     graph.pdf.prune_objects();
     let encrypt = src.crypt().map(|c| c.at());

@@ -2,7 +2,9 @@
 
 Status: **deferred** (2026-10-14). A known bug, acknowledged and not
 scheduled; we'll come back to it. Found while planning M9. What we learned
-is recorded here so the exploration doesn't have to be redone.
+is recorded here so the exploration doesn't have to be redone. M10.5 did
+most of layer 1: a file another program changed is never overwritten
+unasked ([Detect changes](#1-detect-changes-before-saving-essential)).
 
 ## The bug
 
@@ -87,7 +89,18 @@ courtesy; merging comes later.
 
 ### 1. Detect changes before saving (essential)
 
-This works whatever the other writer is.
+This works whatever the other writer is. **Done in M10.5** (its proposal
+33): a file's `FileStamp` (its length, modified time, a hash of its last
+64 KiB and of its last cross-reference section) is taken at open and at
+each save, and re-checked before every write, the rename or in-place
+append included. When another program changed the file, nothing is
+written, and the save asks: Save As…, Overwrite or Cancel. Temp files
+have unique names, a rename keeps the original's mode on Linux and
+macOS, and a recovery sidecar is offered only while its file is the one
+it was written against. What's left of this layer: the check when a
+window comes to the front, the rest of keeping what the original had
+(`ReplaceFileW` on Windows, the group on Linux and macOS), and saying
+plainly that another program has the file open.
 - At open, record the file's length, modified time and a hash. The bytes
   are in memory already, so the hash is cheap.
 - At save, compare (save reads the file anyway). If it changed, don't
@@ -148,13 +161,23 @@ This tells the second person before they start working.
 
 This is the common review case, where both people only added or changed
 marks.
-- With unique ids, "someone else saved" can become: load their version,
-  re-apply my mark edits by `/NM`, done. That works when the pages
-  themselves didn't change (compare per-page fingerprints). Page changes
-  still go to Save As.
-- M9 slice 4 keeps each version's commands, resolved with the ids they
-  assigned, back to the last save. A merge would replay those onto the
-  other person's version, mapping pages by fingerprint.
+- "Someone else saved" is already detected (layer 1, M10.5): the
+  `FileStamp` re-check before every write asks Save As…, Overwrite or
+  Cancel. Merge would be a fourth answer.
+- With unique ids, it can become: load their version, re-apply my mark
+  edits by `/NM`, done. That works when the pages themselves didn't
+  change (compare per-page fingerprints). Page changes still go to Save
+  As.
+  - Sheaf marks' `/NM` embeds the `AnnotId`, so it is unique per
+    document (duplicates get fresh ids); others' `/NM` is unique per page
+    only, so their comments map by page and `/NM`.
+- Since M10.5 a version's steps hold resolved ops and their primitives
+  with before-values, back to the last save. A merge applies them onto
+  the other person's version by value (`Validate`: each must find what
+  it changed as it was) or re-lowers the resolved ops there (`Relower`),
+  and a conflict is explicit, never a silent drop. `Document::edge`'s
+  source list is gone, since sources are content-addressed: a merge
+  maps pages by fingerprint, not by source.
 - After M9's FDF/XFDF slice there's a manual path: Save As, export my
   comments, open their version, import them.
 - A bigger version: reviewers working read-only leave their comments as

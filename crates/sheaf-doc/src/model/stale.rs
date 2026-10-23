@@ -2,7 +2,8 @@
 //! landed on the current one (M10.5 §8.5). What its caller based its ops
 //! on must hold the same values there; then its changes are put there,
 //! checked by value ([`Stale::Validate`]), or its ops are lowered there
-//! again ([`Stale::Relower`]). What it depended on that changed since is a
+//! again ([`Stale::Relower`]), making what they made first once that was
+//! handed out. What it depended on that changed since is a
 //! [`EditError::Conflict`], never repaired: nothing changes, and the
 //! reader is told which edit changed it.
 
@@ -12,7 +13,7 @@ use super::{DocState, Document, GroupId, Step, Version, VersionId};
 use crate::describe::describe;
 use crate::effects::StepEffects;
 use crate::prim::{Key, Rec, Val, same};
-use crate::tx::{Base, EditError, Stale, TxParts, cascade};
+use crate::tx::{Base, EditError, Made, Stale, TxParts, cascade};
 
 impl Document {
     /// `parts`, a transaction made on version `parts.base`, as it lands on
@@ -114,12 +115,39 @@ impl Document {
     /// `parts`' ops lowered again on the current version, each drawing the
     /// ids it drew first. An op that resolved a position read the order,
     /// which must be as it was: the position would name another page now.
+    /// What they made, once handed out ([`Tx::mark_handed_out`]), they must
+    /// make again, each the same thing under the same id and local, or it's
+    /// a Conflict: over the first slot they read that changed since, by
+    /// the edit that changed it; else, when what changed isn't a slot they
+    /// record reading (the outline a bookmark's span is read from), over
+    /// the first slot they write, by no edit named.
+    ///
+    /// [`Tx::mark_handed_out`]: crate::tx::Tx::mark_handed_out
     fn relower(&self, parts: TxParts) -> Result<TxParts, EditError> {
         if parts.positional() {
             let order = parts.base_state.get(&Key::Order);
             self.holds(Key::Order, order.as_ref(), parts.base)?;
         }
-        parts.relowered(self.cursor, self.state().clone())
+        let handed = (parts.handed_out).then(|| (parts.created.clone(), parts.seen.clone()));
+        let made = parts.base;
+        let again = parts.relowered(self.cursor, self.state().clone())?;
+        let Some((created, seen)) = handed.filter(|(created, _)| *created != again.created) else {
+            return Ok(again);
+        };
+        let changed =
+            (seen.iter()).find(|(key, val)| !same(self.state().get(key).as_ref(), val.as_ref()));
+        if let Some((&key, _)) = changed {
+            return Err(self.conflict(key, made, None));
+        }
+        let wrote = (again.steps.iter())
+            .flat_map(|s| s.prims.iter())
+            .map(|p| p.key);
+        match wrote.chain(created.made().map(made_key)).next() {
+            Some(key) => Err(EditError::Conflict { key, by: None }),
+            None => Err(EditError::internal(
+                "lowered again, it made other things, though neither made any",
+            )),
+        }
     }
 
     /// Whether slot `key` holds `val` on the current version, as it did on
@@ -156,5 +184,14 @@ impl Document {
             at = v.parent;
         }
         EditError::Conflict { key, by: None }
+    }
+}
+
+/// The slot that holds what an op made.
+fn made_key(m: Made) -> Key {
+    match m {
+        Made::Page(id) => Key::Page(id),
+        Made::Bookmark(id) => Key::Bookmark(id),
+        Made::Annot(id) => Key::Annot(id),
     }
 }

@@ -6,6 +6,7 @@ use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use super::*;
 use crate::annot::{Box2, Pt};
 use crate::geom::{Affine, Rect};
+use crate::serialize::built::ResObjects;
 
 /// The text of what `w` wrote, with no resources reserved or given.
 fn written(w: ContentWriter) -> (String, ResourceNeeds) {

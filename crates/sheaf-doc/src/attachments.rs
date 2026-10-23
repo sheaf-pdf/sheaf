@@ -330,11 +330,14 @@ fn folder_key(key: &str) -> Option<(i64, &str)> {
     Some((id.parse().ok()?, name))
 }
 
-/// What objects are read from: a source's [`LazyPdf`], or an eager
-/// document the old writers load, so the readers serve both. Its reads
-/// are lopdf's, by their names, so a reader's body reads the same over
-/// either. Transitional (M10.5): it goes with the eager documents in
-/// slice 9.
+/// What objects are read from: a source's [`LazyPdf`], or a document
+/// loaded whole, so the readers serve both. Its reads are lopdf's, by
+/// their names, so a reader's body reads the same over either. Every file
+/// a document reads, and every PDF sheaf builds in memory, is read as a
+/// source; what's loaded whole is a Rewrite's graph (`materialize`'s
+/// records of it and `keep_only`, until a Rewrite needn't load the file
+/// whole), the form check's file and its revisions (`forms::check`), a
+/// stamp collection, the user's own file (`stamp_lib`), and tests' files.
 pub trait Objects {
     /// Object `id`, its references followed.
     fn get_object(&self, id: ObjectId) -> lopdf::Result<&Object>;

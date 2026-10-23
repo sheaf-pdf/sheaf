@@ -39,9 +39,8 @@ pub enum ResBody {
     /// decoded. A reference `(i, 0)` among them is to the `i`th.
     Objects(Arc<[Object]>),
     /// An object the caller has already written, by its number in the
-    /// document being written: a page made a form, say. Transitional
-    /// until slice 9's emitter, whose forms and images are resources by
-    /// content too.
+    /// file being written (or the emitter's placeholder for it): a page
+    /// made a form, say.
     Written(ObjectId),
 }
 

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use lopdf::{Dictionary, Document as Pdf, Object, dictionary};
 
 use super::*;
-use crate::content::ResObjects;
+use crate::serialize::built::ResObjects;
 
 /// An AFM's widths and codes, read here as plainly as it can be: each
 /// `C <code> ; WX <width> ; N <name>` line.

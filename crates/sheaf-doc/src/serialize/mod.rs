@@ -1,9 +1,9 @@
 //! One writer for saves (M10.5 §11.7): saves, Save As, extracted pages,
 //! Clean Copy, Export Flattened, print and recovery sidecars reach their
 //! bytes through here, and so do the PDFs sheaf builds in memory (blank
-//! pages, images as pages, the stamp library's files). lopdf's writer
-//! still writes the comment summary and FDF files, until a later slice
-//! moves them (`docs/document-model.md`, "One writer").
+//! pages, images as pages, the stamp library's files, the comment summary,
+//! FDF files and a tape's picture); lopdf's writer is left to tests and
+//! examples (`docs/document-model.md`, "One writer").
 //!
 //! - [`object`]: an object as PDF syntax, and an indirect object's
 //!   `n g obj` frame. Reals are written at f64, a NaN or an infinity
@@ -19,6 +19,8 @@
 //!   object either copied as the source has it, at its own number, or
 //!   written, its AES IVs keyed by what it is; and a PDF built in memory,
 //!   each object written at its number.
+//! - [`built`]: what a PDF built in memory is made of: the resources its
+//!   content draws with, marks as the writer makes them, and pages.
 //! - [`crypt`]: each object encrypted on its own with the source's
 //!   [`Crypt`](crypt::Crypt), its AES IVs keyed hashes, so an encrypted
 //!   file saves encrypted, its `/Encrypt` and `/ID[0]` kept.
@@ -27,6 +29,7 @@
 //!   another program changed it since it was read.
 
 pub mod append;
+pub mod built;
 pub mod crypt;
 pub mod durable;
 #[cfg(any(test, feature = "fixtures"))]

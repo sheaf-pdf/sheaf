@@ -908,8 +908,8 @@ fn an_overlay_visits_only_its_scope() {
     let pos = 3_500;
     let p = st.order()[pos];
     let def = st.def(p).unwrap();
-    let object = def.base.src.page(def.base.index).unwrap().id;
-    assert_eq!(st.page_showing(def.base.src.id(), object, 0), Some(p));
+    let page = def.base.src.page_obj(def.base.index).unwrap();
+    assert_eq!(st.page_showing(page, 0), Some(p));
     assert_eq!(st.pos_of(p), Some(pos));
     let own: BTreeSet<AnnotId> = marks(pos).map(|i| AnnotId(i as u64 + 1)).collect();
     assert!(own.len() >= 2);

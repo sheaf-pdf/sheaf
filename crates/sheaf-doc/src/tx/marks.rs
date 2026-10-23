@@ -4,12 +4,13 @@
 //!
 //! What a mark is beside what a caller says of it is the host's: its id
 //! and `/NM`, its dates, its author when none is given (a plugin's marks
-//! are the plugin's), the identity tokens in its text (`<<name>>` and
-//! `<<initials>>` stay as they are for a plugin, which never learns who
-//! the user is), its style kept to what its kind draws, a connector's
-//! partner, the comment a reply is to by its `/NM`, and the stems that
-//! name the stamp page or file it holds. An imported comment keeps its own
-//! name, dates and author ([`Imported`]).
+//! are by the plugin's id, as History names it), the identity tokens in
+//! its text (`<<name>>` and `<<initials>>` stay as they are for a plugin,
+//! which never learns who the user is unless the user granted it
+//! `identity`, M10.5 proposal 20), its style kept to what its kind draws,
+//! a connector's partner, the comment a reply is to by its `/NM`, and the
+//! stems that name the stamp page or file it holds. An imported comment
+//! keeps its own name, dates and author ([`Imported`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -623,14 +624,15 @@ fn made(
 
 /// `text` with the identity tokens filled in as dynamic stamps fill them:
 /// the date and time always, the user's name and initials unless a plugin
-/// is the actor, which never learns who the user is.
+/// is the actor, which never learns who the user is unless the user
+/// granted it `identity`.
 fn filled(lw: &Lower, text: &str) -> String {
     if !text.contains("<<") {
         return text.to_string();
     }
     let host = &lw.cx.host;
     match &lw.cx.actor {
-        Actor::Plugin { .. } => {
+        Actor::Plugin { .. } if !lw.cx.identity => {
             (text.replace("<<date>>", &host.date)).replace("<<time>>", &host.time)
         }
         _ => crate::stamp_lib::fill(text, &host.person, &host.initials, &host.date, &host.time),

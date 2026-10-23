@@ -30,7 +30,8 @@ rust-version = "1.98"
 
 [workspace.dependencies]
 sheaf-util = { path = "crates/sheaf-util" }
-sheaf-edit = { path = "crates/sheaf-edit" }
+# Versioned as well: the plugin SDK (`sheaf-plugin-api`) depends on it.
+sheaf-edit = { path = "crates/sheaf-edit", version = "0.1.0" }
 sheaf-doc = { path = "crates/sheaf-doc" }
 sheaf-render = { path = "crates/sheaf-render" }
 sheaf-ui = { path = "crates/sheaf-ui" }

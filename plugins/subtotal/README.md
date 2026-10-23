@@ -12,6 +12,9 @@ Arithmetic is exact to four decimal places, and the total shows as many
 decimals as the most precise number.
 
 It reads each page's words once and filters them as the region moves, so
-dragging stays cheap. Its cache is dropped when the document changes.
+dragging stays cheap. It reads a page's words again only after a change
+that can change them: to the page's text (its content, or text recognized
+on it), or to a header, footer or watermark, or the page order or labels a
+header's page numbers read. A change to marks alone keeps them.
 
 The parsing and arithmetic have unit tests that run on the host: `cargo test`.

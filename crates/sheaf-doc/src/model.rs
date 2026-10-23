@@ -7,9 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use im::Vector;
-use lopdf::ObjectId;
-use serde::{Deserialize, Serialize};
-use sheaf_edit::{DestView, PageSize, Rotation};
+use sheaf_edit::{PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::change::{Cause, ChangeSet};
@@ -20,7 +18,7 @@ use crate::geom::Geom;
 use crate::history::{HistoryPolicy, HistoryStats, MAX_VERSIONS};
 use crate::materialize::record::drawn_of;
 use crate::materialize::{Came, Profile, SaveInput, SaveNote, SaveRecord, SaveTarget, SavedSide};
-use crate::open::{Facts, FileAnnot, FileBody, ViewFacts};
+use crate::open::{Facts, FileAnnot, FileBody, FlatOutlineItem, ViewFacts};
 use crate::prim::{HeapSize, Key, Prim, Val, same};
 use crate::serialize::durable::{self, FileStamp};
 use crate::source::ObjRef;
@@ -46,47 +44,6 @@ pub use sheaf_edit::{OutlineId, PageId, SourceId, TextStyle};
 pub(crate) use state::visits;
 pub use state::{Builder, DocState, Invariant};
 pub(crate) use state::{LaidKey, RenderTables};
-
-/// A bookmark as read from a file: pre-order with depth.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FlatOutlineItem {
-    pub title: String,
-    pub page: Option<u32>,
-    pub depth: u16,
-    /// Where on `page` it lands, in PageSpace; None is the top of the
-    /// page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<DestView>,
-    /// `/C` and `/F`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<[u8; 3]>,
-    #[serde(default, skip_serializing_if = "TextStyle::is_plain")]
-    pub style: TextStyle,
-    /// Its `/Count` isn't negative (see [`Bookmark::open`]).
-    #[serde(default = "yes", skip_serializing_if = "is_yes")]
-    pub open: bool,
-    /// The item's object in its file, which its bookmark keeps as its
-    /// [`Bookmark::src`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub object: Option<lopdf::ObjectId>,
-    /// It goes somewhere sheaf keeps as read ([`Target::Kept`]): an action
-    /// other than a GoTo to a page here, or a destination that isn't a
-    /// page here. `page` is None.
-    #[serde(default, skip_serializing_if = "is_no")]
-    pub kept: bool,
-}
-
-fn yes() -> bool {
-    true
-}
-
-fn is_yes(b: &bool) -> bool {
-    *b
-}
-
-fn is_no(b: &bool) -> bool {
-    !*b
-}
 
 /// A group of versions that undo as one step (M10.5 §8.4): an OCR run's
 /// flushes, a plugin call's batches. A commit in the group joins its
@@ -279,6 +236,72 @@ impl Snapshot {
     /// [`Document::group_members`].
     pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
         group_members_in(&self.state, group)
+    }
+}
+
+/// What a plugin's call reads and lowers with (M10.5 §14.1, §14.3): the
+/// current version, detached, and what a transaction on it lowers with.
+/// The app publishes one at every change, and a call takes its base from
+/// the latest at its first read or submit. It binds no actor: it makes a
+/// plugin's transaction alone ([`plugin_tx`](Self::plugin_tx)), and
+/// [`Document::lower_cx`] stays the only way to make any other's.
+#[derive(Clone)]
+pub struct Published {
+    pub snap: Snapshot,
+    lowering: Lowering,
+}
+
+impl Published {
+    /// A transaction of plugin `id`'s, at its `version`, on the snapshot's
+    /// version, as [`Document::tx_at`] makes one: lowering as of now, its
+    /// marks' `<<name>>` and `<<initials>>` filled in only when the user
+    /// granted it `identity` (§6.8).
+    pub fn plugin_tx(&self, id: Arc<str>, version: Arc<str>, identity: bool) -> Tx {
+        let actor = Actor::Plugin { id, version };
+        Document::tx_at(
+            &self.snap,
+            self.lowering.cx(&self.snap.primary, actor, identity),
+        )
+    }
+
+    /// The document's store, which what a plugin uploads is interned
+    /// into, as a paste's assets are.
+    pub fn store(&self) -> &Arc<Store> {
+        &self.lowering.store
+    }
+
+    /// Whether `author` is the user, as the document knows them: what a
+    /// plugin is told of an author it may not learn the name of (§6.8).
+    pub fn is_user(&self, author: &str) -> bool {
+        *self.lowering.identity.person == *author
+    }
+}
+
+/// What a [`LowerCx`] is made of beside its actor and primary: the
+/// document's store and id allocator, who the user is, the name of the
+/// file that holds the document, and whether that file has opened.
+#[derive(Clone)]
+struct Lowering {
+    store: Arc<Store>,
+    alloc: Arc<IdAlloc>,
+    identity: Identity,
+    file: Arc<str>,
+    ready: bool,
+}
+
+impl Lowering {
+    /// What a transaction of `actor`'s on `primary` lowers with, as of
+    /// now; a plugin's marks name the user only with `identity`.
+    fn cx(&self, primary: &Src, actor: Actor, identity: bool) -> Arc<LowerCx> {
+        Arc::new(LowerCx {
+            store: self.store.clone(),
+            primary: primary.clone(),
+            alloc: self.alloc.clone(),
+            host: HostAttrs::now(&self.identity, self.file.clone()),
+            actor,
+            identity,
+            ready: self.ready,
+        })
     }
 }
 
@@ -706,6 +729,12 @@ impl Document {
     /// (M10.5 §6.8).
     pub fn set_identity(&mut self, who: Identity) {
         self.identity = who;
+    }
+
+    /// The number no other document in the process has, which a version
+    /// names a state only within ([`Snapshot::instance`]).
+    pub fn instance(&self) -> u64 {
+        self.instance
     }
 
     /// The source the document opened on: what a Rewrite writes onto.
@@ -1239,19 +1268,33 @@ impl Document {
     /// What a transaction of `actor`'s lowers with: the store, the id
     /// allocator, who the user is and now, and the name of the file that
     /// holds the document (the one it opened as until it's saved). The
-    /// only way to make one, so a transaction can't claim another actor
-    /// (M10.5 §6.7).
+    /// only way to make one for any actor, so a transaction can't claim
+    /// another (M10.5 §6.7); a plugin's never names the user here, which
+    /// only [`Published::plugin_tx`] grants (§6.8).
     pub fn lower_cx(&self, actor: Actor) -> Arc<LowerCx> {
+        self.lowering().cx(&self.primary, actor, false)
+    }
+
+    /// What its transactions lower with, beside the actor.
+    fn lowering(&self) -> Lowering {
         let file = self.file().and_then(|(path, _)| path.file_name());
         let file = file.map_or_else(|| self.name.clone(), |f| f.to_string_lossy().into());
-        Arc::new(LowerCx {
+        Lowering {
             store: self.store.clone(),
-            primary: self.primary.clone(),
             alloc: self.ids.clone(),
-            host: HostAttrs::now(&self.identity, file),
-            actor,
+            identity: self.identity.clone(),
+            file,
             ready: self.ready,
-        })
+        }
+    }
+
+    /// The current version as plugin calls take it (M10.5 §14.3): its
+    /// snapshot, and what a plugin's transaction on it lowers with.
+    pub fn published(&self) -> Published {
+        Published {
+            snap: self.snapshot(),
+            lowering: self.lowering(),
+        }
     }
 
     /// A transaction of `actor`'s on the current version.
@@ -1280,7 +1323,7 @@ impl Document {
     /// group's otherwise; once the group's edits were undone, or it ended,
     /// it's [`EditError::GroupEnded`] and changes nothing (M10.5 §8.4).
     pub fn commit(&mut self, tx: Tx, opts: CommitOpts) -> Result<Commit, EditError> {
-        let group = opts.group;
+        let (group, depth) = (opts.group, opts.depth);
         if let Some(g) = group {
             self.joins(g, tx.actor())?;
         }
@@ -1291,7 +1334,9 @@ impl Document {
         if let Some(g) = group
             && self.amends(g)
         {
-            return Ok(self.amend(g, parts, commit));
+            let mut commit = self.amend(g, parts, commit);
+            commit.change.depth = depth;
+            return Ok(commit);
         }
         let (from, before) = (self.cursor, self.state().clone());
         let (label, tag) = match group {
@@ -1302,6 +1347,7 @@ impl Document {
         self.push(parts.state, label.to_string(), parts.steps, actor, tag);
         commit.version = Some(self.cursor);
         commit.change = self.made(from, &before, Cause::Commit, label);
+        commit.change.depth = depth;
         Ok(commit)
     }
 
@@ -1673,7 +1719,10 @@ impl Document {
             version: None,
             amended: false,
             created: std::mem::take(&mut parts.created),
-            change: ChangeSet::empty(self.cursor, Cause::Commit, parts.actor().clone(), label),
+            change: ChangeSet {
+                depth: opts.depth,
+                ..ChangeSet::empty(self.cursor, Cause::Commit, parts.actor().clone(), label)
+            },
             effects: StepEffects::union(
                 &parts.steps.iter().map(|s| &s.effects).collect::<Vec<_>>(),
             ),
@@ -2598,17 +2647,18 @@ fn nest(
 /// is in `src`, as a mark is only on copy 0, and a mark holding what it
 /// holds there, its file decoded into `store`.
 fn record_of(store: &Store, a: &FileAnnot, src: &Src, copy: u32) -> (AnnotId, AnnotBody) {
-    let object = a.object.map(|id| ObjRef {
+    let at = |id| ObjRef {
         src: src.clone(),
         id,
-    });
+    };
+    let object = a.object.map(at);
     let body = match &a.body {
         FileBody::Mark { annot, held } => {
             let mark = Mark {
                 src: object.filter(|_| copy == 0),
                 ..Mark::from(Annot::clone(annot))
             };
-            AnnotBody::Mark(Arc::new(holding(mark, store, src, *held)))
+            AnnotBody::Mark(Arc::new(holding(mark, store, held.map(at))))
         }
         FileBody::Foreign { summary, .. } => AnnotBody::Foreign(Arc::new(Foreign {
             src: object,
@@ -2619,23 +2669,20 @@ fn record_of(store: &Store, a: &FileAnnot, src: &Src, copy: u32) -> (AnnotId, An
     (a.id(), body)
 }
 
-/// `mark`, read from `src`, where it holds `held` (see [`FileBody::Mark`]),
-/// with what that is: its page stamp's form, or its attachment's file
-/// decoded into `store`. A file that can't be read is said, and the mark
-/// holds none.
-fn holding(mut mark: Mark, store: &Store, src: &Src, held: Option<ObjectId>) -> Mark {
+/// `mark`, read from a source where it holds `held` (see
+/// [`FileBody::Mark`]), with what that is: its page stamp's form, or its
+/// attachment's file decoded into `store`. A file that can't be read is
+/// said, and the mark holds none.
+fn holding(mut mark: Mark, store: &Store, held: Option<ObjRef>) -> Mark {
     let Some(object) = held else {
         return mark;
     };
     match &mark.annot.kind {
         AnnotKind::PageStamp { .. } => {
-            mark.stamp = Some(FormRef::Base(ObjRef {
-                src: src.clone(),
-                id: object,
-            }));
+            mark.stamp = Some(FormRef::Base(object));
         }
         AnnotKind::FileAttachment { name, size, .. } => {
-            mark.file = file_in(store, src, object, *size)
+            mark.file = file_in(store, &object, *size)
                 .inspect_err(|e| log::warn!("attachment {name}: {e:#}"))
                 .ok();
         }
@@ -2668,8 +2715,8 @@ pub(crate) fn find_file(store: &Store, primary: &Src, stem: &str, size: u64) -> 
         return Some(file.into());
     }
     parsed(store, primary).find_map(|src| {
-        let stream = src.annots().file(stem)?;
-        let file = file_in(store, &src, stream, size);
+        let id = src.annots().file(stem)?;
+        let file = file_in(store, &ObjRef { src, id }, size);
         file.inspect_err(|e| log::warn!("attachment {stem}: {e:#}"))
             .ok()
     })
@@ -2683,13 +2730,14 @@ fn parsed(store: &Store, primary: &Src) -> impl Iterator<Item = Src> {
     std::iter::once(primary.clone()).chain(others)
 }
 
-/// Embedded file `stream` of `src`, which an attachment mark saying its
-/// file is `size` bytes holds, decoded into `store`.
-pub(crate) fn file_in(store: &Store, src: &Src, stream: ObjectId, size: u64) -> Result<BlobRef> {
+/// Embedded file `stream`, which an attachment mark saying its file is
+/// `size` bytes holds, decoded into `store`.
+pub(crate) fn file_in(store: &Store, stream: &ObjRef, size: u64) -> Result<BlobRef> {
     use crate::content::ReadObjects;
-    let bytes = src
+    let bytes = stream
+        .src
         .pdf()
-        .read(stream, |o| match o {
+        .read(stream.id, |o| match o {
             lopdf::Object::Stream(s) => crate::attachments::mark_file_bytes(s, size),
             _ => bail!("the embedded file isn't a stream"),
         })
@@ -2740,6 +2788,7 @@ pub(crate) mod history_tests;
 mod tests {
     use std::path::PathBuf;
 
+    use lopdf::ObjectId;
     use sheaf_edit::{
         AnnotRef, BookmarkPatch, BookmarkRef, HeaderFooterSpec, LabelStyle, Local, Op, PageRef,
         PageSel, Patch, Sibling, Turn,
@@ -4492,7 +4541,7 @@ mod tests {
 
         let written = &d.state().marks_on(page).next().unwrap();
         let mut pdf = lopdf::Document::with_version("1.7");
-        let main = crate::annot::to_pdf(written, &mut pdf).main;
+        let main = crate::serialize::built::to_pdf(written, &mut pdf).main;
         let utf16: Vec<u8> = [0xFE, 0xFF]
             .into_iter()
             .chain(text.encode_utf16().flat_map(u16::to_be_bytes))

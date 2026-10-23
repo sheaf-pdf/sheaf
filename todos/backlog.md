@@ -353,6 +353,65 @@ phase; they're triaged between phases.
   private data as print without markup does (Scrub), or an `AsDocument`
   keep writes its generators' blocks as plain content.
 
+(B14–B18 are on the M5 branch, `m5-intake`, found by M5 slice 1.)
+
+### B19: A bookmark selection isn't tracked, so a re-lowered edit can land on other pages
+
+- **Found:** 2026-10-23, M10.5 slice 20
+- **Where:** `PageSel::Bookmark`'s resolve (`crates/sheaf-doc/src/tx/`),
+  which records only `Key::Order`, not the outline `bookmark_span` reads
+- **Severity:** wrong output
+- **What happens:** an edit that selects pages by a bookmark, re-lowered
+  (`Stale::Relower`) after another edit moved that bookmark, resolves to
+  the bookmark's new span with no conflict. Only a transaction that was
+  handed out conflicts, and its Conflict names no edit. Decision reads
+  of a bookmark selection have the same gap.
+- **Expected:** a move of the bookmark (or of the next one, which ends
+  its span) between the read and the commit conflicts, as other stale
+  reads do.
+- **Repro:** a plugin's edit on `{"bookmark": "Schedule C"}` while the
+  user drags that bookmark to another page; the call ends and
+  re-lowers.
+- **Notes:** record the outline keys the span reads (the bookmark and
+  its next sibling at each level).
+
+### B20: A plugin's region events wait forever after a window closes mid-call
+
+- **Found:** 2026-10-23, M10.5 slice 20 (pre-existing)
+- **Where:** the app's plugin call queue (`crates/sheaf-app/src/plugins.rs`),
+  the `regions` key
+- **Severity:** annoyance (a stuck plugin)
+- **What happens:** if a region call is in flight when its window
+  closes, `ws.update_in` fails and the plugin's `regions` key stays
+  busy, so its later region events in every window never run. Changes
+  are keyed per view and aren't affected.
+- **Expected:** a closed window ends its calls and frees the key.
+- **Repro:** a plugin that handles regions slowly; select a region,
+  close the window before it returns, then select a region in another
+  window.
+
+### B21: `layers::LayerId` is a lopdf `ObjectId` under another name
+
+- **Found:** 2026-10-23, M10.5 slice 20
+- **Where:** `crates/sheaf-doc/src/layers.rs` (`pub type LayerId =
+  ObjectId`), used by `ViewInputs::off` and the app's layers panel
+- **Severity:** annoyance (a design leak)
+- **What happens:** an optional content layer is named by its file
+  object id outside the `ObjectId` allowlist. `tests/object_ids.rs`
+  can't see through the alias.
+- **Expected:** a layer id of sheaf's own, as pages and marks have, or
+  an `ObjRef`.
+- **Notes:** also make the grep test catch type aliases of `ObjectId`.
+
+### B22: `FlatOutlineItem` derives Serialize and Deserialize that nothing uses
+
+- **Found:** 2026-10-23, M10.5 slice 20 (pre-existing)
+- **Where:** `crates/sheaf-doc/src/open/outline.rs`
+- **Severity:** annoyance (dead code)
+- **What happens:** the derives have no serializer anywhere in the
+  workspace, and they pin the type's shape for no reader.
+- **Expected:** drop them, or say who reads it.
+
 ## Features
 
 ### F1: Basic calculator

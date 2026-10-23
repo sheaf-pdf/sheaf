@@ -87,13 +87,14 @@ use super::copy::{Closure, Pages, Scope};
 use super::key::{NameTree, ObjKey};
 use super::plan::{Note, Private, SaveTransform, Unheld};
 use super::record::{DrawnBlocks, SaveRecord};
-use crate::annot::{Annot, AnnotId, StampForm};
+use crate::annot::{Annot, AnnotId};
 use crate::content::sink::{self, Sink};
 use crate::content::{GenId, Res, ResBody, Reserved};
 use crate::forms::field::annot_flags;
 use crate::model::{AnnotBody, DocState, FormRef, PageId};
 use crate::realize::{MarkDraw, ViewInputs};
-use crate::source::ObjRef;
+use crate::serialize::built::StampForm;
+use crate::source::{ObjRef, PageObj};
 use crate::store::{BlobId, Src};
 
 /// The generation a placeholder reference carries. No object in use has
@@ -877,19 +878,18 @@ pub(crate) fn shown(st: &DocState) -> HashMap<PageId, Shown> {
 }
 
 /// The page of `st` each source page's copy is written as, shown as
-/// `shown` says, by the source's blob, the page's object and the copy: the
-/// first in order that shows it. What a reference to a source's page from
-/// that source's objects is written as ([`Closure`]).
+/// `shown` says, by the source page and the copy: the first in order that
+/// shows it. What a reference to a source's page from that source's
+/// objects is written as ([`Closure`]).
 pub(crate) fn written_pages(
     st: &DocState,
     shown: &HashMap<PageId, Shown>,
-) -> BTreeMap<(BlobId, ObjectId, u32), PageId> {
+) -> BTreeMap<(PageObj, u32), PageId> {
     let mut pages = BTreeMap::new();
     for (id, _, _) in st.pages() {
         let page = &shown[&id];
-        if let Some(facts) = page.src.page(page.index) {
-            let at = (page.src.id(), facts.id, page.copy);
-            pages.entry(at).or_insert(id);
+        if let Some(at) = page.src.page_obj(page.index) {
+            pages.entry((at, page.copy)).or_insert(id);
         }
     }
     pages

@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
-use sheaf_plugin_api::types::{AnnotKind, Box2, Edit, PageAnnot, Rgb};
-use sheaf_plugin_api::{Batch, FormBuilder, Plugin, document, http, storage, text, ui};
+use sheaf_plugin_api::sheaf_edit::{Box2, MarkKind, Style};
+use sheaf_plugin_api::types::{AnnotKind, AnnotView};
+use sheaf_plugin_api::{FormBuilder, Ops, Plugin, document, http, ops, storage, text, ui};
 
 /// What the ECB publishes reference rates for (Frankfurter's list).
 pub const CURRENCIES: &[&str] = &[
@@ -216,6 +217,7 @@ pub struct Found {
     pub currency: &'static str,
     pub value: f64,
     pub text: String,
+    /// In PageSpace, as its text was found.
     pub rects: Vec<Box2>,
 }
 
@@ -245,11 +247,7 @@ fn overlaps(a: &Box2, b: &Box2) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-const GREEN: Rgb = Rgb {
-    r: 120,
-    g: 220,
-    b: 140,
-};
+const GREEN: [u8; 3] = [120, 220, 140];
 
 fn run() -> Result<(), String> {
     let pages = document::pages();
@@ -292,14 +290,19 @@ fn run() -> Result<(), String> {
         // Highlights this plugin already left for the target currency.
         let done: Vec<Box2> = document::annotations(page.id)
             .into_iter()
+            .filter_map(|v| match v {
+                AnnotView::Mark(an) => Some(an),
+                AnnotView::Comment(_) => None,
+            })
             .filter(|an| an.contents.starts_with(&format!("≈ {target} ")))
             .filter_map(|an| match an.kind {
-                AnnotKind::Highlight(r) => r.first().copied(),
+                AnnotKind::Highlight(r) => r.first().map(|&r| r.into()),
                 _ => None,
             })
             .collect();
         for m in text::pattern_search(page.id, &pattern)? {
-            let Some(f) = found_from(page.id, &m.text, &m.groups, m.rects.clone()) else {
+            let rects = m.rects.iter().map(|&r| r.into()).collect();
+            let Some(f) = found_from(page.id, &m.text, &m.groups, rects) else {
                 continue;
             };
             if f.currency == target || f.rects.iter().any(|r| done.iter().any(|d| overlaps(r, d))) {
@@ -320,28 +323,29 @@ fn run() -> Result<(), String> {
         }
     }
     let n = found.len();
-    let mut batch = Batch::new(format!(
-        "Convert {n} amount{} to {target}",
-        if n == 1 { "" } else { "s" }
-    ));
+    let mut marks = Ops::new();
     for f in &found {
         let r = &rates[f.currency];
-        let mut annot = sheaf_plugin_api::annot(AnnotKind::Highlight(f.rects.clone()));
-        annot.color = GREEN;
-        annot.opacity = 0.5;
-        annot.contents = format!(
+        let page = (pages.iter().find(|p| p.id == f.page)).expect("a page scanned");
+        let note = format!(
             "≈ {} ({} × {}, ECB {})",
             format_money(f.value * r.rate, target),
             format_money(f.value, f.currency),
             r.rate,
             r.date
         );
-        batch = batch.push(Edit::AnnotAdd(PageAnnot {
-            page: f.page,
-            annot,
-        }));
+        let style = Style {
+            opacity: 0.5,
+            ..ops::style(GREEN)
+        };
+        let rects = f.rects.clone();
+        marks = marks.mark(page, MarkKind::Highlight { rects }, style, &note);
     }
-    batch.submit();
+    let label = format!(
+        "Convert {n} amount{} to {target}",
+        if n == 1 { "" } else { "s" }
+    );
+    marks.submit(&label).map_err(|f| f.message)?;
     // The converted values are in the highlights' notes.
     ui::show_panel("comments");
     let dates: Vec<&str> = {

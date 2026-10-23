@@ -14,7 +14,8 @@ use super::fixture as fx;
 use super::*;
 use crate::annot::{AnnotKind, Box2, Pt};
 use crate::history::FixedCount;
-use crate::model::{Document, FlatOutlineItem};
+use crate::model::Document;
+use crate::open::FlatOutlineItem;
 use crate::store::{BlobKind, Store};
 
 /// A document of `n` blank pages, in a store of its own, with `outline`.
@@ -846,6 +847,129 @@ fn a_plugin_never_learns_who_the_user_is() {
     assert_eq!(mine.author, "Someone");
     assert_eq!(mine.contents, format!("Pat Smith PS {year}"));
     assert_eq!(mine.created, mine.modified, "made now");
+}
+
+/// A plugin learns who the user is only when the user granted it
+/// `identity`, which only a plugin's published transaction carries
+/// (proposal 20): one bound by `lower_cx`, or published without the
+/// grant, keeps `<<name>>` and `<<initials>>` as written. Its marks are by
+/// its id either way.
+#[test]
+fn only_a_plugin_granted_identity_learns_who_the_user_is() {
+    let mut d = doc_of(1, &[]);
+    d.set_identity(Identity {
+        person: "Pat Smith".into(),
+        initials: "PS".into(),
+        date_format: "%Y".into(),
+        time_format: "%H".into(),
+    });
+    let note_by = |d: &mut Document, mut tx: Tx| {
+        let add = Op::AddMark {
+            page: PageRef::Pos(1),
+            mark: note("<<name>> <<initials>>"),
+            reply_to: None,
+            local: None,
+            imported: None,
+        };
+        tx.apply(add, &NoProgress).unwrap();
+        let c = d.commit(tx, CommitOpts::default()).unwrap();
+        let id = c.created.annots().next().unwrap();
+        let mark = d.state().annot(id).unwrap().mark().unwrap().clone();
+        (mark.author, mark.contents)
+    };
+    assert!(!d.lower_cx(plugin()).identity, "never from lower_cx");
+    let bound = d.tx(plugin());
+    let literal = ("tax".to_string(), "<<name>> <<initials>>".to_string());
+    assert_eq!(note_by(&mut d, bound), literal);
+    let ungranted = d.published().plugin_tx("tax".into(), "1.0".into(), false);
+    assert_eq!(note_by(&mut d, ungranted), literal);
+    let granted = d.published().plugin_tx("tax".into(), "1.0".into(), true);
+    let named = ("tax".to_string(), "Pat Smith PS".to_string());
+    assert_eq!(note_by(&mut d, granted), named);
+}
+
+/// A plugin's published transaction is on the version and state a
+/// transaction of its own made now would be, and lowers as a plugin.
+#[test]
+fn a_published_plugin_tx_is_on_the_current_version() {
+    let mut d = doc_of(2, &[]);
+    d.commit_ops(
+        vec![fx::rotate(&[d.page(0).unwrap()], Turn::Quarter)],
+        "Rotate",
+    )
+    .unwrap();
+    let published = d.published();
+    let tx = published.plugin_tx("tax".into(), "1.0".into(), false);
+    let own = d.tx(plugin());
+    assert_eq!((tx.instance, tx.base), (own.instance, own.base));
+    assert_eq!(tx.base, d.current_version());
+    assert_eq!(tx.state(), own.state());
+    assert_eq!(tx.actor(), &plugin());
+    assert_eq!(published.snap.version, d.current_version());
+}
+
+/// A preview of ops says what applying them would, and leaves the
+/// transaction as it was: its state, its steps, its locals and what it
+/// made. Applied, they say the same, but for the ids the preview drew.
+#[test]
+fn a_batch_preview_leaves_the_transaction_as_it_was() {
+    let d = doc_of(2, &[]);
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let mut tx = d.tx(plugin());
+    tx.apply(fx::rotate(&[p0], Turn::Quarter), &NoProgress)
+        .unwrap();
+    let (state, before) = (tx.state().clone(), tx.preview());
+    let add = |local| Op::AddMark {
+        page: PageRef::Id(p1),
+        mark: note("Tie out"),
+        reply_to: None,
+        local: Some(Local(local)),
+        imported: None,
+    };
+    let delete_first = Op::DeletePages {
+        pages: PageSel::Positions("1".parse().unwrap()),
+    };
+    let previewed = tx
+        .preview_batch(
+            vec![add(1), fx::duplicate(&[p1]), delete_first.clone()],
+            &NoProgress,
+        )
+        .unwrap();
+    let lines: Vec<&str> = previewed.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(
+        lines,
+        [
+            "Add a sticky note on page 2",
+            "Duplicate page 2",
+            "Delete page 1"
+        ]
+    );
+    assert_eq!(previewed.caps, [Cap::Plugin; 3]);
+    assert_eq!(previewed.created.ops.len(), 3);
+    assert_eq!(previewed.created.locals.len(), 1);
+    assert_eq!(tx.state(), &state);
+    let after = tx.preview();
+    assert_eq!((after.lines, after.created), (before.lines, before.created));
+    // A local the preview gave names nothing, and is free to give again.
+    let applied = tx.apply_said(vec![add(1)], &NoProgress).unwrap();
+    assert_eq!(
+        applied.created.locals.keys().collect::<Vec<_>>(),
+        [&Local(1)]
+    );
+    assert_eq!(applied.caps, [Cap::Plugin]);
+    let previewed =
+        sheaf_edit::Previewed::from(tx.preview_batch(vec![delete_first], &NoProgress).unwrap());
+    assert!(previewed.removes && previewed.created == [Vec::<Made>::new()]);
+    // What a submit is answered, and a failure.
+    let answer = sheaf_edit::Applied::from(applied);
+    assert_eq!(answer.lines, ["Add a sticky note on page 2"]);
+    assert_eq!(answer.created.len(), 1);
+    let e = tx
+        .preview_batch(vec![fx::delete(&[PageId(99)])], &NoProgress)
+        .unwrap_err();
+    let failure = sheaf_edit::Failure::from(&e);
+    assert_eq!(failure.kind, sheaf_edit::FailureKind::NotFound);
+    assert_eq!(failure.message, e.to_string());
 }
 
 /// A header's `<<file>>` is the name of the file that holds the document
