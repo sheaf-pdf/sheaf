@@ -96,6 +96,7 @@ an image element does not inherit the parent element's color.
 | [bottom-dock](bottom-dock/icon.svg) | Bottom dock | `ToggleBottomDock` |
 | [recognize-text](recognize-text/icon.svg) | Recognize text (OCR) | `RecognizeText` |
 | [cancel-ocr](cancel-ocr/icon.svg) | Cancel OCR | `CancelOcr` |
+| [remove-recognized-text](remove-recognized-text/icon.svg) | Remove recognized text | `RemoveRecognizedText` |
 | [manage-plugins](manage-plugins/icon.svg) | Manage plugins | `ManagePlugins` |
 | [combine-files](combine-files/icon.svg) | Combine files | `CombineFiles` |
 | [split-document](split-document/icon.svg) | Split document | `SplitDocument` |

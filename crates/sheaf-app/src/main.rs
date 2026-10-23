@@ -43,6 +43,7 @@ mod layers_panel;
 mod markup_tools;
 mod measure_tools;
 mod menus;
+mod ocr_clear;
 mod ocr_dialog;
 mod ocr_run;
 mod outline_panel;
@@ -135,6 +136,7 @@ actions!(
         ImportComments,
         ExtractPages,
         CancelOcr,
+        RemoveRecognizedText,
         SinglePage,
         SinglePageContinuous,
         TwoUp,

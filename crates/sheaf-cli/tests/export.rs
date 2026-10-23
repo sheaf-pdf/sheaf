@@ -132,6 +132,38 @@ fn bad_arguments_fail_with_2() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Another tool's comment whose appearance has states and none named
+/// exports as the page view shows it, drawn through the print flatten:
+/// its `/V`'s state, else its `/Off`, else nothing, never its first
+/// (sheaf-render's `the_page_view_shows_a_comment_s_value_s_state_or_its_off`
+/// pins what PDFium shows of the same file).
+#[test]
+fn a_comment_with_states_exports_as_the_page_view_shows_it() {
+    let dir = scratch("stated");
+    let (bytes, shows) = sheaf_doc::forms::fixture::stated_squares();
+    let pdf = dir.join("stated.pdf");
+    std::fs::write(&pdf, bytes).unwrap();
+    let out = dir.join("out");
+    let (p, o) = (pdf.to_str().unwrap(), out.to_str().unwrap());
+    let run = sheaf(&["export", p, "-o", o, "--dpi", "72", "-q"]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let png = image::open(out.join("stated_Page_1.png"))
+        .unwrap()
+        .to_rgb8();
+    assert_eq!(png.dimensions(), (612, 792));
+    for (i, stated) in shows.into_iter().enumerate() {
+        let [x0, y0, x1, y1] = stated.rect;
+        let (x, y) = ((x0 + x1) / 2.0, 792.0 - (y0 + y1) / 2.0);
+        let drawn = png.get_pixel(x as u32, y as u32).0;
+        assert_eq!(drawn, stated.shows.unwrap_or([255; 3]), "row {i}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// PNG width and height from the IHDR chunk.
 fn image_size(path: &Path) -> (u32, u32) {
     let b = std::fs::read(path).unwrap();

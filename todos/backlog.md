@@ -207,59 +207,6 @@ phase; they're triaged between phases.
   - a file written with `sheaf … --signatures break` asks again on its
     next edit (`append_anyway: true`, "… removed since the last save").
 
-### B6: sheaf-app's clippy fails without default features
-
-- **Found:** 2026-10-22, M10.5 slice 18 (pre-existing)
-- **Where:** `crates/sheaf-app/src/contrib.rs:158`,
-  `Contributions::add_panel`
-- **Severity:** annoyance (build)
-- **What happens:** `cargo clippy -p sheaf-app --all-targets
-  --no-default-features -- -D warnings` fails: `add_panel` is dead
-  without the `plugins` feature.
-- **Expected:** clean, or the configuration isn't supported.
-- **Repro:** the command above.
-- **Notes:** no CI configuration builds it. Gate the fn on the feature,
-  or decide the no-plugins build isn't supported and say so.
-
-### B7: Clear OCR text silently does nothing on a damaged old layer
-
-- **Found:** 2026-10-22, M10.5 slice 18
-- **Where:** `ClearOcrText`'s lowering (`crates/sheaf-doc/src/tx/`), the
-  legacy `/SheafOcrLayer` selector (`StreamSel::SheafOcr`)
-- **Severity:** annoyance
-- **What happens:** an older sheaf's OCR layer is a `q` plus a
-  `/SheafOcrLayer` stream. If another tool lost the `q` (no pair, no
-  block), a Clear adds no filter: it changes nothing and says nothing.
-- **Expected:** a Note that the old layer stays, as other kept artifacts
-  get ("… stays on page 3: taking it out would change what else the
-  page draws").
-- **Repro:** a page whose only legacy OCR stream has no leading `q`;
-  ClearOcrText; save.
-- **Notes:** taking it out without the `q` isn't safe (`3 Tr` would
-  leak), so keeping it is right; only the silence is wrong.
-
-### B8: The comment summary PDF has no title, producer or creation date
-
-- **Found:** 2026-10-22, Claude, during M10.5 slice 19 (step 5, the
-  summary as a Session)
-- **Where:** sheaf-ops `comments::summary`, the CLI's `sheaf comments
-  summary` and the app's Comments panel
-- **Severity:** annoyance
-- **What happens:** the summary is now a Session made with `new_empty`
-  plus an insert of the `Memory(Summary)` blob. A session's output takes
-  its `/Info` from its primary, which is the empty document, and no op
-  sets document info. So the saved summary has no `/Title`, `/Producer`
-  or `/CreationDate`.
-- **Expected:** as before slice 19: `/Title` is the summary's title,
-  `/Producer` is sheaf, `/CreationDate` is when it was made. A viewer's
-  title bar and Properties show them.
-- **Repro:** `sheaf comments summary in.pdf -o out.pdf`, then
-  `qpdf --show-object=trailer out.pdf` (or Properties): no `/Info`
-  entries.
-- **Notes:** Greg: "log it" (2026-10-22). The fix is an op (or a Session
-  option) that sets document info, which a Properties editor would also
-  want. Until then the summary could set it on its `new_empty` primary.
-
 ### B9: A radio group keeps its value when its chosen button's page is removed
 
 - **Found:** 2026-10-22, M10.5 slice 19's export corpus tier
@@ -314,45 +261,6 @@ phase; they're triaged between phases.
 - **Notes:** M5's scanner intake (ROADMAP) reworks this path; do it
   there.
 
-### B12: Flatten draws a comment's first appearance state when it has no `/AS`
-
-- **Found:** 2026-10-22, M10.5 slice 19 (step 2, `FlattenAnnotations`)
-  (pre-existing: the old flatten did the same)
-- **Where:** `FlattenAnnotations`' choice of appearance for a
-  non-widget (`crates/sheaf-doc/src/tx/flatten.rs`)
-- **Severity:** wrong output
-- **What happens:** a comment (not a widget) whose `/AP /N` has states
-  and no `/AS` is flattened with its first state. PDFium shows nothing
-  for it (it falls back to `/V`, then `/Off`), so flattening draws what
-  no viewer showed.
-- **Expected:** flatten draws what the viewer showed, nothing here.
-  Widgets already have no first-state fallback.
-- **Repro:** a Square annotation with `/AP << /N << /A … /B … >> >>` and
-  no `/AS`; Export Flattened.
-- **Notes:** rare in the wild; check pdf.js and Acrobat agree with PDFium
-  before changing it.
-
-### B13: A print file with markup renumbers its header when reopened in sheaf
-
-- **Found:** 2026-10-23, M10.5 slice 19's wrap-up (the print numbering
-  fix)
-- **Where:** `Export::print` with markup (`crates/sheaf-doc/src/export.rs`),
-  which keeps sheaf's private data (`Private::Keep`)
-- **Severity:** wrong output
-- **What happens:** printing pages 5–6 of 10 with markup writes "Page 5
-  of 10", but the file keeps the header live in `/SheafGenerators`. Open
-  the print preview's Save as PDF output in sheaf and the header is
-  numbered against that file's own pages, "Page 1 of 2", and a save of
-  it writes that. Other viewers show "Page 5 of 10". Print without
-  markup writes the header as plain content, so it stays.
-- **Expected:** the file reads "Page 5 of 10" in sheaf too.
-- **Repro:** a 10-page document with a "Page <<1>> of <<N>>" header;
-  print preview of pages 5–6 with markup, Save as PDF; open it in sheaf.
-- **Notes:** before the fix the print file said "Page 1 of 2"
-  everywhere. Candidate fixes: print with markup leaves out sheaf's
-  private data as print without markup does (Scrub), or an `AsDocument`
-  keep writes its generators' blocks as plain content.
-
 (B14–B18 are on the M5 branch, `m5-intake`, found by M5 slice 1.)
 
 ### B19: A bookmark selection isn't tracked, so a re-lowered edit can land on other pages
@@ -390,27 +298,23 @@ phase; they're triaged between phases.
   close the window before it returns, then select a region in another
   window.
 
-### B21: `layers::LayerId` is a lopdf `ObjectId` under another name
+### B30: Images to PDF and scan outputs have no /Producer or /CreationDate
 
-- **Found:** 2026-10-23, M10.5 slice 20
-- **Where:** `crates/sheaf-doc/src/layers.rs` (`pub type LayerId =
-  ObjectId`), used by `ViewInputs::off` and the app's layers panel
-- **Severity:** annoyance (a design leak)
-- **What happens:** an optional content layer is named by its file
-  object id outside the `ObjectId` allowlist. `tests/object_ids.rs`
-  can't see through the alias.
-- **Expected:** a layer id of sheaf's own, as pages and marks have, or
-  an `ObjRef`.
-- **Notes:** also make the grep test catch type aliases of `ObjectId`.
-
-### B22: `FlatOutlineItem` derives Serialize and Deserialize that nothing uses
-
-- **Found:** 2026-10-23, M10.5 slice 20 (pre-existing)
-- **Where:** `crates/sheaf-doc/src/open/outline.rs`
-- **Severity:** annoyance (dead code)
-- **What happens:** the derives have no serializer anywhere in the
-  workspace, and they pin the type's shape for no reader.
-- **Expected:** drop them, or say who reads it.
+- **Found:** 2026-10-23, the backlog-fixes PR (beside B8)
+- **Where:** sheaf-ops `images.rs` and `scan.rs`, whose sessions start
+  from `Session::new_empty`; File > Create > From Images and From Scans,
+  `sheaf images-to-pdf` and `sheaf scan`
+- **Severity:** annoyance
+- **What happens:** the output takes its `/Info` from its empty primary,
+  which has none, so it has no `/Producer` or `/CreationDate`. Combine
+  keeps its first file's `/Info`, which is right.
+- **Expected:** `/Producer` sheaf and `/CreationDate` when it was made, as
+  the comment summary has again (B8).
+- **Repro:** `sheaf images-to-pdf a.png -o out.pdf`, then
+  `qpdf --show-object=trailer out.pdf`: `<< /Root 3 0 R /Size 7 >>`.
+- **Notes:** M5's intake rework (`m5-intake`) owns scan; leave scan.rs to
+  it. B8's `Session::new_titled`, an empty primary with an `/Info`, is
+  the likely fix. (B24–B29 are on another branch.)
 
 ### B23: A fuzz test's wall-clock budget fails when the machine is busy
 
@@ -662,20 +566,6 @@ phase; they're triaged between phases.
   - **Overlay or always shown:** follow the platform's auto-hide setting.
   - **Later, maybe:** marks on the track for search hits, bookmarks or
     comments, like an editor's overview ruler.
-
-### F8: A command to remove recognized text
-
-- **Found:** 2026-10-22, M10.5 slice 18
-- **What:** an app command (and a CLI form) that runs `ClearOcrText`
-  on the selected pages or all pages, with the usual Notes.
-- **Why:** slice 18 made saved OCR layers removable (bug 14), but only
-  tests, the API and fuzz call `ClearOcrText`. A user who wants a bad
-  OCR layer gone can only re-OCR over it.
-- **Overlap:** the OCR dialog (`crates/sheaf-app/src/ocr_*`); M10.5
-  slice 19's `sheaf edit` takes any op as JSON, so the CLI form may come
-  free.
-- **Notes:** small: a command and a confirmation. The op, its Notes
-  and the Rewrite it plans exist.
 
 ### F9: Test against pdf-corpus's signatures/ and conformance/ collections
 
@@ -1024,6 +914,231 @@ phase; they're triaged between phases.
 - **Notes:** M9 slice 13 chose the memory order without PDFlyer's table
   to hand (`todos/m9.md`).
 
+### B6: sheaf-app's clippy fails without default features
+
+- **Closed:** 2026-10-23. Fixed in the backlog-fixes PR:
+  `Contributions::add_panel` is built only with the `plugins` feature,
+  as only a plugin's manifest declares a panel. `cargo clippy -p
+  sheaf-app --all-targets --no-default-features -- -D warnings` is clean;
+  still no CI job builds it.
+- **Found:** 2026-10-22, M10.5 slice 18 (pre-existing)
+- **Where:** `crates/sheaf-app/src/contrib.rs:158`,
+  `Contributions::add_panel`
+- **Severity:** annoyance (build)
+- **What happens:** `cargo clippy -p sheaf-app --all-targets
+  --no-default-features -- -D warnings` fails: `add_panel` is dead
+  without the `plugins` feature.
+- **Expected:** clean, or the configuration isn't supported.
+- **Repro:** the command above.
+- **Notes:** no CI configuration builds it. Gate the fn on the feature,
+  or decide the no-plugins build isn't supported and say so.
+
+### B7: Clear OCR text silently does nothing on a damaged old layer
+
+- **Closed:** 2026-10-23. Fixed in the backlog-fixes PR:
+  `PageBlocks::legacy_ocr_stays` says a layer stream is outside the
+  pair. On a page with nothing else to take out, a Clear (or a Set)
+  adds no filter, changes nothing, and the commit says the layer stays
+  (`Notice::OcrStays`, the save's Note's words); a page with text taken
+  out keeps the save's Note, so neither says it twice. Tests:
+  `a_lone_legacy_layer_without_its_q_stays_and_says_so`
+  (materialize/ocr_tests.rs) and, through the app's command (F8),
+  `removing_recognized_text_says_what_stays`.
+- **Found:** 2026-10-22, M10.5 slice 18
+- **Where:** `ClearOcrText`'s lowering (`crates/sheaf-doc/src/tx/`), the
+  legacy `/SheafOcrLayer` selector (`StreamSel::SheafOcr`)
+- **Severity:** annoyance
+- **What happens:** an older sheaf's OCR layer is a `q` plus a
+  `/SheafOcrLayer` stream. If another tool lost the `q` (no pair, no
+  block), a Clear adds no filter: it changes nothing and says nothing.
+- **Expected:** a Note that the old layer stays, as other kept artifacts
+  get ("… stays on page 3: taking it out would change what else the
+  page draws").
+- **Repro:** a page whose only legacy OCR stream has no leading `q`;
+  ClearOcrText; save.
+- **Notes:** taking it out without the `q` isn't safe (`3 Tr` would
+  leak), so keeping it is right; only the silence is wrong.
+
+### B8: The comment summary PDF has no title, producer or creation date
+
+- **Closed:** 2026-10-23. Fixed in the backlog-fixes PR: the summary's
+  primary is `memory::titled`'s (`Session::new_titled`), a PDF of no
+  pages whose `/Info` has the title, `/Producer` sheaf and
+  `/CreationDate`, which a save keeps. No op sets document info: that's
+  for the Properties editor's op (Pending) to design. Test: sheaf-cli's
+  `the_summary_has_its_title_producer_and_date` (`-o`, both layouts).
+- **Found:** 2026-10-22, Claude, during M10.5 slice 19 (step 5, the
+  summary as a Session)
+- **Where:** sheaf-ops `comments::summary`, the CLI's `sheaf comments
+  summary` and the app's Comments panel
+- **Severity:** annoyance
+- **What happens:** the summary is now a Session made with `new_empty`
+  plus an insert of the `Memory(Summary)` blob. A session's output takes
+  its `/Info` from its primary, which is the empty document, and no op
+  sets document info. So the saved summary has no `/Title`, `/Producer`
+  or `/CreationDate`.
+- **Expected:** as before slice 19: `/Title` is the summary's title,
+  `/Producer` is sheaf, `/CreationDate` is when it was made. A viewer's
+  title bar and Properties show them.
+- **Repro:** `sheaf comments summary in.pdf -o out.pdf`, then
+  `qpdf --show-object=trailer out.pdf` (or Properties): no `/Info`
+  entries.
+- **Notes:** Greg: "log it" (2026-10-22). The fix is an op (or a Session
+  option) that sets document info, which a Properties editor would also
+  want. Until then the summary could set it on its `new_empty` primary.
+
+### B12: Flatten draws a comment's first appearance state when it has no `/AS`
+
+- **Closed:** 2026-10-23. Fixed in the backlog-fixes PR: a non-widget
+  annotation whose `/AP /N` has states draws what PDFium shows, the page
+  view's engine: `/AS`'s state, else the one `/V` (or its parent's)
+  names, else `/Off`, else nothing; never its first, and nothing made of
+  its border or fill. A name or a string names a state. Widgets keep
+  their rule (M10 bug 10). It's one choice (`source::appearance`'s
+  `Shows::form`), so Export Flattened, print with markup, print preview
+  and page images all follow it. pdf.js differs where the two disagree:
+  it never takes `/V` or `/Off`, and for a Square, Circle, Ink, the text
+  markups and FreeText with a border or a fill it draws an appearance of
+  its own. Tests: `a_comment_with_states_draws_the_one_pdfium_shows`
+  (materialize/flatten_tests.rs: states and no `/AS`, with a border, with
+  a fill, an `/Off`, a `/V`, a parent's `/V`, a `/V` naming none, an
+  `/AS` naming none, a string `/AS`), `flatten_takes_what_shows_and_leaves_the_rest`
+  and `printable_leaves_what_isnt_printed` (their comment draws its
+  `/Off`), sheaf-cli's `a_comment_with_states_exports_as_the_page_view_shows_it`,
+  and sheaf-render's `the_page_view_shows_a_comment_s_value_s_state_or_its_off`,
+  which pins what PDFium shows of the same file.
+- **Found:** 2026-10-22, M10.5 slice 19 (step 2, `FlattenAnnotations`)
+  (pre-existing: the old flatten did the same)
+- **Where:** `FlattenAnnotations`' choice of appearance for a
+  non-widget (`crates/sheaf-doc/src/tx/flatten.rs`)
+- **Severity:** wrong output
+- **What happens:** a comment (not a widget) whose `/AP /N` has states
+  and no `/AS` is flattened with its first state. PDFium shows nothing
+  for it (it falls back to `/V`, then `/Off`), so flattening draws what
+  no viewer showed.
+- **Expected:** flatten draws what the viewer showed, nothing here.
+  Widgets already have no first-state fallback.
+- **Repro:** a Square annotation with `/AP << /N << /A … /B … >> >>` and
+  no `/AS`; Export Flattened.
+- **Notes:** rare in the wild; check pdf.js and Acrobat agree with PDFium
+  before changing it.
+  - **Checked (2026-10-23, the backlog-fixes PR):** pdf.js and PDFium
+    agree on nothing for the repro, but not on the cases beside it.
+    Neither ever draws the first state.
+    - **pdf.js** (6.4.299, `Annotation.setAppearance` in
+      src/core/annotation.js): with `/N` a dictionary and no `/AS` name,
+      no appearance at all, never `/V` or `/Off`. Square, Circle, Line,
+      Polygon, Ink, the text markups and FreeText then draw one pdf.js
+      makes from `/Rect`, `/C`, `/IC` and the border, if the border has
+      width or there's a fill; a Stamp draws nothing.
+    - **PDFium** (sheaf's, the page view's engine): `/AS`, else `/V` (the
+      annotation's or its parent's), else `/Off`; nothing when that
+      state isn't there, and no appearance of its own while `/AP /N` is.
+    - **Hand-made files** (one Square, states A and B, no `/AS`): both
+      draw nothing; with `/BS /W 4` or an `/IC`, PDFium nothing and
+      pdf.js its own square; with states A and `/Off` instead, PDFium
+      draws Off and pdf.js nothing (its own square with a border). A
+      Circle is the Square's case; a Stamp draws nothing in both.
+    - **Acrobat:** not found in its docs. ISO 32000-1 12.5.5 requires
+      `/AS` when `/AP` has subdictionaries, so such a file isn't
+      conforming.
+    - **Not only Export Flattened:** print with markup, print preview
+      and Export Pages' images draw through the same flatten
+      (`FlattenSet::Printable`), so they show the first state where the
+      page view shows nothing (`sheaf export` drew state A on the repro).
+    - **The choice:** PDFium's, what the page view shows (the
+      coordinator, under Greg's standing instruction to take the
+      recommended answer), over drawing nothing as pdf.js does but for
+      its own appearances.
+
+### B13: A print file with markup renumbers its header when reopened in sheaf
+
+- **Closed:** 2026-10-23. Fixed in the backlog-fixes PR: print with
+  markup leaves sheaf's private data out as print without markup does
+  (`RemovePrivateData`, `Private::Scrub`), so what sheaf drew is plain
+  content and nothing in the file is live. Chosen over writing an
+  `AsDocument` keep's generator blocks as plain content: one rule for
+  both kinds of print, through what's already there, and a print file
+  has no use for the rest of sheaf's private data either (its marks are
+  drawn into its pages). Test:
+  `a_print_file_opened_again_says_the_document_s_numbers`
+  (materialize/header_tests.rs: pages 5–6 of 10, of a document saved
+  and not, the file and a save of it reopened say "Page 5 of 10").
+- **Found:** 2026-10-23, M10.5 slice 19's wrap-up (the print numbering
+  fix)
+- **Where:** `Export::print` with markup (`crates/sheaf-doc/src/export.rs`),
+  which keeps sheaf's private data (`Private::Keep`)
+- **Severity:** wrong output
+- **What happens:** printing pages 5–6 of 10 with markup writes "Page 5
+  of 10", but the file keeps the header live in `/SheafGenerators`. Open
+  the print preview's Save as PDF output in sheaf and the header is
+  numbered against that file's own pages, "Page 1 of 2", and a save of
+  it writes that. Other viewers show "Page 5 of 10". Print without
+  markup writes the header as plain content, so it stays.
+- **Expected:** the file reads "Page 5 of 10" in sheaf too.
+- **Repro:** a 10-page document with a "Page <<1>> of <<N>>" header;
+  print preview of pages 5–6 with markup, Save as PDF; open it in sheaf.
+- **Notes:** before the fix the print file said "Page 1 of 2"
+  everywhere. Candidate fixes: print with markup leaves out sheaf's
+  private data as print without markup does (Scrub), or an `AsDocument`
+  keep writes its generators' blocks as plain content.
+
+### B21: `layers::LayerId` is a lopdf `ObjectId` under another name
+
+- **Closed:** 2026-10-23. Fixed in the backlog-fixes PR: `LayerId` is
+  sheaf's own, a type over the group's object that only layers.rs reads
+  (not an `ObjRef`: the facts are read from a `&Source`, with no `Src`
+  to hold, and the view's override is keyed by source already).
+  `tests/object_ids.rs` sees through a type alias that names `ObjectId`,
+  or names such an alias, and catches a path through one; its probe
+  `an_alias_of_an_object_id_is_seen_through` tests that. With the alias
+  back, `only_a_source_s_readers_and_writers_name_an_object_id` fails
+  on realize/mod.rs and realize/inputs.rs.
+- **Found:** 2026-10-23, M10.5 slice 20
+- **Where:** `crates/sheaf-doc/src/layers.rs` (`pub type LayerId =
+  ObjectId`), used by `ViewInputs::off` and the app's layers panel
+- **Severity:** annoyance (a design leak)
+- **What happens:** an optional content layer is named by its file
+  object id outside the `ObjectId` allowlist. `tests/object_ids.rs`
+  can't see through the alias.
+- **Expected:** a layer id of sheaf's own, as pages and marks have, or
+  an `ObjRef`.
+- **Notes:** also make the grep test catch type aliases of `ObjectId`.
+
+### B22: `FlatOutlineItem` derives Serialize and Deserialize that nothing uses
+
+- **Closed:** 2026-10-23. Fixed in the backlog-fixes PR: the derives
+  and their `serde` attributes are gone; nothing read or wrote it.
+- **Found:** 2026-10-23, M10.5 slice 20 (pre-existing)
+- **Where:** `crates/sheaf-doc/src/open/outline.rs`
+- **Severity:** annoyance (dead code)
+- **What happens:** the derives have no serializer anywhere in the
+  workspace, and they pin the type's shape for no reader.
+- **Expected:** drop them, or say who reads it.
+
+### F8: A command to remove recognized text
+
+- **Closed:** 2026-10-23. Done in the backlog-fixes PR: Document >
+  Remove Recognized Text… (`docview::RemoveRecognizedText`,
+  `ocr_clear.rs`) asks whether the selected pages or every page, then
+  runs `ClearOcrText` as a planner, one undo step, the notice its line,
+  what stays (B7), or that there was none. The command line's form is
+  `sheaf edit`'s `clear-ocr-text`, which README now says. Tests:
+  `removing_recognized_text_is_one_undo_step`,
+  `removing_recognized_text_says_what_stays` and
+  `it_asks_about_the_selected_pages_or_every_page`.
+- **Found:** 2026-10-22, M10.5 slice 18
+- **What:** an app command (and a CLI form) that runs `ClearOcrText`
+  on the selected pages or all pages, with the usual Notes.
+- **Why:** slice 18 made saved OCR layers removable (bug 14), but only
+  tests, the API and fuzz call `ClearOcrText`. A user who wants a bad
+  OCR layer gone can only re-OCR over it.
+- **Overlap:** the OCR dialog (`crates/sheaf-app/src/ocr_*`); M10.5
+  slice 19's `sheaf edit` takes any op as JSON, so the CLI form may come
+  free.
+- **Notes:** small: a command and a confirmation. The op, its Notes
+  and the Rewrite it plans exist.
+
 ## Sources checked
 
 Outside material already compared against sheaf, so the comparison isn't
@@ -1062,3 +1177,6 @@ done twice.
   and an Adobe forum
   [question asking for this](https://community.adobe.com/t5/acrobat/make-clickable-hyperlinks-from-qr-or-zappar-codes-in-pdf-how/m-p/9981646)
   has no answer. It produced F16.
+- **2026-10-23: an appearance with states and no `/AS`.** pdf.js's
+  `src/core/annotation.js` (6.4.299) and PDFium, on hand-made files, and
+  Acrobat's documentation, which doesn't say. It's in B12's notes.

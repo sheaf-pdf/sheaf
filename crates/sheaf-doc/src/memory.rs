@@ -9,7 +9,7 @@
 //! [`Memory`]: crate::store::Origin::Memory
 
 use anyhow::{Context as _, Result, bail};
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_edit::{Fit, PageSize};
 
 use crate::store::{BlobKind, MemoryKind, Src, Store};
@@ -20,11 +20,12 @@ pub fn blank_pages(width: f32, height: f32, count: u32) -> Result<Vec<u8>> {
     if count == 0 {
         bail!("no blank pages to make");
     }
-    pages_pdf(width, height, count)
+    pages_pdf(width, height, count, None)
 }
 
-/// `count` blank pages, none at all when it's 0.
-fn pages_pdf(width: f32, height: f32, count: u32) -> Result<Vec<u8>> {
+/// `count` blank pages, none at all when it's 0, with `info` as the
+/// trailer's `/Info` when there is one.
+fn pages_pdf(width: f32, height: f32, count: u32, info: Option<Dictionary>) -> Result<Vec<u8>> {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
@@ -46,6 +47,10 @@ fn pages_pdf(width: f32, height: f32, count: u32) -> Result<Vec<u8>> {
     );
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
+    if let Some(info) = info {
+        let info = pdf.add_object(info);
+        pdf.trailer.set("Info", info);
+    }
     crate::serialize::full::write_built(&pdf)
 }
 
@@ -60,7 +65,21 @@ pub fn blank(store: &Store, size: PageSize, count: u32) -> Result<Src> {
 /// made in memory starts from (sheaf-ops' `Session::new_empty`), its
 /// pages all inserted, a [`MemoryKind::Blank`] source.
 pub fn empty(store: &Store) -> Result<Src> {
-    let pdf = pages_pdf(0.0, 0.0, 0)?;
+    let pdf = pages_pdf(0.0, 0.0, 0, None)?;
+    Ok(store.open(pdf.into(), BlobKind::memory(MemoryKind::Blank))?)
+}
+
+/// [`empty`], its `/Info` saying it's `title`, that sheaf made it, and
+/// when: what a document sheaf makes whole (the comment summary) starts
+/// from, since a save keeps its primary's `/Info`. Made at a new time
+/// each time, so not the same bytes twice.
+pub fn titled(store: &Store, title: &str) -> Result<Src> {
+    let info = dictionary! {
+        "Title" => crate::save::text_string(title),
+        "Producer" => Object::string_literal("sheaf"),
+        "CreationDate" => Object::string_literal(crate::annot::pdf_date_now()),
+    };
+    let pdf = pages_pdf(0.0, 0.0, 0, Some(info))?;
     Ok(store.open(pdf.into(), BlobKind::memory(MemoryKind::Blank))?)
 }
 

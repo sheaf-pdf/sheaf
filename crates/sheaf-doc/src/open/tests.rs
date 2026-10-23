@@ -14,6 +14,7 @@ use crate::file::ForeignAnnot;
 use crate::forms::corpus::{Corpus, Entry, each_entry};
 use crate::forms::fixture::{Form, every_fact, note, outline_tree};
 use crate::labels::Style;
+use crate::layers::LayerId;
 use crate::materialize::rewrite_tests::annots_read;
 use crate::materialize::{Came, How, ObjKey};
 use crate::model::{DocState, Invariant, Mark, PageId};
@@ -881,9 +882,9 @@ fn a_tree_that_lists_itself_is_read_once() {
     let names: Vec<&str> = facts.attachments.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, ["a.txt"]);
     assert_eq!(facts.labels.map(|l| l.len()), Some(1));
-    let layers: Vec<(Option<ObjectId>, u16)> =
+    let layers: Vec<(Option<LayerId>, u16)> =
         facts.layers.iter().map(|l| (l.id, l.depth)).collect();
-    assert_eq!(layers, [(Some(ocg), 0)]);
+    assert_eq!(layers, [(Some(LayerId::new(ocg)), 0)]);
     let folders = crate::portfolio::folder_paths(src.pdf());
     assert_eq!(
         folders,

@@ -470,6 +470,12 @@ pub fn info(id: &str) -> Option<Info> {
             "Stop text recognition. Pages already recognized keep their text.",
             &["ocr", "stop"],
         ),
+        "docview::RemoveRecognizedText" => (
+            "remove-recognized-text",
+            "Take the text OCR recognized off the selected pages, or every page. What the \
+             pages draw stays.",
+            &["ocr", "clear", "delete", "text layer"],
+        ),
         "docview::NewBookmark" => (
             "bookmark",
             "Bookmark the current page.",

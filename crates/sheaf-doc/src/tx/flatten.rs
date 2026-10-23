@@ -13,7 +13,9 @@
 //! stays, nor a pop-up, which goes with what opens it. A widget draws the
 //! appearance its state (`/AS`) names, and one with states and none named
 //! draws nothing (M10 bug 10); another tool's comment with none named draws
-//! its first. One whose appearance can't be had draws nothing. Each goes as
+//! what PDFium, the page view's engine, shows: the state its `/V` names,
+//! else its `/Off`, else nothing, never its first. One whose appearance
+//! can't be had draws nothing. Each goes as
 //! a delete takes it: a mark or a comment with its thread, a widget from its
 //! field, which goes with its last (the cascades). A page a flatten draws
 //! on must be read, its content drawn around ([`EditError::Content`]).

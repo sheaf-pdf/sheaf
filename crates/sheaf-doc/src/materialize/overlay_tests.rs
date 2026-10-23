@@ -17,6 +17,7 @@ use super::key::{ObjKey, Part};
 use super::tests::{add, bytes, file, insert, open};
 use crate::annot::AnnotId;
 use crate::forms::fixture::{Form, every_kind_in, note};
+use crate::layers::LayerId;
 use crate::model::history_tests::{with_ours, with_theirs};
 use crate::model::visits;
 use crate::model::{AnnotBody, AnnotRec, DocState, Document, Mark, PageId};
@@ -792,7 +793,7 @@ fn layered() -> (Vec<u8>, [ObjectId; 3]) {
 fn the_ocg_patch_turns_the_layer_off_in_the_default_config() {
     let (bytes, [grid, notes, orphan]) = layered();
     let src = crate::forms::fixture::source(bytes.clone());
-    let off = BTreeSet::from([grid, orphan]);
+    let off = BTreeSet::from([grid, orphan].map(LayerId::new));
     let patch = crate::layers::ocg_patch(&src, &off).unwrap();
     let patched = patch
         .as_dict()
@@ -819,12 +820,13 @@ fn the_ocg_patch_turns_the_layer_off_in_the_default_config() {
     pdf.get_dictionary_mut(root)
         .unwrap()
         .set("OCProperties", patch.clone());
-    let on: BTreeMap<ObjectId, bool> = (crate::layers::layers_in(&pdf).into_iter())
+    let on: BTreeMap<LayerId, bool> = (crate::layers::layers_in(&pdf).into_iter())
         .filter_map(|l| Some((l.id?, l.on)))
         .collect();
+    let id = LayerId::new;
     assert_eq!(
         on,
-        BTreeMap::from([(grid, false), (notes, true), (orphan, false)])
+        BTreeMap::from([(id(grid), false), (id(notes), true), (id(orphan), false)])
     );
     assert_eq!(crate::layers::ocg_patch(&file_source(), &off), None);
 

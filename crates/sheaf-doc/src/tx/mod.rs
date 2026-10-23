@@ -1248,13 +1248,7 @@ fn lower_op(lw: &mut Lower, op: &mut ResolvedOp) -> Result<(), EditError> {
         }
         R::AdoptAnnotations { annots } => marks::adopt(lw, annots),
         R::SetOcrText { page, layer } => content::set_ocr(lw, *page, layer),
-        R::ClearOcrText { pages } => {
-            for (i, &page) in pages.iter().enumerate() {
-                lw.pages_done(i, pages.len())?;
-                content::clear_ocr(lw, page)?;
-            }
-            Ok(())
-        }
+        R::ClearOcrText { pages } => content::clear_ocr(lw, pages),
         R::SetWatermark {
             content: drawn,
             position,

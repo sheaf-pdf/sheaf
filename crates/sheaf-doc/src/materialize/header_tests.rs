@@ -382,6 +382,41 @@ fn a_print_numbers_its_pages_as_the_document_does_and_an_extract_as_it_has_them(
     }
 }
 
+/// A print of pages 5 and 6 of 10 with markup, opened in sheaf, reads as
+/// it printed, "Page 5 of 10", and so does a save of it: a print keeps
+/// none of sheaf's private data, so its header isn't live there, to be
+/// numbered against the print file's own two pages. Each of a document
+/// not saved and of one saved and opened again.
+#[test]
+fn a_print_file_opened_again_says_the_document_s_numbers() {
+    use crate::export::Export;
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, "a.pdf", &text_file(10));
+    let mut spec = fx::header("");
+    spec.texts[4] = "Page <<1>> of <<N>>".into();
+    doc.commit_ops(vec![fx::set_header(spec, None)], "header")
+        .unwrap();
+    How::Rewritten.save(&mut doc, &path);
+    let (_, again) = opened(&dir, "b.pdf", &std::fs::read(&path).unwrap());
+    for (d, which) in [(&doc, "not saved"), (&again, "saved")] {
+        let kept = [d.page(4).unwrap(), d.page(5).unwrap()];
+        let printed = d.export_bytes(|f, _| Export::print(f, &kept, true));
+        let (_, print) = opened(&dir, "print.pdf", &printed);
+        let live = print.state().generators().len();
+        assert_eq!(live, 0, "{which}: the print file's header is live");
+        let saved = How::Rewritten.write(&print);
+        for (bytes, what) in [(printed, "the print file"), (saved, "its save")] {
+            let pdf = Pdf::load_mem(&bytes).unwrap();
+            let texts: Vec<String> = pages(&pdf).into_iter().map(|p| drawn(&pdf, p)).collect();
+            assert_eq!(texts.len(), 2, "{which}, {what}");
+            for (n, text) in [5, 6].into_iter().zip(&texts) {
+                let want = format!("(Page {n} of 10) Tj");
+                assert!(text.contains(&want), "{which}, {what}: {want}: {text}");
+            }
+        }
+    }
+}
+
 /// A label change that makes a `<<label>>` header draw what its face
 /// can't says so, and the header draws `?` for it: saving still works.
 /// Both ways.

@@ -155,6 +155,8 @@ impl Contributions {
         self.panels.retain(|p| p.plugin != plugin);
     }
 
+    /// Only a plugin's manifest declares a panel, and no test adds one.
+    #[cfg(feature = "plugins")]
     pub fn add_panel(&mut self, panel: PluginPanel) {
         if !self.panels.iter().any(|p| p.id == panel.id) {
             self.panels.push(panel);

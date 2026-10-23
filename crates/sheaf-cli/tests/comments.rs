@@ -135,6 +135,33 @@ fn writes_the_summary_beside_the_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The summary says what it is, in either layout: its `/Info` gives its
+/// title, sheaf as its producer, and when it was made.
+#[test]
+fn the_summary_has_its_title_producer_and_date() {
+    let dir = scratch("summary-info");
+    let pdf = pdf(&dir);
+    for layout in ["comments", "pages"] {
+        let out = dir.join(format!("{layout}.pdf"));
+        let before = sheaf_doc::pdf_date_now();
+        let (p, o) = (pdf.to_str().unwrap(), out.to_str().unwrap());
+        ok(&sheaf(&["comments", "summary", p, "-l", layout, "-o", o]));
+        let after = sheaf_doc::pdf_date_now();
+        let written = Pdf::load(&out).unwrap();
+        let info = written.trailer.get(b"Info").unwrap().as_reference();
+        let info = written.get_dictionary(info.unwrap()).unwrap();
+        let text = |key: &[u8]| {
+            let s = info.get(key).and_then(Object::as_str);
+            String::from_utf8_lossy(s.unwrap()).into_owned()
+        };
+        assert_eq!(text(b"Title"), "review.pdf", "{layout}");
+        assert_eq!(text(b"Producer"), "sheaf", "{layout}");
+        let made = text(b"CreationDate");
+        assert!(before <= made && made <= after, "{layout}: {made}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Two blank pages.
 fn blank(dir: &Path) -> PathBuf {
     let mut pdf = Pdf::with_version("1.5");

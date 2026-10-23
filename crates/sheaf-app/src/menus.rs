@@ -271,6 +271,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 sep(),
                 item("Recognize &Text (OCR)…", RecognizeText),
                 item("Cancel OC&R", CancelOcr),
+                item("Re&move Recognized Text…", RemoveRecognizedText),
                 sep(),
                 item("New &Bookmark", NewBookmark),
                 item("Bookmarks from &Pages…", BookmarksFromPages),

@@ -695,7 +695,9 @@ fn a_legacy_layer_without_its_q_stays() {
     let dir = scratch();
     let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
     let p0 = doc.page(0).unwrap();
-    doc.commit_ops(vec![fx::clear_ocr(&[p0])], "clear").unwrap();
+    let commit = doc.commit_ops(vec![fx::clear_ocr(&[p0])], "clear").unwrap();
+    // The save says it, not the commit as well.
+    assert_eq!(commit.notices, []);
     let report = save_with(
         &mut doc,
         &path,
@@ -715,6 +717,51 @@ fn a_legacy_layer_without_its_q_stays() {
     assert_eq!(stream(&pdf, streams[0]).1, saved::BASE);
     assert_eq!(stream(&pdf, streams[1]).1, saved::LEGACY_LAYER);
     assert_eq!(depth(&pdf, page).1, Balance::default());
+}
+
+/// An older sheaf's layer whose `q` another tool lost, the only text of
+/// its kind on the page: a Clear can't take it out, so it changes nothing,
+/// and says the layer stays, as a save says of one beside text it takes
+/// out. Recognizing the page again says so too. A save writes it as it
+/// was.
+#[test]
+fn a_lone_legacy_layer_without_its_q_stays_and_says_so() {
+    let mut pdf = saved::legacy_page();
+    let id = pdf.get_pages()[&1];
+    let [_, base, layer] = crate::content::contents(pdf.get_dictionary(id).unwrap())[..] else {
+        panic!("the legacy page draws three streams")
+    };
+    let entries: Vec<Object> = [base, layer].map(Object::Reference).into();
+    pdf.get_dictionary_mut(id).unwrap().set("Contents", entries);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
+    let p0 = doc.page(0).unwrap();
+    let stays = "Recognized text sheaf wrote earlier stays on page 1: taking it out would change \
+                 what else the page draws";
+    let commit = doc.commit_ops(vec![fx::clear_ocr(&[p0])], "clear").unwrap();
+    assert_eq!(commit.version, None, "nothing changed");
+    assert_eq!(crate::notice_text(&commit.notices).as_deref(), Some(stays));
+    let set = fx::ocr([(p0, ocr_layer("again"))]);
+    let commit = doc.commit_ops(set, "ocr").unwrap();
+    assert!(commit.version.is_some());
+    assert_eq!(crate::notice_text(&commit.notices).as_deref(), Some(stays));
+    doc.undo().unwrap();
+    save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
+    let pdf = Pdf::load(&path).unwrap();
+    let page = pages(&pdf)[0];
+    let streams = contents(&pdf, page);
+    assert_eq!(streams.len(), 2);
+    assert_eq!(stream(&pdf, streams[0]).1, saved::BASE);
+    assert_eq!(stream(&pdf, streams[1]).1, saved::LEGACY_LAYER);
 }
 
 /// What each of page `page`'s streams of `pdf` is, by its marker:

@@ -91,6 +91,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "recognize-text",
     "rectangle",
     "redo",
+    "remove-recognized-text",
     "replace-pages",
     "right-dock",
     "rotate-left",
