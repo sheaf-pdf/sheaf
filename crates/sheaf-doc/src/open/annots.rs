@@ -36,7 +36,8 @@ pub struct FileAnnots {
 }
 
 /// The page stamps' page forms and the attachments' embedded files a
-/// source's marks hold, by stem: where two marks name one, the first's, in
+/// source's marks hold, and the forms other tools' stamps are, which the
+/// marks made of them hold, by stem: where two name one, the first's, in
 /// page order and then `/Annots` order.
 #[derive(Debug, Default)]
 struct Held {
@@ -115,7 +116,8 @@ impl FileAnnots {
         })
     }
 
-    /// The page form a page stamp naming `stem` draws.
+    /// The page form a page stamp naming `stem` draws: a mark's, or
+    /// another tool's stamp's that a mark is made of.
     pub fn stamp(&self, stem: &str) -> Option<ObjectId> {
         self.held().stamps.get(stem).copied()
     }
@@ -131,19 +133,23 @@ impl FileAnnots {
             let mut order: Vec<u32> = self.pages.keys().copied().collect();
             order.sort_unstable();
             for a in order.into_iter().flat_map(|index| self.on(index)) {
-                let FileBody::Mark {
-                    annot,
-                    held: Some(object),
-                } = &a.body
-                else {
-                    continue;
+                let (annot, object) = match &a.body {
+                    FileBody::Mark {
+                        annot,
+                        held: Some(object),
+                    } => (&**annot, *object),
+                    FileBody::Foreign { summary, .. } => match (&summary.mark, summary.stamp) {
+                        (Some(mark), Some(form)) => (&**mark, form),
+                        _ => continue,
+                    },
+                    FileBody::Mark { held: None, .. } => continue,
                 };
                 let (by_stem, stem) = match &annot.kind {
                     AnnotKind::PageStamp { stamp, .. } => (&mut held.stamps, stamp),
                     AnnotKind::FileAttachment { file, .. } => (&mut held.files, file),
                     _ => continue,
                 };
-                by_stem.entry(stem.clone()).or_insert(*object);
+                by_stem.entry(stem.clone()).or_insert(object);
             }
             held
         })

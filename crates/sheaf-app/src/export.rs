@@ -137,11 +137,11 @@ impl crate::docview::DocView {
         let crate::docview::State::Ready(doc) = &self.state else {
             return;
         };
-        let snapshot = doc.model.snapshot();
+        let from = doc.model.export_from(sheaf_doc::Actor::User);
         let dir = job.dir.clone();
         self.run_job(
             "Export",
-            move |p| run(&snapshot, &job, p),
+            move |p| run(&from, &job, p),
             |s| Some(format!("Exporting page {} of {}…", s.done, s.total?)),
             move |files| {
                 format!(

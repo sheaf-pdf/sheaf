@@ -9,10 +9,11 @@ use crate::measure::{Measured, Scale};
 use crate::tape::{self, Line, Row, Tape, TapeLook};
 use crate::{
     Anchor, AnnotId, AnnotRef, BatesSpec, BlobId, BlobSel, BookmarkPatch, BookmarkRef, Box2,
-    BoxSpec, Bring, Delta, DestView, FontChoice, FormBring, GridPos, HeaderFooterSpec, Imported,
-    LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, OcrWord, Op, OutlineBring, OutlineId,
-    PageId, PageLabelRange, PageRef, PageSel, PageSource, Patch, Pt, RangeSet, Rotation, ScopeSel,
-    Sibling, Style, TextLayer, TextStyle, Turn, Vec2, WatermarkContent, WatermarkSpec, Z,
+    BoxSpec, Bring, Delta, DestView, Fit, FlattenSet, FontChoice, FormBring, GridPos,
+    HeaderFooterSpec, Imported, LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, OcrWord,
+    Op, OutlineBring, OutlineId, PageId, PageLabelRange, PageRef, PageSel, PageSize, PageSource,
+    Patch, Pt, RangeSet, Rotation, ScopeSel, Sibling, Style, TextLayer, TextStyle, Turn, Vec2,
+    WatermarkContent, WatermarkSpec, Z,
 };
 
 fn r(x: f32, y: f32, w: f32, h: f32) -> Box2 {
@@ -258,6 +259,42 @@ pub fn every_op() -> Vec<Op> {
             before: None,
             bring: Bring::default(),
             locals: vec![],
+        },
+        Op::InsertPages {
+            from: PageSource::Blank {
+                size: PageSize {
+                    width: 612.0,
+                    height: 792.0,
+                },
+                count: 2,
+            },
+            pages: None,
+            before: Some(PageRef::Pos(1)),
+            bring: Bring::default(),
+            locals: vec![],
+        },
+        Op::InsertPages {
+            from: PageSource::Images {
+                images: vec![BlobSel::With("photo".into()), BlobSel::Asset(1)],
+                fit: Fit::Paper {
+                    width: 595.28,
+                    height: 841.89,
+                    margin: 36.0,
+                },
+            },
+            pages: Some(pos("2")),
+            before: None,
+            bring: Bring::default(),
+            locals: vec![Local(6)],
+        },
+        Op::ReplacePages {
+            pages: vec![PageRef::Pos(1)],
+            from: PageSource::Images {
+                images: vec![BlobSel::Id(blob())],
+                fit: Fit::Original,
+            },
+            with: None,
+            bring: Bring::default(),
         },
         Op::ReplacePages {
             pages: vec![PageRef::Pos(2), PageRef::Pos(3)],
@@ -539,6 +576,14 @@ pub fn every_op() -> Vec<Op> {
         Op::RemoveHeaderFooter {
             pages: PageSel::All,
             include_authored: true,
+        },
+        Op::FlattenAnnotations {
+            pages: PageSel::All,
+            which: FlattenSet::All,
+        },
+        Op::FlattenAnnotations {
+            pages: PageSel::Positions(pos("2-3")),
+            which: FlattenSet::Printable,
         },
     ];
     ops.extend(kinds().into_iter().map(|kind| Op::AddMark {

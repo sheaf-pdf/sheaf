@@ -1,13 +1,16 @@
 //! Export pages to image or text files (File > Export Pages, `sheaf
-//! export`). The pages go through the same file printing makes (`sheaf_doc::save::print_pdf`), so sheaf's own
-//! marks come out as they look, then PDFium renders each at the chosen
-//! resolution.
+//! export`). The pages go through the same file printing makes
+//! (`sheaf_doc::export::printed`), so sheaf's own marks come out as they
+//! look, then PDFium renders each at the chosen resolution, and each file
+//! is written durably.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use in_progress::Progress;
-use sheaf_doc::{PAGES, PageId, Snapshot};
+use sheaf_doc::export::ExportFrom;
+use sheaf_doc::serialize::durable;
+use sheaf_doc::{PAGES, PageId};
 use sheaf_edit::Rotation;
 use sheaf_image::encode::{TiffPage, TiffWriter};
 use sheaf_image::raster::{PixelFormat, Raster};
@@ -71,15 +74,19 @@ pub fn file_name(stem: &str, n: usize, of: usize, ext: &str) -> String {
     format!("{stem}_Page_{n:0width$}.{ext}")
 }
 
-/// Run an export on this thread, one page at a time. A cancel stops it
-/// with `Cancelled` before the next page; per-page files already written
-/// stay, a single-file export leaves nothing. Returns the files written.
-pub fn run(snapshot: &Snapshot, job: &ExportJob, progress: &dyn Progress) -> Result<Vec<PathBuf>> {
+/// Run an export of `from`'s version on this thread, one page at a time. A
+/// cancel stops it with `Cancelled` before the next page; per-page files
+/// already written stay, a single-file export leaves nothing. Returns the
+/// files written.
+pub fn run(from: &ExportFrom, job: &ExportJob, progress: &dyn Progress) -> Result<Vec<PathBuf>> {
     if job.pages.is_empty() {
         bail!("no pages to export");
     }
     progress.check()?;
-    let engine = flattened(snapshot, &job.pages, job.markup)?;
+    // Its pages and count are the rendering's: printing only stops.
+    let printing = progress.child("printing", 0.0);
+    let engine = flattened(from, &job.pages, job.markup, &*printing)?;
+    drop(printing);
     let n = engine.page_count() as usize;
     progress.set_total(Some(n as u64), PAGES);
     std::fs::create_dir_all(&job.dir).with_context(|| format!("creating {}", job.dir.display()))?;
@@ -101,16 +108,22 @@ pub fn run(snapshot: &Snapshot, job: &ExportJob, progress: &dyn Progress) -> Res
         let path = job
             .dir
             .join(file_name(&job.stem, i + 1, n, job.format.extension()));
-        std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
+        durable::write(&path, &bytes, None)?;
         written.push(path);
         progress.set(i as u64 + 1);
     }
     Ok(written)
 }
 
-/// The pages as they print, opened in PDFium.
-pub fn flattened(snapshot: &Snapshot, pages: &[PageId], markup: bool) -> Result<PdfiumEngine> {
-    let bytes = sheaf_doc::save::print_pdf(snapshot, pages, markup)?;
+/// `pages` of `from`'s version as they print, opened in PDFium, `p` saying
+/// when to stop.
+pub fn flattened(
+    from: &ExportFrom,
+    pages: &[PageId],
+    markup: bool,
+    p: &dyn Progress,
+) -> Result<PdfiumEngine> {
+    let bytes = sheaf_doc::export::printed(from.clone(), pages, markup, p)?;
     // From memory, so there's no temporary file for two exports at once
     // to share (one named by the clock could be, on macOS).
     PdfiumEngine::open_bytes(bytes.into(), None)
@@ -143,7 +156,7 @@ fn write_text(engine: &PdfiumEngine, n: usize, path: &Path, progress: &dyn Progr
         out.push_str(&page_text(&engine.page_text(PageIndex(i as u32))?));
         progress.set(i as u64 + 1);
     }
-    std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))
+    Ok(durable::write(path, out.as_bytes(), None)?)
 }
 
 /// One page's extracted text with `\n` line ends, no trailing spaces, and
@@ -290,7 +303,7 @@ mod tests {
         };
         let store = sheaf_doc::Store::new();
         let primary = sheaf_doc::store::blank(&store, 1);
-        let snapshot = sheaf_doc::Document::new(
+        let from = sheaf_doc::Document::new(
             store,
             primary,
             "none.pdf".into(),
@@ -298,10 +311,10 @@ mod tests {
             &[],
             sheaf_doc::history::default_policy(),
         )
-        .snapshot();
+        .export_from(sheaf_doc::Actor::User);
         let tracker = crate::Tracker::new();
         tracker.cancel();
-        let err = run(&snapshot, &job, &tracker).unwrap_err();
+        let err = run(&from, &job, &tracker).unwrap_err();
         assert!(err.is::<crate::Cancelled>() && crate::was_cancelled(&err));
         assert!(!dir.exists());
     }

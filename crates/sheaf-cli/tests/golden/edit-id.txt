@@ -1,0 +1,21 @@
+$ sheaf-cli edit $DIR/in.pdf --edits $DIR/edit-id.json -o $DIR/id.pdf
+--- edits
+{
+  "ops": [
+    {
+      "by": 90,
+      "op": "rotate-pages",
+      "pages": {
+        "ids": [
+          17
+        ]
+      }
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 1
+--- stdout
+--- stderr
+editing…
+error: rotate-pages: page 17 is named by id, and session ids aren't meaningful in a file: name it {"pos": n}

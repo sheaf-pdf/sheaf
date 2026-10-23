@@ -533,6 +533,11 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// Install a `.sheafplugin` file: a zip holding `sheaf-plugin.toml`,
 /// `plugin.wasm` and an `icons/` folder (at its root or in one folder).
 /// Returns the plugin's id.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the installer's archive folder holds no document content and is removed after the \
+              install"
+)]
 pub fn install_archive(path: &Path, cx: &mut App) -> Result<String> {
     let tmp = std::env::temp_dir().join(format!(
         "sheaf-plugin-install-{}-{}",
@@ -1600,7 +1605,7 @@ mod tests {
         let snap = d.snapshot();
         let whole = (0, 0, 612, 792);
         let ours = |page| source.render(&snap, page, 612, 792, whole).unwrap();
-        let saved = sheaf_doc::save::rewrite(&snap).unwrap();
+        let saved = sheaf_doc::save::rewrite(&d).unwrap();
         let engine = PdfiumEngine::open_bytes(saved.into(), None).unwrap();
         let theirs = |index, rotation| {
             let job = Job::Tile {

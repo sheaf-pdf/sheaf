@@ -265,6 +265,10 @@ pub struct PageBlocks {
     /// The streams marked `/SheafBlock << /K /Isolate >>`.
     pub isolation: Arc<[ObjectId]>,
     pub legacy_ocr: Option<LegacyOcr>,
+    /// Whether a stream of its content is marked as sheaf's
+    /// ([`STREAM_KEYS`](crate::private::STREAM_KEYS)): `/SheafBlock`, or an
+    /// older sheaf's `/SheafOcrLayer`, whatever else it says.
+    pub sheaf_marked: bool,
     pub balance: Balance,
     /// Whether a Form XObject the page draws outside its pagination
     /// artifacts has one inside: removing the page's leaves it in place.
@@ -432,6 +436,8 @@ impl PageBlocks {
             sheaf: sheaf.into(),
             isolation,
             legacy_ocr: legacy_ocr(content, &marks),
+            sheaf_marked: (content.dicts().iter())
+                .any(|d| (d.iter()).any(|(k, _)| crate::private::STREAM_KEYS.contains(&&k[..]))),
             balance,
             nested_in_forms,
         })
@@ -498,12 +504,12 @@ impl StreamMark {
 /// What sheaf marked a `/Contents` stream as, by its dictionary alone
 /// (§11.4): a generator's block, with the digests of its layout (`/L`) and
 /// of what it was drawn from (`/R`), each None when it isn't 16 bytes, and
-/// the page's Bates number (`/N`, decimal digits), when it has one; an OCR
-/// layer's block, by its layer's id (`/B`); or a stream that isolates the
-/// page's own content. What a source reads of a page's streams without
-/// decompressing them ([`Source::markers`]). The layer an older sheaf
-/// wrote, and a block of placements flattened, are none: the page's own
-/// content.
+/// the page's Bates number (`/N`, decimal digits), when it has one; a
+/// layer's block, of recognized text or of annotations a flatten drew, by
+/// its layer's id (`/B`); or a stream that isolates the page's own
+/// content. What a source reads of a page's streams without decompressing
+/// them ([`Source::markers`]). The layer an older sheaf wrote is none: the
+/// page's own content.
 ///
 /// [`Source::markers`]: crate::source::Source::markers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -515,6 +521,7 @@ pub enum Marker {
         number: Option<u64>,
     },
     Ocr(BlockId),
+    Flat(BlockId),
     Isolate,
 }
 
@@ -537,10 +544,9 @@ impl Marker {
                 })
             }
             StreamMark::Block(SheafBlock::Ocr(id)) => Some(Marker::Ocr(id)),
+            StreamMark::Block(SheafBlock::Flat(id)) => Some(Marker::Flat(id)),
             StreamMark::Isolate => Some(Marker::Isolate),
-            StreamMark::Plain | StreamMark::Block(SheafBlock::Flat(_)) | StreamMark::OcrLayer => {
-                None
-            }
+            StreamMark::Plain | StreamMark::OcrLayer => None,
         }
     }
 }

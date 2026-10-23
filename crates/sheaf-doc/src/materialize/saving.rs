@@ -1,7 +1,7 @@
 //! A save, start to end (M10.5 §9.1): the version sealed, the plan, its
-//! asks, the file written and checked, the record kept. [`save`] runs it
-//! on one thread, for the command line and tests, until slice 19's
-//! `Session::save`; the app runs [`write_file`] in the background between
+//! asks, the file written and checked, the record kept. [`save_with`] runs
+//! it on one thread, for the command line (sheaf-ops' `Session::save`) and
+//! tests; the app runs [`write_file`] in the background between
 //! [`Document::save_input`] and [`Document::record_save`], asking the
 //! reader what the plan asks in between.
 
@@ -76,26 +76,66 @@ impl Written {
     }
 }
 
-/// Save `doc`'s current version to `path`, the reader's answers to what
-/// the plan asks given as `answers`: sealed while it's written, its file
-/// checked as any output is, then the saved version, with the file's
-/// record. Nothing in the document changes but which version is saved:
-/// no version, state or source (M10.5 §9.1).
+/// How a save writes its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveHow {
+    /// As the plan decides ([`plan`]): an Append when one can follow the
+    /// file, onto a copy of it for Save As of a signed document, else a
+    /// Rewrite. The app's saves, and the command line's `--in-place`.
+    Planned,
+    /// A Rewrite, whatever the plan would decide
+    /// ([`forced_rewrite`](super::plan::forced_rewrite)), asking what a
+    /// Rewrite asks: the command line's `-o` (M10.5 proposal 40).
+    Rewrite,
+    /// An Append, onto the document's file or a copy of it at another
+    /// path, signed or not ([`appending`](super::plan::appending)), asking
+    /// what it asks: the command line's `-o … --append`, which keeps a
+    /// signed file's bytes and signatures. One that can't append stops,
+    /// with its ask when it has one (an Append anyway the signatures are
+    /// offered) and failing otherwise, saying why; a Rewrite stands in
+    /// for it only when the reader chose to break the signatures.
+    Append,
+}
+
+/// Save `doc`'s current version to `path` as `how` says, the reader's
+/// answers to what the plan asks given as `answers`: sealed while it's
+/// written, its file checked as any output is, then the saved version,
+/// with the file's record. Nothing in the document changes but which
+/// version is saved: no version, state or source (M10.5 §9.1).
 ///
 /// An ask `answers` doesn't answer stops it before anything is written
 /// ([`SaveStop::Ask`]), as does a file another program changed, found
 /// when it's planned or just before the rename. Whatever stops it leaves
 /// the version unsealed ([`Document::abandon_save`]).
-pub fn save(
+pub fn save_with(
     doc: &mut Document,
     path: &Path,
+    how: SaveHow,
     answers: &AskAnswers,
     p: &dyn Progress,
 ) -> Result<SaveReport, SaveStop> {
-    saved_as(doc, path, answers, Refusal::Rewrite, p, plan)
+    match how {
+        SaveHow::Planned => saved_as(doc, path, answers, Refusal::Rewrite, p, plan),
+        SaveHow::Rewrite => saved_as(
+            doc,
+            path,
+            answers,
+            Refusal::Rewrite,
+            p,
+            super::plan::forced_rewrite,
+        ),
+        SaveHow::Append => saved_as(
+            doc,
+            path,
+            answers,
+            Refusal::Chosen,
+            p,
+            super::plan::appending,
+        ),
+    }
 }
 
-/// [`save`] by an Append, whatever the plan would decide: onto the
+/// [`save_with`] by an Append, whatever the plan would decide: onto the
 /// document's file, or a copy of it at another `path` (`Onto::CopyOf`),
 /// as "Append anyway" saves (save policy's form transforms in the
 /// section, the removal check's finds reported), asking nothing. One that
@@ -131,7 +171,7 @@ pub fn save_appended(doc: &mut Document, path: &Path) -> Result<SaveReport, Save
     )
 }
 
-/// [`save`] by a Rewrite, whatever the plan would decide
+/// [`save_with`] by a Rewrite, whatever the plan would decide
 /// ([`forced_rewrite`](super::plan::forced_rewrite)), giving up signatures
 /// and an XFA part's values when it asks, but never a file another
 /// program changed. What the both-ways tests' Rewrite halves save with.
@@ -142,13 +182,12 @@ pub fn save_rewritten(doc: &mut Document, path: &Path) -> Result<SaveReport, Sav
         drop_xfa_values: true,
         ..Default::default()
     };
-    saved_as(
+    save_with(
         doc,
         path,
+        SaveHow::Rewrite,
         &answers,
-        Refusal::Rewrite,
         &in_progress::NoProgress,
-        super::plan::forced_rewrite,
     )
 }
 
@@ -203,7 +242,7 @@ impl How {
     /// nothing is written or recorded.
     pub fn write(self, doc: &Document) -> Vec<u8> {
         match self {
-            How::Rewritten => crate::save::rewrite(&doc.snapshot()).unwrap(),
+            How::Rewritten => crate::save::rewrite(doc).unwrap(),
             How::Appended => appended(doc).unwrap(),
         }
     }
@@ -247,19 +286,24 @@ macro_rules! both_ways {
     };
 }
 
-/// What a write does with an Append that can't follow the file
+/// What a write does in place of an Append that can't follow the file
 /// ([`append::Refused`](super::append::Refused)).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Refusal {
     /// It rewrites the file instead, asking first as a Rewrite does.
     Rewrite,
+    /// It rewrites the file only when the reader chose to, breaking
+    /// signatures that hold, and otherwise stops, saying why it can't
+    /// append: an Append asked for ([`SaveHow::Append`]), which a Rewrite
+    /// never silently replaces. Its plan, too, is an Append or stops so.
+    Chosen,
     /// It stops: a test's Append half, which must append.
     #[cfg(any(test, feature = "fixtures"))]
     Stop,
 }
 
-/// [`save`], its plan `planned`'s, an Append that can't follow the file
-/// as `refusal` says.
+/// [`save_with`], its plan `planned`'s, an Append that can't follow the
+/// file as `refusal` says.
 fn saved_as(
     doc: &mut Document,
     path: &Path,
@@ -341,9 +385,13 @@ fn write(
     refusal: Refusal,
     p: &dyn Progress,
 ) -> Result<Written, SaveStop> {
+    let mut chose = chose_rewrite(plan, answers);
     let plan = plan.answered(input, &target, answers);
     if let Some(ask) = unanswered(&plan, answers) {
         return Err(SaveStop::Ask(ask));
+    }
+    if refusal == Refusal::Chosen {
+        appends(&plan, chose)?;
     }
     if plan.strategy == Strategy::Unchanged {
         let saved =
@@ -376,10 +424,15 @@ fn write(
         Strategy::Append { .. } => {
             match super::append_onto_saved(input, &plan, &target, mode, p)? {
                 Ok(out) => (plan, out),
-                Err(refused) if refusal == Refusal::Rewrite => {
-                    let plan = fallback(input, &target, &refused).answered(input, &target, answers);
+                Err(refused) if matches!(refusal, Refusal::Rewrite | Refusal::Chosen) => {
+                    let plan = fallback(input, &target, &refused);
+                    chose |= chose_rewrite(&plan, answers);
+                    let plan = plan.answered(input, &target, answers);
                     if let Some(ask) = unanswered(&plan, answers) {
                         return Err(SaveStop::Ask(ask));
+                    }
+                    if refusal == Refusal::Chosen {
+                        appends(&plan, chose)?;
                     }
                     let out = super::materialize(input, &plan, target, p)?;
                     (plan, out)
@@ -439,6 +492,28 @@ fn write(
         wrote: true,
         strategy: plan.strategy,
     })
+}
+
+/// Whether `answers` choose a Rewrite of `plan`, which asks before it
+/// breaks signatures: they break them.
+fn chose_rewrite(plan: &SavePlan, answers: &AskAnswers) -> bool {
+    answers.break_signatures && (plan.asks.iter()).any(|ask| matches!(ask, Ask::Signatures { .. }))
+}
+
+/// For an Append asked for ([`Refusal::Chosen`]): `plan`, unless it's a
+/// Rewrite the reader didn't `chose` by breaking signatures, which stops
+/// the save, saying why it can't append.
+fn appends(plan: &SavePlan, chose: bool) -> Result<(), SaveStop> {
+    match &plan.strategy {
+        Strategy::Rewrite { why } if !chose => {
+            let why: Vec<String> = why.iter().map(Why::to_string).collect();
+            Err(SaveStop::Failed(format!(
+                "the save can't append: {}",
+                why.join("; ")
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// A save stopped by `e`, with its causes.

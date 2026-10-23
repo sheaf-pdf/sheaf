@@ -6,6 +6,7 @@ use anyhow::bail;
 use clap::Args;
 use sheaf_ops::combine::{CombineItem, CombineParams};
 
+use crate::decide::Decisions;
 use crate::images::PaperArg;
 
 #[derive(Args)]
@@ -31,6 +32,8 @@ pub struct CombineArgs {
     /// Replace the output if it's already there.
     #[arg(long)]
     force: bool,
+    #[command(flatten)]
+    decisions: Decisions,
 }
 
 pub fn run(args: CombineArgs, quiet: bool) -> anyhow::Result<()> {
@@ -60,8 +63,9 @@ pub fn run(args: CombineArgs, quiet: bool) -> anyhow::Result<()> {
         bookmark_each_file: !args.no_file_bookmarks,
         image_page: args.image_page.into(),
     };
-    let report = crate::progress::run("combining", quiet, |p| {
-        sheaf_ops::combine::combine(&items, &params, &args.output, p)
+    let answers = args.decisions.answers();
+    let (_, report) = crate::progress::run("combining", quiet, |p| {
+        sheaf_ops::combine::combine(&items, &params, &args.output, &answers, p)
     })?;
     if !quiet {
         eprintln!(

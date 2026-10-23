@@ -14,8 +14,8 @@ use lopdf::ObjectId;
 use sheaf_edit::{Rotation, Z};
 
 use super::{
-    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, GenId, Generator, Mark, OutlineId,
-    PageDef, PageId, Scope, Terminal, Widget,
+    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, FormRef, GenId, Generator, Mark,
+    OutlineId, PageDef, PageId, Scope, Static, Terminal, Widget,
 };
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::forms::{FieldId, full_name_of};
@@ -55,6 +55,12 @@ pub struct DocState {
     /// became of them since: whose blocks in its pages are its own
     /// ([`DocState::backs`]). Never changed by an edit.
     opened_generators: Arc<Opened>,
+    /// The version an export's pages are numbered in, when it keeps them
+    /// as that version numbers them (`PageNumbering::AsDocument`): what a
+    /// generator's page tokens read of a page it has
+    /// ([`DocState::numbered_in`]). None, a version's own and an
+    /// extract's: as this one numbers them. Never changed by an edit.
+    numbered_in: Option<Arc<DocState>>,
     /// Every node of the form's field tree: [`Key::Field`].
     fields: im::OrdMap<FieldId, Arc<FieldNode>>,
     /// The form as a whole: [`Key::Form`].
@@ -211,6 +217,7 @@ impl PartialEq for DocState {
             labels,
             generators,
             opened_generators,
+            numbered_in,
             fields,
             form,
             idx: _,
@@ -225,6 +232,7 @@ impl PartialEq for DocState {
             && *labels == other.labels
             && *generators == other.generators
             && *opened_generators == other.opened_generators
+            && *numbered_in == other.numbered_in
             && *fields == other.fields
             && *form == other.form
     }
@@ -366,6 +374,7 @@ impl DocState {
                 labels: None,
                 generators: im::OrdMap::new(),
                 opened_generators: Arc::default(),
+                numbered_in: None,
                 fields: im::OrdMap::new(),
                 form: Arc::default(),
                 idx: Indexes::default(),
@@ -556,6 +565,27 @@ impl DocState {
         &self.idx.laid
     }
 
+    /// The version whose numbering page `id`'s page tokens (`<<1>>`,
+    /// `<<N>>`, `<<label>>`) read, and the page's position there: for a
+    /// page of an export that keeps its pages as the version it keeps them
+    /// from numbers them ([`DocState::number_in`]), that version, or the
+    /// one it numbers its pages in in turn. None when this one numbers it:
+    /// a version's own page, an extract's, or a page the version an export
+    /// keeps them from hasn't got. O(1) once that version has found its
+    /// positions.
+    pub fn numbered_in(&self, id: PageId) -> Option<(&DocState, usize)> {
+        let from = self.numbered_in.as_deref()?;
+        (from.numbered_in(id)).or_else(|| Some((from, from.pos_of(id)?)))
+    }
+
+    /// Its pages numbered as `from` numbers them, where `from` has them
+    /// ([`DocState::numbered_in`]), or as it numbers them itself (None):
+    /// what an export's `KeepPages` leaves, `from` the version it kept them
+    /// from when they're numbered as the document numbers them.
+    pub(crate) fn number_in(&mut self, from: Option<DocState>) {
+        self.numbered_in = from.map(Arc::new);
+    }
+
     /// Page `id`'s label: its number when the document has no labels.
     /// O(1) once a state of this order and these labels has found one.
     pub fn label_of(&self, id: PageId) -> Option<Arc<str>> {
@@ -642,6 +672,8 @@ impl DocState {
             generators,
             // Read through `backs`.
             opened_generators: _,
+            // Read through `numbered_in`, as the positions are.
+            numbered_in: _,
             fields,
             form,
             idx: _,
@@ -1071,6 +1103,8 @@ impl DocState {
             labels,
             generators,
             opened_generators: _,
+            // Another version, its own invariants checked as it was made.
+            numbered_in: _,
             fields,
             form,
             idx,
@@ -1107,6 +1141,18 @@ impl DocState {
                     def.copy
                 ))
             })?;
+            // What's drawn over it names no annotation or field: a mark it
+            // drew is pinned by value.
+            let placed = (def.content.over.iter()).flat_map(|l| match &l.body {
+                Static::Placements(placed) => &placed[..],
+                Static::OcrText(_) => &[],
+            });
+            for p in placed {
+                let named = matches!(&p.form, FormRef::Pinned(ap) if ap.inputs.names_annotation());
+                hold(!named, || {
+                    Invariant::Pages(format!("{id:?} draws a mark that names an annotation"))
+                })?;
+            }
         }
 
         // The annotations.
@@ -1492,6 +1538,8 @@ impl DocState {
             generators,
             // One for every version, which none changes.
             opened_generators: _,
+            // An export's alone, never a version's.
+            numbered_in: _,
             fields,
             form: _,
             idx,

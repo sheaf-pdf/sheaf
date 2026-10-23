@@ -25,8 +25,8 @@ use crate::content::{GenId, PagOrigin, PaginationKind};
 use crate::forms::{FieldId, Value};
 use crate::labels::LabelSpec;
 use crate::model::{
-    AnnotBody, AnnotRec, Bookmark, CtxNeeds, DocState, FieldNode, Filter, Foreign, GenSpec,
-    Generator, Layer, PageDef, PageId, Scope, Static, Terminal, WatermarkContent, Widget,
+    AnnotBody, AnnotRec, BlockKind, Bookmark, CtxNeeds, DocState, FieldNode, Filter, Foreign,
+    GenSpec, Generator, Layer, PageDef, PageId, Scope, Terminal, WatermarkContent, Widget,
 };
 use crate::prim::{Key, Prim, Val, same};
 use crate::store::BlobId;
@@ -211,6 +211,8 @@ pub enum RemovedKind {
     Bookmarks,
     /// Recognized text, removed or replaced.
     OcrLayers,
+    /// Pages no longer drawing what a flatten drew on them.
+    Flattened,
     /// Comments whose text was replaced.
     CommentText,
     /// Fields whose value or default was replaced or cleared.
@@ -235,9 +237,11 @@ pub enum RemovedKind {
     /// watermarks or backgrounds off: another file's, another program's
     /// (§3.4, §11.4).
     Filtered,
-    /// Pages a filter takes the settings an older sheaf kept out of, an
-    /// image's path among them, what they drew kept (§15's `StripLegacy`).
-    OlderSettings,
+    /// Pages a filter takes sheaf's private data out of, what they draw
+    /// kept (§15's `StripLegacy`): what an older sheaf kept in what it
+    /// drew, an image's path among it, the names it gave what it drew
+    /// with, and what marks sheaf's blocks.
+    PrivateData,
     /// The form's XFA part, which a save drops (§11.8): one.
     XfaDatasets,
     /// What a recovery sidecar's sections removed or replaced (§11.10),
@@ -260,8 +264,9 @@ impl RemovedKind {
             | K::Widgets
             | K::Fields
             | K::Bookmarks
+            | K::Flattened
             | K::Filtered
-            | K::OlderSettings
+            | K::PrivateData
             | K::XfaDatasets
             | K::Recovered
             | K::Found => false,
@@ -288,6 +293,10 @@ impl fmt::Display for Removed {
             K::Fields => ("form field", "form fields"),
             K::Bookmarks => ("bookmark", "bookmarks"),
             K::OcrLayers => ("page's recognized text", "pages' recognized text"),
+            K::Flattened => (
+                "page's flattened annotations",
+                "pages' flattened annotations",
+            ),
             K::CommentText => ("comment's text", "comments' text"),
             K::FieldValues => ("form field's value", "form fields' values"),
             K::FieldText => ("form field's name or text", "form fields' names or text"),
@@ -300,9 +309,9 @@ impl fmt::Display for Removed {
                 "page's watermark or background from another program or file",
                 "pages' watermarks or backgrounds from other programs or files",
             ),
-            K::OlderSettings => (
-                "page's watermark settings from an older sheaf",
-                "pages' watermark settings from an older sheaf",
+            K::PrivateData => (
+                "page's private data from sheaf",
+                "pages' private data from sheaf",
             ),
             K::XfaDatasets => ("form's XFA part", "forms' XFA parts"),
             K::Recovered => return f.write_str("what the recovered changes removed"),
@@ -351,11 +360,13 @@ pub struct ClassifyCx<'a> {
     step: bool,
 }
 
-/// What a state's pages show: their source pages, and their recognized
-/// text by its `Arc`.
+/// What a state's pages show: their source pages, and their layers by
+/// where their content is ([`Static::addr`]).
+///
+/// [`Static::addr`]: crate::model::Static
 struct Shown {
     pages: HashSet<(BlobId, u32)>,
-    ocr: HashSet<usize>,
+    layers: HashSet<usize>,
 }
 
 impl<'a> ClassifyCx<'a> {
@@ -378,7 +389,7 @@ impl<'a> ClassifyCx<'a> {
     pub fn of_step(before: &'a DocState, after: &'a DocState) -> ClassifyCx<'a> {
         let shown = Shown {
             pages: HashSet::new(),
-            ocr: HashSet::new(),
+            layers: HashSet::new(),
         };
         ClassifyCx {
             saved: before,
@@ -395,8 +406,8 @@ impl<'a> ClassifyCx<'a> {
                 pages: defs()
                     .map(|def| (def.base.src.id(), def.base.index))
                     .collect(),
-                ocr: (defs().flat_map(|def| def.content.over.iter()))
-                    .filter_map(|l| l.body.ocr_text().map(addr))
+                layers: (defs().flat_map(|def| def.content.over.iter()))
+                    .map(|l| l.body.addr())
                     .collect(),
             }
         })
@@ -406,11 +417,6 @@ impl<'a> ClassifyCx<'a> {
     fn annot(&self, id: AnnotId) -> Option<&AnnotRec> {
         self.target.annot(id).or_else(|| self.saved.annot(id))
     }
-}
-
-/// Where an `Arc`'s value is: the same layer wherever a page shows it.
-fn addr<T>(arc: &Arc<T>) -> usize {
-    Arc::as_ptr(arc).addr()
 }
 
 /// What changing `key` from `before` to `after` means (§7.1). Pure, and
@@ -625,21 +631,26 @@ fn page(
     }
     if added().any(|f| matches!(f, Filter::StripLegacy(_))) {
         flags |= Flags::REMOVES;
-        found.removed(RemovedKind::OlderSettings, 1);
+        found.removed(RemovedKind::PrivateData, 1);
     }
     // The page's recognized text, its stack's or its file's, replaced or
-    // gone: once a page.
+    // gone, and what a flatten drew on it gone: each once a page.
     let mut ocr = added().any(Filter::drops_ocr);
-    let shown = |l: &Layer| match &l.body {
-        Static::OcrText(text) => cx.shown().ocr.contains(&addr(text)),
-    };
+    let mut flattened = false;
+    let shown = |l: &Layer| cx.shown().layers.contains(&l.body.addr());
     for l in was.iter().filter(|l| !now.contains(l) && !shown(l)) {
         flags |= Flags::REMOVES;
-        ocr |= l.body.ocr_text().is_some();
+        match l.kind() {
+            BlockKind::Ocr => ocr = true,
+            BlockKind::Flattened => flattened = true,
+        }
     }
     if ocr {
         flags |= Flags::REMOVES | Flags::REPLACES_TEXT;
         found.removed(RemovedKind::OcrLayers, 1);
+    }
+    if flattened {
+        found.removed(RemovedKind::Flattened, 1);
     }
     Effects::of(flags, SigClass::OTHER)
 }

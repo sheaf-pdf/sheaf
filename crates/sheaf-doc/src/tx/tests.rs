@@ -460,9 +460,14 @@ fn every_op(d: &Document) -> Vec<ResolvedOp> {
         },
         R::SetHeaderFooter { spec, scope: None },
         R::RemoveHeaderFooter {
-            pages,
+            pages: pages.clone(),
             include_authored: true,
             others: Default::default(),
+        },
+        R::FlattenAnnotations {
+            pages,
+            which: sheaf_edit::FlattenSet::All,
+            flattened: 0,
         },
         R::Revert {
             label: "Recognize text".into(),
@@ -472,8 +477,9 @@ fn every_op(d: &Document) -> Vec<ResolvedOp> {
 
 /// The capability table is total over every op and every kind of target
 /// (§6.7): sheaf's own marks are a plugin's to delete, anything else's
-/// needs approval; content from files and imported names need the user.
-/// The actor table is total over every actor and capability.
+/// needs approval, as a flatten does; content from files and imported
+/// names need the user. The actor table is total over every actor and
+/// capability.
 #[test]
 fn caps_cover_every_op_target_and_actor() {
     use ResolvedOp as R;
@@ -481,7 +487,7 @@ fn caps_cover_every_op_target_and_actor() {
     let ops = every_op(&d);
     let names: std::collections::BTreeSet<&str> = ops.iter().map(ResolvedOp::name).collect();
     assert_eq!(names.len(), ops.len(), "one op of each kind");
-    assert_eq!(names.len(), 25, "every kind there is");
+    assert_eq!(names.len(), 26, "every kind there is");
     let actors = [
         Actor::User,
         Actor::Cli,
@@ -504,7 +510,8 @@ fn caps_cover_every_op_target_and_actor() {
                     | R::SetWatermark { .. }
                     | R::RemoveWatermark { .. }
                     | R::SetHeaderFooter { .. }
-                    | R::RemoveHeaderFooter { .. },
+                    | R::RemoveHeaderFooter { .. }
+                    | R::FlattenAnnotations { .. },
                     _,
                 ) => Cap::Approval,
                 (
@@ -957,6 +964,161 @@ fn a_named_blob_resolves_by_its_name() {
     assert_eq!(d.page_count(), 3);
 }
 
+/// Blank pages and an image's are made in memory as they're inserted: a
+/// blob of their own kind, written by sheaf's serializer, the same bytes
+/// for the same op, so lowered again it's the same blob. A check makes
+/// none, reads no image, and names what's wrong as applying would.
+#[test]
+fn blank_and_image_pages_are_memory_sources() {
+    use crate::store::{MemoryKind, Origin};
+    use sheaf_edit::{Fit, PageSize};
+    let mut d = doc_of(1, &[]);
+    let png = crate::materialize::watermark_tests::png();
+    let image = (d
+        .store()
+        .intern(png.as_slice().into(), BlobKind::image(&png).unwrap()))
+    .unwrap();
+    let letter = PageSize {
+        width: 612.0,
+        height: 792.0,
+    };
+    let blank_of = |count, pages: Option<&str>| Op::InsertPages {
+        from: PageSource::Blank {
+            size: letter,
+            count,
+        },
+        pages: pages.map(|p| p.parse().unwrap()),
+        before: None,
+        bring: Default::default(),
+        locals: Vec::new(),
+    };
+    let blank = |count| blank_of(count, None);
+    let images = |images: Vec<BlobSel>, pages: Option<&str>| Op::InsertPages {
+        from: PageSource::Images {
+            images,
+            fit: Fit::LETTER,
+        },
+        pages: pages.map(|p| p.parse().unwrap()),
+        before: None,
+        bring: Default::default(),
+        locals: Vec::new(),
+    };
+    let by_id = || vec![BlobSel::Id(image.id())];
+    let store = d.store().clone();
+    // A check makes nothing, and refuses what applying would.
+    let mut tx = d.tx(Actor::User);
+    tx.check(&blank(2)).unwrap();
+    tx.check(&images(by_id(), None)).unwrap();
+    let invalid = |r: Result<(), EditError>| matches!(r, Err(EditError::Invalid { .. }));
+    assert!(invalid(tx.check(&blank(0))));
+    // More blank pages than a file opens with: refused by a check and by
+    // applying, before any is made.
+    let most = crate::source::Limits::DEFAULT.page_tree.pages as u32;
+    let held = store.bytes();
+    assert!(invalid(tx.check(&blank(most + 1))));
+    let applied = tx.apply(blank(most + 1), &NoProgress);
+    assert!(
+        matches!(applied, Err(EditError::Invalid { .. })),
+        "{applied:?}"
+    );
+    assert_eq!(store.bytes(), held, "nothing interned");
+    assert!(invalid(tx.check(&images(Vec::new(), None))));
+    let not_an_image = BlobSel::Id(d.primary().id());
+    assert!(invalid(tx.check(&images(vec![not_an_image], None))));
+    let past = tx.check(&blank_of(2, Some("3")));
+    assert!(matches!(past, Err(EditError::NotFound { .. })), "{past:?}");
+    // An image file is read only to make its pages: a check takes one
+    // that can't be on trust, and applying it refuses it.
+    let mut broken = png[..16].to_vec();
+    broken.extend([0; 64]);
+    let kind = BlobKind::image(&broken).unwrap();
+    let broken = (d.store().intern(broken.into(), kind)).unwrap();
+    let unread = images(vec![BlobSel::Id(broken.id())], None);
+    tx.check(&unread).unwrap();
+    assert!(matches!(
+        tx.apply(unread, &NoProgress),
+        Err(EditError::Invalid { .. })
+    ));
+    drop(tx);
+
+    let c = commit(&mut d, Actor::User, vec![blank(2), images(by_id(), None)]).unwrap();
+    assert_eq!(c.lines[0].text, "Insert 3 pages");
+    let made: Vec<PageId> = c.created.pages().collect();
+    let src = |id| d.state().def(id).unwrap().base.src.clone();
+    let (blanks, imaged) = (src(made[0]), src(made[2]));
+    assert_eq!(src(made[1]), blanks);
+    let origin = |src: &Src| match src.blob().kind() {
+        BlobKind::Pdf { origin, .. } => origin.clone(),
+        _ => panic!("a PDF"),
+    };
+    assert_eq!(origin(&blanks), Origin::Memory(MemoryKind::Blank));
+    assert_eq!(origin(&imaged), Origin::Memory(MemoryKind::Images));
+    let pages = sheaf_image::io::read_bytes(png.clone()).unwrap();
+    let want = [
+        crate::memory::blank_pages(612.0, 792.0, 2).unwrap(),
+        crate::images::to_pdf(&pages, Fit::LETTER).unwrap(),
+    ];
+    for (src, want) in [&blanks, &imaged].into_iter().zip(want) {
+        assert_eq!(**src.blob().bytes(), *want);
+        // Written by sheaf's serializer.
+        let after = src
+            .blob()
+            .bytes()
+            .splitn(2, |&b| b == b'\n')
+            .nth(1)
+            .unwrap();
+        assert!(after.starts_with(crate::serialize::full::BINARY));
+    }
+    // The same op makes the same blob.
+    let mut tx = d.tx(Actor::User);
+    let again = tx.apply(images(by_id(), Some("1")), &NoProgress).unwrap();
+    let Made::Page(page) = again.made[0] else {
+        panic!("a page")
+    };
+    assert_eq!(tx.state().def(page).unwrap().base.src, imaged);
+    // A single image named by the command line goes by its name.
+    let named = tx.grant_named("scan.png", Grant::Blob(image.clone().into()));
+    tx.apply(images(vec![named], None), &NoProgress).unwrap();
+    let Some(ResolvedOp::InsertPages { name, .. }) = tx.steps.last().map(|s| &*s.op) else {
+        panic!("an insert")
+    };
+    assert_eq!(&**name, "scan.png");
+}
+
+/// Blank pages in place of others keep their ids, bookmarks and marks, as
+/// a file's pages do, and show at their size.
+#[test]
+fn blank_pages_replace_pages() {
+    let mut d = doc_of(2, &flat(&[("Two", 1, 0)]));
+    let p1 = d.page(1).unwrap();
+    let add = Op::AddMark {
+        page: PageRef::Id(p1),
+        mark: note("n"),
+        reply_to: None,
+        local: None,
+        imported: None,
+    };
+    commit(&mut d, Actor::User, vec![add]).unwrap();
+    let size = sheaf_edit::PageSize {
+        width: 300.0,
+        height: 200.0,
+    };
+    let replace = Op::ReplacePages {
+        pages: vec![PageRef::Id(p1)],
+        from: PageSource::Blank { size, count: 1 },
+        with: None,
+        bring: Default::default(),
+    };
+    let c = commit(&mut d, Actor::User, vec![replace]).unwrap();
+    assert_eq!(c.lines[0].text, "Replace page 2 with 1 page");
+    let st = d.state();
+    assert_eq!(st.page_at(1), Some(p1), "the same id");
+    assert_eq!(st.marks_on(p1).count(), 1);
+    assert_eq!(st.bookmark_count(), 1);
+    let media = st.geom(p1).unwrap().media;
+    assert_eq!((media.x1 - media.x0, media.y1 - media.y0), (300.0, 200.0));
+}
+
 /// A mark changed to what it is, or moved by nothing, isn't changed: no
 /// version, and it keeps when it was last changed.
 #[test]
@@ -1163,4 +1325,91 @@ fn an_adopted_comment_keeps_its_thread_on_its_page() {
     commit(&mut d, Actor::User, vec![adopt("c", 1)]).unwrap();
     assert_eq!(d.state().check_invariants(), Ok(()));
     assert_eq!(d.state().marks().count(), 2);
+}
+
+/// Ops read from a file name things as a person sees them (§14.2): a page
+/// by its position, a bookmark by its titles, an annotation by its `/NM`
+/// and a file by the name the command line gave it. A session's ids mean
+/// nothing there, so an op naming any of them by id is Invalid, checked or
+/// applied, and changes nothing; the same op not from a file applies.
+#[test]
+fn ids_mean_nothing_in_ops_read_from_a_file() {
+    let mut d = doc_of(3, &flat(&[("Part I", 0, 0), ("Ch. 1", 1, 1)]));
+    let note: Op = serde_json::from_str(
+        r#"{"op": "add-mark", "page": {"pos": 1},
+            "mark": {"kind": {"type": "note", "pos": {"x": 10, "y": 10}}, "contents": "here",
+                     "style": {"color": [255, 0, 0], "opacity": 1, "stroke": 1}}}"#,
+    )
+    .unwrap();
+    let made = commit(&mut d, Actor::User, vec![note]).unwrap();
+    let Made::Annot(mark) = made.created.ops[0][0] else {
+        panic!("a mark: {:?}", made.created);
+    };
+    let name = d.state().annot(mark).unwrap().name();
+    let chapter = d.state().bookmarks_preorder()[1].1;
+    let page = d.page(1).unwrap();
+    let primary = d.primary().clone();
+    let from_file = |d: &Document| {
+        let mut tx = d.tx(Actor::Cli);
+        tx.ops_from_file();
+        tx.grant_named("again", Grant::Blob(primary.blob().clone().into()));
+        tx
+    };
+    let by_id = [
+        Op::RotatePages {
+            pages: PageSel::Ids(vec![PageRef::Id(page)]),
+            by: Turn::Quarter,
+        },
+        Op::DeleteBookmarks {
+            bookmarks: vec![BookmarkRef::Id(chapter)],
+        },
+        Op::DeleteAnnotations {
+            annots: vec![AnnotRef::Id(mark)],
+        },
+        Op::InsertPages {
+            from: PageSource::File {
+                file: BlobSel::Id(primary.id()),
+                name: "a.pdf".into(),
+            },
+            pages: None,
+            before: None,
+            bring: Default::default(),
+            locals: Vec::new(),
+        },
+    ];
+    let before = d.current_version();
+    for op in &by_id {
+        let mut tx = from_file(&d);
+        let checked = tx.check(op).unwrap_err();
+        let applied = tx.apply(op.clone(), &NoProgress).unwrap_err();
+        assert_eq!(checked, applied);
+        let EditError::Invalid { why, .. } = &applied else {
+            panic!("{applied:?}");
+        };
+        assert!(
+            why.contains("session ids aren't meaningful in a file"),
+            "{why}"
+        );
+        assert!(tx.preview().lines.is_empty());
+    }
+    assert_eq!(d.current_version(), before);
+    // Named as a person sees them, the same ops apply.
+    let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+        {"op": "rotate-pages", "pages": {"ids": [{"pos": 2}]}, "by": 90},
+        {"op": "delete-bookmarks", "bookmarks": [{"path": ["Part I", "Ch. 1"]}]},
+        {"op": "delete-annotations", "annots": [{"nm": name}]},
+        {"op": "insert-pages", "from": {"type": "file", "file": {"with": "again"}, "name": "a.pdf"}},
+    ]))
+    .unwrap();
+    let mut tx = from_file(&d);
+    tx.apply_batch(ops, &NoProgress).unwrap();
+    d.commit(tx, CommitOpts::default()).unwrap();
+    assert_eq!(d.geom(page).rotate, Rotation::R90);
+    assert_eq!(d.state().bookmark_count(), 1);
+    assert!(d.state().annot(mark).is_none());
+    assert_eq!(d.page_count(), 6);
+    // Not from a file, ids name what they did.
+    d.undo().unwrap();
+    commit(&mut d, Actor::Cli, by_id.to_vec()).unwrap();
+    assert_eq!(d.page_count(), 6);
 }

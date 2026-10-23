@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use in_progress::{Progress, Unit};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::images::PageFit;
-use sheaf_doc::serialize::durable;
+use sheaf_doc::materialize::AskAnswers;
+use sheaf_edit::Fit;
 use sheaf_image::io::PageImage;
+
+use crate::session::{Decided, SaveTo, Session};
 
 /// Page size for pages made from images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -22,9 +24,9 @@ pub enum Paper {
 
 impl Paper {
     /// The fit, with `margin` points around a fitted image.
-    pub fn fit(self, margin: f32) -> PageFit {
-        let with = |f: PageFit| match f {
-            PageFit::Paper { width, height, .. } => PageFit::Paper {
+    pub fn fit(self, margin: f32) -> Fit {
+        let with = |f: Fit| match f {
+            Fit::Paper { width, height, .. } => Fit::Paper {
                 width,
                 height,
                 margin,
@@ -32,9 +34,9 @@ impl Paper {
             f => f,
         };
         match self {
-            Paper::Original => PageFit::Original,
-            Paper::Letter => with(PageFit::LETTER),
-            Paper::A4 => with(PageFit::A4),
+            Paper::Original => Fit::Original,
+            Paper::Letter => with(Fit::LETTER),
+            Paper::A4 => with(Fit::A4),
         }
     }
 }
@@ -74,7 +76,9 @@ pub fn read_all(
     Ok(pages)
 }
 
-/// Write `out` (atomically) as a PDF of `inputs`, one page per image.
+/// Write `out` as a PDF of `inputs`, one page per image: the pages made in
+/// memory, as a scan's are, inserted into a document of no pages and
+/// saved there, durably.
 pub fn images_to_pdf(
     inputs: &[PathBuf],
     params: &ImagesParams,
@@ -83,8 +87,20 @@ pub fn images_to_pdf(
 ) -> Result<()> {
     let pages = read_all(inputs, params.dpi, &*progress.child("reading", 0.8))?;
     progress.check()?;
-    let bytes = sheaf_doc::images::to_pdf(&pages, params.page.fit(params.margin))?;
-    Ok(durable::write(out, &bytes, None)?)
+    let mut session = Session::new_empty();
+    let fit = params.page.fit(params.margin);
+    let insert = crate::scan::made_pages(&mut session, &pages, fit, "images")?;
+    session.commit(vec![insert], "Images to PDF")?;
+    let to = SaveTo::File {
+        path: out.to_path_buf(),
+        append: false,
+    };
+    // A file of its own: nothing to ask.
+    let writing = progress.child("writing", 0.2);
+    session
+        .save(to, &AskAnswers::default(), &*writing)
+        .decided()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -97,9 +113,6 @@ mod tests {
         assert_eq!(p.page, Paper::A4);
         assert_eq!(p.margin, 36.0);
         assert_eq!(p.dpi, None);
-        assert!(matches!(
-            p.page.fit(36.0),
-            PageFit::Paper { margin: 36.0, .. }
-        ));
+        assert!(matches!(p.page.fit(36.0), Fit::Paper { margin: 36.0, .. }));
     }
 }

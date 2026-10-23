@@ -7,6 +7,10 @@
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself; it
 //! fails rather than skips without it so CI can't silently lose it.
 
+// A test crate of its own, whose scratch files go in the temp directory
+// clippy.toml bans outside tests.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -126,7 +130,7 @@ fn check(rotate: i64, by: Rotation) {
     let layers = [(page, Arc::new(layer.clone()))];
     model.commit_ops(ocr(layers), "ocr").unwrap();
     let out = dir.join("ocr.pdf");
-    sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
+    sheaf_doc::save::rewrite_to_path(&model, &out).unwrap();
 
     // The saved page's /Rotate is the page's rotation, so the page shows
     // as it did when its words were recognized.

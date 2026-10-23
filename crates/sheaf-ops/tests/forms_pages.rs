@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use futures::executor::block_on;
 use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_doc::content::PagOrigin;
+use sheaf_doc::export::Export;
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{Form, source};
@@ -53,17 +54,18 @@ sheaf_doc::both_ways!(
 );
 
 /// A cropped form page keeps its widgets and shows its value, with no copy
-/// and no cache file: the page is still its file's, cropped, and on screen
-/// the document's views draw its field (a copy once had no `/AcroForm`, and
-/// the field was blank); nothing is made of it, in the store or the cache
-/// ([`own_cache`]); and saved `how`, the file has the form, its values,
-/// the crop, the value drawn, and the page's annotations as they were.
+/// and no file of its own: the page is still its file's, cropped, and on
+/// screen the document's views draw its field (a copy once had no
+/// `/AcroForm`, and the field was blank); nothing is made of it, in the
+/// store or on disk ([`own_dirs`]); and saved `how`, the file has the
+/// form, its values, the crop, the value drawn, and the page's annotations
+/// as they were.
 fn a_cropped_form_page_keeps_its_fields_by(how: How) {
     let test = match how {
         How::Rewritten => "a_cropped_form_page_keeps_its_fields",
         How::Appended => "a_cropped_form_page_keeps_its_fields_appended",
     };
-    own_cache(test, || cropped_form_page(how));
+    own_dirs(test, || cropped_form_page(how));
 }
 
 /// [`a_cropped_form_page_keeps_its_fields_by`]'s case, in its process.
@@ -176,7 +178,7 @@ fn nothing_made(doc: &Document) -> bool {
 }
 
 /// [`two_page_form`]'s edits kept its fields, `doc` written `how`: nothing
-/// is made of the pages, in the store or the cache ([`own_cache`]); on
+/// is made of the pages, in the store or on disk ([`own_dirs`]); on
 /// screen the document's views draw the fields; and the file has the
 /// form, its values, each widget on its page and the values drawn, the
 /// form check clean. The file.
@@ -243,7 +245,7 @@ fn marked_by(how: How) {
         How::Rewritten => "a_watermarked_form_keeps_its_fields",
         How::Appended => "a_watermarked_form_keeps_its_fields_appended",
     };
-    own_cache(test, || watermarked(false, how));
+    own_dirs(test, || watermarked(false, how));
 }
 
 sheaf_doc::both_ways!(
@@ -256,7 +258,7 @@ fn unmarked_by(how: How) {
         How::Rewritten => "a_form_with_its_watermark_removed_keeps_its_fields",
         How::Appended => "a_form_with_its_watermark_removed_keeps_its_fields_appended",
     };
-    own_cache(test, || watermarked(true, how));
+    own_dirs(test, || watermarked(true, how));
 }
 
 /// Tag `form` as Acrobat tags some forms: beside each widget's `/Form`
@@ -308,7 +310,7 @@ fn replaced_by(how: How) {
         How::Rewritten => "a_form_with_acrobat_s_header_replaced_keeps_its_fields",
         How::Appended => "a_form_with_acrobat_s_header_replaced_keeps_its_fields_appended",
     };
-    own_cache(test, || headed(false, how));
+    own_dirs(test, || headed(false, how));
 }
 
 sheaf_doc::both_ways!(
@@ -321,7 +323,7 @@ fn removed_by(how: How) {
         How::Rewritten => "a_form_with_its_header_and_footer_removed_keeps_its_fields",
         How::Appended => "a_form_with_its_header_and_footer_removed_keeps_its_fields_appended",
     };
-    own_cache(test, || headed(true, how));
+    own_dirs(test, || headed(true, how));
 }
 
 /// Acrobat's header on both pages, a footer of the document's set over it,
@@ -502,7 +504,7 @@ fn an_extracted_page_brings_no_other_pages_value() {
     let path = write(&dir, "form.pdf", &mut leaky_form());
     let doc = open(&path);
     let first = doc.state().order()[0];
-    let bytes = sheaf_doc::save::extract_bytes(&doc.snapshot(), &[first]).unwrap();
+    let bytes = doc.export_bytes(|f, out| Export::extract(f, &[first], out));
     assert!(!holds(&bytes, b"LEAKVALUE123"));
     let report = clean(&bytes, "extracted");
     assert_eq!((report.pages, report.fields, report.widgets), (1, 1, 1));
@@ -522,7 +524,7 @@ fn a_form_left_with_no_fields_goes() {
     let path = write(&dir, "form.pdf", &mut f);
     let mut doc = open(&path);
     let (first, second) = (doc.state().order()[0], doc.state().order()[1]);
-    let bytes = sheaf_doc::save::extract_bytes(&doc.snapshot(), &[second]).unwrap();
+    let bytes = doc.export_bytes(|f, out| Export::extract(f, &[second], out));
     assert_eq!(fields_of(&bytes), None, "extracted");
     assert!(!holds(&bytes, b"Alpha"), "extracted");
     let report = clean(&bytes, "extracted");
@@ -645,7 +647,7 @@ fn corpus_ca_540_leaks_no_removed_value() {
     std::fs::write(&path, filled(&form, "540_form_5007", "LEAKVALUE123")).unwrap();
     let mut doc = open(&path);
     let pages: Vec<PageId> = doc.state().order().iter().copied().collect();
-    let extracted = sheaf_doc::save::extract_bytes(&doc.snapshot(), &[pages[5]]).unwrap();
+    let extracted = doc.export_bytes(|f, out| Export::extract(f, &[pages[5]], out));
     assert!(!holds(&extracted, b"LEAKVALUE123"), "extracted");
     assert_eq!(findings(&extracted), vec![], "extracted");
 
@@ -755,7 +757,7 @@ fn corpus_deleted_pages_leave_no_values() {
         let mut doc = open(&path);
         let id = doc.state().order()[page as usize];
         doc.commit_ops(vec![delete(&[id])], "Delete").unwrap();
-        let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+        let bytes = sheaf_doc::save::rewrite(&doc).unwrap();
         let dangling = dangling_structure(&bytes);
         if holds(&bytes, b"SHEAFLEAK") || dangling > 0 {
             // Kept, to look at.

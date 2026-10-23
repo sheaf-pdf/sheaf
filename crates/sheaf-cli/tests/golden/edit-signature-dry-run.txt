@@ -1,0 +1,66 @@
+$ sheaf-cli edit $DIR/signed.pdf --edits $DIR/edit-signature-dry-run.json --dry-run
+--- edits
+{
+  "label": "Note",
+  "ops": [
+    {
+      "mark": {
+        "contents": "Seen",
+        "kind": {
+          "pos": {
+            "x": 300,
+            "y": 300
+          },
+          "type": "note"
+        },
+        "style": {
+          "color": [
+            220,
+            40,
+            40
+          ],
+          "opacity": 1,
+          "stroke": 1
+        }
+      },
+      "op": "add-mark",
+      "page": {
+        "pos": 1
+      }
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 0
+--- stdout
+{
+  "consequences": [
+    "keeps the file's signature only appended (--append or --in-place)"
+  ],
+  "created": {
+    "locals": {},
+    "ops": [
+      [
+        {
+          "annot": {
+            "nm": "sheaf:#",
+            "page": 1
+          }
+        }
+      ]
+    ]
+  },
+  "lines": [
+    {
+      "removes": false,
+      "text": "Add a sticky note on page 1"
+    }
+  ],
+  "pages": [
+    1
+  ],
+  "removed_pages": [],
+  "version": "Note"
+}
+--- stderr
+editing…

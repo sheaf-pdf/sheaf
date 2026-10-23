@@ -284,7 +284,7 @@ fn a_refused_source_s_text_comes_from_its_groups() {
     let first = read(&text, &d, p0, &screen);
     assert!(d.primary().base_refused());
     assert_eq!(words(&first), ["page", "0"]);
-    let saved = sheaf_doc::save::rewrite(&d.snapshot()).unwrap();
+    let saved = sheaf_doc::save::rewrite(&d).unwrap();
     for (at, page) in [p0, p1, p2].into_iter().enumerate() {
         let view = views.view(d.state(), page, &screen).unwrap();
         assert!(matches!(view.engine, EngineKey::Group(..)), "{at}");
@@ -514,7 +514,7 @@ fn plugin_text_reads_the_page_as_the_file_will_draw_it() {
     let headed = read(&text, &d, p1, &plugin);
     assert_eq!(sorted(&headed), ["1", "Draft", "page"]);
     assert_eq!(words(&read(&text, &d, p2, &plugin)), ["page", "2"]);
-    let saved = sheaf_doc::save::rewrite(&d.snapshot()).unwrap();
+    let saved = sheaf_doc::save::rewrite(&d).unwrap();
     for (at, page) in [p0, p1, p2].into_iter().enumerate() {
         let ours = read(&text, &d, page, &plugin);
         assert_eq!(differ(&ours, &pdfium_s(&saved, at as u32)), None, "{at}");

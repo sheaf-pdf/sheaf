@@ -681,7 +681,7 @@ fn a_field_left_with_no_widgets_goes() {
     let all = ["hidden", "kept", "parent", "parent.gone"].map(String::from);
     assert_eq!(names(&f.bytes()), BTreeSet::from(all));
     let first = d.page(0).unwrap();
-    let extracted = crate::save::extract_bytes(&d.snapshot(), &[first]).unwrap();
+    let extracted = d.export_bytes(|f, out| crate::export::Export::extract(f, &[first], out));
     let second = d.page(1).unwrap();
     d.commit_ops(vec![fx::delete(&[second])], "delete").unwrap();
     let st = d.state();

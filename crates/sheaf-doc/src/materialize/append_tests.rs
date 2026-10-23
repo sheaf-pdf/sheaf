@@ -21,7 +21,9 @@ use super::key::{ObjKey, Part};
 use super::plan::{Onto, SavePlan, Strategy};
 use super::removal::Mode;
 use super::removal_tests::{layer, opened, rewrite_answers, said, scratch};
-use super::{AskAnswers, SaveStop, StrategyKind, save, save_appended, save_rewritten};
+use super::{
+    AskAnswers, SaveHow, SaveStop, StrategyKind, save_appended, save_rewritten, save_with,
+};
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2};
 use crate::model::{Document, PageId};
 use crate::source::Limits;
@@ -91,7 +93,14 @@ pub(super) fn file(nodes: &[usize], kind: XrefType, version: &str) -> Vec<u8> {
 pub(super) fn planned_in_place(doc: &mut Document) -> (Vec<u8>, Vec<u8>) {
     let path = doc.file().unwrap().0.to_path_buf();
     let was = std::fs::read(&path).unwrap();
-    let report = save(doc, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = save_with(
+        doc,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Append));
     let now = std::fs::read(&path).unwrap();
     assert!(now.starts_with(&was), "an Append keeps the file's bytes");
@@ -597,7 +606,14 @@ fn what_a_rewrite_pruned_stops_an_append() {
     );
     let gone = doc.page(1).unwrap();
     doc.commit_ops(vec![fx::delete(&[gone])], "delete").unwrap();
-    save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
+    save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &rewrite_answers(),
+        &NoProgress,
+    )
+    .unwrap();
     let before = std::fs::read(&path).unwrap();
     doc.undo().unwrap();
     let e = appended_in_place(&mut doc).unwrap_err();
@@ -784,7 +800,14 @@ fn numbers_named_near_the_last_refuse_the_append() {
     // Planned, the save is that Rewrite, whose numbers run out the same
     // way: it stops, and nothing is written.
     let path = doc.file().unwrap().0.to_path_buf();
-    let stop = save(&mut doc, &path, &AskAnswers::default(), &NoProgress).unwrap_err();
+    let stop = save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap_err();
     assert!(
         stop.to_string().contains("objects a PDF may have"),
         "{stop}"

@@ -774,11 +774,11 @@ mod tests {
     #[test]
     fn the_header_dialog_previews_the_header_and_drops_a_stale_result() {
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
-        let blank = sheaf_doc::generated::blank_pages(612.0, 792.0, 2).unwrap();
+        let blank = sheaf_doc::memory::blank_pages(612.0, 792.0, 2).unwrap();
         let mut saved = opened(dir.path(), "blank.pdf", &blank);
         let old = set_header(header("OLD OLD OLD"), None);
         saved.commit_ops(vec![old], "Header").unwrap();
-        let headed = sheaf_doc::save::rewrite(&saved.snapshot()).unwrap();
+        let headed = sheaf_doc::save::rewrite(&saved).unwrap();
         let doc = opened(dir.path(), "headed.pdf", &headed);
         let (now, page) = (doc.snapshot(), doc.page(0).unwrap());
         let pool = EnginePool::new().unwrap();
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn the_dialog_starts_from_the_model_after_a_save_and_reopen() {
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
-        let blank = sheaf_doc::generated::blank_pages(612.0, 792.0, 3).unwrap();
+        let blank = sheaf_doc::memory::blank_pages(612.0, 792.0, 3).unwrap();
         let mut doc = opened(dir.path(), "blank.pdf", &blank);
         let fresh = Start::at(doc.state(), false);
         assert!(!fresh.current && !fresh.bates && fresh.pages.is_empty());
@@ -912,7 +912,7 @@ mod tests {
         let unsaved = Start::at(doc.state(), false);
         assert!(unsaved.current && unsaved.bates);
         assert_eq!((&unsaved.spec, unsaved.pages.as_str()), (&spec, "2-3"));
-        let saved = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+        let saved = sheaf_doc::save::rewrite(&doc).unwrap();
         let again = opened(dir.path(), "saved.pdf", &saved);
 
         let reopened = Start::at(again.state(), false);

@@ -5,6 +5,9 @@
 //!
 //! Output lands in target/spike/.
 
+// The spike builds its page's content from operations.
+#![allow(clippy::disallowed_methods)]
+
 use std::time::Instant;
 
 use anyhow::Result;

@@ -6,7 +6,8 @@
 //! [`write_bodies`] is the materializer's (M10.5 §11.7): an object is
 //! either its source's bytes, copied at its own number (raw passthrough),
 //! or written, its AES IVs keyed by its [`ObjKey`]; the header gives the
-//! version the emission needs.
+//! version the emission needs. [`write_built`] is a PDF sheaf builds in
+//! memory, written through it.
 
 use std::borrow::Cow;
 
@@ -177,6 +178,28 @@ pub fn write_bodies<'a>(
         sections: 1,
     };
     Ok((out, facts))
+}
+
+/// `pdf`, a document sheaf built in memory (blank pages, images as pages,
+/// the stamp library's files), as a whole file through [`write_bodies`]:
+/// each object written anew at its number, unencrypted, with a
+/// cross-reference table and the header `pdf`'s version gives. The same
+/// document writes the same bytes, so it interns as the same blob.
+pub fn write_built(pdf: &lopdf::Document) -> Result<Vec<u8>> {
+    let Some(version) = PdfVersion::parse(pdf.version.as_bytes()) else {
+        bail!("{:?} isn't a PDF version", pdf.version);
+    };
+    let bodies = (pdf.objects.iter())
+        .map(|(&id, obj)| Ok((id, Body::Object(Cow::Borrowed(obj), ObjKey::Built(id)))));
+    let layout = Layout {
+        trailer: &pdf.trailer,
+        kind: XrefKind::Table,
+        version,
+        crypt: None,
+        encrypt_at: (0, 0),
+        xref_from: 0,
+    };
+    Ok(write_bodies(bodies, &layout, &in_progress::NoProgress)?.0)
 }
 
 /// Whether object number `n` is one a file may use.

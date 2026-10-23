@@ -47,6 +47,7 @@ use crate::content::{
     ResCx, ResId, Reserved, ResourceNeeds, SheafBlock, Std14, Tok,
 };
 use crate::geom::{Affine, Geom, Rect};
+use crate::materialize::Private;
 use crate::materialize::emit::catalog::GENERATORS;
 use crate::model::{
     DocState, Frozen, GenSpec, Generator, ImageRef, PageCtx, PageForm, PageId, Placed, Scope,
@@ -97,9 +98,16 @@ const CAP_HEIGHT: f32 = 0.72;
 /// Generator `g` on the page `ctx` says, a watermark's image or page `art`
 /// (None for text, or one that can't be had, which draws nothing); the
 /// names it draws with kept clear of `reserved`, those the page's
-/// resources bind already. Empty where it draws nothing.
-pub fn layout(g: &Generator, ctx: &PageCtx, art: Option<&Art>, reserved: &Reserved) -> Drawn {
-    let drawn = write(g, ctx, art, |out| {
+/// resources bind already; its lists without `/SheafGen` when `private`
+/// strips it (§15). Empty where it draws nothing.
+pub fn layout(
+    g: &Generator,
+    ctx: &PageCtx,
+    art: Option<&Art>,
+    reserved: &Reserved,
+    private: Private,
+) -> Drawn {
+    let drawn = write(g, ctx, art, private, |out| {
         let (ops, res) = out.named(reserved);
         Drawn {
             ops: ops.into(),
@@ -113,7 +121,7 @@ pub fn layout(g: &Generator, ctx: &PageCtx, art: Option<&Art>, reserved: &Reserv
 /// [`layout`]'s digest alone: what a block of it there says it is
 /// (`/L`), with no names to choose.
 pub fn layout_digest(g: &Generator, ctx: &PageCtx, art: Option<&Art>) -> u128 {
-    write(g, ctx, art, digest).unwrap_or_else(|| Drawn::empty().layout_digest)
+    write(g, ctx, art, Private::Keep, digest).unwrap_or_else(|| Drawn::empty().layout_digest)
 }
 
 /// A digest of what `out` draws: its content named as though no page's
@@ -132,22 +140,27 @@ fn write<R>(
     g: &Generator,
     ctx: &PageCtx,
     art: Option<&Art>,
+    private: Private,
     done: impl FnOnce(&ContentWriter) -> R,
 ) -> Option<R> {
     match &g.spec {
-        GenSpec::Watermark(wm) => watermark(g, wm, &ctx.geom, art, done),
-        GenSpec::HeaderFooter(hf) => header_footer(g, hf, ctx, done),
+        GenSpec::Watermark(wm) => watermark((g, private), wm, &ctx.geom, art, done),
+        GenSpec::HeaderFooter(hf) => header_footer((g, private), hf, ctx, done),
     }
 }
 
 /// The list a generator's artifact of `kind` is marked with: named in the
-/// page's `/Properties`, it says whose it is.
-fn list(g: &Generator, kind: PaginationKind) -> Dictionary {
-    dictionary! {
+/// page's `/Properties`, it says whose it is, unless `private` strips that.
+fn list(g: &Generator, kind: PaginationKind, private: Private) -> Dictionary {
+    let mut list = dictionary! {
         "Type" => "Pagination",
         "Subtype" => Object::Name(kind.name().to_vec()),
-        "SheafGen" => Object::String(g.id.to_string().into_bytes(), StringFormat::Literal),
+    };
+    if private == Private::Keep {
+        let id = Object::String(g.id.to_string().into_bytes(), StringFormat::Literal);
+        list.set("SheafGen", id);
     }
+    list
 }
 
 /// Header and footer `hf`, generator `g`'s, on the page `ctx` says, handed
@@ -156,7 +169,7 @@ fn list(g: &Generator, kind: PaginationKind) -> Dictionary {
 /// the page as it shows, its baseline where [`header::layout`] places it.
 /// None when every slot is blank there.
 fn header_footer<R>(
-    g: &Generator,
+    (g, private): (&Generator, Private),
     hf: &HeaderFooterSpec,
     ctx: &PageCtx,
     done: impl FnOnce(&ContentWriter) -> R,
@@ -182,7 +195,7 @@ fn header_footer<R>(
             x: line.x,
             y: line.baseline,
         });
-        out.begin_marked("Artifact", list(g, kind));
+        out.begin_marked("Artifact", list(g, kind, private));
         out.save();
         out.begin_text();
         out.fill_color(Color::rgb8(hf.color));
@@ -206,7 +219,7 @@ fn header_footer<R>(
 /// Watermark `wm`, generator `g`'s, on a page of `geom`, its image or page
 /// `art`, handed to `done`: None when it draws nothing.
 fn watermark<R>(
-    g: &Generator,
+    (g, private): (&Generator, Private),
     wm: &WatermarkGen,
     geom: &Geom,
     art: Option<&Art>,
@@ -267,7 +280,7 @@ fn watermark<R>(
     }
     let frame = frame(geom, wm.position, w, h, angle);
     let mut out = ContentWriter::new();
-    out.begin_marked("Artifact", list(g, WatermarkGen::kind_at(g.z)));
+    out.begin_marked("Artifact", list(g, WatermarkGen::kind_at(g.z), private));
     out.save();
     out.gstate(GState {
         fill_alpha: Some(opacity),
@@ -443,7 +456,9 @@ pub(crate) use crate::realize::recipe_digest;
 
 /// What generator `g`'s layout reads of page `id` of `st`, at place
 /// `position`, its boxes and turn `geom`: its label only when its tokens
-/// read it, and its Bates number, fixed when it was set.
+/// read it, and its Bates number, fixed when it was set. A page of an
+/// export kept as the document numbers it reads its place, the count and
+/// its label there ([`DocState::numbered_in`]).
 pub(crate) fn page_ctx(
     st: &DocState,
     g: &Generator,
@@ -451,6 +466,7 @@ pub(crate) fn page_ctx(
     position: usize,
     geom: &Geom,
 ) -> PageCtx {
+    let (st, position) = st.numbered_in(id).unwrap_or((st, position));
     let label = match g.needs().label {
         true => st.label_of(id).unwrap_or_default(),
         false => Arc::default(),

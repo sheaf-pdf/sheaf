@@ -6,6 +6,10 @@
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
+// A test crate of its own, whose scratch files go in the temp directory
+// clippy.toml bans outside tests.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 
 use lopdf::{Object, dictionary};

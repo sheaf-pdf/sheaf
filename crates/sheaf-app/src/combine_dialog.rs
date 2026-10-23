@@ -2,8 +2,11 @@
 //! (`sheaf_ops::combine`, as `sheaf combine` does). Files can be added,
 //! a folder at a time, or dropped on the dialog; reordered and removed;
 //! and limited to some of their pages. Create asks where to save, runs
-//! with progress (Escape stops it), and opens the result.
+//! with progress (Escape stops it), and hands the document it made and
+//! saved to a window, which shows it as it is: nothing is read again
+//! (M10.5 §14.1).
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -11,8 +14,9 @@ use gpui::{
     App, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, MouseButton,
     Subscription, Window, div, prelude::*, px, relative,
 };
-use sheaf_ops::combine::{CombineItem, CombineParams};
+use sheaf_ops::combine::{CombineItem, CombineParams, CombineReport};
 use sheaf_ops::images::Paper;
+use sheaf_ops::session::Session;
 use sheaf_ops::{Tracker, was_cancelled};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
@@ -29,12 +33,28 @@ const PAPERS: [(Paper, &str); 3] = [
 ];
 
 pub enum CombineEvent {
-    /// The PDF is written; `params` are worth remembering.
+    /// The PDF is written at `path`; `params` are worth remembering.
     Created {
         path: PathBuf,
+        combined: Combined,
         params: CombineParams,
     },
     Dismiss,
+}
+
+/// The document Combine made and saved, and what it says of it, for the
+/// window that shows it to take: once, as events go by reference.
+pub struct Combined(Cell<Option<Box<(Session, CombineReport)>>>);
+
+impl Combined {
+    pub fn new(session: Session, report: CombineReport) -> Combined {
+        Combined(Cell::new(Some(Box::new((session, report)))))
+    }
+
+    /// The document and its report, the first time; None after.
+    pub fn take(&self) -> Option<(Session, CombineReport)> {
+        self.0.take().map(|made| *made)
+    }
 }
 
 /// What a file holds, once looked at.
@@ -286,6 +306,13 @@ impl CombineDialog {
             cx.notify();
             return;
         }
+        // The result opens in a window of its own: one file, one view.
+        if crate::workspace::is_open(&out, cx) {
+            self.error =
+                Some("The result can't replace a file open in sheaf; close it first".into());
+            cx.notify();
+            return;
+        }
         let tracker = Tracker::new();
         self.running = Some(tracker.clone());
         self.error = None;
@@ -295,9 +322,13 @@ impl CombineDialog {
         let progress = tracker.clone();
         let target = out.clone();
         let n = items.len();
-        let work = cx
-            .background_executor()
-            .spawn(async move { sheaf_ops::combine::combine(&items, &params, &target, &progress) });
+        // As before, it asks nothing: the first file's signatures the
+        // combined file can't keep are broken, and an XFA part's values
+        // dropped, as print answers them.
+        let answers = sheaf_doc::export::PRINT_ANSWERS;
+        let work = cx.background_executor().spawn(async move {
+            sheaf_ops::combine::combine(&items, &params, &target, &answers, &progress)
+        });
         cx.spawn(async move |this, cx| {
             let mut work = work.fuse();
             let result = loop {
@@ -330,8 +361,9 @@ impl CombineDialog {
                 d.running = None;
                 d.status = None;
                 match result {
-                    Ok(_) => cx.emit(CombineEvent::Created {
+                    Ok((session, report)) => cx.emit(CombineEvent::Created {
                         path: out,
+                        combined: Combined::new(session, report),
                         params: d.params.clone(),
                     }),
                     Err(e) if was_cancelled(&e) => d.error = Some("Stopped".into()),

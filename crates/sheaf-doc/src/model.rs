@@ -24,7 +24,7 @@ use crate::open::{Facts, FileAnnot, FileBody, ViewFacts};
 use crate::prim::{HeapSize, Key, Prim, Val, same};
 use crate::serialize::durable::{self, FileStamp};
 use crate::source::ObjRef;
-use crate::store::{BlobId, BlobKind, BlobRef, Origin, Src, Store};
+use crate::store::{BlobId, BlobKind, BlobRef, Src, Store};
 use crate::tx::{
     Actor, Cascade, Commit, CommitOpts, EditError, HostAttrs, Identity, LowerCx, Notice,
     ResolvedOp, Tx,
@@ -35,11 +35,11 @@ mod stale;
 mod state;
 
 pub use records::{
-    AnnotBody, AnnotRec, Bookmark, ContentStack, CtxNeeds, FieldNode, FieldProps, Filter, Foreign,
-    FormDoc, FormInst, FormRef, Frozen, GenId, GenSpec, Generator, ImageRef, LEGACY_KEYS, Layer,
-    LegacySel, Mark, MarkedSel, PageBase, PageCtx, PageDef, PageForm, Placed, Scope, ScriptState,
-    Static, StreamSel, Target, Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps,
-    XfaState,
+    AnnotBody, AnnotRec, BlockKind, Bookmark, ContentStack, CtxNeeds, FieldNode, FieldProps,
+    Filter, Foreign, FormDoc, FormInst, FormRef, Frozen, GenId, GenSpec, Generator, ImageRef,
+    Layer, LegacySel, Mark, MarkAp, MarkedSel, PageBase, PageCtx, PageDef, PageForm, PinnedAp,
+    PlaceTag, Placed, Placement, Scope, ScriptState, Static, StreamSel, Target, Terminal,
+    WatermarkContent, WatermarkGen, Widget, WidgetProps, XfaState,
 };
 pub use sheaf_edit::{OutlineId, PageId, SourceId, TextStyle};
 #[cfg(test)]
@@ -728,9 +728,9 @@ impl Document {
 
     /// Where page stamp `stem`'s page is, as an edit that brings a mark
     /// naming it finds it: the store's blob of that name, held by whoever
-    /// placed or pasted it; else the form a source's marks draw it with,
-    /// the primary's first; else, until slice 19, the generated cache's
-    /// file of that name, read into the store.
+    /// placed or pasted it; else the form a source's marks, or another
+    /// tool's stamp a mark can be made of, draw it with, the primary's
+    /// first. None when nothing holds it.
     pub fn find_stamp(&self, stem: &str) -> Option<FormRef> {
         find_stamp(&self.store, &self.primary, stem)
     }
@@ -1159,6 +1159,23 @@ impl Document {
         };
         self.ensure_state(to)?;
         Ok(Some(self.move_to(to, Cause::Redo)))
+    }
+
+    /// History before the current version forgotten, as pruning forgets it
+    /// ([`advance_root`](Self::advance_root)): the current version is the
+    /// first one kept, with nothing to undo, and what it brings it keeps.
+    /// The saved version, when it goes, is kept as an anchor, so the
+    /// document still knows its file and is dirty. What a document made by
+    /// one transaction over another's file hands on (Combine, M10.5
+    /// proposal 35). Not past a version being saved, nor while a branch
+    /// off the line holds one: whether it got to the current version.
+    pub fn forget_before_cursor(&mut self) -> bool {
+        while self.root != self.cursor {
+            if !self.advance_root() {
+                return false;
+            }
+        }
+        true
     }
 
     /// Make `id` the current version, as undo and redo do: not an edit,
@@ -2628,26 +2645,9 @@ fn holding(mut mark: Mark, store: &Store, src: &Src, held: Option<ObjectId>) -> 
 }
 
 /// [`Document::find_stamp`] in a document whose blobs are in `store` and
-/// which opened on `primary`: a snapshot's, too.
+/// which opened on `primary`: a snapshot's, too. What lowering finds a
+/// stamp by.
 pub(crate) fn find_stamp(store: &Store, primary: &Src, stem: &str) -> Option<FormRef> {
-    let cached = || {
-        let path = crate::generated::path_of(stem)?;
-        let bytes = sheaf_util::read_file(&path).ok()?;
-        let kind = BlobKind::Pdf {
-            password: None,
-            origin: Origin::File(path.into()),
-        };
-        let blob = store.intern(bytes, kind);
-        blob.inspect_err(|e| log::warn!("stamp {stem}: {e}")).ok()
-    };
-    held_stamp(store, primary, stem).or_else(|| cached().map(|pdf| FormRef::Blob(pdf.into())))
-}
-
-/// Where page stamp `stem`'s page is in what a document already holds: the
-/// store's blob of that name, else the form a source's marks draw it with,
-/// the primary's first. What lowering finds a stamp by: the generated
-/// cache was read, if need be, before it ([`find_stamp`]).
-pub(crate) fn held_stamp(store: &Store, primary: &Src, stem: &str) -> Option<FormRef> {
     let named = || store.get(BlobId::from_stem(stem)?);
     let held = || {
         parsed(store, primary).find_map(|src| {
@@ -4107,7 +4107,7 @@ mod tests {
         dir
     }
 
-    /// `d` saved to a file of its own (`materialize::save`, a Rewrite),
+    /// `d` saved to a file of its own (`materialize::save_with`, a Rewrite),
     /// signatures and XFA values dropped as the reader agreed to, and the
     /// file read back as a source. The document doesn't change: which
     /// version is saved, its record, and nothing else.
@@ -4118,7 +4118,8 @@ mod tests {
             drop_xfa_values: true,
             ..Default::default()
         };
-        crate::materialize::save(d, &path, &answers, &in_progress::NoProgress).unwrap();
+        let how = crate::materialize::SaveHow::Planned;
+        crate::materialize::save_with(d, &path, how, &answers, &in_progress::NoProgress).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         d.store()
             .open(bytes.into(), BlobKind::file(&path, None))
@@ -4695,10 +4696,7 @@ mod tests {
         let (first, last) = (id_at(&d, 0), id_at(&d, 2));
         d.commit_ops(vec![fx::move_pages(&[last], Some(first))], "Move")
             .unwrap();
-        assert_eq!(
-            written(crate::save::rewrite(&d.snapshot()).unwrap()),
-            want(0)
-        );
+        assert_eq!(written(crate::save::rewrite(&d).unwrap()), want(0));
         // A save writes the outline anew once it changed.
         let rename = BookmarkPatch {
             title: Some("3".into()),
@@ -4714,10 +4712,7 @@ mod tests {
         assert_eq!(site.src.as_ref().map(|r| r.id), Some(items[0]));
         d.commit_ops(vec![fx::move_pages(&[last], None)], "Move")
             .unwrap();
-        assert_eq!(
-            written(crate::save::rewrite(&d.snapshot()).unwrap()),
-            want(2)
-        );
+        assert_eq!(written(crate::save::rewrite(&d).unwrap()), want(2));
     }
 
     /// Bookmarks nested deeper than a file is read (32) are written, and a
@@ -4957,11 +4952,11 @@ mod tests {
 
     /// A page stamp's mark finds its page as the host finds it for the op
     /// that places it: in the store, placed and held; else in a source
-    /// whose marks draw it, the primary's first; else in the generated
-    /// cache, read into the store; else nowhere, and the op, holding none,
-    /// fails. An update keeps what it holds.
+    /// whose marks draw it, the primary's first; else nowhere, and the op,
+    /// holding none, fails. An update keeps what it holds. Another tool's
+    /// stamp, made a mark, holds the form its appearance is in its file.
     #[test]
-    fn a_stamp_resolves_from_the_store_a_source_or_the_cache() {
+    fn a_stamp_resolves_from_the_store_or_a_source() {
         use crate::forms::fixture::{self, MARK_STAMP};
         let stamp = fixture::every_mark_kind()[17].clone();
         let add = |d: &mut Document, annot: Annot| {
@@ -4999,7 +4994,7 @@ mod tests {
         a.contents = "edited".into();
         d.commit_ops(vec![fx::update(&a)], "edit").unwrap();
         assert_eq!(stamp_held(&d, id), placed);
-        let saved = crate::save::rewrite(&d.snapshot()).unwrap();
+        let saved = crate::save::rewrite(&d).unwrap();
 
         // Nowhere: the op holds none, and fails.
         let mut other = new_doc(1, &[], Box::new(FixedCount(10)));
@@ -5016,39 +5011,44 @@ mod tests {
         let id = add(&mut opened, stamp.clone()).unwrap();
         assert!(matches!(stamp_held(&opened, id), Some(FormRef::Base(at)) if at.src == primary));
 
-        // The generated cache has it: read into the store.
-        let pdf = crate::generated::blank_pdf(fastrand::u16(300..10_000).into(), 50.0).unwrap();
-        let path = crate::generated::store(&pdf).unwrap();
-        let cached = Annot {
-            kind: AnnotKind::PageStamp {
-                rect: crate::annot::Box2 {
-                    x: 10.0,
-                    y: 10.0,
-                    w: 100.0,
-                    h: 50.0,
-                },
-                stamp: crate::generated::stem_of(&path),
-                name: "Cached".into(),
-                text: None,
+        // Another tool's stamp, adopted: no blob, the file's form.
+        use lopdf::dictionary;
+        let mut f = fixture::Form::new(1);
+        let form = f.pdf.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 100.into(), 40.into()],
             },
-            ..stamp
-        };
-        let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
-        let id = add(&mut d, cached).unwrap();
-        let Some(FormRef::Blob(b)) = stamp_held(&d, id) else {
-            panic!("the cache's")
-        };
-        assert_eq!(**b.bytes(), *pdf);
-        let origin = Origin::File(path.clone().into());
-        assert!(matches!(b.blob().kind(), BlobKind::Pdf { origin: o, .. } if *o == origin));
-        let _ = std::fs::remove_file(&path);
+            format!("0 0 1 rg 0 0 100 40 re f % {}", fastrand::u64(..)).into_bytes(),
+        ));
+        let theirs = f.pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Stamp", "Name" => "SBApproved",
+            "Rect" => vec![100.into(), 600.into(), 200.into(), 640.into()],
+            "AP" => dictionary! { "N" => form },
+        });
+        f.set_annots(0, &[theirs]);
+        let mut d = reopened(f.bytes());
+        let page = d.page(0).unwrap();
+        let (id, stem) = (d.state().foreign_on(page))
+            .find_map(|(id, f)| match &f.summary.mark.as_deref()?.kind {
+                AnnotKind::PageStamp { stamp, .. } => Some((id, stamp.clone())),
+                _ => None,
+            })
+            .expect("a stamp a mark can be made of");
+        assert!(BlobId::from_stem(&stem).is_some_and(|b| d.store().get(b).is_none()));
+        d.commit_ops(vec![fx::adopt(&[id])], "adopt").unwrap();
+        let primary = d.primary().clone();
+        let held = stamp_held(&d, id);
+        assert!(
+            matches!(&held, Some(FormRef::Base(at)) if at.src == primary && at.id == form),
+            "{held:?}"
+        );
     }
 
     /// An attachment's mark finds its file as the host finds it for the op
     /// that attaches it: in the store, attached and held; else in a source
-    /// whose marks embed it, decoded into the store. Never in the
-    /// generated cache: one nothing holds isn't found, and the op, holding
-    /// none, fails.
+    /// whose marks embed it, decoded into the store. One nothing holds
+    /// isn't found, and the op, holding none, fails.
     #[test]
     fn an_attachment_is_a_blob_never_a_cache_file() {
         use crate::forms::fixture::{self, MARK_FILE, MARK_FILE_BYTES};
@@ -5087,7 +5087,7 @@ mod tests {
             (&**attached.bytes(), attached.id().stem()),
             (MARK_FILE_BYTES, MARK_FILE.clone())
         );
-        let saved = crate::save::rewrite(&d.snapshot()).unwrap();
+        let saved = crate::save::rewrite(&d).unwrap();
 
         // Nowhere: the op holds none, and fails.
         let mut other = new_doc(1, &[], Box::new(FixedCount(10)));
@@ -5667,6 +5667,48 @@ mod tests {
         assert!(!d.is_dirty() && d.saved_at() == Some(v));
     }
 
+    /// Forgetting what's before the current version makes it the first:
+    /// nothing to undo, redo still leading on, the saved version kept as
+    /// an anchor, so the document is dirty and still knows its file, and
+    /// its next save is planned against it. Not past a version being
+    /// saved.
+    #[test]
+    fn history_before_the_cursor_is_forgotten() {
+        let mut d = doc();
+        rotate(&mut d, 0, "first");
+        let saved = d.current_version();
+        d.record_save(record_for(&d, saved)).unwrap();
+        let record = d.saved_record().unwrap().clone();
+        rotate(&mut d, 1, "second");
+        let second = d.current_version();
+        rotate(&mut d, 2, "third");
+        let third = d.current_version();
+        let state = d.state().clone();
+        rotate(&mut d, 0, "fourth");
+        let fourth = d.state().clone();
+        d.undo().unwrap();
+        // A version being saved holds it back: the first kept stops there.
+        d.save_input(second).unwrap();
+        assert!(!d.forget_before_cursor());
+        assert_eq!(d.root, second);
+        d.abandon_save(second);
+        assert!(d.forget_before_cursor());
+        assert_eq!(d.root, third);
+        assert_eq!(d.state(), &state);
+        assert!(!d.can_undo() && d.can_redo());
+        assert!(!d.versions.contains_key(&saved));
+        assert!(d.saved_at().is_none() && d.is_dirty());
+        assert!(Arc::ptr_eq(d.saved_record().unwrap(), &record));
+        let saved_side = d.save_input(third).unwrap().saved.unwrap();
+        assert!(Arc::ptr_eq(&saved_side.record, &record));
+        d.abandon_save(third);
+        d.redo().unwrap();
+        assert_eq!(d.state(), &fourth);
+        d.undo().unwrap();
+        assert!(d.forget_before_cursor(), "nothing to forget");
+        assert_eq!(d.version_count(), 2);
+    }
+
     /// The first version kept keeps its steps' edits, lines and keys, but
     /// not their prims: nothing is rebuilt into it. Its step bytes are
     /// counted again without them, the History panel still says what it
@@ -5958,7 +6000,7 @@ mod tests {
                 pixels: Pixels::Gray((0..64).map(|j| (i * 7 + j) as u8).collect()),
             })
             .collect();
-        let scan = crate::images::to_pdf(&rasters, crate::images::PageFit::LETTER).unwrap();
+        let scan = crate::images::to_pdf(&rasters, sheaf_edit::Fit::LETTER).unwrap();
         let (len, before) = (scan.len(), d.store().bytes());
         let src = file(d.store(), scan, "scan.pdf");
         let id = insert_all(&mut d, src);

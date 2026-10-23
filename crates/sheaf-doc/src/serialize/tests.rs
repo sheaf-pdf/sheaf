@@ -767,7 +767,7 @@ fn rewrites_stay_encrypted() {
         for (name, state) in rc4_aes_128_and_aes_256(&plain) {
             for (source, kind) in encrypted(&plain, &state, |_| {}).iter().zip(KINDS) {
                 let name = format!("{name}, {kind:?}, {ids}");
-                let bytes = crate::save::rewrite(&turned(source).snapshot()).unwrap();
+                let bytes = crate::save::rewrite(&turned(source)).unwrap();
                 for text in SECRETS {
                     assert!(
                         !holds(&bytes, text),
@@ -806,7 +806,7 @@ fn an_eff_file_rewrites_with_only_its_attachment_encrypted() {
         .iter()
         .zip(KINDS)
     {
-        let bytes = crate::save::rewrite(&turned(source).snapshot()).unwrap();
+        let bytes = crate::save::rewrite(&turned(source)).unwrap();
         assert!(!holds(&bytes, ATTACHMENT), "{kind:?}");
         for text in [TITLE, PAGE_STRING, FORM_STRING, CONTENT, XMP] {
             assert!(
@@ -865,7 +865,7 @@ fn an_encrypted_object_stream_base_rewrites() {
         }
         let read = form_read(&pdf);
 
-        let bytes = crate::save::rewrite(&turned(&base).snapshot()).unwrap();
+        let bytes = crate::save::rewrite(&turned(&base)).unwrap();
         for bytes in [&base, &bytes] {
             for text in FORM_SECRETS {
                 assert!(
@@ -1022,10 +1022,11 @@ fn print_is_unencrypted() {
     let plain = plaintext();
     for (name, state) in rc4_aes_128_and_aes_256(&plain) {
         let [source, _] = encrypted(&plain, &state, |_| {});
-        let snap = turned(&source).snapshot();
-        let ids: Vec<_> = snap.state.order().iter().copied().collect();
+        let doc = turned(&source);
+        let ids: Vec<_> = doc.state().order().iter().copied().collect();
         for markup in [true, false] {
-            let bytes = crate::save::print_pdf(&snap, &ids, markup).unwrap();
+            let print = |f, _| crate::export::Export::print(f, &ids, markup);
+            let bytes = doc.export_bytes(print);
             let pdf = open(&bytes);
             assert!(!pdf.is_encrypted(), "{name}");
             assert!(!pdf.trailer().has(b"Encrypt"), "{name}");
@@ -1288,7 +1289,7 @@ fn numbered_to_the_last(how: crate::materialize::How) {
         );
         return;
     }
-    let rewritten = crate::save::rewrite(&doc.snapshot()).unwrap();
+    let rewritten = crate::save::rewrite(&doc).unwrap();
     assert!(rewritten.len() < 4096, "{} bytes", rewritten.len());
     let pdf = open(&rewritten);
     assert!(pdf.base_sound());

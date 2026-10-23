@@ -1,0 +1,179 @@
+$ sheaf-cli inspect $DIR/with.pdf --json
+--- exit 0
+--- stdout
+{
+  "bookmarks": [
+    {
+      "page": 2,
+      "path": [
+        "Part I"
+      ]
+    },
+    {
+      "page": 3,
+      "path": [
+        "Part I",
+        "Ch. 1"
+      ]
+    },
+    {
+      "page": 4,
+      "path": [
+        "Part II"
+      ]
+    }
+  ],
+  "comments": [
+    {
+      "nm": "n1",
+      "page": 2,
+      "subtype": "Text"
+    },
+    {
+      "nm": "h1",
+      "page": 4,
+      "subtype": "Highlight"
+    }
+  ],
+  "form": {
+    "fields": 0,
+    "signatures": 0,
+    "widgets": 0,
+    "xfa": "none"
+  },
+  "generators": [
+    {
+      "kind": "background",
+      "scope": "all"
+    },
+    {
+      "kind": "header-footer",
+      "scope": "2-5"
+    }
+  ],
+  "marks": [
+    {
+      "kind": "note",
+      "nm": "sheaf:#",
+      "page": 1
+    }
+  ],
+  "pages": [
+    {
+      "boxes": {
+        "crop": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ],
+        "media": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ]
+      },
+      "label": "1",
+      "pos": 1,
+      "rotate": 0
+    },
+    {
+      "boxes": {
+        "crop": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ],
+        "media": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ]
+      },
+      "label": "i",
+      "pos": 2,
+      "rotate": 0
+    },
+    {
+      "boxes": {
+        "crop": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ],
+        "media": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ]
+      },
+      "label": "ii",
+      "pos": 3,
+      "rotate": 0
+    },
+    {
+      "boxes": {
+        "crop": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ],
+        "media": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ]
+      },
+      "label": "1",
+      "pos": 4,
+      "rotate": 0
+    },
+    {
+      "boxes": {
+        "crop": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ],
+        "media": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ]
+      },
+      "label": "2",
+      "pos": 5,
+      "rotate": 0
+    },
+    {
+      "boxes": {
+        "crop": [
+          0.0,
+          0.0,
+          45.0,
+          22.5
+        ],
+        "media": [
+          0.0,
+          0.0,
+          45.0,
+          22.5
+        ]
+      },
+      "label": "3",
+      "pos": 6,
+      "rotate": 0
+    }
+  ]
+}
+--- stderr
+opening…

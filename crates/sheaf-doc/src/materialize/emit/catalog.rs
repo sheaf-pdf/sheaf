@@ -11,8 +11,9 @@
 //! Reader's usage rights when the save drops them (`DropUr3`).
 //! `/SheafGenerators` names a string of its own
 //! ([`ObjKey::Generators`]) saying what the generators are, when there
-//! are any; `/SheafHeaderFooter`, where an older sheaf kept its header's
-//! settings, is owned and never written. The header gives the version
+//! are any and the output keeps sheaf's private data (§15);
+//! `/SheafHeaderFooter`, where an older sheaf kept its header's settings,
+//! is owned and never written. The header gives the version
 //! (§11.7), so a Rewrite writes no `/Version`.
 //!
 //! An Append's catalog ([`appended`]) holds the keys the state doesn't own
@@ -89,7 +90,10 @@ pub(crate) fn catalog(cx: &mut Cx) {
         );
         out.set("PageLabels", cx.placeholder(ObjKey::Labels));
     }
-    if let Some(json) = crate::generate::catalog_json(st, |c| super::content::drawn_as(cx, c)) {
+    let json = (!cx.strips())
+        .then(|| crate::generate::catalog_json(st, |c| super::content::drawn_as(cx, c)))
+        .flatten();
+    if let Some(json) = json {
         cx.push(ObjKey::Generators, generators(json));
         out.set(GENERATORS, cx.placeholder(ObjKey::Generators));
     }

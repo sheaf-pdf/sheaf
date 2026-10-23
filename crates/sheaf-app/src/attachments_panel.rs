@@ -398,6 +398,13 @@ fn portfolio_fields(
         .collect()
 }
 
+/// Where an attachment the user opens is written, for the program that
+/// opens it.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the one file the user asks for, written for another program to open; M11 slice 1 \
+              deletes it at close"
+)]
 fn temp_dir() -> PathBuf {
     std::env::temp_dir().join(format!("sheaf-attachments-{}", std::process::id()))
 }

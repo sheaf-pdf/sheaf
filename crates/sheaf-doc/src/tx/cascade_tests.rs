@@ -20,7 +20,7 @@ use crate::prim::Rec;
 /// `rules`: the state it makes, and what they did.
 fn lowered_with(d: &Document, op: &Op, rules: &[Rule]) -> (DocState, Vec<Cascade>) {
     let tx = d.tx(Actor::User);
-    let (mut resolved, _) = tx.resolve(op).unwrap();
+    let (mut resolved, _) = tx.resolve(op, true).unwrap();
     let state = Rec::new(tx.state().clone());
     let mut lw = Lower::new(state, &tx.cx, &NoProgress, resolved.name());
     lower_op(&mut lw, &mut resolved).unwrap();

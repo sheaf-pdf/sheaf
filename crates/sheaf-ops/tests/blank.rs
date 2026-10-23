@@ -7,6 +7,10 @@
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
+// A test crate of its own, whose scratch files go in the temp directory
+// clippy.toml bans outside tests.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -15,17 +19,20 @@ use std::sync::Arc;
 use futures::StreamExt;
 use futures::executor::block_on;
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::materialize::AskAnswers;
 use sheaf_doc::realize::ViewInputs;
 use sheaf_doc::serialize::fixture::revision_cut_out;
+use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{Box2, Document, OcrWord, PageId, TextOpts, TextService};
-use sheaf_edit::Rotation;
+use sheaf_edit::{BlobSel, Fit, Op, PageSize, Rotation};
 use sheaf_image::blank::{Sensitivity, Verdict, is_blank};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ocr::job::{EngineFactory, HAS_TEXT_MIN_CHARS};
 use sheaf_ocr::{EngineKind, OcrConfig, OcrEvent, OcrRequest, PageSource};
 use sheaf_ops::NoProgress;
 use sheaf_ops::blank::{BlankParams, Candidate, Reason};
+use sheaf_ops::session::Session;
 use sheaf_ops::text::Text;
 use sheaf_ops::views::{ViewPages, Views};
 use sheaf_render::pdfium::PdfiumEngine;
@@ -150,12 +157,56 @@ fn a_noisy_scanned_blank_is_blank() {
         }
     }
     let page = sheaf_image::io::PageImage::from_image(image::DynamicImage::ImageLuma8(img), 150.0);
-    let bytes = sheaf_doc::images::to_pdf(&[page], sheaf_doc::images::PageFit::Original).unwrap();
+    let bytes = sheaf_doc::images::to_pdf(&[page], sheaf_edit::Fit::Original).unwrap();
     let doc = opened(&dir, "scan.pdf", bytes);
     let found = found(&doc, None, BlankParams::default());
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].reason, Reason::Blank);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Blank pages and an image's, inserted and saved, write no file but the
+/// one saved: they're made in memory (M10.5 §3.9), and nothing goes to the
+/// temp, cache or home directories ([`common::own_dirs`]).
+#[test]
+fn inserted_blank_and_image_pages_write_nothing_else() {
+    common::own_dirs("inserted_blank_and_image_pages_write_nothing_else", || {
+        let dir = common::scratch("memory");
+        let path = dir.join("mixed.pdf");
+        std::fs::write(&path, mixed()).unwrap();
+        let mut doc = common::open(&path);
+        let red = image::RgbImage::from_pixel(40, 20, image::Rgb([200, 30, 30]));
+        let png = sheaf_image::encode::png(&red, 72).unwrap();
+        let kind = BlobKind::image(&png).unwrap();
+        let image = doc.store().intern(png.into(), kind).unwrap();
+        let insert = |from| Op::InsertPages {
+            from,
+            pages: None,
+            before: None,
+            bring: Default::default(),
+            locals: Vec::new(),
+        };
+        let letter = PageSize {
+            width: 612.0,
+            height: 792.0,
+        };
+        let images = vec![BlobSel::Id(image.id())];
+        let ops = vec![
+            insert(sheaf_edit::PageSource::Blank {
+                size: letter,
+                count: 2,
+            }),
+            insert(sheaf_edit::PageSource::Images {
+                images,
+                fit: Fit::LETTER,
+            }),
+        ];
+        doc.commit_ops(ops, "insert").unwrap();
+        drop(image);
+        let (_, bytes) = common::planned(&mut doc, &path);
+        assert_eq!(Pdf::load_mem(&bytes).unwrap().get_pages().len(), 6 + 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    });
 }
 
 /// A header and footer not yet saved, on every page, are no page's
@@ -243,25 +294,73 @@ fn unsaved_ocr_text_still_counts() {
 
 /// A file PDFium refuses (as it does the corpus's 4422502) has its pages
 /// read from its groups: Remove Blank Pages finds the blank pages of the
-/// file it was cut from and writes the rest, which PDFium reads.
+/// file it was cut from and writes the rest, which PDFium reads, and the
+/// pages it took out to a file of their own, each with a bookmark saying
+/// what it was, the document left as it was.
 #[test]
 fn remove_blank_pages_works_on_a_source_pdfium_refuses() {
     let dir = scratch("refused");
     let bytes = revision_cut_out(mixed());
     let refused = PdfiumEngine::open_bytes(bytes.clone().into(), None).err();
     assert!(OpenError::is_refused(&refused.expect("PDFium refuses it")));
-    let mut doc = opened(&dir, "refused.pdf", bytes);
+    let doc = opened(&dir, "refused.pdf", bytes);
     let all = found(&doc, None, BlankParams::default());
     assert_eq!(reasons(&all), MIXED);
     assert!(doc.primary().base_refused());
     let drop: Vec<Candidate> = all.into_iter().filter(|c| c.drop_by_default()).collect();
-    let kept = dir.join("kept.pdf");
-    let n = sheaf_ops::blank::write(&mut doc, &drop, &kept, None).unwrap();
-    assert_eq!(n, 3);
+    let (kept, rejects) = (dir.join("kept.pdf"), dir.join("rejects.pdf"));
+    let session = Session::from(doc);
+    let answers = AskAnswers::default();
+    let n = sheaf_ops::blank::write(&session, &drop, &kept, Some(&rejects), false, &answers);
+    assert_eq!(n.unwrap(), 3);
     let engine = PdfiumEngine::open_bytes(std::fs::read(&kept).unwrap().into(), None).unwrap();
     assert_eq!(engine.page_count(), 3);
     let text = engine.page_text(PageIndex(0)).unwrap();
     assert!(text.contains("Statement of account"), "{text}");
+    let rejected = sheaf_doc::open::file(&rejects, None).unwrap().doc;
+    assert_eq!(rejected.page_count(), drop.len());
+    let titles: Vec<String> = (rejected.state().bookmarks_preorder().into_iter())
+        .map(|(_, _, b)| b.title.to_string())
+        .collect();
+    let want: Vec<String> = (drop.iter())
+        .map(|c| format!("p. {} — {}", c.index + 1, c.reason.label()))
+        .collect();
+    assert_eq!(titles, want);
+    assert_eq!(session.doc.version_count(), 1, "the document is as it was");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Remove Blank Pages over a signed form whose signature is on the page it
+/// takes out: the rejects file would break the signature, so the two asks
+/// before either file is written; answered, both are.
+#[test]
+fn a_removal_that_asks_writes_neither_file() {
+    use sheaf_doc::forms::fixture::{Form, row};
+    let dir = scratch("signed");
+    let mut form = Form::new(2);
+    let sig = form.signature("sig", 1, row(2));
+    form.sign(sig);
+    let doc = opened(&dir, "signed.pdf", form.bytes());
+    let drop = vec![Candidate {
+        index: 1,
+        id: doc.page(1).unwrap(),
+        ink: 0.0,
+        reason: Reason::Blank,
+    }];
+    let (kept, rejects) = (dir.join("kept.pdf"), dir.join("rejects.pdf"));
+    let session = Session::from(doc);
+    let write = |answers: &AskAnswers| {
+        sheaf_ops::blank::write(&session, &drop, &kept, Some(&rejects), false, answers)
+    };
+    let asked = write(&AskAnswers::default()).unwrap_err();
+    assert!(asked.is::<sheaf_ops::session::NeedsDecision>(), "{asked:#}");
+    assert!(!kept.exists() && !rejects.exists());
+    let answers = AskAnswers {
+        break_signatures: true,
+        ..AskAnswers::default()
+    };
+    assert_eq!(write(&answers).unwrap(), 1);
+    assert!(kept.is_file() && rejects.is_file());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -306,7 +405,7 @@ fn ocr_skips_text_on_a_source_pdfium_refuses() {
     );
     assert!(all_read, "{events:?}");
     assert!(doc.primary().base_refused());
-    let saved = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+    let saved = sheaf_doc::save::rewrite(&doc).unwrap();
     let engine = PdfiumEngine::open_bytes(saved.into(), None).unwrap();
     for (at, &id) in order.iter().enumerate() {
         let len = pages.text_len(&pages.page(id).unwrap()).unwrap();

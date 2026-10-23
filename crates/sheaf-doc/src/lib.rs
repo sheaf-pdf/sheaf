@@ -12,6 +12,9 @@
 //! with it (ids, geometry, OCR text, a tape's rows), which are re-exported
 //! where they were defined before (M10.5 §6.1).
 
+// Tests may use what clippy.toml bans (the lint ledger, M10.5 slice 19).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod annot;
 pub mod attachments;
 pub mod change;
@@ -19,10 +22,10 @@ pub mod content;
 pub mod describe;
 pub mod effects;
 pub mod exchange;
+pub mod export;
 pub mod file;
 pub mod forms;
 pub mod generate;
-pub mod generated;
 pub mod geom;
 pub mod history;
 pub mod images;
@@ -32,11 +35,13 @@ pub mod labels;
 pub mod layers;
 pub mod materialize;
 pub mod measure;
+pub mod memory;
 pub mod model;
 pub mod open;
 pub mod page_chars;
 pub mod portfolio;
 pub mod prim;
+pub mod private;
 pub mod properties;
 pub mod realize;
 pub mod recovery;

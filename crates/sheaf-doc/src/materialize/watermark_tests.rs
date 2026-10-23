@@ -16,7 +16,7 @@ use super::emit::content::needs_after;
 use super::key::ObjKey;
 use super::removal;
 use super::removal_tests::{layer, opened, scratch, text_file};
-use super::{How, StrategyKind, save_rewritten};
+use super::{How, SaveHow, StrategyKind, save_rewritten};
 use crate::content::{Balance, Concat, GenId, ResCx};
 use crate::model::{Document, PageId};
 use crate::serialize::fixture::holds;
@@ -593,9 +593,10 @@ fn a_changed_text_rewrites_and_a_moved_watermark_appends() {
     assert_eq!(removal::vetoes_here(), before);
     doc.commit_ops(vec![watermark("FINAL", None)], "change")
         .unwrap();
-    let report = super::save(
+    let report = super::save_with(
         &mut doc,
         &path,
+        SaveHow::Planned,
         &Default::default(),
         &in_progress::NoProgress,
     )
@@ -834,7 +835,14 @@ fn a_watermark_taken_off_isn_t_kept_by_a_field_s_stray_kid() {
     let remove = fx::remove_watermark(Some(Z::Over), &[page]);
     doc.commit_ops(vec![remove], "remove").unwrap();
     let answers = super::AskAnswers::default();
-    let report = super::save(&mut doc, &path, &answers, &in_progress::NoProgress).unwrap();
+    let report = super::save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &answers,
+        &in_progress::NoProgress,
+    )
+    .unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     let out = std::fs::read(&path).unwrap();
     let pdf = Pdf::load_mem(&out).unwrap();

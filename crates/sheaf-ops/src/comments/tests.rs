@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::*;
 use sheaf_doc::annot::REVIEW;
 use sheaf_doc::open::{FileAnnot, FileAnnots, FileBody};
-use sheaf_doc::{FixedCount, Pt, Store};
+use sheaf_doc::{Document, FixedCount, Pt, Store};
 use sheaf_edit::Rotation;
 
 #[test]
@@ -245,6 +245,7 @@ fn theirs(name: &str, parent: Option<&str>) -> ForeignAnnot {
         hidden: false,
         color: Some([0, 0, 255]),
         mark: None,
+        stamp: None,
     }
 }
 

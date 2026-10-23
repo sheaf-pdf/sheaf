@@ -40,7 +40,7 @@ use crate::materialize::emit::catalog::GENERATORS;
 use crate::model::FlatOutlineItem;
 use crate::open::FileAnnots;
 use crate::serialize::crypt::Crypt;
-use crate::store::{Blob, BlobCollision, BlobId, Src};
+use crate::store::{Blob, BlobCollision, BlobId, BlobKind, MemoryKind, Origin, Src};
 
 pub use conformance::{Conformance, PdfA};
 pub use limits::{ContentLimits, FormLimits, Limits, PageTreeLimits};
@@ -135,11 +135,18 @@ pub enum PageTreeError {
 
 impl Source {
     /// `blob` read under `limits`: its cross-reference sections, trailer,
-    /// encryption and page table.
+    /// encryption and page table. A file of no pages doesn't open, but for
+    /// blank pages sheaf made with none, what a document made in memory
+    /// starts from ([`memory::empty`](crate::memory::empty)).
     pub(crate) fn open(blob: Blob, limits: &Limits) -> Result<Source, OpenError> {
         let pdf = LazyPdf::open(blob.bytes().clone(), blob.password(), &limits.reader)?;
         let crypt = Crypt::of(&pdf)?.map(Arc::new);
-        let pages: Arc<[PageFacts]> = pages::table(&pdf, &limits.page_tree)?.into();
+        let blank = Origin::Memory(MemoryKind::Blank);
+        let made = matches!(blob.kind(), BlobKind::Pdf { origin, .. } if *origin == blank);
+        let pages: Arc<[PageFacts]> = match pages::table(&pdf, &limits.page_tree) {
+            Err(OpenError::PageTree(PageTreeError::NoPages)) if made => Arc::new([]),
+            pages => pages?.into(),
+        };
         Ok(Source {
             blob,
             crypt,

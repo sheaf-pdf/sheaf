@@ -14,14 +14,15 @@ use lopdf::{Document as Pdf, Object};
 use sheaf_edit::{Op, Rotation, Turn};
 
 use super::{
-    Ask, AskAnswers, Onto, SavePlan, SaveStop, Strategy, StrategyKind, Why, forced_append, plan,
-    save, save_appended, save_rewritten, write_file,
+    Ask, AskAnswers, Onto, SaveHow, SavePlan, SaveStop, Strategy, StrategyKind, Why, forced_append,
+    plan, save_appended, save_rewritten, save_with, write_file,
 };
+use crate::export::{self, Export, Out};
 use crate::forms::fixture::{Form, row};
 use crate::model::{DocState, Document, GroupKind, PageId, VersionId};
 use crate::serialize::durable::FileStamp;
 use crate::text_layer::{OcrWord, TextLayer};
-use crate::tx::fixture as fx;
+use crate::tx::{Actor, fixture as fx};
 
 /// An empty directory of the test's own.
 fn scratch() -> PathBuf {
@@ -212,7 +213,14 @@ fn an_edit_and_an_ocr_flush_during_a_slow_save_land_after_it() {
     d.redo().unwrap();
     assert_eq!(d.current_version(), after.0);
     // The next save writes them.
-    save(&mut d, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    save_with(
+        &mut d,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert!(!d.is_dirty());
     assert_eq!(pages_of(&path), [(90, true), (90, true)]);
     let _ = std::fs::remove_dir_all(&dir);
@@ -232,7 +240,14 @@ fn undo_across_saves_is_exact() {
         made.push((d.current_version(), d.state().clone()));
         if i == 1 || i == 2 {
             // A turn removes nothing: it appends.
-            let report = save(&mut d, &path, &AskAnswers::default(), &NoProgress).unwrap();
+            let report = save_with(
+                &mut d,
+                &path,
+                SaveHow::Planned,
+                &AskAnswers::default(),
+                &NoProgress,
+            )
+            .unwrap();
             assert_eq!(report.strategy, Some(StrategyKind::Append));
             let (v, st) = made.last().unwrap();
             assert!(d.current_version() == *v && d.state() == st);
@@ -280,7 +295,16 @@ fn a_file_changed_since_open_asks() {
     }));
     for d in [&mut a, &mut b] {
         let v = d.current_version();
-        assert_eq!(save(d, &path, &AskAnswers::default(), &NoProgress), asks);
+        assert_eq!(
+            save_with(
+                d,
+                &path,
+                SaveHow::Planned,
+                &AskAnswers::default(),
+                &NoProgress
+            ),
+            asks
+        );
         assert!(d.is_dirty());
         // Unsealed: the next edit of a job amends it again.
         assert_eq!(d.sealed(v), 0);
@@ -289,7 +313,14 @@ fn a_file_changed_since_open_asks() {
     assert_eq!(names_in(&dir), ["a.pdf"], "nothing was started beside it");
     // Saved as another file: written there, and theirs left.
     let copy = dir.join("copy.pdf");
-    save(&mut a, &copy, &AskAnswers::default(), &NoProgress).unwrap();
+    save_with(
+        &mut a,
+        &copy,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert!(!a.is_dirty());
     assert_eq!(pages_of(&copy), [(90, false), (0, false)]);
     assert_eq!(std::fs::read(&path).unwrap(), theirs);
@@ -298,10 +329,17 @@ fn a_file_changed_since_open_asks() {
         overwrite: true,
         ..Default::default()
     };
-    save(&mut b, &path, &overwrite, &NoProgress).unwrap();
+    save_with(&mut b, &path, SaveHow::Planned, &overwrite, &NoProgress).unwrap();
     assert_eq!(pages_of(&path), [(90, false), (0, false)]);
     turn(&mut b, 1);
-    save(&mut b, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    save_with(
+        &mut b,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(pages_of(&path), [(90, false), (90, false)]);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -328,7 +366,16 @@ fn a_file_changed_while_saving_asks() {
         path: path.as_path().into(),
     }));
     let v = d.current_version();
-    assert_eq!(save(&mut d, &path, &AskAnswers::default(), &gate), asks);
+    assert_eq!(
+        save_with(
+            &mut d,
+            &path,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &gate
+        ),
+        asks
+    );
     assert_eq!(std::fs::read(&path).unwrap(), theirs);
     assert_eq!(names_in(&dir), ["a.pdf"], "no temp file left");
     assert!(d.is_dirty());
@@ -348,7 +395,14 @@ fn save_as_makes_its_file_the_document_s() {
     let mut d = opened(&a);
     turn(&mut d, 0);
     assert_eq!(&**d.file().unwrap().0, a.as_path());
-    let report = save(&mut d, &b, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = save_with(
+        &mut d,
+        &b,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(&*report.path, b.as_path());
     let (file, stamp) = d.file().unwrap();
     assert_eq!(
@@ -361,14 +415,22 @@ fn save_as_makes_its_file_the_document_s() {
     let to_b = plan(&d.recovery_input(), &to_b);
     assert_eq!(to_b.asks, []);
     // An export can't replace it, and can replace what it was.
-    let snap = d.snapshot();
-    let err = crate::save::export_clean_copy(&snap, &b).unwrap_err();
+    let to = |path: &Path| Out::File {
+        path: path.into(),
+        overwrite: true,
+    };
+    let clean = |path| Export::clean_copy(d.export_from(Actor::User), to(path));
+    let err = export::run(clean(&b), &AskAnswers::default(), &NoProgress).unwrap_err();
     assert!(
         err.to_string().contains("can't replace the open file"),
         "{err}"
     );
-    crate::save::export_flattened(&snap, &b).unwrap_err();
-    crate::save::export_clean_copy(&snap, &a).unwrap();
+    let flattened = Export::flattened(d.export_from(Actor::User), to(&b));
+    assert!(matches!(
+        export::preflight(&flattened)[..],
+        [export::Gate::OwnFile { .. }]
+    ));
+    export::run(clean(&a), &AskAnswers::default(), &NoProgress).unwrap();
     // The sidecar of an edit after it, beside it.
     turn(&mut d, 1);
     let (file, base) = d.file().map(|(f, s)| (f.clone(), *s)).unwrap();
@@ -408,7 +470,14 @@ fn a_restored_document_s_first_save_checks_the_base() {
     assert_eq!(planned.strategy, Strategy::Append { onto: Onto::Saved });
     assert_eq!(planned.asks, []);
     // The first writes, its record the file it wrote.
-    let report = save(&mut first, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = save_with(
+        &mut first,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Append));
     assert!(!first.is_dirty());
     let record = first.saved_record().unwrap();
@@ -423,7 +492,13 @@ fn a_restored_document_s_first_save_checks_the_base() {
         path: path.as_path().into(),
     }));
     assert_eq!(
-        save(&mut second, &path, &AskAnswers::default(), &NoProgress),
+        save_with(
+            &mut second,
+            &path,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress
+        ),
         asks
     );
     assert_eq!(std::fs::read(&path).unwrap(), written);
@@ -633,7 +708,7 @@ fn overwrite_makes_an_append_a_rewrite() {
         break_signatures: true,
         ..Default::default()
     };
-    save(&mut d, &path, &answers, &NoProgress).unwrap();
+    save_with(&mut d, &path, SaveHow::Planned, &answers, &NoProgress).unwrap();
     turn(&mut d, 0);
     let plan = planned(Strategy::Append { onto: Onto::Saved });
     let answered = plan.answered(&d.recovery_input(), &target, &overwrite);

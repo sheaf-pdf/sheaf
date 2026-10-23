@@ -10,21 +10,23 @@
 //! each its own record, its kids by id. And the generators (§3.5): what
 //! sheaf draws on pages from one definition.
 //!
-//! A stack holds what something makes today: recognized text over the
-//! page, a block of its own named by its id; filters that take others'
-//! watermarks and backgrounds out of its own content (Remove Watermark's):
-//! blocks of sheaf's no generator of the document's backs, and the
-//! pagination artifacts Acrobat, an older sheaf or, asked to, the author
-//! drew; filters that take the recognized text sheaf wrote in its file out
-//! (a re-OCR's and Clear's); and one that takes the settings an older
-//! sheaf kept out of its watermarks (Clean Copy's). Other filters, layers
-//! under it, a layer's kind and placed forms come with the features that
-//! make them (slice 19). A generator is a header and
-//! footer or a watermark or background, with its z, its scope, what it
-//! fixed when it was set (the date, the file and Bates numbers) and the
-//! kinds of others' artifacts it replaces. A form instance is one per
-//! insert of a source's pages, or duplicate of them, and the form's own
-//! keys (`/DR`, `/CO`, `/DA`…) are written from [`FormDoc`].
+//! A stack holds what something makes today: layers over the page, each a
+//! block of its own named by its id, of recognized text or of the
+//! annotations a flatten drew there, forms placed by matrix (an appearance
+//! a source holds, or a mark's drawn again from what it was drawn from);
+//! filters that take others' watermarks and backgrounds out of its own
+//! content (Remove Watermark's): blocks of sheaf's no generator of the
+//! document's backs, and the pagination artifacts Acrobat, an older sheaf
+//! or, asked to, the author drew; filters that take the recognized text
+//! sheaf wrote in its file out (a re-OCR's and Clear's); and one that takes
+//! the settings an older sheaf kept out of its watermarks (Clean Copy's).
+//! Other filters and layers under it come with the features that make them.
+//! A generator is a header and footer or a watermark or background, with
+//! its z, its scope, what it fixed when it was set (the date, the file and
+//! Bates numbers) and the kinds of others' artifacts it replaces. A form
+//! instance is one per insert of a source's pages, or duplicate of them,
+//! and the form's own keys (`/DR`, `/CO`, `/DA`…) are written from
+//! [`FormDoc`].
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -34,12 +36,14 @@ use anyhow::Result;
 use im::Vector;
 use sheaf_edit::{Color, DestView, FontChoice, GridPos, HeaderFooterSpec, Z};
 
-use crate::annot::{Annot, AnnotId};
+use sheaf_edit::Rotation;
+
+use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::content::{BlockId, PagOrigin, PaginationKind, ResId};
 use crate::file::ForeignAnnot;
 use crate::forms::field::{Action, Border, Choice, Mk, Trigger};
 use crate::forms::{FieldId, FieldKind, Value};
-use crate::geom::Geom;
+use crate::geom::{Affine, Geom};
 use crate::model::{OutlineId, PageId, SourceId, TextStyle};
 use crate::source::ObjRef;
 use crate::store::{BlobRef, Src};
@@ -149,8 +153,7 @@ pub struct ContentStack {
 /// blocks that no generator of the document's backs, which another file
 /// drew, or which another tool merged into a stream of its own; others'
 /// pagination artifacts, by kind and by who drew them; the recognized text
-/// sheaf wrote in the file; and the private data an older sheaf kept in
-/// what it drew.
+/// sheaf wrote in the file; and sheaf's private data in it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Filter {
     /// Marked ranges, spliced out of the streams they're in (§13): each
@@ -159,12 +162,16 @@ pub enum Filter {
     DropMarked(MarkedSel),
     /// Whole streams of its `/Contents`.
     DropStreams(StreamSel),
-    /// What an older sheaf kept in what it drew, taken out, what it drew
-    /// kept: the keys of [`LEGACY_KEYS`] in the property lists of the
-    /// ranges selected, written again without them (§13, §15), each stream
-    /// a copy of its own as [`Filter::DropMarked`]'s are. A list that
-    /// can't be written so keeps them, said in a note. Clean Copy's
-    /// (`save::export_clean_copy`).
+    /// sheaf's private data in the page's own content taken out, what it
+    /// drew kept (§15): what an older sheaf kept in what it drew, the names
+    /// it gave what it drew with, and what sheaf marks its blocks with, as
+    /// [`LegacySel`] selects it. Each stream it changes is a copy of its
+    /// own, as [`Filter::DropMarked`]'s are. A list that can't be written
+    /// again without it keeps it, said in a note. `RemovePrivateData`'s, a
+    /// Strip output's ([`Private::Strip`]), whose check fails on what's
+    /// left (§11.9), or says it in a note under `Private::Scrub`.
+    ///
+    /// [`Private::Strip`]: crate::materialize::Private::Strip
     StripLegacy(LegacySel),
 }
 
@@ -180,16 +187,33 @@ impl Filter {
     }
 }
 
-/// What an older sheaf kept in a watermark's property list: its settings,
-/// an image's path among them, and its mark.
-pub const LEGACY_KEYS: [&[u8]; 2] = [b"SheafSettings", b"SheafStamp"];
-
-/// What a [`Filter::StripLegacy`] takes an older sheaf's private data out
-/// of: marked ranges, whose property lists are written in the content.
-/// Slice 19's RemovePrivateData adds streams.
+/// What a [`Filter::StripLegacy`] takes sheaf's private data out of.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LegacySel {
+    /// The property lists of the ranges selected written in the content:
+    /// written again without [`private::LIST_KEYS`] (§13), an older
+    /// sheaf's settings, an image's path among them, and its mark among
+    /// them. A list named in the resources is [`LegacySel::Resources`]'.
+    ///
+    /// [`private::LIST_KEYS`]: crate::private::LIST_KEYS
     Marked(MarkedSel),
+    /// Every stream of the page's content sheaf marked: its dictionary
+    /// without [`private::STREAM_KEYS`] (a block's `/SheafBlock`, an older
+    /// sheaf's `/SheafOcrLayer`), its data as it was.
+    ///
+    /// [`private::STREAM_KEYS`]: crate::private::STREAM_KEYS
+    Streams,
+    /// The page's resources: each property list named in its
+    /// `/Properties` without [`private::LIST_KEYS`], and each name an
+    /// older sheaf gave a resource ([`private::is_resource_name`]: its
+    /// header's font, its watermark's, its recognized text's, what its
+    /// flatten drew) given a new one, `/Sh…`, where the resources bind it
+    /// and wherever the page's content draws with it, lexically, every
+    /// other byte as it was.
+    ///
+    /// [`private::LIST_KEYS`]: crate::private::LIST_KEYS
+    /// [`private::is_resource_name`]: crate::private::is_resource_name
+    Resources,
 }
 
 /// The marked ranges a [`Filter::DropMarked`] takes out.
@@ -245,11 +269,33 @@ pub struct Layer {
     pub body: Static,
 }
 
+/// What a layer is, as its block says (`/K`): its body's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockKind {
+    /// `/Ocr`: recognized text.
+    Ocr,
+    /// `/Flat`: annotations a flatten drew.
+    Flattened,
+}
+
+impl Layer {
+    /// Its kind, which its body is.
+    pub fn kind(&self) -> BlockKind {
+        match self.body {
+            Static::OcrText(_) => BlockKind::Ocr,
+            Static::Placements(_) => BlockKind::Flattened,
+        }
+    }
+}
+
 /// A layer's content, fixed when it's made.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Static {
     /// Recognized text, invisible, its words in PageSpace.
     OcrText(Arc<TextLayer>),
+    /// Forms placed on the page, in order: the annotations a flatten drew
+    /// there.
+    Placements(Arc<[Placement]>),
 }
 
 impl Static {
@@ -257,7 +303,162 @@ impl Static {
     pub fn ocr_text(&self) -> Option<&Arc<TextLayer>> {
         match self {
             Static::OcrText(text) => Some(text),
+            Static::Placements(_) => None,
         }
+    }
+
+    /// Where its content is: the same layer wherever a page shows it.
+    pub(crate) fn addr(&self) -> usize {
+        match self {
+            Static::OcrText(text) => Arc::as_ptr(text).addr(),
+            Static::Placements(placed) => Arc::as_ptr(placed).addr(),
+        }
+    }
+}
+
+/// A form drawn on a page: `form`, through `matrix`, which takes the box
+/// its own matrix makes of its bounding box onto where it goes (an
+/// annotation's `/Rect`, ISO 32000-1 12.5.5), tagged as `tag` says.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placement {
+    pub form: FormRef,
+    pub matrix: Affine,
+    pub tag: PlaceTag,
+}
+
+/// How a placement is marked in a page's content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlaceTag {
+    /// `/Artifact`: no part of the page's structure, on a page of a
+    /// tagged file.
+    Artifact,
+    /// Not marked: on a page of a file with no structure.
+    Untagged,
+}
+
+/// A mark's appearance pinned by what it's drawn from (§3.4), so a layer
+/// draws it again, the same each time, without the mark or a cache. Made
+/// by [`PinnedAp::new`], which works out its digest.
+#[derive(Debug, Clone)]
+pub struct PinnedAp {
+    pub inputs: MarkAp,
+    /// Of the inputs: what it's known by.
+    pub(crate) digest: u128,
+}
+
+impl PinnedAp {
+    pub fn new(inputs: MarkAp) -> PinnedAp {
+        PinnedAp {
+            digest: crate::realize::pinned_digest(&inputs),
+            inputs,
+        }
+    }
+}
+
+/// Pinned appearances are the same when their inputs' digests are.
+impl PartialEq for PinnedAp {
+    fn eq(&self, other: &PinnedAp) -> bool {
+        self.digest == other.digest
+    }
+}
+
+impl Eq for PinnedAp {}
+
+impl std::hash::Hash for PinnedAp {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.digest.hash(state);
+    }
+}
+
+/// What a sheaf mark's appearance is drawn from, held by value, naming no
+/// annotation: its kind (a connector's without its partner), its look and
+/// text, the turn it reads upright in and the stamp's page it draws. Its
+/// author, dates and names aren't drawn. A widget's (its terminal's value
+/// and display, its state and the form's `/DA`, `/Q` and `/DR`) come with
+/// M10 slice 15's FlattenFields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkAp {
+    pub kind: AnnotKind,
+    pub color: [u8; 3],
+    pub opacity: f32,
+    pub stroke: f32,
+    pub contents: String,
+    pub fill: Option<[u8; 3]>,
+    pub dashed: bool,
+    pub cloudy: bool,
+    pub turn: Rotation,
+    /// A page stamp's page.
+    pub stamp: Option<FormRef>,
+}
+
+impl MarkAp {
+    /// The appearances mark `m` writes, by what each is drawn from: its
+    /// own, then a replacement's struck text, its companion's. None for a
+    /// reply or a status, which draw nothing of their own.
+    pub fn of(m: &Mark) -> Vec<MarkAp> {
+        let a = &m.annot;
+        if matches!(a.kind, AnnotKind::Reply { .. } | AnnotKind::Status { .. }) {
+            return Vec::new();
+        }
+        let stamp = (m.stamp.clone()).filter(|_| matches!(a.kind, AnnotKind::PageStamp { .. }));
+        let companion = crate::annot::companion(a).map(|c| MarkAp::drawn(&c, None));
+        std::iter::once(MarkAp::drawn(a, stamp))
+            .chain(companion)
+            .collect()
+    }
+
+    /// What `a` is drawn from, drawing `stamp`.
+    fn drawn(a: &Annot, stamp: Option<FormRef>) -> MarkAp {
+        let mut kind = a.kind.clone();
+        if let AnnotKind::Connector { partner, .. } = &mut kind {
+            *partner = None;
+        }
+        MarkAp {
+            kind,
+            color: a.color,
+            opacity: a.opacity,
+            stroke: a.stroke,
+            contents: a.contents.clone(),
+            fill: a.fill,
+            dashed: a.dashed,
+            cloudy: a.cloudy,
+            turn: a.turn,
+            stamp,
+        }
+    }
+
+    /// The mark it's drawn as, with no id, author, dates or name.
+    pub fn annot(&self) -> Annot {
+        Annot {
+            id: AnnotId(0),
+            kind: self.kind.clone(),
+            color: self.color,
+            opacity: self.opacity,
+            stroke: self.stroke,
+            author: String::new(),
+            contents: self.contents.clone(),
+            modified: String::new(),
+            created: String::new(),
+            fill: self.fill,
+            dashed: self.dashed,
+            cloudy: self.cloudy,
+            turn: self.turn,
+            name: String::new(),
+        }
+    }
+
+    /// Whether it names an annotation, which a content stack never does
+    /// (`DocState::check_invariants`): a connector's partner, a thread's
+    /// parent.
+    pub(crate) fn names_annotation(&self) -> bool {
+        matches!(
+            self.kind,
+            AnnotKind::Connector {
+                partner: Some(_),
+                ..
+            } | AnnotKind::Reply { .. }
+                | AnnotKind::Status { .. }
+        )
     }
 }
 
@@ -282,15 +483,26 @@ impl ContentStack {
 
     /// The layer of its recognized text, if it has some.
     pub fn ocr_layer(&self) -> Option<&Layer> {
-        self.over.iter().find(|l| l.body.ocr_text().is_some())
+        self.over.iter().find(|l| l.kind() == BlockKind::Ocr)
     }
 
     /// The stack with `layer` as its recognized text, in place of what it
     /// had, or with none: the empty one when that leaves nothing.
     pub fn with_ocr(&self, layer: Option<Layer>) -> Arc<ContentStack> {
         let mut over = self.over.clone();
-        over.retain(|l| l.body.ocr_text().is_none());
+        over.retain(|l| l.kind() != BlockKind::Ocr);
         over.extend(layer);
+        ContentStack {
+            filters: self.filters.clone(),
+            over,
+        }
+        .shared()
+    }
+
+    /// The stack with `layer` drawn over the rest.
+    pub fn with_layer(&self, layer: Layer) -> Arc<ContentStack> {
+        let mut over = self.over.clone();
+        over.push_back(layer);
         ContentStack {
             filters: self.filters.clone(),
             over,
@@ -371,15 +583,18 @@ impl From<Annot> for Mark {
     }
 }
 
-/// The page a page stamp draws, as a form.
+/// A form: the page a page stamp draws, or one a layer places.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FormRef {
-    /// The form a source's appearance of the stamp draws, as a file sheaf
-    /// saved holds it.
+    /// A form a source holds: the stamp's page a file sheaf saved holds,
+    /// or an annotation's appearance.
     Base(ObjRef),
     /// A one-page PDF, its page the form: a library stamp placed, or a
     /// stamp pasted from another document.
     Blob(BlobRef),
+    /// A mark's appearance, drawn from what it was drawn from as it was
+    /// flattened.
+    Pinned(Arc<PinnedAp>),
 }
 
 impl FormRef {
@@ -389,7 +604,14 @@ impl FormRef {
         match self {
             FormRef::Blob(pdf) => Ok(pdf.bytes().clone()),
             FormRef::Base(at) => Ok(crate::stamp_lib::form_to_pdf(at.src.pdf(), at.id)?.into()),
+            FormRef::Pinned(ap) => Ok(crate::annot::pinned_pdf(ap)?.into()),
         }
+    }
+
+    /// A digest of which form it is: a source's object, a blob, or a
+    /// pinned appearance's inputs.
+    pub fn digest(&self) -> u128 {
+        crate::realize::form_ref_digest(self)
     }
 }
 

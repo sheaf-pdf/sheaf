@@ -384,7 +384,7 @@ mod tests {
     fn the_preview_follows_the_document() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("three.pdf");
-        let bytes = sheaf_doc::generated::blank_pages(612.0, 792.0, 3).unwrap();
+        let bytes = sheaf_doc::memory::blank_pages(612.0, 792.0, 3).unwrap();
         std::fs::write(&path, bytes).unwrap();
         let mut doc = sheaf_doc::open::file(&path, None).unwrap().doc;
         let opened = doc.snapshot();

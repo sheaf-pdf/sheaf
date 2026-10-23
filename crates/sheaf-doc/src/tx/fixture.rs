@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use sheaf_edit::{
-    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Box2, BoxSpec, Bring, FontChoice,
-    GridPos, HeaderFooterSpec, LabelStyle, Margins, NewMark, Op, PageLabelRange, PageRef, PageSel,
-    PageSource, Patch, RangeSet, ScopeSel, Sibling, Turn, WatermarkContent, WatermarkSpec, Z,
+    Anchor, AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, Box2, BoxSpec, Bring, FlattenSet,
+    FontChoice, GridPos, HeaderFooterSpec, LabelStyle, Margins, NewMark, Op, PageLabelRange,
+    PageRef, PageSel, PageSource, Patch, RangeSet, ScopeSel, Sibling, Turn, WatermarkContent,
+    WatermarkSpec, Z,
 };
 
 use super::{Actor, Commit, CommitOpts, EditError, JobKind, Tx};
@@ -126,6 +127,14 @@ pub fn duplicate(pages: &[PageId]) -> Op {
 /// The recognized text taken off `pages`.
 pub fn clear_ocr(pages: &[PageId]) -> Op {
     Op::ClearOcrText { pages: ids(pages) }
+}
+
+/// The annotations on `pages` that `which` says flattened.
+pub fn flatten(pages: &[PageId], which: FlattenSet) -> Op {
+    Op::FlattenAnnotations {
+        pages: ids(pages),
+        which,
+    }
 }
 
 /// Annotations `annots`, and their threads, deleted.

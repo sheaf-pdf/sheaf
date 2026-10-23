@@ -12,8 +12,10 @@
 //!   `q`/`Q` balance and the resource names it uses; [`kept`], the last
 //!   two of what's left once ranges are taken out.
 //! - [`splice`]: its streams with ranges taken out, byte for byte, when
-//!   that's safe, and refused when it isn't; and [`without_keys`], a
-//!   marked range's property list written again without some keys.
+//!   that's safe, and refused when it isn't; [`without_keys`], a marked
+//!   range's property list written again without some keys; and
+//!   [`renames`], the resource names it draws with written again as
+//!   others.
 //! - [`PageBlocks`]: its pagination artifacts and who drew them, and
 //!   sheaf's own blocks.
 //! - [`text_bag`]: the words it draws, decoded through its fonts.
@@ -59,7 +61,7 @@ pub use marked::{Marked, PropertiesDict, Props, marked};
 pub use names::{Kept, NameSet, ResKind, kept, names_used};
 pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, contents};
 pub use res::{Res, ResBody, ResId};
-pub use splice::{Rewrite, SpliceError, Spliced, splice, splice_each, without_keys};
+pub use splice::{Rewrite, SpliceError, Spliced, renames, splice, splice_each, without_keys};
 pub use text_bag::{FontDecoders, TextBag, text_bag};
 pub use to_lopdf::ResObjects;
 pub use writer::{

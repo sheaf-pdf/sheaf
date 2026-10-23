@@ -20,7 +20,7 @@ use super::plan::{
     AppendAnyway, Ask, AskAnswers, Note, Onto, SaveStop, Strategy, Why, forced_append,
 };
 use super::removal::{self, Found, Section, Vetoes};
-use super::{save, save_appended, write_file};
+use super::{SaveHow, save_appended, save_with, write_file};
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2};
 use crate::content::ResId;
 use crate::effects::{Removed, RemovedKind};
@@ -274,7 +274,14 @@ fn pages_a_rewrite_pruned_come_back_by_a_rewrite() {
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(3));
     let gone = doc.page(1).unwrap();
     doc.commit_ops(vec![fx::delete(&[gone])], "delete").unwrap();
-    save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
+    save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &rewrite_answers(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(said(&path), ["page 0", "page 2"]);
     doc.undo().unwrap();
     let (strategy, notes) = forced(&mut doc, &AskAnswers::default()).unwrap();
@@ -409,7 +416,14 @@ fn a_field_whose_widget_comes_back_is_written_with_the_form() {
     insert(&mut doc, &form, "b.pdf");
     doc.commit_ops(vec![fx::delete(&[first])], "delete")
         .unwrap();
-    save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
+    save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &rewrite_answers(),
+        &NoProgress,
+    )
+    .unwrap();
     doc.undo().unwrap();
     let (strategy, _) = forced(&mut doc, &AskAnswers::default()).unwrap();
     assert_eq!(strategy, Strategy::Append { onto: Onto::Saved });
@@ -437,7 +451,14 @@ fn a_forced_misclassification_is_vetoed_and_counted() {
     let page = doc.page(0).unwrap();
     let add = fx::add(page, &note("a secret note"));
     doc.commit_ops(vec![add], "add").unwrap();
-    save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
+    save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &rewrite_answers(),
+        &NoProgress,
+    )
+    .unwrap();
     assert!(holds(&std::fs::read(&path).unwrap(), b"a secret note"));
     let id = doc.state().marks_on(page).next().unwrap().id;
     doc.commit_ops(vec![fx::delete_annots(&[id])], "delete")
@@ -552,7 +573,14 @@ fn a_re_ocr_over_a_saved_layer_is_a_rewrite() {
     let page = doc.page(0).unwrap();
     let ocr = |text: &str| fx::ocr([(page, layer(text))]);
     doc.commit_ops(ocr("first"), "ocr").unwrap();
-    save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
+    save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &rewrite_answers(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(marked_in(&path), 1);
     // This session: the page's block.
     doc.commit_ops(ocr("second"), "ocr").unwrap();
@@ -591,7 +619,14 @@ fn an_overwritten_appearance_is_judged_on_its_inputs() {
     let page = doc.page(0).unwrap();
     let add = fx::add(page, &note("a note"));
     doc.commit_ops(vec![add], "add").unwrap();
-    save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
+    save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &rewrite_answers(),
+        &NoProgress,
+    )
+    .unwrap();
     change_mark(&mut doc, |a| a.color = [10, 200, 10]);
     let (strategy, _) = forced(&mut doc, &AskAnswers::default()).unwrap();
     assert_eq!(strategy, Strategy::Append { onto: Onto::Saved });
@@ -738,7 +773,14 @@ fn an_isolating_stream_that_draws_is_read() {
     let (path, mut doc) = opened(&dir, "a.pdf", &text_file(1));
     let set = fx::set_watermark(fx::watermark("DRAFT"), sheaf_edit::Z::Over, None);
     doc.commit_ops(vec![set], "watermark").unwrap();
-    save(&mut doc, &path, &rewrite_answers(), &NoProgress).unwrap();
+    save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &rewrite_answers(),
+        &NoProgress,
+    )
+    .unwrap();
     let mut pdf = Pdf::load(&path).unwrap();
     let page = pdf.get_pages()[&1];
     let ids = super::recognized_tests::contents(&pdf, page);

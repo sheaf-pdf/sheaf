@@ -6,6 +6,10 @@
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
+// A test crate of its own, whose scratch files go in the temp directory
+// clippy.toml bans outside tests.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -219,7 +223,7 @@ fn check(rotate: i64) {
         model.commit_ops(vec![add(page, &annot)], "mark").unwrap();
     }
     let out = dir.join("marked.pdf");
-    sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
+    sheaf_doc::save::rewrite_to_path(&model, &out).unwrap();
 
     // One pixel per point, in the page as shown.
     let engine = engine_on(&out);
@@ -485,7 +489,7 @@ fn tapes_draw_turned_and_from_old_text() {
     let annot = placed(&model, old);
     model.commit_ops(vec![add(page, &annot)], "tape").unwrap();
     let out = dir.join("tapes.pdf");
-    sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
+    sheaf_doc::save::rewrite_to_path(&model, &out).unwrap();
 
     let engine = engine_on(&out);
     let r = engine
@@ -577,7 +581,7 @@ fn clouds_and_callouts_draw() {
         model.commit_ops(vec![add(page, &annot)], "mark").unwrap();
     }
     let out = dir.join("shapes.pdf");
-    sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
+    sheaf_doc::save::rewrite_to_path(&model, &out).unwrap();
     let engine = engine_on(&out);
     let r = engine
         .render(
@@ -655,7 +659,7 @@ fn free_text_reads_back_from_its_appearance() {
     let annot = placed(&model, note);
     let out = model.commit_ops(vec![add(page, &annot)], "note").unwrap();
     assert!(out.notices.is_empty(), "WinAnsi has every one");
-    let bytes = sheaf_doc::save::rewrite(&model.snapshot()).unwrap();
+    let bytes = sheaf_doc::save::rewrite(&model).unwrap();
     let read = appearance_text(&bytes, None, PageIndex(0)).unwrap();
     assert!(read.contains(text), "{read:?}");
     let _ = std::fs::remove_dir_all(&dir);

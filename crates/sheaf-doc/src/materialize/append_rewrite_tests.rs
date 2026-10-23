@@ -30,7 +30,8 @@
 //! the copy an undone insert had, and a later instance's widget and field
 //! read as the instance's copy. And for slice 12's: a connector group's
 //! order after a page holding some of it turned, and saves after pruning
-//! took the saved version, on the line and on an undone branch.
+//! took the saved version, on the line and on an undone branch. And for
+//! slice 19's: a library stamp's mark flattened, then appended.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -46,8 +47,8 @@ use super::plan::{Onto, Strategy, forced_append};
 use super::removal::Mode;
 use super::removal_tests::scratch;
 use super::{
-    AskAnswers, How, ObjKey, SaveReport, StrategyKind, Why, materialize, plan, removal, save,
-    write_file,
+    AskAnswers, How, ObjKey, SaveHow, SaveReport, StrategyKind, Why, materialize, plan, removal,
+    save_with, write_file,
 };
 use crate::annot::{Annot, AnnotKind};
 use crate::file::ForeignAnnot;
@@ -615,7 +616,7 @@ fn planned(doc: &mut Document, path: &Path) -> SaveReport {
         assert!(removes || !derived, "{why:?}: {found:?}");
     }
     doc.abandon_save(v);
-    let report = save(doc, path, &answers(), &NoProgress);
+    let report = save_with(doc, path, SaveHow::Planned, &answers(), &NoProgress);
     report.unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
@@ -756,6 +757,45 @@ proptest! {
     ) {
         run(xfa, marked, &actions);
     }
+}
+
+/// A library stamp's mark made on the second page, two other pages
+/// duplicated and the second flattened, then appended onto the file by
+/// force: the pinned appearance names the stamp's page by its form's
+/// digest, so the Append reopens as a Rewrite does. (Slice 19's failure,
+/// which the property found and whose seed is kept: the name came from the
+/// form's object number, which an Append and a Rewrite give it apart.)
+#[test]
+fn append_rewrite_a_flattened_library_stamp_draws_alike() {
+    fastrand::seed(1);
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, false);
+    let [stamp, _] = crate::forms::fixture::mark_blobs(doc.store());
+    let second = doc.page(1).unwrap();
+    let mark = Annot {
+        kind: AnnotKind::PageStamp {
+            rect: crate::annot::Box2 {
+                x: 56.0,
+                y: 184.0,
+                w: 30.0,
+                h: 20.0,
+            },
+            stamp: stamp.id().stem(),
+            name: "Approved".into(),
+            text: None,
+        },
+        ..super::append_tests::square(0)
+    };
+    doc.commit_ops(vec![fx::add(second, &mark)], "stamp")
+        .unwrap();
+    let others = [3, 4].map(|i| doc.page(i).unwrap());
+    doc.commit_ops(vec![fx::duplicate(&others)], "duplicate")
+        .unwrap();
+    let flatten = fx::flatten(&[second], sheaf_edit::FlattenSet::All);
+    doc.commit_ops(vec![flatten], "flatten").unwrap();
+    let how = forced(&mut doc, &path);
+    assert!(matches!(how, Strategy::Append { .. }), "{how:?}");
+    reopens_as_rewritten(&doc, &dir, "a flattened library stamp appended");
 }
 
 /// [`files`]' document, its form with an XFA part when `xfa`, opened from

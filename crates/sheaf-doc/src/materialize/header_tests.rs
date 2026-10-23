@@ -22,7 +22,7 @@ use super::plan::{Onto, Strategy};
 use super::recognized_tests::{block_of, contents, drawn, everything, isolates, pages, stream};
 use super::removal_tests::{opened, said, scratch, text_file};
 use super::tests::{bytes, file};
-use super::{AskAnswers, How, ObjKey, SaveReport, StrategyKind, Why, removal};
+use super::{AskAnswers, How, ObjKey, SaveHow, SaveReport, StrategyKind, Why, removal};
 use crate::content::{GenId, Marker, PagOrigin, PaginationKind};
 use crate::effects::Flags;
 use crate::model::{Document, Generator, PageId, Scope};
@@ -315,12 +315,70 @@ fn an_extract_keeps_the_binder_s_bates_numbers_and_renumbers_its_pages() {
     doc.commit_ops(vec![fx::set_header(spec, None)], "header")
         .unwrap();
     let all = ids(&doc);
-    let out = crate::save::extract_bytes(&doc.snapshot(), &[all[2], all[4]]).unwrap();
+    let out = doc.export_bytes(|f, out| crate::export::Export::extract(f, &[all[2], all[4]], out));
     let pdf = Pdf::load_mem(&out).unwrap();
     let said: Vec<String> = pages(&pdf).into_iter().map(|p| drawn(&pdf, p)).collect();
     let want = [("(000003)", "(Page 1 of 2)"), ("(000005)", "(Page 2 of 2)")];
     for (text, (bates, page)) in said.iter().zip(want) {
         assert!(text.contains(bates) && text.contains(page), "{text}");
+    }
+}
+
+/// A print numbers the pages it prints as the document does, as print
+/// preview shows them (Greg, 2026-10-22), with markup and without: pages 5
+/// and 6 of 10 say "Page 5 of 10" and "Page 6 of 10", the document's labels
+/// (the print file keeps none) and its Bates numbers. An extract of them
+/// numbers them as it has them, "Page 1 of 2" and "Page 2 of 2", and its
+/// labels as it keeps them, the range starting at its first page ("A-1").
+/// Each of a document not saved, its header drawn anew, and of one saved
+/// and opened again, whose blocks a print keeps.
+#[test]
+fn a_print_numbers_its_pages_as_the_document_does_and_an_extract_as_it_has_them() {
+    use crate::export::Export;
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, "a.pdf", &text_file(10));
+    let mut spec = HeaderFooterSpec {
+        bates: Some(bates("", 6, 1)),
+        ..fx::header("<<bates>>")
+    };
+    spec.texts[2] = "<<label>>".into();
+    spec.texts[4] = "Page <<1>> of <<N>>".into();
+    let all = ids(&doc);
+    let labels = Op::SetPageLabels {
+        ranges: Some(vec![fx::label(all[0], LabelStyle::Decimal, "A-", 1)]),
+    };
+    doc.commit_ops(vec![fx::set_header(spec, None), labels], "header")
+        .unwrap();
+    How::Rewritten.save(&mut doc, &path);
+    let (_, again) = opened(&dir, "b.pdf", &std::fs::read(&path).unwrap());
+    let said = |bytes: Vec<u8>| -> Vec<String> {
+        let pdf = Pdf::load_mem(&bytes).unwrap();
+        pages(&pdf).into_iter().map(|p| drawn(&pdf, p)).collect()
+    };
+    let says = |said: Vec<String>, want: [[&str; 3]; 2], what: &str| {
+        assert_eq!(said.len(), 2, "{what}");
+        for (text, want) in said.iter().zip(want) {
+            for w in want {
+                assert!(text.contains(&format!("({w}) Tj")), "{what}: {w}: {text}");
+            }
+        }
+    };
+    for (d, which) in [(&doc, "not saved"), (&again, "saved")] {
+        let kept = [d.page(4).unwrap(), d.page(5).unwrap()];
+        for markup in [true, false] {
+            let printed = d.export_bytes(|f, _| Export::print(f, &kept, markup));
+            let want = [
+                ["000005", "A-5", "Page 5 of 10"],
+                ["000006", "A-6", "Page 6 of 10"],
+            ];
+            says(said(printed), want, &format!("{which}, print {markup}"));
+        }
+        let extract = d.export_bytes(|f, out| Export::extract(f, &kept, out));
+        let want = [
+            ["000005", "A-1", "Page 1 of 2"],
+            ["000006", "A-2", "Page 2 of 2"],
+        ];
+        says(said(extract), want, &format!("{which}, extract"));
     }
 }
 
@@ -483,9 +541,10 @@ fn a_found_header_removed_leaves_no_trace() {
         include_authored: false,
     };
     again.commit_ops(vec![remove], "remove").unwrap();
-    let report = super::save(
+    let report = super::save_with(
         &mut again,
         &path,
+        SaveHow::Planned,
         &AskAnswers::default(),
         &in_progress::NoProgress,
     )
@@ -631,9 +690,10 @@ fn an_older_sheaf_s_header_is_replaced_and_its_settings_dropped() {
     assert_eq!(older, [(PaginationKind::Header, PagOrigin::SheafLegacy)]);
     let set = fx::set_header(fx::header("Final"), None);
     doc.commit_ops(vec![set], "header").unwrap();
-    let report = super::save(
+    let report = super::save_with(
         &mut doc,
         &path,
+        SaveHow::Planned,
         &AskAnswers::default(),
         &in_progress::NoProgress,
     )
@@ -661,7 +721,14 @@ fn objects_of(section: &[u8]) -> Vec<String> {
 
 /// `doc` saved to `path`, its file, as planned.
 fn planned(doc: &mut Document, path: &Path) -> SaveReport {
-    super::save(doc, path, &AskAnswers::default(), &NoProgress).unwrap()
+    super::save_with(
+        doc,
+        path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap()
 }
 
 /// `doc`'s second and third pages traded, and saved to `path`, its file,

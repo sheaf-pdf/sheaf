@@ -5,18 +5,27 @@
 //! and text exports. Text is Helvetica in WinAnsi, as all of sheaf's
 //! generated text is (decision 11), a tickmark's check or cross in
 //! ZapfDingbats; each sheet is written with the content toolkit's
-//! [`ContentWriter`].
+//! [`ContentWriter`]. The sheets are made in memory, written through
+//! sheaf's serializer, and inserted into a document of no pages
+//! ([`summary`]), which the caller saves ([`summary_to`]).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use in_progress::NoProgress;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::content::{
     Color, ContentWriter, Font, Paint, Res, ResObjects, Reserved, Std14, wrap_with,
 };
+use sheaf_doc::export::ExportFrom;
+use sheaf_doc::materialize::AskAnswers;
 use sheaf_doc::stamp_lib::PageForm;
-use sheaf_doc::{Box2, Pt, Snapshot};
-use sheaf_edit::PageSize;
+use sheaf_doc::store::{BlobKind, MemoryKind};
+use sheaf_doc::{Box2, Pt};
+use sheaf_edit::{BlobSel, Bring, Op, PageSize, PageSource};
+
+use crate::session::{Decided, SaveTo, Session};
 
 use super::{CommentFilter, Listing, Sort, Thread, list, meta, numbers};
 
@@ -66,21 +75,72 @@ const BODY_LH: f32 = 13.0;
 /// Below the last line of the column, for the footer.
 const FOOTER: f32 = 22.0;
 
-/// `snap`'s comments, listed as `cf` and `needle` list them (see [`list`]),
-/// as a summary PDF titled `title`.
-pub fn summary_pdf(
-    snap: &Snapshot,
+/// The comments of `from`'s version, listed as `cf` and `needle` list them
+/// (see [`list`]), as a summary titled `title`: a document of its own,
+/// made in memory, its pages inserted into one of no pages (M10.5 §3.9),
+/// for the caller to save where the reader says.
+pub fn summary(
+    from: &ExportFrom,
+    cf: &CommentFilter,
+    needle: &str,
+    layout: Layout,
+    title: &str,
+) -> Result<Session> {
+    let pdf = summary_bytes(from, cf, needle, layout, title)?;
+    let mut session = Session::new_empty();
+    let kind = BlobKind::memory(MemoryKind::Summary);
+    let src = session.doc.store().open(pdf.into(), kind)?;
+    session.hold(src.blob().clone());
+    let insert = Op::InsertPages {
+        from: PageSource::File {
+            file: BlobSel::Id(src.id()),
+            name: title.to_string(),
+        },
+        pages: None,
+        before: None,
+        bring: Bring::default(),
+        locals: Vec::new(),
+    };
+    session.commit(vec![insert], "Summarize comments")?;
+    Ok(session)
+}
+
+/// [`summary`] written to `path`, a file of its own, so nothing asks;
+/// never the file `from`'s document was opened from, which no export
+/// replaces (§12.1).
+pub fn summary_to(
+    from: &ExportFrom,
+    (cf, needle): (&CommentFilter, &str),
+    layout: Layout,
+    title: &str,
+    path: &Path,
+) -> Result<()> {
+    sheaf_doc::export::not_its_file(&from.snap, path)?;
+    let mut made = summary(from, cf, needle, layout, title)?;
+    let to = SaveTo::File {
+        path: path.into(),
+        append: false,
+    };
+    made.save(to, &AskAnswers::default(), &NoProgress)
+        .decided()?;
+    Ok(())
+}
+
+/// [`summary`]'s pages, as a PDF written through sheaf's serializer.
+fn summary_bytes(
+    from: &ExportFrom,
     cf: &CommentFilter,
     needle: &str,
     layout: Layout,
     title: &str,
 ) -> Result<Vec<u8>> {
+    let snap = &from.snap;
     let listing = list(&snap.state, cf, needle);
     let labels = snap.state.page_labels();
     let mut w = Writer::new(layout);
     match layout {
         Layout::CommentsOnly => comments_only(&mut w, &listing, labels.as_deref(), title, cf),
-        Layout::Pages => pages(&mut w, snap, &listing, labels.as_deref())?,
+        Layout::Pages => pages(&mut w, from, &listing, labels.as_deref())?,
     }
     w.finish(title)
 }
@@ -166,7 +226,7 @@ fn comments_only(
 /// on it, and its list at right.
 fn pages(
     w: &mut Writer,
-    snap: &Snapshot,
+    from: &ExportFrom,
     listing: &Listing,
     labels: Option<&[String]>,
 ) -> Result<()> {
@@ -182,11 +242,11 @@ fn pages(
             .label(x, y - 10.0, 10.0, false, GRAY, "No comments to list.");
         return Ok(());
     }
-    let st = &snap.state;
+    let st = &from.snap.state;
     let ids: Vec<_> = by_page.keys().map(|&p| st.order()[p]).collect();
     // The pages as they print, every mark drawn in.
-    let printed = Pdf::load_mem(&sheaf_doc::save::print_pdf(snap, &ids, true)?)
-        .context("reading the pages back")?;
+    let printed = sheaf_doc::export::printed(from.clone(), &ids, true, &NoProgress)?;
+    let printed = Pdf::load_mem(&printed).context("reading the pages back")?;
     let printed_pages: Vec<ObjectId> = printed.get_pages().values().copied().collect();
     if printed_pages.len() != ids.len() {
         bail!(
@@ -489,7 +549,7 @@ impl Writer {
         self.sheets.last_mut().expect("a sheet")
     }
 
-    /// The file: every sheet with its footer, titled `title`.
+    /// The file: every sheet with its footer, which names `title`.
     fn finish(mut self, title: &str) -> Result<Vec<u8>> {
         if self.sheets.is_empty() {
             self.new_sheet();
@@ -540,15 +600,7 @@ impl Writer {
             "Pages" => pages_id,
         });
         self.pdf.trailer.set("Root", catalog);
-        let info = self.pdf.add_object(dictionary! {
-            "Title" => sheaf_doc::save::text_string(title),
-            "Producer" => Object::string_literal("sheaf"),
-            "CreationDate" => Object::string_literal(sheaf_doc::pdf_date_now()),
-        });
-        self.pdf.trailer.set("Info", info);
-        let mut out = Vec::new();
-        self.pdf.save_to(&mut out)?;
-        Ok(out)
+        sheaf_doc::serialize::full::write_built(&self.pdf)
     }
 }
 

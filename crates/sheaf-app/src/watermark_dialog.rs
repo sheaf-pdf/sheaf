@@ -894,7 +894,7 @@ mod tests {
     #[test]
     fn the_watermark_dialog_previews_the_watermark_and_drops_a_stale_result() {
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
-        let blank = sheaf_doc::generated::blank_pages(612.0, 792.0, 2).unwrap();
+        let blank = sheaf_doc::memory::blank_pages(612.0, 792.0, 2).unwrap();
         let doc = opened(dir.path(), "blank.pdf", &blank);
         let (now, page) = (doc.snapshot(), doc.page(1).unwrap());
         let pool = EnginePool::new().unwrap();
@@ -945,7 +945,7 @@ mod tests {
         let pdf = dir.path().join("cover.pdf");
         std::fs::write(
             &pdf,
-            sheaf_doc::generated::blank_pages(300.0, 200.0, 1).unwrap(),
+            sheaf_doc::memory::blank_pages(300.0, 200.0, 1).unwrap(),
         )
         .unwrap();
         let cover = read_art(doc.store(), &pdf).unwrap();
@@ -1005,7 +1005,7 @@ mod tests {
     #[test]
     fn the_dialog_starts_from_the_model_after_a_save_and_reopen() {
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
-        let blank = sheaf_doc::generated::blank_pages(612.0, 792.0, 3).unwrap();
+        let blank = sheaf_doc::memory::blank_pages(612.0, 792.0, 3).unwrap();
         let mut doc = opened(dir.path(), "blank.pdf", &blank);
         let fresh = Start::at(doc.state(), Z::Over);
         assert!(!fresh.current);
@@ -1029,7 +1029,7 @@ mod tests {
         let unsaved = Start::at(doc.state(), Z::Under);
         let kept = unsaved.art.expect("the image kept");
         assert_eq!(kept.name(), "the image it draws now");
-        let saved = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+        let saved = sheaf_doc::save::rewrite(&doc).unwrap();
         let again = opened(dir.path(), "saved.pdf", &saved);
 
         let over = Start::at(again.state(), Z::Over);

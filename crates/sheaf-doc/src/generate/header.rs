@@ -1,7 +1,8 @@
 //! The header and footer (M10.5 §3.5): six slots of text, left, center
 //! and right of the header and of the footer, whose tokens read the page
 //! they're on. `<<1>>`, `<<N>>` and `<<label>>` are live, read from the
-//! document as it's written; `<<date>>`, `<<file>>` and `<<bates>>` say
+//! document as it's written, a print's pages where the document has them
+//! (`DocState::numbered_in`); `<<date>>`, `<<file>>` and `<<bates>>` say
 //! what its generator fixed when it was set ([`Frozen`]). Each slot is laid
 //! out on the page as it shows, the header's tops `top` below its top edge
 //! and the footer's baselines `bottom` above its bottom edge, at the left

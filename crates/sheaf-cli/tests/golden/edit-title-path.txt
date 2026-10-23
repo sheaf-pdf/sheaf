@@ -1,0 +1,84 @@
+$ sheaf-cli edit $DIR/in.pdf --edits $DIR/edit-title-path.json -o $DIR/title-path.pdf
+--- edits
+{
+  "ops": [
+    {
+      "bookmarks": [
+        {
+          "path": [
+            "Part I",
+            "Ch. 1"
+          ]
+        }
+      ],
+      "op": "patch-bookmarks",
+      "patch": {
+        "title": "Chapter 1"
+      }
+    },
+    {
+      "at": "first",
+      "op": "add-bookmark",
+      "parent": {
+        "path": [
+          "Part II"
+        ]
+      },
+      "target": {
+        "pos": 4
+      },
+      "title": "Schedule B"
+    },
+    {
+      "before": {
+        "pos": 1
+      },
+      "op": "move-pages",
+      "pages": {
+        "bookmark": {
+          "path": [
+            "Part II"
+          ]
+        }
+      }
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 0
+--- stdout
+{
+  "created": {
+    "locals": {},
+    "ops": [
+      [],
+      [
+        {
+          "bookmark": [
+            "Part II",
+            "Schedule B"
+          ]
+        }
+      ],
+      []
+    ]
+  },
+  "lines": [
+    {
+      "removes": false,
+      "text": "Bookmark: rename it “Chapter 1”"
+    },
+    {
+      "removes": false,
+      "text": "Add bookmark “Schedule B”"
+    },
+    {
+      "removes": false,
+      "text": "Move pages 3, 4"
+    }
+  ],
+  "strategy": "rewrite",
+  "version": "Bookmark: rename it “Chapter 1”"
+}
+--- stderr
+editing…

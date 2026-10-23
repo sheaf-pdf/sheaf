@@ -45,6 +45,11 @@ impl PropertiesDict {
     pub fn get(&self, name: &[u8]) -> Option<&Dictionary> {
         self.lists.get(name)
     }
+
+    /// Every list, in no order.
+    pub fn lists(&self) -> impl Iterator<Item = &Dictionary> {
+        self.lists.values()
+    }
 }
 
 /// A marked range's property list.

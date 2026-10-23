@@ -64,7 +64,9 @@ fn check_prints_the_form_and_its_problems() {
 
     let run = sheaf(&["form", "check", dir.join("none.pdf").to_str().unwrap()]);
     assert_eq!(run.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&run.stderr).starts_with("error: reading"));
+    // Not a terminal: the op's start as a line, then the error.
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(err.starts_with("opening…\nerror: reading"), "{err}");
     assert!(sheaf_cli::is_subcommand("form".as_ref()));
     let _ = std::fs::remove_dir_all(&dir);
 }

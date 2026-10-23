@@ -882,6 +882,79 @@ const RETIRED: &[(&str, u8)] = &[
     // reads. API 0.3 has none; 0.2's (`api::v02`) answers none until 0.2
     // goes (slice 20).
     ("api::shared::HostState::page_text_layer", 18),
+    // Memory sources: blank pages, images as pages and library stamps are
+    // PDFs made in memory and interned as blobs, written by sheaf's
+    // serializer (`memory`, `serialize::full::write_built`); nothing is
+    // written to a cache, and a stamp nothing holds isn't found. The
+    // generated cache, the stems it gave by path, combine's image file in
+    // it and `find_stamp`'s cache arm are gone.
+    ("generated", 19),
+    ("generated::cache_dir", 19),
+    ("generated::store", 19),
+    ("generated::store_in", 19),
+    ("generated::name_of", 19),
+    ("generated::is_stem", 19),
+    ("generated::path_of", 19),
+    ("generated::stem_of", 19),
+    ("generated::write_new", 19),
+    ("generated::blank_pdf", 19),
+    ("generated::blank_pages", 19),
+    ("images::PageFit", 19),
+    ("images::files_to_pdf", 19),
+    ("model::held_stamp", 19),
+    ("combine::page_source", 19),
+    ("page_insert::DocView::insert_made", 19),
+    // Private data: under `Private::Strip` a file holds none of
+    // `private::KEYS`, legacy names included (an inline list loses
+    // `private::LIST_KEYS`, derived from them); a page's markers, lists
+    // and names of sheaf's go through its filters,
+    // `RemovedKind::PrivateData`.
+    ("model::LEGACY_KEYS", 19),
+    ("effects::RemovedKind::OlderSettings", 19),
+    // The old exports: every way out is `export::run`, an `ExportTx` of
+    // transforms (`KeepPages`, `RemoveMarkup`, `RemovePrivateData`,
+    // `FlattenAnnotations`) written by `materialize` with the save's
+    // checks, and the presets name them. `subset`'s fake snapshot, the
+    // post-pass on a Rewrite's graph (`flatten_annots`, `/SheafFlat1`,
+    // the widget first-state fallback) and the markup strip are gone,
+    // with the app's methods named after them.
+    ("save::subset", 19),
+    ("save::paired", 19),
+    ("save::form_on", 19),
+    ("save::prune_outline", 19),
+    ("save::print_pdf", 19),
+    ("save::extract_pages", 19),
+    ("save::extract_bytes", 19),
+    ("save::export_clean_copy", 19),
+    ("save::export_flattened", 19),
+    ("save::flatten_annots", 19),
+    ("save::normal_appearance", 19),
+    ("save::strip_markup", 19),
+    ("save::strip_markup_annots", 19),
+    ("save::is_link_or_field", 19),
+    ("save::without_markup", 19),
+    ("save::EXPORT", 19),
+    ("save::CLEAN", 19),
+    ("save::written", 19),
+    ("save::is_the_file", 19),
+    ("materialize::PostPass", 19),
+    ("materialize::materialize_then", 19),
+    ("docview::DocView::ask_before_saving", 19),
+    ("docview::DocView::export_flattened_to", 19),
+    ("docview::DocView::export_flattened_prompt", 19),
+    ("docview::DocView::export_clean_copy_prompt", 19),
+    ("print_dialog::PrintContext::snapshot", 19),
+    // Every subcommand runs on a `Session`, which saves through
+    // `materialize::save_with`, the save core; scan, the summary and blank
+    // pages make their pages in memory, and nothing is opened or saved by
+    // hand.
+    ("materialize::save", 19),
+    ("scan::add_text", 19),
+    ("comments::summary_pdf", 19),
+    // A page past its source's pages can't be: an open makes a page of
+    // each page the source has, and an edit's of what the store holds.
+    // The check of it had no caller.
+    ("save::validate", 19),
 ];
 
 /// Last segments only a path matches: names the new design uses again
@@ -1154,6 +1227,33 @@ const QUALIFIED_ONLY: &[&str] = &[
     // builder's, a set's: not the sink's object added for the OCR layer's
     // installer.
     "add",
+    // The document's store (`Document::store`, the `store` module), the
+    // blank pages made in memory (`memory::blank_pages`) and the tests'
+    // own blank files, a key's path (`model`'s tests), an export's file
+    // stem (`sheaf_ops::export::stem_of`), a name for a thing (`name_of`)
+    // and the realizer's generated content (`untouched::generated`): not
+    // the generated cache's.
+    "store",
+    "blank_pages",
+    "blank_pdf",
+    "path_of",
+    "stem_of",
+    "name_of",
+    "generated",
+    // What a save or a test wrote (`append_tests::written`, the
+    // materializer's `Written`), and a font's subset (`removal_tests`):
+    // not the old exports' state and writer.
+    "written",
+    "subset",
+    // A session's save (`sheaf_ops::session::Session::save`), the app's,
+    // a test's `How::save` and lopdf's: not `materialize::save`, which
+    // `save_with` replaced.
+    "save",
+    // A plugin manifest's check (`Manifest::validate`), a stale
+    // transaction's (`Document::validate`, for `Stale::Validate`) and a
+    // form's count of its validate scripts (`ScriptCounts::validate`): not
+    // the save module's page check.
+    "validate",
 ];
 
 #[test]

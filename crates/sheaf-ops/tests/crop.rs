@@ -7,6 +7,10 @@
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
+// A test crate of its own, whose scratch files go in the temp directory
+// clippy.toml bans outside tests.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::collections::BTreeMap;
@@ -117,13 +121,6 @@ fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sheaf-crop-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // SAFETY: each test sets the same value before any reads it.
-    unsafe {
-        std::env::set_var(
-            "SHEAF_CACHE_DIR",
-            std::env::temp_dir().join("sheaf-crop-cache"),
-        )
-    };
     dir
 }
 
@@ -486,7 +483,7 @@ fn trim_white_crops_a_turned_page_in_page_space() {
         assert!(close(found.crops[0].1, square, 1.0), "{turn:?}: {found:?}");
         landed(&mut doc, &snap, &found, "Trim White").unwrap();
         let out = dir.join("out.pdf");
-        sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
+        sheaf_doc::save::rewrite_to_path(&doc, &out).unwrap();
         let size = doc.page_size(p);
         let job = Job::Page {
             width: size.width.round() as u32,
@@ -554,7 +551,7 @@ fn trim_white_works_on_a_source_pdfium_refuses() {
     assert!(doc.primary().base_refused());
     landed(&mut doc, &snap, &found, "Trim White").unwrap();
     let out = dir.join("out.pdf");
-    sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
+    sheaf_doc::save::rewrite_to_path(&doc, &out).unwrap();
     let saved = crop_box(&out);
     let square = [300.0, 300.0, 400.0, 400.0];
     let near = saved.iter().zip(square).all(|(a, b)| (a - b).abs() <= 1.0);

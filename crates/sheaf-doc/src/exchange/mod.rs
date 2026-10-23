@@ -13,11 +13,11 @@ pub mod xfdf;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
+use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, dictionary};
 
 use sheaf_edit::{AnnotRef, BlobSel, NewMark, Op, PageRef};
 
-use crate::annot::{Annot, AnnotId};
+use crate::annot::{Annot, AnnotId, Emitted};
 use crate::attachments::Objects;
 use crate::file::thread_name;
 use crate::import::{Interned, NotAMark, Options};
@@ -477,7 +477,7 @@ fn bring_held(
         AnnotKind::PageStamp { stamp, name, .. } => {
             match crate::model::find_stamp(store, primary, stamp) {
                 Some(FormRef::Blob(page)) => interned.hold(page.blob().clone()),
-                Some(FormRef::Base(_)) => {}
+                Some(FormRef::Base(_) | FormRef::Pinned(_)) => {}
                 None => {
                     let page = crate::file::stamp_page(pdf, dict)
                         .map(|form| crate::stamp_lib::form_to_pdf(pdf, form));
@@ -518,8 +518,10 @@ fn bring_held(
 
 /// Comments to write out of `snap`: our marks `ours` and other tools'
 /// comments `theirs`, by id, as dictionaries in a [`Comments`], replies
-/// pointing at what they reply to when it's written too. Pages are
-/// counted in the document's order.
+/// pointing at what they reply to when it's written too. Ours are as the
+/// writer makes them ([`emission`](crate::annot::emission)), what they
+/// draw with and hold written once. Pages are counted in the document's
+/// order.
 pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<Comments> {
     let st = &snap.state;
     let mut out = Comments::new();
@@ -535,8 +537,14 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
             continue;
         };
         let a = &m.annot;
-        let written = crate::annot::to_pdf_in(m, &mut out.pdf, &mut cx);
-        let mut main = written.main;
+        let held = cx.held(m, &mut out.pdf);
+        let Emitted {
+            mut main,
+            appearance,
+            companions,
+        } = crate::annot::emission(a, held);
+        let ap = cx.form(appearance, &mut out.pdf);
+        main.set("AP", dictionary! { "N" => ap });
         main.set("Page", index as i64);
         let main_id = out.pdf.add_object(Object::Dictionary(main));
         out.annots.push((index as u32, main_id));
@@ -544,7 +552,9 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
         if let Some(p) = a.thread_parent() {
             parents.push((main_id, p.to_string()));
         }
-        for mut part in written.companions {
+        for (mut part, appearance) in companions {
+            let ap = cx.form(appearance, &mut out.pdf);
+            part.set("AP", dictionary! { "N" => ap });
             part.set("IRT", main_id);
             part.set("RT", Object::Name(b"Group".to_vec()));
             part.set("Page", index as i64);

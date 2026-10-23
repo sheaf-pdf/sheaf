@@ -26,10 +26,14 @@
 //! sheaf builds, draw it. Appearances are drawn with the content toolkit's
 //! writer, their text in the standard 14 fonts; a character those lack
 //! draws `?`, which [`Annot::unencodable`] tells without drawing anything.
-//! A save shares what its marks draw with through a [`WriteCx`], and writes
-//! the stamps' pages and attachments' files the marks hold ([`Mark`]) once.
+//! A save writes marks as [`emission`] makes them, through the emitter.
+//! What a PDF sheaf builds in memory holds of them (the comments a data
+//! file exports, a flattened mark's page) is written through a
+//! [`WriteCx`], which writes what they draw with in common, and the
+//! stamps' pages and attachments' files the marks hold ([`Mark`]), once.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use lopdf::{Dictionary, Object, Stream, StringFormat, dictionary};
@@ -40,11 +44,11 @@ use unicode_normalization::UnicodeNormalization;
 use crate::attachments::{Objects, resolve};
 use crate::content::sink::{Lopdf, Sink};
 use crate::content::{
-    Blend, Color, ContentWriter, FillRule, Font, GState, LineCap, LineJoin, Paint, Res, ResObjects,
-    Reserved, ResourceNeeds, Std14,
+    Blend, Color, ContentWriter, FillRule, Font, GState, LineCap, LineJoin, Paint, Res, ResBody,
+    ResId, ResObjects, Reserved, ResourceNeeds, Std14,
 };
 use crate::geom::{Affine, Geom, Rect};
-use crate::model::{FormRef, Mark};
+use crate::model::{FormRef, Mark, PinnedAp};
 use crate::store::{BlobId, BlobRef};
 
 pub use sheaf_edit::{AnnotId, Box2, Pt};
@@ -311,6 +315,18 @@ pub fn icon_box(pos: Pt) -> Box2 {
 }
 
 impl AnnotKind {
+    /// Its annotation's flags (`/F`, ISO 32000-1 12.5.3): Print; a reply's
+    /// NoZoom and NoRotate too, as Acrobat writes them, and a status's
+    /// Hidden as well.
+    pub fn flags(&self) -> u32 {
+        use crate::forms::field::annot_flags::{HIDDEN, NO_ROTATE, NO_ZOOM, PRINT};
+        match self {
+            AnnotKind::Reply { .. } => PRINT | NO_ZOOM | NO_ROTATE,
+            AnnotKind::Status { .. } => PRINT | NO_ZOOM | NO_ROTATE | HIDDEN,
+            _ => PRINT,
+        }
+    }
+
     /// The same shape with every point mapped by `mp`, every box by `mb`
     /// and an icon's corner by `icon_at`; `size` maps the text size of
     /// tapes.
@@ -1152,14 +1168,16 @@ pub const PART: &str = "SheafPart";
 /// any companions. Objects they point at (appearance streams, images,
 /// embedded files) are already in the document. The writer gives each
 /// companion `/IRT` to the main annotation and `/RT /Group`.
+#[cfg(any(test, feature = "fixtures"))]
 pub struct Written {
     pub main: Dictionary,
     pub companions: Vec<Dictionary>,
 }
 
-/// What the marks one save writes share: the fonts and ExtGStates their
-/// appearances draw with, each one object a save, and the stamps' pages
-/// and attachments' files the marks hold, each written once.
+/// What the marks written into one PDF built in memory share: the fonts
+/// and ExtGStates their appearances draw with, each one object a file,
+/// and the stamps' pages and attachments' files the marks hold, each
+/// written once.
 pub struct WriteCx {
     pub(crate) res: ResObjects,
     /// Each stamp's page as a form in the file, by the form a mark holds:
@@ -1173,12 +1191,28 @@ pub struct WriteCx {
 }
 
 /// A stamp's page as a form in the file: its number (or the emitter's
-/// placeholder for it), `/BBox` and `/Matrix`.
+/// placeholder for it), what the content that draws it names it by,
+/// `/BBox` and `/Matrix`.
 #[derive(Debug, Clone, Copy)]
 pub struct StampForm {
     pub id: lopdf::ObjectId,
+    /// Its number's digest ([`Res::written`]), or in a pinned appearance
+    /// its form's, which no save's numbering moves.
+    pub res: ResId,
     pub bbox: Rect,
     pub matrix: Affine,
+}
+
+impl StampForm {
+    /// Form `id`, named by its number.
+    pub fn written(id: lopdf::ObjectId, bbox: Rect, matrix: Affine) -> StampForm {
+        StampForm {
+            id,
+            res: Res::written(id).id,
+            bbox,
+            matrix,
+        }
+    }
 }
 
 /// What a mark draws and embeds that isn't its own, where the file being
@@ -1211,7 +1245,7 @@ impl Default for WriteCx {
 }
 
 impl WriteCx {
-    /// For a save of marks into a file of its own.
+    /// For marks written into a file of their own.
     pub fn new() -> WriteCx {
         WriteCx {
             res: ResObjects::default(),
@@ -1222,8 +1256,9 @@ impl WriteCx {
     }
 
     /// Stamp `stem`'s page, the library's `name`, held as `form`, as a form
-    /// in `pdf`: copied from the source that holds it, or imported from its
-    /// one-page PDF. None, said once, when it can't be had.
+    /// in `pdf`: copied from the source that holds it, imported from its
+    /// one-page PDF, or drawn from what it's pinned to. None, said once,
+    /// when it can't be had.
     fn stamp(
         &mut self,
         form: &FormRef,
@@ -1243,18 +1278,40 @@ impl WriteCx {
                 .map_err(anyhow::Error::from)
                 .and_then(|src| crate::stamp_lib::page_form(&src, pdf))
                 .map(|f| Some(f.id)),
+            FormRef::Pinned(ap) => {
+                let page = match (&ap.inputs.kind, &ap.inputs.stamp) {
+                    (AnnotKind::PageStamp { stamp, name, .. }, Some(page)) => {
+                        self.stamp(page, stamp, name, pdf)
+                    }
+                    _ => None,
+                };
+                let drawn = appearance(&ap.inputs.annot(), page);
+                Ok(Some(drawn.write(pdf, &mut self.res)))
+            }
         };
         let made = made
             .and_then(|id| {
                 let id = id.context("a page, not a form")?;
                 let (bbox, matrix) =
                     crate::stamp_lib::form_frame(&*pdf, id).context("a form with no box")?;
-                Ok(StampForm { id, bbox, matrix })
+                Ok(StampForm::written(id, bbox, matrix))
             })
             .inspect_err(|e| log::warn!("stamp {name} ({stem}) is drawn without its page: {e:#}"))
             .ok();
         self.stamps.insert(form.clone(), made);
         made
+    }
+
+    /// What mark `m` holds, in `pdf`: its stamp's page as a form, its
+    /// file as an embedded file stream, each written once. What it can't
+    /// have is said, and it's drawn without it.
+    pub fn held(&mut self, m: &Mark, pdf: &mut lopdf::Document) -> Held {
+        held(&m.annot, m.stamp.as_ref(), m.file.as_ref(), pdf, self)
+    }
+
+    /// `appearance` as a form in `pdf`, what it draws with written once.
+    pub fn form(&mut self, appearance: Appearance, pdf: &mut lopdf::Document) -> lopdf::ObjectId {
+        appearance.write(pdf, &mut self.res)
     }
 
     /// The attachment's file `file` as an embedded file stream in `pdf`,
@@ -1278,27 +1335,31 @@ impl WriteCx {
 /// geometry is PageSpace, which is the page's user space, so it needs
 /// nothing of the page. The caller adds [`Written::main`] (and the
 /// companions) to the page's `/Annots`. A page stamp is drawn without its
-/// page, an attachment without its file.
+/// page, an attachment without its file. What tests build their files
+/// with.
+#[cfg(any(test, feature = "fixtures"))]
 pub fn to_pdf(a: &Annot, pdf: &mut lopdf::Document) -> Written {
     write(a, None, None, pdf, &mut WriteCx::new())
 }
 
-/// [`to_pdf`], for one of the marks a save writes into `pdf` through
-/// `cx`, with what it holds: what they draw with in common is in the file
-/// once, and so is each stamp's page and file.
+/// [`to_pdf`], for one of the marks written into `pdf` through `cx`, with
+/// what it holds: what they draw with in common is in the file once, and
+/// so is each stamp's page and file.
+#[cfg(any(test, feature = "fixtures"))]
 pub fn to_pdf_in(m: &Mark, pdf: &mut lopdf::Document, cx: &mut WriteCx) -> Written {
     write(&m.annot, m.stamp.as_ref(), m.file.as_ref(), pdf, cx)
 }
 
-/// `a` written into `pdf` through `cx`, drawing the page `stamp` and
-/// embedding `file` where it names them.
-fn write(
+/// What `a` holds, as `stamp` and `file`, written into `pdf` through
+/// `cx` where `a` names them: its stamp's page as a form, its file as an
+/// embedded file stream. What it can't have is said.
+fn held(
     a: &Annot,
     stamp: Option<&FormRef>,
     file: Option<&BlobRef>,
     pdf: &mut lopdf::Document,
     cx: &mut WriteCx,
-) -> Written {
+) -> Held {
     let stamp = match (&a.kind, stamp) {
         (AnnotKind::PageStamp { stamp, name, .. }, Some(form)) => cx.stamp(form, stamp, name, pdf),
         (AnnotKind::PageStamp { stamp, name, .. }, None) => {
@@ -1320,17 +1381,31 @@ fn write(
         }
         _ => None,
     };
+    Held { stamp, file }
+}
+
+/// `a` written into `pdf` through `cx`, drawing the page `stamp` and
+/// embedding `file` where it names them.
+#[cfg(any(test, feature = "fixtures"))]
+fn write(
+    a: &Annot,
+    stamp: Option<&FormRef>,
+    file: Option<&BlobRef>,
+    pdf: &mut lopdf::Document,
+    cx: &mut WriteCx,
+) -> Written {
+    let held = held(a, stamp, file, pdf, cx);
     let Emitted {
         mut main,
         appearance,
         companions,
-    } = emission(a, Held { stamp, file });
-    let ap = appearance.write(pdf, &mut cx.res);
+    } = emission(a, held);
+    let ap = cx.form(appearance, pdf);
     main.set("AP", dictionary! { "N" => ap });
     let companions = companions
         .into_iter()
         .map(|(mut dict, appearance)| {
-            let ap = appearance.write(pdf, &mut cx.res);
+            let ap = cx.form(appearance, pdf);
             dict.set("AP", dictionary! { "N" => ap });
             dict
         })
@@ -1368,16 +1443,7 @@ pub fn emission(a: &Annot, held: Held) -> Emitted {
         pdf_text_string(&serde_json::to_string(&payload).unwrap_or_default()),
     );
     let mut companions = Vec::new();
-    // A replacement's crossed-out text: a StrikeOut of its own, grouped
-    // under the Caret, which carries the mark.
-    if let AnnotKind::Replace { rects, .. } = &a.kind {
-        let strike = Annot {
-            kind: AnnotKind::StrikeOut {
-                rects: rects.clone(),
-            },
-            contents: String::new(),
-            ..a.clone()
-        };
+    if let Some(strike) = companion(a) {
         let (mut dict, appearance) = annotation(&strike, None);
         dict.set("NM", pdf_text_string(&a.strike_name()));
         companions.push((dict, appearance));
@@ -1387,6 +1453,39 @@ pub fn emission(a: &Annot, held: Held) -> Emitted {
         appearance,
         companions,
     }
+}
+
+/// What `a` writes beside itself, drawn as a mark of its own: a
+/// replacement's crossed-out text, a StrikeOut grouped under the Caret,
+/// which carries the mark.
+pub fn companion(a: &Annot) -> Option<Annot> {
+    let AnnotKind::Replace { rects, .. } = &a.kind else {
+        return None;
+    };
+    Some(Annot {
+        kind: AnnotKind::StrikeOut {
+            rects: rects.clone(),
+        },
+        contents: String::new(),
+        ..a.clone()
+    })
+}
+
+/// Mark `a`'s appearance alone, drawing `stamp`, as [`emission`] draws it:
+/// what a flattened mark's layer draws again ([`PinnedAp`]).
+///
+/// [`PinnedAp`]: crate::model::PinnedAp
+pub(crate) fn appearance(a: &Annot, stamp: Option<StampForm>) -> Appearance {
+    annotation(a, stamp).1
+}
+
+/// The pinned appearance `ap` as a one-page PDF, its page its form.
+pub(crate) fn pinned_pdf(ap: &Arc<PinnedAp>) -> anyhow::Result<Vec<u8>> {
+    let mut pdf = lopdf::Document::with_version("1.5");
+    let form = FormRef::Pinned(ap.clone());
+    let made = WriteCx::new().stamp(&form, "", "a flattened mark", &mut pdf);
+    let made = made.context("its appearance couldn't be drawn")?;
+    crate::stamp_lib::form_to_pdf(&pdf, made.id)
 }
 
 /// No objects at all: what [`staleness`] reads a dictionary of direct
@@ -1862,19 +1961,34 @@ impl Appearance {
     /// It as a form, compressed, its resources written through `sink`,
     /// once a file each.
     pub fn form(self, sink: &mut dyn Sink) -> Stream {
-        let mut resources = Dictionary::new();
-        crate::content::sink::bind(sink, &self.needs, &mut resources);
-        let mut form = Stream::new(
-            dictionary! {
-                "Type" => "XObject",
-                "Subtype" => "Form",
-                "BBox" => pdf_rect(self.bbox),
-                "Resources" => resources,
-            },
-            self.content,
-        );
+        let mut form = Stream::new(self.form_dict(sink), self.content);
         let _ = form.compress();
         form
+    }
+
+    /// Its form's dictionary, the resources it draws with written through
+    /// `sink`, once a file each: what [`form`](Self::form) holds its
+    /// content with.
+    pub(crate) fn form_dict(&self, sink: &mut dyn Sink) -> Dictionary {
+        let mut resources = Dictionary::new();
+        crate::content::sink::bind(sink, &self.needs, &mut resources);
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => pdf_rect(self.bbox),
+            "Resources" => resources,
+        }
+    }
+
+    /// Its `/BBox`, in user space: the mark's `/Rect`.
+    pub(crate) fn bbox(&self) -> Rect {
+        let [x0, y0, x1, y1] = self.bbox;
+        Rect::new(x0, y0, x1, y1)
+    }
+
+    /// Its content, drawn.
+    pub(crate) fn into_content(self) -> Vec<u8> {
+        self.content
     }
 
     /// It as a form in `pdf`, the resources written through `res`, once a
@@ -1926,7 +2040,11 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             y: -rect.bottom(),
             ..*rect
         };
-        w.place_form(Res::written(form.id), form.bbox, form.matrix, target);
+        let res = Res {
+            id: form.res,
+            body: ResBody::Written(form.id),
+        };
+        w.place_form(res, form.bbox, form.matrix, target);
         if turned {
             w.restore();
         }
@@ -1948,7 +2066,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
         "NM" => pdf_text_string(&a.name()),
         "T" => pdf_text_string(&a.author),
         "M" => pdf_text_string(&a.modified),
-        "F" => 4i64, // Print
+        "F" => i64::from(a.kind.flags()),
         "CA" => alpha,
     };
     if !a.contents.is_empty() {
@@ -2021,10 +2139,6 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
             dict.set("Name", Object::Name(b"Comment".to_vec()));
             dict.set("C", color_arr);
             dict.set("Open", false);
-            // Print, NoZoom, NoRotate, as Acrobat writes them; a status is
-            // hidden too.
-            let hidden = matches!(a.kind, AnnotKind::Status { .. });
-            dict.set("F", if hidden { 30i64 } else { 28i64 });
             if let AnnotKind::Status { model, state, .. } = &a.kind {
                 dict.set("StateModel", pdf_text_string(model));
                 dict.set("State", pdf_text_string(state));

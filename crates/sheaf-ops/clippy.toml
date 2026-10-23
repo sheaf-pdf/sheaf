@@ -1,1 +1,12 @@
-# The disallowed-methods bans land per the lint ledger (todos/m10.5-edit-api.md, Lint ledgers; slice 19).
+# The disallowed-methods bans of the lint ledger (todos/m10.5-edit-api.md,
+# Lint ledgers), landed in M10.5 slice 19. Test code is allowed them (the
+# crate root's `cfg_attr(test, allow(...))`); a legitimate use elsewhere
+# carries an `#[allow]` with its reason.
+disallowed-methods = [
+    { path = "lopdf::content::Content::decode", reason = "content is read by sheaf_doc::content's lexer, which keeps every byte; decoding to operations loses them" },
+    { path = "lopdf::content::Content::encode", reason = "content is written by sheaf_doc::content's writer or spliced, never re-encoded from operations" },
+    { path = "lopdf::Document::get_page_content", reason = "a page's content is read through its Source and sheaf_doc::content's lexer, stream by stream" },
+    { path = "lopdf::Document::change_page_content", reason = "a page's content is written by the emitter (materialize), not edited in lopdf's graph" },
+    { path = "lopdf::Document::add_page_contents", reason = "a page's content is written by the emitter (materialize), not edited in lopdf's graph" },
+    { path = "std::env::temp_dir", reason = "sheaf writes no document content to the temp directory: memory sources, and durable writes beside their target" },
+]

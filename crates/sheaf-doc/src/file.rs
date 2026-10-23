@@ -425,6 +425,10 @@ pub struct ForeignAnnot {
     /// What it is as one of our marks, when sheaf can hold it: what
     /// editing it makes it (M9 decision 5). Read when the file is.
     pub mark: Option<Box<Annot>>,
+    /// For a stamp whose `mark` is a page stamp, the form its appearance
+    /// is (`/AP /N`): the page that mark names by stem, which it holds
+    /// once it's made.
+    pub stamp: Option<ObjectId>,
 }
 
 impl ForeignAnnot {
@@ -792,6 +796,7 @@ pub fn annots_in<P: Objects + ?Sized>(
                         [v(0), v(1), v(2)]
                     }),
                 mark: None,
+                stamp: None,
             };
             found.push(InFile {
                 object,
@@ -802,9 +807,12 @@ pub fn annots_in<P: Objects + ?Sized>(
         if !dicts.is_empty() {
             let (at, dicts): (Vec<usize>, Vec<&lopdf::Dictionary>) = dicts.into_iter().unzip();
             let marks = crate::import::convert_page(pdf, &dicts, turn, Default::default());
-            for (i, m) in at.into_iter().zip(marks) {
+            for ((i, dict), m) in at.into_iter().zip(dicts).zip(marks) {
                 if let Found::Foreign(f) = &mut found[i].found {
                     f.mark = m.ok().map(Box::new);
+                    f.stamp = (f.mark.as_deref())
+                        .filter(|m| matches!(m.kind, crate::annot::AnnotKind::PageStamp { .. }))
+                        .and_then(|_| crate::import::appearance(pdf, dict));
                 }
             }
         }

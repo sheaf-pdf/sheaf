@@ -11,7 +11,7 @@ use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
 use crate::effects::{Removed, RemovedKind};
 use crate::materialize::ocr_tests::ocr_block;
 use crate::materialize::{
-    AskAnswers, How, StrategyKind, Why, forced_rewrite, materialize, removal, save,
+    AskAnswers, How, SaveHow, StrategyKind, Why, forced_rewrite, materialize, removal, save_with,
 };
 use crate::model::Document;
 use crate::save::rewrite;
@@ -150,10 +150,17 @@ const WAYS: [Way; 2] = [Way::Save, Way::Rewrite];
 fn saved(model: &mut Document, path: &Path, way: Way) -> Vec<u8> {
     match way {
         Way::Save => {
-            save(model, path, &AskAnswers::default(), &NoProgress).unwrap();
+            save_with(
+                model,
+                path,
+                SaveHow::Planned,
+                &AskAnswers::default(),
+                &NoProgress,
+            )
+            .unwrap();
             std::fs::read(path).unwrap()
         }
-        Way::Rewrite => rewrite(&model.snapshot()).unwrap(),
+        Way::Rewrite => rewrite(model).unwrap(),
     }
 }
 
@@ -391,7 +398,7 @@ fn fields_tags_and_threads_let_go_of_a_deleted_page() {
     let mut model = opened(&path);
     let third = model.page(2).unwrap();
     model.commit_ops(vec![fx::delete(&[third])], "del").unwrap();
-    let_go_of_the_third_page(&rewrite(&model.snapshot()).unwrap());
+    let_go_of_the_third_page(&rewrite(&model).unwrap());
 }
 
 /// What [`fields_tags_and_threads_let_go_of_a_deleted_page`] checks of a
@@ -451,7 +458,7 @@ fn copies_hold_only_the_pages_copied() {
     let model = opened(&path);
     let (p0, p1) = (model.page(0).unwrap(), model.page(1).unwrap());
     // Extract pages 1 and 2: page 3 doesn't come, nor does the link to it.
-    let bytes = crate::save::extract_bytes(&model.snapshot(), &[p0, p1]).unwrap();
+    let bytes = model.export_bytes(|f, out| crate::export::Export::extract(f, &[p0, p1], out));
     assert!(!says(&bytes, "MARK A 2") && says(&bytes, "MARK A 1"));
     assert_eq!(page_annots(&bytes, 0), 1);
     // So is a stamp made from a page, and the forms the summary draws.
@@ -556,7 +563,14 @@ fn saved_without(model: &mut Document, path: &Path, text: &str) -> Vec<Why> {
     let found = removal::of_rewrite(&input, &out, file).unwrap();
     assert!(found.is_some(), "the removal check finds {text} gone");
     model.abandon_save(v);
-    let report = save(model, path, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = save_with(
+        model,
+        path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     assert!(!readable(&std::fs::read(path).unwrap(), text), "{text}");
     report.why
@@ -902,7 +916,7 @@ fn keep_only_names_what_it_changed() {
     node.set("Kids", kids);
     node.set("Count", 2);
     let before = pdf.objects.clone();
-    let kept = super::keep_only(&mut pdf, &pages[..2].iter().copied().collect());
+    let kept = super::keep_only(&mut pdf, &pages[..2].iter().copied().collect(), &[]);
     let changed: std::collections::BTreeSet<ObjectId> = (pdf.objects.iter())
         .filter(|(id, o)| before.get(id) != Some(o))
         .map(|(id, _)| *id)

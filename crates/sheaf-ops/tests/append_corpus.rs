@@ -56,6 +56,10 @@
 //! slice notes, and moves the baseline. Skips when there's no corpus (see
 //! `sheaf_doc::forms::corpus`).
 
+// A test crate of its own, whose scratch files go in the temp directory
+// clippy.toml bans outside tests.
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,13 +70,13 @@ use sheaf_doc::content::{
     FontDecoders, PagOrigin, PageContent, PaginationKind, ResCx, TextBag, text_bag,
 };
 use sheaf_doc::effects::{Flags, judge};
+use sheaf_doc::forms::Report;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::sigs::Verdict;
-use sheaf_doc::forms::{Finding, Report};
 use sheaf_doc::geom::Geom;
 use sheaf_doc::materialize::{
-    Ask, AskAnswers, How, Note, Onto, SaveStop, Strategy, StrategyKind, Why, forced_append,
-    materialize, plan, removal, save, save_rewritten, write_file,
+    Ask, AskAnswers, How, Note, Onto, SaveHow, SaveStop, Strategy, StrategyKind, Why,
+    forced_append, materialize, plan, removal, save_rewritten, save_with, write_file,
 };
 use sheaf_doc::model::Scope;
 use sheaf_doc::text_layer::from_engine;
@@ -187,7 +191,13 @@ fn marked(entry: &Entry, corpus: &Corpus, dir: &Path) -> Option<Result<Marked, S
 /// its reopen.
 fn saved_with_a_mark(doc: &mut Document, path: &Path, before: &[u8]) -> Result<Marked, String> {
     let pages = doc.state().page_count();
-    let report = match save(doc, path, &AskAnswers::default(), &NoProgress) {
+    let report = match save_with(
+        doc,
+        path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    ) {
         Ok(report) => report,
         Err(SaveStop::Ask(Ask::Signatures { .. })) => return Ok(Marked::Asked),
         Err(stop) => return Err(format!("stopped: {stop}")),
@@ -357,7 +367,13 @@ fn saved_cropped(
     path: &Path,
     before: &[u8],
 ) -> Result<Cropped, String> {
-    let report = match save(doc, path, &AskAnswers::default(), &NoProgress) {
+    let report = match save_with(
+        doc,
+        path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    ) {
         Ok(report) => report,
         Err(SaveStop::Ask(Ask::Signatures { .. })) => return Ok(Cropped::Asked),
         Err(stop) => return Err(format!("stopped: {stop}")),
@@ -387,7 +403,7 @@ fn saved_cropped(
     // What the form check finds after that it didn't before: nothing a
     // save told of, as this one asks first.
     let was = sheaf_doc::forms::check(before, None).ok();
-    nothing_found(was.as_ref(), path, |_| false)?;
+    common::nothing_found(was.as_ref(), path, |_| false)?;
     let again = opened(path).ok_or("the saved file doesn't open")?;
     let first = again.page(0).ok_or("no first page")?;
     let (shows, showed) = (again.geom(first).visible(), doc.geom(page).visible());
@@ -504,19 +520,6 @@ fn drawn_words(doc: &Document) -> TextBag {
     bag
 }
 
-/// Whether `finding` is what a save told to break signatures and drop an
-/// XFA part's values may leave: what save policy decides, and asks about
-/// first.
-fn told(finding: &Finding) -> bool {
-    matches!(
-        finding,
-        Finding::StaleSignature { .. }
-            | Finding::StaleSigFlags { .. }
-            | Finding::XfaMismatch { .. }
-            | Finding::EarlierValues { .. }
-    )
-}
-
 /// How many times `bag` holds `word`.
 fn times(bag: &TextBag, word: &str) -> usize {
     bag.words().find(|(w, _)| *w == word).map_or(0, |(_, n)| n)
@@ -570,7 +573,7 @@ fn round_trip(
         }),
     }
     .map_err(|stop| format!("the first save stopped: {stop}"))?;
-    nothing_found(was, path, told)?;
+    common::nothing_found(was, path, common::told)?;
     let mut again = opened(path).ok_or("the saved file doesn't open")?;
     let found = again
         .state()
@@ -589,7 +592,8 @@ fn round_trip(
         drop_xfa_values: true,
         ..Default::default()
     };
-    let report = save(&mut again, path, &answers, &NoProgress).map_err(|e| format!("{e}"))?;
+    let report = save_with(&mut again, path, SaveHow::Planned, &answers, &NoProgress)
+        .map_err(|e| format!("{e}"))?;
     if report.strategy != Some(StrategyKind::Rewrite) {
         return Err(format!("removed, saved as {:?}", report.strategy));
     }
@@ -799,7 +803,7 @@ fn header_trip(
     .map_err(|stop| format!("the first save stopped: {stop}"))?;
     trip.declined.extend(declined);
     trip.notes.extend(notes.iter().map(note_kind));
-    nothing_found(was, path, told)?;
+    common::nothing_found(was, path, common::told)?;
     let again = opened(path).ok_or("the saved file doesn't open")?;
     let found = (again.state().header_footer()).ok_or("its header and footer isn't found")?;
     if found.scope != Scope::All {
@@ -833,7 +837,7 @@ fn header_trip(
             drop_xfa_values: true,
             ..Default::default()
         };
-        let mut saved = save(&mut last, path, &answers, &NoProgress);
+        let mut saved = save_with(&mut last, path, SaveHow::Planned, &answers, &NoProgress);
         let anyway = matches!(
             saved,
             Err(SaveStop::Ask(Ask::Signatures {
@@ -845,7 +849,7 @@ fn header_trip(
             // Appended anyway, as the reader may: the removal check still
             // stops it on whatever it finds (`Mode::Anyway`).
             answers.append_anyway = true;
-            saved = save(&mut last, path, &answers, &NoProgress);
+            saved = save_with(&mut last, path, SaveHow::Planned, &answers, &NoProgress);
         }
         match saved {
             Ok(report) if report.strategy == Some(StrategyKind::Append) => {
@@ -879,7 +883,8 @@ fn header_trip(
         drop_xfa_values: true,
         ..Default::default()
     };
-    let report = save(&mut last, path, &answers, &NoProgress).map_err(|e| format!("{e}"))?;
+    let report = save_with(&mut last, path, SaveHow::Planned, &answers, &NoProgress)
+        .map_err(|e| format!("{e}"))?;
     trip.notes.extend(report.notes.iter().map(note_kind));
     if report.strategy != Some(StrategyKind::Rewrite) {
         return Err(format!("removed, saved as {:?}", report.strategy));
@@ -1129,36 +1134,12 @@ fn removed_and_saved(doc: &mut Document, path: &Path) -> Result<(), String> {
         drop_xfa_values: true,
         ..Default::default()
     };
-    let report = save(doc, path, &answers, &NoProgress).map_err(|e| format!("{e}"))?;
+    let report = save_with(doc, path, SaveHow::Planned, &answers, &NoProgress)
+        .map_err(|e| format!("{e}"))?;
     let replaces = (report.why.iter()).any(|w| matches!(w, Why::ReplacesText(_)));
     match report.strategy {
         Some(StrategyKind::Rewrite) if replaces => Ok(()),
         other => Err(format!("saved as {other:?} for {}", reasons(&report.why))),
-    }
-}
-
-/// What the form check finds in the file at `path` that it didn't in the
-/// file it was (`was`; none to compare when its check failed), as
-/// [`Report::added_since`] tells it, but what the save may leave
-/// (`leaves`, [`told`] where it was told to): an error, when it finds any.
-/// A finding the file had, naming fewer now (widgets on no page the save
-/// dropped, a missing font fewer widgets name), isn't one.
-fn nothing_found(
-    was: Option<&Report>,
-    path: &Path,
-    leaves: fn(&Finding) -> bool,
-) -> Result<(), String> {
-    let Some(was) = was else {
-        return Ok(());
-    };
-    let bytes = std::fs::read(path).unwrap();
-    let now = sheaf_doc::forms::check(&bytes, None).map_err(|e| format!("check: {e:#}"))?;
-    let added: Vec<_> = (now.added_since(was).into_iter())
-        .filter(|f| !leaves(f))
-        .collect();
-    match added.is_empty() {
-        true => Ok(()),
-        false => Err(format!("the form check finds {added:?}")),
     }
 }
 
@@ -1278,7 +1259,7 @@ fn ocr_trip(
         return Err(format!("recognized, its flags are {flags:?}"));
     }
     added_and_saved(doc, path, "text", &mut trip)?;
-    nothing_found(was, path, told).map_err(|e| format!("text added, {e}"))?;
+    common::nothing_found(was, path, common::told).map_err(|e| format!("text added, {e}"))?;
     let mut again = opened(path).ok_or("the saved file doesn't open")?;
     each_once(&again, &took)?;
     if let Some(theirs) = theirs {
@@ -1290,7 +1271,7 @@ fn ocr_trip(
         .commit_ops(vec![set_header(fx_header(HEADER), None)], "header")
         .map_err(|e| format!("no header: {e}"))?;
     added_and_saved(&mut again, path, "a header", &mut trip)?;
-    nothing_found(was, path, told).map_err(|e| format!("a header added, {e}"))?;
+    common::nothing_found(was, path, common::told).map_err(|e| format!("a header added, {e}"))?;
     let mut headed = opened(path).ok_or("the headed file doesn't open")?;
     isolated_once(&headed, &took)?;
     each_once(&headed, &took)?;
@@ -1304,7 +1285,7 @@ fn ocr_trip(
         ));
     }
     removed_and_saved(&mut headed, path).map_err(|e| format!("recognized again, {e}"))?;
-    nothing_found(was, path, told).map_err(|e| format!("recognized again, {e}"))?;
+    common::nothing_found(was, path, common::told).map_err(|e| format!("recognized again, {e}"))?;
     none_left(path, OCR).map_err(|e| format!("recognized again, {e}"))?;
     let mut last = opened(path).ok_or("the file recognized again doesn't open")?;
     each_once(&last, &retook)?;
@@ -1322,7 +1303,7 @@ fn ocr_trip(
     last.commit(tx, CommitOpts::labelled("Clear recognized text"))
         .map_err(|e| format!("not cleared: {e}"))?;
     removed_and_saved(&mut last, path).map_err(|e| format!("cleared, {e}"))?;
-    nothing_found(was, path, told).map_err(|e| format!("cleared, {e}"))?;
+    common::nothing_found(was, path, common::told).map_err(|e| format!("cleared, {e}"))?;
     none_left(path, REOCR).map_err(|e| format!("cleared, {e}"))?;
     if let Some(theirs) = theirs {
         let cleared = opened(path).ok_or("the cleared file doesn't open")?;
@@ -1756,7 +1737,8 @@ fn saved_then_deleted(
         drop_xfa_values: true,
         ..Default::default()
     };
-    let report = save(doc, path, &answers, &NoProgress).map_err(|e| format!("saving: {e}"))?;
+    let report = save_with(doc, path, SaveHow::Planned, &answers, &NoProgress)
+        .map_err(|e| format!("saving: {e}"))?;
     if report.strategy != Some(StrategyKind::Rewrite) {
         return Err(format!("saved as {:?}, not a Rewrite", report.strategy));
     }
@@ -2069,7 +2051,7 @@ fn a_comment_on_a_signed_file_appends_or_asks_by_what_its_signatures_allow() {
             append_anyway: want.is_some(),
             ..Default::default()
         };
-        let report = save(&mut doc, &copy, &answers, &NoProgress).unwrap();
+        let report = save_with(&mut doc, &copy, SaveHow::Planned, &answers, &NoProgress).unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Append), "{path}");
         let after = std::fs::read(&copy).unwrap();
         assert!(after.starts_with(&before), "{path}: the signed bytes moved");

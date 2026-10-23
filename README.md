@@ -40,10 +40,22 @@ remember window layout or recent files.
 Some work runs without a window. `sheaf <subcommand> …` runs it headless,
 and so does `sheaf-cli <subcommand> …`, a separate binary with no GUI at
 all, for servers and CI. `--help` on either lists the options. A progress
-bar shows on stderr (`-q` hides it), and Ctrl-C stops the work cleanly
-(exit status 130).
+bar shows on stderr when it's a terminal, and a line per step when it
+isn't (`-q` hides both); Ctrl-C stops the work cleanly.
+
+A subcommand that writes a PDF never decides for you what the file loses:
+when its output would break a signature or drop a form's XFA values, it
+stops before writing anything, exits 3 and prints the question as JSON on
+stdout. `--signatures ask|break|append-anyway` and `--xfa ask|drop`
+answer it (`ask` is the default); `-o out.pdf --append` copies the input
+and appends the changes, which keeps a signed file's signatures.
+`--force` only ever means "replace an output that's there". Exit status:
+0 done, 1 failed, 2 bad arguments, 3 a decision is needed, 130 cancelled.
 
 ```sh
+sheaf edit binder.pdf --edits tidy.json -o tidy.pdf
+sheaf edit signed.pdf --edits note.json -o noted.pdf --append
+sheaf inspect binder.pdf --json
 sheaf export binder.pdf -o pngs/ --pages "1-3, 10-" --dpi 200
 sheaf export binder.pdf -f tiff --tiff bw -o binder.tif
 sheaf-cli export binder.pdf -f text -o binder.txt
@@ -55,6 +67,9 @@ sheaf comments csv binder.pdf -c number,page,author,text --author "Pat Smith" > 
 
 | Subcommand | Does |
 |---|---|
+| `edit` | Edits from a JSON file (`--edits FILE`, or `-` for stdin) applied as one undoable version and saved: `-o out.pdf` (written whole), `-o out.pdf --append`, or `--in-place`. The edits are sheaf's ops (`--schema` prints their JSON schema) and name things as you see them: pages by position (`{"pos": 3}`), bookmarks by their titles (`{"path": ["Part I", "Ch. 2"]}`), comments by `/NM` (`{"nm": "…"}`), and files by `--with NAME=PATH` (`{"with": "NAME"}`). Prints what it did as JSON; `--dry-run` says what it would do and writes nothing. Examples in [docs/document-model.md](docs/document-model.md) |
+| `inspect` | `--json`: a PDF's pages (labels, boxes, rotation), sheaf's marks and other tools' comments by `/NM`, bookmarks by title path, headers, footers and watermarks, and a form summary: what `edit` needs to name things |
+| `form` | `check`: a PDF's form as the file has it, for what other viewers would trip on or a save would carry where it shouldn't. Prints its kind (AcroForm, hybrid, XFA-only) and how many fields, widgets and pages it has, its XFA, NeedAppearances, Reader usage rights, certification and signatures, then each problem: widgets no field reaches, on no page, on more than one or with the wrong `/P`, kids whose `/Parent` is elsewhere, fonts a `/DA` names that `/DR` lacks, full names held twice, values with no appearance, values only an earlier revision holds, an XFA copy that differs from the fields, and signatures or `/SigFlags` that no longer fit the file; `--password` for an encrypted one |
 | `combine` | PDFs and images into one PDF in order; `file:range` takes some pages (`a.pdf:1-3,7`). A bookmark per file (`--no-file-bookmarks` to skip), `--image-page` |
 | `export` | Pages to PNG, JPEG, TIFF or text, as File > Export Pages. Prints the files written; refuses to overwrite without `--force` |
 | `split` | One PDF into several: `--every N`, `--bookmarks` (a file per top-level bookmark), `--max-size 10MB`, or `--ranges "1-3; 4-10; 11-"` |
@@ -237,8 +252,8 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Comment summary and export | ✅ File > Comments, or the panel's Export menu: what the panel lists, filtered and sorted as it is, as a summary PDF (the comments numbered and threaded; or each page beside its list, with the numbers on the page), a CSV (columns chosen in the Export menu: number, page, page label, type, author, dates, status, checked, color, text, reply-to) or text. `sheaf comments` |
 | Import / export comments (FDF, XFDF) | ✅ File > Comments > Import… takes FDF, XFDF or another PDF's comments: one that's here already (by its `/NM`) is updated, the rest added, as one undo step, and kinds sheaf can't hold are listed. Export XFDF or FDF of what the panel lists, or (panel's Export menu) what's selected. `sheaf comments import`/`export` |
 | Edit other tools' comments | ✅ Another tool's note, highlight, shape, line, ink, text box, callout, text edit or stamp becomes a sheaf mark when it's edited: drag it, double-click it (or F2 in the panel) to edit its text, or right-click > Make Editable in the Comments panel. It keeps its name, so its replies stay with it, and a save puts it where it was |
-| Flatten annotations | ✅ File > Export Flattened Copy… (links and form fields kept) |
-| Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | ✅ File > Export Clean Copy; keeps links, form fields, bookmarks |
+| Flatten annotations | ✅ File > Export Flattened Copy…: every comment, mark and form field shown drawn into its page as viewers show it (hidden ones left out), so it looks the same anywhere and can't be edited; links kept. `flatten-annotations` in `sheaf edit` |
+| Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | ✅ File > Export Clean Copy; keeps links, form fields, bookmarks, and none of sheaf's own data (its names for marks, an older sheaf's watermark settings) |
 | Measurement tools (distance, area, perimeter, scale) | ✅ Tools > Measure: Distance (Ctrl+Shift+D, a drag), Perimeter (Ctrl+Shift+P) and Area (Ctrl+Shift+A, corner by corner, as Polyline and Polygon). The scale bar takes a scale as typed ("1 in = 10 ft", "1/8 in = 1 ft", "1:100") and the decimals; Calibrate (Ctrl+Shift+C) is a line of known length, then its real length. The status bar shows the measurement while drawing; Shift keeps to 45°, and points snap to the grid and guides when they show. Written as Acrobat's dimension annotations (`/Measure`), with the value on the mark; the comment CSV has Measurement and Scale columns |
 
 ### Content editing

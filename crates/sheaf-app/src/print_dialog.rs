@@ -2,13 +2,15 @@
 //! sheet, as Acrobat's is. Printers and their paper come from
 //! `sheaf_print`, read in the background when the dialog opens; the job
 //! itself is run by the document view (`DocView::print`). The preview draws
-//! the document as the dialog opened on it, each page realized under
-//! print's own inputs (M10.5 §10.4), so what the screen hides shows here as
-//! it prints.
+//! the document as the dialog opened on it, each page realized as it
+//! prints: under print's own inputs (M10.5 §10.4), so what the screen
+//! hides shows here as it prints, and with markup, its annotations drawn
+//! into it as the print file draws them (§16 row 28).
 //!
 //! Tab moves between rows, Left/Right change the highlighted row,
 //! Page Up/Page Down step the preview, Enter prints, Escape cancels.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -18,8 +20,9 @@ use gpui::{
     RenderImage, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use serde::{Deserialize, Serialize};
+use sheaf_doc::export::{ExportFrom, print_preview};
 use sheaf_doc::realize::{PageView, RenderKey, ViewInputs};
-use sheaf_doc::{PageId, Snapshot};
+use sheaf_doc::{DocState, PageId};
 use sheaf_edit::Rotation;
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::views::Views;
@@ -112,8 +115,9 @@ pub enum Pages {
 pub struct PrintContext {
     /// The document's file name, for the print queue.
     pub title: String,
-    pub snapshot: Snapshot,
-    /// What draws the snapshot's pages: the document's.
+    /// The version printed, as an export takes it.
+    pub from: ExportFrom,
+    /// What draws its pages: the document's.
     pub views: Views,
     pub current: usize,
     /// Selected pages (display indices, in order).
@@ -121,6 +125,10 @@ pub struct PrintContext {
     /// The selected bookmark's title and its pages.
     pub bookmark: Option<(String, Vec<usize>)>,
     pub prefs: PrintPrefs,
+    /// Each page previewed with markup, as it prints
+    /// ([`print_preview`]), or None where it can't be: made, or tried and
+    /// logged, once.
+    pub printed: RefCell<HashMap<PageId, Option<DocState>>>,
 }
 
 /// What to print and how.
@@ -145,14 +153,34 @@ pub enum PrintEvent {
 type ImageKey = (RenderKey, Job);
 
 impl PrintContext {
+    /// What page `id` is drawn from as it prints with or without `markup`
+    /// ([`print_preview`]). None when its annotations can't be drawn into
+    /// it, which the print file can't either.
+    fn state(&self, id: PageId, markup: bool) -> Option<DocState> {
+        if !markup {
+            return Some(self.from.snap.state.clone());
+        }
+        if let Some(st) = self.printed.borrow().get(&id) {
+            return st.clone();
+        }
+        let st = print_preview(&self.from, id, markup)
+            .inspect_err(|e| log::warn!("print preview: {e}"))
+            .ok();
+        self.printed.borrow_mut().insert(id, st.clone());
+        st
+    }
+
     /// Page `id` as the preview draws it, `width` device px wide, with or
-    /// without `markup`: its view under print's inputs
+    /// without `markup`: its view as it prints, under print's inputs
     /// ([`ViewInputs::print`]), whatever the screen hides, and the job its
     /// engine draws it by, turned as it prints. None for a page the
     /// snapshot hasn't got.
     pub(crate) fn preview(&self, id: PageId, width: u32, markup: bool) -> Option<(PageView, Job)> {
         let inputs = ViewInputs::print(markup);
-        let view = self.views.view(&self.snapshot.state, id, &inputs).ok()?;
+        let view = self
+            .views
+            .view(&self.state(id, markup)?, id, &inputs)
+            .ok()?;
         let rotation = view.job.rotation;
         Some((view, Job::Page { width, rotation }))
     }
@@ -166,13 +194,20 @@ impl PrintContext {
         width: u32,
         markup: bool,
     ) -> oneshot::Receiver<anyhow::Result<Rendered>> {
-        let (st, inputs) = (&self.snapshot.state, ViewInputs::print(markup));
+        let inputs = ViewInputs::print(markup);
         let job = Job::Page {
             width,
             rotation: Rotation::R0,
         };
         let format = PixelFormat::Bgra;
-        (self.views).render(st, id, &inputs, job, format, 0, Budget::Screen)
+        match self.state(id, markup) {
+            Some(st) => (self.views).render(&st, id, &inputs, job, format, 0, Budget::Screen),
+            None => {
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(Err(anyhow::anyhow!("the page can't be drawn as it prints")));
+                rx
+            }
+        }
     }
 }
 
@@ -357,7 +392,7 @@ impl PrintDialog {
 
     /// Display indices of the pages to print, or why there are none.
     fn page_list(&self, cx: &App) -> Result<Vec<usize>, String> {
-        let n = self.ctx.snapshot.state.page_count();
+        let n = self.ctx.from.snap.state.page_count();
         match self.pages {
             Pages::All => Ok((0..n).collect()),
             Pages::Current => Ok(vec![self.ctx.current.min(n.saturating_sub(1))]),
@@ -483,7 +518,7 @@ impl PrintDialog {
                 return;
             }
         };
-        let st = &self.ctx.snapshot.state;
+        let st = &self.ctx.from.snap.state;
         let ids: Vec<PageId> = list.iter().filter_map(|&i| st.page_at(i)).collect();
         let paper = self.current_paper();
         let prefs = PrintPrefs {
@@ -667,7 +702,7 @@ impl PrintDialog {
                 })),
             )
             .into_any_element();
-        let n = self.ctx.snapshot.state.page_count();
+        let n = self.ctx.from.snap.state.page_count();
         let page_opts = [
             (Pages::All, format!("All ({n})")),
             (
@@ -826,9 +861,9 @@ impl PrintDialog {
             .shadow_md();
         let mut caption = String::new();
         if let Some(index) = index
-            && let Some(id) = self.ctx.snapshot.state.page_at(index)
+            && let Some(id) = self.ctx.from.snap.state.page_at(index)
         {
-            let geom = self.ctx.snapshot.geom(id);
+            let geom = self.ctx.from.snap.geom(id);
             let shown = geom.shown();
             let p = sheaf_print::place(
                 shown.width,
@@ -851,18 +886,6 @@ impl PrintDialog {
                 .border_color(theme::BORDER);
             if let Some(im) = image {
                 page = page.child(img(im).size_full().object_fit(ObjectFit::Fill));
-            }
-            if self.markup {
-                let (to_view, k) = (geom.to_view(), w / shown.width.max(1.0));
-                for m in self.ctx.snapshot.state.mark_records_on(id) {
-                    page = page.children(crate::docview::annot_elements(
-                        &m.annot,
-                        m.stamp.as_ref(),
-                        &to_view,
-                        shown,
-                        k,
-                    ));
-                }
             }
             sheet = sheet.w(px(p.sheet_w * s)).h(px(p.sheet_h * s)).child(page);
             caption = format!(

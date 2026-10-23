@@ -8,7 +8,10 @@ use clap::{Args, ValueEnum};
 use sheaf_image::blank::Sensitivity;
 use sheaf_ops::blank::BlankParams;
 use sheaf_ops::export::stem_of;
+use sheaf_ops::session::Session;
 use sheaf_ops::views::Views;
+
+use crate::decide::Decisions;
 
 #[derive(Args)]
 #[command(about = "Remove blank pages from a PDF")]
@@ -40,6 +43,8 @@ pub struct BlanksArgs {
     /// Replace files that are already there.
     #[arg(long)]
     force: bool,
+    #[command(flatten)]
+    decisions: Decisions,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -63,8 +68,10 @@ pub fn run(args: BlanksArgs, quiet: bool) -> anyhow::Result<()> {
             }
         }
     }
-    let mut doc = sheaf_doc::open::file(&args.input, args.password.as_deref())?.doc;
-    let snap = doc.snapshot();
+    let session = crate::progress::run("opening", quiet, |p| {
+        Session::open(&args.input, args.password.as_deref(), p)
+    })?;
+    let snap = session.doc.snapshot();
     let pages = match &args.pages {
         Some(r) => Some(
             sheaf_ops::pages::parse(r, snap.state.page_count())
@@ -112,7 +119,9 @@ pub fn run(args: BlanksArgs, quiet: bool) -> anyhow::Result<()> {
         eprintln!("no blank pages; nothing written");
         return Ok(());
     }
-    let n = sheaf_ops::blank::write(&mut doc, &drop, &output, args.rejects.as_deref())?;
+    let rejects = args.rejects.as_deref();
+    let answers = args.decisions.answers();
+    let n = sheaf_ops::blank::write(&session, &drop, &output, rejects, args.force, &answers)?;
     if !quiet {
         eprintln!("{}: {n} pages, {} removed", output.display(), drop.len());
     }

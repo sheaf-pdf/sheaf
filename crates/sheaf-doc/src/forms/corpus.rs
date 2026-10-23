@@ -1,8 +1,10 @@
 //! Greg's corpus of real files (M10 proposal 21): where it is, and the
-//! manifests of the two categories the tests read, a row per file:
-//! `forms/manifest.tsv` for the forms under `forms/`, and
-//! `scans/manifest.tsv` for the scanned documents under `scans/`. Each of
-//! the corpus's categories has a manifest of its own, in its folder.
+//! manifests of the categories the tests read, a row per file:
+//! `forms/manifest.tsv` for the forms under `forms/`,
+//! `scans/manifest.tsv` for the scanned documents under `scans/`, and
+//! `signatures/manifest.tsv` for the signed files under `signatures/`.
+//! Each of the corpus's categories has a manifest of its own, in its
+//! folder.
 //!
 //! Tests look in `$SHEAF_CORPUS`, then in `../pdf-corpus` beside the
 //! workspace, and skip, passing with a message, when neither is there
@@ -29,8 +31,11 @@ const FORMS: &str = "forms/manifest.tsv";
 /// The scans manifest, relative to the corpus root.
 const SCANS: &str = "scans/manifest.tsv";
 
-/// One row of a manifest (`forms/manifest.tsv` or `scans/manifest.tsv`).
-/// Columns it lacks are left empty.
+/// The signed files' manifest, relative to the corpus root.
+const SIGNATURES: &str = "signatures/manifest.tsv";
+
+/// One row of a manifest (`forms/`, `scans/` or `signatures/
+/// manifest.tsv`). Columns it lacks are left empty.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Entry {
     /// Relative to the corpus root (`forms/irs/f1040.pdf`).
@@ -55,11 +60,21 @@ pub struct Entry {
     /// `public-domain`, `restricted`, `unstated` or `unknown`.
     pub license: String,
     pub sha256: String,
+    /// The columns the fields above don't name, by their header's name:
+    /// the signatures manifest's `signatures`, `subfilters`, `certified`
+    /// (DocMDP's `/P`, empty when it certifies nothing), `intact` and
+    /// `valid` (how many signatures pyHanko found so), among them.
+    pub extra: BTreeMap<String, String>,
 }
 
 impl Entry {
     pub fn restricted(&self) -> bool {
         self.license == "restricted"
+    }
+
+    /// Column `name` of [`extra`](Self::extra), empty when it has none.
+    pub fn column(&self, name: &str) -> &str {
+        self.extra.get(name).map_or("", String::as_str)
     }
 }
 
@@ -107,6 +122,13 @@ impl Corpus {
         self.rows(SCANS)
     }
 
+    /// `signatures/manifest.tsv`'s rows: every file under `signatures/`.
+    /// An error when the corpus has none, as one from before its signed
+    /// files came does.
+    pub fn signatures(&self) -> Result<Vec<Entry>> {
+        self.rows(SIGNATURES)
+    }
+
     /// The rows of the manifest at `manifest`, relative to the root.
     fn rows(&self, manifest: &str) -> Result<Vec<Entry>> {
         let path = self.root.join(manifest);
@@ -148,6 +170,21 @@ pub fn each_entry<T: Send>(entries: &[Entry], read: impl Fn(&Entry) -> T + Sync)
     outcomes.into_inner().unwrap().into_values().collect()
 }
 
+/// The columns [`Entry`]'s fields hold.
+const NAMED: [&str; 11] = [
+    "path",
+    "form",
+    "title",
+    "pages",
+    "kind",
+    "fields",
+    "field_types",
+    "field_scripts",
+    "source",
+    "license",
+    "sha256",
+];
+
 /// A manifest's rows, by its header's column names.
 pub fn parse_manifest(text: &str) -> Result<Vec<Entry>> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
@@ -181,6 +218,10 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>> {
             source: get("source"),
             license: get("license"),
             sha256: get("sha256"),
+            extra: (cells.iter())
+                .filter(|(key, _)| !NAMED.contains(key))
+                .map(|(key, value)| (key.to_string(), value.trim().to_string()))
+                .collect(),
         });
     }
     Ok(out)

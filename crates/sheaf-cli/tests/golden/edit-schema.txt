@@ -1,0 +1,17 @@
+$ sheaf-cli edit --schema
+--- exit 0
+--- stdout
+{
+  "$defs": {
+    "Anchor": {
+      "additionalProperties": false,
+      "description": "One end of a connector pair: where it is.",
+      "properties": {
+        "page": {
+          "$ref": "#/$defs/PageRef"
+        },
+        "rect": {
+          "$ref": "#/$defs/Box2"
+        }
+…
+--- stderr

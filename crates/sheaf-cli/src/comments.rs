@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use sheaf_doc::annot::REVIEW_STATES;
-use sheaf_doc::tx::{Actor, CommitOpts};
 use sheaf_ops::comments::{self, Column, CommentFilter, DataFormat, Layout, Sort, Summary};
+use sheaf_ops::session::{Decided, SaveTo, Session};
+
+use crate::decide::Decisions;
 
 #[derive(Args)]
 #[command(about = "Summarize or list a PDF's comments")]
@@ -44,6 +46,9 @@ struct ExportArgs {
     output: Option<PathBuf>,
     #[arg(short, long, value_enum)]
     format: Option<FormatArg>,
+    /// Replace the output file if it's there.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -54,9 +59,17 @@ struct ImportArgs {
     #[arg(required = true)]
     from: Vec<PathBuf>,
     /// Where to write the result (default: beside the input,
-    /// "<name> - imported.pdf").
-    #[arg(short, long)]
+    /// "<name> - imported.pdf"), written whole.
+    #[arg(short, long, conflicts_with = "in_place")]
     output: Option<PathBuf>,
+    /// Copy the input to the output and append the comments to it, so a
+    /// signed input keeps its signatures; it stops, saying why, when the
+    /// changes can't be appended.
+    #[arg(long, conflicts_with = "in_place")]
+    append: bool,
+    /// Save into the input itself, appending when the file allows.
+    #[arg(long)]
+    in_place: bool,
     #[arg(long)]
     password: Option<String>,
     /// The password of a PDF the comments come from.
@@ -65,6 +78,8 @@ struct ImportArgs {
     /// Replace the output file if it's there.
     #[arg(long)]
     force: bool,
+    #[command(flatten)]
+    decisions: Decisions,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -94,6 +109,9 @@ struct CsvArgs {
     /// Where to write it (default: standard output).
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// Replace the output file if it's there.
+    #[arg(long)]
+    force: bool,
     /// The columns, in order, e.g. "number,page,author,text". Any of:
     /// number, page, page-label, type, label, author, date, modified,
     /// status, checked, color, text, reply-to.
@@ -108,6 +126,9 @@ struct TextArgs {
     /// Where to write it (default: standard output).
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// Replace the output file if it's there.
+    #[arg(long)]
+    force: bool,
 }
 
 /// What every listing takes: the file, and the panel's filter and sort.
@@ -174,14 +195,15 @@ enum SummaryArg {
 
 /// The file's comments, and the filter as asked.
 struct Opened {
-    doc: sheaf_doc::Document,
+    session: Session,
     filter: CommentFilter,
     needle: String,
 }
 
 impl Common {
     fn open(&self) -> anyhow::Result<Opened> {
-        let doc = comments::open(&self.input, self.password.as_deref())?;
+        let session = comments::open(&self.input, self.password.as_deref())?;
+        let doc = &session.doc;
         let mut filter = CommentFilter {
             sort: match self.sort {
                 SortArg::Page => Sort::Page,
@@ -219,7 +241,7 @@ impl Common {
         let states = REVIEW_STATES.iter().map(|s| s.to_string()).collect();
         filter.statuses = hidden(&states, &self.statuses, "status")?;
         Ok(Opened {
-            doc,
+            session,
             filter,
             needle: self.search.as_deref().unwrap_or("").trim().to_lowercase(),
         })
@@ -269,11 +291,13 @@ pub fn run(args: CommentsArgs, _quiet: bool) -> anyhow::Result<()> {
                     })
                     .collect::<anyhow::Result<_>>()?
             };
+            refuse_existing(a.output.as_deref(), a.force)?;
             let o = a.common.open()?;
-            let listing = comments::list(o.doc.state(), &o.filter, &o.needle);
-            let labels = o.doc.state().page_labels();
+            let st = o.session.doc.state();
+            let listing = comments::list(st, &o.filter, &o.needle);
+            let labels = st.page_labels();
             let out = comments::csv(&listing, labels.as_deref(), &columns);
-            write_out(a.output.as_deref(), out.as_bytes())
+            write_out(&o.session, a.output.as_deref(), out.as_bytes())
         }
         What::Export(a) => {
             let format = match (a.format, a.output.as_deref().and_then(DataFormat::of)) {
@@ -282,62 +306,68 @@ pub fn run(args: CommentsArgs, _quiet: bool) -> anyhow::Result<()> {
                 (None, Some(f)) => f,
                 (None, None) => DataFormat::Xfdf,
             };
+            refuse_existing(a.output.as_deref(), a.force)?;
             let o = a.common.open()?;
-            let listing = comments::list(o.doc.state(), &o.filter, &o.needle);
-            let out = comments::export_data(&o.doc.snapshot(), &comments::items(&listing), format)?;
-            write_out(a.output.as_deref(), &out)
+            let doc = &o.session.doc;
+            let listing = comments::list(doc.state(), &o.filter, &o.needle);
+            let out = comments::export_data(&doc.snapshot(), &comments::items(&listing), format)?;
+            write_out(&o.session, a.output.as_deref(), &out)
         }
         What::Import(a) => import(a),
         What::Text(a) => {
+            refuse_existing(a.output.as_deref(), a.force)?;
             let o = a.common.open()?;
-            let listing = comments::list(o.doc.state(), &o.filter, &o.needle);
-            let labels = o.doc.state().page_labels();
+            let st = o.session.doc.state();
+            let listing = comments::list(st, &o.filter, &o.needle);
+            let labels = st.page_labels();
             let out = comments::text(
                 &listing,
                 labels.as_deref(),
                 &file_name(&a.common.input),
                 o.filter.sort,
             );
-            write_out(a.output.as_deref(), out.as_bytes())
+            write_out(&o.session, a.output.as_deref(), out.as_bytes())
         }
     }
 }
 
 fn import(a: ImportArgs) -> anyhow::Result<()> {
-    let output = a.output.clone().unwrap_or_else(|| {
-        let stem = sheaf_ops::export::stem_of(&a.input);
-        a.input.with_file_name(format!("{stem} - imported.pdf"))
-    });
-    if output.exists() && !a.force {
-        bail!("{} already exists (--force replaces)", output.display());
-    }
-    let mut doc = comments::open(&a.input, a.password.as_deref())?;
+    let to = match (&a.output, a.in_place) {
+        (_, true) => SaveTo::InPlace,
+        (output, false) => {
+            let path = output.clone().unwrap_or_else(|| {
+                let stem = sheaf_ops::export::stem_of(&a.input);
+                a.input.with_file_name(format!("{stem} - imported.pdf"))
+            });
+            if path.exists() && !a.force {
+                bail!("{} already exists (--force replaces)", path.display());
+            }
+            SaveTo::File {
+                path,
+                append: a.append,
+            }
+        }
+    };
+    let mut session = comments::open(&a.input, a.password.as_deref())?;
     for from in &a.from {
         let bytes = std::fs::read(from).with_context(|| format!("reading {}", from.display()))?;
-        let (snap, store) = (doc.snapshot(), doc.store().clone());
-        let got = comments::import_data(&snap, &store, &bytes, a.from_password.as_deref())
+        let said = comments::import(&mut session, &bytes, a.from_password.as_deref())
             .with_context(|| from.display().to_string())?;
-        eprintln!("{}: {}", from.display(), got.summary());
-        // What the marks hold is held in the transaction until they're
-        // added.
-        let mut tx = doc.tx(Actor::Cli);
-        let ops = got.ops_in(&mut tx);
-        if !ops.is_empty() {
-            tx.apply_batch(ops, &sheaf_ops::NoProgress)?;
-            doc.commit(tx, CommitOpts::labelled("Import comments"))?;
-        }
+        eprintln!("{}: {said}", from.display());
     }
-    // It asks nothing: a save the file's signatures allow keeps them (an
-    // Append onto a copy of the input), and one they don't, or one that
-    // drops XFA holding values, goes ahead, rewriting the file.
-    let answers = sheaf_doc::materialize::AskAnswers {
-        break_signatures: true,
-        drop_xfa_values: true,
-        ..Default::default()
+    let written = match &to {
+        SaveTo::InPlace => a.input.clone(),
+        SaveTo::File { path, .. } => path.clone(),
     };
-    sheaf_doc::materialize::save(&mut doc, &output, &answers, &sheaf_ops::NoProgress)
-        .with_context(|| format!("writing {}", output.display()))?;
-    println!("{}", output.display());
+    // Written whole to another file (-o), unless the comments are
+    // appended to a copy of the input (--append) or to the input itself
+    // (--in-place), which keeps a signed file's signatures where they
+    // allow the change. What it asks only the flags answer.
+    session
+        .save(to, &a.decisions.answers(), &sheaf_ops::NoProgress)
+        .decided()
+        .with_context(|| format!("writing {}", written.display()))?;
+    println!("{}", written.display());
     Ok(())
 }
 
@@ -356,14 +386,10 @@ fn summary(a: SummaryArgs) -> anyhow::Result<()> {
         LayoutArg::Comments => Layout::CommentsOnly,
         LayoutArg::Pages => Layout::Pages,
     };
-    let bytes = comments::summary_pdf(
-        &o.doc.snapshot(),
-        &o.filter,
-        &o.needle,
-        layout,
-        &file_name(&a.common.input),
-    )?;
-    std::fs::write(&output, bytes).with_context(|| format!("writing {}", output.display()))?;
+    let from = o.session.export_from();
+    let title = file_name(&a.common.input);
+    comments::summary_to(&from, (&o.filter, &o.needle), layout, &title, &output)
+        .with_context(|| format!("writing {}", output.display()))?;
     println!("{}", output.display());
     Ok(())
 }
@@ -374,12 +400,21 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// `bytes` to the file, else to standard output.
-fn write_out(output: Option<&Path>, bytes: &[u8]) -> anyhow::Result<()> {
+/// An error when `output` is there and `force` doesn't say to replace it.
+fn refuse_existing(output: Option<&Path>, force: bool) -> anyhow::Result<()> {
     match output {
-        Some(path) => {
-            std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
+        Some(path) if path.exists() && !force => {
+            bail!("{} already exists (--force replaces)", path.display())
         }
+        _ => Ok(()),
+    }
+}
+
+/// `bytes`, an export of `session`'s comments, to the file, durably (never
+/// the file `session` was opened from), else to standard output.
+fn write_out(session: &Session, output: Option<&Path>, bytes: &[u8]) -> anyhow::Result<()> {
+    match output {
+        Some(path) => comments::write_to(&session.doc.snapshot(), path, bytes),
         None => {
             let mut out = std::io::stdout().lock();
             out.write_all(bytes)?;

@@ -16,8 +16,9 @@ use super::append_tests::{appended_in_place, keys_at, planned_in_place, square, 
 use super::key::ObjKey;
 use super::removal_tests::{opened, scratch, text_file};
 use super::watermark_tests::{image_watermark, kinds, png};
-use super::{AskAnswers, How, StrategyKind, save_rewritten};
+use super::{AskAnswers, How, SaveHow, StrategyKind, save_rewritten};
 use crate::content::{Balance, Concat, GenId, ResCx};
+use crate::export::Export;
 use crate::model::{
     Document, Filter, ImageRef, MarkedSel, PageId, Scope, StreamSel, WatermarkContent as Content,
 };
@@ -261,7 +262,14 @@ fn a_found_watermark_removed_leaves_no_trace() {
     again
         .commit_ops(vec![fx::remove_watermark(None, &all)], "remove")
         .unwrap();
-    let report = super::save(&mut again, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = super::save_with(
+        &mut again,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     let pdf = Pdf::load(&path).unwrap();
     assert_eq!(blocks(&pdf), vec![Vec::<GenId>::new(); 3]);
@@ -325,8 +333,8 @@ fn a_found_watermark_gone_any_way_leaves_no_block() {
     // The pages the background isn't on extracted.
     let (_, again) = opened(&dir, "d.pdf", &bytes);
     let rest: Vec<PageId> = again.state().order().iter().skip(1).copied().collect();
-    let pdf =
-        Pdf::load_mem(&crate::save::extract_bytes(&again.snapshot(), &rest).unwrap()).unwrap();
+    let extracted = again.export_bytes(|f, out| Export::extract(f, &rest, out));
+    let pdf = Pdf::load_mem(&extracted).unwrap();
     assert_eq!(blocks(&pdf), vec![vec![over]; 2]);
     let all = everything(&pdf);
     assert!(!all.contains("(one)"), "the background's text");
@@ -986,7 +994,7 @@ crate::both_ways!(
 /// A watermark found again and removed from every page is gone from what
 /// is made without saving too: a clean copy, every page extracted, and
 /// every page printed without markup hold no block of it, and nowhere its
-/// text.
+/// text; the clean copy and the print none of sheaf's private data.
 #[test]
 fn a_found_watermark_removed_is_gone_from_copies() {
     let dir = scratch();
@@ -998,18 +1006,15 @@ fn a_found_watermark_removed_is_gone_from_copies() {
     again
         .commit_ops(vec![fx::remove_watermark(None, &all)], "remove")
         .unwrap();
-    let snapshot = again.snapshot();
-    let out = dir.join("clean.pdf");
-    crate::save::export_clean_copy(&snapshot, &out).unwrap();
     let made = [
-        ("clean copy", std::fs::read(&out).unwrap()),
+        ("clean copy", again.export_bytes(Export::clean_copy)),
         (
             "extracted",
-            crate::save::extract_bytes(&snapshot, &all).unwrap(),
+            again.export_bytes(|f, out| Export::extract(f, &all, out)),
         ),
         (
             "printed",
-            crate::save::print_pdf(&snapshot, &all, false).unwrap(),
+            again.export_bytes(|f, _| Export::print(f, &all, false)),
         ),
     ];
     for (what, bytes) in made {
@@ -1018,6 +1023,9 @@ fn a_found_watermark_removed_is_gone_from_copies() {
         let all = everything(&pdf);
         for gone in ["DRAFT", "SheafBlock"] {
             assert!(!all.contains(gone), "{what}: {gone}");
+        }
+        if what != "extracted" {
+            assert_eq!(crate::private::found(&pdf), [], "{what}");
         }
     }
 }

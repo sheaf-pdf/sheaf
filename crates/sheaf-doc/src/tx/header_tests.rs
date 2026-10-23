@@ -12,7 +12,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use in_progress::{Level, NoProgress, Progress, Unit};
-use sheaf_edit::{BatesSpec, HeaderFooterSpec, LabelStyle, Op, PageSel, ScopeSel, Z};
+use sheaf_edit::{
+    BatesSpec, HeaderFooterSpec, LabelStyle, Op, OutlinePolicy, PageNumbering, PageSel, ScopeSel,
+    Transform, Z,
+};
 
 use super::fixture as fx;
 use super::stale_tests::{on, planned};
@@ -195,6 +198,19 @@ fn bates_numbers_never_run_past_the_largest() {
     assert_eq!(numbers(&d, &[p0, p1]), [Some(u64::MAX - 1), Some(u64::MAX)]);
 }
 
+/// What an export keeps of `d` when it keeps `pages` alone.
+fn kept(d: &Document, pages: &[PageId]) -> DocState {
+    let mut xtx = ExportTx::new(&d.snapshot(), d.lower_cx(Actor::User));
+    let keep = Transform::KeepPages {
+        pages: PageSel::ids(pages.iter().copied()),
+        outline: OutlinePolicy::Drop,
+        labels: false,
+        numbering: PageNumbering::AsKept,
+    };
+    xtx.apply(keep, &NoProgress).unwrap();
+    xtx.state().clone()
+}
+
 /// An extract keeps the numbers of the pages it keeps, and the header and
 /// footer only on those of its pages it keeps; it has none when it keeps
 /// none of them.
@@ -203,8 +219,8 @@ fn an_extract_keeps_the_numbers_of_the_pages_it_keeps() {
     let mut d = doc_of(4, &[]);
     let [p0, p1, p2, p3] = [0, 1, 2, 3].map(|i| d.page(i).unwrap());
     commit(&mut d, Actor::User, vec![fx::set_header(bates(), None)]).unwrap();
-    let kept = crate::save::subset(d.state(), &[p1, p3], false).unwrap();
-    let g = kept.header_footer().unwrap();
+    let kept_of = kept(&d, &[p1, p3]);
+    let g = kept_of.header_footer().unwrap();
     assert_eq!(g.scope, Scope::All);
     let want: im::OrdMap<PageId, u64> = [(p1, 101u64), (p3, 103)].into_iter().collect();
     assert_eq!(g.frozen.bates.as_deref(), Some(&want));
@@ -215,13 +231,12 @@ fn an_extract_keeps_the_numbers_of_the_pages_it_keeps() {
         vec![fx::set_header(bates(), Some(&[p0, p1]))],
     )
     .unwrap();
-    let kept = crate::save::subset(d.state(), &[p1, p3], false).unwrap();
-    let g = kept.header_footer().unwrap();
+    let kept_of = kept(&d, &[p1, p3]);
+    let g = kept_of.header_footer().unwrap();
     assert_eq!(g.scope, Scope::Pages(im::OrdSet::unit(p1)));
     let want: im::OrdMap<PageId, u64> = [(p1, 101u64)].into_iter().collect();
     assert_eq!(g.frozen.bates.as_deref(), Some(&want));
-    let none = crate::save::subset(d.state(), &[p2, p3], false).unwrap();
-    assert!(none.header_footer().is_none());
+    assert!(kept(&d, &[p2, p3]).header_footer().is_none());
 }
 
 /// Taken off pages, it's narrowed to the pages it's left on, their numbers

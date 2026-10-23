@@ -79,6 +79,34 @@ impl Rotation {
     }
 }
 
+/// How big each page made from an image is.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum Fit {
+    /// The image's own size at its resolution.
+    Original,
+    /// A sheet of this size in points (portrait; a landscape image turns
+    /// it landscape), the image scaled to fit inside `margin` and centered.
+    Paper {
+        width: f32,
+        height: f32,
+        margin: f32,
+    },
+}
+
+impl Fit {
+    pub const LETTER: Fit = Fit::Paper {
+        width: 612.0,
+        height: 792.0,
+        margin: 0.0,
+    };
+    pub const A4: Fit = Fit::Paper {
+        width: 595.28,
+        height: 841.89,
+        margin: 0.0,
+    };
+}
+
 /// Distances in points from each side of a page as it shows, turned by its
 /// `/Rotate`: what a crop takes off, what a header and footer keep clear.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -20,7 +20,7 @@ use sheaf_doc::model::ScriptState;
 use sheaf_doc::tx::fixture::{duplicate, replace, rotate};
 use sheaf_doc::{Commit, Document, Notice, PageId};
 use sheaf_edit::{Margins, Turn};
-use sheaf_ops::combine::{CombineItem, CombineParams};
+use sheaf_ops::combine::{CombineItem, CombineParams, CombineReport};
 use sheaf_render::PageIndex;
 use sheaf_render::pdfium::render_appearances;
 
@@ -384,7 +384,7 @@ fn saved_twice(appended: bool) {
         doc.commit_ops(vec![rotate(&[last], Turn::Quarter)], "Rotate")
             .unwrap();
         let copy = dir.join("rewritten.pdf");
-        sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &copy).unwrap();
+        sheaf_doc::save::rewrite_to_path(&doc, &copy).unwrap();
         let again = match rewritten {
             false => planned(&mut doc, &path).0,
             true => save_in_place(&mut doc, &path, false),
@@ -614,7 +614,7 @@ fn scripts_from_two_forms_are_off_and_kept_apart_by(how: How) {
     let (combined, _) =
         sheaf_ops::combine::build(&items, &CombineParams::default(), &sheaf_ops::NoProgress)
             .unwrap();
-    assert!(scripts_off(&combined));
+    assert!(scripts_off(&combined.doc));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -650,11 +650,12 @@ fn a_files_pages_in_runs_join_one_form() {
             password: None,
         },
     ];
-    let (doc, _) =
+    let (session, _) =
         sheaf_ops::combine::build(&items, &CombineParams::default(), &sheaf_ops::NoProgress)
             .unwrap();
+    let doc = session.doc;
     assert_eq!(names(&doc), ["a", "a2", "both"]);
-    let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+    let bytes = sheaf_doc::save::rewrite(&doc).unwrap();
     let report = clean(&bytes, "combined");
     assert_eq!((report.pages, report.fields, report.widgets), (4, 3, 4));
     assert!(!holds(&bytes, b"MIDDLE"));
@@ -668,8 +669,9 @@ fn corpus_path(path: &str) -> Option<PathBuf> {
     Some(corpus.path(&entry))
 }
 
-/// Combine `paths` as the app does, and the rewrite.
-fn combined(paths: &[PathBuf]) -> (Document, Vec<u8>) {
+/// Combine `paths` as the app does: the document, what Combine says, and
+/// the rewrite.
+fn combined(paths: &[PathBuf]) -> (Document, CombineReport, Vec<u8>) {
     let items: Vec<CombineItem> = paths
         .iter()
         .map(|p| CombineItem {
@@ -678,11 +680,11 @@ fn combined(paths: &[PathBuf]) -> (Document, Vec<u8>) {
             password: None,
         })
         .collect();
-    let (doc, _) =
+    let (session, report) =
         sheaf_ops::combine::build(&items, &CombineParams::default(), &sheaf_ops::NoProgress)
             .unwrap();
-    let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
-    (doc, bytes)
+    let bytes = sheaf_doc::save::rewrite(&session.doc).unwrap();
+    (session.doc, report, bytes)
 }
 
 /// Fields and widgets the form check counts in a file.
@@ -701,7 +703,17 @@ fn corpus_the_1040_and_two_schedules_combine_with_unique_names() {
         return;
     };
     let paths = [f1040, s1, sb];
-    let (doc, bytes) = combined(&paths);
+    let (doc, report, bytes) = combined(&paths);
+    // One version, with nothing to undo, what Combine says of it, and
+    // the scripts' state: what the new window starts from.
+    assert_eq!(doc.version_count(), 1);
+    assert!(!doc.can_undo() && doc.is_dirty());
+    let renamed = |file: &str| {
+        format!("Fields from {file}.pdf are under “{file}”, since their names were taken")
+    };
+    let said = [renamed("f1040s1"), renamed("f1040sb")].join(". ");
+    assert_eq!(report.notice, Some(said));
+    assert_eq!(doc.state().form().scripts, ScriptState::On, "none clash");
     // Every IRS form's root is `topmostSubform[0]`: the schedules are
     // renamed for their files, under parents sheaf made.
     let st = doc.state();
@@ -726,7 +738,7 @@ fn corpus_a_form_combined_with_itself_is_two_forms() {
     let Some(f1040) = corpus_path("forms/irs/f1040.pdf") else {
         return;
     };
-    let (_, bytes) = combined(&[f1040.clone(), f1040.clone()]);
+    let (_, _, bytes) = combined(&[f1040.clone(), f1040.clone()]);
     let (fields, widgets) = counts(&f1040);
     let report = check(&bytes, None).unwrap();
     assert_eq!((report.fields, report.widgets), (2 * fields, 2 * widgets));
@@ -743,7 +755,7 @@ fn corpus_scripted_forms_combined_have_scripts_off() {
     ) else {
         return;
     };
-    let (doc, bytes) = combined(&[ca.clone(), ny.clone()]);
+    let (doc, _, bytes) = combined(&[ca.clone(), ny.clone()]);
     assert!(scripts_off(&doc));
     let want = [ca, ny]
         .iter()

@@ -30,13 +30,16 @@ use anyhow::{Context, Result};
 use futures::executor::block_on;
 use in_progress::{NoProgress, Progress};
 use serde::{Deserialize, Serialize};
+use sheaf_doc::export::{Export, Out};
+use sheaf_doc::materialize::AskAnswers;
 use sheaf_doc::realize::ViewInputs;
-use sheaf_doc::{Actor, CommitOpts, Document, PAGES, PageId, Snapshot, TextOpts, TextService};
-use sheaf_edit::{BookmarkRef, Op, PageRef, PageSel, Rotation, Sibling};
+use sheaf_doc::{PAGES, PageId, Snapshot, TextOpts, TextService};
+use sheaf_edit::Rotation;
 use sheaf_image::blank::{Sensitivity, Verdict, is_blank};
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::{Budget, Job};
 
+use crate::session::{Decided, Session};
 use crate::text::Text;
 use crate::views::Views;
 
@@ -201,56 +204,51 @@ pub fn find(
     Ok(out)
 }
 
-/// Write `doc` without the `drop` pages to `kept`, and, with `rejects`,
-/// the dropped pages to a file of their own, each bookmarked with where it
-/// was and why ("p. 4 — blank"), so nothing is lost for good: those made
-/// in `doc`, the command line's. Returns how many pages `kept` has.
+/// Write `session`'s current version without the `drop` pages to `kept`,
+/// and, with `rejects`, the dropped pages to a file of their own, each
+/// bookmarked with where it was and why ("p. 4 — blank"), so nothing is
+/// lost for good: two exports ([`Export::extract`] and
+/// [`Export::rejects`]), which replace files there when `overwrite` and
+/// stop at what either asks that `answers` don't answer ([`NeedsDecision`])
+/// before either is written. The document is left as it was. Returns how
+/// many pages `kept` has.
+///
+/// [`NeedsDecision`]: crate::session::NeedsDecision
 pub fn write(
-    doc: &mut Document,
+    session: &Session,
     drop: &[Candidate],
     kept: &Path,
     rejects: Option<&Path>,
+    overwrite: bool,
+    answers: &AskAnswers,
 ) -> Result<usize> {
+    let from = session.export_from();
     let gone: HashSet<PageId> = drop.iter().map(|c| c.id).collect();
-    let snap = doc.snapshot();
-    let keep: Vec<PageId> = snap
-        .state
-        .order()
-        .iter()
+    let keep: Vec<PageId> = (from.snap.state.order().iter())
         .copied()
         .filter(|id| !gone.contains(id))
         .collect();
     if keep.is_empty() {
         anyhow::bail!("every page is blank; nothing to keep");
     }
-    sheaf_doc::save::extract_pages(&snap, &keep, kept)?;
-    let Some(rejects) = rejects.filter(|_| !drop.is_empty()) else {
-        return Ok(keep.len());
+    let to = |path: &Path| Out::File {
+        path: path.into(),
+        overwrite,
     };
-    // The rejects' own bookmarks replace the document's.
-    let roots = snap.state.outline_roots().iter().copied();
-    let mut ops = vec![
-        Op::DeleteBookmarks {
-            bookmarks: roots.map(BookmarkRef::Id).collect(),
-        },
-        Op::DeletePages {
-            pages: PageSel::ids(keep.iter().copied()),
-        },
-    ];
-    ops.extend(drop.iter().map(|c| Op::AddBookmark {
-        parent: None,
-        at: Sibling::Last,
-        title: format!("p. {} — {}", c.index + 1, c.reason.label()),
-        target: Some(PageRef::Id(c.id)),
-        view: None,
-        color: None,
-        style: Default::default(),
-        local: None,
-    }));
-    let mut tx = doc.tx(Actor::Cli);
-    tx.apply_batch(ops, &NoProgress)?;
-    doc.commit(tx, CommitOpts::labelled("Rejected pages"))?;
-    sheaf_doc::save::rewrite_to_path(&doc.snapshot(), rejects)?;
+    let titled: Vec<(PageId, String)> = (drop.iter())
+        .map(|c| (c.id, format!("p. {} — {}", c.index + 1, c.reason.label())))
+        .collect();
+    let rejected = (rejects.filter(|_| !drop.is_empty()))
+        .map(|rejects| Export::rejects(from.clone(), &titled, to(rejects)));
+    // What the second file asks stops both before the first is written.
+    if let Some(rejected) = &rejected {
+        sheaf_doc::export::check(rejected, answers, &NoProgress).decided()?;
+    }
+    let extract = Export::extract(from, &keep, to(kept));
+    session.export(extract, answers, &NoProgress).decided()?;
+    if let Some(rejected) = rejected {
+        session.export(rejected, answers, &NoProgress).decided()?;
+    }
     Ok(keep.len())
 }
 

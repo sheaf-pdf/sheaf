@@ -513,7 +513,7 @@ fn holding(
             mark.file = file_named(store, file);
         }
         (AnnotKind::PageStamp { stamp, name, .. }, None) => {
-            let form = crate::model::held_stamp(store, &lw.cx.primary, stamp);
+            let form = crate::model::find_stamp(store, &lw.cx.primary, stamp);
             mark.stamp = Some(form.ok_or_else(|| lw.not_found(format!("the stamp {name}")))?);
         }
         (AnnotKind::FileAttachment { file, name, .. }, None) => {

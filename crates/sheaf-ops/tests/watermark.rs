@@ -20,6 +20,7 @@ use common::{
 };
 use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::content::{PagOrigin, PaginationKind};
+use sheaf_doc::export::Export;
 use sheaf_doc::generate::fixture as older;
 use sheaf_doc::materialize::How;
 use sheaf_doc::text_layer::fixture as saved;
@@ -650,7 +651,8 @@ fn older_pdf(dir: &Path, name: &str) -> PathBuf {
 
 /// A clean copy of a page an older sheaf drew a watermark and a background
 /// on draws them as the file did, pixel for pixel, and holds neither the
-/// settings it kept in them nor the image's path.
+/// settings it kept in them, nor the image's path, nor the names it gave
+/// what they draw with: none of sheaf's private data (§15).
 #[test]
 fn a_clean_copy_draws_an_older_sheaf_s_watermark_as_it_was() {
     let dir = scratch("watermark-older-clean");
@@ -658,12 +660,18 @@ fn a_clean_copy_draws_an_older_sheaf_s_watermark_as_it_was() {
     let original = std::fs::read(&path).unwrap();
     let doc = open(&path);
     let out = dir.join("clean.pdf");
-    sheaf_doc::save::export_clean_copy(&doc.snapshot(), &out).unwrap();
-    let clean = std::fs::read(&out).unwrap();
-    for gone in [&b"SheafSettings"[..], b"SheafStamp", b"/home/someone"] {
+    let clean = common::exported_to(&doc, Export::clean_copy, &out);
+    for gone in [
+        &b"SheafSettings"[..],
+        b"SheafStamp",
+        b"SheafWM",
+        b"/home/someone",
+    ] {
         assert!(holds(&original, gone));
         assert!(!holds(&clean, gone), "{}", String::from_utf8_lossy(gone));
     }
+    let found = sheaf_doc::private::found(&Pdf::load_mem(&clean).unwrap());
+    assert_eq!(found, []);
     let (before, after) = (drawn(original), drawn(clean));
     let tinted = |more: usize, less: usize| {
         (before.data.chunks(4))

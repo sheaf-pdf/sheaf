@@ -14,6 +14,9 @@
 //! engine at a time. A scan for blank pages and Trim White's, like OCR,
 //! read pages through the pool.
 
+// Tests may use what clippy.toml bans (the lint ledger, M10.5 slice 19).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod pool;
 
 pub(crate) use pool::Segments;

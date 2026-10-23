@@ -524,8 +524,8 @@ pub(crate) fn adopt(lw: &mut Lower, ids: &[AnnotId]) -> Result<(), EditError> {
             parent.clone_from(now);
         }
         let (stamp, file) = match &annot.kind {
-            // Until slice 19, a comment's stamp the file drew is found in
-            // the generated cache, where reading the file put it.
+            // A comment's stamp holds the form its appearance is in its
+            // file, which reading the file found it by.
             AnnotKind::PageStamp { stamp, name, .. } => {
                 let found = crate::model::find_stamp(&lw.cx.store, &lw.cx.primary, stamp);
                 (

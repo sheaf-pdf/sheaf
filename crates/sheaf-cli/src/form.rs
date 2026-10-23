@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::{Args, Subcommand};
+use sheaf_ops::session::Session;
 
 #[derive(Args)]
 #[command(about = "Check a PDF's form")]
@@ -27,10 +29,17 @@ struct CheckArgs {
     password: Option<String>,
 }
 
-pub fn run(args: FormArgs, _quiet: bool) -> anyhow::Result<()> {
+pub fn run(args: FormArgs, quiet: bool) -> anyhow::Result<()> {
     match args.what {
         What::Check(a) => {
-            let report = sheaf_doc::forms::check_file(&a.input, a.password.as_deref())?;
+            let session = crate::progress::run("opening", quiet, |p| {
+                Session::open(&a.input, a.password.as_deref(), p)
+            })?;
+            // The file as the session read it: its last whole save's, when
+            // a crash cut one short.
+            let bytes = session.doc.primary().bytes();
+            let report = sheaf_doc::forms::check(bytes, a.password.as_deref())
+                .with_context(|| format!("checking {}", a.input.display()))?;
             print!("{report}");
             Ok(())
         }

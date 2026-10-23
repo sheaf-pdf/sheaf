@@ -5,6 +5,9 @@
 //! `check()` once cancelled. Ops move here one at a time, when the
 //! command line needs them.
 
+// Tests may use what clippy.toml bans (the lint ledger, M10.5 slice 19).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod blank;
 pub mod combine;
 pub mod comments;
@@ -15,6 +18,7 @@ pub mod images;
 pub mod pages;
 pub mod prefs;
 pub mod scan;
+pub mod session;
 pub mod split;
 pub mod stamps;
 pub mod text;

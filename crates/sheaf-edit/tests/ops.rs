@@ -8,8 +8,9 @@ use serde_json::{Value, json};
 use sheaf_edit::fixture::{blob, every_op, layer};
 use sheaf_edit::{
     AnnotId, AnnotRef, BlobId, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Envelope, FontChoice,
-    GridPos, HeaderFooterSpec, Local, Margins, Op, OutlineId, PageId, PageRef, PageSel, Patch,
-    RangeSet, Rotation, ScopeSel, Turn, WatermarkContent, WatermarkSpec, Z,
+    GridPos, HeaderFooterSpec, Local, Margins, MarkupKeep, Op, OutlineId, OutlinePolicy, PageId,
+    PageNumbering, PageRef, PageSel, Patch, RangeSet, Rotation, ScopeSel, Transform, Turn,
+    WatermarkContent, WatermarkSpec, Z,
 };
 
 fn pos(s: &str) -> RangeSet {
@@ -560,4 +561,56 @@ fn blob_ids_are_written_as_b_hex_and_length() {
     ] {
         assert!(read::<BlobId>(json!(bad)).is_err(), "{bad}");
     }
+}
+
+/// Transforms are an export's, outside the envelope: each names itself,
+/// and refuses what it doesn't know as an op does.
+#[test]
+fn transforms_round_trip_and_name_themselves() {
+    let transforms = [
+        Transform::Op(Op::DeletePages {
+            pages: PageSel::All,
+        }),
+        Transform::KeepPages {
+            pages: PageSel::Positions(pos("2-3")),
+            outline: OutlinePolicy::Headings,
+            labels: true,
+            numbering: PageNumbering::AsKept,
+        },
+        Transform::KeepPages {
+            pages: PageSel::All,
+            outline: OutlinePolicy::Drop,
+            labels: false,
+            numbering: PageNumbering::AsDocument,
+        },
+        Transform::RemoveMarkup {
+            keep: MarkupKeep::LINKS_AND_WIDGETS,
+        },
+        Transform::RemovePrivateData,
+    ];
+    let json = serde_json::to_value(&transforms).unwrap();
+    assert_eq!(
+        json,
+        json!([
+            {"op": {"op": "delete-pages", "pages": "all"}},
+            {"keep-pages": {"pages": {"positions": "2-3"}, "outline": "headings", "labels": true,
+                "numbering": "as-kept"}},
+            {"keep-pages": {"pages": "all", "outline": "drop", "labels": false,
+                "numbering": "as-document"}},
+            {"remove-markup": {"keep": {"links": true, "widgets": true}}},
+            "remove-private-data",
+        ])
+    );
+    assert_eq!(read::<Vec<Transform>>(json), Ok(transforms.to_vec()));
+    let e = read::<Transform>(json!({"keep-pages": {"pages": "all", "outline": "drop",
+        "labels": false, "numbering": "as-kept", "label": true}}))
+    .unwrap_err();
+    assert!(e.contains("unknown field `label`"), "{e}");
+    let e = read::<Transform>(json!({"keep-pages": {"pages": "all", "outline": "drop",
+        "labels": false}}))
+    .unwrap_err();
+    assert!(e.contains("missing field `numbering`"), "{e}");
+    let e = read::<Transform>(json!({"remove-markup": {"keep": {"links": true}}})).unwrap_err();
+    assert!(e.contains("missing field `widgets`"), "{e}");
+    assert!(read::<Transform>(json!("save")).is_err());
 }

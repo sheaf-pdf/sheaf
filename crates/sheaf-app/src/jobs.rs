@@ -1,7 +1,7 @@
 //! Background work on a document, its progress in the status bar and
 //! Escape to stop it (M10.5 §14.1), in two kinds:
-//! - **Jobs** write files (Export Pages, Split Document), one at a time
-//!   ([`DocView::run_job`]).
+//! - **Jobs** write files (the exports, Export Pages, Split Document), one
+//!   at a time ([`DocView::run_job`], [`DocView::write_export`]).
 //! - **Planners** plan an edit off the UI thread, over a snapshot (an
 //!   insert, Trim White, a watermark's or a header and footer's removal, a
 //!   comment import, the blank-page search), and land it on the UI thread,
@@ -9,17 +9,22 @@
 //!   ([`DocView::run_planner`]). Any number run at once, beside a job and
 //!   OCR's own run; Escape stops the newest.
 
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
 use gpui::Context;
+use sheaf_doc::export::ExportFrom;
+use sheaf_doc::materialize::AskAnswers;
 use sheaf_doc::{PageId, Store};
+use sheaf_ops::session::NeedsDecision;
+use sheaf_ops::split::SplitBy;
 use sheaf_ops::views::Views;
 use sheaf_ops::{ProgressSnapshot as Snapshot, Tracker, was_cancelled};
 
-use crate::docview::{DocView, State};
+use crate::docview::{Asking, DocView, Exporting, State};
 
 /// A running job or planner: its name ("Export") and tracker.
 pub(crate) struct Job {
@@ -39,17 +44,9 @@ impl DocView {
         done: impl FnOnce(T) -> String + 'static,
         cx: &mut Context<Self>,
     ) -> bool {
-        if let Some(job) = &self.job {
-            let msg = format!("{} is still running — Esc stops it", job.name);
-            self.set_notice(msg, cx);
+        let Some(tracker) = self.start_job(name, cx) else {
             return false;
-        }
-        let tracker = Tracker::new();
-        self.job = Some(Job {
-            name: name.to_string(),
-            tracker: tracker.clone(),
-        });
-        self.set_notice(format!("{name}…"), cx);
+        };
         let name = name.to_string();
         let end = move |v: &mut DocView, result: anyhow::Result<T>, _: &mut Context<DocView>| {
             v.job = None;
@@ -60,6 +57,23 @@ impl DocView {
         };
         self.drive(tracker, work, status, end, cx);
         true
+    }
+
+    /// A job called `name` begun, with its tracker; None while another
+    /// runs, which the status line says.
+    pub(crate) fn start_job(&mut self, name: &str, cx: &mut Context<Self>) -> Option<Tracker> {
+        if let Some(job) = &self.job {
+            let msg = format!("{} is still running — Esc stops it", job.name);
+            self.set_notice(msg, cx);
+            return None;
+        }
+        let tracker = Tracker::new();
+        self.job = Some(Job {
+            name: name.to_string(),
+            tracker: tracker.clone(),
+        });
+        self.set_notice(format!("{name}…"), cx);
+        Some(tracker)
     }
 
     /// Plan an edit: `work` on a background thread, over what it took of
@@ -101,7 +115,7 @@ impl DocView {
     /// `work` run on a background thread with `tracker`, `status` turning
     /// its progress into the status line meanwhile; then `end` given the
     /// view and the result, returning the final status line, if any.
-    fn drive<T: Send + 'static>(
+    pub(crate) fn drive<T: Send + 'static>(
         &mut self,
         tracker: Tracker,
         work: impl FnOnce(&Tracker) -> anyhow::Result<T> + Send + 'static,
@@ -230,7 +244,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let snapshot = doc.model.snapshot();
+        let from = doc.model.export_from(sheaf_doc::Actor::User);
         let stem = sheaf_ops::export::stem_of(&self.path);
         let rx = crate::file_dialog::open(
             cx,
@@ -248,7 +262,7 @@ impl DocView {
             };
             let Some(dir) = dirs.pop() else { return };
             // Names are known ahead except for a size split.
-            let clash: Vec<std::path::PathBuf> = sheaf_ops::split::plan(&snapshot, &by, &stem)
+            let clash: Vec<std::path::PathBuf> = sheaf_ops::split::plan(&from.snap, &by, &stem)
                 .map(|parts| {
                     parts
                         .iter()
@@ -284,37 +298,86 @@ impl DocView {
                 }
                 force = true;
             }
+            let answers = AskAnswers::default();
             this.update(cx, |v, cx| {
-                let shown = dir.clone();
-                v.run_job(
-                    "Split",
-                    move |p| sheaf_ops::split::split(&snapshot, &by, &dir, &stem, force, p),
-                    |s| {
-                        Some(match s.step.as_str() {
-                            "measuring" => format!("Measuring: page {} of {}…", s.done, s.total?),
-                            _ => format!("Writing file {} of {}…", s.done + 1, s.total?),
-                        })
-                    },
-                    move |files| {
-                        format!(
-                            "Split into {} file{} in {}",
-                            files.len(),
-                            if files.len() == 1 { "" } else { "s" },
-                            shown.display()
-                        )
-                    },
-                    cx,
-                );
+                let split = Splitting {
+                    from,
+                    by,
+                    dir,
+                    stem,
+                    force,
+                };
+                v.split_into(split, answers, cx)
             })
             .ok();
         })
         .detach();
     }
+
+    /// `split` as a job, each part an extract that asks what `answers`
+    /// don't answer, before any part is written. What one asks is asked
+    /// next frame, and the split runs again with the answer.
+    fn split_into(&mut self, split: Splitting, answers: AskAnswers, cx: &mut Context<Self>) {
+        let Some(tracker) = self.start_job("Split", cx) else {
+            return;
+        };
+        let work = {
+            let s = split.clone();
+            move |p: &Tracker| {
+                sheaf_ops::split::split(&s.from, &s.by, &s.dir, &s.stem, s.force, &answers, p)
+            }
+        };
+        let status = |s: &Snapshot| {
+            Some(match s.step.as_str() {
+                "measuring" => format!("Measuring: page {} of {}…", s.done, s.total?),
+                "checking" => format!("Checking file {} of {}…", s.done + 1, s.total?),
+                _ => format!("Writing file {} of {}…", s.done + 1, s.total?),
+            })
+        };
+        let end = move |v: &mut DocView,
+                        result: anyhow::Result<Vec<PathBuf>>,
+                        _: &mut Context<DocView>| {
+            v.job = None;
+            let e = match result {
+                Ok(files) => {
+                    let s = if files.len() == 1 { "" } else { "s" };
+                    let (n, dir) = (files.len(), split.dir.display());
+                    return Some(format!("Split into {n} file{s} in {dir}"));
+                }
+                Err(e) => e,
+            };
+            let Some(NeedsDecision(ask)) = e.downcast_ref::<NeedsDecision>() else {
+                return Some(ended("Split", &e));
+            };
+            let again = move |v: &mut DocView, answers, cx: &mut Context<DocView>| {
+                v.split_into(split, answers, cx)
+            };
+            let exporting = Exporting {
+                answers,
+                again: Box::new(again),
+            };
+            v.pending_ask = Some((Asking::Export(exporting), ask.clone()));
+            None
+        };
+        self.drive(tracker, work, status, end, cx);
+    }
+}
+
+/// A split as Split Document asks for it: of `from`'s version, as `by`
+/// says, into `dir`, its files named after `stem`, replacing files there
+/// when `force`.
+#[derive(Clone)]
+struct Splitting {
+    from: ExportFrom,
+    by: SplitBy,
+    dir: PathBuf,
+    stem: String,
+    force: bool,
 }
 
 /// The final status line of a job or planner `name` that ended with `e`:
 /// stopped, or failed and why.
-fn ended(name: &str, e: &anyhow::Error) -> String {
+pub(crate) fn ended(name: &str, e: &anyhow::Error) -> String {
     match was_cancelled(e) {
         true => format!("{name} stopped"),
         false => format!("{name} failed: {e:#}"),

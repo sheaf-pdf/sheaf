@@ -7,18 +7,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use in_progress::{Level, NoProgress, Progress};
+use in_progress::{Level, Progress};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::images::placement;
-use sheaf_doc::materialize::Came;
-use sheaf_doc::serialize::durable;
-use sheaf_doc::{Actor, Box2, CommitOpts, Document, JobKind, PAGES, Store};
-use sheaf_edit::{Op, PageRef};
+use sheaf_doc::materialize::AskAnswers;
+use sheaf_doc::store::{BlobKind, MemoryKind};
+use sheaf_doc::{Actor, Box2, JobKind, PAGES};
+use sheaf_edit::{BlobSel, Bring, Op, PageRef, PageSource};
 use sheaf_image::clean::ScanParams;
 use sheaf_image::io::PageImage;
 use sheaf_ocr::{OcrConfig, OcrImage, OcrWord};
 
 use crate::images::Paper;
+use crate::session::{Decided, SaveTo, Session};
 
 /// Color and gray pages are stored as JPEG at this quality.
 const JPEG_QUALITY: u8 = 80;
@@ -230,20 +231,60 @@ pub fn scan(
     if pages.is_empty() {
         anyhow::bail!("every page came out blank");
     }
-    let bytes = sheaf_doc::images::to_pdf(&pages, fit)?;
-    if engine.is_none() {
-        durable::write(out, &bytes, None)?;
-        return Ok(report);
+    // The pages made in memory, one file of them, which a document of no
+    // pages takes in, the recognized text its own (M10.5 §3.9).
+    let mut session = Session::new_empty();
+    let insert = made_pages(&mut session, &pages, fit, "scan")?;
+    session.commit(vec![insert], "Scan")?;
+    if engine.is_some() {
+        // As the app's OCR gives a page its text.
+        let ops = (session.doc.state().pages())
+            .zip(words)
+            .map(|((id, _, geom), w)| Op::SetOcrText {
+                page: PageRef::Id(id),
+                layer: Arc::new(sheaf_doc::text_layer::from_engine(w, geom, &engine_name)),
+            })
+            .collect();
+        session.commit_as(Actor::Job(JobKind::Ocr), ops, "Recognize Text")?;
     }
-    // Add the text through the document model, as the app's OCR does.
-    let mut tmp = out.as_os_str().to_owned();
-    tmp.push(".images.part");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    let result = add_text(&tmp, words, &engine_name, out);
-    let _ = std::fs::remove_file(&tmp);
-    result?;
+    let to = SaveTo::File {
+        path: out.to_path_buf(),
+        append: false,
+    };
+    // A file of its own: nothing to ask.
+    let writing = progress.child("writing", 0.0);
+    session
+        .save(to, &AskAnswers::default(), &*writing)
+        .decided()?;
     Ok(report)
+}
+
+/// `pages` made one PDF in memory ([`sheaf_doc::images::to_pdf`], each as
+/// `fit` says), interned as a [`MemoryKind::Images`] source held by
+/// `session`: the insert of all its pages at the end, under `name`. The
+/// pages are made from images already read, decoded and cleaned, so they
+/// go in as they're made, rather than as image files the insert reads
+/// again.
+pub(crate) fn made_pages(
+    session: &mut Session,
+    pages: &[PageImage],
+    fit: sheaf_edit::Fit,
+    name: &str,
+) -> Result<Op> {
+    let bytes = sheaf_doc::images::to_pdf(pages, fit)?;
+    let kind = BlobKind::memory(MemoryKind::Images);
+    let src = session.doc.store().open(bytes.into(), kind)?;
+    session.hold(src.blob().clone());
+    Ok(Op::InsertPages {
+        from: PageSource::File {
+            file: BlobSel::Id(src.id()),
+            name: name.to_string(),
+        },
+        pages: None,
+        before: None,
+        bring: Bring::default(),
+        locals: Vec::new(),
+    })
 }
 
 /// Whether a cleaned page is blank enough to leave out.
@@ -255,11 +296,7 @@ pub fn is_blank_page(image: &image::DynamicImage) -> bool {
 }
 
 /// An engine's words on a cleaned image, in points on its page.
-fn to_page(
-    found: &[OcrWord],
-    page: &PageImage,
-    fit: sheaf_doc::images::PageFit,
-) -> Vec<sheaf_doc::OcrWord> {
+fn to_page(found: &[OcrWord], page: &PageImage, fit: sheaf_edit::Fit) -> Vec<sheaf_doc::OcrWord> {
     let place = placement(page, fit).image;
     let sx = place.w / page.width as f32;
     let sy = place.h / page.height as f32;
@@ -279,43 +316,6 @@ fn to_page(
             }
         })
         .collect()
-}
-
-/// Open the image PDF at `src`, give each page its text layer (`words`,
-/// in points from each page's top-left), and write the result to `out`.
-fn add_text(
-    src: &Path,
-    words: Vec<Vec<sheaf_doc::OcrWord>>,
-    engine: &str,
-    out: &Path,
-) -> Result<()> {
-    let store = Store::new();
-    let (primary, stamp) = store.read_file(src, None)?;
-    let came = Came::Read {
-        path: src.into(),
-        stamp,
-    };
-    let mut doc = Document::new(
-        store,
-        primary,
-        sheaf_doc::store::file_name(src),
-        Some(came),
-        &[],
-        sheaf_doc::history::default_policy(),
-    );
-    let ops = doc
-        .state()
-        .pages()
-        .zip(words)
-        .map(|((id, _, geom), w)| Op::SetOcrText {
-            page: PageRef::Id(id),
-            layer: Arc::new(sheaf_doc::text_layer::from_engine(w, geom, engine)),
-        })
-        .collect();
-    let mut tx = doc.tx(Actor::Job(JobKind::Ocr));
-    tx.apply_batch(ops, &NoProgress)?;
-    doc.commit(tx, CommitOpts::labelled("Recognize Text"))?;
-    sheaf_doc::save::rewrite_to_path(&doc.snapshot(), out)
 }
 
 #[cfg(test)]

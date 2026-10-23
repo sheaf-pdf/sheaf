@@ -14,7 +14,7 @@ use crate::forms::field::Mk;
 use crate::labels::Style;
 use crate::model::{
     FieldProps, Filter, FormDoc, FormInst, Frozen, GenId, GenSpec, ImageRef, LegacySel, Mark,
-    MarkedSel, OutlineId, PageBase, Placed, Scope, SourceId, StreamSel, Target, TextStyle,
+    MarkedSel, OutlineId, PageBase, Placed, Scope, SourceId, Static, StreamSel, Target, TextStyle,
     WatermarkGen, WidgetProps,
 };
 use crate::source::ObjRef;
@@ -89,6 +89,7 @@ fn summary(contents: &str, mark: Option<Annot>) -> ForeignAnnot {
         hidden: false,
         color: None,
         mark: mark.map(Box::new),
+        stamp: None,
     }
 }
 
@@ -678,6 +679,59 @@ fn recognized_text() {
     assert_eq!(p.flags, removes);
 }
 
+/// `st`'s page `i` with a flattened layer, block `b<n>`'s, over it,
+/// placing source object `form`.
+fn flattened(st: &DocState, i: u64, n: u64, form: u32) -> Val {
+    let def = st.def(PageId(i)).unwrap();
+    let placed = crate::model::Placement {
+        form: crate::model::FormRef::Base(ObjRef {
+            src: def.base.src.clone(),
+            id: (form, 0),
+        }),
+        matrix: crate::geom::Affine::IDENTITY,
+        tag: crate::model::PlaceTag::Untagged,
+    };
+    let layer = Layer {
+        id: BlockId(n),
+        body: Static::Placements(Arc::from([placed])),
+    };
+    let content = def.content.with_layer(layer);
+    Val::Page(Arc::new(PageDef::new(def.base.clone(), def.copy, content)))
+}
+
+/// A flattened layer is what's drawn: added, content; gone, removed, once
+/// a page, but where another page shows it still. Its annotations' going
+/// is theirs to say.
+#[test]
+fn flattened_layers() {
+    let st = blank(2);
+    let page = Key::Page(PageId(0));
+    let e = put(&st, page, Some(flattened(&st, 0, 1, 9)));
+    assert_eq!((e.flags, e.sig), (Flags::CONTENT, OTHER));
+    let flat = flattened(&st, 0, 1, 9);
+    let st = holding(st.clone(), &[(page, flat.clone())]);
+    let p = path(&st, &[(page, Some(with_ocr(&st, 0, Some(layer("x")))))]);
+    assert_eq!(p.flags, Flags::CONTENT, "recognized text beside it");
+    let bare = blank(2).get(&page);
+    let p = path(&st, &[(page, bare.clone())]);
+    assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+    assert_eq!(removed(&p), [(RemovedKind::Flattened, 1)]);
+    // Gone where another page shows it still: nothing's gone.
+    let Val::Page(shown) = flat else {
+        panic!("a page")
+    };
+    let other = st.def(PageId(1)).unwrap();
+    let shared = PageDef::new(other.base.clone(), other.copy, shown.content.clone());
+    let p = path(
+        &st,
+        &[
+            (page, bare),
+            (Key::Page(PageId(1)), Some(Val::Page(Arc::new(shared)))),
+        ],
+    );
+    assert_eq!(p.flags, Flags::CONTENT);
+}
+
 /// The recognized text sheaf wrote in the file, taken out by a filter, in
 /// streams of its own or merged into another's: replaced text, once a
 /// page, whether a layer replaces it or not; the filter taken off again,
@@ -757,10 +811,17 @@ fn filters_added_and_taken_off() {
     }));
     let p = path(&st, &[(page, Some(with_filter(&st, 0, older.clone())))]);
     assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
-    assert_eq!(removed(&p), [(RemovedKind::OlderSettings, 1)]);
+    assert_eq!(removed(&p), [(RemovedKind::PrivateData, 1)]);
     let both = holding(st.clone(), &[(page, with_filter(&st, 0, acrobat_s))]);
     let p = path(&both, &[(page, Some(with_filter(&both, 0, older)))]);
-    assert_eq!(removed(&p), [(RemovedKind::OlderSettings, 1)]);
+    assert_eq!(removed(&p), [(RemovedKind::PrivateData, 1)]);
+    // And what marks sheaf's streams, or what its resources hold.
+    for sel in [LegacySel::Streams, LegacySel::Resources] {
+        let strip = Filter::StripLegacy(sel);
+        let p = path(&st, &[(page, Some(with_filter(&st, 0, strip)))]);
+        assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
+        assert_eq!(removed(&p), [(RemovedKind::PrivateData, 1)]);
+    }
 }
 
 #[test]

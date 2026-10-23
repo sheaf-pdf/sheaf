@@ -7,6 +7,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use sheaf_edit::Transform;
+
 use super::resolve::ResolvedOp;
 use crate::model::{AnnotBody, DocState};
 
@@ -129,7 +131,8 @@ pub fn cap_of(op: &ResolvedOp, targets: &[Target]) -> Cap {
         | R::SetWatermark { .. }
         | R::RemoveWatermark { .. }
         | R::SetHeaderFooter { .. }
-        | R::RemoveHeaderFooter { .. } => Cap::Approval,
+        | R::RemoveHeaderFooter { .. }
+        | R::FlattenAnnotations { .. } => Cap::Approval,
         R::InsertPages { .. }
         | R::ReplacePages { .. }
         | R::SetOcrText { .. }
@@ -144,6 +147,31 @@ pub(crate) fn targets(op: &ResolvedOp, st: &DocState) -> Vec<Target> {
             annots.iter().filter_map(|&id| Target::of(st, id)).collect()
         }
         _ => Vec::new(),
+    }
+}
+
+/// The capability an export's `transform` needs, beside what an op it
+/// makes needs (an [`Transform::Op`]'s is its op's, checked as it's
+/// lowered): leaving pages out is a delete's, which a plugin may make;
+/// taking markup or sheaf's private data off changes what the user didn't
+/// make in sheaf. One sheaf-edit adds needs the user's until it has a row.
+pub fn transform_cap(transform: &Transform) -> Option<Cap> {
+    match transform {
+        Transform::Op(_) => None,
+        Transform::KeepPages { .. } => Some(Cap::Plugin),
+        Transform::RemoveMarkup { .. } | Transform::RemovePrivateData => Some(Cap::Approval),
+        _ => Some(Cap::User),
+    }
+}
+
+/// Whether `actor` may make an export's transform that needs `cap`
+/// ([`transform_cap`]): the user and the command line any, a plugin those
+/// a plugin may, and the jobs that make one kind of edit none.
+pub fn actor_exports(actor: &Actor, cap: Cap) -> bool {
+    match actor {
+        Actor::User | Actor::Cli | Actor::Job(JobKind::Import | JobKind::Insert) => true,
+        Actor::Job(JobKind::Ocr | JobKind::Trim) => false,
+        Actor::Plugin { .. } => cap == Cap::Plugin,
     }
 }
 

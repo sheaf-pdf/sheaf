@@ -1,5 +1,6 @@
 //! Images as PDF pages: each image becomes one page showing it, sized
-//! from its resolution or fitted to a paper size.
+//! from its resolution or fitted to a paper size ([`Fit`]), written
+//! through sheaf's serializer.
 //!
 //! The bytes are kept as small as the image allows: a JPEG goes in as it
 //! is (DCTDecode, with its EXIF rotation as the page's `/Rotate`); a
@@ -8,39 +9,12 @@
 //! [`sheaf_image::io`]'s.
 
 use std::io::Write;
-use std::path::Path;
 
 use anyhow::{Result, bail};
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_edit::Fit;
 use sheaf_image::encode::g4;
 use sheaf_image::io::{PageImage, Pixels};
-
-/// How big each page is.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PageFit {
-    /// The image's own size at its resolution.
-    Original,
-    /// A sheet of this size in points (portrait; a landscape image turns
-    /// it landscape), the image scaled to fit inside `margin` and centered.
-    Paper {
-        width: f32,
-        height: f32,
-        margin: f32,
-    },
-}
-
-impl PageFit {
-    pub const LETTER: PageFit = PageFit::Paper {
-        width: 612.0,
-        height: 792.0,
-        margin: 0.0,
-    };
-    pub const A4: PageFit = PageFit::Paper {
-        width: 595.28,
-        height: 841.89,
-        margin: 0.0,
-    };
-}
 
 /// Where an image goes on its page, as shown (upright, top-left origin,
 /// points).
@@ -51,11 +25,11 @@ pub struct Placement {
     pub image: crate::Box2,
 }
 
-pub fn placement(page: &PageImage, fit: PageFit) -> Placement {
+pub fn placement(page: &PageImage, fit: Fit) -> Placement {
     let (iw, ih) = page.size_pt();
     let (pw, ph, x, y, w, h) = match fit {
-        PageFit::Original => (iw, ih, 0.0, 0.0, iw, ih),
-        PageFit::Paper {
+        Fit::Original => (iw, ih, 0.0, 0.0, iw, ih),
+        Fit::Paper {
             width,
             height,
             margin,
@@ -77,7 +51,7 @@ pub fn placement(page: &PageImage, fit: PageFit) -> Placement {
 }
 
 /// A PDF with one page per image.
-pub fn to_pdf(pages: &[PageImage], fit: PageFit) -> Result<Vec<u8>> {
+pub fn to_pdf(pages: &[PageImage], fit: Fit) -> Result<Vec<u8>> {
     if pages.is_empty() {
         bail!("no images");
     }
@@ -121,9 +95,7 @@ pub fn to_pdf(pages: &[PageImage], fit: PageFit) -> Result<Vec<u8>> {
     );
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
-    let mut out = Vec::new();
-    pdf.save_to(&mut out)?;
-    Ok(out)
+    crate::serialize::full::write_built(&pdf)
 }
 
 pub(crate) fn image_stream(page: &PageImage) -> Result<Stream> {
@@ -167,15 +139,6 @@ fn flate(mut dict: lopdf::Dictionary, data: &[u8]) -> Result<Stream> {
     enc.write_all(data)?;
     dict.set("Filter", "FlateDecode");
     Ok(Stream::new(dict, enc.finish()?).with_compression(false))
-}
-
-/// Read every file and make one PDF of all their pages.
-pub fn files_to_pdf(paths: &[impl AsRef<Path>], fit: PageFit) -> Result<Vec<u8>> {
-    let mut pages = Vec::new();
-    for p in paths {
-        pages.extend(sheaf_image::io::read(p.as_ref())?);
-    }
-    to_pdf(&pages, fit)
 }
 
 #[cfg(test)]
@@ -240,7 +203,7 @@ mod tests {
         assert!(
             matches!(&pages[0].pixels, Pixels::Jpeg { bytes: b, components: 3 } if *b == bytes)
         );
-        let pdf = to_pdf(&pages, PageFit::Original).unwrap();
+        let pdf = to_pdf(&pages, Fit::Original).unwrap();
         // 192 px at 96 dpi is 2 in.
         assert_eq!(
             page_facts(&pdf),
@@ -260,11 +223,11 @@ mod tests {
         }));
         let pages = read_bytes(encode(&bw, ImageFormat::Png)).unwrap();
         assert!(matches!(pages[0].pixels, Pixels::Bilevel(_)));
-        let pdf = to_pdf(&pages, PageFit::Original).unwrap();
+        let pdf = to_pdf(&pages, Fit::Original).unwrap();
         assert_eq!(page_facts(&pdf)[0].2, "CCITTFaxDecode");
         let rgb = read_bytes(encode(&gradient(10, 10), ImageFormat::Png)).unwrap();
         assert_eq!(
-            page_facts(&to_pdf(&rgb, PageFit::Original).unwrap())[0].2,
+            page_facts(&to_pdf(&rgb, Fit::Original).unwrap())[0].2,
             "FlateDecode"
         );
     }
@@ -276,7 +239,7 @@ mod tests {
         let gray = PageImage::jpeg(&gradient(40, 30).grayscale(), 150.0, 80).unwrap();
         assert!(matches!(gray.pixels, Pixels::Jpeg { components: 1, .. }));
         assert_eq!(
-            page_facts(&to_pdf(&[gray], PageFit::Original).unwrap())[0].2,
+            page_facts(&to_pdf(&[gray], Fit::Original).unwrap())[0].2,
             "DCTDecode"
         );
     }
@@ -284,7 +247,7 @@ mod tests {
     #[test]
     fn fits_paper_turning_it_for_landscape() {
         let page = PageImage::from_image(gradient(200, 100), 100.0);
-        let pdf = to_pdf(&[page], PageFit::LETTER).unwrap();
+        let pdf = to_pdf(&[page], Fit::LETTER).unwrap();
         assert_eq!(page_facts(&pdf)[0].0, [0.0, 0.0, 792.0, 612.0]);
     }
 }

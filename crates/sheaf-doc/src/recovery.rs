@@ -342,7 +342,8 @@ pub(crate) mod tests {
     use crate::effects::{Removed, RemovedKind};
     use crate::forms::fixture::{Form, row};
     use crate::materialize::{
-        AppendAnyway, Ask, AskAnswers, Onto, SaveStop, Strategy, StrategyKind, Why, plan, save,
+        AppendAnyway, Ask, AskAnswers, Onto, SaveHow, SaveStop, Strategy, StrategyKind, Why, plan,
+        save_with,
     };
     use crate::model::Document;
     use crate::serialize::fixture::holds;
@@ -727,7 +728,14 @@ pub(crate) mod tests {
                 .xfa
         );
         let mut recovered = restored(&pdf, &rec, None);
-        let report = save(&mut recovered, &pdf, &AskAnswers::default(), &NoProgress).unwrap();
+        let report = save_with(
+            &mut recovered,
+            &pdf,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.why, [Why::RecoveredRemovals]);
         let saved = std::fs::read(&pdf).unwrap();
         assert!(
@@ -867,7 +875,14 @@ pub(crate) mod tests {
         assert_eq!(texts(&recovered), "HEADERSECRET <<1>>");
         let planned = plan(&recovered.recovery_input(), &recovered.save_target(&pdf));
         assert_eq!(planned.strategy, Strategy::Append { onto: Onto::Saved });
-        let report = save(&mut recovered, &pdf, &AskAnswers::default(), &NoProgress).unwrap();
+        let report = save_with(
+            &mut recovered,
+            &pdf,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Append));
         let written = std::fs::read(&pdf).unwrap();
         assert!(written.starts_with(&table));
@@ -948,7 +963,14 @@ pub(crate) mod tests {
         turn(&mut model, 0);
         let set = fx::set_header(fx::header("Page <<1>> of <<N>>"), None);
         model.commit_ops(vec![set], "header").unwrap();
-        let report = save(&mut model, &pdf, &AskAnswers::default(), &NoProgress).unwrap();
+        let report = save_with(
+            &mut model,
+            &pdf,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Append));
         let [first, second] = [0, 1].map(|i| model.page(i).unwrap());
         let reorder = fx::move_pages(&[second], Some(first));
@@ -958,7 +980,14 @@ pub(crate) mod tests {
         let rec = find(&pdf).unwrap();
         assert!(!rec.pending.flags.removes);
         let mut recovered = restored(&pdf, &rec, None);
-        let report = save(&mut recovered, &pdf, &AskAnswers::default(), &NoProgress).unwrap();
+        let report = save_with(
+            &mut recovered,
+            &pdf,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Append));
         assert_eq!(report.why, []);
         let reopened = crate::open::file(&pdf, None).unwrap().doc;
@@ -986,7 +1015,14 @@ pub(crate) mod tests {
         two_page_pdf(&pdf);
         let mut model = crate::open::file(&pdf, None).unwrap().doc;
         crate::serialize::tests::mark(&mut model);
-        let report = save(&mut model, &pdf, &AskAnswers::default(), &NoProgress).unwrap();
+        let report = save_with(
+            &mut model,
+            &pdf,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Append));
         let page = model.page(0).unwrap();
         let id = model.state().marks_on(page).next().unwrap().id;
@@ -1043,7 +1079,14 @@ pub(crate) mod tests {
         let page = third.page(0).unwrap();
         assert_eq!(third.geom(page).rotate, Rotation::R90);
         assert_eq!(third.state().marks_on(page).count(), 1);
-        let report = save(&mut third, &pdf, &AskAnswers::default(), &NoProgress).unwrap();
+        let report = save_with(
+            &mut third,
+            &pdf,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Append));
         assert!(!third.is_dirty());
         let written = std::fs::read(&pdf).unwrap();
@@ -1086,7 +1129,14 @@ pub(crate) mod tests {
         let planned = plan(&recovered.recovery_input(), &recovered.save_target(&pdf));
         assert_eq!(planned.strategy, Strategy::Append { onto: Onto::Saved });
         assert_eq!(planned.asks, []);
-        let report = save(&mut recovered, &pdf, &AskAnswers::default(), &NoProgress).unwrap();
+        let report = save_with(
+            &mut recovered,
+            &pdf,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Append));
         let before = std::fs::read(&pdf).unwrap();
         assert!(before.starts_with(&bytes) && fits(&before));
@@ -1123,7 +1173,13 @@ pub(crate) mod tests {
             reason: Some(why),
         };
         assert_eq!(planned.asks, std::slice::from_ref(&asks));
-        let stop = save(&mut recovered, &pdf, &AskAnswers::default(), &NoProgress);
+        let stop = save_with(
+            &mut recovered,
+            &pdf,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        );
         assert_eq!(stop, Err(SaveStop::Ask(asks)));
         assert_eq!(std::fs::read(&pdf).unwrap(), before);
         let anyway = AskAnswers {
@@ -1131,7 +1187,8 @@ pub(crate) mod tests {
             stays_readable: true,
             ..Default::default()
         };
-        let report = save(&mut recovered, &pdf, &anyway, &NoProgress).unwrap();
+        let report =
+            save_with(&mut recovered, &pdf, SaveHow::Planned, &anyway, &NoProgress).unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Append));
         let now = std::fs::read(&pdf).unwrap();
         assert!(now.starts_with(&before) && fits(&now));
@@ -1160,7 +1217,14 @@ pub(crate) mod tests {
         let copy = dir.join("copy.pdf");
         let planned = plan(&recovered.recovery_input(), &recovered.save_target(&copy));
         assert_eq!(planned.strategy, Strategy::Append { onto: Onto::CopyOf });
-        let report = save(&mut recovered, &copy, &AskAnswers::default(), &NoProgress).unwrap();
+        let report = save_with(
+            &mut recovered,
+            &copy,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Append));
         assert_eq!(std::fs::read(&pdf).unwrap(), bytes);
         let copied = std::fs::read(&copy).unwrap();

@@ -7,11 +7,11 @@
 //! - Windows: GDI, with PDFium rasterizing each page at the printer's
 //!   resolution, the job opened from memory.
 //!
-//! The PDF a job prints is made by the caller (`sheaf_doc::save::print_pdf`)
-//! at the page's own size, in memory, and goes to the spooler from there:
-//! nothing is written to disk (M10.5 §10.6). Scaling and orientation are
-//! the backend's job, done the way [`place`] says so the preview matches
-//! the paper.
+//! The PDF a job prints is made by the caller, the print export
+//! (`sheaf_doc::export::printed`), at the page's own size, in memory, and
+//! goes to the spooler from there: nothing is written to disk (M10.5
+//! §10.6). Scaling and orientation are the backend's job, done the way
+//! [`place`] says so the preview matches the paper.
 
 use std::sync::Arc;
 

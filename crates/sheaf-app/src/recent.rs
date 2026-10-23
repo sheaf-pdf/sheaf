@@ -117,6 +117,10 @@ pub fn add(path: &Path, cx: &mut App) {
 }
 
 /// sheaf's own temporary files: `<temp>/sheaf-…` (opened attachments).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a path check that writes nothing: opened attachments stay out of the recent list"
+)]
 fn is_sheaf_temp(path: &Path) -> bool {
     path.strip_prefix(std::env::temp_dir())
         .ok()

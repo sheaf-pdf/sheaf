@@ -11,6 +11,10 @@
 //! [`every_fact`] is a file with one of each fact a file opens with, and
 //! [`outline_tree`] gives a form bookmarks.
 
+// Built for other crates' tests under the `fixtures` feature, outside
+// `cfg(test)`: its pages' content is encoded from operations.
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::LazyLock;

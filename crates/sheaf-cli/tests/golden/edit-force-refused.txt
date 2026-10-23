@@ -1,0 +1,22 @@
+$ sheaf-cli edit $DIR/in.pdf --edits $DIR/edit-force-refused.json -o $DIR/taken.pdf
+--- edits
+{
+  "ops": [
+    {
+      "by": 90,
+      "op": "rotate-pages",
+      "pages": {
+        "ids": [
+          {
+            "pos": 1
+          }
+        ]
+      }
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 1
+--- stdout
+--- stderr
+error: $DIR/taken.pdf already exists (--force replaces)

@@ -33,6 +33,11 @@
 //! their block's `/ShOCR`, then the header; and, cleared, no recognized
 //! word.
 //!
+//! From slice 19 so does a tagged page holding a filled field and a mark,
+//! written either way, then flattened, a Rewrite: pdf.js reads the page's
+//! own text alone, then, flattened, each annotation's text after it, inside
+//! an `/Artifact` of its own.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`. A test
 //! whose tools are missing says so and passes. Run with
@@ -44,6 +49,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use lopdf::{Dictionary, Object, dictionary};
+use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::forms::fixture::{Form, outline_tree};
 use sheaf_doc::materialize::{How, StrategyKind};
 use sheaf_doc::serialize::fixture::{
@@ -51,12 +57,12 @@ use sheaf_doc::serialize::fixture::{
     rc4_aes_128_and_aes_256, written,
 };
 use sheaf_doc::tx::fixture::{
-    add, clear_ocr, delete, delete_named, header, move_pages, ocr, patch_bookmark, remove_header,
-    remove_watermark, rotate, set_header, set_watermark, watermark,
+    add, clear_ocr, delete, delete_named, flatten, header, move_pages, ocr, patch_bookmark,
+    remove_header, remove_watermark, rotate, set_header, set_watermark, watermark,
 };
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DestView, OcrWord, PageId, Snapshot};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DestView, OcrWord, PageId};
 use sheaf_edit::{
-    BatesSpec, BookmarkPatch, GridPos, Margins, Op, PageRef, Rotation, Sibling, Turn, Z,
+    BatesSpec, BookmarkPatch, FlattenSet, GridPos, Margins, Op, PageRef, Rotation, Sibling, Turn, Z,
 };
 
 mod common;
@@ -194,12 +200,10 @@ fn qpdf_checks(how: How) {
         let base = dir.join(format!("{file}.pdf"));
         std::fs::write(&base, &bytes).unwrap();
         let doc = edited(&base, password);
-        let snap = doc.snapshot();
-        let ids: Vec<PageId> = snap.state.order().iter().copied().collect();
-        let exported = |export: fn(&Snapshot, &Path) -> anyhow::Result<()>, how: &str| {
+        let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
+        let exported = |export: fn(ExportFrom, Out) -> Export, how: &str| {
             let path = dir.join(format!("{file}-{how}.pdf"));
-            export(&snap, &path).unwrap();
-            std::fs::read(&path).unwrap()
+            common::exported_to(&doc, export, &path)
         };
         let saved = (format!("{how:?}"), how.write(&doc));
         if how == How::Appended {
@@ -219,26 +223,20 @@ fn qpdf_checks(how: How) {
             saved,
             (
                 "Extract".into(),
-                sheaf_doc::save::extract_bytes(&snap, &ids[..1]).unwrap(),
+                doc.export_bytes(|f, out| Export::extract(f, &ids[..1], out)),
             ),
             (
                 "Print".into(),
-                sheaf_doc::save::print_pdf(&snap, &ids, true).unwrap(),
+                doc.export_bytes(|f, _| Export::print(f, &ids, true)),
             ),
             (
                 "PrintClean".into(),
-                sheaf_doc::save::print_pdf(&snap, &ids, false).unwrap(),
+                doc.export_bytes(|f, _| Export::print(f, &ids, false)),
             ),
-            (
-                "Clean".into(),
-                exported(sheaf_doc::save::export_clean_copy, "clean-copy"),
-            ),
+            ("Clean".into(), exported(Export::clean_copy, "clean-copy")),
             (
                 "Flattened".into(),
-                exported(
-                    |snap, path| sheaf_doc::save::export_flattened(snap, path).map(drop),
-                    "flattened-copy",
-                ),
+                exported(Export::flattened, "flattened-copy"),
             ),
         ];
         outputs_checked(
@@ -389,7 +387,7 @@ fn three_appends_pass_qpdf_check() {
 #[test]
 #[ignore = "needs qpdf"]
 fn pages_deleted_saved_and_undone_pass_qpdf_check() {
-    use sheaf_doc::materialize::{AskAnswers, Why, save};
+    use sheaf_doc::materialize::{AskAnswers, SaveHow, Why, save_with};
     let Some(qpdf) = qpdf() else {
         return;
     };
@@ -408,9 +406,23 @@ fn pages_deleted_saved_and_undone_pass_qpdf_check() {
         let mut doc = sheaf_doc::open::file(&path, password).unwrap().doc;
         let gone = doc.page(1).unwrap();
         doc.commit_ops(vec![delete(&[gone])], "delete").unwrap();
-        save(&mut doc, &path, &answers, &sheaf_ops::NoProgress).unwrap();
+        save_with(
+            &mut doc,
+            &path,
+            SaveHow::Planned,
+            &answers,
+            &sheaf_ops::NoProgress,
+        )
+        .unwrap();
         doc.undo().unwrap();
-        let report = save(&mut doc, &path, &answers, &sheaf_ops::NoProgress).unwrap();
+        let report = save_with(
+            &mut doc,
+            &path,
+            SaveHow::Planned,
+            &answers,
+            &sheaf_ops::NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.why, [Why::BaseObjectsMissing], "{name}");
         if let Err(e) = run(qpdf_with(&qpdf, password).arg("--check").arg(&path)) {
             failed.push(format!("{name}: {e}"));
@@ -1125,6 +1137,213 @@ fn ocr_block_reads(how: How) {
             let read = marked_read(pdfjs, &script, &path, 1, &format!("{what}, {how:?}"));
             assert_eq!(read, want, "pdf.js, {what}, {how:?}");
         }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+sheaf_doc::both_ways!(
+    #[ignore = "needs qpdf, or node and pdf.js"]
+    a_flattened_page_reads_in_pdfjs,
+    a_flattened_page_reads_in_pdfjs_appended: flattened_reads
+);
+
+/// A tagged page holding a filled text field and a mark of sheaf's saying
+/// "Look", written `how`, then flattened and saved as planned, a Rewrite:
+/// each file passes `qpdf --check`; pdf.js reads the page's own text alone
+/// while they're annotations, and once flattened, each's text after it,
+/// inside an `/Artifact` of its own, the field's in the text field's own
+/// marked content, in the order the page listed them.
+fn flattened_reads(how: How) {
+    let (qpdf, pdfjs) = (qpdf(), pdfjs());
+    if qpdf.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch(&format!("interop-flatten-{how:?}"));
+    let script = dir.join("marked.mjs");
+    std::fs::write(&script, PDFJS_MARKED).unwrap();
+    let mut form = Form::new(1);
+    let field = form.text("Name", 0, [100.0, 600.0, 300.0, 620.0]);
+    form.fill(field, "Ada");
+    form.tag();
+    let base = common::write(&dir, "flatten.pdf", &mut form);
+    let mut doc = common::open(&base);
+    let page = doc.page(0).unwrap();
+    let look = Annot {
+        id: AnnotId(0),
+        kind: AnnotKind::FreeText {
+            rect: Box2 {
+                x: 72.0,
+                y: 300.0,
+                w: 200.0,
+                h: 40.0,
+            },
+            size: 12.0,
+        },
+        color: [255, 0, 0],
+        opacity: 1.0,
+        stroke: 1.0,
+        author: String::new(),
+        contents: "Look".into(),
+        modified: String::new(),
+        created: String::new(),
+        fill: None,
+        dashed: false,
+        cloudy: false,
+        turn: Rotation::R0,
+        name: String::new(),
+    };
+    doc.commit_ops(vec![add(page, &look)], "Look").unwrap();
+    let marked = how.write(&doc);
+    how.save(&mut doc, &base);
+    let page = doc.page(0).unwrap();
+    doc.commit_ops(vec![flatten(&[page], FlattenSet::All)], "Flatten")
+        .unwrap();
+    let (strategy, flattened) = common::planned(&mut doc, &base);
+    assert_eq!(strategy, StrategyKind::Rewrite, "{how:?}: what went goes");
+    let outputs = [
+        ("marked", marked, "text \"Page 1\"".to_string()),
+        (
+            "flattened",
+            flattened,
+            "text \"Page 1\"\n\
+             begin Artifact\nbegin Tx\ntext \"Ada\"\nend\nend\n\
+             begin Artifact\ntext \"Look\"\nend"
+                .to_string(),
+        ),
+    ];
+    for (what, bytes, want) in outputs {
+        let path = dir.join(format!("flatten-{what}-{how:?}.pdf"));
+        std::fs::write(&path, &bytes).unwrap();
+        if let Some(qpdf) = &qpdf {
+            run(Command::new(qpdf).arg("--check").arg(&path))
+                .unwrap_or_else(|e| panic!("qpdf --check, {what}, {how:?}: {e}"));
+            println!("qpdf --check, {what}, {how:?}: passes");
+        }
+        if let Some(pdfjs) = &pdfjs {
+            let read = marked_read(pdfjs, &script, &path, 1, &format!("{what}, {how:?}"));
+            assert_eq!(read, want, "pdf.js, {what}, {how:?}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Each export of an edited form (its page turned, a note on it) passes
+/// `qpdf --check`, and pdf.js reads its page and the annotations it keeps:
+/// an extract keeps the note and the field, a clean copy and a print
+/// without markup the field alone, and a flattened copy and a print with
+/// markup none, the field's value drawn into the page.
+#[test]
+#[ignore = "needs qpdf, or node and pdf.js"]
+fn the_exports_read_in_pdfjs() {
+    let (qpdf, pdfjs) = (qpdf(), pdfjs());
+    if qpdf.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch("interop-exports");
+    let script = dir.join("pages.mjs");
+    std::fs::write(&script, PDFJS_PAGES).unwrap();
+    let [base, _] = written(&form());
+    let path = dir.join("form.pdf");
+    std::fs::write(&path, base).unwrap();
+    let doc = edited(&path, None);
+    let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
+    let value = sheaf_doc::serialize::fixture::VALUE;
+    let outputs: [(&str, Vec<u8>, usize); 5] = [
+        (
+            "extract",
+            doc.export_bytes(|f, out| Export::extract(f, &ids, out)),
+            2,
+        ),
+        (
+            "print",
+            doc.export_bytes(|f, _| Export::print(f, &ids, true)),
+            0,
+        ),
+        (
+            "print-clean",
+            doc.export_bytes(|f, _| Export::print(f, &ids, false)),
+            1,
+        ),
+        ("clean", doc.export_bytes(Export::clean_copy), 1),
+        ("flattened", doc.export_bytes(Export::flattened), 0),
+    ];
+    for (what, bytes, annotations) in outputs {
+        let out = dir.join(format!("{what}.pdf"));
+        std::fs::write(&out, bytes).unwrap();
+        if let Some(qpdf) = &qpdf {
+            run(Command::new(qpdf).arg("--check").arg(&out))
+                .unwrap_or_else(|e| panic!("qpdf --check, {what}: {e}"));
+            println!("qpdf --check, {what}: passes");
+        }
+        if let Some(pdfjs) = &pdfjs {
+            let read = run(Command::new("node").arg(&script).arg(pdfjs).arg(&out)).unwrap();
+            println!("pdf.js, {what}: {read}");
+            assert!(read.starts_with("pages 1\n"), "{what}: {read}");
+            assert!(read.contains("Page 1"), "{what}: {read}");
+            let kept = format!(", {annotations} annotations");
+            assert!(read.contains(&kept), "{what}: {read}");
+            if annotations == 0 {
+                assert!(read.contains(value), "{what}: {read}");
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A page an older sheaf wrote recognized text on (`/SheafOcrLayer`, in
+/// the font `/SheafOcr`) and drew a header on (in the font `/SheafHF`, its
+/// settings in the catalog), given a watermark of the document's: its
+/// clean copy, which holds none of sheaf's private data, the names it gave
+/// what it drew with given new ones, passes `qpdf --check`, and pdf.js
+/// reads the page as it read the file, then the watermark, inside an
+/// `/Artifact` of its own.
+#[test]
+#[ignore = "needs qpdf, or node and pdf.js"]
+fn a_clean_copy_reads_in_pdfjs() {
+    use sheaf_doc::generate::fixture as older;
+    let (qpdf, pdfjs) = (qpdf(), pdfjs());
+    if qpdf.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch("interop-clean");
+    let script = dir.join("marked.mjs");
+    std::fs::write(&script, PDFJS_MARKED).unwrap();
+    let mut pdf = sheaf_doc::text_layer::fixture::legacy_page();
+    let page = *pdf.get_pages().get(&1).unwrap();
+    let mut dict = pdf.get_dictionary(page).unwrap().clone();
+    older::legacy_header(&mut pdf, &mut dict);
+    pdf.objects.insert(page, Object::Dictionary(dict));
+    let catalog = pdf.trailer.get(b"Root").and_then(Object::as_reference);
+    let settings = Object::string_literal(older::HEADER_SETTINGS);
+    (pdf.get_dictionary_mut(catalog.unwrap()).unwrap()).set("SheafHeaderFooter", settings);
+    let base = dir.join("older.pdf");
+    pdf.save(&base).unwrap();
+    let mut doc = common::open(&base);
+    doc.commit_ops(
+        vec![set_watermark(watermark("MINE"), Z::Over, None)],
+        "Watermark",
+    )
+    .unwrap();
+    let path = dir.join("clean.pdf");
+    let clean = common::exported_to(&doc, Export::clean_copy, &path);
+    let clean = lopdf::Document::load_mem(&clean).unwrap();
+    assert_eq!(sheaf_doc::private::found(&clean), []);
+    for (what, path) in [("older", &base), ("clean", &path)] {
+        if let Some(qpdf) = &qpdf {
+            run(Command::new(qpdf).arg("--check").arg(path))
+                .unwrap_or_else(|e| panic!("qpdf --check, {what}: {e}"));
+            println!("qpdf --check, {what}: passes");
+        }
+    }
+    if let Some(pdfjs) = &pdfjs {
+        let older = marked_read(pdfjs, &script, &base, 1, "older");
+        assert!(
+            older.contains("Saved") && older.contains("Draft"),
+            "{older}"
+        );
+        let read = marked_read(pdfjs, &script, &path, 1, "clean");
+        let want = format!("{older}\nbegin Artifact\ntext \"MINE\"\nend");
+        assert_eq!(read, want, "pdf.js, clean");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

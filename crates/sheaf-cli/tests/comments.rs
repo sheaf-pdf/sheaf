@@ -233,3 +233,64 @@ fn comments_go_out_as_xfdf_and_come_back_in() {
     assert!(String::from_utf8_lossy(&run.stderr).contains("0 added, 3 updated"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A signed file's comments brought in and written whole would break its
+/// signature: the command line stops rather than choose, exiting 3 with
+/// the ask as JSON, and writes nothing; its flags answer. `--append`
+/// copies the file and appends, keeping its bytes and signature; written
+/// whole with `--signatures break`, the signature goes (M10.5 proposal
+/// 40). `--force` only replaces the file that's there.
+#[test]
+fn a_signed_file_asks_before_its_signature_breaks() {
+    use sheaf_doc::forms::fixture::{Form, row};
+    let dir = scratch("signed");
+    let mut form = Form::new(1);
+    let sig = form.signature("sig", 0, row(2));
+    form.sign(sig);
+    let signed = dir.join("signed.pdf");
+    std::fs::write(&signed, form.bytes()).unwrap();
+    let original = std::fs::read(&signed).unwrap();
+    let xfdf = dir.join("notes.xfdf");
+    std::fs::write(
+        &xfdf,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><annots>
+<text page="0" rect="100,600,120,620" name="cy-1" title="Cy"><contents>Look here</contents></text>
+</annots></xfdf>"#,
+    )
+    .unwrap();
+    let out = dir.join("out.pdf");
+    let import = |more: &[&str]| {
+        let mut args = vec!["comments", "import", signed.to_str().unwrap()];
+        args.extend([xfdf.to_str().unwrap(), "-o", out.to_str().unwrap()]);
+        args.extend(more);
+        sheaf(&args)
+    };
+    let run = import(&[]);
+    assert_eq!(
+        run.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let asked = String::from_utf8(run.stdout).unwrap();
+    for want in [
+        r#""kind":"signatures""#,
+        r#""signatures":1"#,
+        r#""breaks":1"#,
+        r#""append_anyway":false"#,
+    ] {
+        assert!(asked.contains(want), "{want} in {asked}");
+    }
+    assert!(!out.exists());
+    ok(&import(&["--append"]));
+    let appended = std::fs::read(&out).unwrap();
+    assert!(appended.starts_with(&original) && appended.len() > original.len());
+    let run = import(&["--signatures", "break"]);
+    assert_eq!(run.status.code(), Some(1), "it's there, and isn't replaced");
+    assert_eq!(std::fs::read(&out).unwrap(), appended);
+    ok(&import(&["--signatures", "break", "--force"]));
+    assert!(!std::fs::read(&out).unwrap().starts_with(&original));
+    assert_eq!(std::fs::read(&signed).unwrap(), original);
+    let _ = std::fs::remove_dir_all(&dir);
+}

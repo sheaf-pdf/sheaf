@@ -4,6 +4,9 @@
 //!
 //! Each file opens in its own window.
 
+// Tests may use what clippy.toml bans (the lint ledger, M10.5 slice 19).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod adopt;
 mod assets;
 mod attach;

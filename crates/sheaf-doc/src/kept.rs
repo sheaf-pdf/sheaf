@@ -29,10 +29,14 @@ pub struct Kept {
 type Changed = RefCell<BTreeSet<ObjectId>>;
 
 /// Make `pdf` reach no page but `kept`, its page tree (the catalog's
-/// `/Pages`) and its form's page templates. References that a copy
-/// couldn't follow (null, see `materialize::copy::remap`) count as gone
-/// too. Gives what a reader should be told, and the objects it changed.
-pub(crate) fn keep_only(pdf: &mut Pdf, kept: &HashSet<ObjectId>) -> Kept {
+/// `/Pages`) and its form's page templates, and none of the annotations
+/// `removed`, which kept pages left out of their `/Annots` (a flatten's,
+/// a delete's): what still names them, as the structure tree's object
+/// references do, goes, so their values and text go with them.
+/// References that a copy couldn't follow (null, see
+/// `materialize::copy::remap`) count as gone too. Gives what a reader
+/// should be told, and the objects it changed.
+pub(crate) fn keep_only(pdf: &mut Pdf, kept: &HashSet<ObjectId>, removed: &[ObjectId]) -> Kept {
     let Some(catalog_id) = pdf
         .trailer
         .get(b"Root")
@@ -74,6 +78,7 @@ pub(crate) fn keep_only(pdf: &mut Pdf, kept: &HashSet<ObjectId>) -> Kept {
         changed: Changed::default(),
     };
     gone.dropped = dropped_annots(pdf, &gone);
+    gone.dropped.extend(removed);
     let mut notes = Vec::new();
 
     let names = clean_named_dests(pdf, catalog_id, &gone);
@@ -106,7 +111,8 @@ pub(crate) fn keep_only(pdf: &mut Pdf, kept: &HashSet<ObjectId>) -> Kept {
 struct Gone<'a> {
     kept: &'a HashSet<ObjectId>,
     tree: Option<ObjectId>,
-    /// Annotations of pages that aren't kept (see [`dropped_annots`]).
+    /// Annotations of pages that aren't kept (see [`dropped_annots`]), and
+    /// those kept pages left out.
     dropped: HashSet<ObjectId>,
     changed: Changed,
 }

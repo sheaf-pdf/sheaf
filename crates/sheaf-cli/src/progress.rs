@@ -1,4 +1,6 @@
 //! Drawing a `Tracker` as a bar on stderr while an op runs, and Ctrl-C.
+//! A stderr that isn't a terminal gets no bar, but plain lines: one as
+//! each op starts, and one per message.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,15 +33,19 @@ pub fn run<T: Send>(
             .progress_chars("=> "),
     );
     bar.set_message(label.to_string());
+    let plain = !quiet && bar.is_hidden();
+    if plain {
+        eprintln!("{label}…");
+    }
     let done = AtomicBool::new(false);
     let result = std::thread::scope(|s| {
         s.spawn(|| {
             let mut last_message = None;
             while !done.load(Ordering::Relaxed) {
-                draw(&bar, &tracker.snapshot(), &mut last_message);
+                draw(&bar, plain, &tracker.snapshot(), &mut last_message);
                 std::thread::sleep(Duration::from_millis(80));
             }
-            draw(&bar, &tracker.snapshot(), &mut last_message);
+            draw(&bar, plain, &tracker.snapshot(), &mut last_message);
         });
         let result = work(&tracker);
         done.store(true, Ordering::Relaxed);
@@ -50,7 +56,14 @@ pub fn run<T: Send>(
     result
 }
 
-fn draw(bar: &ProgressBar, snap: &Snapshot, last_message: &mut Option<(Level, String)>) {
+/// `snap` on `bar`, its message as a line of its own: above the bar, or
+/// when `plain`, alone.
+fn draw(
+    bar: &ProgressBar,
+    plain: bool,
+    snap: &Snapshot,
+    last_message: &mut Option<(Level, String)>,
+) {
     if let Some(total) = snap.total {
         bar.set_length(total);
         bar.set_position(snap.done.min(total));
@@ -63,7 +76,10 @@ fn draw(bar: &ProgressBar, snap: &Snapshot, last_message: &mut Option<(Level, St
                 Level::Warn => "warning: ",
                 Level::Error => "error: ",
             };
-            bar.println(format!("{tag}{msg}"));
+            match plain {
+                true => eprintln!("{tag}{msg}"),
+                false => bar.println(format!("{tag}{msg}")),
+            }
         }
         last_message.clone_from(&snap.message);
     }
@@ -75,9 +91,10 @@ fn install_ctrlc() {
         let result = ctrlc::set_handler(|| {
             let current = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
             match current.as_ref() {
+                // Cancelled, then said: what reads the line knows it is.
                 Some(t) if !t.snapshot().cancelled => {
-                    eprintln!("\nstopping… (Ctrl-C again to quit now)");
                     t.cancel();
+                    eprintln!("\nstopping… (Ctrl-C again to quit now)");
                 }
                 _ => std::process::exit(130),
             }

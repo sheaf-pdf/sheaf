@@ -132,15 +132,55 @@ fn splits_by_count_ranges_and_size() {
         .lines()
         .map(String::from)
         .collect();
-    assert!(files.len() >= 3, "{files:?}");
-    let mut total = 0;
+    // The parts a size split made before it was an export (slice 19).
+    let counts: Vec<usize> = files.iter().map(|f| pages(f)).collect();
+    assert_eq!(counts, [2, 2, 2, 1], "{files:?}");
     for f in &files {
         assert!(std::fs::metadata(f).unwrap().len() <= 50_000, "{f}");
-        total += pages(f);
     }
-    assert_eq!(total, 7);
 
     // A method is required.
     assert_eq!(sheaf(&["split", input]).status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A signed file split a page a part, its signature on the last page: the
+/// last part asks before its signature breaks (exit 3), and nothing is
+/// written, the parts before it neither (M10.5 proposal 40). Answered,
+/// the split writes every part, with no `--force`.
+#[test]
+fn a_split_that_asks_writes_no_part() {
+    use sheaf_doc::forms::fixture::{Form, row};
+    let dir = std::env::temp_dir().join(format!("sheaf-cli-split-signed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut form = Form::new(3);
+    let sig = form.signature("sig", 2, row(2));
+    form.sign(sig);
+    let input = dir.join("signed.pdf");
+    std::fs::write(&input, form.bytes()).unwrap();
+    let out = dir.join("parts");
+    let split = |more: &[&str]| {
+        let mut args = vec!["split", "-q", input.to_str().unwrap(), "--every", "1"];
+        args.extend(["-o", out.to_str().unwrap()]);
+        args.extend(more);
+        sheaf(&args)
+    };
+    let run = split(&[]);
+    let said = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(3), "{said}");
+    let asked = String::from_utf8(run.stdout).unwrap();
+    assert!(asked.contains(r#""kind":"signatures""#), "{asked}");
+    let written: Vec<_> = std::fs::read_dir(&out).unwrap().collect();
+    assert!(written.is_empty(), "{written:?}");
+    let run = split(&["--signatures", "break"]);
+    let said = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{said}");
+    let counts: Vec<usize> = String::from_utf8(run.stdout)
+        .unwrap()
+        .lines()
+        .map(pages)
+        .collect();
+    assert_eq!(counts, [1, 1, 1]);
     let _ = std::fs::remove_dir_all(&dir);
 }

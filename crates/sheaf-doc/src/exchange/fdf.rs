@@ -63,7 +63,7 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
     Ok(Comments { pdf, annots, file })
 }
 
-/// `comments` as an FDF file.
+/// `comments` as an FDF file, written through sheaf's serializer.
 pub fn write(comments: &Comments) -> Result<Vec<u8>> {
     let mut pdf = comments.pdf.clone();
     pdf.version = "1.2".into();
@@ -80,8 +80,7 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
     }
     let root = pdf.add_object(dictionary! { "FDF" => fdf });
     pdf.trailer = dictionary! { "Root" => root };
-    let mut out = Vec::new();
-    pdf.save_to(&mut out).context("writing the FDF")?;
+    let mut out = crate::serialize::full::write_built(&pdf).context("writing the FDF")?;
     if out.starts_with(b"%PDF-") {
         out[..5].copy_from_slice(b"%FDF-");
     }

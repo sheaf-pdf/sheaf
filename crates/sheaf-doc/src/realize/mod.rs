@@ -54,7 +54,9 @@ use sheaf_util::Checksum;
 
 pub use inputs::{MarkDraw, OcgOverride, ViewInputs};
 pub use key::{RenderKey, render_key, render_reads};
-pub(crate) use key::{form_digest, layout_reads, page_digest, recipe_digest};
+pub(crate) use key::{
+    form_digest, form_ref_digest, layout_reads, page_digest, pinned_digest, recipe_digest,
+};
 #[cfg(any(test, feature = "fixtures"))]
 pub use untouched::emission_is_base;
 pub use untouched::untouched;

@@ -254,6 +254,8 @@ pub struct Widget {
 pub mod annot_flags {
     pub const HIDDEN: u32 = 1 << 1;
     pub const PRINT: u32 = 1 << 2;
+    pub const NO_ZOOM: u32 = 1 << 3;
+    pub const NO_ROTATE: u32 = 1 << 4;
     pub const NO_VIEW: u32 = 1 << 5;
     pub const READ_ONLY: u32 = 1 << 6;
 }

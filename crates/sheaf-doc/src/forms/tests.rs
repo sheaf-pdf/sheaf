@@ -724,6 +724,9 @@ fn the_manifest_by_its_header() {
     assert_eq!(rows[1].pages, 0);
     assert_eq!(rows[1].field_scripts["keystroke"], 2);
     assert_eq!(rows[1].sha256, "");
+    assert_eq!(rows[0].column("extra"), "x");
+    assert_eq!((rows[1].column("extra"), rows[1].column("none")), ("", ""));
+    assert!(!rows[0].extra.contains_key("pages"));
     assert!(parse_manifest("form\ttitle\n").is_err());
 }
 
@@ -731,7 +734,8 @@ fn the_manifest_by_its_header() {
 /// must have a forms manifest. With none there, the corpus tests skip;
 /// one there without `forms/manifest.tsv`, or with only the old
 /// top-level `manifest.tsv`, is an error, not a skip. Its scans are
-/// `scans/manifest.tsv`'s rows, and a corpus without them says so.
+/// `scans/manifest.tsv`'s rows, its signed files `signatures/
+/// manifest.tsv`'s, and a corpus without them says so.
 #[test]
 fn the_corpus_is_where_its_manifest_is() {
     let dir = std::env::temp_dir().join(format!("sheaf-corpus-{}", std::process::id()));
@@ -764,6 +768,25 @@ fn the_corpus_is_where_its_manifest_is() {
     let scans = found.scans().unwrap();
     assert_eq!((scans[0].pages, scans[0].kind.as_str()), (3, "scan-ocr"));
     assert_eq!(found.path(&scans[0]), some.join("scans/s/b.pdf"));
+    let err = found.signatures().err().unwrap();
+    assert!(
+        format!("{err:#}").contains("signatures/manifest.tsv"),
+        "{err:#}"
+    );
+    std::fs::create_dir_all(some.join("signatures")).unwrap();
+    std::fs::write(
+        some.join("signatures/manifest.tsv"),
+        "path\tpages\tsignatures\tsubfilters\tcertified\tintact\tvalid\n\
+         signatures/s/c.pdf\t1\t2\tadbe.pkcs7.detached:2\t\t2\t2\n",
+    )
+    .unwrap();
+    let signed = found.signatures().unwrap();
+    assert_eq!(found.path(&signed[0]), some.join("signatures/s/c.pdf"));
+    assert_eq!(signed[0].column("subfilters"), "adbe.pkcs7.detached:2");
+    assert_eq!(
+        (signed[0].column("valid"), signed[0].column("certified")),
+        ("2", "")
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

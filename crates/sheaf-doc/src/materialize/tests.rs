@@ -1494,65 +1494,6 @@ fn an_object_a_copy_names_that_doesnt_read_is_copied_as_null() {
     ));
 }
 
-/// An export's post-pass runs after the graph's checks, and its graph is
-/// checked again: a post-pass that leaves a reference to nothing, or
-/// reaches a page the file doesn't keep, stops the write.
-#[test]
-fn an_export_s_post_pass_is_checked_too() {
-    let d = open(&bytes(&file("A", 2, false)), None);
-    let input = SaveInput::detached(&d.snapshot());
-    let dense = Profile {
-        numbering: Numbering::Dense,
-        ..Profile::default()
-    };
-    let first = |pdf: &mut Pdf| *pdf.get_pages().values().next().unwrap();
-    let mut fine = |_: &mut Pdf| Ok(());
-    let written = materialize_then(
-        &input,
-        &rewrite_plan(),
-        target(dense),
-        Some(&mut fine),
-        &NoProgress,
-    );
-    assert!(written.is_ok());
-    let mut dangling = |pdf: &mut Pdf| {
-        let page = first(pdf);
-        let nothing = (pdf.max_id + 7, 0);
-        pdf.get_dictionary_mut(page)?
-            .set("Annots", vec![Object::Reference(nothing)]);
-        Ok(())
-    };
-    let stop = materialize_then(
-        &input,
-        &rewrite_plan(),
-        target(dense),
-        Some(&mut dangling),
-        &NoProgress,
-    );
-    let Err(SaveStop::Failed(e)) = stop else {
-        panic!("{:?}", stop.err());
-    };
-    assert!(e.contains("hasn't got"), "{e}");
-    let mut reaching = |pdf: &mut Pdf| {
-        let page = first(pdf);
-        let stray = pdf.add_object(dictionary! { "Type" => "Page" });
-        pdf.get_dictionary_mut(page)?
-            .set("B", vec![Object::Reference(stray)]);
-        Ok(())
-    };
-    let stop = materialize_then(
-        &input,
-        &rewrite_plan(),
-        target(dense),
-        Some(&mut reaching),
-        &NoProgress,
-    );
-    let Err(SaveStop::Failed(e)) = stop else {
-        panic!("{:?}", stop.err());
-    };
-    assert!(e.contains("doesn't keep"), "{e}");
-}
-
 /// The fast paths that copy an unchanged object as the file has it write
 /// what the built path would: another tool's annotation with `/RT` and no
 /// `/IRT` loses the `/RT` (it has no parent), an outline root with no

@@ -56,10 +56,12 @@ use crate::store::{Blob, BlobRef, Src, Store};
 pub(crate) mod bookmarks;
 pub mod caps;
 pub mod cascade;
-mod content;
+pub(crate) mod content;
 pub mod error;
+pub mod export;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
+mod flatten;
 pub(crate) mod forms;
 pub(crate) mod marks;
 pub(crate) mod pages;
@@ -80,10 +82,11 @@ pub(crate) mod tests;
 #[cfg(test)]
 mod watermark_tests;
 
-pub use caps::{Actor, Cap, JobKind, Target, actor_allows, cap_of};
+pub use caps::{Actor, Cap, JobKind, Target, actor_allows, actor_exports, cap_of, transform_cap};
 pub use cascade::{Cascade, Rule};
 pub use content::others_on;
 pub use error::{EditError, Notice, notice_text};
+pub use export::ExportTx;
 pub use marks::{mark_changes, mark_kind, mark_patch, mark_style};
 pub use resolve::{
     At, BookmarkChange, OthersFound, ResolvedOp, incoming, op_name, ready_to_insert,
@@ -407,6 +410,8 @@ pub struct Tx {
     pins: Vec<Blob>,
     grants: Vec<Grant>,
     named: HashMap<String, usize>,
+    /// Its ops were read from a file ([`ops_from_file`](Tx::ops_from_file)).
+    from_file: bool,
     cx: Arc<LowerCx>,
 }
 
@@ -441,8 +446,19 @@ impl Tx {
             pins: Vec::new(),
             grants: Vec::new(),
             named: HashMap::new(),
+            from_file: false,
             cx,
         }
+    }
+
+    /// Its ops come from a file, as `sheaf edit`'s do (M10.5 §14.2): they
+    /// name things as a person sees them, by position, title path, `/NM`
+    /// and the names the command line gave its files, never by id. A
+    /// session's ids mean nothing outside it, so an op naming a page, a
+    /// bookmark, an annotation or a blob by id is
+    /// [`Invalid`](EditError::Invalid).
+    pub fn ops_from_file(&mut self) {
+        self.from_file = true;
     }
 
     /// `op`, lowered: all of it, or nothing and why not. Canceled by `p`,
@@ -460,7 +476,7 @@ impl Tx {
         p: &dyn Progress,
     ) -> Result<OpResult, EditError> {
         self.ready()?;
-        let (resolved, reads) = self.resolve(&op)?;
+        let (resolved, reads) = self.resolve(&op, true)?;
         self.allowed(&resolved)?;
         let positional = reads.contains(&Key::Order);
         let (made, drawn) = self.lower(resolved, reads, pins, p)?;
@@ -494,10 +510,11 @@ impl Tx {
     }
 
     /// Whether `op` could be applied now: its references resolve, and the
-    /// actor may make it. Nothing is lowered, and no id is drawn.
+    /// actor may make it. Nothing is lowered, no id is drawn, and pages an
+    /// insert makes in memory aren't made.
     pub fn check(&self, op: &Op) -> Result<(), EditError> {
         self.ready()?;
-        let (resolved, _) = self.resolve(op)?;
+        let (resolved, _) = self.resolve(op, false)?;
         self.allowed(&resolved)
     }
 
@@ -576,15 +593,18 @@ impl Tx {
     }
 
     /// `op` with its references resolved against the state as it is, and
-    /// the slots resolving read.
-    fn resolve(&self, op: &Op) -> Result<(ResolvedOp, BTreeSet<Key>), EditError> {
+    /// the slots resolving read; the pages an insert makes in memory made
+    /// and interned when `build` ([`Resolver::build`](resolve::Resolver)).
+    fn resolve(&self, op: &Op, build: bool) -> Result<(ResolvedOp, BTreeSet<Key>), EditError> {
         let mut r = resolve::Resolver {
             st: &self.state,
             locals: &self.locals,
             cx: &self.cx,
             grants: &self.grants,
             named: &self.named,
+            from_file: self.from_file,
             op: op_name(op),
+            build,
             reads: BTreeSet::new(),
         };
         let resolved = r.op(op)?;
@@ -711,6 +731,7 @@ impl Tx {
             pins: self.pins,
             grants: self.grants,
             named: self.named,
+            from_file: self.from_file,
             cx: self.cx,
         }
     }
@@ -731,6 +752,7 @@ pub(crate) struct TxParts {
     pins: Vec<Blob>,
     grants: Vec<Grant>,
     named: HashMap<String, usize>,
+    from_file: bool,
     cx: Arc<LowerCx>,
 }
 
@@ -756,6 +778,7 @@ impl TxParts {
         tx.pins = self.pins;
         tx.grants = self.grants;
         tx.named = self.named;
+        tx.from_file = self.from_file;
         for Entry { op, drawn, .. } in self.entries {
             tx.apply_pinned(op, drawn, &in_progress::NoProgress)?;
         }
@@ -1137,6 +1160,14 @@ fn lower_op(lw: &mut Lower, op: &mut ResolvedOp) -> Result<(), EditError> {
             others,
         } => {
             *others = content::remove_header_footer(lw, pages, *include_authored)?;
+            Ok(())
+        }
+        R::FlattenAnnotations {
+            pages,
+            which,
+            flattened,
+        } => {
+            *flattened = flatten::flatten(lw, pages, *which)?;
             Ok(())
         }
         R::Revert { .. } => Err(EditError::internal(

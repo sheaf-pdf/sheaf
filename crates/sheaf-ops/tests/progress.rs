@@ -1,9 +1,14 @@
 //! What the app and the command line read from an op's tracker: a cancel
 //! told from a failure, and where the bar is when a step ends.
 
+// A test crate of its own, whose scratch files go in the temp directory
+// clippy.toml bans outside tests.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 
-use sheaf_doc::Document;
+use sheaf_doc::materialize::AskAnswers;
+use sheaf_doc::{Actor, Document};
 use sheaf_ops::combine::{CombineItem, CombineParams, combine};
 use sheaf_ops::split::{SplitBy, split};
 use sheaf_ops::{Cancelled, Tracker, was_cancelled};
@@ -58,14 +63,15 @@ fn combining_reads_to_the_dialog_s_threshold() {
         .iter()
         .map(|name| {
             let path = dir.join(format!("{name}.pdf"));
-            let bytes = sheaf_doc::save::rewrite(&blank(1).snapshot()).unwrap();
+            let bytes = sheaf_doc::save::rewrite(&blank(1)).unwrap();
             std::fs::write(&path, bytes).unwrap();
             CombineItem::new(path)
         })
         .collect();
     let tracker = Tracker::new();
     let out = dir.join("out.pdf");
-    combine(&items, &CombineParams::default(), &out, &tracker).unwrap();
+    let answers = AskAnswers::default();
+    combine(&items, &CombineParams::default(), &out, &answers, &tracker).unwrap();
     let f = tracker.snapshot().fraction;
     assert!(f >= Some(0.7), "{f:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -78,7 +84,9 @@ fn a_size_split_ends_full() {
     let dir = scratch("split");
     let tracker = Tracker::new();
     let by = SplitBy::MaxBytes(u64::MAX);
-    let parts = split(&blank(3).snapshot(), &by, &dir, "a", false, &tracker).unwrap();
+    let from = blank(3).export_from(Actor::User);
+    let answers = AskAnswers::default();
+    let parts = split(&from, &by, &dir, "a", false, &answers, &tracker).unwrap();
     assert_eq!(parts.len(), 1);
     let s = tracker.snapshot();
     assert_eq!((s.fraction, s.step.as_str()), (Some(1.0), ""));

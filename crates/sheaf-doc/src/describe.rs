@@ -6,7 +6,7 @@
 //! one line ([`lines`]): a batch of 7,000 is "Recognize text on 7000
 //! pages".
 
-use sheaf_edit::{MarkKind, Z};
+use sheaf_edit::{FlattenSet, MarkKind, Z};
 
 use crate::effects::Flags;
 use crate::model::{AnnotBody, DocState, PageId, Step};
@@ -146,6 +146,17 @@ pub fn describe(op: &ResolvedOp, before: &DocState) -> String {
         } => {
             let found = others_found(others);
             format!("Remove the header and footer from {}{found}", pages(ids))
+        }
+        R::FlattenAnnotations {
+            pages: ids,
+            which,
+            flattened,
+        } => {
+            let what = match which {
+                FlattenSet::All => count(*flattened, "annotation"),
+                FlattenSet::Printable => count(*flattened, "printable annotation"),
+            };
+            format!("Flatten {what} on {}", pages(ids))
         }
         R::Revert { label } => format!("Undo all of {label}"),
     }
@@ -347,6 +358,14 @@ fn run_line(run: &[Step]) -> String {
             let found = others_found(&others);
             format!("Remove the header and footer from {}{found}", pages())
         }
+        R::FlattenAnnotations { .. } => {
+            let flattened = |op: &ResolvedOp| match op {
+                R::FlattenAnnotations { flattened, .. } => *flattened,
+                _ => 0,
+            };
+            let what = count(sum(flattened), "annotation");
+            format!("Flatten {what} on {}", pages())
+        }
         // A version's only step.
         R::Revert { .. } => run[0].line.clone(),
     }
@@ -363,7 +382,8 @@ fn page_count(op: &ResolvedOp) -> usize {
         | R::SetPageBoxes { pages, .. }
         | R::ClearOcrText { pages }
         | R::RemoveWatermark { pages, .. }
-        | R::RemoveHeaderFooter { pages, .. } => pages.len(),
+        | R::RemoveHeaderFooter { pages, .. }
+        | R::FlattenAnnotations { pages, .. } => pages.len(),
         R::InsertPages { pages, .. } => pages.len(),
         R::ReplacePages { with, .. } => with.len(),
         R::SetOcrText { .. } => 1,

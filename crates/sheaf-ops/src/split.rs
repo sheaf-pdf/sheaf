@@ -1,14 +1,19 @@
 //! Split a document into several files (Document > Split Document…,
 //! `sheaf split`): every N pages, by page ranges, at each top-level
-//! bookmark, or into files no bigger than a size. Each part keeps its
-//! pages' markup and the bookmarks that point into it.
+//! bookmark, or into files no bigger than a size. Each part is an extract
+//! ([`Export::extract`]): it keeps its pages' markup and the bookmarks that
+//! point into it.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
-use in_progress::{Level, Progress, Unit};
+use in_progress::{Level, NoProgress, Progress, Unit};
 use serde::{Deserialize, Serialize};
+use sheaf_doc::export::{Export, ExportFrom, Out};
+use sheaf_doc::materialize::AskAnswers;
 use sheaf_doc::{PAGES, PageId, Snapshot};
+
+use crate::session::Decided;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -135,21 +140,29 @@ pub fn file_safe(title: &str) -> String {
     }
 }
 
-/// Split `snap` into files in `dir` named after `stem`. Returns them in
-/// order. With `force`, existing files are replaced; otherwise that's an
-/// error before anything is written.
+/// Split `from`'s version into files in `dir` named after `stem`, each an
+/// extract, which stops at what any part asks that `answers` don't answer
+/// ([`NeedsDecision`]) before anything is written. Returns them in order.
+/// With `force`, existing files are replaced; otherwise that's an error
+/// before anything is written.
+///
+/// [`NeedsDecision`]: crate::session::NeedsDecision
 pub fn split(
-    snap: &Snapshot,
+    from: &ExportFrom,
     by: &SplitBy,
     dir: &Path,
     stem: &str,
     force: bool,
+    answers: &AskAnswers,
     progress: &dyn Progress,
 ) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(dir)?;
     let parts = match by {
-        SplitBy::MaxBytes(max) => by_size(snap, *max, stem, &*progress.child("measuring", 0.5))?,
-        _ => plan(snap, by, stem)?,
+        SplitBy::MaxBytes(max) => {
+            let measuring = progress.child("measuring", 0.5);
+            by_size(from, *max, stem, answers, &*measuring)?
+        }
+        _ => plan(&from.snap, by, stem)?,
     };
     let paths: Vec<PathBuf> = parts
         .iter()
@@ -158,11 +171,34 @@ pub fn split(
     if !force && let Some(p) = paths.iter().find(|p| p.exists()) {
         bail!("{} already exists", p.display());
     }
+    let extracts: Vec<Export> = (parts.iter().zip(&paths))
+        .map(|(part, path)| {
+            let out = Out::File {
+                path: path.clone(),
+                overwrite: force,
+            };
+            Export::extract(from.clone(), &part.pages, out)
+        })
+        .collect();
+    // What any part asks stops the split before one is written: each is
+    // checked first, but a size split's, asked about as they were measured.
+    if !matches!(by, SplitBy::MaxBytes(_)) {
+        let step = progress.child("checking", 0.25);
+        step.set_total(Some(parts.len() as u64), Unit::ITEMS);
+        for (i, extract) in extracts.iter().enumerate() {
+            step.check()?;
+            sheaf_doc::export::check(extract, answers, &NoProgress).decided()?;
+            step.set(i as u64 + 1);
+        }
+    }
     let step = progress.child("writing", 1.0);
     step.set_total(Some(parts.len() as u64), Unit::ITEMS);
-    for (i, (part, path)) in parts.iter().zip(&paths).enumerate() {
+    for (i, (part, extract)) in parts.iter().zip(extracts).enumerate() {
         step.check()?;
-        sheaf_doc::save::extract_pages(snap, &part.pages, path)?;
+        // Its count is the parts': the part only stops.
+        let part_of = step.child(&part.name, 0.0);
+        sheaf_doc::export::run(extract, answers, &*part_of).decided()?;
+        drop(part_of);
         step.set(i as u64 + 1);
     }
     Ok(paths)
@@ -171,8 +207,14 @@ pub fn split(
 /// Greedy parts no bigger than `max` bytes: each takes as many pages as
 /// fit, found by doubling then bisecting. A page too big on its own is a
 /// part by itself, with a warning.
-fn by_size(snap: &Snapshot, max: u64, stem: &str, progress: &dyn Progress) -> Result<Vec<Part>> {
-    let pages: Vec<PageId> = snap.state.order().iter().copied().collect();
+fn by_size(
+    from: &ExportFrom,
+    max: u64,
+    stem: &str,
+    answers: &AskAnswers,
+    progress: &dyn Progress,
+) -> Result<Vec<Part>> {
+    let pages: Vec<PageId> = from.snap.state.order().iter().copied().collect();
     if pages.is_empty() {
         bail!("the document has no pages");
     }
@@ -180,9 +222,12 @@ fn by_size(snap: &Snapshot, max: u64, stem: &str, progress: &dyn Progress) -> Re
         bail!("the size limit must be more than zero");
     }
     progress.set_total(Some(pages.len() as u64), PAGES);
-    let fits = |from: usize, to: usize| -> Result<bool> {
+    let fits = |first: usize, end: usize| -> Result<bool> {
         progress.check()?;
-        Ok(sheaf_doc::save::extract_bytes(snap, &pages[from..to])?.len() as u64 <= max)
+        let extract = Export::extract(from.clone(), &pages[first..end], Out::Bytes);
+        let made = sheaf_doc::export::run(extract, answers, &NoProgress).decided()?;
+        let bytes = made.bytes.expect("an extract to bytes is its bytes");
+        Ok(bytes.len() as u64 <= max)
     };
     let mut groups = Vec::new();
     let mut start = 0;
@@ -326,5 +371,77 @@ mod tests {
         assert_eq!(parse_size("500"), Ok(500));
         assert!(parse_size("ten").is_err());
         assert!(parse_size("5 TB").is_err());
+    }
+
+    /// A size split's parts, as their extracts measure them: pages that
+    /// carry more marks than others, bookmarks and labels.
+    #[test]
+    fn a_size_split_makes_the_parts_it_did() {
+        use sheaf_doc::annot::{Annot, AnnotId, AnnotKind, Box2};
+        use sheaf_doc::tx::fixture::{add, label};
+        use sheaf_edit::{LabelStyle, Rotation};
+        let mut d = doc(12);
+        let ids: Vec<_> = d.state().order().iter().copied().collect();
+        let mut ops = Vec::new();
+        for (i, &page) in ids.iter().enumerate() {
+            for k in 0..(i * 7) % 5 {
+                let kind = AnnotKind::Square {
+                    rect: Box2 {
+                        x: 20.0 + 30.0 * k as f32,
+                        y: 40.0 + 10.0 * i as f32,
+                        w: 25.0,
+                        h: 15.0,
+                    },
+                };
+                let a = Annot {
+                    id: AnnotId(0),
+                    kind,
+                    color: [200, 20, 20],
+                    opacity: 1.0,
+                    stroke: 1.0,
+                    author: "t".into(),
+                    contents: format!("mark {k} on page {}", i + 1).repeat(k + 1),
+                    modified: String::new(),
+                    created: String::new(),
+                    fill: None,
+                    dashed: false,
+                    cloudy: false,
+                    turn: Rotation::R0,
+                    name: String::new(),
+                };
+                ops.push(add(page, &a));
+            }
+        }
+        d.commit_ops(ops, "marks").unwrap();
+        for (title, page) in [("One", 0), ("Two", 4), ("Three", 9)] {
+            let after = d.state().outline_roots().last().copied();
+            let add = bookmark(None, after, title, Some(ids[page]));
+            d.commit_ops(vec![add], "b").unwrap();
+        }
+        let ranges = vec![
+            label(ids[0], LabelStyle::LowerRoman, "", 1),
+            label(ids[3], LabelStyle::Decimal, "A-", 1),
+        ];
+        let labels = sheaf_edit::Op::SetPageLabels {
+            ranges: Some(ranges),
+        };
+        d.commit_ops(vec![labels], "labels").unwrap();
+        let from = d.export_from(sheaf_doc::Actor::User);
+        let tracker = crate::Tracker::new();
+        // The parts the split made before size splits were exports, each
+        // row run against it (main at 3c72df2, ten runs alike). An
+        // extract's length varies by a few bytes with its marks' random
+        // ids, so each limit is some hundreds of bytes from every extract
+        // measured against it, then and now (pages 1-7 are 11,431-11,443
+        // bytes then and 11,998-12,008 now, pages 8-10 7,655-7,663 and
+        // 8,011-8,017).
+        for (max, parts) in [
+            (3_000, &[2, 1, 1, 1, 2, 1, 1, 1, 2][..]),
+            (7_500, &[4, 3, 2, 3]),
+            (12_500, &[7, 5]),
+        ] {
+            let made = by_size(&from, max, "S", &AskAnswers::default(), &tracker).unwrap();
+            assert_eq!(sizes(&made), parts, "{max}");
+        }
     }
 }

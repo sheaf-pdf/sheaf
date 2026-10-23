@@ -66,6 +66,8 @@ fn rewritten(d: &Document) -> Emission {
     let base = EmitBase::Rewrite {
         primary: &snap.primary,
         drawn: None,
+        private: super::Private::Keep,
+        unheld: super::Unheld::Keep,
     };
     emit::emit(&snap.state, EmitScope::All, base, &[], &NoProgress).unwrap()
 }

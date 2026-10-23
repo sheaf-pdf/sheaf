@@ -6,10 +6,13 @@
 //! Acrobat stamp file reads the same way.
 //!
 //! A stamp placed in a document is its page alone, a one-page PDF named
-//! by content (`generated::store`), which the mark holds
-//! ([`FormRef`](crate::model::FormRef)). Saved, its appearance draws that
-//! page as a Form XObject ([`page_form`]), which the file holds from then
-//! on; [`form_to_pdf`] makes a one-page PDF of it again, to show or copy.
+//! by its blob's stem ([`BlobId::stem`](crate::store::BlobId::stem)),
+//! which the mark holds ([`FormRef`](crate::model::FormRef)). Saved, its
+//! appearance draws that page as a Form XObject ([`page_form`]), which
+//! the file holds from then on; [`form_to_pdf`] makes a one-page PDF of it
+//! again, to show or copy. The files made here are written through
+//! sheaf's serializer
+//! ([`write_built`](crate::serialize::full::write_built)).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -299,9 +302,7 @@ fn finish(
         let info = out.add_object(dictionary! { "Title" => text_string(t) });
         out.trailer.set("Info", info);
     }
-    let mut bytes = Vec::new();
-    out.save_to(&mut bytes)?;
-    Ok(bytes)
+    crate::serialize::full::write_built(out)
 }
 
 fn text_string(s: &str) -> Object {

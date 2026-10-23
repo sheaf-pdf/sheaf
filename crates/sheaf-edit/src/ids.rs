@@ -125,10 +125,9 @@ pub struct BlobId {
 }
 
 impl BlobId {
-    /// The blob `stem` names: the generated cache's name for a file (its
-    /// checksum in 32 hex digits, a dash and its length), which marks name
-    /// a stamp's page and an attachment's file by. None for any other
-    /// name, an older one of 16 hex digits among them.
+    /// The blob `stem` names ([`stem`](Self::stem)), as marks name a
+    /// stamp's page and an attachment's file. None for any other name, an
+    /// older one of 16 hex digits among them.
     pub fn from_stem(stem: &str) -> Option<BlobId> {
         let (hash, len) = stem.split_once('-')?;
         let id = BlobId {
@@ -138,7 +137,8 @@ impl BlobId {
         (id.stem() == stem).then_some(id)
     }
 
-    /// Its name as the generated cache gives it, what marks name it by.
+    /// Its name, what marks name it by: its checksum in 32 hex digits, a
+    /// dash and its length.
     pub fn stem(&self) -> String {
         format!("{:032x}-{}", self.hash, self.len)
     }

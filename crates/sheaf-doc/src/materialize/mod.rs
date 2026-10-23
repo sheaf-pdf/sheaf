@@ -19,8 +19,8 @@
 //!    pages kept, and prunes what nothing reaches;
 //! 5. checks the graph ([`verify::graph`], [`verify::copied`]):
 //!    copy-on-write, every reference resolved, the pages reached the
-//!    tree's and the templates; and again, but copy-on-write, after an
-//!    export's post-pass;
+//!    tree's and the templates; and for a file without sheaf's private
+//!    data, that it holds none ([`verify::private`]);
 //! 6. writes the file through [`serialize::full`](crate::serialize::full):
 //!    an object neither emitted nor changed by `keep_only` is copied as its
 //!    source has it, when the numbers are stable, the base sound and the
@@ -37,7 +37,7 @@
 //! [`plan`] decides a save before any of it, with save policy's form
 //! transforms ([`crate::forms::rules::plan`]), which the emitter applies.
 //! [`write_file`] writes a planned save's file, once the reader answered
-//! its asks, and makes its record; [`save`] runs a whole save on one
+//! its asks, and makes its record; [`save_with`] runs a whole save on one
 //! thread, from the seal to the record.
 //!
 //! - [`key`]: [`ObjKey`], what the emitter names an object by.
@@ -66,6 +66,8 @@ mod append_tests;
 pub mod copy;
 pub mod deps;
 pub mod emit;
+#[cfg(test)]
+mod flatten_tests;
 pub mod graph;
 #[cfg(test)]
 pub(crate) mod header_tests;
@@ -80,6 +82,8 @@ mod overlay_tests;
 pub mod plan;
 #[cfg(test)]
 mod plan_tests;
+#[cfg(test)]
+mod private_tests;
 #[cfg(test)]
 mod recognized_tests;
 pub mod record;
@@ -110,15 +114,16 @@ pub use key::ObjKey;
 #[cfg(any(test, feature = "fixtures"))]
 pub use plan::forced_append;
 pub use plan::{
-    AppendAnyway, Ask, AskAnswers, Encryption, Note, Numbering, Onto, Profile, SavePlan, SaveStop,
-    SaveTarget, SaveTransform, Strategy, StrategyKind, Why, forced_rewrite, plan, unanswered,
+    AppendAnyway, Ask, AskAnswers, Encryption, Note, Numbering, Onto, Private, Profile, SavePlan,
+    SaveStop, SaveTarget, SaveTransform, Strategy, StrategyKind, Unheld, Why, appending,
+    forced_rewrite, plan, unanswered,
 };
 pub use record::{
     Came, OutputRecord, PendingTail, SaveInput, SaveNote, SaveRecord, SavedSide, TailFlags,
 };
 #[cfg(any(test, feature = "fixtures"))]
 pub use saving::{How, appended, save_appended, save_rewritten};
-pub use saving::{SaveReport, Written, save, write_file};
+pub use saving::{SaveHow, SaveReport, Written, save_with, write_file};
 
 use crate::serialize::crypt::Crypt;
 use crate::serialize::full::{self, Body, Layout};
@@ -158,31 +163,12 @@ pub fn materialize(
     target: SaveTarget,
     p: &dyn Progress,
 ) -> Result<Output, SaveStop> {
-    materialize_then(input, plan, target, None, p)
-}
-
-/// What an export does to a Rewrite's graph once it's checked, before
-/// it's numbered and written: `save::flatten_annots`, and the clean copy's
-/// strip of every annotation the records don't hold but links and
-/// widgets. Transitional: slice 19's export transforms replace it
-/// (`FlattenAnnotations`, `RemoveMarkup`).
-pub type PostPass<'a> = &'a mut dyn FnMut(&mut lopdf::Document) -> Result<()>;
-
-/// [`materialize`], with `post`, when given, run on a Rewrite's graph
-/// after the graph's checks: what it leaves unreachable is pruned, the
-/// graph's references and pages are checked again ([`verify::links`]),
-/// and no object of a graph it ran on is copied as its source has it,
-/// since it may have changed any of them. The written file is checked as
-/// any other.
-pub fn materialize_then(
-    input: &SaveInput,
-    plan: &SavePlan,
-    target: SaveTarget,
-    post: Option<PostPass>,
-    p: &dyn Progress,
-) -> Result<Output, SaveStop> {
     match plan.strategy {
-        Strategy::Rewrite { .. } => rewrite(input, plan, &target, post, p).map_err(stopped),
+        Strategy::Rewrite { .. } => rewrite(input, plan, &target, p).map_err(stopped),
+        // What it would write after holds what it holds.
+        Strategy::Append { .. } if target.profile.private.strips() => Err(SaveStop::Failed(
+            "a file without sheaf's private data is written whole".into(),
+        )),
         Strategy::Append { .. } => append_onto_saved(input, plan, &target, Mode::Veto, p)?
             .map_err(|refused| SaveStop::Failed(refused.to_string())),
         Strategy::Unchanged => Err(SaveStop::Failed(
@@ -257,13 +243,11 @@ fn stopped(e: anyhow::Error) -> SaveStop {
     }
 }
 
-/// `input` as a whole new file over its primary's objects, `post` run on
-/// its checked graph.
+/// `input` as a whole new file over its primary's objects.
 fn rewrite(
     input: &SaveInput,
     plan: &SavePlan,
     target: &SaveTarget,
-    post: Option<PostPass>,
     p: &dyn Progress,
 ) -> Result<Output> {
     let src = &input.primary;
@@ -271,6 +255,8 @@ fn rewrite(
     let base = EmitBase::Rewrite {
         primary: src,
         drawn: input.saved.as_ref().map(|s| &*s.record.drawn),
+        private: target.profile.private,
+        unheld: target.profile.unheld,
     };
     let mut e = emit::emit(&input.target, EmitScope::All, base, &plan.transforms, p)?;
     let drawn = std::mem::take(&mut e.drawn);
@@ -291,8 +277,7 @@ fn rewrite(
         }
     };
     let stable = target.profile.numbering == Numbering::Stable;
-    let raw =
-        stable && post.is_none() && src.base_sound() && same_crypt(crypt.as_ref(), src.crypt());
+    let raw = stable && src.base_sound() && same_crypt(crypt.as_ref(), src.crypt());
     // Where the primary's objects are in its bytes, found while the graph
     // is built and pruned, for those written as they were.
     let spans = raw.then(|| Spans::find(src));
@@ -314,6 +299,18 @@ fn rewrite(
         .collect();
     let form_at: HashSet<ObjectId> = e.form_keys.iter().filter_map(|k| numbers.get(k)).collect();
     let form_touched = e.form_touched;
+    // The annotations the pages left out, where the graph has them: one
+    // numbered past what a file may use moves.
+    let removed: Vec<ObjectId> = (e.removed_annots.iter())
+        .filter_map(|r| match r.id.0 < crate::serialize::NUMBERS {
+            true => Some(r.id),
+            false => numbers.get(&ObjKey::Base {
+                blob,
+                obj: r.id,
+                copy: 0,
+            }),
+        })
+        .collect();
     let mut graph = graph::rewrite_graph(e, &numbers, src, loaded)?;
     if graph.moved > 0 {
         notes.push(Note(format!(
@@ -324,7 +321,7 @@ fn rewrite(
     }
     p.check()?;
     let released = graph::release_written(&mut graph.pdf, src, &tree, &owned);
-    let kept = crate::kept::keep_only(&mut graph.pdf, &tree);
+    let kept = crate::kept::keep_only(&mut graph.pdf, &tree, &removed);
     notes.extend(kept.notes.into_iter().map(Note));
     graph.pdf.prune_objects();
     let encrypt = src.crypt().map(|c| c.at());
@@ -351,10 +348,10 @@ fn rewrite(
         let changed = |id| changed(id) || spans.contains_key(&id);
         verify::copied(&graph, src, &in_use, &changed)?;
     }
-    if let Some(post) = post {
-        post(&mut graph.pdf)?;
-        graph.pdf.prune_objects();
-        verify::links(&graph, &checked, &tree, encrypt)?;
+    match target.profile.private {
+        Private::Keep => {}
+        Private::Strip => verify::private(&graph)?,
+        Private::Scrub => notes.extend(verify::private_left(&graph)),
     }
     if !stable {
         let dense = number::dense(&graph.pdf.objects, |id| graph.deferred.contains_key(&id));
