@@ -11,7 +11,9 @@
 //! - full names more than one field has;
 //! - values with no appearance (what PDFium's screen hides, bug 10);
 //! - values an earlier revision holds that the current one doesn't;
-//! - `/XFA`, `/Perms` and `/SigFlags`, and whether they still fit the file.
+//! - `/XFA`, `/Perms` and `/SigFlags`, and whether they still fit the file;
+//!   a signature that fits it whose digest doesn't match the bytes it
+//!   covers (`forms::sigs::integrity`).
 //!
 //! The tree comes from untrusted files: it's read with a visited set,
 //! within the form reader's caps (`FormLimits`): at most 32 deep and
@@ -128,6 +130,10 @@ pub enum Finding {
         covers: u64,
         size: u64,
     },
+    /// A signature whose `/ByteRange` is a revision of this file, but
+    /// whose digest doesn't match the bytes it covers: they changed after
+    /// it was signed (B5). One that doesn't fit is a `StaleSignature`.
+    BrokenSignature { what: String },
     /// `/SigFlags` says there are signatures, or signature fields, and
     /// there aren't.
     StaleSigFlags { flags: i64, why: &'static str },
@@ -164,6 +170,7 @@ impl Finding {
             Finding::EarlierValues { .. } => "values in earlier revisions",
             Finding::XfaMismatch { .. } => "an XFA copy that doesn't fit",
             Finding::StaleSignature { .. } => "signatures that don't fit",
+            Finding::BrokenSignature { .. } => "signatures whose bytes changed",
             Finding::StaleSigFlags { .. } => "SigFlags with nothing to flag",
             Finding::Damaged(_) => "damaged field trees",
         }
@@ -189,8 +196,9 @@ impl Finding {
 
     /// What of it `was`'s findings of its kind don't have: the names it
     /// lists more often than they do, and the fonts missing for more
-    /// widgets than they were; of a kind that names nothing, itself unless
-    /// `was` has it as it is. None when that's nothing.
+    /// widgets than they were; of a signature, itself unless `was` found
+    /// that signature stale or broken; of another kind that names nothing,
+    /// itself unless `was` has it as it is. None when that's nothing.
     fn beyond(&self, was: &Report) -> Option<Finding> {
         let same = || (was.findings.iter()).filter(|w| w.kind() == self.kind());
         let mut had: HashMap<&str, usize> = HashMap::new();
@@ -235,6 +243,18 @@ impl Finding {
                         .collect(),
                 )
             }
+            // A signature the file had as not fitting or not matching it
+            // is nothing new however it's found now: every save changes the
+            // file's size, and a Rewrite its revisions' ends (B5: a save
+            // over a broken signature doesn't ask).
+            Finding::StaleSignature { what, .. } | Finding::BrokenSignature { what } => {
+                let had = (was.findings.iter()).any(|w| match w {
+                    Finding::StaleSignature { what: had, .. }
+                    | Finding::BrokenSignature { what: had } => had == what,
+                    _ => false,
+                });
+                return (!had).then(|| self.clone());
+            }
             other => match was.findings.contains(other) {
                 true => return None,
                 false => return Some(other.clone()),
@@ -248,8 +268,9 @@ impl Report {
     /// Its findings that `was`, the report on the file it was saved from,
     /// hasn't: of a kind that names widgets, fields or fonts, the names it
     /// lists more often than `was`'s finding of the kind does, and the
-    /// fonts now missing for more widgets than they were; of any other
-    /// kind, a finding `was` hasn't as it is. A finding naming fewer of
+    /// fonts now missing for more widgets than they were; of a signature
+    /// that doesn't fit or match, one `was` didn't find either way; of any
+    /// other kind, a finding `was` hasn't as it is. A finding naming fewer of
     /// what `was`'s did (widgets on no page a save dropped, a missing font
     /// fewer widgets name) adds nothing.
     pub fn added_since(&self, was: &Report) -> Vec<Finding> {
@@ -432,12 +453,18 @@ fn check_pdf(pdf: &Pdf, bytes: &[u8], password: Option<&str>) -> Report {
         }
     }
     for (what, sig) in signatures {
-        if let Err(covers) = byte_range_fits(sig, bytes, &ends) {
-            findings.push(Finding::StaleSignature {
+        match byte_range_fits(sig, bytes, &ends) {
+            Err(covers) => findings.push(Finding::StaleSignature {
                 what,
                 covers,
                 size: bytes.len() as u64,
-            });
+            }),
+            Ok(()) => {
+                let signed = super::sigs::integrity::signed(pdf, sig, &LIMITS);
+                if signed.is_ok_and(|s| super::sigs::integrity::integrity(&s, bytes).is_broken()) {
+                    findings.push(Finding::BrokenSignature { what });
+                }
+            }
         }
     }
     let flags = report.sig_flags;
@@ -1313,6 +1340,10 @@ impl fmt::Display for Finding {
                 "{what} signs {covers} bytes, which isn't where a revision of this \
                  {size}-byte file ends"
             ),
+            Finding::BrokenSignature { what } => write!(
+                f,
+                "{what} doesn't match the bytes it signs: they changed after it was signed"
+            ),
             Finding::StaleSigFlags { flags, why } => write!(f, "SigFlags {flags} with {why}"),
             Finding::Damaged(reason) => write!(f, "damaged: {reason}"),
         }
@@ -1405,6 +1436,48 @@ mod tests {
         assert_eq!(
             damaged("too deep").added_since(&damaged("a loop")),
             vec![Finding::Damaged("too deep".into())]
+        );
+    }
+
+    /// A signature the file had as stale or broken is no new finding after
+    /// a save, whatever size the file is now or whichever way it's found
+    /// (B5: a save over a broken signature doesn't ask); one that fitted
+    /// and matched, or another signature, is.
+    #[test]
+    fn a_signature_broken_already_is_nothing_new() {
+        let stale = |what: &str, size| Finding::StaleSignature {
+            what: what.into(),
+            covers: 100,
+            size,
+        };
+        let broken = |what: &str| Finding::BrokenSignature { what: what.into() };
+        let now = |f| finding(vec![f]);
+        assert!(
+            now(stale("A", 120))
+                .added_since(&now(stale("A", 90)))
+                .is_empty()
+        );
+        assert!(
+            now(stale("A", 120))
+                .added_since(&now(broken("A")))
+                .is_empty()
+        );
+        assert!(
+            now(broken("A"))
+                .added_since(&now(stale("A", 90)))
+                .is_empty()
+        );
+        assert_eq!(
+            now(stale("A", 120)).added_since(&finding(Vec::new())),
+            vec![stale("A", 120)]
+        );
+        assert_eq!(
+            now(stale("B", 120)).added_since(&now(broken("A"))),
+            vec![stale("B", 120)]
+        );
+        assert_eq!(
+            now(broken("B")).added_since(&now(stale("A", 90))),
+            vec![broken("B")]
         );
     }
 

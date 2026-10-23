@@ -227,15 +227,17 @@ fn saved_with_a_mark(doc: &mut Document, path: &Path, before: &[u8]) -> Result<M
 
 /// One mark saved as planned onto every file (slice 10): files marked, and
 /// those appended. Lower counts are a regression unless the slice notes say
-/// why they're right. Of the 4,389, 360 asked about their signatures first
+/// why they're right. Of the 4,389, 359 asked about their signatures first
 /// (a certification, or a `/Lock`, with `/P` 1 or 2, and 1263925's that
-/// can't be read), and 259 were rewritten: 211 for the removal check, every
+/// can't be read), and 260 were rewritten: 211 for the removal check, every
 /// one a file whose usage rights a comment is outside, which save policy
 /// drops (its `/Perms /UR3` signature unlinked); 34 whose first page shows a
 /// widget that is its field's object, though the field has others or the
 /// widget shows twice, which a save writes apart, so the file hasn't got
-/// it (`BaseObjectsMissing`); and 14 whose cross-reference table was
-/// rebuilt to read them (`BaseUnsound`).
+/// it (`BaseObjectsMissing`); and 15 whose cross-reference table was
+/// rebuilt to read them (`BaseUnsound`). One of those, 7334180, asked
+/// before B5: its signature is broken already (its `/ByteRange` doesn't
+/// span its own `/Contents`), so its Rewrite asks nothing.
 const MARKED: MarkedBaseline = MarkedBaseline {
     manifest: 4392,
     files: 4389,

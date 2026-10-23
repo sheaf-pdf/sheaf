@@ -2263,7 +2263,32 @@ about 21 ms, its fsyncs included.
   of a file nothing changed, a plain copy) passes it. `Flagged` and
   `Invalid` ask, while
   the record's signatures hold: `Ask::Signatures { impact, append_anyway,
-  reason }`. Append anyway (`AppendAnyway { stays_readable }`, what the
+  reason }`. A signature they'd ask about is checked first (backlog B5,
+  `forms::sigs::integrity`): one whose signed bytes no longer match its
+  digest is `AlreadyBroken`, which doesn't ask, so a file a Rewrite (or
+  `--signatures break`) wrote, or one whose signatures were broken when
+  it came, isn't asked about again. `Signature::integrity` is `Intact`,
+  `Broken`, or `Unknown` with why, which asks as an intact one does
+  (never broken on a guess): the `/ByteRange` hashed, from the source's
+  bytes, by the digest algorithm the SignerInfo names, against its
+  messageDigest signed attribute, a document timestamp's messageImprint,
+  or for no signed attributes the DigestInfo its RSA PKCS#1 v1.5 value
+  opens to with the key of the signer's certificate in the CMS. The CMS
+  is read as BER (cms 0.3.0-rc.0, pinned until M12's kickoff), as far as
+  the digest needs; the ranges as pyHanko hashes them (in order, cut at
+  the file's end, overlapping, starting anywhere), but counted from the
+  file's header as sheaf reads every offset (from its first byte too,
+  pyHanko's count, where bytes come before the header: either that
+  matches is intact), and those covering more bytes than the file are
+  `Unknown`. It's computed once per
+  signature dictionary of a source, when a save first needs it, within
+  `FormLimits` (`signatures` checked, `cms` the longest `/Contents`); a
+  CMS that nests its indefinite lengths past 32, or isn't SignedData of
+  one SignerInfo, an algorithm sheaf doesn't hash (GOST, SHA-3), and a
+  signature value that isn't RSA PKCS#1 v1.5, are `Unknown`. Over the
+  corpus's `signatures/` it agrees with pyHanko's `intact` on every
+  signature it can check. The form check reports a signature that fits
+  its revision but no longer matches as `BrokenSignature`. Append anyway (`AppendAnyway { stays_readable }`, what the
   save leaves readable, by kind) is offered on an Append the signatures
   don't allow, and on a Rewrite whose every reason is what an Append would
   leave readable (`Removes`, `ReplacesText`, `TransformNeedsRewrite`,
@@ -2526,7 +2551,7 @@ about 21 ms, its fsyncs included.
   ways, is checked gone from raw, hex, UTF-16 and decoded bytes
   (`kept/tests.rs`), and over the corpus (sheaf-ops
   `tests/append_corpus.rs`): every file takes a mark as planned (3,770 of
-  4,389 append, 360 ask about signatures, 259 rewrite), a page, a mark, a
+  4,389 append, 359 ask about signatures, 260 rewrite), a page, a mark, a
   reply, a mark's text, another tool's comment or a bookmark deleted
   after a first save each way is gone from every file (an ignored tier,
   run before each slice's commit), the removal check
@@ -4991,7 +5016,9 @@ layers, form facts) for a window that takes it.
 - **`NeedsDecision(Ask)`** is a save's or an export's stop at an ask, as
   an op's error (`Decided::decided`, which keeps a cancel recognisable):
   the command line exits 3 and prints `NeedsDecision::json()` (kind,
-  message, counts, `append_anyway`, `stays_readable`, reason). combine,
+  message, counts, `append_anyway`, `stays_readable`, reason; a
+  signature ask's counts are `signatures`, `breaks`, `flags` and
+  `already_broken`, which it doesn't ask about). combine,
   comments import, remove-blanks and split take `--signatures
   ask|break|append-anyway` and `--xfa ask|drop` (sheaf-cli's
   `decide.rs`); comments import writes with `-o OUT [--append]` or
@@ -5099,7 +5126,7 @@ write edits, its keys sorted too:
 {
   "bookmarks": [{"page": 2, "path": ["Part I", "Ch. 1"]}],
   "comments": [{"nm": "n1", "page": 1, "subtype": "Text"}],
-  "form": {"fields": 12, "signatures": 1, "widgets": 14, "xfa": "none"},
+  "form": {"fields": 12, "signatures": 1, "signatures_broken": 0, "widgets": 14, "xfa": "none"},
   "generators": [{"kind": "header-footer", "scope": "2-5"}],
   "marks": [{"kind": "note", "nm": "sheaf:4127", "page": 2}],
   "pages": [{"boxes": {"crop": [0, 0, 612, 792], "media": [0, 0, 612, 792]}, "label": "i", "pos": 1, "rotate": 0}]
@@ -5113,7 +5140,8 @@ bookmarks in outline order; generators, one of each kind at most, by
 kind: `background`, `header-footer` or `watermark`, over `all` pages
 (those added later too) or positions; the form's terminal fields and
 their widgets, its XFA part (`none`, `static`, or `dynamic`: the XFA is
-the form) and the file's signatures.
+the form) and the file's signatures, and how many of them no longer
+match the bytes they signed (`signatures_broken`).
 
 The examples below run in CI (sheaf-cli's `docs_json_examples_run`), as
 a dry run and saved, on a binder of four pages labelled i, ii, 1 and 2,

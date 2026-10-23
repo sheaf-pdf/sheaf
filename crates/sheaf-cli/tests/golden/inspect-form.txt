@@ -7,6 +7,7 @@ $ sheaf-cli inspect $DIR/signed.pdf --json
   "form": {
     "fields": 1,
     "signatures": 1,
+    "signatures_broken": 0,
     "widgets": 1,
     "xfa": "none"
   },

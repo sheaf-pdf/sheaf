@@ -284,6 +284,54 @@ fn a_signed_file_appended_keeps_its_signatures() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The corpus's files whose signatures were broken when they came (B5):
+/// pyHanko finds none of their signatures intact, and their digests don't
+/// match the bytes they sign.
+const BROKEN: [&str; 2] = [
+    "signatures/safedocs/0008830.pdf",
+    "signatures/safedocs/0010094.pdf",
+];
+
+/// A signature broken already isn't asked about (B5): a mark on each of
+/// [`BROKEN`] written whole is a Rewrite, not a stop to ask (3); and a
+/// file `--signatures break` wrote, its signatures broken, isn't asked
+/// about on its next edit written whole.
+#[test]
+fn a_signature_broken_already_isn_t_asked_about() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let dir = scratch("broken-corpus");
+    let file = edits(&dir, "note.json", &note());
+    let whole = |input: &Path, out: &Path, more: &[&str]| {
+        let mut args = vec!["edit", path(input), "--edits", path(&file), "-o", path(out)];
+        args.extend(more);
+        run(&args)
+    };
+    let rows = corpus.signatures().unwrap();
+    for name in BROKEN {
+        let row = (rows.iter().find(|r| r.path == name)).unwrap();
+        assert_eq!(row.column("intact"), "0", "{name}");
+        assert_eq!(row.column("encryption"), "", "{name}");
+        let out = dir.join(Path::new(name).file_name().unwrap());
+        let done: Value = serde_json::from_str(&ok(&whole(&corpus.path(row), &out, &[]))).unwrap();
+        assert_eq!(done["strategy"], "rewrite", "{name}");
+    }
+    let row = &signed(&corpus)[0];
+    let broken = dir.join("broken.pdf");
+    let done: Value = serde_json::from_str(&ok(&whole(
+        &corpus.path(row),
+        &broken,
+        &["--signatures", "break"],
+    )))
+    .unwrap();
+    assert_eq!(done["strategy"], "rewrite", "{}", row.path);
+    let again = dir.join("again.pdf");
+    let done: Value = serde_json::from_str(&ok(&whole(&broken, &again, &[]))).unwrap();
+    assert_eq!(done["strategy"], "rewrite", "{}", row.path);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// What names where a process may put temp and cache files: the temp
 /// folder (`TMPDIR` on Unix, `TMP` and `TEMP` on Windows), the cache
 /// folder on Linux, and the home folder, under which macOS keeps caches.

@@ -33,7 +33,7 @@ $ sheaf-cli edit $DIR/signed.pdf --edits $DIR/edit-signature-asks.json -o $DIR/s
 }
 --- exit 3
 --- stdout
-{"append_anyway":false,"breaks":1,"flags":0,"kind":"signatures","message":"the save would break or flag 1 of the file's 1 signature(s)","reason":null,"signatures":1,"stays_readable":null}
+{"already_broken":0,"append_anyway":false,"breaks":1,"flags":0,"kind":"signatures","message":"the save would break or flag 1 of the file's 1 signature(s)","reason":null,"signatures":1,"stays_readable":null}
 --- stderr
 editing…
 error: writing $DIR/signed-out.pdf: a decision is needed: the save would break or flag 1 of the file's 1 signature(s)

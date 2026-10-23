@@ -278,10 +278,12 @@ pub struct Previewed {
 pub struct NeedsDecision(pub Ask);
 
 impl NeedsDecision {
-    /// The choice as JSON: its kind, the message, its counts, and for a
-    /// signature ask whether an Append anyway is offered (and what it
-    /// would leave readable in the signed revision) and the reason the
-    /// save is a Rewrite.
+    /// The choice as JSON: its kind, the message, its counts (for a
+    /// signature ask, those the save breaks, flags, and finds broken
+    /// already, which it doesn't ask about), and for a signature ask
+    /// whether an Append anyway is offered (and what it would leave
+    /// readable in the signed revision) and the reason the save is a
+    /// Rewrite.
     pub fn json(&self) -> serde_json::Value {
         let message = self.0.to_string();
         match &self.0 {
@@ -309,6 +311,7 @@ impl NeedsDecision {
                     "signatures": impact.len(),
                     "breaks": count(sheaf_doc::forms::sigs::Verdict::Invalid),
                     "flags": count(sheaf_doc::forms::sigs::Verdict::Flagged),
+                    "already_broken": count(sheaf_doc::forms::sigs::Verdict::AlreadyBroken),
                     "append_anyway": stays.is_some(),
                     "stays_readable": stays,
                     "reason": reason.as_ref().map(ToString::to_string),

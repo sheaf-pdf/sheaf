@@ -512,6 +512,48 @@ fn signatures_fit_their_revision() {
     );
 }
 
+/// A signature that fits its revision but whose digest doesn't match the
+/// bytes it signs (B5) is found; one intact isn't, nor one that can't be
+/// checked (the fixture's zeros); appended to, it's still intact; and one
+/// whose `/ByteRange` doesn't fit is stale, not broken as well.
+#[test]
+fn a_signature_whose_bytes_changed_is_found() {
+    let mut f = Form::new(1);
+    let field = f.signature("Signature1", 0, row(0));
+    let name = f.text("name", 0, row(1));
+    f.sign(field);
+    assert_findings(&checked(&f.bytes()), &[]);
+    let signed = f.signed_bytes(super::fixture::detached);
+    assert_findings(&checked(&signed), &[]);
+    let appended = append_revision(&signed, &[name], |pdf| {
+        let d = pdf.get_dictionary_mut(name).unwrap();
+        d.set("TU", Object::string_literal("Your name"));
+    });
+    assert_findings(&checked(&appended), &[]);
+    let mut changed = signed.clone();
+    let at = (changed.windows(8)).position(|w| w == b"(Page 1)").unwrap();
+    changed[at + 6] = b'7';
+    let report = checked(&changed);
+    assert_findings(
+        &report,
+        &[Finding::BrokenSignature {
+            what: "the signature in \"Signature1\"".into(),
+        }],
+    );
+    assert!(
+        report.to_string().contains("changed after it was signed"),
+        "{report}"
+    );
+    let mut pdf = Pdf::load_mem(&changed).unwrap();
+    let mut rewritten = Vec::new();
+    pdf.save_to(&mut rewritten).unwrap();
+    let report = checked(&rewritten);
+    assert!(
+        matches!(&report.findings[..], [Finding::StaleSignature { .. }]),
+        "{report}"
+    );
+}
+
 #[test]
 fn sig_flags_with_nothing_to_flag() {
     let mut f = Form::new(1);

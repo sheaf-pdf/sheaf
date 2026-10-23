@@ -300,14 +300,12 @@ pub fn append(
     };
     verify::section(&checked)?;
     // What the plan found the file's signatures allow, unless the reader
-    // chose to append anyway, never writes their roots (§9.3).
+    // chose to append anyway, never writes their roots (§9.3), while one
+    // isn't broken already (B5: there'd be nothing to ask about).
     let signed =
         (objects.values()).any(|(key, _)| matches!(key, ObjKey::Catalog | ObjKey::AcroForm));
-    if mode == Mode::Veto
-        && signed
-        && record.signatures_hold
-        && !primary.signatures().signed.is_empty()
-    {
+    let holding = || (primary.signatures().signed.iter()).any(|s| !s.integrity().is_broken());
+    if mode == Mode::Veto && signed && record.signatures_hold && holding() {
         return Err(Refused::Unplanned.into());
     }
 

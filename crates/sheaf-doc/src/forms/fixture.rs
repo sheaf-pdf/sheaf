@@ -5,7 +5,12 @@
 //! A [`Form`] is a plain lopdf document plus the ids a test needs to
 //! break it on purpose. [`Form::bytes`] writes it, filling in each
 //! signature's `/ByteRange` around its `/Contents` as signing would (the
-//! contents are zeros: nothing is really signed), and [`Form::source`]
+//! contents are zeros: nothing is really signed, so a signature's digest
+//! can't be checked); [`Form::signed_bytes`] fills each `/Contents` with
+//! CMS that signs what its `/ByteRange` spans ([`detached`],
+//! [`timestamped`], or [`signed_data`]'s by a [`CmsSpec`]), the
+//! signature value made with a throwaway RSA key or zeros, so its digest
+//! checks out ([`crate::forms::sigs::Integrity`]). [`Form::source`]
 //! reads what it writes as `forms::read` reads a file. lopdf can't write a
 //! hybrid-reference file, so [`hybrid_reference`] writes one by hand.
 //! [`every_fact`] is a file with one of each fact a file opens with, and
@@ -39,7 +44,7 @@ pub const COMBO: i64 = 1 << 17;
 /// What a signature's `/ByteRange` says until [`Form::bytes`] fills it in.
 const RANGE_PLACEHOLDER: &[u8] = b"[0 9999999999 9999999999 9999999999]";
 /// Bytes of zeros in a signature's `/Contents`.
-const CONTENTS_LEN: usize = 512;
+const CONTENTS_LEN: usize = 2048;
 
 pub struct Form {
     pub pdf: Pdf,
@@ -507,6 +512,15 @@ impl Form {
         out
     }
 
+    /// [`Form::bytes`], each signature's `/Contents` the CMS `cms` makes
+    /// of the SHA-256 of what its `/ByteRange` spans ([`sign_contents`]):
+    /// [`detached`] or [`timestamped`], so each signature is intact.
+    pub fn signed_bytes(&mut self, cms: fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
+        let mut out = self.bytes();
+        sign_contents(&mut out, cms);
+        out
+    }
+
     /// The file, as a source in a store of its own.
     pub fn source(&mut self) -> Src {
         source(self.bytes())
@@ -668,6 +682,318 @@ pub fn source(bytes: Vec<u8>) -> Src {
     Store::new()
         .open(bytes.into(), kind)
         .expect("the file opens as a source")
+}
+
+/// Each signature's `/Contents` in `bytes`, a file [`Form::bytes`] wrote,
+/// the CMS `cms` makes of the SHA-256 of what its `/ByteRange` spans, in
+/// hex, its zeros after.
+pub fn sign_contents(bytes: &mut [u8], cms: fn(&[u8]) -> Vec<u8>) {
+    use sha2::Digest;
+    let mut from = 0;
+    while let Some(at) = find(&bytes[from..], b"/ByteRange") {
+        let at = from + at + b"/ByteRange".len();
+        let at = at + find(&bytes[at..], b"[").expect("its array") + 1;
+        let end = at + find(&bytes[at..], b"]").expect("its end");
+        let range: Vec<usize> = (std::str::from_utf8(&bytes[at..end]).unwrap())
+            .split_whitespace()
+            .map(|n| n.parse().unwrap())
+            .collect();
+        let [_, a, b, c] = range[..] else {
+            panic!("a /ByteRange of two ranges: {range:?}");
+        };
+        let digest = (sha2::Sha256::new().chain_update(&bytes[..a]))
+            .chain_update(&bytes[b..b + c])
+            .finalize();
+        let hex: Vec<u8> = (cms(&digest).iter())
+            .flat_map(|byte| format!("{byte:02X}").into_bytes())
+            .collect();
+        assert!(hex.len() <= b - a - 2, "the CMS fits the /Contents");
+        bytes[a + 1..a + 1 + hex.len()].copy_from_slice(&hex);
+        from = end;
+    }
+}
+
+/// The OIDs a fixture's CMS names (RFC 5652, RFC 3161, RFC 5758).
+pub mod oid {
+    pub const DATA: &str = "1.2.840.113549.1.7.1";
+    pub const SIGNED_DATA: &str = "1.2.840.113549.1.7.2";
+    pub const TST_INFO: &str = "1.2.840.113549.1.9.16.1.4";
+    pub const CONTENT_TYPE: &str = "1.2.840.113549.1.9.3";
+    pub const MESSAGE_DIGEST: &str = "1.2.840.113549.1.9.4";
+    pub const SHA1: &str = "1.3.14.3.2.26";
+    pub const SHA256: &str = "2.16.840.1.101.3.4.2.1";
+    pub const ECDSA_SHA256: &str = "1.2.840.10045.4.3.2";
+    pub const RSA: &str = "1.2.840.113549.1.1.1";
+    pub const RSA_SHA256: &str = "1.2.840.113549.1.1.11";
+    /// GOST R 34.11-2012 (256 bits), which sheaf doesn't compute.
+    pub const GOST: &str = "1.2.643.7.1.1.2.2";
+}
+
+/// What [`signed_data`] makes: CMS SignedData as a signer writes one in a
+/// signature's `/Contents`, but for the signature value, zeros (nothing
+/// checks one over signed attributes before M12) unless it's RSA's, and
+/// no certificates but the RSA key's.
+#[derive(Debug, Clone)]
+pub struct CmsSpec<'a> {
+    /// The SignerInfos' digest algorithm.
+    pub digest_alg: &'a str,
+    /// Their messageDigest signed attribute, beside contentType: None for
+    /// no signed attributes.
+    pub message_digest: Option<&'a [u8]>,
+    /// What's encapsulated, and its type: id-data and None for a detached
+    /// signature.
+    pub econtent_type: &'a str,
+    pub econtent: Option<&'a [u8]>,
+    /// SignerInfos: one, as a PDF signature has.
+    pub signers: u8,
+    /// With no signed attributes, the digest the SignerInfos' signature
+    /// value signs, by their digest algorithm: RSA PKCS#1 v1.5 with the
+    /// fixture's throwaway key ([`TEST_RSA_N`]), whose certificate the CMS
+    /// holds, and which its issuer and serial number name.
+    pub rsa: Option<&'a [u8]>,
+}
+
+/// The fixture's throwaway 1024-bit RSA key: its modulus and private
+/// exponent, in hex; its public exponent is 65537.
+pub const TEST_RSA_N: &str = "d64f6ec37c54d906237c4e7d0d21099405a85740039a7c2390550dde5b2b6efa45ca832972156c268e011cc20042a35d79af7a2aaa2bef19da521ec1d2a6d64239f8829859e239650b7c9f29681cd02f8a72dfd98520cb5aafa578bfac62ce9d5ec4dd72bd513b3c36f496a21fea6cc6fb42efac032dc5f21512ac4c3ad6775d";
+const TEST_RSA_D: &str = "96681b199169cf0272e72c02b1b32d10b8c3c3b046972666a3463e3c7f09c5925a66dd94b9df750ebdfce3dcf7e7ccd5aeb04bf2238a3ffd89eeb66d5b5501eb21fba5b600d1b7b8fc991eeff3de68022bf9aae2b5217440ff44e236f20af1eeb615136b65c361bbae2740f98d17cb3b4dfc890a6c86d9807520fb13f7897aa1";
+
+impl CmsSpec<'_> {
+    /// A detached signature of `digest`, by `digest_alg`.
+    pub fn detached<'a>(digest_alg: &'a str, digest: &'a [u8]) -> CmsSpec<'a> {
+        CmsSpec {
+            digest_alg,
+            message_digest: Some(digest),
+            econtent_type: oid::DATA,
+            econtent: None,
+            signers: 1,
+            rsa: None,
+        }
+    }
+}
+
+/// [`CmsSpec`]'s CMS, DER-encoded.
+pub fn signed_data(spec: &CmsSpec) -> Vec<u8> {
+    use cms::content_info::{CmsVersion, ContentInfo};
+    use cms::signed_data::{
+        EncapsulatedContentInfo, SignedData, SignerIdentifier, SignerInfo, SignerInfos,
+    };
+    use cms::spki::AlgorithmIdentifierOwned;
+    use cms::x509_cert::attr::Attribute;
+    use cms::x509_cert::ext::pkix::SubjectKeyIdentifier;
+    use der::asn1::{ObjectIdentifier, OctetString, SetOfVec};
+    use der::{Any, Encode};
+    fn any<T: der::EncodeValue + der::Tagged>(value: &T) -> Any {
+        Any::encode_from(value).unwrap()
+    }
+    let id = ObjectIdentifier::new_unwrap;
+    let octets = |bytes: &[u8]| OctetString::new(bytes).unwrap();
+    let alg = |oid: &str| AlgorithmIdentifierOwned {
+        oid: id(oid),
+        parameters: None,
+    };
+    let attr = |oid: &str, value: Any| Attribute {
+        oid: id(oid),
+        values: SetOfVec::try_from(vec![value]).unwrap(),
+    };
+    let signed_attrs = spec.message_digest.map(|digest| {
+        SetOfVec::try_from(vec![
+            attr(oid::CONTENT_TYPE, any(&id(spec.econtent_type))),
+            attr(oid::MESSAGE_DIGEST, any(&octets(digest))),
+        ])
+        .unwrap()
+    });
+    let rsa = spec.rsa.map(|digest| rsa_signed(spec.digest_alg, digest));
+    let signer = |n: u8| match &rsa {
+        None => SignerInfo {
+            version: CmsVersion::V3,
+            sid: SignerIdentifier::SubjectKeyIdentifier(SubjectKeyIdentifier(octets(&[n; 20]))),
+            digest_alg: alg(spec.digest_alg),
+            signed_attrs: signed_attrs.clone(),
+            signature_algorithm: alg(oid::ECDSA_SHA256),
+            signature: octets(&[0; 64]),
+            unsigned_attrs: None,
+        },
+        Some((certificate, signature)) => SignerInfo {
+            version: CmsVersion::V1,
+            sid: SignerIdentifier::IssuerAndSerialNumber(cms::cert::IssuerAndSerialNumber {
+                issuer: certificate.tbs_certificate().issuer().clone(),
+                serial_number: certificate.tbs_certificate().serial_number().clone(),
+            }),
+            digest_alg: alg(spec.digest_alg),
+            signed_attrs: signed_attrs.clone(),
+            signature_algorithm: alg(oid::RSA),
+            signature: octets(signature),
+            unsigned_attrs: None,
+        },
+    };
+    let certificates = rsa.as_ref().map(|(certificate, _)| {
+        let choice = cms::cert::CertificateChoices::Certificate(certificate.clone());
+        cms::signed_data::CertificateSet(SetOfVec::try_from(vec![choice]).unwrap())
+    });
+    let signed = SignedData {
+        version: CmsVersion::V3,
+        digest_algorithms: SetOfVec::try_from(vec![alg(spec.digest_alg)]).unwrap(),
+        encap_content_info: EncapsulatedContentInfo {
+            econtent_type: id(spec.econtent_type),
+            econtent: spec.econtent.map(|content| any(&octets(content))),
+        },
+        certificates,
+        crls: None,
+        signer_infos: SignerInfos(
+            SetOfVec::try_from((1..=spec.signers).map(signer).collect::<Vec<_>>()).unwrap(),
+        ),
+    };
+    let info = ContentInfo {
+        content_type: id(oid::SIGNED_DATA),
+        content: any(&signed),
+    };
+    info.to_der().unwrap()
+}
+
+/// A certificate of the fixture's RSA key ([`TEST_RSA_N`]), and its
+/// PKCS#1 v1.5 signature of `digest`, by `digest_alg`.
+fn rsa_signed(digest_alg: &str, digest: &[u8]) -> (cms::cert::x509::Certificate, Vec<u8>) {
+    use cms::cert::x509::Certificate;
+    use cms::cert::x509::name::Name;
+    use cms::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
+    use der::asn1::{BitString, ObjectIdentifier, OctetString, Uint, UtcTime};
+    use der::{Any, Decode, Encode};
+    use num_bigint::BigUint;
+    use std::str::FromStr;
+    #[derive(der::Sequence)]
+    struct RsaPublicKey {
+        modulus: Uint,
+        exponent: Uint,
+    }
+    #[derive(der::Sequence)]
+    struct Validity {
+        not_before: UtcTime,
+        not_after: UtcTime,
+    }
+    #[derive(der::Sequence)]
+    struct Tbs {
+        #[asn1(context_specific = "0", tag_mode = "EXPLICIT")]
+        version: u8,
+        serial: u32,
+        signature: AlgorithmIdentifierOwned,
+        issuer: Name,
+        validity: Validity,
+        subject: Name,
+        key: SubjectPublicKeyInfoOwned,
+    }
+    #[derive(der::Sequence)]
+    struct Cert {
+        tbs: Tbs,
+        algorithm: AlgorithmIdentifierOwned,
+        signature: BitString,
+    }
+    #[derive(der::Sequence)]
+    struct DigestInfo {
+        algorithm: AlgorithmIdentifierOwned,
+        digest: OctetString,
+    }
+    let alg = |oid: &str| AlgorithmIdentifierOwned {
+        oid: ObjectIdentifier::new_unwrap(oid),
+        parameters: Some(Any::null()),
+    };
+    let hex = |h: &str| BigUint::parse_bytes(h.as_bytes(), 16).unwrap();
+    let (n, d) = (hex(TEST_RSA_N), hex(TEST_RSA_D));
+    let e = BigUint::from(65537u32);
+    let key = RsaPublicKey {
+        modulus: Uint::new(&n.to_bytes_be()).unwrap(),
+        exponent: Uint::new(&e.to_bytes_be()).unwrap(),
+    };
+    let name = Name::from_str("CN=sheaf test signer").unwrap();
+    let time = |secs| UtcTime::from_unix_duration(std::time::Duration::from_secs(secs)).unwrap();
+    let cert = Cert {
+        tbs: Tbs {
+            version: 2,
+            serial: 1,
+            signature: alg(oid::RSA_SHA256),
+            issuer: name.clone(),
+            validity: Validity {
+                not_before: time(1_700_000_000),
+                not_after: time(2_000_000_000),
+            },
+            subject: name,
+            key: SubjectPublicKeyInfoOwned {
+                algorithm: alg(oid::RSA),
+                subject_public_key: BitString::from_bytes(&key.to_der().unwrap()).unwrap(),
+            },
+        },
+        algorithm: alg(oid::RSA_SHA256),
+        signature: BitString::from_bytes(&[0; 128]).unwrap(),
+    };
+    let certificate = Certificate::from_der(&cert.to_der().unwrap()).unwrap();
+    // EMSA-PKCS1-v1_5: 0x00 0x01, 0xFF to the length of the modulus, 0x00,
+    // the DigestInfo.
+    let info = DigestInfo {
+        algorithm: alg(digest_alg),
+        digest: OctetString::new(digest).unwrap(),
+    };
+    let info = info.to_der().unwrap();
+    let k = n.to_bytes_be().len();
+    let em = [&[0, 1][..], &vec![0xff; k - 3 - info.len()], &[0], &info].concat();
+    let signature = BigUint::from_bytes_be(&em).modpow(&d, &n).to_bytes_be();
+    let signature = [vec![0; k - signature.len()], signature].concat();
+    (certificate, signature)
+}
+
+/// A detached signature's CMS (`adbe.pkcs7.detached`) whose messageDigest
+/// is `sha256`, a SHA-256.
+pub fn detached(sha256: &[u8]) -> Vec<u8> {
+    signed_data(&CmsSpec::detached(oid::SHA256, sha256))
+}
+
+/// A document timestamp's CMS (`ETSI.RFC3161`): a TSTInfo whose
+/// messageImprint is `sha256`, a SHA-256, signed as a TSA signs one.
+pub fn timestamped(sha256: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    let tst = tst_info(sha256);
+    let digest = sha2::Sha256::digest(&tst);
+    signed_data(&CmsSpec {
+        message_digest: Some(&digest),
+        econtent_type: oid::TST_INFO,
+        econtent: Some(&tst),
+        ..CmsSpec::detached(oid::SHA256, &[])
+    })
+}
+
+/// A TSTInfo (RFC 3161) of the SHA-256 `imprint`, DER-encoded.
+pub fn tst_info(imprint: &[u8]) -> Vec<u8> {
+    use cms::spki::AlgorithmIdentifierOwned;
+    use der::Encode;
+    use der::asn1::{GeneralizedTime, ObjectIdentifier, OctetString};
+    #[derive(der::Sequence)]
+    struct TstInfo {
+        version: u8,
+        policy: ObjectIdentifier,
+        message_imprint: MessageImprint,
+        serial_number: u32,
+        gen_time: GeneralizedTime,
+    }
+    #[derive(der::Sequence)]
+    struct MessageImprint {
+        hash_algorithm: AlgorithmIdentifierOwned,
+        hashed_message: OctetString,
+    }
+    let at = std::time::Duration::from_secs(1_760_529_600);
+    TstInfo {
+        version: 1,
+        policy: ObjectIdentifier::new_unwrap("1.2.3.4.1"),
+        message_imprint: MessageImprint {
+            hash_algorithm: AlgorithmIdentifierOwned {
+                oid: ObjectIdentifier::new_unwrap(oid::SHA256),
+                parameters: None,
+            },
+            hashed_message: OctetString::new(imprint).unwrap(),
+        },
+        serial_number: 1,
+        gen_time: GeneralizedTime::from_unix_duration(at).unwrap(),
+    }
+    .to_der()
+    .unwrap()
 }
 
 /// Rows down a page, 30 pt apart.

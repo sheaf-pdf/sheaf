@@ -15,8 +15,8 @@ use lopdf::{
     Document as Pdf, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions, dictionary,
 };
 use sheaf_doc::export::Export;
-use sheaf_doc::forms::fixture::{Form, note, outline_tree};
-use sheaf_doc::forms::sigs::Verdict;
+use sheaf_doc::forms::fixture::{Form, detached, note, outline_tree};
+use sheaf_doc::forms::sigs::{Integrity, Verdict};
 use sheaf_doc::forms::{Finding, Value, check};
 use sheaf_doc::materialize::{Ask, AskAnswers, Note, SaveReport, SaveStop, StrategyKind, Why};
 use sheaf_doc::tx::fixture::{
@@ -458,6 +458,42 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
         ..Default::default()
     };
     save(&mut doc, &plain, drop_xfa).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file whose signature a forced Rewrite broke, opened again and its
+/// pages reordered, appends asking nothing (backlog B5): the bytes it
+/// signed are gone, so there's nothing left to break. Intact, the same
+/// reorder asks first.
+#[test]
+fn a_signature_a_rewrite_broke_isn_t_asked_about_again() {
+    let dir = scratch("saves-broken");
+    let path = dir.join("signed.pdf");
+    std::fs::write(&path, signed().signed_bytes(detached)).unwrap();
+    let reordered = |doc: &mut Document| {
+        let order: Vec<_> = doc.state().order().iter().copied().collect();
+        doc.commit_ops(vec![move_pages(&[order[1]], Some(order[0]))], "Reorder")
+            .unwrap();
+    };
+    let mut doc = open(&path);
+    let integrity = |doc: &Document| doc.primary().signatures().signed[0].integrity().clone();
+    assert_eq!(integrity(&doc), Integrity::Intact);
+    reordered(&mut doc);
+    let stop = save(&mut doc, &path, AskAnswers::default()).unwrap_err();
+    assert!(
+        matches!(&stop, SaveStop::Ask(Ask::Signatures { impact, .. })
+            if impact[0].verdict == Verdict::Flagged),
+        "{stop:?}"
+    );
+    let report = sheaf_doc::materialize::save_rewritten(&mut doc, &path).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    let mut doc = open(&path);
+    assert_eq!(integrity(&doc), Integrity::Broken);
+    reordered(&mut doc);
+    let before = std::fs::read(&path).unwrap();
+    let report = save(&mut doc, &path, AskAnswers::default()).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
+    assert!(std::fs::read(&path).unwrap().starts_with(&before));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

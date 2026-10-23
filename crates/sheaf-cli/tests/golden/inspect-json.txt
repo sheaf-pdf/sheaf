@@ -38,6 +38,7 @@ $ sheaf-cli inspect $DIR/with.pdf --json
   "form": {
     "fields": 0,
     "signatures": 0,
+    "signatures_broken": 0,
     "widgets": 0,
     "xfa": "none"
   },

@@ -4,7 +4,9 @@
 //! usage rights (`/Perms /UR3`), read once from the source
 //! ([`Source::signatures`]). [`sig_impact`] says what a save would do to
 //! each signature, by §9.3's table, which stays conservative until it's
-//! checked against Acrobat.
+//! checked against Acrobat. A signature whose signed bytes no longer match
+//! its digest is broken already, and a save doesn't ask about it
+//! ([`integrity`], backlog B5); one whose digest can't be checked asks.
 //!
 //! Signature dictionaries come from untrusted files, so what's read of
 //! them is capped by the source's [`FormLimits`]. A reference or lock that
@@ -16,15 +18,20 @@
 //! [`Source::signatures`]: crate::Source::signatures
 //! [`FormLimits`]: crate::source::FormLimits
 
-use std::collections::BTreeSet;
+pub mod integrity;
 
-use lopdf::{Dictionary, LazyPdf, Object};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+
+use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
 
 use super::{Field, FieldKind, FileForm};
 use crate::attachments::{Objects, resolve};
 use crate::effects::{AnnotOps, SigClass};
 use crate::file::pdf_text;
 use crate::source::{FormLimits, Source};
+use integrity::Check;
+pub use integrity::{Integrity, Unchecked};
 
 /// What a file's signatures allow after them.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -36,8 +43,9 @@ pub struct Signatures {
     pub usage_rights: Option<UsageRights>,
 }
 
-/// One signature, and what it allows after it.
-#[derive(Debug, Clone, PartialEq)]
+/// One signature, and what it allows after it. Equal by what it allows:
+/// its digest's check isn't compared.
+#[derive(Debug, Clone)]
 pub struct Signature {
     /// Its field's full name: empty for a certification no signed field
     /// holds.
@@ -54,6 +62,30 @@ pub struct Signature {
     pub locks: Vec<Lock>,
     /// Its dictionary can't be read.
     pub unreadable: bool,
+    /// Whether its signed bytes still match its digest
+    /// ([`Signature::integrity`]): checked once, when first asked.
+    check: Arc<Check>,
+}
+
+impl PartialEq for Signature {
+    fn eq(&self, other: &Signature) -> bool {
+        let Signature {
+            field,
+            p,
+            certifies,
+            locks,
+            unreadable,
+            check: _,
+        } = self;
+        (field, p, certifies, locks, unreadable)
+            == (
+                &other.field,
+                &other.p,
+                &other.certifies,
+                &other.locks,
+                &other.unreadable,
+            )
+    }
 }
 
 /// The fields a signature locks (FieldMDP's `/Action` with its `/Fields`),
@@ -103,6 +135,10 @@ pub enum Verdict {
     Flagged,
     /// The save breaks it: the save asks.
     Invalid,
+    /// Its signed bytes no longer match its digest
+    /// ([`Integrity::Broken`]): it's broken already, so the save that
+    /// would break or flag it doesn't ask.
+    AlreadyBroken,
 }
 
 impl Signatures {
@@ -128,7 +164,15 @@ impl Signature {
             certifies,
             locks: Vec::new(),
             unreadable: true,
+            check: Arc::new(Check::unknown(Unchecked::Unreadable)),
         }
+    }
+
+    /// Whether its signed bytes, in the source it was read from, still
+    /// match the digest it signed: hashed the first time it's asked, once
+    /// for the fields that share it.
+    pub fn integrity(&self) -> &Integrity {
+        self.check.get()
     }
 
     /// The classes of change an Append may make and leave it valid: by its
@@ -184,6 +228,12 @@ impl UsageRights {
 /// sets a `/P`, and leaves an approval signature's bytes valid, which
 /// viewers flag. P = 1 allows no change, so only an Append of none (Save
 /// As of a file nothing changed, onto a copy of it) is within it.
+///
+/// A signature the save would break or flag is checked first (B5): one
+/// whose bytes no longer match its digest is [`Verdict::AlreadyBroken`],
+/// which doesn't ask, as there's nothing left to break. One whose digest
+/// can't be checked ([`Integrity::Unknown`]) asks as an intact one does.
+/// The rest aren't checked: they don't ask either way.
 pub fn sig_impact(
     sigs: &Signatures,
     pending: Pending,
@@ -192,12 +242,16 @@ pub fn sig_impact(
 ) -> Vec<SigImpact> {
     let verdict = |s: &Signature| {
         let within = s.allows().contains(class) && !s.locks_any(fields);
-        match (pending, s.p, within) {
+        let verdict = match (pending, s.p, within) {
             (Pending::Rewrite, _, _) => Verdict::Invalid,
             (Pending::Append, Some(_), true) => Verdict::Allowed,
             (Pending::Append, Some(_), false) => Verdict::Invalid,
             (Pending::Append, None, true) => Verdict::Noted,
             (Pending::Append, None, false) => Verdict::Flagged,
+        };
+        match verdict.asks() && s.integrity().is_broken() {
+            true => Verdict::AlreadyBroken,
+            false => verdict,
         }
     };
     (sigs.signed.iter())
@@ -211,7 +265,8 @@ pub fn sig_impact(
 /// `/AcroForm /SigFlags`' SignaturesExist.
 const SIGNATURES_EXIST: i64 = 1;
 
-/// Read the signatures in `src`, within its [`FormLimits`].
+/// Read the signatures in `src`, within its [`FormLimits`]: each one's
+/// digest is checked against `src`'s bytes when first asked.
 pub fn read(src: &Source) -> Signatures {
     let pdf = src.pdf();
     let form = src.form();
@@ -219,6 +274,9 @@ pub fn read(src: &Source) -> Signatures {
         pdf,
         limits: &src.limits().forms,
         names: 0,
+        bytes: src.bytes().clone(),
+        checks: HashMap::new(),
+        checked: 0,
     };
     let perms = (pdf.catalog().ok())
         .and_then(|c| c.get(b"Perms").ok())
@@ -316,12 +374,20 @@ fn permits(p: Option<&Object>) -> u8 {
 }
 
 /// Reads signatures' dictionaries within the form caps: the names locks
-/// list count as names, their lists as entries.
+/// list count as names, their lists as entries, and the signatures whose
+/// digests are checked as signatures.
 struct Reader<'a> {
     pdf: &'a LazyPdf,
     limits: &'a FormLimits,
     /// Bytes of lock names so far.
     names: usize,
+    /// The source's bytes, which the signatures' digests are checked
+    /// against.
+    bytes: Arc<[u8]>,
+    /// The checks of the signature dictionaries read by reference, so
+    /// fields that share one share its check; and how many there are.
+    checks: HashMap<ObjectId, Arc<Check>>,
+    checked: usize,
 }
 
 impl Reader<'_> {
@@ -351,6 +417,7 @@ impl Reader<'_> {
             certifies,
             locks: Vec::new(),
             unreadable: false,
+            check: self.check(v, dict),
         };
         // DocMDP's `/P`, when it has a DocMDP reference.
         let mut doc_mdp = None;
@@ -386,6 +453,26 @@ impl Reader<'_> {
             }
         }
         Some(sig)
+    }
+
+    /// The check of the signature dictionary `dict`, field `v`'s: the one
+    /// another field's `/V` made of the same object, or a new one, which
+    /// can't be checked past the caps' signatures.
+    fn check(&mut self, v: &Object, dict: &Dictionary) -> Arc<Check> {
+        let id = v.as_reference().ok();
+        if let Some(check) = id.and_then(|id| self.checks.get(&id)) {
+            return check.clone();
+        }
+        let signed = match self.checked < self.limits.signatures {
+            true => integrity::signed(self.pdf, dict, self.limits),
+            false => Err(Unchecked::TooMany),
+        };
+        self.checked += 1;
+        let check = Arc::new(Check::new(signed, self.bytes.clone()));
+        if let Some(id) = id {
+            self.checks.insert(id, check.clone());
+        }
+        check
     }
 
     /// The fields `lock` locks, a FieldMDP reference's `/TransformParams`
