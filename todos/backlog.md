@@ -493,9 +493,9 @@ phase; they're triaged between phases.
     signature asks must be right (B5). Today's signed-file tests use
     the 322 `/DocMDP` forms.
   - `conformance/`: the PDF/A save Note (M10.5 slice 16), PDF/A
-    convert and validate (M14), accessibility (M14).
+    convert and validate (M14), PDF/UA (M17).
 - **Overlap:** M10.5 slice 19's exports and signature asks; M12
-  (digital signatures); M14.
+  (digital signatures); M14; M17.
 - **Notes:** each needs a `Corpus::` reader for its manifest, like
   `scans()`, and a tier with its own `SHEAF_…_ONLY` narrowing.
 

@@ -285,6 +285,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Optimize / reduce file size | 📋 |
 | Preflight / accessibility checker | ❓ |
 | PDF/UA validation and accessibility review | ❓ |
+| sheaf itself with a screen reader and the keyboard | 📋 |
 | Batch actions / scripting | 📋 (Lua or Rhai, not JS) |
 | Create Portfolios | ❌ not planned (opening them is planned) |
 
