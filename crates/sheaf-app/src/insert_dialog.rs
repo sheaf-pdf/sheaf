@@ -25,7 +25,7 @@ pub enum Insert {
 
 pub enum InsertEvent {
     Blank {
-        count: usize,
+        count: u32,
         size: Size,
         at: Where,
     },
@@ -167,7 +167,7 @@ impl InsertDialog {
 
     fn go(&mut self, cx: &mut Context<Self>) {
         match &self.kind {
-            Insert::Blank => match self.count.read(cx).text().trim().parse::<usize>() {
+            Insert::Blank => match self.count.read(cx).text().trim().parse::<u32>() {
                 Ok(n) if (1..=500).contains(&n) => cx.emit(InsertEvent::Blank {
                     count: n,
                     size: self.size.unwrap_or(Size::Current),

@@ -2,10 +2,12 @@
 //! or another PDF's (Acrobat's Import/Export Data File, M9 slice 18).
 //!
 //! Whatever the format, comments travel as PDF annotation dictionaries
-//! ([`Comments`]): XFDF's elements are read into the same keys. Coming in,
-//! each becomes a mark through [`crate::import`], the converter that also
-//! makes another tool's comment editable, and is matched to what's there
-//! by `/NM` ([`import`]).
+//! ([`Comments`]), read from a source as any PDF's are: another PDF is
+//! read as it is, and an FDF file's, XFDF's elements (read into the same
+//! keys) and a document's gathered to go out are written into a PDF of
+//! their own first. Coming in, each becomes a mark through
+//! [`crate::import`], the converter that also makes another tool's comment
+//! editable, and is matched to what's there by `/NM` ([`import`]).
 
 pub mod fdf;
 pub mod xfdf;
@@ -13,41 +15,48 @@ pub mod xfdf;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
+use lopdf::{Dictionary, LazyPdf, Object, ObjectId, dictionary};
 
 use sheaf_edit::{AnnotRef, BlobSel, NewMark, Op, PageRef};
 
-use crate::annot::{Annot, AnnotId};
+use crate::annot::{Annot, AnnotId, Emitted};
 use crate::attachments::Objects;
 use crate::file::thread_name;
 use crate::import::{Interned, NotAMark, Options};
 use crate::model::{DocState, FormRef, PageId, Snapshot};
 use crate::prim::Key;
+use crate::serialize::built::{Built, WriteCx};
 use crate::store::{Blob, BlobId, BlobKind, Src, Store};
 use crate::tx::{Grant, Tx};
 
-/// Comments as dictionaries, each with its page (from 0). `pdf` holds
-/// what they refer to: appearances, files, the comments their `/IRT`
-/// names.
+/// Comments as dictionaries in `src`, each with its page (from 0). `src`
+/// holds what they refer to: appearances, files, the comments their
+/// `/IRT` names.
 pub struct Comments {
-    pub pdf: Pdf,
+    pub src: Src,
     pub annots: Vec<(u32, ObjectId)>,
     /// The PDF they're comments on, as the data file names it.
     pub file: Option<String>,
 }
 
 impl Comments {
-    pub fn new() -> Comments {
-        Comments {
-            pdf: Pdf::with_version("1.2"),
-            annots: Vec::new(),
-            file: None,
-        }
+    /// Comments `annots`, built in memory in `built` (a data file's, read,
+    /// or a document's, gathered), each with its page: written through
+    /// sheaf's serializer as a file of no pages, and read as a source, as
+    /// another PDF's comments are.
+    pub fn built(
+        built: Built,
+        annots: Vec<(u32, ObjectId)>,
+        file: Option<String>,
+    ) -> Result<Comments> {
+        let bytes = built.finish().context("writing the comments")?;
+        let src = Store::new().open(bytes.into(), BlobKind::comments(None))?;
+        Ok(Comments { src, annots, file })
     }
 
     /// The `i`th comment's dictionary.
     pub fn dict(&self, i: usize) -> Option<&Dictionary> {
-        self.pdf.get_dictionary(self.annots.get(i)?.1).ok()
+        self.src.pdf().get_dictionary(self.annots.get(i)?.1).ok()
     }
 
     pub fn len(&self) -> usize {
@@ -60,13 +69,7 @@ impl Comments {
 
     /// The name of what `dict` replies to, or is part of.
     pub fn parent_of(&self, dict: &Dictionary) -> Option<String> {
-        crate::import::irt_name(&self.pdf, dict)
-    }
-}
-
-impl Default for Comments {
-    fn default() -> Self {
-        Comments::new()
+        crate::import::irt_name(self.src.pdf(), dict)
     }
 }
 
@@ -88,30 +91,18 @@ pub fn read(bytes: &[u8], password: Option<&str>) -> Result<Comments> {
 
 /// Another PDF's comments: every annotation but links, form fields and
 /// popups, sheaf's own included (they come back exactly, from
-/// `/SheafAnnot`).
+/// `/SheafAnnot`). The PDF is read as a source, decrypted with `password`.
 pub fn from_pdf(bytes: &[u8], password: Option<&str>) -> Result<Comments> {
-    let mut pdf = Pdf::load_mem(bytes).context("reading the PDF")?;
-    if pdf.is_encrypted() {
-        let options = lopdf::LoadOptions::with_password(password.unwrap_or(""));
-        pdf = Pdf::load_mem_with_options(bytes, options)
-            .map_err(|e| anyhow::anyhow!("{e}"))
-            .context("decrypting the PDF")?;
-    }
+    let src = Store::new()
+        .open(bytes.into(), BlobKind::comments(password))
+        .context("reading the PDF")?;
     let mut annots = Vec::new();
-    for (i, page) in pdf.get_pages().into_values().enumerate() {
-        let list = pdf
-            .get_dictionary(page)
-            .ok()
-            .and_then(|d| d.get(b"Annots").ok())
-            .and_then(|a| pdf.dereference(a).ok())
-            .and_then(|(_, a)| a.as_array().ok())
-            .cloned()
-            .unwrap_or_default();
-        for entry in list {
+    for (i, page) in src.pages().iter().enumerate() {
+        for entry in page.annots.iter() {
             let Ok(id) = entry.as_reference() else {
                 continue;
             };
-            let Ok(d) = pdf.get_dictionary(id) else {
+            let Ok(d) = src.pdf().get_dictionary(id) else {
                 continue;
             };
             if matches!(
@@ -124,7 +115,7 @@ pub fn from_pdf(bytes: &[u8], password: Option<&str>) -> Result<Comments> {
         }
     }
     Ok(Comments {
-        pdf,
+        src,
         annots,
         file: None,
     })
@@ -234,6 +225,7 @@ enum Brought {
 /// [`Imported`]: sheaf_edit::Imported
 pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
     let st = &snap.state;
+    let pdf = comments.src.pdf();
     let mut out = Imported::default();
     let interned = Interned::new(store);
     let ours: HashMap<String, (PageId, AnnotId)> = st
@@ -244,7 +236,7 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
     // By page, so a replacement's parts meet.
     let mut by_page: BTreeMap<u32, Vec<ObjectId>> = BTreeMap::new();
     for &(page, id) in &comments.annots {
-        if comments.pdf.get_dictionary(id).is_ok() {
+        if pdf.get_dictionary(id).is_ok() {
             by_page.entry(page).or_default().push(id);
         }
     }
@@ -252,7 +244,7 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
         let entries: Vec<Object> = ids.iter().map(|&id| Object::Reference(id)).collect();
         let dicts: Vec<&Dictionary> = ids
             .iter()
-            .filter_map(|&id| comments.pdf.get_dictionary(id).ok())
+            .filter_map(|&id| pdf.get_dictionary(id).ok())
             .collect();
         let Some((id, rotation)) = st
             .page_at(page as usize)
@@ -270,17 +262,17 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
         let files = Options {
             files: Some(&interned),
         };
-        let converted = crate::import::convert_page(&comments.pdf, &dicts, rotation, files);
+        let converted = crate::import::convert_page(pdf, &dicts, rotation, files);
         let page_annots = crate::file::PageAnnots::new(&entries);
         let mut new = Vec::new();
         for ((dict, entry), mark) in dicts.iter().zip(&entries).zip(converted) {
             // One of sheaf's comes back exactly as it was, under the name
             // it had there, so what replies to it there does here; one
             // another tool has edited since is that tool's.
-            let own = crate::file::sheaf_mark(&comments.pdf, entry, rotation, &page_annots);
+            let own = crate::file::sheaf_mark(pdf, entry, rotation, &page_annots);
             let mark = match own {
                 Some(mut a) => {
-                    bring_held(&comments.pdf, dict, &mut a, snap, &interned);
+                    bring_held(pdf, dict, &mut a, snap, &interned);
                     if a.name.is_empty() {
                         a.name = a.name();
                     }
@@ -465,7 +457,7 @@ fn held(
 /// [`find_stamp`]: crate::model::find_stamp
 /// [`find_file`]: crate::model::find_file
 fn bring_held(
-    pdf: &Pdf,
+    pdf: &LazyPdf,
     dict: &Dictionary,
     a: &mut crate::Annot,
     snap: &Snapshot,
@@ -477,7 +469,7 @@ fn bring_held(
         AnnotKind::PageStamp { stamp, name, .. } => {
             match crate::model::find_stamp(store, primary, stamp) {
                 Some(FormRef::Blob(page)) => interned.hold(page.blob().clone()),
-                Some(FormRef::Base(_)) => {}
+                Some(FormRef::Base(_) | FormRef::Pinned(_)) => {}
                 None => {
                     let page = crate::file::stamp_page(pdf, dict)
                         .map(|form| crate::stamp_lib::form_to_pdf(pdf, form));
@@ -518,12 +510,15 @@ fn bring_held(
 
 /// Comments to write out of `snap`: our marks `ours` and other tools'
 /// comments `theirs`, by id, as dictionaries in a [`Comments`], replies
-/// pointing at what they reply to when it's written too. Pages are
-/// counted in the document's order.
+/// pointing at what they reply to when it's written too. Ours are as the
+/// writer makes them ([`emission`](crate::annot::emission)), what they
+/// draw with and hold written once. Pages are counted in the document's
+/// order.
 pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<Comments> {
     let st = &snap.state;
-    let mut out = Comments::new();
-    let mut cx = crate::annot::WriteCx::new();
+    let mut built = Built::new();
+    let mut annots = Vec::new();
+    let mut cx = WriteCx::new();
     // Each written comment's name and parent's name, to link them after.
     let mut names: HashMap<String, ObjectId> = HashMap::new();
     let mut parents: Vec<(ObjectId, String)> = Vec::new();
@@ -535,21 +530,29 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
             continue;
         };
         let a = &m.annot;
-        let written = crate::annot::to_pdf_in(m, &mut out.pdf, &mut cx);
-        let mut main = written.main;
+        let held = cx.held(m, built.pdf());
+        let Emitted {
+            mut main,
+            appearance,
+            companions,
+        } = crate::annot::emission(a, held);
+        let ap = cx.form(appearance, built.pdf());
+        main.set("AP", dictionary! { "N" => ap });
         main.set("Page", index as i64);
-        let main_id = out.pdf.add_object(Object::Dictionary(main));
-        out.annots.push((index as u32, main_id));
+        let main_id = built.pdf().add_object(Object::Dictionary(main));
+        annots.push((index as u32, main_id));
         names.insert(a.name(), main_id);
         if let Some(p) = a.thread_parent() {
             parents.push((main_id, p.to_string()));
         }
-        for mut part in written.companions {
+        for (mut part, appearance) in companions {
+            let ap = cx.form(appearance, built.pdf());
+            part.set("AP", dictionary! { "N" => ap });
             part.set("IRT", main_id);
             part.set("RT", Object::Name(b"Group".to_vec()));
             part.set("Page", index as i64);
-            let part_id = out.pdf.add_object(Object::Dictionary(part));
-            out.annots.push((index as u32, part_id));
+            let part_id = built.pdf().add_object(Object::Dictionary(part));
+            annots.push((index as u32, part_id));
         }
     }
     let mut maps: HashMap<BlobId, HashMap<ObjectId, ObjectId>> = HashMap::new();
@@ -584,20 +587,17 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
             dict.remove(key);
         }
         let map = maps.entry(src.id()).or_default();
-        let Ok(Object::Dictionary(mut copied)) = crate::materialize::copy::remap(
-            src.pdf(),
-            &Object::Dictionary(dict),
-            &mut out.pdf,
-            map,
-        ) else {
+        let Ok(Object::Dictionary(mut copied)) =
+            crate::materialize::copy::remap(src.pdf(), &Object::Dictionary(dict), built.pdf(), map)
+        else {
             continue;
         };
         copied.set("Page", index as i64);
         if !copied.has(b"NM") {
             copied.set("NM", crate::save::text_string(&f.name));
         }
-        let id = out.pdf.add_object(Object::Dictionary(copied));
-        out.annots.push((index as u32, id));
+        let id = built.pdf().add_object(Object::Dictionary(copied));
+        annots.push((index as u32, id));
         names.insert(f.name.clone(), id);
         if let Some(p) = &f.parent {
             parents.push((id, p.clone()));
@@ -609,19 +609,19 @@ pub fn gather(snap: &Snapshot, ours: &[AnnotId], theirs: &[AnnotId]) -> Result<C
             // Not written: by name, as XFDF says it.
             None => crate::save::text_string(&parent),
         };
-        if let Ok(d) = out.pdf.get_dictionary_mut(child) {
+        if let Ok(d) = built.pdf().get_dictionary_mut(child) {
             d.set("IRT", to);
         }
     }
     // The file of the first page: the document's own, else the file its
     // source was first read from.
-    out.file = (st.pages().next())
+    let file = (st.pages().next())
         .and_then(|(_, def, _)| match def.base.src == snap.primary {
             true => Some(snap.name.clone()),
             false => def.base.src.blob().origin_name(),
         })
         .map(|n| n.to_string());
-    Ok(out)
+    Comments::built(built, annots, file)
 }
 
 /// Page `page`'s annotation in `/Annots` slot `slot`.

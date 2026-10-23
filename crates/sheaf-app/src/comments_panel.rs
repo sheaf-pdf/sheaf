@@ -1390,7 +1390,7 @@ impl DocView {
             .chain(doc.selected_foreign.map(Item::Foreign))
             .collect();
         doc.notice = Some(format!("Writing comments to {}…", path.display()));
-        let snapshot = doc.model.snapshot();
+        let from = doc.model.export_from(sheaf_doc::Actor::User);
         let cf = doc.comment_filter.clone();
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -1399,11 +1399,14 @@ impl DocView {
                 .spawn({
                     let path = path.clone();
                     async move {
+                        let snapshot = &from.snap;
                         let listing = comments::list(&snapshot.state, &cf, &needle);
                         let labels = snapshot.state.page_labels();
                         let bytes = match kind {
                             ExportKind::Summary(layout) => {
-                                comments::summary_pdf(&snapshot, &cf, &needle, layout, &title)?
+                                let filter = (&cf, needle.as_str());
+                                comments::summary_to(&from, filter, layout, &title, &path)?;
+                                return anyhow::Ok(listing.count);
                             }
                             ExportKind::Csv => {
                                 comments::csv(&listing, labels.as_deref(), &columns).into_bytes()
@@ -1418,11 +1421,10 @@ impl DocView {
                                 } else {
                                     comments::items(&listing)
                                 };
-                                comments::export_data(&snapshot, &items, format)?
+                                comments::export_data(snapshot, &items, format)?
                             }
                         };
-                        std::fs::write(&path, bytes)
-                            .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+                        comments::write_to(snapshot, &path, &bytes)?;
                         anyhow::Ok(match kind {
                             ExportKind::Data(_, true) => selected.len(),
                             _ => listing.count,
@@ -1857,6 +1859,7 @@ mod tests {
                 hidden: false,
                 color: None,
                 mark: None,
+                stamp: None,
             };
             AnnotBody::Foreign(Arc::new(Foreign {
                 src: None,

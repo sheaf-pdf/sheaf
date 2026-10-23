@@ -1,0 +1,38 @@
+$ sheaf-cli edit $DIR/in.pdf --edits $DIR/edit-force-replaces.json -o $DIR/taken.pdf --force
+--- edits
+{
+  "ops": [
+    {
+      "by": 90,
+      "op": "rotate-pages",
+      "pages": {
+        "ids": [
+          {
+            "pos": 1
+          }
+        ]
+      }
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 0
+--- stdout
+{
+  "created": {
+    "locals": {},
+    "ops": [
+      []
+    ]
+  },
+  "lines": [
+    {
+      "removes": false,
+      "text": "Rotate page 1 90°"
+    }
+  ],
+  "strategy": "rewrite",
+  "version": "Rotate page 1 90°"
+}
+--- stderr
+editing…

@@ -1,10 +1,13 @@
 //! FDF: a PDF-syntax file of annotation dictionaries, each with `/Page`,
 //! under the catalog's `/FDF /Annots` (ISO 32000 §12.7.8).
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use lopdf::{Document as Pdf, Object, dictionary};
 
 use super::Comments;
+use crate::serialize::built::Built;
 
 /// The comments in an FDF file.
 pub fn read(bytes: &[u8]) -> Result<Comments> {
@@ -60,28 +63,33 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
             .unwrap_or(0);
         annots.push((page.max(0) as u32, id));
     }
-    Ok(Comments { pdf, annots, file })
+    Comments::built(Built::from(pdf), annots, file)
 }
 
-/// `comments` as an FDF file.
+/// `comments` as an FDF file, written through sheaf's serializer: each
+/// with its page, and what it refers to copied with it.
 pub fn write(comments: &Comments) -> Result<Vec<u8>> {
-    let mut pdf = comments.pdf.clone();
-    pdf.version = "1.2".into();
+    let mut pdf = Pdf::with_version("1.2");
+    let mut copied = HashMap::new();
+    let mut annots = Vec::new();
     for &(page, id) in &comments.annots {
+        let copy =
+            crate::materialize::copy::copy_object(comments.src.pdf(), id, &mut pdf, &mut copied);
+        let Ok(Some(id)) = copy else {
+            continue;
+        };
         if let Ok(d) = pdf.get_dictionary_mut(id) {
             d.set("Page", page as i64);
         }
+        annots.push(Object::Reference(id));
     }
-    let mut fdf = dictionary! {
-        "Annots" => comments.annots.iter().map(|&(_, id)| Object::Reference(id)).collect::<Vec<_>>(),
-    };
+    let mut fdf = dictionary! { "Annots" => annots };
     if let Some(f) = &comments.file {
         fdf.set("F", crate::save::text_string(f));
     }
     let root = pdf.add_object(dictionary! { "FDF" => fdf });
     pdf.trailer = dictionary! { "Root" => root };
-    let mut out = Vec::new();
-    pdf.save_to(&mut out).context("writing the FDF")?;
+    let mut out = crate::serialize::full::write_built(&pdf).context("writing the FDF")?;
     if out.starts_with(b"%PDF-") {
         out[..5].copy_from_slice(b"%FDF-");
     }

@@ -6,6 +6,9 @@
 //! pool of their own, and an OCR engine that reads nothing.
 
 #![allow(dead_code)]
+// The tests' scratch files go in the temp directory, which clippy.toml
+// bans outside tests; each test that includes this is a crate of its own.
+#![allow(clippy::disallowed_methods)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -14,6 +17,7 @@ use std::sync::Arc;
 
 use lopdf::xref::XrefType;
 use lopdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
+use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{Form, Rect, source};
 use sheaf_doc::forms::{FileForm, Finding, Report, Value, check};
@@ -29,50 +33,55 @@ use sheaf_ops::views::Views;
 /// Half of a row's inside, in pixels.
 pub const HALF_A_ROW: usize = 196 * 26 / 2;
 
+/// A new, empty directory for test `name` to write its files to: in the
+/// temp directory, or, in the process [`own_dirs`] runs a test in, beside
+/// the directories it watches.
 pub fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("sheaf-forms-{name}-{}", std::process::id()));
+    let base = match std::env::var_os(OWN_DIRS) {
+        Some(done) => Path::new(&done).with_file_name("scratch"),
+        None => std::env::temp_dir(),
+    };
+    let dir = base.join(format!("sheaf-forms-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // A test in a process of its own ([`own_cache`]) keeps the cache
-    // directory it was started with.
-    if std::env::var_os(OWN_CACHE).is_none() {
-        // SAFETY: each test sets the same value before any reads it.
-        unsafe {
-            std::env::set_var(
-                "SHEAF_CACHE_DIR",
-                std::env::temp_dir().join(format!("sheaf-forms-cache-{}", std::process::id())),
-            )
-        };
-    }
     dir
 }
 
-/// Set in the process [`own_cache`] runs a test in: the file it writes
+/// Set in the process [`own_dirs`] runs a test in: the file it writes
 /// once the test has run.
-const OWN_CACHE: &str = "SHEAF_TEST_OWN_CACHE";
+const OWN_DIRS: &str = "SHEAF_TEST_OWN_DIRS";
+
+/// The variables that name where a process may put temp and cache files:
+/// the temp directory (`TMPDIR` on Unix, `TMP` and `TEMP` on Windows), the
+/// cache directory on Linux, and the home directory, under which macOS
+/// keeps caches.
+const DIRS: [&str; 5] = ["TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME", "HOME"];
 
 /// `test`, which runs `body`, run in a process of its own (the binary run
-/// again for `test` alone) whose `SHEAF_CACHE_DIR` is a new, empty
-/// directory no other test writes to, which must still be empty after:
-/// opening a file can write to the cache (another tool's stamp, kept as a
-/// mark), so a directory the binary's tests share can't say what one test
-/// wrote. In that process, `body` itself.
-pub fn own_cache(test: &str, body: impl FnOnce()) {
-    if let Some(done) = std::env::var_os(OWN_CACHE) {
+/// again for `test` alone) whose temp, cache and home directories
+/// ([`DIRS`]) are new and empty, and must still be empty after: sheaf
+/// writes no file of a document's but the one it's asked to (M10.5 §3.9),
+/// and a directory the binary's tests share can't say what one test
+/// wrote. The test's own files go in its [`scratch`] directory, outside
+/// them. In that process, `body` itself.
+pub fn own_dirs(test: &str, body: impl FnOnce()) {
+    if let Some(done) = std::env::var_os(OWN_DIRS) {
         body();
         std::fs::write(done, "").unwrap();
         return;
     }
-    let dir = std::env::temp_dir().join(format!("sheaf-own-cache-{test}-{}", std::process::id()));
-    let (cache, done) = (dir.join("cache"), dir.join("done"));
+    let dir = std::env::temp_dir().join(format!("sheaf-own-dirs-{test}-{}", std::process::id()));
+    let done = dir.join("done");
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&cache).unwrap();
-    let out = Command::new(std::env::current_exe().unwrap())
-        .args([test, "--exact", "--nocapture", "--quiet"])
-        .env(OWN_CACHE, &done)
-        .env("SHEAF_CACHE_DIR", &cache)
-        .output()
-        .unwrap_or_else(|e| panic!("running {test} in its own process: {e}"));
+    let mut run = Command::new(std::env::current_exe().unwrap());
+    run.args([test, "--exact", "--nocapture", "--quiet"])
+        .env(OWN_DIRS, &done);
+    for var in DIRS {
+        let own = dir.join(var.to_lowercase());
+        std::fs::create_dir_all(&own).unwrap();
+        run.env(var, own);
+    }
+    let out = (run.output()).unwrap_or_else(|e| panic!("running {test} in its own process: {e}"));
     let said = || {
         let [out, err] = [&out.stdout, &out.stderr].map(|b| String::from_utf8_lossy(b));
         format!("{out}{err}")
@@ -82,10 +91,13 @@ pub fn own_cache(test: &str, body: impl FnOnce()) {
         done.exists(),
         "{test} ran nothing in its own process: does `{test} --exact` still name it?"
     );
-    let cached: Vec<PathBuf> = (std::fs::read_dir(&cache).unwrap())
-        .map(|e| e.unwrap().path())
-        .collect();
-    assert!(cached.is_empty(), "{test} wrote to the cache: {cached:?}");
+    for var in DIRS {
+        let own = dir.join(var.to_lowercase());
+        let written: Vec<PathBuf> = (std::fs::read_dir(&own).unwrap())
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert!(written.is_empty(), "{test} wrote to its {var}: {written:?}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -243,15 +255,18 @@ pub fn saved(doc: &mut Document, path: &Path, how: How) -> (StrategyKind, Vec<u8
 }
 
 /// `doc` saved to `path`, its own file, as the save's plan says
-/// (`materialize::save`), a signature or an XFA part's values given up
-/// when it asks. What it was saved as, and the file.
+/// (`save_with`'s `SaveHow::Planned`, which a session's in-place save
+/// runs), a signature or an XFA part's values given up when it asks. What
+/// it was saved as, and the file.
 pub fn planned(doc: &mut Document, path: &Path) -> (StrategyKind, Vec<u8>) {
     let answers = sheaf_doc::materialize::AskAnswers {
         break_signatures: true,
         drop_xfa_values: true,
         ..Default::default()
     };
-    let report = sheaf_doc::materialize::save(doc, path, &answers, &sheaf_ops::NoProgress);
+    let how = sheaf_doc::materialize::SaveHow::Planned;
+    let report =
+        sheaf_doc::materialize::save_with(doc, path, how, &answers, &sheaf_ops::NoProgress);
     let strategy = report.unwrap().strategy.expect("the file was written");
     (strategy, std::fs::read(path).unwrap())
 }
@@ -267,9 +282,27 @@ pub fn rewritten_and_saved(doc: &mut Document, path: &Path) -> [(StrategyKind, V
     [written, saved]
 }
 
+/// The export `make` makes of `doc`'s current version, the user's, put at
+/// `path` (replacing a file there), what it asks answered as print answers
+/// it: its bytes.
+pub fn exported_to(
+    doc: &Document,
+    make: impl FnOnce(ExportFrom, Out) -> Export,
+    path: &Path,
+) -> Vec<u8> {
+    let out = Out::File {
+        path: path.into(),
+        overwrite: true,
+    };
+    let e = make(doc.export_from(Actor::User), out);
+    let answers = sheaf_doc::export::PRINT_ANSWERS;
+    sheaf_doc::export::run(e, &answers, &sheaf_ops::NoProgress).unwrap();
+    std::fs::read(path).unwrap()
+}
+
 /// What `doc` writes by a Rewrite: a save's bytes.
 pub fn rewritten(doc: &Document) -> Vec<u8> {
-    sheaf_doc::save::rewrite(&doc.snapshot()).unwrap()
+    sheaf_doc::save::rewrite(doc).unwrap()
 }
 
 /// What `doc` writes by an Append onto its file, whatever a save would
@@ -409,6 +442,44 @@ pub fn filled(bytes: &[u8], name: &str, value: &str) -> Vec<u8> {
             .unwrap()
             .set("V", Object::string_literal(value));
     })
+}
+
+/// Whether `finding` is what a save told to break signatures and drop an
+/// XFA part's values may leave: what save policy decides, and asks about
+/// first.
+pub fn told(finding: &Finding) -> bool {
+    matches!(
+        finding,
+        Finding::StaleSignature { .. }
+            | Finding::StaleSigFlags { .. }
+            | Finding::XfaMismatch { .. }
+            | Finding::EarlierValues { .. }
+    )
+}
+
+/// What the form check finds in the file at `path` that it didn't in the
+/// file it was (`was`; none to compare when its check failed), as
+/// [`Report::added_since`] tells it, but what the save may leave
+/// (`leaves`, [`told`] where it was told to): an error, when it finds any.
+/// A finding the file had, naming fewer now (widgets on no page the save
+/// dropped, a missing font fewer widgets name), isn't one.
+pub fn nothing_found(
+    was: Option<&Report>,
+    path: &Path,
+    leaves: fn(&Finding) -> bool,
+) -> Result<(), String> {
+    let Some(was) = was else {
+        return Ok(());
+    };
+    let bytes = std::fs::read(path).unwrap();
+    let now = sheaf_doc::forms::check(&bytes, None).map_err(|e| format!("check: {e:#}"))?;
+    let added: Vec<_> = (now.added_since(was).into_iter())
+        .filter(|f| !leaves(f))
+        .collect();
+    match added.is_empty() {
+        true => Ok(()),
+        false => Err(format!("the form check finds {added:?}")),
+    }
 }
 
 /// What the form check finds in `bytes`.

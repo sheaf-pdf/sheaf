@@ -25,13 +25,14 @@ use gpui::{
     RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window, div,
     img, point, prelude::*, px, relative, rgb, rgba,
 };
+use sheaf_doc::export::{Export, ExportError, ExportFrom, Exported, Out};
 use sheaf_doc::geom::{Affine, Geom};
+use sheaf_doc::materialize;
 use sheaf_doc::materialize::Came;
 use sheaf_doc::prim::Key;
 use sheaf_doc::realize::{EngineKey, PageView};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, FormRef, Pt};
 use sheaf_doc::{OcgOverride, RenderKey, ViewInputs};
-use sheaf_doc::{materialize, save};
 use sheaf_edit::{PageSize, Rotation};
 use sheaf_ui::button::Button;
 use sheaf_ui::list::ListLayout;
@@ -135,12 +136,13 @@ pub(crate) struct Doc {
     pub(crate) changes: u64,
     /// The last change, for the `--script` dump.
     pub(crate) last_change: Option<Arc<ChangeSet>>,
-    /// The document as plugin calls read it, swapped at every change
-    /// ([`DocView::on_change`]): a call takes its base from it at its first
-    /// read (M10.5 §14.3). Each document has its own, so a call can tell
-    /// when the view was reopened on another meanwhile.
+    /// The document as plugin calls read it, published again at every
+    /// change ([`DocView::on_change`]) and when who the user is changes: a
+    /// call makes its transaction on it at its first read or submit (M10.5
+    /// §14.3). Each document has its own, so a call can tell when the view
+    /// was reopened on another meanwhile.
     #[cfg(feature = "plugins")]
-    pub(crate) plugin_cell: Arc<arc_swap::ArcSwap<sheaf_doc::Snapshot>>,
+    pub(crate) plugin_cell: Arc<arc_swap::ArcSwap<sheaf_doc::Published>>,
     /// Bumped when where the pages go changed: their order or their
     /// boxes. The panes' layouts are built at one count, and again at the
     /// next.
@@ -268,7 +270,7 @@ impl Doc {
         measure_scale: sheaf_doc::measure::Scale,
     ) -> Doc {
         #[cfg(feature = "plugins")]
-        let plugin_cell = Arc::new(arc_swap::ArcSwap::from_pointee(model.snapshot()));
+        let plugin_cell = Arc::new(arc_swap::ArcSwap::from_pointee(model.published()));
         let views = Views::new(engines());
         let text = Text::new(views.clone(), Budget::Screen);
         let strip_pins = Pins::new(views.pool());
@@ -788,8 +790,9 @@ pub struct DocView {
     /// A save stopped to ask the reader something (M10.5 §9.2), its
     /// version still sealed, until they've answered: whether to replace a
     /// file another program changed, to break a signed file's signatures,
-    /// or to drop an XFA part that holds values.
-    pending_ask: Option<(Saving, materialize::Ask)>,
+    /// or to drop an XFA part that holds values; or an export, which asks
+    /// the last two (§12.1).
+    pub(crate) pending_ask: Option<(Asking, materialize::Ask)>,
     autosave: Option<Task<()>>,
     /// When the edits since the last sidecar write began.
     autosave_since: Option<Instant>,
@@ -840,6 +843,23 @@ pub(crate) struct Saving {
     plan: materialize::SavePlan,
     answers: materialize::AskAnswers,
     started: Instant,
+}
+
+/// An export the reader is asked about before it writes (M10.5 §12.1):
+/// how it's answered so far, and what runs it again with the answer.
+pub(crate) struct Exporting {
+    pub(crate) answers: materialize::AskAnswers,
+    pub(crate) again: Again,
+}
+
+/// What runs an export again with the reader's answers.
+pub(crate) type Again =
+    Box<dyn FnOnce(&mut DocView, materialize::AskAnswers, &mut Context<DocView>)>;
+
+/// What a write asks the reader about: a save's, or an export's.
+pub(crate) enum Asking {
+    Save(Saving),
+    Export(Exporting),
 }
 
 /// A search match, addressed by page id so it survives reordering.
@@ -1112,6 +1132,70 @@ impl DocView {
             self.new_search(cx);
             self.start_search(q, cx);
         }
+    }
+
+    /// A view of `session`'s document, made and saved to `path`, its file,
+    /// elsewhere (Combine's, M10.5 §14.1): shown as it is, nothing read
+    /// again, its history where the session left it. Its marks are made by
+    /// the user from now on, measured at their scale, and the file is
+    /// among the recent ones. `notice` is what it was told as it was made.
+    /// [`Self::adopted`] tells the listeners it opened, once they listen.
+    pub(crate) fn adopt(
+        path: PathBuf,
+        session: sheaf_ops::session::Session,
+        notice: Option<String>,
+        timing: bool,
+        launched: Instant,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let who = crate::prefs::get(cx).doc_identity();
+        let scale = (crate::state::get(cx).measure_scale.clone()).unwrap_or_default();
+        let opened = path.clone();
+        cx.defer(move |cx| crate::recent::add(&opened, cx));
+        Self::adopting(path, session, notice, who, scale, timing, launched, cx)
+    }
+
+    /// [`Self::adopt`] with the user `who` and the measure `scale` given.
+    #[allow(clippy::too_many_arguments)]
+    fn adopting(
+        path: PathBuf,
+        session: sheaf_ops::session::Session,
+        notice: Option<String>,
+        who: Identity,
+        scale: sheaf_doc::measure::Scale,
+        timing: bool,
+        launched: Instant,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::unopened(path, None, timing, launched, cx);
+        let sheaf_ops::session::Session { mut doc, view, .. } = session;
+        doc.set_identity(who);
+        let drawn = doc.primary().page_count() > 0;
+        this.state = State::Ready(Box::new(Doc::new(doc, cx.focus_handle(), scale)));
+        this.take_view(view);
+        if let (Some(notice), State::Ready(doc)) = (notice, &mut this.state) {
+            doc.notice = Some(notice);
+        }
+        // A primary of no pages, made in memory, draws nothing.
+        if drawn {
+            this.ask_form_type(cx);
+        }
+        this
+    }
+
+    /// An adopted document ([`Self::adopt`]) is open: the change that
+    /// says so, with every flag set, which listeners hear as
+    /// [`DocEvent::Opened`].
+    pub(crate) fn adopted(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let model = &doc.model;
+        let v = model.current_version();
+        let label = (model.timeline().into_iter())
+            .find(|version| version.current)
+            .map_or_else(|| model.name().clone(), |version| version.label.into());
+        self.on_change(&ChangeSet::opened(v, v, label, model.state()), cx);
     }
 
     /// Ask the primary file's base engine what form the file has, which
@@ -1437,23 +1521,12 @@ impl DocView {
         if doc.notice.as_deref() == Some(STILL_OPENING) {
             doc.notice = None;
         }
-        doc.attachments = view.attachments;
-        doc.collection = view.collection;
-        doc.set_layers(view.layers);
-        if let Some(notice) = crate::form_bar::damaged_notice(&view.form) {
-            doc.notice = Some(notice);
-        }
-        doc.forms.primary = Some(Arc::new(view.form));
-        if doc.collection.is_some() {
-            doc.open_portfolio();
-            self.wanted_panel = Some("attachments");
-        }
+        let renamed = view.renamed.len();
+        self.take_view(view);
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
         let st = doc.model.state();
-        // Start with the top level expanded where the file leaves it open.
-        doc.outline_expanded = (st.outline_roots().iter())
-            .filter(|&&id| st.bookmark(id).is_some_and(|b| b.open))
-            .copied()
-            .collect();
         if self.timing {
             eprintln!(
                 "[timing] ready: {} sheaf annotations, {} third-party, {} bookmarks, {} fields \
@@ -1467,7 +1540,7 @@ impl DocView {
             );
         }
         if doc.notice.is_none() {
-            doc.notice = renamed_notice(view.renamed.len());
+            doc.notice = renamed_notice(renamed);
         }
         if recovered {
             doc.notice = Some("Recovered unsaved changes — Ctrl+S to keep them".into());
@@ -1496,6 +1569,33 @@ impl DocView {
             self.selftest_ocr(p, cx);
         }
         cx.notify();
+    }
+
+    /// What the view shows beside the document, as its primary file
+    /// opened (`view`): its attachments, a portfolio's schema (whose panel
+    /// it then wants shown), its layers and what its form says, a damaged
+    /// one in the notice; and the outline's top level expanded where the
+    /// file leaves it open.
+    fn take_view(&mut self, view: sheaf_doc::open::ViewFacts) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        doc.attachments = view.attachments;
+        doc.collection = view.collection;
+        doc.set_layers(view.layers);
+        if let Some(notice) = crate::form_bar::damaged_notice(&view.form) {
+            doc.notice = Some(notice);
+        }
+        doc.forms.primary = Some(Arc::new(view.form));
+        if doc.collection.is_some() {
+            doc.open_portfolio();
+            self.wanted_panel = Some("attachments");
+        }
+        let st = doc.model.state();
+        doc.outline_expanded = (st.outline_roots().iter())
+            .filter(|&&id| st.bookmark(id).is_some_and(|b| b.open))
+            .copied()
+            .collect();
     }
 
     pub fn go_to_page(&mut self, page: usize, cx: &mut Context<Self>) {
@@ -1620,7 +1720,7 @@ impl DocView {
         };
         let selection = doc.follow(ch);
         #[cfg(feature = "plugins")]
-        doc.plugin_cell.store(Arc::new(doc.model.snapshot()));
+        doc.plugin_cell.store(Arc::new(doc.model.published()));
         let change = Arc::new(ch.clone());
         doc.last_change = Some(change.clone());
         if selection {
@@ -1653,11 +1753,13 @@ impl DocView {
     }
 
     /// What a plugin command sees of this document; `ocr` is the OCR
-    /// choices it runs with.
+    /// choices it runs with, and `committer` where what it commits as it
+    /// runs lands.
     #[cfg(feature = "plugins")]
     pub(crate) fn plugin_context(
         &self,
         ocr: sheaf_ocr::OcrConfig,
+        committer: Arc<dyn sheaf_plugin::Committer>,
     ) -> Option<sheaf_plugin::DocContext> {
         let State::Ready(doc) = &self.state else {
             return None;
@@ -1678,6 +1780,7 @@ impl DocView {
             text: crate::plugins::text_source(&doc.views),
             ocr: Some(crate::plugins::ocr_source(&doc.views, ocr)),
             render: Some(crate::plugins::render_source(&doc.views)),
+            committer: Some(committer),
         })
     }
 
@@ -1832,6 +1935,9 @@ impl DocView {
     pub(crate) fn sync_author(&mut self, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state {
             doc.model.set_identity(crate::prefs::get(cx).doc_identity());
+            // What a plugin's call lowers with knows who the user is.
+            #[cfg(feature = "plugins")]
+            doc.plugin_cell.store(Arc::new(doc.model.published()));
         }
     }
 
@@ -1919,7 +2025,7 @@ impl DocView {
     /// on (M10.5 §9.1). The current version is sealed while it's saved, so
     /// an edit made meanwhile, an OCR flush among them, makes a version
     /// after it, which stays unsaved. The plan is made in the background,
-    /// what it asks is asked ([`Self::ask_before_saving`]), the file is
+    /// what it asks is asked ([`Self::ask_before_writing`]), the file is
     /// written in the background, and the version is recorded as the saved
     /// one ([`Self::finish_save`]). Nothing the screen shows changes.
     /// Resolves to whether it saved: false when it stopped to ask.
@@ -1985,7 +2091,7 @@ impl DocView {
             if let State::Ready(doc) = &mut self.state {
                 doc.notice = None;
             }
-            self.pending_ask = Some((saving, ask));
+            self.pending_ask = Some((Asking::Save(saving), ask));
             cx.notify();
             return Task::ready(false);
         }
@@ -2012,22 +2118,22 @@ impl DocView {
         })
     }
 
-    /// Ask the reader what `ask`, from `saving`'s plan or its write, needs,
-    /// and go on saving as they choose; any other answer ends the save,
-    /// nothing written. A signed file's ask offers what the plan allows:
-    /// an Append anyway, which keeps the signed revision as it was signed
-    /// and what the save removes readable in it, and a Rewrite, which
-    /// breaks every signature.
-    fn ask_before_saving(
+    /// Ask the reader what `ask`, from a save's plan or its write, or from
+    /// an export, needs, and go on writing as they choose; any other answer
+    /// ends it, nothing written. A signed file's ask offers what the plan
+    /// allows: an Append anyway, which keeps the signed revision as it was
+    /// signed and what the save removes readable in it, and a Rewrite, which
+    /// breaks every signature; an export, a new file, only the second.
+    fn ask_before_writing(
         &mut self,
-        mut saving: Saving,
+        mut asking: Asking,
         ask: materialize::Ask,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         use gpui::PromptButton;
         use materialize::Ask;
-        /// What a button of the ask does: the last, Cancel, ends the save.
+        /// What a button of the ask does: the last, Cancel, ends the write.
         #[derive(Clone, Copy)]
         enum Choice {
             SaveAs,
@@ -2037,6 +2143,7 @@ impl DocView {
             DropXfa,
         }
         let name = self.file_name();
+        let exports = matches!(asking, Asking::Export(_));
         let (message, detail, choices) = match &ask {
             Ask::FileChanged { .. } => (
                 format!("\"{name}\" changed on disk"),
@@ -2054,6 +2161,9 @@ impl DocView {
                 let n = impact.len();
                 let s = if n == 1 { "" } else { "s" };
                 let mut detail = match reason {
+                    _ if exports => {
+                        format!("The export is a new file, which breaks its signature{s}.")
+                    }
                     Some(why) => {
                         format!(
                             "Saving rewrites the whole file ({why}), which breaks its signature{s}."
@@ -2084,19 +2194,30 @@ impl DocView {
                     }
                     choices.push((PromptButton::new("Append Anyway"), Choice::AppendAnyway));
                 }
+                let verb = if exports { "Export" } else { "Rewrite" };
                 choices.push((
-                    PromptButton::new(format!("Rewrite (breaks {n} signature{s})")),
+                    PromptButton::new(format!("{verb} (breaks {n} signature{s})")),
                     Choice::Rewrite,
                 ));
                 (format!("\"{name}\" is signed"), detail, choices)
             }
-            Ask::XfaHoldsValues { .. } => (
-                "Remove the form's XFA part?".to_string(),
-                "It holds values sheaf doesn't show, which Adobe Acrobat or Reader shows. \
-                 Saving the form as it is now removes it, and them."
-                    .to_string(),
-                vec![(PromptButton::new("Save and Remove It"), Choice::DropXfa)],
-            ),
+            Ask::XfaHoldsValues { .. } => {
+                let (what, button) = match exports {
+                    true => ("The export leaves it out", "Export Without It"),
+                    false => (
+                        "Saving the form as it is now removes it",
+                        "Save and Remove It",
+                    ),
+                };
+                (
+                    "Remove the form's XFA part?".to_string(),
+                    format!(
+                        "It holds values sheaf doesn't show, which Adobe Acrobat or Reader \
+                         shows. {what}, and them."
+                    ),
+                    vec![(PromptButton::new(button), Choice::DropXfa)],
+                )
+            }
         };
         let offer = match &ask {
             Ask::Signatures { append_anyway, .. } => append_anyway.clone(),
@@ -2115,38 +2236,90 @@ impl DocView {
         cx.spawn(async move |this, cx| {
             let answer = rx.await.ok();
             this.update(cx, |view, cx| {
-                match answer
-                    .and_then(|i| choices.get(i))
-                    .map(|(_, choice)| *choice)
-                {
-                    Some(Choice::SaveAs) => {
-                        view.abandon_save(saving, cx);
-                        view.save_as(cx);
-                        return;
-                    }
-                    Some(Choice::Overwrite) => saving.answers.overwrite = true,
+                let choice = answer.and_then(|i| choices.get(i)).map(|(_, c)| *c);
+                let answers = match &mut asking {
+                    Asking::Save(saving) => &mut saving.answers,
+                    Asking::Export(exporting) => &mut exporting.answers,
+                };
+                match choice {
+                    Some(Choice::Overwrite) => answers.overwrite = true,
                     Some(Choice::AppendAnyway) => {
                         if let Some(offer) = &offer {
-                            saving.answers.take(offer);
+                            answers.take(offer);
                         }
                     }
-                    Some(Choice::Rewrite) => saving.answers.break_signatures = true,
+                    Some(Choice::Rewrite) => answers.break_signatures = true,
                     Some(Choice::DropXfa) => {
-                        saving.answers.drop_xfa_values = true;
-                        if let State::Ready(doc) = &mut view.state {
+                        answers.drop_xfa_values = true;
+                        if let (Asking::Save(_), State::Ready(doc)) = (&asking, &mut view.state) {
                             doc.forms.xfa_values_dropped = true;
                         }
                     }
-                    None => {
+                    Some(Choice::SaveAs) | None => {}
+                }
+                match (asking, choice) {
+                    (Asking::Save(saving), Some(Choice::SaveAs)) => {
                         view.abandon_save(saving, cx);
-                        return;
+                        view.save_as(cx);
+                    }
+                    (Asking::Save(saving), None) => view.abandon_save(saving, cx),
+                    (Asking::Save(saving), _) => view.go_on_saving(saving, cx).detach(),
+                    (Asking::Export(_), Some(Choice::SaveAs) | None) => cx.notify(),
+                    (Asking::Export(exporting), _) => {
+                        (exporting.again)(view, exporting.answers, cx)
                     }
                 }
-                view.go_on_saving(saving, cx).detach();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// `export`, written as a job (one at a time, its pages counted in the
+    /// status line, Escape stopping it) as `answers` answer it, the notice
+    /// saying how it went: `done`'s once it's written, else what it is
+    /// (`what`, "Extract") and why it stopped. What it asks is asked next
+    /// frame, and it's written again with the answer
+    /// ([`Self::ask_before_writing`]).
+    pub(crate) fn write_export(
+        &mut self,
+        export: Export,
+        answers: materialize::AskAnswers,
+        what: &'static str,
+        done: impl FnOnce(&Exported) -> String + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tracker) = self.start_job(what, cx) else {
+            return;
+        };
+        let work = {
+            let export = export.clone();
+            move |p: &sheaf_ops::Tracker| Ok(sheaf_doc::export::run(export, &answers, p)?)
+        };
+        let status = move |s: &sheaf_ops::ProgressSnapshot| {
+            Some(format!("{what}: page {} of {}…", s.done, s.total?))
+        };
+        let end =
+            move |v: &mut DocView, result: anyhow::Result<Exported>, _: &mut Context<DocView>| {
+                v.job = None;
+                let e = match result {
+                    Ok(made) => return Some(done(&made)),
+                    Err(e) => e,
+                };
+                let Some(ExportError::Ask(ask)) = e.downcast_ref::<ExportError>() else {
+                    return Some(crate::jobs::ended(what, &e));
+                };
+                let again = move |v: &mut DocView, answers, cx: &mut Context<DocView>| {
+                    v.write_export(export, answers, what, done, cx)
+                };
+                let exporting = Exporting {
+                    answers,
+                    again: Box::new(again),
+                };
+                v.pending_ask = Some((Asking::Export(exporting), ask.clone()));
+                None
+            };
+        self.drive(tracker, work, status, end, cx);
     }
 
     /// `saving` ends with nothing written: its version is unsealed.
@@ -2181,7 +2354,7 @@ impl DocView {
             Err(materialize::SaveStop::Ask(ask)) => {
                 // Asked next frame.
                 doc.notice = None;
-                self.pending_ask = Some((saving, ask));
+                self.pending_ask = Some((Asking::Save(saving), ask));
                 cx.notify();
                 return false;
             }
@@ -2677,7 +2850,7 @@ impl DocView {
             [0, 150, 0],
         );
         self.add_annot(p0, tick, "Tickmark", cx);
-        self.export_flattened_to(path, cx);
+        self.flattened_copy_to(path, cx);
     }
 
     // ----- extract pages -------------------------------------------------------
@@ -2715,38 +2888,25 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        doc.notice = Some(format!("Extracting to {}…", path.display()));
-        let snapshot = doc.model.snapshot();
+        // The save dialog asked before it named a file there.
+        let out = Out::File {
+            path: path.clone(),
+            overwrite: true,
+        };
+        let export = Export::extract(doc.model.export_from(Actor::User), &ids, out);
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move { save::extract_pages(&snapshot, &ids, &path) }
-                })
-                .await;
-            this.update(cx, |view, cx| {
-                if let State::Ready(doc) = &mut view.state {
-                    doc.notice = Some(match result {
-                        Ok(n) => format!(
-                            "Extracted {n} page{} to {}",
-                            if n == 1 { "" } else { "s" },
-                            path.display()
-                        ),
-                        Err(e) => format!("Extract failed: {e:#}"),
-                    });
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        let done = move |made: &Exported| {
+            let n = made.pages;
+            let s = if n == 1 { "" } else { "s" };
+            format!("Extracted {n} page{s} to {}", path.display())
+        };
+        let answers = materialize::AskAnswers::default();
+        self.write_export(export, answers, "Extract", done, cx);
     }
 
     // ----- export flattened copy ----------------------------------------------
 
-    fn export_flattened_prompt(&mut self, cx: &mut Context<Self>) {
+    fn flattened_copy_prompt(&mut self, cx: &mut Context<Self>) {
         let dir = self
             .path
             .parent()
@@ -2760,25 +2920,23 @@ impl DocView {
         let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
-                this.update(cx, |view, cx| view.export_flattened_to(path, cx))
+                this.update(cx, |view, cx| view.flattened_copy_to(path, cx))
                     .ok();
             }
         })
         .detach();
     }
 
-    pub fn export_flattened_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub fn flattened_copy_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.still_opening(cx) {
             return;
         }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        doc.notice = Some(format!("Exporting flattened copy to {}…", path.display()));
-        let snapshot = doc.model.snapshot();
         // Flattening keeps an attachment's icon and drops its file, as
         // Acrobat does: say so.
-        let files = (snapshot.state.marks())
+        let files = (doc.model.state().marks())
             .filter(|(_, a)| matches!(a.kind, AnnotKind::FileAttachment { .. }))
             .count()
             + doc
@@ -2786,54 +2944,41 @@ impl DocView {
                 .iter()
                 .filter(|a| matches!(a.at, sheaf_doc::attachments::AttachmentRef::Annot { .. }))
                 .count();
-        let timing = self.timing;
+        let out = Out::File {
+            path: path.clone(),
+            overwrite: true,
+        };
+        let export = Export::flattened(doc.model.export_from(Actor::User), out);
+        let (timing, t) = (self.timing, Instant::now());
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let t = Instant::now();
-            let result = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move { save::export_flattened(&snapshot, &path) }
-                })
-                .await;
-            this.update(cx, |view, cx| {
-                if let State::Ready(doc) = &mut view.state {
-                    doc.notice = Some(match result {
-                        Ok(n) => {
-                            if timing {
-                                eprintln!(
-                                    "[timing] exported flattened copy ({n} marks) in {:?}",
-                                    t.elapsed()
-                                );
-                            }
-                            format!(
-                                "Exported flattened copy to {} ({n} mark{}){}",
-                                path.display(),
-                                if n == 1 { "" } else { "s" },
-                                match files {
-                                    0 => String::new(),
-                                    1 => " — the attachment's icon is kept, its file isn't".into(),
-                                    _ =>
-                                        " — attachments' icons are kept, their files aren't".into(),
-                                }
-                            )
-                        }
-                        Err(e) => format!("Export failed: {e:#}"),
-                    });
+        let done = move |made: &Exported| {
+            let n = made.flattened;
+            if timing {
+                eprintln!(
+                    "[timing] exported flattened copy ({n} annotations) in {:?}",
+                    t.elapsed()
+                );
+            }
+            format!(
+                "Exported flattened copy to {} ({n} annotation{}){}",
+                path.display(),
+                if n == 1 { "" } else { "s" },
+                match files {
+                    0 => String::new(),
+                    1 => " — the attachment's icon is kept, its file isn't".into(),
+                    _ => " — attachments' icons are kept, their files aren't".into(),
                 }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            )
+        };
+        let answers = materialize::AskAnswers::default();
+        self.write_export(export, answers, "Export", done, cx);
     }
 
     // ----- export clean copy ---------------------------------------------------
 
     /// File > Export Clean Copy: ask for a path, then write the document
     /// there with all markup removed.
-    fn export_clean_copy_prompt(&mut self, cx: &mut Context<Self>) {
+    fn clean_copy_prompt(&mut self, cx: &mut Context<Self>) {
         let dir = self
             .path
             .parent()
@@ -2861,40 +3006,25 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        doc.notice = Some(format!("Exporting clean copy to {}…", path.display()));
-        let snapshot = doc.model.snapshot();
-        let timing = self.timing;
+        let out = Out::File {
+            path: path.clone(),
+            overwrite: true,
+        };
+        let export = Export::clean_copy(doc.model.export_from(Actor::User), out);
+        let (timing, t) = (self.timing, Instant::now());
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let t = Instant::now();
-            let result = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move { save::export_clean_copy(&snapshot, &path) }
-                })
-                .await;
-            this.update(cx, |view, cx| {
-                if let State::Ready(doc) = &mut view.state {
-                    doc.notice = Some(match &result {
-                        Ok(()) => {
-                            if timing {
-                                eprintln!(
-                                    "[timing] exported clean copy {} in {:?}",
-                                    path.display(),
-                                    t.elapsed()
-                                );
-                            }
-                            format!("Exported clean copy to {}", path.display())
-                        }
-                        Err(e) => format!("Export failed: {e:#}"),
-                    });
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        let done = move |_: &Exported| {
+            if timing {
+                eprintln!(
+                    "[timing] exported clean copy {} in {:?}",
+                    path.display(),
+                    t.elapsed()
+                );
+            }
+            format!("Exported clean copy to {}", path.display())
+        };
+        let answers = materialize::AskAnswers::default();
+        self.write_export(export, answers, "Export", done, cx);
     }
 
     /// Open the inline text field for annotation `id` on `page`.
@@ -3659,12 +3789,13 @@ impl DocView {
         });
         Some(crate::print_dialog::PrintContext {
             title: self.file_name(),
-            snapshot: doc.model.snapshot(),
+            from: doc.model.export_from(Actor::User),
             views: doc.views.clone(),
             current: doc.current_page(),
             selected,
             bookmark,
             prefs,
+            printed: Default::default(),
         })
     }
 
@@ -3678,7 +3809,7 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let snapshot = doc.model.snapshot();
+        let from = doc.model.export_from(Actor::User);
         let n = req.pages.len();
         let pages = format!("{n} page{}", if n == 1 { "" } else { "s" });
         if req.save_pdf {
@@ -3695,25 +3826,19 @@ impl DocView {
             let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
             cx.spawn(async move |this, cx| {
                 let Ok(Ok(Some(path))) = rx.await else { return };
-                let result = cx
-                    .background_executor()
-                    .spawn({
-                        let path = path.clone();
-                        async move {
-                            let bytes = save::print_pdf(&snapshot, &req.pages, req.markup)?;
-                            std::fs::write(&path, bytes)?;
-                            anyhow::Ok(())
-                        }
-                    })
-                    .await;
+                // The save dialog asked before it named a file there.
+                let out = Out::File {
+                    path: path.clone(),
+                    overwrite: true,
+                };
+                let export = Export {
+                    out,
+                    ..Export::print(from, &req.pages, req.markup)
+                };
+                let done = move |_: &Exported| format!("Saved {pages} to {}", path.display());
+                let answers = sheaf_doc::export::PRINT_ANSWERS;
                 this.update(cx, |v, cx| {
-                    if let State::Ready(doc) = &mut v.state {
-                        doc.notice = Some(match result {
-                            Ok(()) => format!("Saved {pages} to {}", path.display()),
-                            Err(e) => format!("Couldn't save: {e:#}"),
-                        });
-                    }
-                    cx.notify();
+                    v.write_export(export, answers, "Save as PDF", done, cx)
                 })
                 .ok();
             })
@@ -3728,7 +3853,7 @@ impl DocView {
             let t = Instant::now();
             let result = cx
                 .background_executor()
-                .spawn(async move { send_print(&snapshot, &req) })
+                .spawn(async move { send_print(from, &req) })
                 .await;
             this.update(cx, |v, cx| {
                 if timing {
@@ -3774,14 +3899,11 @@ impl DocView {
     }
 }
 
-/// Prints `req`'s pages of `snapshot`: their print file, made in memory
-/// and handed to the printer from there, so no file is written (M10.5
-/// §10.6). What the spooler said.
-fn send_print(
-    snapshot: &sheaf_doc::Snapshot,
-    req: &crate::print_dialog::PrintRequest,
-) -> anyhow::Result<String> {
-    let bytes = save::print_pdf(snapshot, &req.pages, req.markup)?;
+/// Prints `req`'s pages of `from`'s version: their print file
+/// ([`Export::print`]), made in memory and handed to the printer from
+/// there, so no file is written (M10.5 §10.6). What the spooler said.
+fn send_print(from: ExportFrom, req: &crate::print_dialog::PrintRequest) -> anyhow::Result<String> {
+    let bytes = sheaf_doc::export::printed(from, &req.pages, req.markup, &sheaf_ops::NoProgress)?;
     sheaf_print::submit(&req.job, bytes.into())
 }
 
@@ -4820,8 +4942,8 @@ impl Render for DocView {
         if let Some(rec) = self.pending_recovery.take() {
             self.offer_recovery(rec, window, cx);
         }
-        if let Some((saving, ask)) = self.pending_ask.take() {
-            self.ask_before_saving(saving, ask, window, cx);
+        if let Some((asking, ask)) = self.pending_ask.take() {
+            self.ask_before_writing(asking, ask, window, cx);
         }
         if let Some((page, id)) = self.pending_edit.take() {
             self.start_annot_editor_for(page, id, window, cx);
@@ -5065,8 +5187,8 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &SelectAllPages, _, cx| v.select_all(cx)))
             .on_action(cx.listener(|v, _: &Save, _, cx| v.save(cx).detach()))
             .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx)))
-            .on_action(cx.listener(|v, _: &ExportCleanCopy, _, cx| v.export_clean_copy_prompt(cx)))
-            .on_action(cx.listener(|v, _: &ExportFlattened, _, cx| v.export_flattened_prompt(cx)))
+            .on_action(cx.listener(|v, _: &ExportCleanCopy, _, cx| v.clean_copy_prompt(cx)))
+            .on_action(cx.listener(|v, _: &ExportFlattened, _, cx| v.flattened_copy_prompt(cx)))
             .on_action(cx.listener(|v, _: &crate::SummarizeComments, _, cx| {
                 v.export_comments_prompt(
                     ExportKind::Summary(sheaf_ops::comments::Layout::CommentsOnly),
@@ -6419,10 +6541,10 @@ mod tests {
     /// A file of `pages` blank pages, in a `sheaf-` temporary directory,
     /// which the recent files leave out.
     #[cfg(target_os = "linux")]
-    fn blank_file(pages: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+    fn blank_file(pages: u32) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
         let path = dir.path().join("blank.pdf");
-        let bytes = sheaf_doc::generated::blank_pages(612.0, 792.0, pages).unwrap();
+        let bytes = sheaf_doc::memory::blank_pages(612.0, 792.0, pages).unwrap();
         std::fs::write(&path, bytes).unwrap();
         (dir, path)
     }
@@ -6751,7 +6873,7 @@ mod tests {
             cx.update(|cx| {
                 view.update(cx, |v, _| {
                     let doc = shown(v);
-                    let read = doc.plugin_cell.load().version;
+                    let read = doc.plugin_cell.load().snap.version;
                     assert_eq!(read, doc.model.current_version());
                 })
             });
@@ -6859,6 +6981,143 @@ mod tests {
             }
         });
         assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// `files` combined into `out` as the Combine dialog combines them,
+    /// then shown as the workspace shows what it made (`adopt`), in a
+    /// headless app: the view shows the document Combine made, nothing
+    /// read again (its store and its version), at its one version, the
+    /// saved file's, with nothing to undo, every field named apart, what
+    /// Combine said as its notice, and its scripts as Combine left them;
+    /// autosave and recovery follow its file, the saved one, and
+    /// listeners hear it opened. What Combine said.
+    #[cfg(target_os = "linux")]
+    fn shown_as_combined(files: &[std::path::PathBuf], out: &std::path::Path) -> Option<String> {
+        use sheaf_ops::combine::{CombineItem, CombineParams};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let items: Vec<CombineItem> = files.iter().map(CombineItem::new).collect();
+        let answers = sheaf_doc::export::PRINT_ANSWERS;
+        let (session, report) = sheaf_ops::combine::combine(
+            &items,
+            &CombineParams::default(),
+            out,
+            &answers,
+            &sheaf_ops::NoProgress,
+        )
+        .unwrap();
+        let (store, version) = (session.doc.store().clone(), session.doc.current_version());
+        let scripts = session.doc.state().form().scripts.clone();
+        let st = session.doc.state();
+        let names: Vec<String> = (st.terminals())
+            .map(|(id, _, _)| st.full_name(id).unwrap())
+            .collect();
+        let apart: HashSet<&String> = names.iter().collect();
+        assert_eq!(apart.len(), names.len(), "{names:?}");
+        let notice = report.notice.clone();
+        let out = out.to_path_buf();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let (ran, notice) = (ran.clone(), notice.clone());
+            move |cx| {
+                let view = cx.new(|cx| {
+                    let who = Identity::default();
+                    let (scale, at) = (Default::default(), Instant::now());
+                    DocView::adopting(
+                        out.clone(),
+                        session,
+                        notice.clone(),
+                        who,
+                        scale,
+                        false,
+                        at,
+                        cx,
+                    )
+                });
+                let heard = Rc::new(RefCell::new(Vec::new()));
+                cx.subscribe(&view, {
+                    let heard = heard.clone();
+                    move |_, ev: &DocEvent, _| heard.borrow_mut().push(ev.clone())
+                })
+                .detach();
+                cx.spawn(async move |cx| {
+                    cx.update(|cx| view.update(cx, |v, cx| v.adopted(cx)));
+                    assert_eq!(heard.take(), [DocEvent::Opened]);
+                    cx.update(|cx| {
+                        view.update(cx, |v, _| {
+                            assert_eq!(v.path, out);
+                            let doc = shown(v);
+                            let model = &doc.model;
+                            assert!(Arc::ptr_eq(model.store(), &store), "the same document");
+                            assert_eq!(model.current_version(), version);
+                            assert!(model.is_ready() && doc.reading.is_none());
+                            assert_eq!(model.version_count(), 1);
+                            assert!(!model.can_undo() && !model.is_dirty());
+                            let file = model.file().map(|(file, _)| file.to_path_buf());
+                            assert_eq!(file, Some(out.clone()));
+                            assert_eq!(doc.notice, notice);
+                            assert_eq!(model.state().form().scripts, scripts);
+                        })
+                    });
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+        report.notice
+    }
+
+    /// Combine hands the document it made to a window as it is (M10.5
+    /// §14.1): two forms whose fields have one name and each a document
+    /// script, the second's fields put under a parent of their own and
+    /// the scripts turned off, which the window says; and the 1040 with
+    /// Schedules 1 and B from Greg's corpus (skipped without it), the
+    /// schedules renamed for their files and their scripts on.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_combined_document_opens_in_its_window_as_made() {
+        use lopdf::{Object, dictionary};
+        use sheaf_doc::forms::fixture::{Form, row};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let form = |name: &str| {
+            let mut f = Form::new(1);
+            f.text("name", 0, row(0));
+            let script = f.pdf.add_object(dictionary! {
+                "S" => "JavaScript", "JS" => Object::string_literal("var v;"),
+            });
+            let names = vec![Object::string_literal("Init"), script.into()];
+            let catalog = f.catalog;
+            f.dict(catalog).set(
+                "Names",
+                dictionary! { "JavaScript" => dictionary! { "Names" => names } },
+            );
+            let path = dir.path().join(format!("{name}.pdf"));
+            std::fs::write(&path, f.bytes()).unwrap();
+            path
+        };
+        let files = [form("a"), form("b")];
+        let said = shown_as_combined(&files, &dir.path().join("combined.pdf"));
+        let want = "Fields from b.pdf are under “b”, since their names were taken; its scripts \
+                    still use the old names. Scripts are off: fields from more than one form \
+                    have them";
+        assert_eq!(said.as_deref(), Some(want));
+
+        let Some(corpus) = sheaf_doc::forms::corpus::Corpus::or_skip() else {
+            return;
+        };
+        let files = ["f1040", "f1040s1", "f1040sb"].map(|name| {
+            let path = format!("forms/irs/{name}.pdf");
+            corpus.path(&corpus.entry(&path).unwrap().expect("in the manifest"))
+        });
+        let said = shown_as_combined(&files, &dir.path().join("1040.pdf"));
+        let renamed = |file: &str| {
+            format!("Fields from {file}.pdf are under “{file}”, since their names were taken")
+        };
+        let want = [renamed("f1040s1"), renamed("f1040sb")].join(". ");
+        assert_eq!(said, Some(want));
     }
 
     /// A view showing `model`, the document of the file at `path`.
@@ -6995,6 +7254,70 @@ mod tests {
                     let view = doc.views.view(doc.model.state(), made[0], &doc.inputs);
                     assert_eq!(view.unwrap().engine, EngineKey::Base(src));
                     assert_eq!(doc.model.undo_label(), Some("Insert blank.pdf"));
+                });
+                ran.store(true, Ordering::Relaxed);
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// An image's page, planned while the user moves a page, lands too,
+    /// lowered again on the moved pages: made in memory again, the same
+    /// bytes and so the same blob, it keeps the ids its plan drew (M10.5
+    /// §3.9, §8.5). Once it's landed, nothing holds the image.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_made_page_lands_lowered_again() {
+        use sheaf_doc::store::{BlobKind, MemoryKind, Origin};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(3);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    let doc = shown(view);
+                    let [a, b, c] = std::array::from_fn(|i| doc.page_id(i).unwrap());
+                    let red = image::RgbImage::from_pixel(40, 20, image::Rgb([200, 30, 30]));
+                    let png = sheaf_image::encode::png(&red, 72).unwrap();
+                    let kind = BlobKind::image(&png).unwrap();
+                    let image = doc.model.store().intern(png.into(), kind).unwrap();
+                    let from = sheaf_edit::PageSource::Images {
+                        images: vec![sheaf_edit::BlobSel::Id(image.id())],
+                        fit: sheaf_edit::Fit::LETTER,
+                    };
+                    let (snap, lower) = (doc.model.snapshot(), doc.model.lower_cx(Actor::User));
+                    let (p, held) = (&sheaf_ops::NoProgress, image.id());
+                    let plan =
+                        crate::page_insert::plan_made(&snap, lower, from, vec![image], Some(b), p);
+                    let plan = plan.unwrap();
+                    let made_as = match plan.src().blob().kind() {
+                        BlobKind::Pdf { origin, .. } => origin.clone(),
+                        _ => panic!("a PDF"),
+                    };
+                    assert_eq!(made_as, Origin::Memory(MemoryKind::Images));
+                    let (src, planned) = (plan.src().id(), plan.created());
+                    let to_end = Op::MovePages {
+                        pages: PageSel::ids([a]),
+                        before: None,
+                    };
+                    let tx = view.lower(vec![to_end], "Move page", cx).unwrap();
+                    view.commit(tx, CommitOpts::labelled("Move page"), cx)
+                        .unwrap();
+                    let commit = view.land(plan, "Insert image", cx).unwrap();
+                    assert_eq!(commit.created, planned);
+                    let made: Vec<PageId> = commit.created.pages().collect();
+                    let doc = shown(view);
+                    assert_eq!(order(doc), [made[0], b, c, a]);
+                    let def = doc.model.state().def(made[0]).unwrap();
+                    assert_eq!(def.base.src.id(), src);
+                    assert!(
+                        doc.model.store().get(held).is_none(),
+                        "the image isn't held"
+                    );
                 });
                 ran.store(true, Ordering::Relaxed);
                 cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
@@ -7699,7 +8022,7 @@ mod tests {
                     let drawn = |view: &mut DocView| {
                         let prefs = crate::print_dialog::PrintPrefs::default();
                         let ctx = view.print_context(prefs).unwrap();
-                        let page = ctx.snapshot.state.page_at(0).unwrap();
+                        let page = ctx.from.snap.state.page_at(0).unwrap();
                         let doc = shown(view);
                         let screen = doc.views.view(doc.model.state(), page, &doc.inputs);
                         let (preview, job) = ctx.preview(page, 400, true).unwrap();
@@ -7707,7 +8030,7 @@ mod tests {
                         let printed = futures::executor::block_on(rx).unwrap().unwrap();
                         let request = printed.request;
                         assert_eq!((request.page.0, request.job), (preview.index, job));
-                        let pages = ViewPages::new(ctx.views.clone(), ctx.snapshot.clone());
+                        let pages = ViewPages::new(ctx.views.clone(), ctx.from.snap.clone());
                         let read = pages.render(&pages.page(page).unwrap(), 400).unwrap();
                         let key = preview.key;
                         (screen.unwrap().key, key, printed.raster.data, read.data)
@@ -7939,7 +8262,7 @@ mod tests {
                     let rx = ctx.render_preview(page, 400, true);
                     let preview = futures::executor::block_on(rx).unwrap().unwrap();
                     assert_eq!(preview.raster.width, 400);
-                    let pages: Vec<PageId> = ctx.snapshot.state.order().iter().copied().collect();
+                    let pages: Vec<PageId> = ctx.from.snap.state.order().iter().copied().collect();
                     let job = sheaf_print::JobSettings {
                         printer: "Office".into(),
                         title: ctx.title.clone(),
@@ -7957,7 +8280,11 @@ mod tests {
                         save_pdf: false,
                         prefs,
                     };
-                    assert_eq!(send_print(&ctx.snapshot, &req).unwrap(), "request fake-1");
+                    let State::Ready(doc) = &view.state else {
+                        panic!("the view is ready");
+                    };
+                    let from = doc.model.export_from(Actor::User);
+                    assert_eq!(send_print(from.clone(), &req).unwrap(), "request fake-1");
                     for format in [Format::Png, Format::Tiff(TiffMode::Color)] {
                         let job = ExportJob {
                             pages: pages.clone(),
@@ -7968,7 +8295,7 @@ mod tests {
                             stem: "print".into(),
                         };
                         let progress = &sheaf_ops::NoProgress;
-                        let files = sheaf_ops::export::run(&ctx.snapshot, &job, progress).unwrap();
+                        let files = sheaf_ops::export::run(&from, &job, progress).unwrap();
                         assert_eq!(files.len(), if format.single_file() { 1 } else { 2 });
                         assert!(files.iter().all(|f| f.starts_with(&out) && f.is_file()));
                     }
@@ -7978,6 +8305,118 @@ mod tests {
             }
         });
         assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// The exports are jobs, one at a time (M10.5 §12, §14.1): an Extract
+    /// is the running job, an export asked for meanwhile is refused and the
+    /// status line says why, and once the Extract is written the job is
+    /// done and the notice says so. The document's own file is refused as
+    /// its target (§12.1) and nothing is written.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn exports_run_as_jobs_one_at_a_time() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("a.pdf");
+        std::fs::write(&path, said(2)).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let (out, flat) = (dir.path().join("out.pdf"), dir.path().join("flat.pdf"));
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let (ran, path) = (ran.clone(), path.clone());
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |v, cx| {
+                    let ids = vec![shown(v).page_id(0).unwrap()];
+                    v.extract_to(ids, out.clone(), cx);
+                    assert_eq!(v.job.as_ref().map(|j| j.name.as_str()), Some("Extract"));
+                    v.flattened_copy_to(flat.clone(), cx);
+                    let said = "Extract is still running — Esc stops it";
+                    assert_eq!(shown(v).notice.as_deref(), Some(said));
+                });
+                cx.spawn(async move |cx| {
+                    let ended = async |cx: &mut gpui::AsyncApp| {
+                        for _ in 0..1000 {
+                            if cx.update(|cx| view.read(cx).job.is_none()) {
+                                return;
+                            }
+                            let tick = std::time::Duration::from_millis(10);
+                            cx.background_executor().timer(tick).await;
+                        }
+                        panic!("the job ran on");
+                    };
+                    ended(cx).await;
+                    cx.update(|cx| {
+                        view.update(cx, |v, cx| {
+                            let said = format!("Extracted 1 page to {}", out.display());
+                            assert_eq!(shown(v).notice.as_deref(), Some(&*said));
+                            assert!(out.is_file() && !flat.exists());
+                            v.export_clean_to(path.clone(), cx);
+                        })
+                    });
+                    ended(cx).await;
+                    cx.update(|cx| {
+                        let notice = view.update(cx, |v, _| shown(v).notice.clone());
+                        let said = "Export failed: an export can't replace the open file; \
+                                    choose another name";
+                        assert_eq!(notice.as_deref(), Some(said));
+                        ran.store(true, Ordering::Relaxed);
+                        cx.quit();
+                    });
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// A page whose annotations can't be drawn into it (its content can't
+    /// be read) has no print preview with markup, and it's tried once: the
+    /// preview keeps that, so a later frame doesn't lower it again.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_print_preview_that_cant_be_made_is_tried_once() {
+        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("unread.pdf");
+        let mut pdf = Pdf::load_mem(&said(1)).unwrap();
+        let page = pdf.get_pages()[&1];
+        let bad = pdf.add_object(Stream::new(dictionary! {}, b"0 0 9 9 re f EMC".to_vec()));
+        let dict = pdf.get_dictionary_mut(page).unwrap();
+        dict.set("Contents", Object::Reference(bad));
+        pdf.save(&path).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        gpui_platform::headless().run({
+            let seen = seen.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |view, cx| {
+                    let page = shown(view).page_id(0).unwrap();
+                    let rect = Box2 {
+                        x: 300.0,
+                        y: 600.0,
+                        w: 80.0,
+                        h: 50.0,
+                    };
+                    let square = view.new_annot(AnnotKind::Square { rect }, [200, 0, 0]);
+                    let added = view.add_annot(page, square, "Square", cx).is_some();
+                    let prefs = crate::print_dialog::PrintPrefs::default();
+                    let ctx = view.print_context(prefs).unwrap();
+                    let mut seen = seen.lock().unwrap();
+                    seen.push(added);
+                    for _ in 0..2 {
+                        seen.push(ctx.preview(page, 400, true).is_none());
+                        seen.push(ctx.printed.borrow().get(&page) == Some(&None));
+                    }
+                    seen.push(ctx.preview(page, 400, false).is_some());
+                });
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert_eq!(*seen.lock().unwrap(), [true; 6]);
     }
 
     /// The threads of this process.
@@ -8025,7 +8464,7 @@ mod tests {
         let files: Vec<PathBuf> = (0..=20)
             .map(|k| {
                 let file = dir.path().join(format!("{k}.pdf"));
-                let bytes = sheaf_doc::generated::blank_pages(600.0 + k as f32, 792.0, 1);
+                let bytes = sheaf_doc::memory::blank_pages(600.0 + k as f32, 792.0, 1);
                 std::fs::write(&file, bytes.unwrap()).unwrap();
                 file
             })

@@ -1,0 +1,25 @@
+$ sheaf-cli edit $DIR/in.pdf --edits - -o $DIR/cancelled.pdf
+--- edits
+{
+  "ops": [
+    {
+      "by": 90,
+      "op": "rotate-pages",
+      "pages": {
+        "ids": [
+          {
+            "pos": 1
+          }
+        ]
+      }
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 130
+--- stdout
+--- stderr
+editing…
+
+stopping… (Ctrl-C again to quit now)
+cancelled

@@ -15,7 +15,7 @@ use crate::PageId;
 use crate::content::{
     self, Concat, DrawnForms, PageBlocks, PageContent, PropertiesDict, ResCx, SpanAcross,
 };
-use crate::model::LEGACY_KEYS;
+use crate::private::LIST_KEYS;
 use crate::store::{BlobKind, Src, Store};
 
 /// `data` read lazily: every object the cross-reference table lists, and
@@ -188,7 +188,7 @@ pub fn splice(data: &[u8]) -> usize {
         }
     }
     for span in top {
-        if let Ok(Some(rewrite)) = content::without_keys(concat, &res, lim, span, &LEGACY_KEYS) {
+        if let Ok(Some(rewrite)) = content::without_keys(concat, &res, lim, span, &LIST_KEYS) {
             let nothing = content::splice_each(concat, &res, lim, &[]);
             let rewritten = (nothing.streams(concat, &[rewrite])).expect("a list written again");
             assert_rewritten(concat, &res, &rewritten);
@@ -396,7 +396,7 @@ fn assert_kept(content: &Concat, res: &ResCx, kept: &[Cow<[u8]>], drop: &[SpanAc
 }
 
 /// That `rewritten`, `content` with a list written again without
-/// [`LEGACY_KEYS`], lexes as `content` does but for that list, which reads
+/// [`LIST_KEYS`], lexes as `content` does but for that list, which reads
 /// as it did without them.
 fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>]) {
     let lim = &Limits::DEFAULT;
@@ -420,7 +420,7 @@ fn assert_rewritten(content: &Concat, res: &ResCx, rewritten: &[Cow<[u8]>]) {
     let Some(Object::Dictionary(mut left)) = read(was) else {
         panic!("a list written again was one")
     };
-    for key in LEGACY_KEYS {
+    for key in LIST_KEYS {
         left.remove(key);
     }
     assert_eq!(

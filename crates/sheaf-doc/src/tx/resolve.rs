@@ -14,9 +14,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use sheaf_edit::{
-    AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Color, Delta, DestView, GridPos,
-    HeaderFooterSpec, Imported, Local, MarkKind, MarkPatch, NewMark, Op, PageRef, PageSel,
-    PageSource, Patch, ScopeSel, Sibling, Style, TextStyle, Turn, Z,
+    AnnotRef, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Color, Delta, DestView, Fit,
+    FlattenSet, GridPos, HeaderFooterSpec, Imported, Local, MarkKind, MarkPatch, NewMark, Op,
+    PageRef, PageSel, PageSource, Patch, ScopeSel, Sibling, Style, TextStyle, Turn, Z,
 };
 
 use super::Made;
@@ -24,9 +24,11 @@ use super::error::EditError;
 use super::{Grant, LowerCx};
 use crate::annot::{AnnotId, AnnotKind, Box2};
 use crate::labels::LabelSpec;
+use crate::memory;
 use crate::model::{DocState, Foreign, ImageRef, OutlineId, PageForm, PageId, WatermarkContent};
 use crate::open::FileBody;
 use crate::prim::Key;
+use crate::source::ObjRef;
 use crate::store::{Blob, BlobId, BlobKind, BlobRef, Src, Store};
 use crate::text_layer::TextLayer;
 
@@ -169,6 +171,13 @@ pub enum ResolvedOp {
         include_authored: bool,
         others: OthersFound,
     },
+    /// `flattened` is how many annotations its lowering flattened, none
+    /// before.
+    FlattenAnnotations {
+        pages: Vec<PageId>,
+        which: FlattenSet,
+        flattened: usize,
+    },
     /// A group's versions taken back, the group called `label`: what
     /// History's "Undo all of …" makes, and a failed call's rollback. No
     /// `Op` says it, and it's never lowered: its step holds the group's
@@ -267,6 +276,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::RemoveWatermark { .. } => "remove-watermark",
         Op::SetHeaderFooter { .. } => "set-header-footer",
         Op::RemoveHeaderFooter { .. } => "remove-header-footer",
+        Op::FlattenAnnotations { .. } => "flatten-annotations",
         _ => "op",
     }
 }
@@ -300,6 +310,7 @@ impl ResolvedOp {
             R::RemoveWatermark { .. } => "remove-watermark",
             R::SetHeaderFooter { .. } => "set-header-footer",
             R::RemoveHeaderFooter { .. } => "remove-header-footer",
+            R::FlattenAnnotations { .. } => "flatten-annotations",
             R::Revert { .. } => "revert",
         }
     }
@@ -325,7 +336,13 @@ pub(super) struct Resolver<'a> {
     pub(super) cx: &'a LowerCx,
     pub(super) grants: &'a [Grant],
     pub(super) named: &'a HashMap<String, usize>,
+    /// The ops were read from a file, where an id means nothing
+    /// ([`Tx::ops_from_file`](super::Tx::ops_from_file)).
+    pub(super) from_file: bool,
     pub(super) op: &'static str,
+    /// Pages an insert makes in memory are made, and interned: an op
+    /// applied, not checked ([`Tx::check`](super::Tx::check)).
+    pub(super) build: bool,
     /// The slots resolving read: lowering reads (§6.3).
     pub(super) reads: BTreeSet<Key>,
 }
@@ -337,6 +354,17 @@ impl Resolver<'_> {
 
     fn invalid(&self, why: impl std::fmt::Display) -> EditError {
         EditError::invalid(self.op, why)
+    }
+
+    /// Whether `what` may be named by id: not in ops read from a file,
+    /// where `instead` says how to name it.
+    fn id_allowed(&self, what: impl std::fmt::Display, instead: &str) -> Result<(), EditError> {
+        match self.from_file {
+            true => Err(self.invalid(format!(
+                "{what} is named by id, and session ids aren't meaningful in a file: {instead}"
+            ))),
+            false => Ok(()),
+        }
     }
 
     /// `op`, resolved.
@@ -370,9 +398,9 @@ impl Resolver<'_> {
                 bring,
                 locals,
             } => {
-                let (from, name) = self.source(from)?;
+                let (from, name, count) = self.source(from)?;
                 R::InsertPages {
-                    pages: self.source_pages(&from, pages.as_ref())?,
+                    pages: self.source_pages(count, pages.as_ref())?,
                     from,
                     name,
                     before: self.maybe_page(before.as_ref())?,
@@ -386,14 +414,14 @@ impl Resolver<'_> {
                 with,
                 bring,
             } => {
-                let (from, name) = self.source(from)?;
+                let (from, name, count) = self.source(from)?;
                 let mut ids = Vec::with_capacity(pages.len());
                 for p in pages {
                     ids.push(self.page(p)?);
                 }
                 R::ReplacePages {
                     pages: once_each(ids),
-                    with: self.source_pages(&from, with.as_ref())?,
+                    with: self.source_pages(count, with.as_ref())?,
                     from,
                     name,
                     bring: bring.clone(),
@@ -654,6 +682,11 @@ impl Resolver<'_> {
                 include_authored: *include_authored,
                 others: OthersFound::default(),
             },
+            Op::FlattenAnnotations { pages, which } => R::FlattenAnnotations {
+                pages: self.pages(pages)?,
+                which: *which,
+                flattened: 0,
+            },
             _ => return Err(EditError::internal(format!("{op:?} has no lowering"))),
         })
     }
@@ -685,7 +718,10 @@ impl Resolver<'_> {
 
     pub(super) fn page(&mut self, r: &PageRef) -> Result<PageId, EditError> {
         let id = match *r {
-            PageRef::Id(id) => id,
+            PageRef::Id(id) => {
+                self.id_allowed(format_args!("page {}", id.0), "name it {\"pos\": n}")?;
+                id
+            }
             PageRef::New(l) => match self.local(l)? {
                 Made::Page(id) => id,
                 _ => return Err(self.invalid(format!("{l} isn't a page"))),
@@ -755,7 +791,11 @@ impl Resolver<'_> {
 
     fn bookmark(&mut self, r: &BookmarkRef) -> Result<OutlineId, EditError> {
         let id = match r {
-            BookmarkRef::Id(id) => *id,
+            BookmarkRef::Id(id) => {
+                let instead = "name it {\"path\": [its titles from the top]}";
+                self.id_allowed(format_args!("bookmark {}", id.0), instead)?;
+                *id
+            }
             BookmarkRef::New(l) => match self.local(*l)? {
                 Made::Bookmark(id) => id,
                 _ => return Err(self.invalid(format!("{l} isn't a bookmark"))),
@@ -836,7 +876,13 @@ impl Resolver<'_> {
 
     fn annot(&mut self, r: &AnnotRef) -> Result<AnnotId, EditError> {
         let id = match r {
-            AnnotRef::Id(id) => *id,
+            AnnotRef::Id(id) => {
+                self.id_allowed(
+                    format_args!("annotation {}", id.0),
+                    "name it {\"nm\": its /NM}",
+                )?;
+                *id
+            }
             AnnotRef::New(l) => match self.local(*l)? {
                 Made::Annot(id) => id,
                 _ => return Err(self.invalid(format!("{l} isn't an annotation"))),
@@ -971,6 +1017,8 @@ impl Resolver<'_> {
     fn blob(&self, sel: &BlobSel) -> Result<Grant, EditError> {
         match sel {
             BlobSel::Id(id) => {
+                let instead = "name the file {\"with\": NAME}, given as --with NAME=PATH";
+                self.id_allowed(format_args!("blob {}", id.stem()), instead)?;
                 if matches!(self.cx.actor, super::Actor::Plugin { .. }) {
                     return Err(EditError::Refused(super::Cap::User));
                 }
@@ -1094,32 +1142,112 @@ impl Resolver<'_> {
         }
     }
 
-    /// The source `from` is, and the name it goes by.
-    fn source(&self, from: &PageSource) -> Result<(Src, Arc<str>), EditError> {
-        let PageSource::File { file, name } = from;
-        let blob = match self.blob(file)? {
-            Grant::Blob(b) => b,
-            Grant::Stamp { .. } => return Err(self.invalid("a stamp's page isn't a file of pages")),
-        };
-        let src = (self.cx.store.source(blob.blob()))
-            .map_err(|e| self.invalid(format!("{name} can't be read as a PDF: {e}")))?;
-        Ok((src, name.as_str().into()))
+    /// The source `from` is, the name it goes by, and how many pages it
+    /// has. Pages made in memory, blank or of images, are made and
+    /// interned ([`memory`]) when the resolver builds; the same op makes
+    /// the same bytes, so lowering it again finds the same blob. A check
+    /// makes none: its op stands with the primary in their place, which
+    /// only the capabilities read, and how many pages image files hold is
+    /// known once they're read.
+    fn source(&self, from: &PageSource) -> Result<(Src, Arc<str>, Option<u32>), EditError> {
+        match from {
+            PageSource::File { file, name } => {
+                let blob = match self.blob(file)? {
+                    Grant::Blob(b) => b,
+                    Grant::Stamp { .. } => {
+                        return Err(self.invalid("a stamp's page isn't a file of pages"));
+                    }
+                };
+                let src = (self.cx.store.source(blob.blob()))
+                    .map_err(|e| self.invalid(format!("{name} can't be read as a PDF: {e}")))?;
+                let count = src.page_count();
+                Ok((src, name.as_str().into(), Some(count)))
+            }
+            PageSource::Blank { size, count } => {
+                let sides = [size.width, size.height];
+                if !sides.iter().all(|s| s.is_finite() && *s > 0.0) {
+                    return Err(self.invalid("the blank pages' size isn't one"));
+                }
+                if *count == 0 {
+                    return Err(self.invalid("no blank pages to insert"));
+                }
+                // As many as a file opens with (the page tree's limit),
+                // refused before they're made, which takes gigabytes near it.
+                if *count as usize > crate::source::Limits::DEFAULT.page_tree.pages {
+                    return Err(self.invalid("more blank pages than a file holds"));
+                }
+                let name = match count {
+                    1 => "blank page".into(),
+                    n => format!("{n} blank pages").into(),
+                };
+                if !self.build {
+                    return Ok((self.cx.primary.clone(), name, Some(*count)));
+                }
+                let src = (memory::blank(&self.cx.store, *size, *count))
+                    .map_err(|e| self.invalid(format!("the blank pages can't be made: {e:#}")))?;
+                Ok((src, name, Some(*count)))
+            }
+            PageSource::Images { images, fit } => {
+                if images.is_empty() {
+                    return Err(self.invalid("no images to insert"));
+                }
+                if let Fit::Paper {
+                    width,
+                    height,
+                    margin,
+                } = *fit
+                {
+                    let numbers = [width, height, margin].iter().all(|v| v.is_finite());
+                    if !numbers || width <= 0.0 || height <= 0.0 {
+                        return Err(self.invalid("the images' paper size isn't one"));
+                    }
+                    if margin < 0.0 || 2.0 * margin >= width.min(height) {
+                        return Err(self.invalid("the margin leaves no room for the image"));
+                    }
+                }
+                let mut files = Vec::with_capacity(images.len());
+                for sel in images {
+                    // By its bytes, as a watermark's image is.
+                    let file = self.file(sel)?;
+                    if BlobKind::image(file.bytes()).is_none() {
+                        return Err(
+                            self.invalid(format!("image {} isn't an image file", files.len() + 1))
+                        );
+                    }
+                    files.push(file);
+                }
+                let name = match images.as_slice() {
+                    [BlobSel::With(name)] => name.as_str().into(),
+                    [_] => "1 image".into(),
+                    many => format!("{} images", many.len()).into(),
+                };
+                if !self.build {
+                    return Ok((self.cx.primary.clone(), name, None));
+                }
+                let bytes: Vec<&[u8]> = files.iter().map(|f| &**f.bytes()).collect();
+                let src = (memory::images(&self.cx.store, &bytes, *fit))
+                    .map_err(|e| self.invalid(format!("the images can't be made pages: {e:#}")))?;
+                let count = src.page_count();
+                Ok((src, name, Some(count)))
+            }
+        }
     }
 
-    /// The pages of `src` that `pages` names, 1-based, as 0-based indexes;
-    /// every page when none.
+    /// The pages of a source of `count` pages that `pages` names, 1-based,
+    /// as 0-based indexes; every page when none. Of one whose count isn't
+    /// known yet, those `pages` names, and none for every page.
     fn source_pages(
         &self,
-        src: &Src,
+        count: Option<u32>,
         pages: Option<&sheaf_edit::RangeSet>,
     ) -> Result<Vec<u32>, EditError> {
-        let count = src.page_count();
-        match pages {
-            None => Ok((0..count).collect()),
-            Some(set) if set.last() > count => {
+        match (pages, count) {
+            (None, Some(count)) => Ok((0..count).collect()),
+            (None, None) => Ok(Vec::new()),
+            (Some(set), Some(count)) if set.last() > count => {
                 Err(self.not_found(format!("page {} of the file's {count}", set.last())))
             }
-            Some(set) => Ok(set.iter().map(|p| p - 1).collect()),
+            (Some(set), _) => Ok(set.iter().map(|p| p - 1).collect()),
         }
     }
 
@@ -1150,12 +1278,11 @@ fn once_each<T: Copy + Eq + std::hash::Hash>(ids: Vec<T>) -> Vec<T> {
 
 /// What the marks on pages `pages` of `src` hold that the document's store
 /// may not have yet, decoded and interned there for an insert to lower:
-/// each attachment's file, and the pages of stamps found by name
-/// ([`find_stamp`](crate::model::find_stamp), the generated cache
-/// included until slice 19). The caller pins them in the transaction
-/// ([`Tx::pin`](super::Tx::pin)) until it's committed. Off the UI thread
-/// when the caller can (§3.1). A file that can't be decoded is said, and
-/// its mark holds none.
+/// each attachment's file, and the pages of stamps the store holds by
+/// name ([`find_stamp`](crate::model::find_stamp)). The caller pins them
+/// in the transaction ([`Tx::pin`](super::Tx::pin)) until it's committed.
+/// Off the UI thread when the caller can (§3.1). A file that can't be
+/// decoded is said, and its mark holds none.
 pub fn incoming(store: &Store, primary: &Src, src: &Src, pages: &[u32]) -> Vec<Blob> {
     let fact = src.annots().clone();
     let mut out = Vec::new();
@@ -1165,8 +1292,12 @@ pub fn incoming(store: &Store, primary: &Src, src: &Src, pages: &[u32]) -> Vec<B
                 continue;
             };
             let found = match (&annot.kind, held) {
-                (AnnotKind::FileAttachment { name, size, .. }, Some(stream)) => {
-                    crate::model::file_in(store, src, *stream, *size)
+                (AnnotKind::FileAttachment { name, size, .. }, Some(id)) => {
+                    let stream = ObjRef {
+                        src: src.clone(),
+                        id: *id,
+                    };
+                    crate::model::file_in(store, &stream, *size)
                         .inspect_err(|e| log::warn!("attachment {name}: {e:#}"))
                         .ok()
                 }

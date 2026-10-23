@@ -6607,7 +6607,10 @@ dependencies = [
  "indicatif",
  "log",
  "lopdf",
+ "schemars",
+ "serde_json",
  "sheaf-doc",
+ "sheaf-edit",
  "sheaf-image",
  "sheaf-ocr",
  "sheaf-ops",
@@ -6761,8 +6764,11 @@ dependencies = [
 
 [[package]]
 name = "sheaf-plugin-api"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "sheaf-edit",
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.62.0",
 ]

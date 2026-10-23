@@ -16,14 +16,16 @@
 //!   back up a tree or across to another annotation.
 //! - **Derived objects** are judged on their record inputs, the saved
 //!   state's against the target's: a sheaf mark's objects, and what they
-//!   reach, on what the mark says; the blocks drawn on a page (OCR text and
-//!   the generators: the header and footer, watermarks and backgrounds) on
-//!   its OCR words, its header's text there and what its watermarks draw,
-//!   a block the file held when it opened too, when the saved state backs
-//!   its generator; `/SheafGenerators` on what every generator's recipe
-//!   says. A resource sheaf drew with, a page's resources it made and the
-//!   streams that isolate a page's content are their user's, and say
-//!   nothing of their own. A live redraw's old block, which a generator
+//!   reach, on what the mark says; the blocks drawn on a page (OCR text,
+//!   flattened annotations and the generators: the header and footer,
+//!   watermarks and backgrounds) on its OCR words, what its flattened
+//!   annotations draw, its header's text there and what its watermarks
+//!   draw, a block the file held when it opened too, when the saved state
+//!   backs its generator; `/SheafGenerators` on what every generator's
+//!   recipe says. A resource sheaf drew with, a mark's appearance a
+//!   flatten pinned, a page's resources it made and the streams that
+//!   isolate a page's content are their user's, and say nothing of their
+//!   own. A live redraw's old block, which a generator
 //!   lays out otherwise now from the same recipe, may go once every page
 //!   it was on draws it again or is gone ([`Section::allowed`]): a page
 //!   number drawn again leaks nothing. Pages laid out alike share a block,
@@ -60,7 +62,7 @@ use crate::annot::{AnnotId, AnnotKind};
 use crate::content::{Concat, FontDecoders, GenId, Marker, ReadObjects, ResCx, TextBag, text_bag};
 use crate::file::text_string;
 use crate::model::{
-    AnnotBody, AnnotRec, DocState, FormRef, GenSpec, ImageRef, Mark, PageForm, PageId,
+    AnnotBody, AnnotRec, DocState, FormRef, GenSpec, ImageRef, Mark, PageForm, PageId, Static,
     WatermarkContent, WatermarkGen,
 };
 use crate::prim::Key;
@@ -396,8 +398,9 @@ impl<'a> Walk<'a> {
         // A block of sheaf's the file held when it opened is judged as the
         // block it is, on what's drawn over its page, for a generator the
         // saved state backs; a stream that isolates content says nothing,
-        // when it holds only that; recognized text's is the file's own, its
-        // words read as any stream's are.
+        // when it holds only that; recognized text's and flattened
+        // annotations' are the file's own, their words read as any
+        // stream's are.
         if let ObjKey::Base { .. } = key
             && let Ok(stream) = obj.as_stream()
             && let Some(marker) = Marker::of(&stream.dict)
@@ -414,12 +417,16 @@ impl<'a> Walk<'a> {
                     self.blocks.insert(item.id.0, key);
                     return;
                 }
-                (Marker::Gen { .. } | Marker::Ocr(_), _) => {}
+                (Marker::Gen { .. } | Marker::Ocr(_) | Marker::Flat(_), _) => {}
             }
         }
         match (key, item.page) {
             (
-                ObjKey::Res(_) | ObjKey::ResPart(..) | ObjKey::Shared(_) | ObjKey::PageRes { .. },
+                ObjKey::Res(_)
+                | ObjKey::ResPart(..)
+                | ObjKey::Pinned(_)
+                | ObjKey::Shared(_)
+                | ObjKey::PageRes { .. },
                 _,
             ) => return,
             (ObjKey::Block(_), Some(page)) => {
@@ -519,17 +526,17 @@ impl<'a> Walk<'a> {
         let header = (s.said.iter()).any(|k| matches!(k, Key::Generator(_)));
         for (&page, &key) in &self.pages {
             let redrawn = |g: GenId| s.allowed.redrawn.contains(&(page, g));
-            let ([ocr, hf], [a, b]) = (then.on(page, redrawn), after.on(page, |_| false));
+            let ([layers, hf], [a, b]) = (then.on(page, redrawn), after.on(page, |_| false));
             let mut drawn = a;
             drawn.extend(&b);
-            let mut all = ocr.clone();
+            let mut all = layers.clone();
             all.extend(&hf);
             if all.missing_from(&drawn) == 0 {
                 continue;
             }
             let mut unsaid = TextBag::default();
             if !s.said.contains(&Key::Page(page)) {
-                unsaid.extend(&ocr);
+                unsaid.extend(&layers);
             }
             if !header {
                 unsaid.extend(&hf);
@@ -794,10 +801,20 @@ fn says(rec: Option<&AnnotRec>) -> TextBag {
 /// Adds what mark `m` says to `bag` ([`says`]).
 fn mark_says(m: &Mark, bag: &mut TextBag) {
     let a = &m.annot;
-    for text in [&a.contents, &a.author, &a.name()] {
+    for text in [&a.author, &a.name()] {
         bag.add(text);
     }
-    match &a.kind {
+    drawn_says(&a.kind, &a.contents, m.stamp.as_ref(), bag);
+    if let Some(file) = &m.file {
+        bag.add_hash(blob_hash(file.id()));
+    }
+}
+
+/// Adds what a mark of `kind` saying `contents` draws to `bag`: its text,
+/// its kind's own and the stamp's page it holds ([`form_says`]).
+fn drawn_says(kind: &AnnotKind, contents: &str, stamp: Option<&FormRef>, bag: &mut TextBag) {
+    bag.add(contents);
+    match kind {
         AnnotKind::Stamp { glyph, .. } => bag.add(glyph),
         AnnotKind::Connector { label, .. } => bag.add(label),
         AnnotKind::Tape { tape, .. } => {
@@ -837,19 +854,31 @@ fn mark_says(m: &Mark, bag: &mut TextBag) {
         }
         _ => {}
     }
-    if let Some(file) = &m.file {
-        bag.add_hash(blob_hash(file.id()));
+    if let Some(form) = stamp {
+        form_says(form, bag);
     }
-    match &m.stamp {
-        Some(FormRef::Blob(blob)) => bag.add_hash(blob_hash(blob.id())),
-        Some(FormRef::Base(r)) => {
-            let mut bytes = blob_hash(r.src.id()).to_be_bytes().to_vec();
-            bytes.extend(r.id.0.to_be_bytes());
-            bytes.extend(r.id.1.to_be_bytes());
-            bag.add_hash(sheaf_util::checksum(&bytes));
+}
+
+/// Adds what form `form` draws to `bag`: a blob's page or a source's
+/// object by hash, and a pinned appearance's mark as it's drawn
+/// ([`drawn_says`]).
+fn form_says(form: &FormRef, bag: &mut TextBag) {
+    match form {
+        FormRef::Blob(blob) => bag.add_hash(blob_hash(blob.id())),
+        FormRef::Base(at) => bag.add_hash(at_hash(at)),
+        FormRef::Pinned(ap) => {
+            let ap = &ap.inputs;
+            drawn_says(&ap.kind, &ap.contents, ap.stamp.as_ref(), bag);
         }
-        None => {}
     }
+}
+
+/// A source's object's identity as one hash.
+fn at_hash(at: &ObjRef) -> u128 {
+    let mut bytes = blob_hash(at.src.id()).to_be_bytes().to_vec();
+    bytes.extend(at.id.0.to_be_bytes());
+    bytes.extend(at.id.1.to_be_bytes());
+    sheaf_util::checksum(&bytes)
 }
 
 /// A blob's identity as one hash.
@@ -869,19 +898,29 @@ impl<'a> Drawn<'a> {
         Drawn { st }
     }
 
-    /// The words drawn over page `id`: its OCR text, then what the
-    /// generators on it draw there but those `skip` names: the header and
-    /// footer's text on it, and what its watermarks draw. Nothing for a
-    /// page the state hasn't got.
+    /// The words drawn over page `id`: its layers' (its OCR text, and
+    /// what a flatten drew there, [`form_says`]), then what the generators
+    /// on it draw there but those `skip` names: the header and footer's
+    /// text on it, and what its watermarks draw. Nothing for a page the
+    /// state hasn't got.
     fn on(&self, id: PageId, skip: impl Fn(GenId) -> bool) -> [TextBag; 2] {
         let st = self.st;
-        let (mut ocr, mut bag) = (TextBag::default(), TextBag::default());
-        let (Some(pos), Some(geom)) = (st.pos_of(id), st.geom(id)) else {
-            return [ocr, bag];
+        let (mut layers, mut bag) = (TextBag::default(), TextBag::default());
+        let (Some(def), Some(pos), Some(geom)) = (st.def(id), st.pos_of(id), st.geom(id)) else {
+            return [layers, bag];
         };
-        if let Some(layer) = st.ocr_text(id) {
-            for word in &layer.words {
-                ocr.add(&word.text);
+        for layer in &def.content.over {
+            match &layer.body {
+                Static::OcrText(text) => {
+                    for word in &text.words {
+                        layers.add(&word.text);
+                    }
+                }
+                Static::Placements(placed) => {
+                    for p in placed.iter() {
+                        form_says(&p.form, &mut layers);
+                    }
+                }
             }
         }
         let on = crate::materialize::emit::content::generators_on(st, id);
@@ -896,7 +935,7 @@ impl<'a> Drawn<'a> {
                 GenSpec::Watermark(wm) => watermark_says(wm, &mut bag),
             }
         }
-        [ocr, bag]
+        [layers, bag]
     }
 }
 
@@ -928,17 +967,11 @@ fn generators_say(st: &DocState) -> TextBag {
 /// Adds what watermark `wm` draws to `bag`: its text, or its image or
 /// page, by hash.
 fn watermark_says(wm: &WatermarkGen, bag: &mut TextBag) {
-    let placed = |at: &ObjRef| {
-        let mut bytes = blob_hash(at.src.id()).to_be_bytes().to_vec();
-        bytes.extend(at.id.0.to_be_bytes());
-        bytes.extend(at.id.1.to_be_bytes());
-        sheaf_util::checksum(&bytes)
-    };
     match &wm.content {
         WatermarkContent::Text { text, .. } => bag.add(text),
         WatermarkContent::Image { image, .. } => bag.add_hash(match image {
             ImageRef::Blob(blob) => blob_hash(blob.id()),
-            ImageRef::Placed(p) => placed(&p.at),
+            ImageRef::Placed(p) => at_hash(&p.at),
         }),
         WatermarkContent::Page { page, .. } => bag.add_hash(match page {
             PageForm::Blob { pdf, index } => {
@@ -946,7 +979,7 @@ fn watermark_says(wm: &WatermarkGen, bag: &mut TextBag) {
                 bytes.extend(index.to_be_bytes());
                 sheaf_util::checksum(&bytes)
             }
-            PageForm::Placed(p) => placed(&p.at),
+            PageForm::Placed(p) => at_hash(&p.at),
         }),
     }
 }

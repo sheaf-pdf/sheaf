@@ -3,8 +3,9 @@
 A sheaf plugin that reads each page's text (including OCR text not yet saved)
 and bookmarks every tax form it finds: "Form 1040", "Schedule C", "W-2 — Acme
 Corp", "1099-INT — Chase". A form spanning several pages gets one bookmark,
-on its first page. Running it again doesn't duplicate bookmarks. All the
-bookmarks undo as one step.
+on its first page. The new bookmarks go at the end of the top level, in
+page order. Running it again doesn't duplicate bookmarks. All the bookmarks
+undo as one step.
 
 Tools → Tax → Bookmarks from Tax Forms, the command palette, or Ctrl+Alt+B.
 

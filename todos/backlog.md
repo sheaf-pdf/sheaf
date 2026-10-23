@@ -198,6 +198,14 @@ phase; they're triaged between phases.
 - **Notes:** probably needs the digest check pyHanko does
   (`../pdf-corpus/signatures/` has files changed after signing and
   digest mismatches to test against; see F9).
+- **Also (M10.5 slice 19):** the exports' and the command line's
+  signature ask reuse `sig_impact`, so:
+  - a signature already invalid when the file was opened still asks:
+    `signatures/safedocs/0008830.pdf` and `0010094.pdf`, which pyHanko
+    finds neither intact nor valid, exit 3 on a mark add (37
+    unencrypted files in `signatures/` have such a signature);
+  - a file written with `sheaf … --signatures break` asks again on its
+    next edit (`append_anyway: true`, "… removed since the last save").
 
 ### B6: sheaf-app's clippy fails without default features
 
@@ -229,6 +237,180 @@ phase; they're triaged between phases.
   ClearOcrText; save.
 - **Notes:** taking it out without the `q` isn't safe (`3 Tr` would
   leak), so keeping it is right; only the silence is wrong.
+
+### B8: The comment summary PDF has no title, producer or creation date
+
+- **Found:** 2026-10-22, Claude, during M10.5 slice 19 (step 5, the
+  summary as a Session)
+- **Where:** sheaf-ops `comments::summary`, the CLI's `sheaf comments
+  summary` and the app's Comments panel
+- **Severity:** annoyance
+- **What happens:** the summary is now a Session made with `new_empty`
+  plus an insert of the `Memory(Summary)` blob. A session's output takes
+  its `/Info` from its primary, which is the empty document, and no op
+  sets document info. So the saved summary has no `/Title`, `/Producer`
+  or `/CreationDate`.
+- **Expected:** as before slice 19: `/Title` is the summary's title,
+  `/Producer` is sheaf, `/CreationDate` is when it was made. A viewer's
+  title bar and Properties show them.
+- **Repro:** `sheaf comments summary in.pdf -o out.pdf`, then
+  `qpdf --show-object=trailer out.pdf` (or Properties): no `/Info`
+  entries.
+- **Notes:** Greg: "log it" (2026-10-22). The fix is an op (or a Session
+  option) that sets document info, which a Properties editor would also
+  want. Until then the summary could set it on its `new_empty` primary.
+
+### B9: A radio group keeps its value when its chosen button's page is removed
+
+- **Found:** 2026-10-22, M10.5 slice 19's export corpus tier
+  (pre-existing: `DeletePages`')
+- **Where:** `DeletePages`' lowering (`crates/sheaf-doc/src/tx/`), and so
+  an extract's `KeepPages`
+- **Severity:** wrong output
+- **What happens:** delete the page holding a radio group's chosen
+  button (or extract the other pages) and the group keeps its `/V`,
+  which no button left can show. `forms::check` then reports
+  `NoAppearance`, and `StaleSigFlags` on the delete.
+- **Expected:** what's left is consistent: the group's `/V` is a state
+  one of its remaining buttons has, or `/Off`; the form check finds
+  nothing new.
+- **Repro:** `forms/safedocs/0070616.pdf`, field `Gruppieren4`: the
+  export tier's `export_round_trips` asserts this as its one known
+  failure.
+- **Notes:** the same question for a check box group and for a
+  choice's `/Opt`-bound value; worth checking what Acrobat does to `/V`
+  on Delete Pages.
+
+### B10: After a Combine, the "XFA part holds values" bar can stay up
+
+- **Found:** 2026-10-22, M10.5 slice 19 (step 7, Combine's hand-off)
+- **Where:** the app's Combine hand-off (`crates/sheaf-app/`), the
+  adopted window's form facts
+- **Severity:** annoyance
+- **What happens:** Combine is one transaction on the first file's
+  session, handed to a window as made, answered with `PRINT_ANSWERS`
+  (which drop an XFA part's values). The adopted window keeps the first
+  file's form facts as opened, and `xfa_values_dropped` isn't set. So a
+  hybrid first file whose XFA held values can still show the bar after
+  the combine dropped them.
+- **Expected:** the bar reflects the combined document: gone, or saying
+  the values were dropped.
+- **Repro:** Combine with a hybrid XFA form holding values as the first
+  file.
+- **Notes:** none found in the corpus runs; read from the code.
+
+### B11: Create from Scans still writes a file and reopens it
+
+- **Found:** 2026-10-22, M10.5 slice 19
+- **Where:** `Workspace::create_from_scans`
+  (`crates/sheaf-app/src/workspace.rs`), `open_paths`
+- **Severity:** annoyance
+- **What happens:** scan builds a Session now, but the app writes its
+  result to a file and opens that file, where Combine hands its
+  Document to a window as made.
+- **Expected:** the scan's Session handed to a window, as Combine does:
+  no file until the user saves.
+- **Repro:** Create from Scans in the app.
+- **Notes:** M5's scanner intake (ROADMAP) reworks this path; do it
+  there.
+
+### B12: Flatten draws a comment's first appearance state when it has no `/AS`
+
+- **Found:** 2026-10-22, M10.5 slice 19 (step 2, `FlattenAnnotations`)
+  (pre-existing: the old flatten did the same)
+- **Where:** `FlattenAnnotations`' choice of appearance for a
+  non-widget (`crates/sheaf-doc/src/tx/flatten.rs`)
+- **Severity:** wrong output
+- **What happens:** a comment (not a widget) whose `/AP /N` has states
+  and no `/AS` is flattened with its first state. PDFium shows nothing
+  for it (it falls back to `/V`, then `/Off`), so flattening draws what
+  no viewer showed.
+- **Expected:** flatten draws what the viewer showed, nothing here.
+  Widgets already have no first-state fallback.
+- **Repro:** a Square annotation with `/AP << /N << /A … /B … >> >>` and
+  no `/AS`; Export Flattened.
+- **Notes:** rare in the wild; check pdf.js and Acrobat agree with PDFium
+  before changing it.
+
+### B13: A print file with markup renumbers its header when reopened in sheaf
+
+- **Found:** 2026-10-23, M10.5 slice 19's wrap-up (the print numbering
+  fix)
+- **Where:** `Export::print` with markup (`crates/sheaf-doc/src/export.rs`),
+  which keeps sheaf's private data (`Private::Keep`)
+- **Severity:** wrong output
+- **What happens:** printing pages 5–6 of 10 with markup writes "Page 5
+  of 10", but the file keeps the header live in `/SheafGenerators`. Open
+  the print preview's Save as PDF output in sheaf and the header is
+  numbered against that file's own pages, "Page 1 of 2", and a save of
+  it writes that. Other viewers show "Page 5 of 10". Print without
+  markup writes the header as plain content, so it stays.
+- **Expected:** the file reads "Page 5 of 10" in sheaf too.
+- **Repro:** a 10-page document with a "Page <<1>> of <<N>>" header;
+  print preview of pages 5–6 with markup, Save as PDF; open it in sheaf.
+- **Notes:** before the fix the print file said "Page 1 of 2"
+  everywhere. Candidate fixes: print with markup leaves out sheaf's
+  private data as print without markup does (Scrub), or an `AsDocument`
+  keep writes its generators' blocks as plain content.
+
+(B14–B18 are on the M5 branch, `m5-intake`, found by M5 slice 1.)
+
+### B19: A bookmark selection isn't tracked, so a re-lowered edit can land on other pages
+
+- **Found:** 2026-10-23, M10.5 slice 20
+- **Where:** `PageSel::Bookmark`'s resolve (`crates/sheaf-doc/src/tx/`),
+  which records only `Key::Order`, not the outline `bookmark_span` reads
+- **Severity:** wrong output
+- **What happens:** an edit that selects pages by a bookmark, re-lowered
+  (`Stale::Relower`) after another edit moved that bookmark, resolves to
+  the bookmark's new span with no conflict. Only a transaction that was
+  handed out conflicts, and its Conflict names no edit. Decision reads
+  of a bookmark selection have the same gap.
+- **Expected:** a move of the bookmark (or of the next one, which ends
+  its span) between the read and the commit conflicts, as other stale
+  reads do.
+- **Repro:** a plugin's edit on `{"bookmark": "Schedule C"}` while the
+  user drags that bookmark to another page; the call ends and
+  re-lowers.
+- **Notes:** record the outline keys the span reads (the bookmark and
+  its next sibling at each level).
+
+### B20: A plugin's region events wait forever after a window closes mid-call
+
+- **Found:** 2026-10-23, M10.5 slice 20 (pre-existing)
+- **Where:** the app's plugin call queue (`crates/sheaf-app/src/plugins.rs`),
+  the `regions` key
+- **Severity:** annoyance (a stuck plugin)
+- **What happens:** if a region call is in flight when its window
+  closes, `ws.update_in` fails and the plugin's `regions` key stays
+  busy, so its later region events in every window never run. Changes
+  are keyed per view and aren't affected.
+- **Expected:** a closed window ends its calls and frees the key.
+- **Repro:** a plugin that handles regions slowly; select a region,
+  close the window before it returns, then select a region in another
+  window.
+
+### B21: `layers::LayerId` is a lopdf `ObjectId` under another name
+
+- **Found:** 2026-10-23, M10.5 slice 20
+- **Where:** `crates/sheaf-doc/src/layers.rs` (`pub type LayerId =
+  ObjectId`), used by `ViewInputs::off` and the app's layers panel
+- **Severity:** annoyance (a design leak)
+- **What happens:** an optional content layer is named by its file
+  object id outside the `ObjectId` allowlist. `tests/object_ids.rs`
+  can't see through the alias.
+- **Expected:** a layer id of sheaf's own, as pages and marks have, or
+  an `ObjRef`.
+- **Notes:** also make the grep test catch type aliases of `ObjectId`.
+
+### B22: `FlatOutlineItem` derives Serialize and Deserialize that nothing uses
+
+- **Found:** 2026-10-23, M10.5 slice 20 (pre-existing)
+- **Where:** `crates/sheaf-doc/src/open/outline.rs`
+- **Severity:** annoyance (dead code)
+- **What happens:** the derives have no serializer anywhere in the
+  workspace, and they pin the type's shape for no reader.
+- **Expected:** drop them, or say who reads it.
 
 ## Features
 
@@ -497,6 +679,117 @@ phase; they're triaged between phases.
   (digital signatures); M14.
 - **Notes:** each needs a `Corpus::` reader for its manifest, like
   `scans()`, and a tier with its own `SHEAF_…_ONLY` narrowing.
+  - **Progress (M10.5 slice 19):** `Corpus::signatures()` reads
+    `signatures/`'s manifest; sheaf-cli's `tests/edit.rs` uses it (an
+    `--append` onto signed files keeps their signatures). No tier sweeps
+    the collection yet, and `conformance/` is still unread.
+
+### F13: In-house what sheaf uses of lopdf and drop the dependency
+
+- **Found:** 2026-10-22, Greg and Claude, during M10.5 slice 19
+- **What:** a long-term direction, not scheduled, and never mid-milestone
+  (Greg, 2026-10-22). Bring what sheaf uses of lopdf into sheaf's own
+  crates and drop the dependency, while still sending upstream any fix
+  found along the way. It isn't either/or.
+  - **Already sheaf's own:** the writer (`serialize/`), the content-stream
+    code (`content/`) and the lazy-reading layer (`source/`).
+  - **Still lopdf's:**
+    - the object model;
+    - the object parser and cross-reference reading;
+    - object streams;
+    - stream decompression;
+    - encryption, which sheaf would keep on the RustCrypto crates and
+      not hand-roll;
+    - the eager `Document`: the Rewrite graph, PDFs built in memory,
+      `prune_objects`;
+    - its writer, used only by `annot::tape_pdf`, tests and fixtures.
+  - About 9k of lopdf's 23.5k lines are off sheaf's production paths:
+    text encodings and glyph tables, CMap parsing, outlines, bookmarks
+    and TOC, fonts, dates, XObject helpers, IncrementalDocument.
+- **Why:** sheaf carries a vendored, patched lopdf whose patches reshape
+  its reader, encryption and object model. The vendored crate is outside
+  the workspace, so sheaf's clippy `-D warnings` and lint bans don't run
+  on it, and each new upstream commit means reapplying the patch.
+- **A first step:** move `LazyPdf` (`vendor/lopdf/src/lazy.rs`, 989
+  lines) into sheaf-doc's `source/`.
+  - The byte sources and caps (`ByteSource`, `FileBytes`, `ReadLimits`,
+    `parse_from`) stay in lopdf, whose shared `XrefReader` reads through
+    them.
+  - lopdf then makes public what LazyPdf reads today as crate-private:
+    from reader.rs, `XrefReader`, `Resolved`, `decryption`, `encrypts`,
+    `header_offset`, `length_value`, `normal_offsets`, `object_bound`;
+    from the parser, `Resolve`, `header`, `indirect_object_in`,
+    `stream_end`.
+  - Keep `source::lazy_tests` identical across the move: every object of
+    the corpus's readable forms, read lazily, equals the eager load.
+- **Upstream meanwhile** (Greg: the weekend of 2026-10-24/25, each pull
+  request confirmed first): `vendor/lopdf/SHEAF.md` lists fixes that
+  stand on their own:
+  - each xref stream read once;
+  - lenient `/XRefStm` past EOF;
+  - white space around `startxref`;
+  - `/Encrypt null`;
+  - strings in stream dictionaries (lopdf #603);
+  - `/EFF`;
+  - V4+ filter names and `/Identity`;
+  - the set in `traverse_objects` and `prune_objects`.
+- **Overlap:** `vendor/lopdf/SHEAF.md`, "Going back to crates.io";
+  F15 (a Rewrite that doesn't load the file whole) would remove the
+  largest use of the eager `Document`.
+- **Notes:** to size at triage: the object model's reach (about 400
+  import sites), and the parser's edge cases, which lopdf's parser
+  fixes and the corpus comparisons encode (`source::lazy_tests`; the
+  corpus runs).
+- **Maybe published** (Greg asked, 2026-10-22): the in-housed lopdf parts,
+  `LazyPdf`, sheaf-doc's writer (`serialize/`), its `source/` and
+  `geom`, and the generic half of `content/` (lex, writer, splice) could
+  become one layer crate, and later perhaps a published alternative to
+  lopdf, as `in-progress` and `instance-handoff` were extracted.
+  - **Production coupling today:**
+    - `serialize` reaches `materialize` (`ObjKey`) and `source`;
+    - `source` reaches `content`, `geom` and `store` (`BlobId`);
+    - `content` reaches `annot` and `private`, which are sheaf's blocks
+      and markers.
+  - Make it an internal crate with a clean boundary first; decide on
+    publishing after an ecosystem survey.
+- **Deferred** (Greg, 2026-10-22): revisit after more milestones, since
+  what sheaf needs from this layer may change as later scopes dig in.
+  Upstream fixes go ahead meanwhile.
+
+### F14: An automated test of `sheaf scan --ocr`
+
+- **Found:** 2026-10-22, M10.5 slice 19 (step 5, scan as a Session)
+- **What:** a CLI test that runs `sheaf scan --ocr` on a few images and
+  checks the output's text layer: the words found, one OCR block a page,
+  one font.
+- **Why:** slice 19 moved scan onto a Session (an empty session plus an
+  insert of the images, then OCR). Only a hand run checks the `--ocr`
+  path; the OCR op itself is tested in sheaf-doc and the corpus tiers.
+- **Overlap:** M5's scanner intake (ROADMAP), which reworks scan.
+- **Notes:** the worry was that Tesseract may be missing in CI. Check
+  what `--ocr` needs (sheaf-ocr's default engine vs the `tesseract`
+  feature, used only for orientation) and either run it everywhere or
+  install what it needs in CI. Don't make it skip silently.
+
+### F15: A Rewrite that doesn't load the whole file (the flatten export's memory gate)
+
+- **Found:** 2026-10-22, M10.5 slice 19 (the flatten gate)
+- **What:** a Rewrite that copies the primary's objects without loading
+  the file whole: a streaming copy, its pruning and `keep_only`
+  included.
+- **Why:** the plan's gate for Export Flattened on the heavy 7k test
+  file (peak ≤ 1.5× the file + 200 MB, 220.5 MB, in the flatten's own
+  process) can't be met by construction. Opening the heavy alone peaks
+  at 221 MB, and the export peaks at 513–515 MB, most of it the
+  Rewrite's eager load of the primary (`materialize::graph::eager`; a
+  plain Rewrite adds 252 MB). The gate is measured on every run and
+  asserted only with `SHEAF_GATE_FLATTEN`, like proposal 8's accepted
+  misses. Every Rewrite-based save and export of a large file pays this.
+- **Overlap:** M10.5 proposal 37 (a symbolic `keep_only`, unbudgeted);
+  F13 (the eager `Document` is lopdf's); M14 (object-stream packing).
+- **Notes:** the gate may also want restating as what the export adds
+  over the open (293 MB today against 220.5) rather than the process's
+  peak; decide with the design. Slice 19's notes have the five runs.
 
 ## Closed
 

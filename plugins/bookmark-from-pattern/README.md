@@ -2,8 +2,8 @@
 
 Ships with sheaf. **Document → Bookmarks from Pattern…** finds every match of
 a pattern and bookmarks it. Each bookmark lands on the match itself, not
-just its page. Use one of your Patterns presets or type a regular
-expression.
+just its page: a little above it as the page shows, turned or not. Use one
+of your Patterns presets or type a regular expression.
 
 - **Title** is a template: `{0}` is the whole match, `{1}`, `{2}` … are
   capture groups, `{name}` a named group. `Invoice (\d+)` with the title

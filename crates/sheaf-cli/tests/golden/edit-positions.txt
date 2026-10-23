@@ -1,0 +1,76 @@
+$ sheaf-cli edit $DIR/in.pdf --edits $DIR/edit-positions.json -o $DIR/positions.pdf
+--- edits
+{
+  "label": "Tidy the binder",
+  "ops": [
+    {
+      "op": "delete-pages",
+      "pages": {
+        "positions": "2"
+      }
+    },
+    {
+      "by": 90,
+      "op": "rotate-pages",
+      "pages": {
+        "ids": [
+          {
+            "pos": 2
+          }
+        ]
+      }
+    },
+    {
+      "at": "last",
+      "local": "$1",
+      "op": "add-bookmark",
+      "target": {
+        "pos": 3
+      },
+      "title": "The end"
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 0
+--- stdout
+{
+  "created": {
+    "locals": {
+      "$1": {
+        "bookmark": [
+          "The end"
+        ]
+      }
+    },
+    "ops": [
+      [],
+      [],
+      [
+        {
+          "bookmark": [
+            "The end"
+          ]
+        }
+      ]
+    ]
+  },
+  "lines": [
+    {
+      "removes": true,
+      "text": "Delete page 2"
+    },
+    {
+      "removes": false,
+      "text": "Rotate page 2 90°"
+    },
+    {
+      "removes": false,
+      "text": "Add bookmark “The end”"
+    }
+  ],
+  "strategy": "rewrite",
+  "version": "Tidy the binder"
+}
+--- stderr
+editing…

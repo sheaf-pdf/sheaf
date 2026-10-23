@@ -33,12 +33,16 @@
 //! other byte of the content, as they were. Only a list written in the
 //! content, in one stream, is, and only when what's left of it reads as
 //! the list without those keys; otherwise it's refused
-//! ([`SpliceError::List`]).
+//! ([`SpliceError::List`]). And the names content draws its resources by
+//! may be written again as others ([`renames`], how a filter gives the
+//! names an older sheaf gave them new ones): a name token for a name
+//! token, every other byte as it was.
 
 use std::borrow::Cow;
 use std::ops::Range;
 
 use super::lex::{self, LexError, ResCx, Tok};
+use super::names::ResKind;
 use super::page::{Concat, SpanAcross};
 use crate::source::Limits;
 
@@ -193,6 +197,55 @@ pub fn without_keys(
     let with =
         lex::without_entries(&s[list.clone()], keys, lim.content.depth).ok_or_else(refused)?;
     Ok((with != s[list.clone()]).then_some(Rewrite { range: list, with }))
+}
+
+/// The names `content`, lexed with `res`, draws with that `renamed` gives
+/// new ones (each a category, its old name and its new), written again as
+/// the new ones, every other byte as it was: a font's (`Tf`), an
+/// XObject's (`Do`), a graphics state's (`gs`), a shading's (`sh`), a
+/// color space's (`cs`, `CS`), a pattern's (`scn`, `SCN`) and a named
+/// property list's (`BDC`, `DP`), as [`names_used`] finds them. A name an
+/// inline image draws with isn't, and still names what it did.
+///
+/// [`names_used`]: super::names_used
+pub fn renames(
+    content: &Concat,
+    res: &ResCx,
+    lim: &Limits,
+    renamed: &[(ResKind, Vec<u8>, Vec<u8>)],
+) -> Result<Vec<Rewrite>, LexError> {
+    let mut rewrites = Vec::new();
+    if renamed.is_empty() {
+        return Ok(rewrites);
+    }
+    lex::steps(content.bytes(), res, lim, |step| {
+        let (kind, i) = match step.tok {
+            Tok::Op(b"Tf") => (ResKind::Font, 1),
+            Tok::Op(b"Do") => (ResKind::XObject, 0),
+            Tok::Op(b"gs") => (ResKind::ExtGState, 0),
+            Tok::Op(b"sh") => (ResKind::Shading, 0),
+            Tok::Op(b"cs" | b"CS") => (ResKind::ColorSpace, 0),
+            Tok::Op(b"scn" | b"SCN") => (ResKind::Pattern, 0),
+            Tok::Op(b"BDC" | b"DP") => (ResKind::Properties, 0),
+            _ => return Ok::<_, LexError>(()),
+        };
+        let (Some(name), Some(at)) = (
+            step.name(i),
+            (step.operands.len().checked_sub(i + 1)).map(|at| step.operands[at].clone()),
+        ) else {
+            return Ok(());
+        };
+        let new = (renamed.iter())
+            .find(|(k, old, _)| *k == kind && **old == *name)
+            .map(|(.., new)| new);
+        if let Some(new) = new {
+            let mut with = Vec::new();
+            crate::serialize::object::name(&mut with, new);
+            rewrites.push(Rewrite { range: at, with });
+        }
+        Ok(())
+    })?;
+    Ok(rewrites)
 }
 
 /// A range to take out, in the joined bytes.

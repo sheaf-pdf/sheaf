@@ -561,6 +561,23 @@ fn keys_change_with_ocr_text_a_header_a_deleted_comment_and_a_field_value() {
     assert_eq!(key(&st, p0, &ViewInputs::content_only()), content);
 }
 
+/// Flattened, a page draws its annotations as its own content, whichever
+/// the inputs draw: its key changes under every one, and another page's
+/// doesn't.
+#[test]
+fn flattening_changes_a_page_s_key_under_every_input() {
+    let mut d = theirs();
+    let [p0, p1] = [0, 1].map(|i| d.page(i).unwrap());
+    let was = all_keys(&d);
+    let op = fx::flatten(&[p0], sheaf_edit::FlattenSet::All);
+    d.commit_ops(vec![op], "Flatten").unwrap();
+    for (inputs, was) in every_input().iter().zip(&was) {
+        let st = d.state();
+        assert_ne!(key(st, p0, inputs), was[&p0], "{inputs:?}");
+        assert_eq!(key(st, p1, inputs), was[&p1], "{inputs:?}");
+    }
+}
+
 /// A header its page's file draws already, as its blocks laid out alike
 /// there say, isn't drawn again: that page's key reads no position. Moved
 /// where its tokens read otherwise, it's drawn anew, and its key is a
@@ -962,4 +979,51 @@ fn a_header_s_layouts_are_kept_as_laid_out_in_every_version() {
     while d.undo().unwrap().is_some() {
         check(&d, "undone");
     }
+}
+
+/// A page an export keeps as the document numbers it (print's
+/// `PageNumbering::AsDocument`) keys as it does in the document under
+/// every input, its header's tokens reading where the document has it
+/// ([`DocState::numbered_in`]); kept as the export numbers it (an
+/// extract's), it keys as the second of two.
+#[test]
+fn a_page_kept_as_the_document_numbers_it_keys_as_in_the_document() {
+    use crate::tx::ExportTx;
+    use sheaf_edit::{OutlinePolicy, PageNumbering, PageSel, Transform};
+
+    let mut d = doc_of(10, &[]);
+    let ids: Vec<PageId> = d.state().order().iter().copied().collect();
+    let mut spec = fx::header("Page <<1>> of <<N>>");
+    spec.texts[2] = "<<label>>".into();
+    let labels = Op::SetPageLabels {
+        ranges: Some(vec![fx::label(ids[0], LabelStyle::UpperRoman, "", 1)]),
+    };
+    d.commit_ops(vec![fx::set_header(spec, None), labels], "Header")
+        .unwrap();
+    let kept = |numbering| {
+        let mut xtx = ExportTx::new(&d.snapshot(), d.lower_cx(Actor::User));
+        let keep = Transform::KeepPages {
+            pages: PageSel::ids([ids[4], ids[5]]),
+            outline: OutlinePolicy::Drop,
+            labels: false,
+            numbering,
+        };
+        xtx.apply(keep, &NoProgress).unwrap();
+        xtx.state().clone()
+    };
+    let (printed, extracted) = (kept(PageNumbering::AsDocument), kept(PageNumbering::AsKept));
+    for inputs in every_input() {
+        for &p in &ids[4..6] {
+            assert_eq!(
+                key(&printed, p, &inputs),
+                key(d.state(), p, &inputs),
+                "{inputs:?}"
+            );
+        }
+    }
+    let print = ViewInputs::print(true);
+    assert_ne!(
+        key(&extracted, ids[5], &print),
+        key(d.state(), ids[5], &print)
+    );
 }

@@ -1,0 +1,15 @@
+$ sheaf-cli edit $DIR/in.pdf --edits $DIR/edit-usage.json
+--- edits
+{
+  "ops": [],
+  "v": "1.0"
+}
+--- exit 2
+--- stdout
+--- stderr
+error: the following required arguments were not provided:
+  --output <OUTPUT>
+
+Usage: sheaf-cli edit --edits <FILE|-> --output <OUTPUT> <INPUT>
+
+For more information, try '--help'.

@@ -1,0 +1,38 @@
+$ sheaf-cli inspect $DIR/signed.pdf --json
+--- exit 0
+--- stdout
+{
+  "bookmarks": [],
+  "comments": [],
+  "form": {
+    "fields": 1,
+    "signatures": 1,
+    "widgets": 1,
+    "xfa": "none"
+  },
+  "generators": [],
+  "marks": [],
+  "pages": [
+    {
+      "boxes": {
+        "crop": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ],
+        "media": [
+          0.0,
+          0.0,
+          612.0,
+          792.0
+        ]
+      },
+      "label": "1",
+      "pos": 1,
+      "rotate": 0
+    }
+  ]
+}
+--- stderr
+opening…

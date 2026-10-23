@@ -13,7 +13,7 @@ use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::add;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Document, FixedCount, Store};
-use sheaf_doc::{generated, stamp_lib};
+use sheaf_doc::{memory, stamp_lib};
 use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_render::PageIndex;
@@ -96,7 +96,12 @@ fn a_stamp_of_several_streams_draws_as_its_page() {
     let page = one_page(&mut collection, BOX, streams.into(), dictionary! {});
     let collection = Pdf::load_mem(&page).unwrap();
 
-    let stamp = Pdf::load_mem(&stamp_lib::one_page(&collection, 0).unwrap()).unwrap();
+    let stamp = Store::new()
+        .open(
+            stamp_lib::one_page(&collection, 0).unwrap().into(),
+            BlobKind::stamp(),
+        )
+        .unwrap();
     let mut placed = Pdf::with_version("1.7");
     let form = stamp_lib::page_form(&stamp, &mut placed).unwrap();
     let size = form.geom.shown();
@@ -158,7 +163,7 @@ fn a_stamp_from_a_cropped_turned_page_lands_where_it_shows() {
     stamp.save_to(&mut stamp_bytes).unwrap();
 
     // Placed in the box 50–150 across, 50–250 up, on a page 300 by 400.
-    let blank = generated::blank_pdf(300.0, 400.0).unwrap();
+    let blank = memory::blank_pages(300.0, 400.0, 1).unwrap();
     let store = Store::new();
     let primary = store
         .open(blank.into(), BlobKind::file("blank.pdf".as_ref(), None))
@@ -197,7 +202,7 @@ fn a_stamp_from_a_cropped_turned_page_lands_where_it_shows() {
     };
     let page = doc.page(0).unwrap();
     doc.commit_ops(vec![add(page, &annot)], "Stamp").unwrap();
-    let saved = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+    let saved = sheaf_doc::save::rewrite(&doc).unwrap();
 
     // A pixel a point, each.
     let shown = render_at(stamp_bytes, 100);

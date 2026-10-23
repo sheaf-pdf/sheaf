@@ -11,9 +11,11 @@
 //! page tree, structure tree, outline, name trees and information), which
 //! the written file has its own of: a signature's `/Reference /Data` names
 //! its file's catalog, and copying that copied the file's whole form, its
-//! widgets on no page. The old writers copy
-//! into lopdf's graph by number ([`copy_object`], [`remap`]) until they
-//! go.
+//! widgets on no page. A PDF built in memory
+//! ([`serialize::built`](crate::serialize::built)) copies into its graph
+//! by number ([`copy_object`], [`remap`]): a stamp's page made a form, a
+//! form back to a page, another tool's comment gathered, comments copied
+//! out to an FDF file.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -26,6 +28,7 @@ use super::key::ObjKey;
 use super::record::ObjMap;
 use crate::attachments::Objects;
 use crate::model::{DocState, PageId};
+use crate::source::PageObj;
 use crate::store::{BlobId, Src};
 
 /// Where references are followed from: `src`'s objects, as `copy` of
@@ -63,11 +66,11 @@ pub(crate) struct Closure<'a> {
 
 /// The pages an emission writes, as a copied reference finds them.
 pub(crate) enum Pages<'a> {
-    /// A save's: each page, by its source's blob, its object and its copy
-    /// as the page is written ([`written_pages`]).
+    /// A save's: each page, by its source page and its copy as the page is
+    /// written ([`written_pages`]).
     ///
     /// [`written_pages`]: super::emit::written_pages
-    Written(BTreeMap<(BlobId, ObjectId, u32), PageId>),
+    Written(BTreeMap<(PageObj, u32), PageId>),
     /// An overlay's: the state's pages ([`DocState::page_named`]), of which
     /// those `within` it are written there. A reference to any other names
     /// nothing in it, though a link to one still leads somewhere.
@@ -82,10 +85,11 @@ impl Pages<'_> {
     /// its lowest copy written ([`page_named`]); in an overlay, one that's
     /// written there.
     fn named(&self, blob: BlobId, page: ObjectId, copy: u32) -> Option<PageId> {
+        let at = PageObj { blob, id: page };
         match self {
-            Pages::Written(pages) => page_named(pages, blob, page, copy),
+            Pages::Written(pages) => page_named(pages, at, copy),
             Pages::Overlay { st, within } => {
-                (st.page_named(blob, page, copy)).filter(|p| within.contains(p))
+                (st.page_named(at, copy)).filter(|p| within.contains(p))
             }
         }
     }
@@ -93,12 +97,10 @@ impl Pages<'_> {
     /// Whether copy 0 of page `page` of `blob` is written, or with `any`,
     /// any copy of it: in an overlay, whether the document has it.
     fn has(&self, blob: BlobId, page: ObjectId, any: bool) -> bool {
+        let at = PageObj { blob, id: page };
         match (self, any) {
-            (Pages::Written(pages), false) => pages.contains_key(&(blob, page, 0)),
-            (Pages::Written(pages), true) => {
-                let copies = (blob, page, 0)..=(blob, page, u32::MAX);
-                pages.range(copies).next().is_some()
-            }
+            (Pages::Written(pages), false) => pages.contains_key(&(at, 0)),
+            (Pages::Written(pages), true) => pages.range((at, 0)..=(at, u32::MAX)).next().is_some(),
             (Pages::Overlay { st, .. }, any) => page_of(st, blob, page, any).is_some(),
         }
     }
@@ -108,9 +110,10 @@ impl Pages<'_> {
 /// `any`, the one a reference to any copy of it names: where an overlay
 /// finds a reference to that page leads, written there or not.
 pub(crate) fn page_of(st: &DocState, blob: BlobId, page: ObjectId, any: bool) -> Option<PageId> {
+    let at = PageObj { blob, id: page };
     match any {
-        false => st.page_showing(blob, page, 0),
-        true => st.page_named(blob, page, 0),
+        false => st.page_showing(at, 0),
+        true => st.page_named(at, 0),
     }
 }
 
@@ -286,21 +289,19 @@ impl<'a> Closure<'a> {
     }
 }
 
-/// The page of `pages` (the pages written, by their source's blob, their
-/// object and their copy) a reference to page `page` of `blob`, read as
-/// `copy` of it, names: the page written as that copy, else as its lowest
-/// copy written; None when no copy is. What [`Closure::sym`] writes for
-/// one, but from the primary's copy 0, whose references are its own
-/// objects' numbers.
+/// The page of `pages` (the pages written, by their source page and
+/// their copy) a reference to source page `page`, read as `copy` of it,
+/// names: the page written as that copy, else as its lowest copy written;
+/// None when no copy is. What [`Closure::sym`] writes for one, but from
+/// the primary's copy 0, whose references are its own objects' numbers.
 pub(crate) fn page_named(
-    pages: &BTreeMap<(BlobId, ObjectId, u32), PageId>,
-    blob: BlobId,
-    page: ObjectId,
+    pages: &BTreeMap<(PageObj, u32), PageId>,
+    page: PageObj,
     copy: u32,
 ) -> Option<PageId> {
-    (pages.get(&(blob, page, copy)))
+    (pages.get(&(page, copy)))
         .or_else(|| {
-            (pages.range((blob, page, 0)..=(blob, page, u32::MAX)))
+            (pages.range((page, 0)..=(page, u32::MAX)))
                 .next()
                 .map(|(_, p)| p)
         })
@@ -353,42 +354,6 @@ fn is_type<P: Objects + ?Sized>(pdf: &P, id: ObjectId, kind: &[u8]) -> bool {
     )
 }
 
-/// Clone a page dictionary from `src` into `dst`, deep-copying everything it
-/// references (resources, content, annotations…) with fresh object numbers.
-/// Other pages aren't copied (see [`remap`]): a reference to one the caller
-/// is copying too goes through `map`, where the caller reserved it.
-pub(crate) fn copy_page_dict(
-    src: &Pdf,
-    page: ObjectId,
-    dst: &mut Pdf,
-    map: &mut HashMap<ObjectId, ObjectId>,
-) -> Result<Dictionary> {
-    let dict = src.get_dictionary(page)?.clone();
-    // The page's own id must map to the object we're about to create so
-    // annotations' /P back-references resolve; the caller inserts it.
-    let new_id = match map.get(&page) {
-        Some(&id) => id,
-        None => {
-            let id = dst.new_object_id();
-            map.insert(page, id);
-            id
-        }
-    };
-    let mut out = Dictionary::new();
-    for (k, v) in dict.iter() {
-        if k == b"Parent" {
-            continue;
-        }
-        out.set(k.clone(), remap(src, v, dst, map)?);
-    }
-    // Hold the id so later allocations don't collide; the caller may
-    // replace this placeholder, or it stays as the page.
-    dst.objects
-        .entry(new_id)
-        .or_insert_with(|| Object::Dictionary(out.clone()));
-    Ok(out)
-}
-
 /// A page or a node of the page tree.
 pub(crate) fn is_page_node<P: Objects + ?Sized>(pdf: &P, id: ObjectId) -> bool {
     matches!(
@@ -428,7 +393,7 @@ pub(crate) fn copy_object<P: Objects + ?Sized>(
 
 /// `obj` from `src` in `dst`, copying what it references. A page is never
 /// copied this way: one in `map` (being copied too) is referred to there,
-/// and any other becomes null, for [`crate::kept::keep_only`] to tidy.
+/// and any other becomes null, for [`super::kept::keep_only`] to tidy.
 pub(crate) fn remap<P: Objects + ?Sized>(
     src: &P,
     obj: &Object,

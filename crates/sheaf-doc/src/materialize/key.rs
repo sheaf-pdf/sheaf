@@ -5,8 +5,8 @@
 //!
 //! Only the keys the emitter writes are here; the other name trees,
 //! generators' forms and filtered streams come with what writes them. A
-//! generator's block and a layer of recognized text's are each an
-//! [`ObjKey::Block`] by its stream's digest.
+//! generator's block and a layer's (recognized text, flattened
+//! annotations) are each an [`ObjKey::Block`] by its stream's digest.
 //!
 //! [`SaveRecord`]: super::SaveRecord
 
@@ -66,8 +66,8 @@ pub enum ObjKey {
     /// itself): a font's descendant, descriptor and program.
     ResPart(ResId, u32),
     /// A block sheaf draws on a page, a stream of its own, by its digest:
-    /// a generator's, or a layer of recognized text's. Identical ones are
-    /// one object.
+    /// a generator's, or a layer's (recognized text, flattened
+    /// annotations). Identical ones are one object.
     Block(u128),
     /// A name tree of the catalog's `/Names` a save builds: the document
     /// scripts of forms that came in from other files beside the primary's.
@@ -98,6 +98,17 @@ pub enum ObjKey {
         stream: u128,
         filter: u64,
     },
+    /// Object `n g` of a PDF sheaf builds whole in memory (blank pages,
+    /// images as pages, the stamp library's files), at its own number:
+    /// [`write_built`](crate::serialize::full::write_built)'s, which
+    /// never encrypts, so the key only names it. No save writes one.
+    Built(ObjectId),
+    /// A mark's appearance a flattened layer places, drawn again from what
+    /// it's pinned to, by their digest ([`PinnedAp`]): identical ones are
+    /// one object.
+    ///
+    /// [`PinnedAp`]: crate::model::PinnedAp
+    Pinned(u128),
 }
 
 /// What a mark writes beside its dictionary, and another tool's comment
@@ -162,7 +173,9 @@ impl ObjKey {
             | ObjKey::ResPart(..)
             | ObjKey::Block(_)
             | ObjKey::PageRes { .. }
-            | ObjKey::Filtered { .. } => false,
+            | ObjKey::Filtered { .. }
+            | ObjKey::Built(_)
+            | ObjKey::Pinned(_) => false,
         }
     }
 
@@ -271,6 +284,15 @@ impl ObjKey {
                 out.extend(stream.to_be_bytes());
                 out.extend(filter.to_be_bytes());
             }
+            ObjKey::Built((n, g)) => {
+                out.push(20);
+                out.extend(n.to_be_bytes());
+                out.extend(g.to_be_bytes());
+            }
+            ObjKey::Pinned(digest) => {
+                out.push(21);
+                out.extend(digest.to_be_bytes());
+            }
         }
         out
     }
@@ -350,6 +372,10 @@ mod tests {
                 stream: 2,
                 filter: 1,
             },
+            ObjKey::Built((1, 0)),
+            ObjKey::Built((1, 1)),
+            ObjKey::Pinned(1),
+            ObjKey::Pinned(2),
         ]
     }
 

@@ -9,6 +9,9 @@
 //! schemars, and nothing of sheaf's, so it builds for wasm32-wasip2 and a
 //! plugin can use it.
 //!
+//! What sheaf answers a plugin that hands it ops ([`reply`]) is here too:
+//! what a submit made, what a preview would do, why one failed.
+//!
 //! Op JSON is a file format, versioned by its [`Envelope`]. An op's own
 //! specs refuse fields they don't know, so a misspelled one is an error;
 //! a field added after 1.0 has a default, which a test holds the schema
@@ -29,8 +32,10 @@ pub mod op;
 pub mod page;
 pub mod patch;
 pub mod refs;
+pub mod reply;
 pub mod tape;
 pub mod text_layer;
+pub mod transform;
 pub mod watermark;
 
 pub use envelope::{Envelope, VERSION};
@@ -39,11 +44,15 @@ pub use header_footer::{BatesSpec, HeaderFooterSpec};
 pub use ids::{AnnotId, BlobId, FieldId, Local, NotALocal, OutlineId, PageId, SourceId};
 pub use labels::{LabelStyle, PageLabelRange};
 pub use mark::{Anchor, Color, FontChoice, Imported, MarkKind, MarkPatch, NewMark, Style};
-pub use op::{BookmarkPatch, Bring, Delta, FormBring, Op, OutlineBring, PageSource, Sibling, Turn};
-pub use page::{BoxSpec, DestView, Margins, PageSize, Rotation, TextStyle};
+pub use op::{
+    BookmarkPatch, Bring, Delta, FlattenSet, FormBring, Op, OutlineBring, PageSource, Sibling, Turn,
+};
+pub use page::{BoxSpec, DestView, Fit, Margins, PageSize, Rotation, TextStyle};
 pub use patch::Patch;
 pub use refs::{
     AnnotRef, BlobSel, BookmarkRef, PageRef, PageSel, RangeSet, RangeSetError, ScopeSel,
 };
+pub use reply::{Applied, Cap, Failure, FailureKind, Made, Previewed};
 pub use text_layer::{OcrWord, TextLayer};
+pub use transform::{MarkupKeep, OutlinePolicy, PageNumbering, Transform};
 pub use watermark::{GridPos, WatermarkContent, WatermarkSpec, Z};

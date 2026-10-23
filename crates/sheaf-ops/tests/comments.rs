@@ -4,15 +4,23 @@
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
+// A test crate of its own, whose scratch files go in the temp directory
+// clippy.toml bans outside tests.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::export::Export;
+use sheaf_doc::materialize::AskAnswers;
 use sheaf_doc::save::text_string;
 use sheaf_doc::tx::fixture::add;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
+use sheaf_doc::{Actor, Annot, AnnotId, AnnotKind, Box2, Pt};
 use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
+use sheaf_ops::NoProgress;
 use sheaf_ops::comments::{self, Column, CommentFilter, Layout};
+use sheaf_ops::session::SaveTo;
 use sheaf_render::PageIndex;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
@@ -111,7 +119,7 @@ fn placed(doc: &sheaf_doc::Document, i: usize, a: Annot) -> Annot {
 /// tickmark on page 3 at (50, 60), as they show, and the other tools'
 /// comments in it.
 fn opened(dir: &Path) -> sheaf_doc::Document {
-    let mut doc = comments::open(&pdf(dir), None).unwrap();
+    let mut doc = comments::open(&pdf(dir), None).unwrap().doc;
     let pages: Vec<_> = doc.state().order().iter().copied().collect();
     let note = mark(
         AnnotKind::Note {
@@ -161,34 +169,34 @@ fn px(r: &Raster, x: f32, y: f32) -> [u8; 3] {
     [r.data[i], r.data[i + 1], r.data[i + 2]]
 }
 
-/// The same summary gives the same pages, twice and on two threads:
-/// their content and resources, byte for byte, the file's creation date
-/// aside.
+/// `doc`'s comments, as `cf` lists them, summarized as `layout` lays them
+/// out and saved to `path` as the reader saves the summary: its bytes.
+fn summary(doc: &sheaf_doc::Document, cf: &CommentFilter, layout: Layout, path: &Path) -> Vec<u8> {
+    let from = doc.export_from(Actor::User);
+    let mut made = comments::summary(&from, cf, "", layout, "review.pdf").unwrap();
+    let to = SaveTo::File {
+        path: path.into(),
+        append: false,
+    };
+    made.save(to, &AskAnswers::default(), &NoProgress).unwrap();
+    std::fs::read(path).unwrap()
+}
+
+/// The same summary gives the same file, twice and on two threads, byte
+/// for byte: it's made in memory and saved, and nothing in it is the
+/// time's.
 #[test]
 fn the_summary_writes_the_same_pages_every_time() {
     let dir = scratch("same");
     let doc = opened(&dir);
-    let snap = doc.snapshot();
-    let write = || {
-        let bytes = comments::summary_pdf(
-            &snap,
-            &CommentFilter::default(),
-            "",
-            Layout::Pages,
-            "review.pdf",
-        )
-        .unwrap();
-        let mut pdf = Pdf::load_mem(&bytes).unwrap();
-        let info = pdf.trailer.remove(b"Info").unwrap();
-        pdf.objects.remove(&info.as_reference().unwrap());
-        let mut out = Vec::new();
-        pdf.save_to(&mut out).unwrap();
-        out
+    let write = |n: usize| {
+        let path = dir.join(format!("summary {n}.pdf"));
+        summary(&doc, &CommentFilter::default(), Layout::Pages, &path)
     };
-    let first = write();
-    assert_eq!(write(), first);
+    let first = write(0);
+    assert_eq!(write(1), first);
     std::thread::scope(|s| {
-        let threads: Vec<_> = (0..2).map(|_| s.spawn(write)).collect();
+        let threads: Vec<_> = (2..4).map(|n| s.spawn(move || write(n))).collect();
         for t in threads {
             assert_eq!(t.join().unwrap(), first);
         }
@@ -199,14 +207,8 @@ fn the_summary_writes_the_same_pages_every_time() {
 fn the_summary_lists_every_comment_and_thread() {
     let dir = scratch("only");
     let doc = opened(&dir);
-    let bytes = comments::summary_pdf(
-        &doc.snapshot(),
-        &CommentFilter::default(),
-        "",
-        Layout::CommentsOnly,
-        "review.pdf",
-    )
-    .unwrap();
+    let all = dir.join("all.pdf");
+    let bytes = summary(&doc, &CommentFilter::default(), Layout::CommentsOnly, &all);
     let e = engine(bytes);
     assert_eq!(e.page_count(), 1);
     let text = e.page_text(PageIndex(0)).unwrap();
@@ -230,8 +232,7 @@ fn the_summary_lists_every_comment_and_thread() {
         pages: Some((1, 1)),
         ..Default::default()
     };
-    let bytes = comments::summary_pdf(&doc.snapshot(), &cf, "", Layout::CommentsOnly, "review.pdf")
-        .unwrap();
+    let bytes = summary(&doc, &cf, Layout::CommentsOnly, &dir.join("page 2.pdf"));
     let text = engine(bytes).page_text(PageIndex(0)).unwrap();
     assert!(
         text.contains("Filtered: page 2") && text.contains("Done"),
@@ -244,14 +245,8 @@ fn the_summary_lists_every_comment_and_thread() {
 fn the_pages_layout_draws_each_page_with_its_numbers() {
     let dir = scratch("pages");
     let doc = opened(&dir);
-    let bytes = comments::summary_pdf(
-        &doc.snapshot(),
-        &CommentFilter::default(),
-        "",
-        Layout::Pages,
-        "review.pdf",
-    )
-    .unwrap();
+    let pages = dir.join("pages.pdf");
+    let bytes = summary(&doc, &CommentFilter::default(), Layout::Pages, &pages);
     let e = engine(bytes);
     assert_eq!(e.page_count(), 3);
     let text = e.page_text(PageIndex(1)).unwrap();
@@ -291,6 +286,80 @@ fn the_pages_layout_draws_each_page_with_its_numbers() {
             [red, g, b]
         );
     }
+}
+
+/// Comments brought in from the same XFDF twice, through a session, as
+/// `sheaf comments import` brings them (M10.5 §6.8): the second time they
+/// update the marks the first made, matched by `/NM`, rather than add
+/// them again; each keeps its own name, dates and author, and the reply
+/// still threads under its comment by name, in the saved file too.
+#[test]
+fn importing_the_same_xfdf_twice_updates_it() {
+    let dir = scratch("import-twice");
+    let xfdf = r#"<?xml version="1.0" encoding="UTF-8"?>
+<xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><annots>
+<text page="0" rect="100,600,120,620" name="cy-1" title="Cy" date="D:20261003100000" creationdate="D:20261002090000"><contents>Look here</contents></text>
+<text page="0" rect="100,600,120,620" name="di-1" title="Di" inreplyto="cy-1" date="D:20261004110000"><contents>Seen</contents></text>
+</annots></xfdf>"#;
+    let mut session = comments::open(&pdf(&dir), None).unwrap();
+    let said = comments::import(&mut session, xfdf.as_bytes(), None).unwrap();
+    assert_eq!(said, "2 added, 0 updated");
+    let said = comments::import(&mut session, xfdf.as_bytes(), None).unwrap();
+    assert_eq!(said, "0 added, 2 updated");
+    let theirs = |doc: &sheaf_doc::Document| {
+        let st = doc.state();
+        let p0 = st.order()[0];
+        let marks: Vec<(String, String, String, String, Option<String>)> = (st.marks_on(p0))
+            .map(|a| {
+                let parent = a.thread_parent().map(str::to_string);
+                (
+                    a.name(),
+                    a.author.clone(),
+                    a.created.clone(),
+                    a.modified.clone(),
+                    parent,
+                )
+            })
+            .collect();
+        marks
+    };
+    let want = vec![
+        (
+            "cy-1".to_string(),
+            "Cy".to_string(),
+            "D:20261002090000".to_string(),
+            "D:20261003100000".to_string(),
+            None,
+        ),
+        (
+            "di-1".to_string(),
+            "Di".to_string(),
+            String::new(),
+            "D:20261004110000".to_string(),
+            Some("cy-1".to_string()),
+        ),
+    ];
+    assert_eq!(theirs(&session.doc), want);
+    let path = dir.join("imported.pdf");
+    let to = SaveTo::File {
+        path: path.clone(),
+        append: false,
+    };
+    session
+        .save(to, &AskAnswers::default(), &NoProgress)
+        .unwrap();
+    let back = comments::open(&path, None).unwrap();
+    assert_eq!(theirs(&back.doc), want);
+    let listing = comments::list(back.doc.state(), &CommentFilter::default(), "");
+    let thread: Vec<&str> = (listing
+        .threads()
+        .find(|t| t.page == 0)
+        .unwrap()
+        .entries
+        .iter())
+    .map(|e| &*e.comment.name)
+    .collect();
+    assert_eq!(thread, ["cy-1", "di-1"]);
 }
 
 #[test]
@@ -346,7 +415,7 @@ fn a_measurement_shows_its_value_and_lists_it() {
     );
     doc.commit_ops(vec![add(p0, &m)], "measure").unwrap();
     // Two inches at 1 in = 10 ft: drawn on the page with its value.
-    let printed = sheaf_doc::save::print_pdf(&doc.snapshot(), &[p0], true).unwrap();
+    let printed = doc.export_bytes(|f, _| Export::print(f, &[p0], true));
     let text = engine(printed).page_text(PageIndex(0)).unwrap();
     assert!(text.contains("20.00 ft"), "{text}");
     let listing = comments::list(doc.state(), &CommentFilter::default(), "");
@@ -376,7 +445,7 @@ fn links_are_foreign_records() {
         .set("Annots", vec![link.into()]);
     let path = dir.join("linked.pdf");
     file.save(&path).unwrap();
-    let doc = comments::open(&path, None).unwrap();
+    let doc = comments::open(&path, None).unwrap().doc;
     let st = doc.state();
     let p0 = st.order()[0];
     let theirs: Vec<(String, Option<lopdf::ObjectId>)> = (st.foreign_on(p0))
@@ -387,7 +456,7 @@ fn links_are_foreign_records() {
     let listing = comments::list(st, &CommentFilter::default(), "");
     let pages: Vec<usize> = listing.threads().map(|t| t.page).collect();
     assert_eq!(pages, [1]);
-    let out = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+    let out = sheaf_doc::save::rewrite(&doc).unwrap();
     let back = Pdf::load_mem(&out).unwrap();
     let page = back.page_iter().next().unwrap();
     let list = back.get_dictionary(page).unwrap().get(b"Annots").unwrap();
@@ -417,7 +486,7 @@ fn the_comments_panel_lists_what_the_file_holds() {
     type Page = (usize, Vec<String>);
     let entries = corpus.forms().unwrap();
     let outcomes = each_entry(&entries, |entry| {
-        let doc = comments::open(&corpus.path(entry), None).ok()?;
+        let doc = comments::open(&corpus.path(entry), None).ok()?.doc;
         let mut listed: BTreeMap<usize, Page> = BTreeMap::new();
         let listing = comments::list(doc.state(), &CommentFilter::default(), "");
         for t in listing.threads() {

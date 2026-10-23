@@ -1,8 +1,9 @@
 id = "test-plugin"
 name = "Test Plugin"
 version = "0.1.0"
-api = "^0.3"
-events = ["opened", "edited", "closed"]
+api = "^0.4"
+edit-schema = "1.0"
+events = ["opened", "changed", "closed", "edit-refused"]
 
 [[commands]]
 id = "count"
@@ -33,7 +34,7 @@ menu = "Tools/Test"
 id = "marks"
 label = "Marks"
 icon = "icons/bookmark.svg"
-help = "Reads the marks on page 1 and adds a polygon, for the host tests."
+help = "Reads the annotations on page 1 and adds a polygon, for the host tests."
 
 [[commands]]
 id = "prefs"

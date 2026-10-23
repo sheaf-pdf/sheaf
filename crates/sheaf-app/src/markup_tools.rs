@@ -23,8 +23,7 @@ use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::mark_changes;
 use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Blob, BlobRef, Box2, CommitOpts, DocState, Document, FormRef,
-    PageId, Pt,
+    Annot, AnnotId, AnnotKind, Blob, BlobId, Box2, CommitOpts, Document, FormRef, PageId, Pt,
 };
 use sheaf_edit::{AnnotRef, Delta, Op, PageSize, Rotation, Vec2};
 use sheaf_ui::theme;
@@ -1513,81 +1512,86 @@ struct CopiedMarks {
 /// held them in the frame the file displayed, before PageSpace).
 const COPIED_MARKS: u32 = 2;
 
-/// What the marks copied last hold, by stem: each page stamp's page and
-/// each attachment's file, held while they're on the clipboard (M10.5
-/// §14.1's clipboard blob cache). A paste in any window gives them to its
-/// document, whose files may have neither. It holds one copy's, as the
-/// clipboard does.
+/// What the marks copied last hold: each page stamp's page and each
+/// attachment's file, held as blobs by their ids while they're on the
+/// clipboard, which the marks name by their stems (M10.5 §14.1's
+/// clipboard blob cache). A stamp's page a file holds, or one drawn from
+/// what it's pinned to, is held as a one-page PDF made as it's copied: what
+/// the clipboard holds of a file is never the file. A paste in any window
+/// gives them to its document, whose files may have none of them. It holds
+/// one copy's, as the clipboard does.
 #[derive(Default)]
 struct CopiedAssets {
-    stamps: HashMap<String, FormRef>,
-    files: HashMap<String, BlobRef>,
+    blobs: HashMap<BlobId, Blob>,
+    /// Each stem the marks name, and the blob it is.
+    by_stem: HashMap<String, BlobId>,
 }
 
 static COPIED_ASSETS: LazyLock<Mutex<CopiedAssets>> = LazyLock::new(Default::default);
 
 impl CopiedAssets {
-    /// What `marks`, `st`'s, hold.
-    fn of(marks: &[Annot], st: &DocState) -> CopiedAssets {
+    /// What `marks`, `doc`'s, hold.
+    fn of(marks: &[Annot], doc: &Document) -> CopiedAssets {
         let mut held = CopiedAssets::default();
+        let st = doc.state();
         for a in marks {
             let Some(m) = st.annot(a.id).and_then(|rec| rec.mark_record()) else {
                 continue;
             };
-            match (&a.kind, &m.stamp, &m.file) {
-                (AnnotKind::PageStamp { stamp, .. }, Some(form), _) => {
-                    held.stamps.insert(stamp.clone(), form.clone());
+            let (stem, blob) = match (&a.kind, &m.stamp, &m.file) {
+                (AnnotKind::PageStamp { stamp, name, .. }, Some(form), _) => {
+                    let blob = match form {
+                        FormRef::Blob(page) => Ok(page.blob().clone()),
+                        FormRef::Base(_) | FormRef::Pinned(_) => form
+                            .to_pdf()
+                            .and_then(|page| Ok(doc.store().intern(page, BlobKind::stamp())?)),
+                    };
+                    match blob {
+                        Ok(blob) => (stamp, blob),
+                        Err(e) => {
+                            log::warn!("copying stamp {name}: {e:#}");
+                            continue;
+                        }
+                    }
                 }
                 (AnnotKind::FileAttachment { file: stem, .. }, _, Some(file)) => {
-                    held.files.insert(stem.clone(), file.clone());
+                    (stem, file.blob().clone())
                 }
-                _ => {}
-            }
+                _ => continue,
+            };
+            held.by_stem.insert(stem.clone(), blob.id());
+            held.blobs.insert(blob.id(), blob);
         }
         held
     }
 
     /// What `marks` name of these, given to `doc`, the document they're
-    /// pasted into: interned into its store, but for a stamp's page it
-    /// has under the same stem; a page a file holds is made a one-page
-    /// PDF first, and a mark whose bytes are another blob's then names
-    /// that one. The blobs, to hold until the marks are added.
+    /// pasted into: interned into its store, and each mark then naming its
+    /// blob by its stem, but for a stamp's page it has under the same stem.
+    /// The blobs, to hold until the marks are added.
     fn give(&self, marks: &mut [Annot], doc: &Document) -> Vec<Blob> {
-        let store = doc.store();
         let mut held = Vec::new();
         for a in marks {
-            let (stem, bytes, kind) = match &mut a.kind {
-                AnnotKind::PageStamp { stamp, name, .. } => {
-                    let Some(form) = self.stamps.get(stamp.as_str()) else {
+            let (stem, kind) = match &mut a.kind {
+                AnnotKind::PageStamp { stamp, .. } => match doc.find_stamp(stamp) {
+                    Some(FormRef::Base(_) | FormRef::Pinned(_)) => continue,
+                    Some(FormRef::Blob(page)) => {
+                        held.push(page.blob().clone());
                         continue;
-                    };
-                    let page = match (form, doc.find_stamp(stamp)) {
-                        (_, Some(FormRef::Base(_))) => continue,
-                        (FormRef::Blob(page), _) => page.bytes().clone(),
-                        (FormRef::Base(_), Some(FormRef::Blob(page))) => {
-                            held.push(page.blob().clone());
-                            continue;
-                        }
-                        (FormRef::Base(_), None) => match form.to_pdf() {
-                            Ok(page) => page,
-                            Err(e) => {
-                                log::warn!("pasting stamp {name}: {e:#}");
-                                continue;
-                            }
-                        },
-                    };
-                    (stamp, page, BlobKind::stamp())
-                }
-                AnnotKind::FileAttachment { file, .. } => match self.files.get(file.as_str()) {
-                    Some(bytes) => (file, bytes.bytes().clone(), BlobKind::Attachment),
-                    None => continue,
+                    }
+                    None => (stamp, BlobKind::stamp()),
                 },
+                AnnotKind::FileAttachment { file, .. } => (file, BlobKind::Attachment),
                 _ => continue,
             };
-            match store.intern(bytes, kind) {
-                Ok(blob) => {
-                    *stem = blob.id().stem();
-                    held.push(blob);
+            let Some(blob) = (self.by_stem.get(stem.as_str())).and_then(|id| self.blobs.get(id))
+            else {
+                continue;
+            };
+            match doc.store().intern(blob.bytes().clone(), kind) {
+                Ok(given) => {
+                    *stem = given.id().stem();
+                    held.push(given);
                 }
                 Err(e) => log::warn!("pasting {stem}: {e}"),
             }
@@ -1678,7 +1682,7 @@ impl DocView {
         if marks.is_empty() {
             return false;
         }
-        let held = CopiedAssets::of(&marks, doc.model.state());
+        let held = CopiedAssets::of(&marks, &doc.model);
         if let Ok(mut copied) = COPIED_ASSETS.lock() {
             *copied = held;
         }
@@ -2077,28 +2081,30 @@ mod tests {
         }
     }
 
+    /// A document of one blank page, of no file.
+    fn blank() -> Document {
+        let store = sheaf_doc::Store::new();
+        let primary = sheaf_doc::store::blank(&store, 1);
+        Document::new(
+            store,
+            primary,
+            "a.pdf".into(),
+            None,
+            &[],
+            Box::new(sheaf_doc::FixedCount(10)),
+        )
+    }
+
     /// Copied marks take their stamps' pages and files with them, and a
     /// paste gives them to a document that has neither: the file as it
-    /// is, and a page a file holds as a one-page PDF, which the pasted
-    /// mark names by its blob's stem.
+    /// is, and a page a file holds as a one-page PDF, made as it's copied,
+    /// which the pasted mark names by its blob's stem.
     #[test]
     fn copied_marks_take_what_they_hold() {
+        use sheaf_doc::Mark;
         use sheaf_doc::forms::fixture::{self, MARK_FILE, MARK_FILE_BYTES, MARK_STAMP};
         use sheaf_doc::store::blob_id;
         use sheaf_doc::tx::fixture as ops;
-        use sheaf_doc::{FixedCount, Mark, Store};
-        let blank = || {
-            let store = Store::new();
-            let primary = sheaf_doc::store::blank(&store, 1);
-            Document::new(
-                store,
-                primary,
-                "a.pdf".into(),
-                None,
-                &[],
-                Box::new(FixedCount(10)),
-            )
-        };
         // Placed and attached, saved, and opened: the stamp's page is the
         // file's.
         let mut doc = blank();
@@ -2113,13 +2119,13 @@ mod tests {
             std::process::id(),
             fastrand::u64(..)
         ));
-        sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &path).unwrap();
+        sheaf_doc::save::rewrite_to_path(&doc, &path).unwrap();
         let doc = sheaf_doc::open::file(&path, None).unwrap().doc;
         let _ = std::fs::remove_file(&path);
         let p0 = doc.page(0).unwrap();
         let marks: Vec<Annot> = doc.state().marks_on(p0).cloned().collect();
-        let copied = CopiedAssets::of(&marks, doc.state());
-        assert_eq!((copied.stamps.len(), copied.files.len()), (1, 1));
+        let copied = CopiedAssets::of(&marks, &doc);
+        assert_eq!((copied.by_stem.len(), copied.blobs.len()), (2, 2));
         drop(doc);
 
         let mut other = blank();
@@ -2141,6 +2147,75 @@ mod tests {
             matches!(&got[1].annot.kind, AnnotKind::FileAttachment { file, .. } if *file == *MARK_FILE)
         );
         assert_eq!(&**got[1].file.as_ref().unwrap().bytes(), MARK_FILE_BYTES);
+    }
+
+    /// A library stamp's page is a blob made in memory (`Memory(Library)`),
+    /// which no file holds and nothing wrote anywhere: its mark copied, and
+    /// its window closed, it pastes into the document of another, which has
+    /// nothing of it, holding the same page, which a save writes and the
+    /// file opens with.
+    #[test]
+    fn a_library_stamp_pastes_into_another_window() {
+        use sheaf_doc::store::{MemoryKind, Origin};
+        use sheaf_doc::tx::fixture as ops;
+        let library = |blob: &Blob| {
+            matches!(
+                blob.kind(),
+                BlobKind::Pdf {
+                    origin: Origin::Memory(MemoryKind::Library),
+                    ..
+                }
+            )
+        };
+        let page: std::sync::Arc<[u8]> = sheaf_doc::memory::blank_pages(144.0, 72.0, 1)
+            .unwrap()
+            .into();
+        let mut doc = blank();
+        let placed = doc.store().intern(page.clone(), BlobKind::stamp()).unwrap();
+        let mut stamp = sheaf_doc::forms::fixture::every_mark_kind()[17].clone();
+        let AnnotKind::PageStamp { stamp: stem, .. } = &mut stamp.kind else {
+            panic!("a page stamp")
+        };
+        *stem = placed.id().stem();
+        let p0 = doc.page(0).unwrap();
+        doc.commit_ops(vec![ops::add(p0, &stamp)], "Stamp").unwrap();
+        drop(placed);
+        let marks: Vec<Annot> = doc.state().marks_on(p0).cloned().collect();
+        let copied = CopiedAssets::of(&marks, &doc);
+        assert!(copied.blobs.values().all(library));
+        drop(doc);
+
+        let mut other = blank();
+        let mut pasted = marks;
+        let held = copied.give(&mut pasted, &other);
+        assert!(held.iter().all(library));
+        let p0 = other.page(0).unwrap();
+        let paste = pasted.iter().map(|a| ops::add(p0, a)).collect();
+        other.commit_ops(paste, "Paste").unwrap();
+        drop((held, copied));
+        let got: Vec<_> = other.state().mark_records_on(p0).collect();
+        match got[..] {
+            [m] => match &m.stamp {
+                Some(FormRef::Blob(held)) => assert_eq!(held.bytes(), &page),
+                other => panic!("the stamp's page: {other:?}"),
+            },
+            _ => panic!("one mark: {got:?}"),
+        }
+        let bytes = sheaf_doc::save::rewrite(&other).unwrap();
+        let store = sheaf_doc::Store::new();
+        let kind = BlobKind::file(std::path::Path::new("pasted.pdf"), None);
+        let src = store.open(bytes.into(), kind).unwrap();
+        let facts = sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
+        let policy = sheaf_doc::history::default_policy();
+        let mut back = sheaf_doc::open::start(store, src, "pasted.pdf".into(), None, policy);
+        back.ready(facts).unwrap();
+        let p0 = back.page(0).unwrap();
+        let got: Vec<_> = back.state().mark_records_on(p0).collect();
+        assert!(
+            matches!(got[..], [m] if matches!(m.annot.kind, AnnotKind::PageStamp { .. })
+                && matches!(m.stamp, Some(FormRef::Base(_)))),
+            "{got:?}"
+        );
     }
 
     fn mark(kind: AnnotKind) -> Annot {

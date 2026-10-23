@@ -1,7 +1,8 @@
 //! What sheaf draws on pages, lowered: recognized text over a page, in
 //! place of what sheaf wrote in its file, and the watermark, the
 //! background and the header and footer, each drawn by a generator (M10.5
-//! §3.4–3.5).
+//! §3.4–3.5); and sheaf's private data taken out of a page's content
+//! (§15).
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
@@ -11,14 +12,15 @@ use sheaf_edit::{GridPos, HeaderFooterSpec, Z};
 use super::{EditError, Lower, Notice, OthersFound};
 use crate::content::{
     self, BlockAt, ContentError, Font, GenId, PagOrigin, PageContent, Pagination, PaginationKind,
-    ResCx, SheafBlock, SpanAcross, Std14,
+    PropertiesDict, ResCx, Reserved, SheafBlock, SpanAcross, Std14,
 };
 use crate::generate::{self, header};
 use crate::model::{
-    DocState, Filter, Frozen, GenSpec, Generator, Layer, MarkedSel, PageDef, PageId, Scope, Static,
-    StreamSel, WatermarkContent, WatermarkGen,
+    DocState, Filter, Frozen, GenSpec, Generator, Layer, LegacySel, MarkedSel, PageDef, PageId,
+    Scope, Static, StreamSel, WatermarkContent, WatermarkGen,
 };
 use crate::prim::{Key, Val};
+use crate::private;
 use crate::store::Src;
 use crate::text_layer::TextLayer;
 
@@ -92,6 +94,64 @@ fn saved_ocr(lw: &Lower, page: PageId, def: &PageDef) -> Result<Vec<Filter>, Edi
         filters.push(Filter::DropMarked(MarkedSel::SheafOcr));
     }
     Ok(filters)
+}
+
+/// The filters that take sheaf's private data out of the content of page
+/// `def` (§15): `RemovePrivateData`'s, which a Strip output writes
+/// ([`Private::Strip`]). What an older sheaf kept in the lists written in
+/// its pagination artifacts, and in those of sheaf's blocks another tool
+/// merged into a stream ([`LegacySel::Marked`]); what marks its streams as
+/// sheaf's ([`LegacySel::Streams`]); and the lists named in its resources,
+/// and the names an older sheaf gave them ([`LegacySel::Resources`]). Read
+/// from the page's blocks and resources, facts of its source read once.
+/// None for a page that holds none, or whose content can't be read, which
+/// is written as it is, and fails a Strip output's check if it holds any
+/// (a Scrub output's says so in a note).
+///
+/// [`Private::Strip`]: crate::materialize::Private::Strip
+pub(crate) fn private_filters(def: &PageDef) -> Vec<Filter> {
+    let (src, index) = (&def.base.src, def.base.index);
+    let Ok(blocks) = src.blocks(index) else {
+        return Vec::new();
+    };
+    let mut sels = Vec::new();
+    let kinds = BTreeSet::from(PaginationKind::ALL);
+    let origins = BTreeSet::from([PagOrigin::SheafLegacy]);
+    if blocks.selected(&kinds, &origins).next().is_some() {
+        sels.push(LegacySel::Marked(MarkedSel::Pagination { kinds, origins }));
+    }
+    for b in blocks.sheaf.iter() {
+        let sel = match (b.block, b.at) {
+            (SheafBlock::Gen(g), BlockAt::Marked(_)) => MarkedSel::SheafGen(g),
+            (SheafBlock::Ocr(_), BlockAt::Marked(_)) => MarkedSel::SheafOcr,
+            _ => continue,
+        };
+        let sel = LegacySel::Marked(sel);
+        if !sels.contains(&sel) {
+            sels.push(sel);
+        }
+    }
+    if blocks.sheaf_marked {
+        sels.push(LegacySel::Streams);
+    }
+    if private_resources(src, index) {
+        sels.push(LegacySel::Resources);
+    }
+    sels.into_iter().map(Filter::StripLegacy).collect()
+}
+
+/// Whether page `index` of `src`'s resources hold sheaf's private data: a
+/// name an older sheaf gave one, or a property list named there with a
+/// key of [`private::LIST_KEYS`].
+fn private_resources(src: &Src, index: u32) -> bool {
+    let Some(facts) = src.page(index) else {
+        return false;
+    };
+    let resources = facts.resources.as_deref();
+    let reserved = Reserved::read(src.pdf(), resources);
+    let lists = PropertiesDict::read(src.pdf(), resources);
+    (reserved.names()).any(|(_, name)| private::is_resource_name(name))
+        || (lists.lists()).any(|l| (l.iter()).any(|(k, _)| private::LIST_KEYS.contains(&&k[..])))
 }
 
 /// Nothing when a save can cut `spans`, ranges of page `index` of `src`,

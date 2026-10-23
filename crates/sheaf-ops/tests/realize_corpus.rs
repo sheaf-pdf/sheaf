@@ -51,6 +51,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use lopdf::Object;
+use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::{FieldKind, Value};
 use sheaf_doc::model::{FieldNode, Terminal};
@@ -59,8 +60,9 @@ use sheaf_doc::realize::{EngineKey, PageView, Realizer, ViewInputs, emission_is_
 use sheaf_doc::serialize::crypt::Crypt;
 use sheaf_doc::text_layer::from_engine;
 use sheaf_doc::tx::fixture as fx;
-use sheaf_doc::{Box2, DocState, Document, EditError, OcrWord, PageId};
+use sheaf_doc::{Actor, Box2, DocState, Document, EditError, OcrWord, PageId};
 use sheaf_edit::{BatesSpec, Z};
+use sheaf_ops::NoProgress;
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 use sheaf_render::{OpenError, PageIndex};
 
@@ -496,7 +498,13 @@ fn edit_and_check(d: &mut Document, tier: Tier, set: Set, out: &mut Outcome) -> 
     }
     let mut snap = d.snapshot();
     snap.state = st.clone();
-    let saved = sheaf_doc::save::rewrite(&snap)?;
+    let from = ExportFrom {
+        snap,
+        cx: d.lower_cx(Actor::User),
+    };
+    let answers = sheaf_doc::export::PRINT_ANSWERS;
+    let saved = sheaf_doc::export::run(Export::whole(from, Out::Bytes), &answers, &NoProgress)?;
+    let saved = saved.bytes.expect("a Rewrite to bytes is its bytes");
     let password = d.primary().password().map(String::from);
     let inputs = ViewInputs::plugin();
     let realizer = Realizer::new();

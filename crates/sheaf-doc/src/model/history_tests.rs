@@ -25,9 +25,9 @@ use lopdf::{Object, ObjectId, dictionary};
 use proptest::prelude::*;
 use sheaf_edit::{
     Anchor, AnnotRef, BatesSpec, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Delta,
-    GridPos, Imported, LabelStyle, Local, Margins, MarkKind, MarkPatch, NewMark, Op, OutlineBring,
-    PageRef, PageSel, Patch, RangeSet, ScopeSel, Sibling, Style, Turn, Vec2, WatermarkContent,
-    WatermarkSpec, Z,
+    DestView, FlattenSet, GridPos, Imported, LabelStyle, Local, Margins, MarkKind, MarkPatch,
+    NewMark, Op, OutlineBring, PageRef, PageSel, PageSource, Patch, RangeSet, ScopeSel, Sibling,
+    Style, Turn, Vec2, WatermarkContent, WatermarkSpec, Z,
 };
 
 use super::tests::{flat, opened_doc, square, tl};
@@ -47,7 +47,7 @@ const PLUGIN: &str = "test-plugin";
 
 /// The ops a run makes versions of, by name: below [`KINDS`], an action
 /// is an op of the kind at its place here.
-const OPS: [&str; 24] = [
+const OPS: [&str; 25] = [
     "move-pages",
     "rotate-pages",
     "delete-pages",
@@ -72,6 +72,7 @@ const OPS: [&str; 24] = [
     "remove-watermark",
     "set-header-footer",
     "remove-header-footer",
+    "flatten-annotations",
 ];
 
 /// A run's actions: below this, an op of the kind [`OPS`] names; then
@@ -103,11 +104,13 @@ pub(crate) struct Run {
     pub(crate) d: Document,
     /// The opened file, and another with a form and marks, whose pages
     /// come in, each held by the run, as an op's caller holds what it
-    /// inserts; and a stamp's page and an attachment's file, which marks
-    /// hold.
+    /// inserts; a stamp's page and an attachment's file, which marks
+    /// hold; and an image file, whose page comes in made in memory, as
+    /// blank pages do.
     opened: Src,
     other: Src,
     held: [Blob; 2],
+    image: Blob,
     /// The group the run's group actions commit in, until one begins
     /// another, or it ends.
     group: Option<RunGroup>,
@@ -247,10 +250,16 @@ impl Run {
     pub(crate) fn over(d: Document, other: Vec<u8>) -> Self {
         let kind = BlobKind::file(Path::new("form.pdf"), None);
         let other = d.store().open(other.into(), kind).unwrap();
+        let png = crate::materialize::watermark_tests::png();
+        let image = (d
+            .store()
+            .intern(png.as_slice().into(), BlobKind::image(&png).unwrap()))
+        .unwrap();
         let made = vec![(d.current_version(), d.state().clone())];
         Self {
             opened: d.primary().clone(),
             held: crate::forms::fixture::mark_blobs(d.store()),
+            image,
             d,
             other,
             group: None,
@@ -830,13 +839,32 @@ impl Run {
             let parent = parent.map(|p| bookmark_ref(st, rng, p, locals));
             (parent, at)
         };
-        // A file pages come from, and the op's name for it.
-        let source = |rng: &mut fastrand::Rng| {
-            let (src, name) = match rng.bool() {
-                true => (&self.other, "form.pdf"),
-                false => (&self.opened, "a.pdf"),
-            };
-            (src, fx::file(src, name))
+        // Where pages come from, and how many it has: a file, by the op's
+        // name for it, or blank pages or an image's, made in memory.
+        let source = |rng: &mut fastrand::Rng| match rng.u8(..6) {
+            0 => {
+                let count = rng.u32(1..=3);
+                let size = sheaf_edit::PageSize {
+                    width: [612.0, 595.0][rng.usize(..2)],
+                    height: 792.0,
+                };
+                (count, PageSource::Blank { size, count })
+            }
+            1 => {
+                let fit = match rng.bool() {
+                    true => sheaf_edit::Fit::Original,
+                    false => sheaf_edit::Fit::LETTER,
+                };
+                let images = vec![BlobSel::Id(self.image.id())];
+                (1, PageSource::Images { images, fit })
+            }
+            n => {
+                let (src, name) = match n % 2 {
+                    0 => (&self.other, "form.pdf"),
+                    _ => (&self.opened, "a.pdf"),
+                };
+                (src.page_count(), fx::file(src, name))
+            }
         };
         // A few of its pages, from 1: a saved file has all the document's,
         // and bringing in all of them doubles it.
@@ -927,8 +955,8 @@ impl Run {
                 }
             }
             "insert-pages" => {
-                let (src, from) = source(rng);
-                let pages = within(rng, src.page_count());
+                let (count, from) = source(rng);
+                let pages = within(rng, count);
                 let n = pages.iter().count().min(2);
                 Op::InsertPages {
                     from,
@@ -939,7 +967,7 @@ impl Run {
                 }
             }
             "replace-pages" => {
-                let (src, from) = source(rng);
+                let (count, from) = source(rng);
                 // With two pages left, no more pages replaced than there
                 // are replacements, so none goes.
                 let ids = match pages.len() > 2 {
@@ -949,7 +977,7 @@ impl Run {
                 Op::ReplacePages {
                     pages: ids.iter().map(|&id| page_by(rng, id)).collect(),
                     from,
-                    with: Some(within(rng, src.page_count())),
+                    with: Some(within(rng, count)),
                     bring: bring(rng),
                 }
             }
@@ -1316,6 +1344,13 @@ impl Run {
                     false => some_pages(rng),
                 },
                 include_authored: rng.bool(),
+            },
+            "flatten-annotations" => Op::FlattenAnnotations {
+                pages: match rng.u8(..4) {
+                    0 => PageSel::All,
+                    _ => some_pages(rng),
+                },
+                which: [FlattenSet::All, FlattenSet::Printable][rng.usize(..2)],
             },
             k => unreachable!("kind {k}"),
         }
@@ -1728,6 +1763,8 @@ fn each_kind_s_no_op_pushes_nothing() {
             pages: none(),
             include_authored: false,
         },
+        // The printed annotations of a page whose comments aren't printed.
+        fx::flatten(&[p2], FlattenSet::Printable),
     ];
     let names: BTreeSet<&str> = no_ops.iter().map(crate::tx::op_name).collect();
     assert_eq!(names.len(), no_ops.len());

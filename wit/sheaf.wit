@@ -1,11 +1,16 @@
 /// The sheaf plugin API. Plugins are WebAssembly components targeting the
 /// `plugin` world. See docs/plugins.md.
 ///
-/// Versioning: semver on this package. The host keeps serving the previous
-/// minor/major world when it moves on (N-1), so a plugin built against an
-/// older API keeps loading. 0.3 has every kind of mark and their new
-/// fields, and the plugin's preferences; 0.2 is still served.
-package sheaf:plugin@0.3.0;
+/// Versioning: semver on this package, and a plugin loads only under the
+/// minor it was built for until sheaf's first release. Edits cross as Op
+/// JSON of the version the manifest's `edit-schema` names, so a new kind of
+/// edit needs no new world; a new read does.
+///
+/// Coordinates are PageSpace: a page's own user space, in points, y up,
+/// as the file has it before its `/Rotate` (and before any turn added in
+/// sheaf). A page's `to-view` and `from-view` map it to and from the page
+/// as it shows: points, y down, from the top-left corner of what shows.
+package sheaf:plugin@0.4.0;
 
 /// Shared data types. Ids are opaque and stable for the life of an open
 /// document; they are not page numbers.
@@ -19,27 +24,42 @@ interface types {
 
     record rgb { r: u8, g: u8, b: u8 }
 
-    /// Page coordinates: points, top-left origin, in the page's displayed
-    /// space (after the file's own /Rotate, before any rotation added in
-    /// sheaf).
+    /// A point in PageSpace.
     record pt { x: f32, y: f32 }
+    /// A box in PageSpace: (`x`, `y`) its corner nearest the origin, `w`
+    /// and `h` its size.
     record box2 { x: f32, y: f32, w: f32, h: f32 }
+
+    /// A map of the plane, in PDF's order: x' = a·x + c·y + e,
+    /// y' = b·x + d·y + f.
+    record affine { a: f32, b: f32, c: f32, d: f32, e: f32, f: f32 }
+
+    /// A version of a document: `id` names a state of document
+    /// `instance` only. A document opened again is another instance, and
+    /// ids kept from before mean nothing in it.
+    record version { instance: u64, id: u64 }
 
     record page-info {
         id: page-id,
-        /// Rotation added in sheaf on top of the file's.
-        rotation: rotation,
-        /// Displayed size in points, including `rotation`.
-        width: f32,
-        height: f32,
+        /// The page's boxes, in PageSpace.
+        media: box2,
+        crop: box2,
+        /// How the page is turned as it shows: the file's `/Rotate` with
+        /// any turn added in sheaf.
+        rotate: rotation,
+        /// What the page is called: its page label, or its number.
+        label: string,
+        /// PageSpace to the page as it shows, and back.
+        to-view: affine,
+        from-view: affine,
     }
 
     /// `/XYZ`: this point at the window's top-left, at this zoom (1.0 =
-    /// 100%). Page coordinates; none keeps the viewer's current value.
+    /// 100%). PageSpace; none keeps the viewer's current value.
     record dest-xyz { left: option<f32>, top: option<f32>, zoom: option<f32> }
 
     /// Another destination kind (`Fit`, `FitH`, `FitR`, ...) as the file has
-    /// it: its name and its numbers in PDF user space (none for null).
+    /// it: its name and its numbers in PageSpace (none for null).
     record dest-other { kind: string, params: list<option<f32>> }
 
     /// Where a bookmark lands on its page.
@@ -82,7 +102,6 @@ interface types {
     record connector-shape {
         rect: box2,
         label: string,
-        /// Set by the host; ignored in edits.
         partner: option<annot-id>,
     }
 
@@ -94,9 +113,8 @@ interface types {
     /// (state None, Accepted, Rejected, Cancelled or Completed) or
     /// "Marked" (Marked or Unmarked).
     record status-shape { parent: string, model: string, state: string }
-    /// A stamp from the library: `stamp` names its one-page PDF in the
-    /// cache, `name` is what the library calls it, `text` its filled-in
-    /// dynamic text.
+    /// A page stamp: `stamp` names the page it draws, `name` is what the
+    /// library calls it, `text` its filled-in dynamic text.
     record page-stamp-shape { rect: box2, stamp: string, name: string, text: option<string> }
     /// A text stamp in a frame; `status` when Set Status placed it.
     record text-stamp-shape { rect: box2, text: string, status: bool }
@@ -104,7 +122,7 @@ interface types {
     record page-border-shape { rect: box2, status: string }
     /// A text box with a leader line through `knee` to an arrow at `point`.
     record callout-shape { rect: box2, knee: pt, point: pt, size: f32 }
-    /// A file behind an icon: `file` names its bytes in the cache.
+    /// A file behind an icon: `file` names its bytes.
     record attachment-shape { pos: pt, icon: string, file: string, name: string, size: u64 }
 
     enum measured { distance, perimeter, area }
@@ -144,90 +162,132 @@ interface types {
         measure(measure-shape),
     }
 
+    /// Who made a mark or a comment, as a plugin is told: "you" for the
+    /// user, "plugin <id>" for an installed plugin, and "other" for
+    /// anyone else. A plugin granted `identity` is told others' names as
+    /// they're written, and the user's.
+    type author = string;
+
+    /// One of sheaf's marks, as it is: read it, and change it with ops.
     record annot {
-        /// Assigned by the host; ignored when adding.
         id: annot-id,
         kind: annot-kind,
         color: rgb,
         /// 0 to 1.
         opacity: f32,
         stroke: f32,
-        /// Who made it. Set by the host, ignored in edits: a plugin's
-        /// marks are by the plugin.
-        author: string,
-        /// Its text. `<<date>>` and `<<time>>` are filled in by the host,
-        /// as dynamic stamps are; `<<name>>` and `<<initials>>` stay as a
-        /// plugin writes them.
+        author: author,
+        /// Its text. In a plugin's own marks, `<<name>>` and `<<initials>>`
+        /// stay as it wrote them, unless it was granted `identity`.
         contents: string,
         /// The inside's color, for kinds with one.
         fill: option<rgb>,
         dashed: bool,
         /// A cloudy border, for rectangles, ellipses and polygons.
         cloudy: bool,
-        /// PDF dates. Set by the host; ignored in edits (a change is now).
+        /// PDF dates.
         created: string,
         modified: string,
         /// What it's called in threads and in the file (`/NM`); replies
-        /// name their comment by it. Set by the host; ignored in edits.
+        /// name their comment by it.
         name: string,
     }
 
-    record move-pages { ids: list<page-id>, before: option<page-id> }
-    record rotate-pages { ids: list<page-id>, by: rotation }
-    record outline-insert {
-        parent: option<outline-id>,
-        /// Insert after this sibling; none means first.
-        after: option<outline-id>,
-        title: string,
-        target: option<page-id>,
-        /// Where on `target` it lands; none is the top of the page.
-        view: option<dest-view>,
+    /// Another tool's comment, which sheaf shows and keeps but doesn't
+    /// edit: what it is (`/Subtype`), where, what it says and who made
+    /// it, and its name, which replies and review states name it by.
+    record comment-summary {
+        id: annot-id,
+        subtype: string,
+        rect: box2,
+        contents: string,
+        author: author,
+        name: string,
     }
-    /// One bookmark of a subtree, in pre-order. `depth` is relative to the
-    /// insert point: 0 is a sibling there, 1 a child of the item above at
-    /// depth 0, and so on.
-    record new-outline-item {
-        title: string,
-        target: option<page-id>,
-        view: option<dest-view>,
-        depth: u16,
+
+    /// An annotation a plugin is shown: never a form field's widget, nor a
+    /// link.
+    variant annot-view {
+        mark(annot),
+        comment(comment-summary),
     }
-    /// Several bookmarks in one edit, nested by depth: a new parent and its
-    /// children, say. They go after `after` under `parent`, in order.
-    record outline-insert-tree {
-        parent: option<outline-id>,
-        after: option<outline-id>,
-        items: list<new-outline-item>,
-    }
-    record outline-move {
-        id: outline-id,
-        parent: option<outline-id>,
-        after: option<outline-id>,
-        with-pages: bool,
-    }
-    /// None leaves a field as it is; for target and color, some(none)
-    /// clears it.
-    record outline-edit {
-        id: outline-id,
-        title: option<string>,
-        target: option<option<page-id>>,
-        color: option<option<rgb>>,
-        view: option<option<dest-view>>,
-    }
-    record page-annot { page: page-id, annot: annot }
-    record annot-ref { page: page-id, id: annot-id }
-    record connector-pair { a: page-annot, b: page-annot }
 
     /// A region the user selected (Shift+drag) on a page.
     record region { page: page-id, rect: box2 }
 
+    /// What made a change.
+    enum change-cause {
+        /// The file's facts came in.
+        opened,
+        commit,
+        /// An edit joined the version before it, its group's.
+        amend,
+        undo,
+        redo,
+        /// History went to another version.
+        jump,
+        saved,
+        /// A failed plugin call's edits were taken back.
+        rollback,
+        /// History's "Undo all of".
+        revert,
+        /// Several changes of different causes, told as one.
+        coalesced,
+    }
+
+    /// Who made a change, by kind: never a name.
+    enum actor-kind {
+        user,
+        /// Another plugin: a plugin isn't told of its own changes.
+        plugin,
+        /// A job sheaf runs for the user: text recognition, an import.
+        job,
+        /// Several changes by different kinds, told as one.
+        mixed,
+    }
+
+    /// What a change changed, as a plugin reads the document.
+    record scopes {
+        /// Pages moved, added or removed: positions and page numbers may
+        /// read differently.
+        order: bool,
+        /// Pages whose boxes or turn changed, and pages added or removed.
+        geometry: list<page-id>,
+        /// Pages that may draw something else, or nothing: their content
+        /// changed, or they were added or removed.
+        content: list<page-id>,
+        /// Pages whose annotations changed.
+        annots: list<page-id>,
+        outline: bool,
+        labels: bool,
+        /// The form, or a field of it.
+        form: bool,
+        /// A watermark, background, header or footer: what any page it's on
+        /// draws may differ.
+        generators: bool,
+    }
+
+    /// One change, or changes made while the plugin was busy, merged: from
+    /// `parent`, the version before the first, to `version`, with what any
+    /// of them changed. Only changes alike to answer merge, so an edit
+    /// answering a merged change is refused only when it would be for each
+    /// of them. A plugin whose last version is `parent` missed nothing; one
+    /// whose isn't reads again.
+    record change-info {
+        version: version,
+        parent: version,
+        cause: change-cause,
+        actor-kind: actor-kind,
+        scopes: scopes,
+    }
+
     /// Something that happened to a document, for plugins that subscribe
     /// (manifest `events`).
     variant doc-event {
+        /// The document's file has opened.
         opened,
-        /// The document changed: an edit, an undo or a redo. The undo
-        /// label. Not sent for the plugin's own edits.
-        edited(string),
+        /// The document changed. Not sent for the plugin's own changes.
+        changed(change-info),
         /// Saved, to this path.
         saved(string),
         selection-changed,
@@ -238,36 +298,38 @@ interface types {
         region(region),
         /// The region was cleared (also under `"region"`).
         region-cleared,
-    }
-
-    /// One change to the document; mirrors sheaf's own edits.
-    variant edit {
-        move-pages(move-pages),
-        rotate-pages(rotate-pages),
-        delete-pages(list<page-id>),
-        duplicate-pages(list<page-id>),
-        outline-insert(outline-insert),
-        outline-insert-tree(outline-insert-tree),
-        outline-move(outline-move),
-        outline-edit(outline-edit),
-        outline-delete(outline-id),
-        annot-add(page-annot),
-        annot-update(page-annot),
-        annot-delete(annot-ref),
-        connector-add(connector-pair),
+        /// Edits of the plugin's didn't land, and why: a change it read
+        /// changed since, or it answered an undo. Edits answering it are
+        /// refused, and not told again.
+        edit-refused(string),
     }
 }
 
-/// The document the command runs against, as it was when the call started.
-/// With no document open, `path` is none and the lists are empty.
+/// The document the call runs against. A call reads one version, its base:
+/// the document as it is at the call's first read or submit (a call that
+/// first shows a form reads the document as the user left it), then as the
+/// call's own submits change it. What each read returns is what the call
+/// decides by: when the call's edits land, each must hold as it was read,
+/// or they don't, and the plugin is told. With no document open, `path`
+/// and `version` are none and the lists are empty.
 interface document {
-    use types.{page-id, page-info, outline-item, annot};
+    use types.{page-id, page-info, outline-item, annot-view, version as doc-version};
 
+    /// Where the document is on disk.
     path: func() -> option<string>;
-    /// In document order.
+    /// The call's base: what its reads read, and its edits are made on.
+    version: func() -> option<doc-version>;
+    /// The pages in order. Reads their order, each page's content and
+    /// boxes, and the page labels.
     pages: func() -> list<page-info>;
+    /// The bookmarks, in pre-order; positions in PageSpace. Reads the top
+    /// level and each bookmark.
     outline: func() -> list<outline-item>;
-    annotations: func(page: page-id) -> list<annot>;
+    /// A page's annotations, in the file's order: sheaf's marks, and other
+    /// tools' comments as summaries. Never a form field's widget or a link.
+    /// Authors are told as roles (`types.author`). Reads the page's list of
+    /// annotations and each one shown.
+    annotations: func(page: page-id) -> list<annot-view>;
     /// Selected pages in document order; empty when nothing is selected.
     selection: func() -> list<page-id>;
     current-page: func() -> option<page-id>;
@@ -275,7 +337,8 @@ interface document {
 
 /// Page text as the file will draw it now: its own, recognized (OCR) text
 /// and a header or footer, saved or not; form fields' values and
-/// annotations' text left out.
+/// annotations' text left out. Positions in PageSpace. Each call reads what
+/// the page draws as text.
 interface text {
     use types.{page-id, text-match, box2};
 
@@ -285,7 +348,7 @@ interface text {
     pattern-search: func(page: page-id, regex: string) -> result<list<text-match>, string>;
     /// Every occurrence of `query`, like Find.
     search: func(page: page-id, query: string, match-case: bool) -> result<list<text-match>, string>;
-    /// Boxes of the text under `rect`, merged per line.
+    /// Boxes of the text in `rect`, merged per line.
     text-boxes: func(page: page-id, rect: box2) -> result<list<box2>, string>;
     /// The page's words with their boxes, in reading order; only those
     /// whose box centre is in `rect`, if given. For live work, fetch a
@@ -293,15 +356,15 @@ interface text {
     words: func(page: page-id, rect: option<box2>) -> result<list<text-match>, string>;
 }
 
-/// Read-only page images. A renderer draws a page (or part of it) at the
-/// resolution and in the pixel format you ask for; the pixels stay in
-/// sheaf until you read them, a strip or a tile at a time. Pages render as
-/// the file will draw them now: sheaf's own markup, a header or footer
-/// saved or not, and other tools' comments and form fields included,
-/// in the file's own orientation (the one text and annotations use; a page
-/// turned in sheaf isn't drawn turned). Handles last for one call.
-/// Rendering time doesn't count against the call's limit; rendered pixels
-/// per call and images alive at once are capped.
+/// Read-only page images. A renderer draws a page (or part of it) as it
+/// shows, at the resolution and in the pixel format you ask for; the pixels
+/// stay in sheaf until you read them, a strip or a tile at a time. Pages
+/// render as the file will draw them now: sheaf's marks, a header or footer
+/// saved or not, and other tools' comments and form fields' appearances
+/// included, unless you ask for it without markup. Each render reads what
+/// the page draws so. Handles last for one call. Rendering time doesn't
+/// count against the call's limit; rendered pixels per call and images
+/// alive at once are capped.
 interface render {
     use types.{page-id, box2, pt};
 
@@ -315,17 +378,20 @@ interface render {
     record render-options {
         /// Resolution, 1 to 600.
         dpi: u32,
-        /// Part of the page in page coordinates; none for all of it.
+        /// Part of the page in PageSpace; none for all of it.
         region: option<box2>,
         format: pixel-format,
+        /// The page alone: no marks and no other tool's comments (form
+        /// fields still drawn), as a print without markup draws it.
+        without-markup: bool,
     }
 
-    /// Rendered pixels, rows top to bottom.
+    /// Rendered pixels, rows top to bottom of the page as it shows.
     resource image {
         width: func() -> u32;
         height: func() -> u32;
         format: func() -> pixel-format;
-        /// The page point under pixel (x, y).
+        /// The PageSpace point at pixel (x, y).
         to-page: func(x: f32, y: f32) -> pt;
         /// `count` whole rows starting at row `y`.
         read-rows: func(y: u32, count: u32) -> list<u8>;
@@ -335,7 +401,7 @@ interface render {
 
     resource page-renderer {
         constructor(page: page-id);
-        /// The page's size in points, as the file draws it.
+        /// The page's size in points as it shows, turned as it shows.
         size: func() -> tuple<f32, f32>;
         render: func(options: render-options) -> result<image, string>;
     }
@@ -357,7 +423,7 @@ interface ocr {
 
     record ocr-word {
         text: string,
-        /// Page coordinates, like annotations.
+        /// PageSpace.
         rect: box2,
         /// 0 to 1.
         confidence: f32,
@@ -382,10 +448,10 @@ interface ocr {
 
     /// Recognize one page now with the user's OCR engine. It reads the
     /// page's own content: no form fields, comments, markup, or header,
-    /// footer, watermark or background sheaf draws, saved or not. Doesn't
-    /// change the document. Time spent here doesn't count against the
-    /// call's limit. Text a page has been recognized with, saved or not,
-    /// is its content: `text` reads it.
+    /// footer, watermark or background sheaf draws, saved or not; that's
+    /// what it reads. Doesn't change the document. Time spent here doesn't
+    /// count against the call's limit. Text a page has been recognized
+    /// with, saved or not, is its content: `text` reads it.
     recognize: func(page: page-id, options: ocr-options) -> result<text-layer, string>;
 }
 
@@ -406,16 +472,74 @@ interface storage {
     preferences: func() -> string;
 }
 
-/// Changes to the document. A call's submits become one undo step, applied
-/// after the command returns, in order, to the document as the call read
-/// it; if something it read has changed since (listing the pages reads
-/// their order), none are applied; if an edit fails, the ones applied are
-/// taken back, unless the user has changed what they did since, when they
-/// stay; either way the user is told.
+/// Changes to the document, as ops: the JSON envelope
+/// `{"v": "1.0", "ops": [...]}` of sheaf's edit vocabulary (its schema is
+/// in docs/plugins.md), `v` the manifest's `edit-schema`. Answers are JSON
+/// too: what a submit made (`{"created", "locals", "lines"}`) or why it
+/// failed (`{"kind", "message"}`).
+///
+/// A call's submits go into one transaction, made on the call's base, which
+/// the call's later reads see. It lands when the call returns, or at
+/// `commit`: its reads must still hold, and its ops are made again on the
+/// document as it is then, making what they made at first, under the same
+/// ids, so an edit the user made meanwhile to something the call didn't
+/// read lands beside it. If they don't, nothing lands, and the plugin gets
+/// `edit-refused`. A call's edits are one undo step, called as its first
+/// submit is. If the call fails, traps or is stopped, they're taken back,
+/// those it committed too, unless the user has changed them since.
+///
+/// What a plugin may do: move, turn, delete and copy pages; page labels;
+/// bookmarks; sheaf's marks, replies and review states, page stamps and
+/// attachments of what it uploads; and delete sheaf's marks. Anything else
+/// is refused (`refused`): inserting pages or deleting another tool's
+/// comments needs the user. A plugin never names a blob by id; it uploads
+/// (`assets`). Its marks are by the plugin, and `<<name>>` and
+/// `<<initials>>` in them stay as written unless it was granted
+/// `identity`.
 interface edits {
-    use types.{edit};
+    use types.{version};
 
-    submit: func(label: string, edits: list<edit>);
+    /// Lower `ops` into the call's transaction on the plugin's thread: all
+    /// of them, checked now, or none and why. `label` is what undo calls
+    /// the call's edits, the first submit's. The ids it answers with are
+    /// what the edits keep once they land, or they don't land. An envelope
+    /// with a label of its own, or a version other than the manifest's
+    /// `edit-schema`, is `invalid`; edits answering an undo, a redo,
+    /// another plugin's answer to a change or an `edit-refused` are
+    /// `refused`.
+    submit: func(label: string, ops: string) -> result<string, string>;
+    /// What `ops` would do, applied now, with nothing applied:
+    /// `{"lines", "created", "locals", "caps", "removes"}`, `caps` what
+    /// each op needs ("plugin" is what a plugin may make). The ids it names
+    /// are drawn, never given again. Refused as `submit` would be.
+    preview: func(ops: string) -> result<string, string>;
+    /// Land the call's edits so far now, waiting while sheaf does: the
+    /// version they made, or why they didn't land. Edits after it are made
+    /// on that version, and join it as one undo step unless the user edits
+    /// in between. Refused as `submit` would be.
+    commit: func() -> result<version, string>;
+}
+
+/// Bytes a plugin hands sheaf for its edits to hold.
+interface assets {
+    enum asset-kind {
+        /// An image file (PNG, JPEG), for a page stamp: drawn at 72 pixels
+        /// to the inch.
+        image,
+        /// A PDF, for a page stamp: its first page.
+        pdf,
+        /// A file, for an attachment.
+        file,
+    }
+
+    /// An uploaded asset, which ops name as `{"asset": n}`.
+    type asset = u32;
+
+    /// `bytes` held for this call's edits: a handle for ops to name until
+    /// the call returns, through any `commit`. A call's uploads together
+    /// hold at most 64 MiB, an image counting its pixels at four bytes
+    /// each too.
+    upload: func(bytes: list<u8>, kind: asset-kind) -> result<asset, string>;
 }
 
 /// Declarative UI: plugins describe it as data and sheaf draws it.
@@ -500,7 +624,7 @@ interface ui {
 }
 
 /// Progress for long commands, shown in the status bar while the call
-/// runs, with a way for the user to stop it. (Since 0.2.1.)
+/// runs, with a way for the user to stop it.
 interface progress {
     /// What a count counts.
     enum unit { items, pages, bytes }
@@ -520,8 +644,8 @@ interface progress {
         /// Shown in the status bar.
         message: func(level: level, message: string);
         /// The user asked to stop: tidy up and return (an error saying so
-        /// is fine). Check once per page or chunk; the call's time limit
-        /// still applies.
+        /// is fine; the call's edits are taken back either way). Check once
+        /// per page or chunk; the call's time limit still applies.
         is-cancelled: func() -> bool;
         /// A step covering `weight` (0 to 1) of this task, after its count
         /// and its earlier steps. Dropping it fills that part.
@@ -541,6 +665,7 @@ world plugin {
     import document;
     import text;
     import edits;
+    import assets;
     import ui;
     import storage;
     import patterns;

@@ -30,7 +30,7 @@ use sheaf_render::pdfium::PdfiumEngine;
 /// save is called.
 fn saved(doc: &Document, how: How) -> (&'static str, anyhow::Result<Vec<u8>>) {
     match how {
-        How::Rewritten => ("Rewrite", sheaf_doc::save::rewrite(&doc.snapshot())),
+        How::Rewritten => ("Rewrite", sheaf_doc::save::rewrite(doc)),
         How::Appended => {
             let appended = sheaf_doc::materialize::appended(doc);
             ("Append", appended.map_err(anyhow::Error::from))

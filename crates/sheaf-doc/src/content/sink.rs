@@ -1,22 +1,21 @@
 //! Where content's resources are written (M10.5 slice 9): a [`Sink`] reads
 //! what a dictionary names and writes the resources a [`ContentWriter`]'s
 //! content draws with, once however many draw with them, so a mark's
-//! appearance form ([`bind`]) serves both the lopdf document an old writer
-//! builds ([`Lopdf`]) and the emitter, whose dictionaries refer to objects
-//! by key; the emitter reads a page's `/Contents` and `/Resources` through
-//! it too.
+//! appearance form ([`bind`]) serves both a PDF built in memory
+//! ([`serialize::built`](crate::serialize::built)) and the emitter, whose
+//! dictionaries refer to objects by key; the emitter reads a page's
+//! `/Contents` and `/Resources` through it too.
 //!
-//! A dictionary and what a sink reads for it are in one space: an old
-//! writer's object numbers, or the emitter's placeholders.
+//! A dictionary and what a sink reads for it are in one space: a built
+//! PDF's object numbers, or the emitter's placeholders.
 //!
 //! [`ContentWriter`]: super::ContentWriter
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
+use lopdf::{Dictionary, Object, ObjectId};
 
 use super::names::ResKind;
 use super::page::ReadObjects;
 use super::res::Res;
-use super::to_lopdf::ResObjects;
 use super::writer::{Reserved, ResourceNeeds};
 
 /// What content's resources are read through and written to.
@@ -34,31 +33,6 @@ pub trait Sink {
     /// The names a page's `resources` binds, which new content keeps
     /// clear of.
     fn reserved(&mut self, resources: Option<&Object>) -> Reserved;
-}
-
-/// The lopdf document an old writer builds, and the resources it has
-/// written.
-pub struct Lopdf<'a> {
-    pub pdf: &'a mut Pdf,
-    pub res: &'a mut ResObjects,
-}
-
-impl Sink for Lopdf<'_> {
-    fn dict(&mut self, id: ObjectId) -> Option<Dictionary> {
-        self.pdf.get_dictionary(id).ok().cloned()
-    }
-
-    fn array(&mut self, id: ObjectId) -> Option<Vec<Object>> {
-        self.pdf.get_object(id).ok()?.as_array().ok().cloned()
-    }
-
-    fn resource(&mut self, res: &Res) -> ObjectId {
-        self.res.object(self.pdf, res)
-    }
-
-    fn reserved(&mut self, resources: Option<&Object>) -> Reserved {
-        Reserved::read(self.pdf, resources)
-    }
 }
 
 /// The entries of `page`'s `/Contents`, an array's or the one stream's,

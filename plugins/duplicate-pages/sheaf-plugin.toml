@@ -1,7 +1,8 @@
 id = "duplicate-pages"
 name = "Find Duplicate Pages"
-version = "0.2.1"
-api = "^0.3"
+version = "0.3.0"
+api = "^0.4"
+edit-schema = "1.0"
 homepage = "https://github.com/sheaf-pdf/sheaf/tree/main/plugins/duplicate-pages"
 description = "Finds pages that appear twice in a binder (the same statement scanned twice, a W-2 sent in two batches, pages repeated by a merge) and lets you remove the extra copies."
 

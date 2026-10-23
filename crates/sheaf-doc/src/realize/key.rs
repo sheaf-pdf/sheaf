@@ -26,15 +26,16 @@ use crate::content::{Marker, PagOrigin, PaginationKind};
 use crate::file::ForeignAnnot;
 use crate::forms::FieldId;
 use crate::forms::field::{Action, Border, Choice, Color, Mk, Trigger, Value};
-use crate::geom::{Geom, Rect};
+use crate::geom::{Affine, Geom, Rect};
 use crate::materialize::emit::Shown;
 use crate::materialize::emit::annots::{LinkTo, base_annots};
 use crate::materialize::emit::content;
 use crate::model::{
     AnnotBody, ContentStack, CtxNeeds, DocState, FieldProps, Filter, Foreign, FormDoc, FormInst,
-    FormRef, Frozen, GenSpec, Generator, ImageRef, Layer, LegacySel, Mark, MarkedSel, PageBase,
-    PageCtx, PageDef, PageForm, PageId, Placed, RenderTables, ScriptState, Static, StreamSel,
-    Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps, XfaState,
+    FormRef, Frozen, GenSpec, Generator, ImageRef, Layer, LegacySel, Mark, MarkAp, MarkedSel,
+    PageBase, PageCtx, PageDef, PageForm, PageId, PlaceTag, Placed, Placement, RenderTables,
+    ScriptState, Static, StreamSel, Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps,
+    XfaState,
 };
 use crate::prim::Key;
 use crate::source::ObjRef;
@@ -98,8 +99,8 @@ pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<Re
             .feed(&on.base_draws);
         if !on.base_draws {
             // It's laid out in the page as it shows, turned, with what its
-            // tokens read of where the page is; its Bates number is its
-            // recipe's.
+            // tokens read of where the page is, in the version that numbers
+            // it (`generate::page_ctx`'s); its Bates number is its recipe's.
             sum.feed(drawn.geom);
             let CtxNeeds {
                 index,
@@ -107,8 +108,12 @@ pub fn render_key(st: &DocState, page: PageId, inputs: &ViewInputs) -> Option<Re
                 label,
                 bates: _,
             } = on.needs;
+            let (st, pos) = match st.numbered_in(page) {
+                Some((from, pos)) => (from, Some(pos)),
+                None => (st, index.then(|| st.pos_of(page)).flatten()),
+            };
             if index {
-                sum.feed(&st.pos_of(page));
+                sum.feed(&pos);
             }
             if count {
                 sum.feed(&st.page_count());
@@ -191,6 +196,21 @@ pub(crate) fn page_digest(base: &PageBase, content: &ContentStack) -> u128 {
 
 /// The form's digest ([`FormDoc::digest`]).
 pub(crate) fn form_digest(form: &FormDoc) -> u128 {
+    let mut sum = Sum(Checksum::new());
+    sum.feed(form);
+    sum.0.finish()
+}
+
+/// What a pinned appearance is drawn from, as a digest
+/// ([`PinnedAp::digest`](crate::model::PinnedAp)).
+pub(crate) fn pinned_digest(ap: &MarkAp) -> u128 {
+    let mut sum = Sum(Checksum::new());
+    sum.feed(ap);
+    sum.0.finish()
+}
+
+/// Which form `form` is, as a digest ([`FormRef::digest`]).
+pub(crate) fn form_ref_digest(form: &FormRef) -> u128 {
     let mut sum = Sum(Checksum::new());
     sum.feed(form);
     sum.0.finish()
@@ -615,7 +635,55 @@ impl Feed for Layer {
         sum.feed(&id.0);
         match body {
             Static::OcrText(text) => sum.feed(&0u8).feed(text),
+            Static::Placements(placed) => sum.feed(&1u8).feed(placed),
         };
+    }
+}
+
+impl Feed for Placement {
+    fn feed(&self, sum: &mut Sum) {
+        let Placement { form, matrix, tag } = self;
+        let tag = match tag {
+            PlaceTag::Artifact => 0u8,
+            PlaceTag::Untagged => 1,
+        };
+        sum.feed(form).feed(matrix).feed(&tag);
+    }
+}
+
+impl Feed for Affine {
+    fn feed(&self, sum: &mut Sum) {
+        let Affine { a, b, c, d, e, f } = self;
+        sum.feed(a).feed(b).feed(c).feed(d).feed(e).feed(f);
+    }
+}
+
+/// All of it, as [`Annot`]'s feed has a mark's look.
+impl Feed for MarkAp {
+    fn feed(&self, sum: &mut Sum) {
+        let MarkAp {
+            kind,
+            color,
+            opacity,
+            stroke,
+            contents,
+            fill,
+            dashed,
+            cloudy,
+            turn,
+            stamp,
+        } = self;
+        _ = write!(sum, "{kind:?}");
+        sum.feed(&0xffu8);
+        sum.feed(color)
+            .feed(opacity)
+            .feed(stroke)
+            .feed(contents)
+            .feed(fill)
+            .feed(dashed)
+            .feed(cloudy)
+            .feed(turn)
+            .feed(stamp);
     }
 }
 
@@ -699,6 +767,7 @@ impl Feed for FormRef {
         match self {
             FormRef::Base(at) => sum.feed(&0u8).feed(at),
             FormRef::Blob(pdf) => sum.feed(&1u8).feed(pdf),
+            FormRef::Pinned(ap) => sum.feed(&2u8).feed(&ap.digest),
         };
     }
 }
@@ -729,6 +798,7 @@ impl Feed for Foreign {
             hidden: _,
             color: _,
             mark: _,
+            stamp: _,
         } = &**summary;
         sum.feed(src).feed(slot);
     }
@@ -998,12 +1068,15 @@ impl Feed for Filter {
             Filter::DropStreams(StreamSel::SheafGen(g)) => sum.feed(&1u8).feed(&g.0),
             Filter::DropStreams(StreamSel::SheafOcr) => sum.feed(&4u8),
             Filter::StripLegacy(LegacySel::Marked(sel)) => sum.feed(&3u8).feed(sel),
+            Filter::StripLegacy(LegacySel::Streams) => sum.feed(&6u8),
+            Filter::StripLegacy(LegacySel::Resources) => sum.feed(&7u8),
         };
     }
 }
 
 /// Fed as its [`Filter::DropMarked`]'s, 0, 2 and 5 the tags they share
-/// with [`Filter::DropStreams`]' 1 and 4 and [`Filter::StripLegacy`]'s 3.
+/// with [`Filter::DropStreams`]' 1 and 4 and [`Filter::StripLegacy`]'s 3,
+/// 6 and 7.
 impl Feed for MarkedSel {
     fn feed(&self, sum: &mut Sum) {
         match self {

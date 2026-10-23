@@ -3,7 +3,8 @@
 //! from the pages alone, so the first page paints at once; [`finish`]
 //! reads what the file says besides them, on any thread; and
 //! [`Document::ready`] makes that the opened version, after which edits
-//! are taken. [`file`] does the three in a row.
+//! are taken. [`read`] does the three in a row ([`file`] counting
+//! nothing).
 //!
 //! What [`finish`] reads: what its pages hold beside their content, the
 //! source's [`annots`](Source::annots) (the file's marks, the stamps'
@@ -33,7 +34,7 @@ use crate::history::HistoryPolicy;
 use crate::labels::LabelRange;
 use crate::layers::Layer;
 use crate::materialize::Came;
-use crate::model::{FlatOutlineItem, PageId};
+use crate::model::PageId;
 use crate::portfolio::Collection;
 use crate::serialize::append::Torn;
 use crate::{Document, PAGES, Source, Src, Store};
@@ -45,7 +46,7 @@ pub(crate) mod tests;
 
 pub use annots::{FileAnnot, FileAnnots, FileBody};
 pub(crate) use outline::Dests;
-pub use outline::outline;
+pub use outline::{FlatOutlineItem, outline};
 
 /// What a file says about itself when it opens, every page by its index
 /// in the source's page table.
@@ -132,12 +133,20 @@ pub fn start(
     Document::loading(store, primary, name, came, policy)
 }
 
+/// `path` opened as the app opens it, with no window: [`read`], counting
+/// nothing.
+pub fn file(path: &Path, password: Option<&str>) -> Result<Opened> {
+    read(path, password, &NoProgress)
+}
+
 /// `path` opened as the app opens it, with no window: an append a crash
 /// cut short undone ([`undo_torn`]), then [`start`], [`finish`] and
-/// [`Document::ready`] in a row, in a store of its own.
+/// [`Document::ready`] in a row, in a store of its own. `p` counts the
+/// pages [`finish`] reads; what was undone is in [`Opened::torn`], for the
+/// reader to be told.
 ///
 /// [`undo_torn`]: crate::serialize::append::undo_torn
-pub fn file(path: &Path, password: Option<&str>) -> Result<Opened> {
+pub fn read(path: &Path, password: Option<&str>, p: &dyn Progress) -> Result<Opened> {
     // A file it can't undo is read as it is: its last whole section's.
     let torn = (crate::serialize::append::undo_torn(path))
         .inspect_err(|e| log::warn!("undoing the last save to {}: {e}", path.display()))
@@ -160,7 +169,7 @@ pub fn file(path: &Path, password: Option<&str>) -> Result<Opened> {
         Some(came),
         crate::history::default_policy(),
     );
-    let (view, _) = doc.ready(finish(&src, &NoProgress))?;
+    let (view, _) = doc.ready(finish(&src, p))?;
     Ok(Opened { doc, view, torn })
 }
 

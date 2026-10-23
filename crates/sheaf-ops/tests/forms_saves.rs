@@ -14,15 +14,18 @@ use std::path::Path;
 use lopdf::{
     Document as Pdf, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions, dictionary,
 };
+use sheaf_doc::export::Export;
 use sheaf_doc::forms::fixture::{Form, note, outline_tree};
 use sheaf_doc::forms::sigs::Verdict;
 use sheaf_doc::forms::{Finding, Value, check};
-use sheaf_doc::materialize::{Ask, AskAnswers, Note, SaveReport, SaveStop, Why};
+use sheaf_doc::materialize::{Ask, AskAnswers, Note, SaveReport, SaveStop, StrategyKind, Why};
 use sheaf_doc::tx::fixture::{
     add, bookmark, delete, duplicate, insert, move_pages, patch_bookmark, rotate,
 };
 use sheaf_doc::{AnnotBody, AnnotId, Document, ObjRef};
 use sheaf_edit::{BookmarkPatch, Turn};
+use sheaf_ops::NoProgress;
+use sheaf_ops::session::{SaveTo, Session};
 
 mod common;
 use common::*;
@@ -116,10 +119,9 @@ fn an_export_without_a_hybrid_form_s_widget_page_drops_its_xfa() {
     let dir = scratch("export-xfa");
     let path = write(&dir, "form.pdf", &mut hybrid());
     let doc = open(&path);
-    let snap = doc.snapshot();
-    let order: Vec<_> = snap.state.order().iter().copied().collect();
-    let extracted = sheaf_doc::save::extract_bytes(&snap, &order[..1]).unwrap();
-    let printed = sheaf_doc::save::print_pdf(&snap, &order[..1], false).unwrap();
+    let order: Vec<_> = doc.state().order().iter().copied().collect();
+    let extracted = doc.export_bytes(|f, out| Export::extract(f, &order[..1], out));
+    let printed = doc.export_bytes(|f, _| Export::print(f, &order[..1], false));
     for (bytes, what) in [(&extracted, "extracted"), (&printed, "printed")] {
         clean(bytes, what);
         assert!(!parts(bytes).0, "{what}: the XFA copy stayed");
@@ -129,7 +131,7 @@ fn an_export_without_a_hybrid_form_s_widget_page_drops_its_xfa() {
             "{what}"
         );
     }
-    let every = sheaf_doc::save::extract_bytes(&snap, &order).unwrap();
+    let every = doc.export_bytes(|f, out| Export::extract(f, &order, out));
     clean(&every, "every page");
     assert!(parts(&every).0, "every page: the XFA copy went");
     assert_eq!(tooltips(&every).len(), 2);
@@ -263,9 +265,11 @@ fn signature_fits(bytes: &[u8]) -> bool {
         .any(|f| matches!(f, Finding::StaleSignature { .. }))
 }
 
-/// `doc` saved to `path` (`materialize::save`) with `answers`.
+/// `doc` saved to `path` as the plan decides, as the app saves (Save As
+/// to another path), with `answers`.
 fn save(doc: &mut Document, path: &Path, answers: AskAnswers) -> Result<SaveReport, SaveStop> {
-    sheaf_doc::materialize::save(doc, path, &answers, &sheaf_ops::NoProgress)
+    let how = sheaf_doc::materialize::SaveHow::Planned;
+    sheaf_doc::materialize::save_with(doc, path, how, &answers, &sheaf_ops::NoProgress)
 }
 
 /// Whether `stop` asks before a Rewrite breaks the file's one signature,
@@ -279,6 +283,122 @@ fn asks_for_removal(stop: &SaveStop) -> bool {
             reason: Some(Why::Removes(_)),
         }) if impact.len() == 1 && impact[0].verdict == Verdict::Invalid
     )
+}
+
+/// The command line's saves of a signed file (M10.5 proposal 40): `-o`
+/// writes it whole, which asks before the signature breaks, offering no
+/// Append; `-o --append` copies the file and appends, keeping its bytes
+/// and its signature where the change is within it. One that isn't is
+/// offered an Append anyway, which `--signatures append-anyway` takes and
+/// `--signatures break` turns down for a Rewrite. Nothing a stop asks is
+/// written.
+#[test]
+fn a_session_saves_a_signed_file_as_its_flags_say() {
+    let dir = scratch("session-signed");
+    let path = write(&dir, "signed.pdf", &mut signed());
+    let original = std::fs::read(&path).unwrap();
+    let mut session = Session::open(&path, None, &NoProgress).unwrap();
+    let first = session.doc.state().order()[0];
+    session.commit(vec![add(first, &note())], "Note").unwrap();
+    let to = |name: &str, append| SaveTo::File {
+        path: dir.join(name),
+        append,
+    };
+    let asked = AskAnswers::default();
+    // `-o`: written whole, breaking the signature: asked.
+    let stop = session.save(to("whole.pdf", false), &asked, &NoProgress);
+    let append_anyway = match stop {
+        Err(SaveStop::Ask(Ask::Signatures { append_anyway, .. })) => append_anyway,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(append_anyway, None);
+    assert!(!dir.join("whole.pdf").exists());
+    // `-o --append`: the file copied, the comment appended.
+    let report = session.save(to("appended.pdf", true), &asked, &NoProgress);
+    assert_eq!(report.unwrap().strategy, Some(StrategyKind::Append));
+    let appended = std::fs::read(dir.join("appended.pdf")).unwrap();
+    assert!(appended.starts_with(&original) && signature_fits(&appended));
+    // A page deleted: appending would leave it in the signed revision,
+    // so it's asked, offering the Append anyway.
+    let second = session.doc.state().order()[1];
+    session.commit(vec![delete(&[second])], "Delete").unwrap();
+    let stop = session.save(to("removed.pdf", true), &asked, &NoProgress);
+    assert!(asks_for_removal(&stop.unwrap_err()));
+    assert!(!dir.join("removed.pdf").exists());
+    let anyway = AskAnswers {
+        append_anyway: true,
+        stays_readable: true,
+        found: true,
+        ..Default::default()
+    };
+    let report = session.save(to("removed.pdf", true), &anyway, &NoProgress);
+    assert_eq!(report.unwrap().strategy, Some(StrategyKind::Append));
+    let removed = std::fs::read(dir.join("removed.pdf")).unwrap();
+    assert!(removed.starts_with(&appended) && signature_fits(&removed));
+    // Or rewritten, as `--signatures break` chooses.
+    let second = session.doc.state().order()[0];
+    session
+        .commit(vec![rotate(&[second], Turn::Quarter)], "Rotate")
+        .unwrap();
+    let broken = AskAnswers {
+        break_signatures: true,
+        ..Default::default()
+    };
+    let report = session.save(to("broken.pdf", true), &broken, &NoProgress);
+    assert_eq!(report.unwrap().strategy, Some(StrategyKind::Rewrite));
+    assert!(!signature_fits(
+        &std::fs::read(dir.join("broken.pdf")).unwrap()
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An unsigned file is appended to as asked, a copy of it with the change
+/// after its bytes; one whose change an Append can't carry without
+/// leaving it readable stops, saying why, rather than be written whole.
+/// In place, the plan decides.
+#[test]
+fn a_session_appends_only_what_it_can() {
+    let dir = scratch("session-plain");
+    let path = write(&dir, "plain.pdf", &mut Form::new(2));
+    let original = std::fs::read(&path).unwrap();
+    let mut session = Session::open(&path, None, &NoProgress).unwrap();
+    let first = session.doc.state().order()[0];
+    session
+        .commit(vec![rotate(&[first], Turn::Quarter)], "Rotate")
+        .unwrap();
+    let asked = AskAnswers::default();
+    let to = |name: &str, append| SaveTo::File {
+        path: dir.join(name),
+        append,
+    };
+    let report = session.save(to("appended.pdf", true), &asked, &NoProgress);
+    assert_eq!(report.unwrap().strategy, Some(StrategyKind::Append));
+    assert!(
+        std::fs::read(dir.join("appended.pdf"))
+            .unwrap()
+            .starts_with(&original)
+    );
+    let second = session.doc.state().order()[1];
+    session.commit(vec![delete(&[second])], "Delete").unwrap();
+    let stop = session.save(to("removed.pdf", true), &asked, &NoProgress);
+    match stop {
+        Err(SaveStop::Failed(why)) => {
+            assert_eq!(
+                why,
+                "the save can't append: 1 page removed since the last save"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!dir.join("removed.pdf").exists());
+    // Written whole, it goes; saved in place after, the plan finds the
+    // file as the document is, and writes nothing.
+    let report = session.save(to("whole.pdf", false), &asked, &NoProgress);
+    assert_eq!(report.unwrap().strategy, Some(StrategyKind::Rewrite));
+    let report = session.save(SaveTo::InPlace, &asked, &NoProgress).unwrap();
+    assert_eq!(report.strategy, None);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A save of a signed file that removes something asks first (M10.5
@@ -491,7 +611,7 @@ fn signed_fields_brought_in_are_kept_and_said_so() {
         sheaf_doc::notice_text(&out.notices).as_deref(),
         Some("The signature from signed.pdf is no longer valid here")
     );
-    let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+    let bytes = sheaf_doc::save::rewrite(&doc).unwrap();
     let report = check(&bytes, None).unwrap();
     assert_eq!(report.signed, 1);
     let _ = std::fs::remove_dir_all(&dir);
@@ -509,7 +629,7 @@ fn without_page(path: &Path, index: usize) -> (Document, Vec<u8>) {
     let mut doc = open(path);
     let id = doc.state().order()[index];
     doc.commit_ops(vec![delete(&[id])], "Delete").unwrap();
-    let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+    let bytes = sheaf_doc::save::rewrite(&doc).unwrap();
     (doc, bytes)
 }
 
@@ -549,7 +669,7 @@ fn corpus_the_w9s_instructions_page_alone_has_no_form() {
     };
     let doc = open(&fw9);
     let second = doc.state().order()[1];
-    let bytes = sheaf_doc::save::extract_bytes(&doc.snapshot(), &[second]).unwrap();
+    let bytes = doc.export_bytes(|f, out| Export::extract(f, &[second], out));
     let report = clean(&bytes, "W-9 page 2");
     assert_eq!(report.class(), "no form");
     assert_eq!(parts(&bytes), (false, false, false));
@@ -563,7 +683,7 @@ fn everything() -> Form {
     let a = blue(&mut f, "a", 0, 0, "Alpha");
     let b = blue(&mut f, "b", 1, 0, "Beta");
     f.group("top", &[a, b]);
-    let mark = sheaf_doc::annot::to_pdf(&note(), &mut f.pdf).main;
+    let mark = sheaf_doc::serialize::built::to_pdf(&note(), &mut f.pdf).main;
     let mark = f.pdf.add_object(mark);
     let theirs = f.pdf.add_object(dictionary! {
         "Type" => "Annot", "Subtype" => "Text",

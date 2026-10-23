@@ -6,7 +6,9 @@ use lopdf::dictionary;
 use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Rotation, Z};
 
 use super::*;
-use crate::content::{Need, ResBody, ResKind};
+use crate::content::{GenId, Need, ResBody, ResKind};
+use crate::model::{Frozen, ImageRef};
+use crate::source::ObjRef;
 
 /// A watermark of `text`, `angle` degrees, at `position`.
 fn text(text: &str, angle: f32, position: GridPos) -> WatermarkGen {
@@ -86,7 +88,13 @@ fn a_watermark_is_laid_out_upright_on_the_page_as_it_shows() {
         let geom = page(r);
         let size = geom.shown();
         let wm = text("DRAFT", 0.0, GridPos::Center);
-        let drawn = layout(&over(1, &wm), &ctx_of(&geom), None, &Reserved::default());
+        let drawn = layout(
+            &over(1, &wm),
+            &ctx_of(&geom),
+            None,
+            &Reserved::default(),
+            Private::Keep,
+        );
         let m = drawn_in(&drawn.ops);
         let w = Std14::HelveticaBold.width("DRAFT", 72.0);
         let h = 72.0 * CAP_HEIGHT;
@@ -108,7 +116,13 @@ fn a_watermark_is_laid_out_upright_on_the_page_as_it_shows() {
         assert!(near(middle.y, size.height / 2.0), "{r:?}: {middle:?}");
 
         let wm = text("DRAFT", 90.0, GridPos::BottomRight);
-        let drawn = layout(&over(1, &wm), &ctx_of(&geom), None, &Reserved::default());
+        let drawn = layout(
+            &over(1, &wm),
+            &ctx_of(&geom),
+            None,
+            &Reserved::default(),
+            Private::Keep,
+        );
         let m = drawn_in(&drawn.ops);
         let o = shown(&geom, m, Pt { x: 0.0, y: 0.0 });
         let along = shown(&geom, m, Pt { x: 1.0, y: 0.0 });
@@ -130,7 +144,13 @@ fn a_watermark_is_laid_out_upright_on_the_page_as_it_shows() {
 fn a_block_is_a_pagination_artifact_in_its_own_state() {
     let geom = page(Rotation::R0);
     let wm = text("Café 漢字", 0.0, GridPos::Center);
-    let drawn = layout(&over(0xab, &wm), &ctx_of(&geom), None, &Reserved::default());
+    let drawn = layout(
+        &over(0xab, &wm),
+        &ctx_of(&geom),
+        None,
+        &Reserved::default(),
+        Private::Keep,
+    );
     let ops = &drawn.ops;
     let kinds: Vec<ResKind> = drawn.res.0.iter().map(|n| n.kind).collect();
     assert_eq!(
@@ -159,6 +179,24 @@ fn a_block_is_a_pagination_artifact_in_its_own_state() {
     assert_eq!(gs.get(b"CA").unwrap().as_float().unwrap(), 0.3);
     let drawn_text = b"(Caf\xe9 ??) Tj";
     assert!(ops.windows(drawn_text.len()).any(|w| w == drawn_text));
+    // Without sheaf's private data, its list says its kind alone, and it
+    // draws the same.
+    let stripped = layout(
+        &over(0xab, &wm),
+        &ctx_of(&geom),
+        None,
+        &Reserved::default(),
+        Private::Strip,
+    );
+    let Object::Dictionary(list) = object(&stripped.res.0[0]) else {
+        panic!("a property list");
+    };
+    assert_eq!(
+        list,
+        &dictionary! { "Type" => "Pagination", "Subtype" => "Watermark" }
+    );
+    let after = |ops: &[u8]| ops[ops.windows(3).position(|w| w == b"BDC").unwrap()..].to_vec();
+    assert_eq!(after(&stripped.ops), after(ops));
 }
 
 /// The object a resource is.
@@ -176,7 +214,13 @@ fn object(need: &Need) -> &Object {
 fn the_layout_digest_covers_what_is_drawn_never_names() {
     let geom = page(Rotation::R0);
     let wm = text("DRAFT", 45.0, GridPos::Center);
-    let free = layout(&over(1, &wm), &ctx_of(&geom), None, &Reserved::default());
+    let free = layout(
+        &over(1, &wm),
+        &ctx_of(&geom),
+        None,
+        &Reserved::default(),
+        Private::Keep,
+    );
     let font = (free.res.0.iter())
         .find(|n| n.kind == ResKind::Font)
         .unwrap();
@@ -187,7 +231,7 @@ fn the_layout_digest_covers_what_is_drawn_never_names() {
         res: Res::dict(dictionary! { "Other" => 1 }),
     }]);
     taken.take(&other);
-    let clear = layout(&over(1, &wm), &ctx_of(&geom), None, &taken);
+    let clear = layout(&over(1, &wm), &ctx_of(&geom), None, &taken, Private::Keep);
     assert_ne!(clear.ops, free.ops);
     let renamed = (clear.res.0.iter())
         .find(|n| n.kind == ResKind::Font)
@@ -208,13 +252,25 @@ fn the_layout_digest_covers_what_is_drawn_never_names() {
         },
         ..wm.clone()
     };
-    let other = layout(&over(1, &faint), &ctx_of(&geom), None, &Reserved::default());
+    let other = layout(
+        &over(1, &faint),
+        &ctx_of(&geom),
+        None,
+        &Reserved::default(),
+        Private::Keep,
+    );
     assert_ne!(other.layout_digest, free.layout_digest);
     let moved = WatermarkGen {
         position: GridPos::Top,
         ..wm.clone()
     };
-    let other = layout(&over(1, &moved), &ctx_of(&geom), None, &Reserved::default());
+    let other = layout(
+        &over(1, &moved),
+        &ctx_of(&geom),
+        None,
+        &Reserved::default(),
+        Private::Keep,
+    );
     assert_ne!(other.layout_digest, free.layout_digest);
 }
 
@@ -241,7 +297,13 @@ fn an_image_keeps_its_proportions_and_its_turn() {
         },
         ..text("x", 0.0, GridPos::Center)
     };
-    let none = layout(&over(1, &image), &ctx_of(&geom), None, &Reserved::default());
+    let none = layout(
+        &over(1, &image),
+        &ctx_of(&geom),
+        None,
+        &Reserved::default(),
+        Private::Keep,
+    );
     assert!(none.ops.is_empty() && none.res.0.is_empty());
     let res = Res::dict(dictionary! { "Subtype" => "Image" });
     for (turns, across, up) in [(0, 40.0, 20.0), (1, 20.0, 40.0)] {
@@ -256,6 +318,7 @@ fn an_image_keeps_its_proportions_and_its_turn() {
             &ctx_of(&geom),
             Some(&art),
             &Reserved::default(),
+            Private::Keep,
         );
         let text = String::from_utf8_lossy(&drawn.ops).into_owned();
         let w = size.width * 0.5;
@@ -358,7 +421,13 @@ fn a_header_goes_out_in_win_ansi_with_a_named_list() {
     spec.texts[5] = "<<file>>".into();
     spec.font = FontChoice::TimesRoman;
     let g = header_gen(0x2a, spec);
-    let drawn = layout(&g, &ctx_of(&page(Rotation::R0)), None, &Reserved::default());
+    let drawn = layout(
+        &g,
+        &ctx_of(&page(Rotation::R0)),
+        None,
+        &Reserved::default(),
+        Private::Keep,
+    );
     let out = &drawn.ops;
     let text = b"(Caf\xe9 \x93x\x94 \x96 \x80 \\(a\\\\b\\)) Tj";
     assert!(out.windows(text.len()).any(|w| w == text), "{out:?}");
@@ -410,7 +479,13 @@ fn identical_headers_write_identical_bytes() {
             label: "5".into(),
             bates: Some(17),
         };
-        layout(&header_gen(7, spec), &ctx, None, &Reserved::default())
+        layout(
+            &header_gen(7, spec),
+            &ctx,
+            None,
+            &Reserved::default(),
+            Private::Keep,
+        )
     }
     let first = write();
     assert!(!first.ops.is_empty());
@@ -433,7 +508,13 @@ fn a_header_is_laid_out_upright_on_the_page_as_it_shows() {
     for r in [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270] {
         let geom = page(r);
         let size = geom.shown();
-        let drawn = layout(&g, &ctx_of(&geom), None, &Reserved::default());
+        let drawn = layout(
+            &g,
+            &ctx_of(&geom),
+            None,
+            &Reserved::default(),
+            Private::Keep,
+        );
         let text = String::from_utf8_lossy(&drawn.ops).into_owned();
         let tm: Vec<Affine> = (text.lines())
             .filter(|l| l.ends_with(" Tm"))
@@ -484,14 +565,20 @@ fn a_header_with_nothing_to_draw_draws_nothing() {
     };
     let g = header_gen(1, spec);
     let geom = page(Rotation::R0);
-    let none = layout(&g, &ctx_of(&geom), None, &Reserved::default());
+    let none = layout(
+        &g,
+        &ctx_of(&geom),
+        None,
+        &Reserved::default(),
+        Private::Keep,
+    );
     assert!(none.ops.is_empty() && none.res.0.is_empty());
     assert_eq!(none.layout_digest, Drawn::empty().layout_digest);
     let numbered = PageCtx {
         bates: Some(3),
         ..ctx_of(&geom)
     };
-    let drawn = layout(&g, &numbered, None, &Reserved::default());
+    let drawn = layout(&g, &numbered, None, &Reserved::default(), Private::Keep);
     assert!(String::from_utf8_lossy(&drawn.ops).contains("(000003) Tj"));
     assert_eq!(layout_digest(&g, &numbered, None), drawn.layout_digest);
 }

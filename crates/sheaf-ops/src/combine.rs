@@ -3,22 +3,21 @@
 //! bookmark per file and each PDF's own bookmarks nested under it.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use in_progress::{NoProgress, Progress, Unit};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::materialize::Came;
-use sheaf_doc::open::Facts;
+use sheaf_doc::materialize::AskAnswers;
 use sheaf_doc::tx::Made;
-use sheaf_doc::{
-    Actor, CommitOpts, Document, FlatOutlineItem, JobKind, Notice, OutlineId, PageId, Store, Tx,
-};
+use sheaf_doc::{Actor, CommitOpts, FlatOutlineItem, JobKind, Notice, OutlineId, PageId, Tx};
 use sheaf_edit::{
     BlobSel, BookmarkRef, Bring, DestView, Op, OutlineBring, PageRef, PageSel, PageSource,
     RangeSet, Sibling,
 };
 
 use crate::images::Paper;
+use crate::session::{Decided, SaveTo, Session};
 
 /// One input: a file and, optionally, which of its pages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,88 +96,48 @@ pub fn is_pdf(path: &Path) -> bool {
     }
 }
 
-/// The file sheaf can take its pages from: the PDF itself, or a PDF made
-/// from the image (kept in the generated-file cache).
-pub fn page_source(path: &Path, image_page: Paper) -> Result<PathBuf> {
-    if is_pdf(path) {
-        return Ok(path.to_path_buf());
-    }
-    let pages = sheaf_image::io::read(path)?;
-    let pdf = sheaf_doc::images::to_pdf(&pages, image_page.fit(0.0))?;
-    sheaf_doc::generated::store(&pdf)
-}
-
-/// Build the combined document (not yet written): the first file opened
-/// as the document, and the rest put in by one transaction (M10.5 §14.2):
-/// the first file's pages left out deleted, each further file's pages
-/// inserted, with its marks and form, and a bookmark per file.
+/// Build the combined document (not yet written): the first file opened as
+/// the document, or a document of no pages when it's an image, and the
+/// rest put in by one transaction (M10.5 §14.2, proposal 35): the first
+/// file's outline and labels taken off and its pages left out deleted,
+/// each further file's pages inserted, with its marks and form, and a
+/// bookmark per file over each file's own. The first file stays the
+/// primary, so its catalog flows through, and so do its generators: a
+/// header or watermark it has on every page is on the pages inserted too,
+/// as an insert into it would have it. The history starts at the
+/// combined version, with nothing to undo.
 pub fn build(
     items: &[CombineItem],
     params: &CombineParams,
     progress: &dyn Progress,
-) -> Result<(Document, CombineReport)> {
-    if items.is_empty() {
+) -> Result<(Session, CombineReport)> {
+    let Some(first) = items.first() else {
         bail!("nothing to combine");
-    }
+    };
     progress.set_total(Some(items.len() as u64), Unit::ITEMS);
-    let store = Store::new();
-    // The first file's document, and the transaction the rest go into.
-    let mut doc: Option<(Document, Tx)> = None;
+    let pdf_first = is_pdf(&first.path);
+    let mut session = match pdf_first {
+        true => Session::open(&first.path, first.password.as_deref(), &NoProgress)
+            .with_context(|| format!("opening {}", first.path.display()))?,
+        false => Session::new_empty(),
+    };
+    let store = session.doc.store().clone();
+    let mut tx = session.tx(Actor::Job(JobKind::Insert));
+    if pdf_first {
+        opened_aside(&mut tx)?;
+    }
     let mut report = CombineReport::default();
     for (n, item) in items.iter().enumerate() {
         progress.check()?;
-        let name = item
-            .path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let file = page_source(&item.path, params.image_page)
-            .with_context(|| format!("reading {}", item.path.display()))?;
-        let (src, stamp) = (store.read_file(&file, item.password.as_deref()))
-            .with_context(|| format!("opening {name}"))?;
-        let count = src.page_count() as usize;
-        let wanted: Vec<u32> = match &item.pages {
-            Some(r) if !r.trim().is_empty() => crate::pages::parse(r, count)
-                .map_err(anyhow::Error::msg)
-                .with_context(|| format!("{name}: pages"))?
-                .into_iter()
-                .map(|i| i as u32)
-                .collect(),
-            _ => (0..src.page_count()).collect(),
-        };
-        let outline = src.outline().clone();
-        // Page ids of this file's pages, by index in the file.
-        let ids: Vec<(u32, PageId)> = match doc.as_mut() {
-            None => {
-                // The first file opens as the document, with its marks and
-                // form; an image's page has none. Its bookmarks go under its
-                // own below, like every file's, and its labels and
-                // header/footer aren't taken.
-                let came = Came::Read {
-                    path: file.as_path().into(),
-                    stamp,
-                };
-                let facts = match is_pdf(&item.path) {
-                    true => Facts {
-                        annots: src.annots().clone(),
-                        form: src.form().clone(),
-                        ..Default::default()
-                    },
-                    false => Facts::default(),
-                };
-                let mut d = sheaf_doc::open::start(
-                    store.clone(),
-                    src,
-                    sheaf_doc::store::file_name(&file),
-                    Some(came),
-                    sheaf_doc::history::default_policy(),
-                );
-                d.ready(facts)?;
-                let mut tx = d.tx(Actor::Job(JobKind::Insert));
-                let all: Vec<PageId> = d.state().order().iter().copied().collect();
-                let drop: Vec<PageId> = all
-                    .iter()
-                    .enumerate()
+        let name = sheaf_doc::store::file_name(&item.path).to_string();
+        // Page ids of this file's pages, by index in the file, and its
+        // bookmarks.
+        let (ids, outline) = match (n, pdf_first) {
+            (0, true) => {
+                let primary = session.doc.primary().clone();
+                let wanted = wanted(item, primary.page_count(), &name)?;
+                let all: Vec<PageId> = tx.state().order().iter().copied().collect();
+                let drop: Vec<PageId> = (all.iter().enumerate())
                     .filter(|(i, _)| !wanted.contains(&(*i as u32)))
                     .map(|(_, id)| *id)
                     .collect();
@@ -189,51 +148,68 @@ pub fn build(
                     tx.apply(delete, &NoProgress)?;
                 }
                 let ids = wanted.iter().map(|&i| (i, all[i as usize])).collect();
-                doc = Some((d, tx));
-                ids
+                (ids, primary.outline().clone())
             }
-            Some((d, tx)) => {
-                // Its pages as one insert, its form as one instance of
-                // its own (M10.5 §3.7), its marks with them, holding what
-                // they hold.
-                for blob in sheaf_doc::tx::ready_to_insert(d.store(), d.primary(), &src, &wanted) {
+            _ if is_pdf(&item.path) => {
+                let (src, _) = (store.read_file(&item.path, item.password.as_deref()))
+                    .with_context(|| format!("opening {name}"))?;
+                let wanted = wanted(item, src.page_count(), &name)?;
+                // Its pages as one insert, its form as one instance of its
+                // own (M10.5 §3.7), its marks with them, holding what they
+                // hold.
+                for blob in
+                    sheaf_doc::tx::ready_to_insert(&store, session.doc.primary(), &src, &wanted)
+                {
                     tx.pin(blob);
                 }
                 tx.pin(src.blob().clone());
-                let insert = Op::InsertPages {
-                    from: PageSource::File {
-                        file: BlobSel::Id(src.id()),
-                        name: sheaf_doc::store::file_name(&file).to_string(),
-                    },
-                    pages: Some(RangeSet::from_runs(wanted.iter().map(|&i| i + 1..=i + 1))?),
-                    before: None,
-                    bring: Bring {
-                        outline: OutlineBring::None,
-                        ..Bring::default()
-                    },
-                    locals: Vec::new(),
+                let from = PageSource::File {
+                    file: BlobSel::Id(src.id()),
+                    name: name.clone(),
                 };
-                let made = tx.apply(insert, &NoProgress)?.made;
-                let pages = made.into_iter().filter_map(|m| match m {
-                    Made::Page(id) => Some(id),
+                let ids = insert(&mut tx, from, Some(&wanted))?;
+                (ids, src.outline().clone())
+            }
+            _ => {
+                // An image's pages are made in memory, as an insert of it
+                // makes them (M10.5 §3.9).
+                let image = store.read_image(&item.path)?;
+                tx.pin(image.clone());
+                let fit = params.image_page.fit(0.0);
+                // A subset of a TIFF's pages needs their count, which only
+                // reading them says.
+                let wanted = match &item.pages {
+                    Some(r) if !r.trim().is_empty() => {
+                        let made = sheaf_doc::memory::images(&store, &[&**image.bytes()], fit)
+                            .with_context(|| format!("reading {}", item.path.display()))?;
+                        Some(wanted(item, made.page_count(), &name)?)
+                    }
                     _ => None,
-                });
-                wanted.iter().copied().zip(pages).collect()
+                };
+                let from = PageSource::Images {
+                    images: vec![BlobSel::Id(image.id())],
+                    fit,
+                };
+                (insert(&mut tx, from, wanted.as_deref())?, Arc::from([]))
             }
         };
-        let (_, tx) = doc.as_mut().expect("made above");
         let title = item
             .path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or(name);
-        report.bookmarks += add_bookmarks(tx, &title, &ids, &outline, params.bookmark_each_file)?;
+        report.bookmarks +=
+            add_bookmarks(&mut tx, &title, &ids, &outline, params.bookmark_each_file)?;
         report.pages += ids.len();
         report.files += 1;
         progress.set(n as u64 + 1);
     }
-    let (mut doc, tx) = doc.expect("at least one item");
-    let mut notices = doc.commit(tx, CommitOpts::labelled("Combine"))?.notices;
+    let mut notices = session
+        .doc
+        .commit(tx, CommitOpts::labelled("Combine"))?
+        .notices;
+    // What the new document starts from: there's nothing to undo to.
+    session.doc.forget_before_cursor();
     // Told as one: the forms renamed, then the signatures that don't hold,
     // then the rest.
     notices.sort_by_key(|n| match n {
@@ -242,7 +218,63 @@ pub fn build(
         Notice::ScriptsOff | Notice::Unencodable => 2,
     });
     report.notice = sheaf_doc::notice_text(&notices);
-    Ok((doc, report))
+    Ok((session, report))
+}
+
+/// The opened first file's own bookmarks and labels taken off in `tx`:
+/// its bookmarks go under its own below, as every file's do, and the
+/// combined file's pages are numbered as they come.
+fn opened_aside(tx: &mut Tx) -> Result<()> {
+    let roots: Vec<BookmarkRef> = (tx.state().outline_roots().iter())
+        .map(|&id| BookmarkRef::Id(id))
+        .collect();
+    if !roots.is_empty() {
+        tx.apply(Op::DeleteBookmarks { bookmarks: roots }, &NoProgress)?;
+    }
+    if tx.state().label_ranges().is_some() {
+        tx.apply(Op::SetPageLabels { ranges: None }, &NoProgress)?;
+    }
+    Ok(())
+}
+
+/// The pages of a file of `count` pages that `item` names, from 0.
+fn wanted(item: &CombineItem, count: u32, name: &str) -> Result<Vec<u32>> {
+    Ok(match &item.pages {
+        Some(r) if !r.trim().is_empty() => crate::pages::parse(r, count as usize)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("{name}: pages"))?
+            .into_iter()
+            .map(|i| i as u32)
+            .collect(),
+        _ => (0..count).collect(),
+    })
+}
+
+/// Pages `wanted` (from 0; every page when None) of `from` inserted at the
+/// end in `tx`: each page's index in its file, with the page it made.
+fn insert(tx: &mut Tx, from: PageSource, wanted: Option<&[u32]>) -> Result<Vec<(u32, PageId)>> {
+    let pages = wanted
+        .map(|w| RangeSet::from_runs(w.iter().map(|&i| i + 1..=i + 1)))
+        .transpose()?;
+    let insert = Op::InsertPages {
+        from,
+        pages,
+        before: None,
+        bring: Bring {
+            outline: OutlineBring::None,
+            ..Bring::default()
+        },
+        locals: Vec::new(),
+    };
+    let made = tx.apply(insert, &NoProgress)?.made;
+    let pages = made.into_iter().filter_map(|m| match m {
+        Made::Page(id) => Some(id),
+        _ => None,
+    });
+    Ok(match wanted {
+        Some(wanted) => wanted.iter().copied().zip(pages).collect(),
+        None => (0..).zip(pages).collect(),
+    })
 }
 
 /// This file's bookmarks at the end of the outline: under one titled with
@@ -320,17 +352,26 @@ fn add_bookmark(
     }
 }
 
-/// Combine `items` into a new PDF at `out`.
+/// Combine `items` into a new PDF at `out`, written whole: `answers`
+/// answer what the save asks (the first file's signatures it breaks, an
+/// XFA part's values it drops). The combined document, saved there.
 pub fn combine(
     items: &[CombineItem],
     params: &CombineParams,
     out: &Path,
+    answers: &AskAnswers,
     progress: &dyn Progress,
-) -> Result<CombineReport> {
-    let (doc, report) = build(items, params, &*progress.child("reading", 0.7))?;
+) -> Result<(Session, CombineReport)> {
+    let (mut session, report) = build(items, params, &*progress.child("reading", 0.7))?;
     progress.check()?;
-    sheaf_doc::save::rewrite_to_path(&doc.snapshot(), out)?;
-    Ok(report)
+    let to = SaveTo::File {
+        path: out.to_path_buf(),
+        append: false,
+    };
+    session
+        .save(to, answers, &*progress.child("writing", 0.3))
+        .decided()?;
+    Ok((session, report))
 }
 
 #[cfg(test)]
@@ -338,12 +379,12 @@ mod tests {
     use super::*;
 
     /// Each file's page stamps and attachments come with its marks: the
-    /// combined document finds them in the files, whose stems no cache
-    /// has, and writes them, and every mark reopens as sheaf's.
+    /// combined document finds them in the files, whose stems nothing else
+    /// holds, and writes them, and every mark reopens as sheaf's.
     #[test]
     fn marks_bring_what_they_hold() {
-        use sheaf_doc::annot::{WriteCx, to_pdf_in};
         use sheaf_doc::forms::fixture::{self, Form};
+        use sheaf_doc::serialize::built::{WriteCx, to_pdf_in};
         use sheaf_doc::store::blob_id;
         use sheaf_doc::{AnnotKind, FormRef, Mark};
         let dir = std::env::temp_dir().join(format!(
@@ -387,8 +428,8 @@ mod tests {
                 password: None,
             }
         });
-        let (doc, _) = build(&items, &CombineParams::default(), &NoProgress).unwrap();
-        let st = doc.state();
+        let (session, _) = build(&items, &CombineParams::default(), &NoProgress).unwrap();
+        let st = session.doc.state();
         for (name, &p) in ["a", "b"].iter().zip(st.order()) {
             let marks: Vec<&Mark> = st.mark_records_on(p).collect();
             let stamp = marks[0].stamp.as_ref();
@@ -401,13 +442,121 @@ mod tests {
             );
         }
         let out = dir.join("combined.pdf");
-        sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
+        sheaf_doc::save::rewrite_to_path(&session.doc, &out).unwrap();
         let back = sheaf_doc::open::file(&out, None).unwrap();
         let st = back.doc.state();
         for &p in st.order() {
             let marks: Vec<bool> = st.annots_on(p).map(|(_, a)| a.mark().is_some()).collect();
             assert_eq!(marks, [true, true], "two marks, none another tool's");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Images are pages made in memory, first or after a PDF: the
+    /// document starts from an image's, and the next comes in as an insert
+    /// of it, nothing read from or written to a cache.
+    #[test]
+    fn images_are_pages_made_in_memory() {
+        use sheaf_doc::store::{BlobKind, MemoryKind, Origin};
+        let dir = std::env::temp_dir().join(format!(
+            "sheaf-combine-images-{}-{:x}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = |name: &str, width| {
+            let path = dir.join(name);
+            image::RgbImage::from_pixel(width, 48, image::Rgb([10, 200, 10]))
+                .save(&path)
+                .unwrap();
+            CombineItem::new(path)
+        };
+        let pdf = dir.join("blank.pdf");
+        std::fs::write(
+            &pdf,
+            sheaf_doc::memory::blank_pages(612.0, 792.0, 2).unwrap(),
+        )
+        .unwrap();
+        let items = [
+            image("first.png", 96),
+            CombineItem::new(&pdf),
+            image("last.png", 64),
+        ];
+        let (session, report) = build(&items, &CombineParams::default(), &NoProgress).unwrap();
+        assert_eq!((report.pages, report.files), (4, 3));
+        let st = session.doc.state();
+        let origins: Vec<Origin> = (st.order().iter())
+            .map(|&p| match st.def(p).unwrap().base.src.blob().kind() {
+                BlobKind::Pdf { origin, .. } => origin.clone(),
+                _ => panic!("a PDF"),
+            })
+            .collect();
+        let made = Origin::Memory(MemoryKind::Images);
+        assert_eq!(origins[0], made);
+        assert!(matches!(&origins[1], Origin::File(path) if **path == *pdf));
+        assert_eq!(origins[3], made);
+        let titles: Vec<String> = (st.bookmarks_preorder().iter())
+            .map(|(_, _, b)| b.title.to_string())
+            .collect();
+        assert_eq!(titles, ["first", "blank", "last"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The first file opens as the document, its generators with it: a
+    /// header it has on every page is on the pages inserted after it too,
+    /// as an insert into it would have it (M10.5 proposal 35). Its labels
+    /// and its own bookmarks are taken off, its bookmarks under its own
+    /// again, as every file's are.
+    #[test]
+    fn the_first_file_s_header_covers_the_pages_combined_after_it() {
+        use sheaf_doc::tx::fixture::{bookmark, header, set_header};
+        let dir = std::env::temp_dir().join(format!(
+            "sheaf-combine-header-{}-{:x}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = sheaf_doc::Store::new();
+        let mut first = sheaf_doc::Document::new(
+            store.clone(),
+            sheaf_doc::store::blank(&store, 2),
+            "first.pdf".into(),
+            None,
+            &[],
+            sheaf_doc::history::default_policy(),
+        );
+        let p0 = first.state().order()[0];
+        let labels = vec![sheaf_edit::PageLabelRange {
+            start: PageRef::Id(p0),
+            style: sheaf_edit::LabelStyle::LowerRoman,
+            prefix: String::new(),
+            first: 1,
+        }];
+        let ops = vec![
+            set_header(header("HEADED"), None),
+            bookmark(None, None, "Opening", Some(p0)),
+            Op::SetPageLabels {
+                ranges: Some(labels),
+            },
+        ];
+        first.commit_ops(ops, "set up").unwrap();
+        let a = dir.join("first.pdf");
+        sheaf_doc::save::rewrite_to_path(&first, &a).unwrap();
+        let b = dir.join("second.pdf");
+        std::fs::write(&b, sheaf_doc::memory::blank_pages(612.0, 792.0, 1).unwrap()).unwrap();
+        let items = [CombineItem::new(&a), CombineItem::new(&b)];
+        let (session, report) = build(&items, &CombineParams::default(), &NoProgress).unwrap();
+        assert_eq!(report.pages, 3);
+        let st = session.doc.state();
+        let headers: Vec<_> = st.generators().values().collect();
+        assert_eq!(headers.len(), 1);
+        assert!(st.order().iter().all(|&p| headers[0].covers(p)));
+        assert_eq!(st.label_ranges(), None);
+        let titles: Vec<(u16, String)> = (st.bookmarks_preorder().iter())
+            .map(|(depth, _, b)| (*depth, b.title.to_string()))
+            .collect();
+        let want = [(0, "first"), (1, "Opening"), (0, "second")];
+        assert_eq!(titles, want.map(|(d, t)| (d, t.to_string())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -50,8 +50,8 @@ pub struct Library {
     pub favorites: Vec<StampRef>,
 }
 
-/// A library stamp's page: a one-page PDF, and its stem, the name the
-/// generated-file cache gives it, which marks name it by.
+/// A library stamp's page: a one-page PDF, and its stem, its blob's
+/// ([`BlobId::stem`](sheaf_doc::BlobId::stem)), which marks name it by.
 pub struct StampPage {
     pub stem: String,
     pub pdf: Arc<[u8]>,
@@ -117,9 +117,8 @@ impl DocView {
     }
 
     /// Read the library again (off the main thread), with each stamp's
-    /// page, for its picture and for placing. Each is put in the
-    /// generated-file cache too, where a mark naming it by its stem
-    /// without the page finds it (until M10.5 slice 19).
+    /// page, for its picture and for placing, which interns it
+    /// (`MemoryKind::Library`).
     pub(crate) fn load_stamps(&mut self, cx: &mut Context<Self>) {
         if let Some(p) = &mut self.stamps {
             p.loading = true;
@@ -132,9 +131,8 @@ impl DocView {
                     Ok(pdfs) => pdfs
                         .into_iter()
                         .map(|pdf| {
-                            let path = sheaf_doc::generated::store(&pdf).ok()?;
                             Some(StampPage {
-                                stem: sheaf_doc::generated::stem_of(&path),
+                                stem: sheaf_doc::store::blob_id(&pdf).stem(),
                                 pdf: pdf.into(),
                             })
                         })

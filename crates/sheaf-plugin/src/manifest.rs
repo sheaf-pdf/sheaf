@@ -6,7 +6,8 @@
 //! id = "tax-form-bookmarks"
 //! name = "Tax Form Bookmarks"
 //! version = "0.1.0"
-//! api = "^0.2"
+//! api = "^0.4"
+//! edit-schema = "1.0"
 //! homepage = "https://example.com/tax-form-bookmarks"
 //!
 //! [[commands]]
@@ -32,7 +33,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
-use crate::{API_PREVIOUS, API_VERSION};
+use crate::API_VERSION;
 
 /// Namespaces built-in actions use; a plugin id can't take one, so its
 /// command ids (`<plugin>::<command>`) never collide with an action name.
@@ -59,8 +60,16 @@ pub struct Manifest {
     pub id: String,
     pub name: String,
     pub version: semver::Version,
-    /// Which API versions the plugin was built for, e.g. `"^0.1"`.
+    /// Which API versions the plugin was built for, e.g. `"^0.4"`: it
+    /// loads only where that holds this sheaf's ([`API_VERSION`]), and
+    /// while the API is 0.x a caret holds one minor alone.
     pub api: semver::VersionReq,
+    /// The Op JSON version its edits are written in, as `"1.0"`
+    /// ([`sheaf_edit::VERSION`]): a later one than this sheaf reads, or
+    /// another major, doesn't load. None: it doesn't say, and only each
+    /// edit's envelope does.
+    #[serde(default, rename = "edit-schema")]
+    pub edit_schema: Option<String>,
     #[serde(default)]
     pub description: String,
     /// An `https://` page about the plugin, linked from the plugin manager.
@@ -80,7 +89,7 @@ pub struct Manifest {
     #[serde(default)]
     pub permissions: Permissions,
     /// The keys its `[plugins.<id>]` section of `settings.toml` may hold
-    /// (API 0.3's `storage.preferences`), so sheaf can point out a typo.
+    /// (`storage.preferences`), so sheaf can point out a typo.
     /// Empty: it doesn't say, and nothing is checked.
     #[serde(default)]
     pub preferences: Vec<String>,
@@ -184,18 +193,24 @@ pub struct Permissions {
     /// Hosts it may make HTTP requests to: `"api.example.com"` (any port),
     /// `"*.example.com"` (subdomains too) or `"127.0.0.1:8080"` (that port).
     pub network: Vec<String>,
+    /// Who the user is: `<<name>>` and `<<initials>>` in its marks are
+    /// filled in, and the authors it reads are named, not roles (M10.5
+    /// §6.8). No bundled plugin asks for it.
+    pub identity: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EventKind {
     Opened,
-    Edited,
+    Changed,
     Saved,
     SelectionChanged,
     Closed,
     /// Region selected and region cleared.
     Region,
+    /// The plugin's edits didn't land.
+    EditRefused,
 }
 
 /// Permissions as concrete directories.
@@ -205,11 +220,13 @@ pub struct Grants {
     pub write: Vec<PathBuf>,
     /// Hosts for HTTP (see [`Permissions::network`]).
     pub network: Vec<String>,
+    /// Who the user is (see [`Permissions::identity`]).
+    pub identity: bool,
 }
 
 impl Grants {
     pub fn is_empty(&self) -> bool {
-        self.read.is_empty() && self.write.is_empty() && self.network.is_empty()
+        self.read.is_empty() && self.write.is_empty() && self.network.is_empty() && !self.identity
     }
 
     /// Whether an HTTP request to `host` (and `port`, if the URL gave one)
@@ -245,6 +262,9 @@ impl Grants {
                 .map(|d| format!("Read and change files in {}", d.display())),
         );
         out.extend(self.network.iter().map(|h| format!("Connect to {h}")));
+        if self.identity {
+            out.push("Know your name".into());
+        }
         out
     }
 }
@@ -256,6 +276,7 @@ impl Permissions {
             read: self.read.iter().map(|d| expand_home(d)).collect(),
             write: self.write.iter().map(|d| expand_home(d)).collect(),
             network: self.network.clone(),
+            identity: self.identity,
         }
     }
 }
@@ -353,11 +374,24 @@ impl Manifest {
         {
             bail!("homepage {url:?} must be an https:// URL");
         }
-        if !self.api.matches(&API_VERSION) && !self.api.matches(&API_PREVIOUS) {
+        if !self.api.matches(&API_VERSION) {
             bail!(
-                "built for API {}, but this sheaf provides {API_VERSION} (and {API_PREVIOUS})",
+                "built for API {}, but this sheaf provides {API_VERSION}",
                 self.api
             );
+        }
+        if let Some(v) = &self.edit_schema {
+            match sheaf_edit::envelope::reads(v) {
+                None => bail!(
+                    "edit-schema {v:?} must be a version, as \"{}\"",
+                    sheaf_edit::VERSION
+                ),
+                Some(false) => bail!(
+                    "built for edits {v}; this sheaf reads up to {}",
+                    sheaf_edit::VERSION
+                ),
+                Some(true) => {}
+            }
         }
         let mut seen = Vec::new();
         for c in &self.commands {
@@ -453,7 +487,8 @@ mod tests {
         id = "tax-form-bookmarks"
         name = "Tax Form Bookmarks"
         version = "0.1.0"
-        api = "^0.2"
+        api = "^0.4"
+        edit-schema = "1.0"
         homepage = "https://example.com/tax"
 
         [[commands]]
@@ -492,6 +527,31 @@ mod tests {
         assert_eq!(m.marks.stamps, ["Agreed"]);
         assert_eq!(m.permissions, Permissions::default());
         assert!(m.permissions.network.is_empty());
+        assert_eq!(m.edit_schema.as_deref(), Some("1.0"));
+    }
+
+    /// A plugin's edits are Op JSON of the version it says, which this
+    /// sheaf must read: an earlier minor of its major, or its own.
+    #[test]
+    fn a_plugin_built_for_newer_edits_is_refused() {
+        let schema = |v: &str| bad(|s| s.replace("edit-schema = \"1.0\"", v));
+        let newer = schema("edit-schema = \"1.1\"");
+        assert!(newer.contains("built for edits 1.1; this sheaf reads up to 1.0"));
+        assert!(schema("edit-schema = \"2.0\"").contains("built for edits 2.0"));
+        assert!(schema("edit-schema = \"1\"").contains("must be a version"));
+        assert!(schema("edit-schema = \"v1.0\"").contains("must be a version"));
+        let none = Manifest::parse(&GOOD.replace("edit-schema = \"1.0\"\n", "")).unwrap();
+        assert_eq!(none.edit_schema, None, "a plugin that makes no edits");
+    }
+
+    /// Knowing who the user is, is asked for like any other permission.
+    #[test]
+    fn identity_is_a_permission_asked_for() {
+        let m = Manifest::parse(&format!("{GOOD}\n[permissions]\nidentity = true\n")).unwrap();
+        let grants = m.permissions.grants();
+        assert!(grants.identity && !grants.is_empty());
+        assert_eq!(grants.describe(), ["Know your name"]);
+        assert!(!Manifest::parse(GOOD).unwrap().permissions.grants().identity);
     }
 
     fn bad(edit: impl Fn(&str) -> String) -> String {
@@ -523,8 +583,11 @@ mod tests {
     fn rejects_invalid_manifests() {
         assert!(bad(|s| s.replace("tax-form-bookmarks", "Tax Forms")).contains("plugin id"));
         assert!(bad(|s| s.replace("tax-form-bookmarks", "docview")).contains("reserved"));
-        assert!(bad(|s| s.replace("^0.2", "^2.0")).contains("built for API"));
-        assert!(bad(|s| s.replace("^0.2", "^0.1")).contains("built for API"));
+        assert!(bad(|s| s.replace("^0.4", "^2.0")).contains("built for API"));
+        // The minor before is no longer served: one minor alone, until
+        // sheaf's first release.
+        let older = bad(|s| s.replace("^0.4", "^0.3"));
+        assert!(older.contains("built for API ^0.3, but this sheaf provides 0.4.0"));
         assert!(bad(|s| s.replace("https://example.com/tax", "http://x")).contains("homepage"));
         assert!(bad(|s| s.replace("[\"document\"]", "[\"editable\"]")).contains("unknown `when`"));
         assert!(

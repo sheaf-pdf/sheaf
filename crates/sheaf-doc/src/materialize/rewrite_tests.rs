@@ -3,7 +3,7 @@
 //! marks and other tools' comments, stamps and attachments, encryption,
 //! the header and footer and labels; OCR layers are `ocr_tests`'. A test
 //! that saves both ways has an Append half ([`crate::both_ways!`]).
-//! The fixtures here are the export tests' too (`save::tests`).
+//! The fixtures here are the export tests' too (`export::tests`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,8 +15,9 @@ use sheaf_edit::{AnnotRef, BookmarkPatch, DestView, Op, PageRef, Patch, Rotation
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::FixedCount;
-use crate::materialize::{self, AskAnswers, Came, How, StrategyKind, Why};
-use crate::model::{Document, FlatOutlineItem, Mark, PageId};
+use crate::materialize::{self, AskAnswers, Came, How, SaveHow, StrategyKind, Why};
+use crate::model::{Document, Mark, PageId};
+use crate::open::FlatOutlineItem;
 use crate::save::{rewrite, rewrite_to_path, text_string};
 use crate::serialize::crypt::Crypt;
 use crate::store::{BlobKind, Src, Store};
@@ -382,7 +383,7 @@ fn identity_round_trip() {
         ],
         Box::new(FixedCount(10)),
     );
-    let bytes = rewrite(&model.snapshot()).unwrap();
+    let bytes = rewrite(&model).unwrap();
     assert_eq!(
         read_pages(&bytes),
         vec![("A 0".into(), 0), ("A 1".into(), 0), ("A 2".into(), 0)]
@@ -444,7 +445,7 @@ fn edits_materialize() {
         .commit_ops(vec![fx::duplicate(&[ids[0]])], "dup")
         .unwrap(); // A3 A0 A0 B0 B1 A2
 
-    let bytes = rewrite(&model.snapshot()).unwrap();
+    let bytes = rewrite(&model).unwrap();
     assert_eq!(
         read_pages(&bytes),
         vec![
@@ -548,7 +549,14 @@ fn appends_onto(modern: bool) {
     // A page was deleted and a bookmark renamed: saving the primary path
     // is a full rewrite, so neither is left in an earlier revision (bug
     // 14, strict removal).
-    let report = materialize::save(&mut model, &a, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = materialize::save_with(
+        &mut model,
+        &a,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     let removed = |kind, count| crate::effects::Removed { kind, count };
     let why = [
@@ -668,7 +676,14 @@ fn a_file_lopdf_rebuilds_is_rewritten() {
     let mut model = rotated(&a);
 
     // An update would have no section for /Prev to point at.
-    let report = materialize::save(&mut model, &a, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = materialize::save_with(
+        &mut model,
+        &a,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     assert_eq!(report.why, [Why::BaseUnsound]);
     let saved = std::fs::read(&a).unwrap();
@@ -957,7 +972,14 @@ fn undo_past_a_save(first: How) {
         assert_eq!(saved[0].0, "A 2", "{what}");
         model.undo().unwrap();
         let report = match again {
-            None => materialize::save(&mut model, &a, &AskAnswers::default(), &NoProgress).unwrap(),
+            None => materialize::save_with(
+                &mut model,
+                &a,
+                SaveHow::Planned,
+                &AskAnswers::default(),
+                &NoProgress,
+            )
+            .unwrap(),
             Some(how) => how.save(&mut model, &a),
         };
         let want = again.map_or(StrategyKind::Append, How::strategy);
@@ -1100,7 +1122,7 @@ fn file_with_their_comments(dir: &Path) -> (std::path::PathBuf, Vec<Annot>) {
     );
     model.commit_ops(vec![fx::add(p0, &note)], "note").unwrap();
     let ours: Vec<Annot> = model.state().marks_on(p0).cloned().collect();
-    let bytes = rewrite(&model.snapshot()).unwrap();
+    let bytes = rewrite(&model).unwrap();
     let mut pdf = Pdf::load_mem(&bytes).unwrap();
     let page0 = pdf.get_pages()[&1];
     let note_obj = page_annots(&bytes)[0].0;
@@ -1413,9 +1435,14 @@ fn a_comment_made_ours_is_saved_in_place() {
                     ),
                     "{refused:#}"
                 );
-                let saved =
-                    materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress)
-                        .unwrap();
+                let saved = materialize::save_with(
+                    &mut model,
+                    &path,
+                    SaveHow::Planned,
+                    &AskAnswers::default(),
+                    &NoProgress,
+                )
+                .unwrap();
                 assert_eq!(saved.strategy, Some(StrategyKind::Rewrite));
                 // KNOWN MISCOUNT, not the spec: `Removes([Comments: 1])`
                 // today, the caret's strikeout (see the doc comment).
@@ -1447,7 +1474,13 @@ fn a_comment_made_ours_is_saved_in_place() {
             .commit_ops(vec![fx::delete_annots(&[sq])], "delete")
             .unwrap();
         // The mark and its thread's reply.
-        let saved = materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress);
+        let saved = materialize::save_with(
+            &mut model,
+            &path,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        );
         let saved = saved.unwrap();
         assert_eq!(saved.strategy, Some(StrategyKind::Rewrite), "{appended}");
         assert_eq!(saved.why, removes(2), "{appended}");
@@ -1531,12 +1564,25 @@ fn a_link_a_save_left_out_is_gone_from_its_file() {
             .map(|a| String::from_utf8_lossy(a.get(b"Subtype").unwrap().as_name().unwrap()).into())
             .collect()
     };
-    let report = materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress);
+    let report = materialize::save_with(
+        &mut model,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    );
     assert_eq!(report.unwrap().strategy, Some(StrategyKind::Rewrite));
     assert_eq!(subtypes(&path), ["Text"]);
     assert_eq!(model.state().foreign_on(p0).count(), 2);
     model.undo().unwrap();
-    materialize::save(&mut model, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    materialize::save_with(
+        &mut model,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(subtypes(&path), ["Link", "Text"]);
 }
 
@@ -1591,7 +1637,13 @@ fn deleted_comments_stay_out(how: How) {
     // Saved in place, it's a Rewrite: something's gone.
     let file = match how {
         How::Appended => {
-            let saved = materialize::save(&mut model, &copy, &AskAnswers::default(), &NoProgress);
+            let saved = materialize::save_with(
+                &mut model,
+                &copy,
+                SaveHow::Planned,
+                &AskAnswers::default(),
+                &NoProgress,
+            );
             assert_eq!(saved.unwrap().strategy, Some(StrategyKind::Rewrite));
             std::fs::read(&copy).unwrap()
         }
@@ -1608,7 +1660,14 @@ fn deleted_comments_stay_out(how: How) {
         How::Appended => {
             let refused = materialize::appended(&model).unwrap_err().to_string();
             assert!(refused.contains("the saved file hasn't got"), "{refused}");
-            materialize::save(&mut model, &copy, &AskAnswers::default(), &NoProgress).unwrap();
+            materialize::save_with(
+                &mut model,
+                &copy,
+                SaveHow::Planned,
+                &AskAnswers::default(),
+                &NoProgress,
+            )
+            .unwrap();
             std::fs::read(&copy).unwrap()
         }
         How::Rewritten => save(&model),
@@ -1650,7 +1709,13 @@ fn saves_marks_and_comments(in_place: bool) {
         true => (materialize::save_appended(&mut model, &copy), copy.clone()),
         false => {
             let out = dir.join("marks-out.pdf");
-            let report = materialize::save(&mut model, &out, &AskAnswers::default(), &NoProgress);
+            let report = materialize::save_with(
+                &mut model,
+                &out,
+                SaveHow::Planned,
+                &AskAnswers::default(),
+                &NoProgress,
+            );
             (report, out)
         }
     };
@@ -1674,7 +1739,13 @@ fn saves_marks_and_comments(in_place: bool) {
     model
         .commit_ops(vec![fx::delete_named(p0, &[&name])], "delete theirs")
         .unwrap();
-    let report = materialize::save(&mut model, &out, &AskAnswers::default(), &NoProgress);
+    let report = materialize::save_with(
+        &mut model,
+        &out,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    );
     assert_eq!(report.unwrap().strategy, Some(StrategyKind::Rewrite));
     let bytes = std::fs::read(&out).unwrap();
     assert!(!says(&bytes, "No name") && says(&bytes, "Agreed"));
@@ -1737,7 +1808,13 @@ fn dup_without_theirs(how: How) {
     }
     let file = match how {
         How::Appended => {
-            let saved = materialize::save(&mut model, &copy, &AskAnswers::default(), &NoProgress);
+            let saved = materialize::save_with(
+                &mut model,
+                &copy,
+                SaveHow::Planned,
+                &AskAnswers::default(),
+                &NoProgress,
+            );
             assert_eq!(saved.unwrap().strategy, Some(StrategyKind::Rewrite));
             std::fs::read(&copy).unwrap()
         }
@@ -1967,7 +2044,7 @@ fn two_attachments_of_one_file_embed_it_once() {
             .commit_ops(vec![fx::add(p0, &annot)], "attach")
             .unwrap();
     }
-    let out = rewrite(&model.snapshot()).unwrap();
+    let out = rewrite(&model).unwrap();
     let pdf = Pdf::load_mem(&out).unwrap();
     let files: Vec<(ObjectId, Vec<u8>)> = page_annots(&out)
         .iter()
@@ -1988,21 +2065,20 @@ fn two_attachments_of_one_file_embed_it_once() {
 }
 
 crate::both_ways!(
-    stamps_and_attachments_survive_an_empty_cache,
-    stamps_and_attachments_survive_an_empty_cache_appended: survive_an_empty_cache
+    stamps_and_attachments_are_read_from_the_file,
+    stamps_and_attachments_are_read_from_the_file_appended: read_from_the_file
 );
 
-/// A stamp placed from the library and a file attached, saved, open
-/// on a machine whose cache hasn't the stamp: the marks are still
-/// sheaf's, and saved again either way, the stamp's page draws and the
-/// file's bytes are the same, from the file each time. Appended to, the
-/// file keeps the page and the file where they are.
-fn survive_an_empty_cache(how: How) {
+/// A stamp placed from the library and a file attached, saved, opened
+/// again in a store that holds neither: the marks are still sheaf's, and
+/// saved again either way, the stamp's page draws and the file's bytes
+/// are the same, from the file each time. Appended to, the file keeps
+/// the page and the file where they are.
+fn read_from_the_file(how: How) {
     use crate::annot::AnnotKind;
     let tag = format!("{:x}", fastrand::u64(..));
     let pdf = stamp_page(&tag);
-    let stamp_path = crate::generated::store(&pdf).unwrap();
-    let stamp = crate::generated::stem_of(&stamp_path);
+    let stamp = crate::store::blob_id(&pdf).stem();
     let bytes = format!("workpaper notes {tag}").into_bytes();
     let dir = tempdir();
     let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
@@ -2024,8 +2100,14 @@ fn survive_an_empty_cache(how: How) {
     }
     drop(held);
     let saved = dir.join("saved.pdf");
-    materialize::save(&mut model, &saved, &AskAnswers::default(), &NoProgress).unwrap();
-    std::fs::remove_file(&stamp_path).unwrap();
+    materialize::save_with(
+        &mut model,
+        &saved,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
 
     let check = |path: &Path| -> (Document, [ObjectId; 2]) {
         let mut doc = crate::open::file(path, None).unwrap().doc;
@@ -2110,7 +2192,7 @@ fn a_file_whose_pages_come_in_cant_replace_a_stamp() {
     let insert = fx::insert(&incoming, [0], "a.pdf", None);
     model.commit_ops(vec![insert], "ins").unwrap();
 
-    let out = rewrite(&model.snapshot()).unwrap();
+    let out = rewrite(&model).unwrap();
     let pdf = Pdf::load_mem(&out).unwrap();
     let drawn = |page: usize| {
         let (_, _, stream) = drawn_form(&pdf, &page_annots_on(&out, page)[0].1);
@@ -2376,7 +2458,7 @@ fn annots_read_back(how: How) {
         .unwrap();
     assert_eq!(annots.len(), 2);
 
-    let rw = rewrite(&model.snapshot()).unwrap();
+    let rw = rewrite(&model).unwrap();
     let out3 = dir.join("rw.pdf");
     std::fs::write(&out3, &rw).unwrap();
     assert_eq!(
@@ -2701,7 +2783,7 @@ fn header_footer_is_drawn_and_found_again() {
         .commit_ops(vec![fx::set_header(footer.clone(), None)], "hf")
         .unwrap();
     let out = dir.join("hf-out.pdf");
-    rewrite_to_path(&model.snapshot(), &out).unwrap();
+    rewrite_to_path(&model, &out).unwrap();
     let pdf = Pdf::load(&out).unwrap();
     let src = crate::forms::fixture::source(std::fs::read(&out).unwrap());
     let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
@@ -2789,14 +2871,14 @@ fn page_labels_follow_pages(how: How) {
         .commit_ops(vec![fx::move_pages(&[ids[2]], Some(ids[0]))], "move")
         .unwrap();
     let out = dir.join("moved.pdf");
-    rewrite_to_path(&model.snapshot(), &out).unwrap();
+    rewrite_to_path(&model, &out).unwrap();
     assert_eq!(read(&out).unwrap(), vec!["1", "i", "ii", "iii"]);
     // Removed.
     model
         .commit_ops(vec![Op::SetPageLabels { ranges: None }], "none")
         .unwrap();
     let out = dir.join("none.pdf");
-    rewrite_to_path(&model.snapshot(), &out).unwrap();
+    rewrite_to_path(&model, &out).unwrap();
     assert_eq!(read(&out), None);
 }
 

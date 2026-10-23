@@ -168,6 +168,25 @@ impl Affine {
         (x2, y2)
     }
 
+    /// The map that scales and moves `frame` onto `target`, as a form whose
+    /// box on the page is `frame` is placed to fill `target` (an
+    /// annotation's appearance onto its `/Rect`, ISO 32000-1 12.5.5). None
+    /// for a frame with no area, which draws nothing.
+    pub fn onto(frame: Rect, target: Box2) -> Option<Affine> {
+        let (w, h) = (frame.width(), frame.height());
+        if !(w > 0.0 && h > 0.0) {
+            return None;
+        }
+        let (sx, sy) = (target.w / w, target.h / h);
+        Some(Affine {
+            a: sx,
+            d: sy,
+            e: target.x - frame.x0 * sx,
+            f: target.y - frame.y0 * sy,
+            ..Affine::IDENTITY
+        })
+    }
+
     /// `self`, then `next`.
     pub fn then(self, next: Affine) -> Affine {
         Affine {

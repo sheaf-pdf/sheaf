@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object};
+use lopdf::{Dictionary, Object, ObjectId};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt, REVIEW};
@@ -20,9 +20,10 @@ use crate::store::{Blob, BlobKind, Store};
 /// What a conversion may do beyond reading the dictionary.
 #[derive(Clone, Copy, Default)]
 pub struct Options<'a> {
-    /// Where an attachment's embedded file is kept, which makes it a mark.
-    /// None when converting a whole file ahead of need, where copying every
-    /// attachment would be waste.
+    /// Where an attachment's embedded file is kept, which makes it a mark,
+    /// and a stamp's page. None when converting a whole file ahead of
+    /// need, where copying every attachment would be waste: a stamp then
+    /// names its page by stem alone.
     pub files: Option<&'a Interned<'a>>,
 }
 
@@ -262,7 +263,7 @@ pub fn convert<P: Objects + ?Sized>(
             }
         }
         "Caret" => AnnotKind::Insert { at: within(0.0) },
-        "Stamp" => stamp(pdf, dict, rect),
+        "Stamp" => stamp(pdf, dict, rect, opts.files),
         "FileAttachment" => match opts.files {
             Some(files) => attachment(pdf, dict, rect, files).ok_or_else(unsupported)?,
             None => return Err(unsupported()),
@@ -353,9 +354,18 @@ fn measure(
     }
 }
 
-/// A stamp: its appearance as one of ours, in the cache, when it has one
-/// sheaf can read; else a text stamp saying its name.
-fn stamp<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> AnnotKind {
+/// A stamp: its appearance as one of ours, a one-page PDF it names by its
+/// blob's stem, when it has one sheaf can read; else a text stamp saying
+/// its name. The page is interned through `files` and held there; a file
+/// converted ahead of need, with none, has only the stem, which the form
+/// the page is made of stands for in the file
+/// ([`ForeignAnnot::stamp`](crate::file::ForeignAnnot::stamp)).
+fn stamp<P: Objects + ?Sized>(
+    pdf: &P,
+    dict: &Dictionary,
+    rect: Box2,
+    files: Option<&Interned<'_>>,
+) -> AnnotKind {
     let name = dict
         .get(b"Name")
         .ok()
@@ -373,20 +383,15 @@ fn stamp<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> AnnotKi
         }
         n => n.to_string(),
     };
-    let form = dict
-        .get(b"AP")
-        .ok()
-        .and_then(|o| pdf.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict().ok())
-        .and_then(|ap| ap.get(b"N").ok())
-        .and_then(|n| n.as_reference().ok());
-    let stored = form
-        .and_then(|f| crate::stamp_lib::form_to_pdf(pdf, f).ok())
-        .and_then(|bytes| crate::generated::store(&bytes).ok());
-    match stored {
-        Some(path) => AnnotKind::PageStamp {
+    let page = appearance(pdf, dict).and_then(|f| crate::stamp_lib::form_to_pdf(pdf, f).ok());
+    let stem = page.and_then(|page| match files {
+        Some(files) => Some(files.intern(page.into(), BlobKind::stamp())?.id().stem()),
+        None => Some(crate::store::blob_id(&page).stem()),
+    });
+    match stem {
+        Some(stamp) => AnnotKind::PageStamp {
             rect,
-            stamp: crate::generated::stem_of(&path),
+            stamp,
             name: shown,
             text: None,
         },
@@ -396,6 +401,12 @@ fn stamp<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> AnnotKi
             status: false,
         },
     }
+}
+
+/// The form a stamp's normal appearance (`/AP /N`) is.
+pub(crate) fn appearance<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<ObjectId> {
+    let (_, ap) = pdf.dereference(dict.get(b"AP").ok()?).ok()?;
+    ap.as_dict().ok()?.get(b"N").ok()?.as_reference().ok()
 }
 
 /// An attachment, its embedded file interned through `files`.

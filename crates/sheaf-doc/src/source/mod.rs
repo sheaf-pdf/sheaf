@@ -12,6 +12,7 @@
 //! refuses the bytes, once an engine has tried them. Sources come from the
 //! [`Store`](crate::store::Store), one per distinct file.
 
+pub(crate) mod appearance;
 mod conformance;
 #[doc(hidden)]
 pub mod fuzz;
@@ -37,10 +38,9 @@ use crate::forms::sigs::Signatures;
 use crate::generate::Saved;
 use crate::geom::Geom;
 use crate::materialize::emit::catalog::GENERATORS;
-use crate::model::FlatOutlineItem;
-use crate::open::FileAnnots;
+use crate::open::{FileAnnots, FlatOutlineItem};
 use crate::serialize::crypt::Crypt;
-use crate::store::{Blob, BlobCollision, BlobId, Src};
+use crate::store::{Blob, BlobCollision, BlobId, BlobKind, MemoryKind, Origin, Src};
 
 pub use conformance::{Conformance, PdfA};
 pub use limits::{ContentLimits, FormLimits, Limits, PageTreeLimits};
@@ -84,6 +84,17 @@ pub type Markers = Arc<[(ObjectId, Marker)]>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ObjRef {
     pub src: Src,
+    pub id: ObjectId,
+}
+
+/// A page of a source, by the source's blob and the page's object: what
+/// the pages showing copies of it are found by
+/// ([`DocState::page_showing`](crate::DocState::page_showing)). Unlike an
+/// [`ObjRef`] it doesn't pin the source. Ordered by the blob and then the
+/// object, so the copies of a page, keyed after it, are found together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PageObj {
+    pub blob: BlobId,
     pub id: ObjectId,
 }
 
@@ -135,11 +146,25 @@ pub enum PageTreeError {
 
 impl Source {
     /// `blob` read under `limits`: its cross-reference sections, trailer,
-    /// encryption and page table.
+    /// encryption and page table. A file of no pages doesn't open, but for
+    /// blank pages sheaf made with none, what a document made in memory
+    /// starts from ([`memory::empty`](crate::memory::empty)), and comments
+    /// read as data, which are on no page of their own
+    /// ([`MemoryKind::Comments`]).
     pub(crate) fn open(blob: Blob, limits: &Limits) -> Result<Source, OpenError> {
         let pdf = LazyPdf::open(blob.bytes().clone(), blob.password(), &limits.reader)?;
         let crypt = Crypt::of(&pdf)?.map(Arc::new);
-        let pages: Arc<[PageFacts]> = pages::table(&pdf, &limits.page_tree)?.into();
+        let pageless = matches!(
+            blob.kind(),
+            BlobKind::Pdf {
+                origin: Origin::Memory(MemoryKind::Blank | MemoryKind::Comments),
+                ..
+            }
+        );
+        let pages: Arc<[PageFacts]> = match pages::table(&pdf, &limits.page_tree) {
+            Err(OpenError::PageTree(PageTreeError::NoPages)) if pageless => Arc::new([]),
+            pages => pages?.into(),
+        };
         Ok(Source {
             blob,
             crypt,
@@ -243,6 +268,16 @@ impl Source {
     /// Page `index`, in the order PDFium numbers them.
     pub fn page(&self, index: u32) -> Option<&PageFacts> {
         self.pages.get(index as usize)
+    }
+
+    /// Page `index` as [`PageObj`]: what the pages showing it are found
+    /// by.
+    pub fn page_obj(&self, index: u32) -> Option<PageObj> {
+        let page = self.page(index)?;
+        Some(PageObj {
+            blob: self.id(),
+            id: page.id,
+        })
     }
 
     /// Every page, in that order.

@@ -1,0 +1,103 @@
+$ sheaf-cli edit $DIR/in.pdf --edits $DIR/edit-dry-run.json --dry-run
+--- edits
+{
+  "ops": [
+    {
+      "op": "delete-pages",
+      "pages": {
+        "positions": "2"
+      }
+    },
+    {
+      "annots": [
+        {
+          "nm": "n1"
+        }
+      ],
+      "op": "delete-annotations"
+    },
+    {
+      "local": "$1",
+      "mark": {
+        "kind": {
+          "rect": {
+            "h": 50,
+            "w": 100,
+            "x": 72,
+            "y": 72
+          },
+          "type": "square"
+        },
+        "style": {
+          "color": [
+            220,
+            40,
+            40
+          ],
+          "opacity": 1,
+          "stroke": 1
+        }
+      },
+      "op": "add-mark",
+      "page": {
+        "pos": 2
+      }
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 0
+--- stdout
+{
+  "consequences": [
+    "removes 1 page",
+    "removes 1 comment",
+    "removes 1 bookmark"
+  ],
+  "created": {
+    "locals": {
+      "$1": {
+        "annot": {
+          "nm": "sheaf:#",
+          "page": 2
+        }
+      }
+    },
+    "ops": [
+      [],
+      [],
+      [
+        {
+          "annot": {
+            "nm": "sheaf:#",
+            "page": 2
+          }
+        }
+      ]
+    ]
+  },
+  "lines": [
+    {
+      "removes": true,
+      "text": "Delete page 2"
+    },
+    {
+      "removes": true,
+      "text": "Delete a comment on page 1"
+    },
+    {
+      "removes": false,
+      "text": "Add a rectangle on page 2"
+    }
+  ],
+  "pages": [
+    1,
+    2
+  ],
+  "removed_pages": [
+    2
+  ],
+  "version": "Delete page 2"
+}
+--- stderr
+editing…

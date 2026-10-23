@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{ArgGroup, Args};
 use sheaf_ops::export::stem_of;
+use sheaf_ops::session::Session;
 use sheaf_ops::split::SplitBy;
+
+use crate::decide::Decisions;
 
 #[derive(Args)]
 #[command(
@@ -38,6 +41,8 @@ pub struct SplitArgs {
     /// Replace files that are already there.
     #[arg(long)]
     force: bool,
+    #[command(flatten)]
+    decisions: Decisions,
 }
 
 pub fn run(args: SplitArgs, quiet: bool) -> anyhow::Result<()> {
@@ -63,10 +68,13 @@ pub fn run(args: SplitArgs, quiet: bool) -> anyhow::Result<()> {
             .unwrap_or_else(|| PathBuf::from("."))
     });
     let stem = args.name.clone().unwrap_or_else(|| stem_of(&args.input));
-    let doc = sheaf_doc::open::file(&args.input, args.password.as_deref())?.doc;
-    let snap = doc.snapshot();
+    let session = crate::progress::run("opening", quiet, |p| {
+        Session::open(&args.input, args.password.as_deref(), p)
+    })?;
+    let from = session.export_from();
+    let answers = args.decisions.answers();
     let files = crate::progress::run("splitting", quiet, |p| {
-        sheaf_ops::split::split(&snap, &by, &dir, &stem, args.force, p)
+        sheaf_ops::split::split(&from, &by, &dir, &stem, args.force, &answers, p)
     })?;
     for f in files {
         println!("{}", f.display());

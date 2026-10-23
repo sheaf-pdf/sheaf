@@ -879,9 +879,159 @@ const RETIRED: &[(&str, u8)] = &[
     ("content::sink::Sink::stream_dict", 18),
     // The plugin API's OCR override, the layer a page's stack holds:
     // recognized text is the page's content, saved or not, which `text`
-    // reads. API 0.3 has none; 0.2's (`api::v02`) answers none until 0.2
-    // goes (slice 20).
+    // reads, and the API has none.
     ("api::shared::HostState::page_text_layer", 18),
+    // Memory sources: blank pages, images as pages and library stamps are
+    // PDFs made in memory and interned as blobs, written by sheaf's
+    // serializer (`memory`, `serialize::full::write_built`); nothing is
+    // written to a cache, and a stamp nothing holds isn't found. The
+    // generated cache, the stems it gave by path, combine's image file in
+    // it and `find_stamp`'s cache arm are gone.
+    ("generated", 19),
+    ("generated::cache_dir", 19),
+    ("generated::store", 19),
+    ("generated::store_in", 19),
+    ("generated::name_of", 19),
+    ("generated::is_stem", 19),
+    ("generated::path_of", 19),
+    ("generated::stem_of", 19),
+    ("generated::write_new", 19),
+    ("generated::blank_pdf", 19),
+    ("generated::blank_pages", 19),
+    ("images::PageFit", 19),
+    ("images::files_to_pdf", 19),
+    ("model::held_stamp", 19),
+    ("combine::page_source", 19),
+    ("page_insert::DocView::insert_made", 19),
+    // Private data: under `Private::Strip` a file holds none of
+    // `private::KEYS`, legacy names included (an inline list loses
+    // `private::LIST_KEYS`, derived from them); a page's markers, lists
+    // and names of sheaf's go through its filters,
+    // `RemovedKind::PrivateData`.
+    ("model::LEGACY_KEYS", 19),
+    ("effects::RemovedKind::OlderSettings", 19),
+    // The old exports: every way out is `export::run`, an `ExportTx` of
+    // transforms (`KeepPages`, `RemoveMarkup`, `RemovePrivateData`,
+    // `FlattenAnnotations`) written by `materialize` with the save's
+    // checks, and the presets name them. `subset`'s fake snapshot, the
+    // post-pass on a Rewrite's graph (`flatten_annots`, `/SheafFlat1`,
+    // the widget first-state fallback) and the markup strip are gone,
+    // with the app's methods named after them.
+    ("save::subset", 19),
+    ("save::paired", 19),
+    ("save::form_on", 19),
+    ("save::prune_outline", 19),
+    ("save::print_pdf", 19),
+    ("save::extract_pages", 19),
+    ("save::extract_bytes", 19),
+    ("save::export_clean_copy", 19),
+    ("save::export_flattened", 19),
+    ("save::flatten_annots", 19),
+    ("save::normal_appearance", 19),
+    ("save::strip_markup", 19),
+    ("save::strip_markup_annots", 19),
+    ("save::is_link_or_field", 19),
+    ("save::without_markup", 19),
+    ("save::EXPORT", 19),
+    ("save::CLEAN", 19),
+    ("save::written", 19),
+    ("save::is_the_file", 19),
+    ("materialize::PostPass", 19),
+    ("materialize::materialize_then", 19),
+    ("docview::DocView::ask_before_saving", 19),
+    ("docview::DocView::export_flattened_to", 19),
+    ("docview::DocView::export_flattened_prompt", 19),
+    ("docview::DocView::export_clean_copy_prompt", 19),
+    ("print_dialog::PrintContext::snapshot", 19),
+    // Every subcommand runs on a `Session`, which saves through
+    // `materialize::save_with`, the save core; scan, the summary and blank
+    // pages make their pages in memory, and nothing is opened or saved by
+    // hand.
+    ("materialize::save", 19),
+    ("scan::add_text", 19),
+    ("comments::summary_pdf", 19),
+    // A page past its source's pages can't be: an open makes a page of
+    // each page the source has, and an edit's of what the store holds.
+    // The check of it had no caller.
+    ("save::validate", 19),
+    // One plugin world, `sheaf:plugin@0.4.0` (M10.5 §14.3): WIT 0.2 and
+    // 0.3, their two bindings, the transitional adapter that said their
+    // edits as ops, a plugin's world chosen per plugin, and the API before
+    // the current one are gone. A call's edits are Op JSON lowered into
+    // its one transaction, which lands as the call's group
+    // (`sheaf_plugin::Landing`): no batches, no stems held for the host to
+    // find (a plugin uploads its assets), no reads kept beside them.
+    ("api::v02", 20),
+    ("api::v03", 20),
+    ("api::bindings_v02", 20),
+    ("api::bindings_v03", 20),
+    ("api::shared::Adapter", 20),
+    ("api::shared::Said", 20),
+    ("api::shared::More", 20),
+    ("api::shared::page_frame", 20),
+    ("api::shared::to_frame", 20),
+    ("api::shared::dest_from_wit", 20),
+    ("api::shared::rotation_from_wit", 20),
+    ("api::shared::pt_from_wit", 20),
+    ("api::shared::rgb_from_wit", 20),
+    ("API_PREVIOUS", 20),
+    ("runtime::World", 20),
+    ("runtime::EditBatch", 20),
+    ("runtime::Held", 20),
+    ("runtime::CallOutput::batches", 20),
+    ("runtime::CallOutput::reads", 20),
+    ("runtime::CallOutput::base", 20),
+    ("runtime::HostState::batches", 20),
+    ("runtime::HostState::reads", 20),
+    ("runtime::HostState::read", 20),
+    ("runtime::HostState::page_base", 20),
+    ("plugins::land", 20),
+    ("plugins::Landed", 20),
+    ("plugins::edited_label", 20),
+    ("batch::Batch", 20),
+    ("batch::annot", 20),
+    ("batch::at", 20),
+    ("batch::BLUE", 20),
+    // A plugin is told what a change changed (`changed`, its scopes), not
+    // its undo label.
+    ("runtime::DocEvent::Edited", 20),
+    ("manifest::EventKind::Edited", 20),
+    // The app holds back a busy plugin's regions, latest wins, and its
+    // changes, merged, in one kind of queue (`plugins::Coalescer`), and
+    // sends what waited when a call from either ends (`queue_done`).
+    ("plugins::Latest", 20),
+    ("plugins::region_done", 20),
+    // PDFs sheaf builds in memory are built by `serialize::built`: the
+    // resources their content draws with (`ResObjects`), marks as the
+    // writer makes them (`WriteCx`, `Held`, `StampForm`, and the tests'
+    // `to_pdf`), and pages (`Built`), each written by `write_built`; the
+    // marks' module builds dictionaries and content alone, and reads the
+    // digest of what it wrote with no file. Exchange's comments are a
+    // source, read as any PDF's are, not a document loaded whole.
+    ("content::to_lopdf", 20),
+    ("content::ResObjects", 20),
+    ("content::sink::Lopdf", 20),
+    ("annot::WriteCx", 20),
+    ("annot::StampForm", 20),
+    ("annot::Held", 20),
+    ("annot::Written", 20),
+    ("annot::to_pdf", 20),
+    ("annot::to_pdf_in", 20),
+    ("annot::NoObjects", 20),
+    ("annot::Appearance::write", 20),
+    ("materialize::copy::copy_page_dict", 20),
+    ("exchange::Comments::pdf", 20),
+    ("exchange::Comments::new", 20),
+    // Model-level code names no lopdf `ObjectId` (rule 7,
+    // tests/object_ids.rs): a bookmark as read from a file is the open's
+    // fact (`open::FlatOutlineItem`), and a flatten reads what an
+    // annotation shows through its source (`source::appearance`).
+    ("model::FlatOutlineItem", 20),
+    ("tx::flatten::Shows", 20),
+    ("tx::flatten::read", 20),
+    ("tx::flatten::shown", 20),
+    ("tx::flatten::frame", 20),
+    ("tx::flatten::unkept", 20),
 ];
 
 /// Last segments only a path matches: names the new design uses again
@@ -1020,10 +1170,10 @@ const QUALIFIED_ONLY: &[&str] = &[
     // A version's lines (`VersionView::edits`), and the app's count of
     // them.
     "edits",
-    // The plugin API's edits until WIT 0.4 (slice 20), and what a
-    // transaction and the app's document view apply.
+    // The History panel's rows of a version's lines (`Row::Edit`) and
+    // `sheaf edit` (`Command::Edit`), and what a transaction and the app's
+    // document view apply.
     "Edit",
-    "NewOutlineItem",
     "apply",
     "apply_batch",
     // A plugin form's own submit and a print job's, Rec's touched keys and
@@ -1154,6 +1304,79 @@ const QUALIFIED_ONLY: &[&str] = &[
     // builder's, a set's: not the sink's object added for the OCR layer's
     // installer.
     "add",
+    // The document's store (`Document::store`, the `store` module), the
+    // blank pages made in memory (`memory::blank_pages`) and the tests'
+    // own blank files, a key's path (`model`'s tests), an export's file
+    // stem (`sheaf_ops::export::stem_of`), a name for a thing (`name_of`)
+    // and the realizer's generated content (`untouched::generated`): not
+    // the generated cache's.
+    "store",
+    "blank_pages",
+    "blank_pdf",
+    "path_of",
+    "stem_of",
+    "name_of",
+    "generated",
+    // What a save or a test wrote (`append_tests::written`, the
+    // materializer's `Written`), and a font's subset (`removal_tests`):
+    // not the old exports' state and writer.
+    "written",
+    "subset",
+    // A session's save (`sheaf_ops::session::Session::save`), the app's,
+    // a test's `How::save` and lopdf's: not `materialize::save`, which
+    // `save_with` replaced.
+    "save",
+    // A plugin manifest's check (`Manifest::validate`), a stale
+    // transaction's (`Document::validate`, for `Stale::Validate`) and a
+    // form's count of its validate scripts (`ScriptCounts::validate`): not
+    // the save module's page check.
+    "validate",
+    // A plugin's transaction on what the document published to its calls
+    // (`Published::plugin_tx`, M10.5 §14.3): not the app's, which made
+    // one on the document as a call returned.
+    "plugin_tx",
+    // The plugin API's one world (`api::World`), not the choice of two; a
+    // mark's held asset (`serialize::built::Held`) and private data's name
+    // a walk found (`private::Said`), not the adapter's or the marks'
+    // module's; a call's landing (`sheaf_plugin::Landed`, `Landing`), not
+    // the app's batch loop's.
+    "World",
+    "Held",
+    "Said",
+    "Landed",
+    "land",
+    // A mark turned to the page it was copied from (`Annot::to_frame`),
+    // not a page's API frame; what a lowering read (`Lower::reads`), not
+    // a call's reads beside its batches.
+    "to_frame",
+    "reads",
+    // A bookmark position, sheaf's blue and an annotation of every other
+    // kind: the plugin API's own (`ops::at`, `ops::BLUE`) and every
+    // `annot`, not `batch`'s.
+    "at",
+    "BLUE",
+    "annot",
+    // A plugin's render option (`render-options.without-markup`), not the
+    // old save's.
+    "without_markup",
+    // What builds a PDF in memory (`serialize::built`'s `ResObjects`,
+    // `WriteCx`, `StampForm`, `Written`, `to_pdf` and `to_pdf_in`), a
+    // form's page as a one-page PDF (`FormRef::to_pdf`), and every type's
+    // constructor: not the content toolkit's, the marks' module's or
+    // exchange's.
+    "ResObjects",
+    "WriteCx",
+    "StampForm",
+    "Written",
+    "to_pdf",
+    "to_pdf_in",
+    "new",
+    // A bookmark as read from a file (`open::FlatOutlineItem`), and what
+    // an annotation shows read through its source (`source::appearance`'s
+    // `Shows` and `unkept`): not the model's or lowering's.
+    "FlatOutlineItem",
+    "Shows",
+    "unkept",
 ];
 
 #[test]

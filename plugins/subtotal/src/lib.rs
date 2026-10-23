@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use sheaf_plugin_api::types::{Box2, DocEvent};
+use sheaf_plugin_api::types::{Box2, ChangeInfo, DocEvent};
 use sheaf_plugin_api::{Plugin, document, text, ui};
 
 /// Fixed-point scale: 4 decimals.
@@ -137,19 +137,20 @@ fn centre_in(b: &Box2, r: &Box2) -> bool {
     cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
 }
 
-/// Numbers on a page with their boxes.
+/// Numbers on a page with their boxes, in PageSpace.
 type PageNumbers = Vec<(Amount, Box2)>;
 
-/// Each page's numbers, for the document (path) they came from.
-type Cache = Option<(Option<String>, HashMap<u64, PageNumbers>)>;
+/// Each page's numbers, for the document they came from: its path, and
+/// the instance of it open then, whose pages the ids name.
+type Cache = Option<((Option<String>, Option<u64>), HashMap<u64, PageNumbers>)>;
 
 static CACHE: Mutex<Cache> = Mutex::new(None);
 
 fn page_numbers(page: u64) -> Result<PageNumbers, String> {
-    let path = document::path();
+    let of = (document::path(), document::version().map(|v| v.instance));
     let mut cache = CACHE.lock().unwrap();
-    if cache.as_ref().is_none_or(|(p, _)| *p != path) {
-        *cache = Some((path, HashMap::new()));
+    if cache.as_ref().is_none_or(|(o, _)| *o != of) {
+        *cache = Some((of, HashMap::new()));
     }
     let pages = &mut cache.as_mut().unwrap().1;
     if let Some(n) = pages.get(&page) {
@@ -165,6 +166,26 @@ fn page_numbers(page: u64) -> Result<PageNumbers, String> {
         .collect();
     pages.insert(page, numbers.clone());
     Ok(numbers)
+}
+
+/// The pages whose numbers `change` may have changed, which are read
+/// again: those whose text it changed (their content, recognized text
+/// included, or added or removed); or every one when it changed a header,
+/// footer or watermark, or the order or labels a header's page numbers
+/// read, or came from another instance of the document. Marks aren't page
+/// text, so a change to them alone keeps every page's.
+fn forget(change: &ChangeInfo) {
+    let mut cache = CACHE.lock().unwrap();
+    let Some(((_, instance), pages)) = cache.as_mut() else {
+        return;
+    };
+    let s = &change.scopes;
+    if s.generators || s.order || s.labels || *instance != Some(change.version.instance) {
+        pages.clear();
+    }
+    for page in &s.content {
+        pages.remove(page);
+    }
 }
 
 struct Subtotal;
@@ -185,8 +206,7 @@ impl Plugin for Subtotal {
                 ui::notice(&summary(&amounts));
             }
             DocEvent::RegionCleared => ui::notice(""),
-            // OCR results or page changes can change a page's numbers.
-            DocEvent::Edited(_) => *CACHE.lock().unwrap() = None,
+            DocEvent::Changed(change) => forget(&change),
             _ => {}
         }
         Ok(())
@@ -231,6 +251,68 @@ mod tests {
         assert_eq!(summary(&[]), "Subtotal: no numbers in the selection");
         // More than four decimals round at the fourth.
         assert_eq!(v("0.123456"), Some("0.1235".into()));
+    }
+
+    /// A change to a page's text forgets that page's numbers, one to its
+    /// marks alone none, and one to a header, or of another instance of
+    /// the document, every page's.
+    #[test]
+    fn only_changes_to_text_forget_numbers() {
+        use sheaf_plugin_api::types::{ActorKind, ChangeCause, Scopes, Version};
+        let cached = |pages: &[u64]| {
+            let numbers = pages.iter().map(|&p| (p, Vec::new())).collect();
+            *CACHE.lock().unwrap() = Some(((None, Some(7)), numbers));
+        };
+        let kept = || {
+            let cache = CACHE.lock().unwrap();
+            let mut pages: Vec<u64> = cache.as_ref().unwrap().1.keys().copied().collect();
+            pages.sort();
+            pages
+        };
+        let change = |instance, scopes| ChangeInfo {
+            version: Version { instance, id: 2 },
+            parent: Version { instance, id: 1 },
+            cause: ChangeCause::Commit,
+            actor_kind: ActorKind::User,
+            scopes,
+        };
+        let none = Scopes {
+            order: false,
+            geometry: Vec::new(),
+            content: Vec::new(),
+            annots: Vec::new(),
+            outline: false,
+            labels: false,
+            form: false,
+            generators: false,
+        };
+        cached(&[1, 2]);
+        forget(&change(
+            7,
+            Scopes {
+                content: vec![1],
+                annots: vec![2],
+                ..none.clone()
+            },
+        ));
+        assert_eq!(kept(), [2]);
+        for all in [
+            Scopes {
+                generators: true,
+                ..none.clone()
+            },
+            Scopes {
+                order: true,
+                ..none.clone()
+            },
+        ] {
+            cached(&[1, 2]);
+            forget(&change(7, all));
+            assert!(kept().is_empty());
+        }
+        cached(&[1, 2]);
+        forget(&change(8, none));
+        assert!(kept().is_empty(), "another instance's pages");
     }
 
     #[test]

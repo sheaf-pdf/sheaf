@@ -1,5 +1,9 @@
 //! Scanning with blank pages left out.
 
+// A test crate of its own, whose scratch files go in the temp directory
+// clippy.toml bans outside tests.
+#![allow(clippy::disallowed_methods)]
+
 use image::{Rgb, RgbImage};
 use lopdf::Document as Pdf;
 use sheaf_ocr::OcrConfig;

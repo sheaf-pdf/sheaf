@@ -40,10 +40,22 @@ remember window layout or recent files.
 Some work runs without a window. `sheaf <subcommand> …` runs it headless,
 and so does `sheaf-cli <subcommand> …`, a separate binary with no GUI at
 all, for servers and CI. `--help` on either lists the options. A progress
-bar shows on stderr (`-q` hides it), and Ctrl-C stops the work cleanly
-(exit status 130).
+bar shows on stderr when it's a terminal, and a line per step when it
+isn't (`-q` hides both); Ctrl-C stops the work cleanly.
+
+A subcommand that writes a PDF never decides for you what the file loses:
+when its output would break a signature or drop a form's XFA values, it
+stops before writing anything, exits 3 and prints the question as JSON on
+stdout. `--signatures ask|break|append-anyway` and `--xfa ask|drop`
+answer it (`ask` is the default); `-o out.pdf --append` copies the input
+and appends the changes, which keeps a signed file's signatures.
+`--force` only ever means "replace an output that's there". Exit status:
+0 done, 1 failed, 2 bad arguments, 3 a decision is needed, 130 cancelled.
 
 ```sh
+sheaf edit binder.pdf --edits tidy.json -o tidy.pdf
+sheaf edit signed.pdf --edits note.json -o noted.pdf --append
+sheaf inspect binder.pdf --json
 sheaf export binder.pdf -o pngs/ --pages "1-3, 10-" --dpi 200
 sheaf export binder.pdf -f tiff --tiff bw -o binder.tif
 sheaf-cli export binder.pdf -f text -o binder.txt
@@ -55,6 +67,9 @@ sheaf comments csv binder.pdf -c number,page,author,text --author "Pat Smith" > 
 
 | Subcommand | Does |
 |---|---|
+| `edit` | Edits from a JSON file (`--edits FILE`, or `-` for stdin) applied as one undoable version and saved: `-o out.pdf` (written whole), `-o out.pdf --append`, or `--in-place`. The edits are sheaf's ops (`--schema` prints their JSON schema) and name things as you see them: pages by position (`{"pos": 3}`), bookmarks by their titles (`{"path": ["Part I", "Ch. 2"]}`), comments by `/NM` (`{"nm": "…"}`), and files by `--with NAME=PATH` (`{"with": "NAME"}`). Prints what it did as JSON; `--dry-run` says what it would do and writes nothing. Examples in [docs/document-model.md](docs/document-model.md) |
+| `inspect` | `--json`: a PDF's pages (labels, boxes, rotation), sheaf's marks and other tools' comments by `/NM`, bookmarks by title path, headers, footers and watermarks, and a form summary: what `edit` needs to name things |
+| `form` | `check`: a PDF's form as the file has it, for what other viewers would trip on or a save would carry where it shouldn't. Prints its kind (AcroForm, hybrid, XFA-only) and how many fields, widgets and pages it has, its XFA, NeedAppearances, Reader usage rights, certification and signatures, then each problem: widgets no field reaches, on no page, on more than one or with the wrong `/P`, kids whose `/Parent` is elsewhere, fonts a `/DA` names that `/DR` lacks, full names held twice, values with no appearance, values only an earlier revision holds, an XFA copy that differs from the fields, and signatures or `/SigFlags` that no longer fit the file; `--password` for an encrypted one |
 | `combine` | PDFs and images into one PDF in order; `file:range` takes some pages (`a.pdf:1-3,7`). A bookmark per file (`--no-file-bookmarks` to skip), `--image-page` |
 | `export` | Pages to PNG, JPEG, TIFF or text, as File > Export Pages. Prints the files written; refuses to overwrite without `--force` |
 | `split` | One PDF into several: `--every N`, `--bookmarks` (a file per top-level bookmark), `--max-size 10MB`, or `--ranges "1-3; 4-10; 11-"` |
@@ -147,10 +162,10 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 |---|---|---|
 | UI framework | **GPUI** (`gpui` + `gpui_platform`, from gpui-pre) | GPU-accelerated, retained-mode, proven in Zed. Pre-1.0 with breaking changes; pin versions ([Updating GPUI](#updating-gpui)). Linux backend is wgpu (Blade was removed Feb 2026). **Needs a spike** — see [Open questions](#open-questions). |
 | Rasterizer | **PDFium** via `pdfium-render` | Chrome's engine: fast, BSD-licensed, handles encrypted files, forms, broken PDFs. Hidden behind a `Renderer` trait so a pure-Rust engine (hayro) can replace it once mature. |
-| Document edits | **lopdf** (or our own object layer) | PDFium's write API is limited (esp. outlines). Structural edits — page tree, bookmarks, annotations — are done on the raw object graph and saved incrementally. An edited page renders from an overlay: an append section built in memory over the file's bytes, nothing written to disk or loaded again. |
+| Document edits | **sheaf's own model and writer**, over **lopdf**'s objects | PDFium's write API is limited (esp. outlines). Every edit is an op (`sheaf_edit::Op`), lowered in a transaction into the document model's records, never into the file's object graph. sheaf's own emitter writes a save (`serialize/`, `materialize/`) as an incremental update or a rewrite, as the save is planned (below). lopdf supplies the object types files are read as, a source at a time, and parses what's still loaded whole: a Rewrite's graph, the form check, a stamp collection. An edited page renders from an overlay: an append section built in memory over the file's bytes, nothing written to disk or loaded again. |
 | Rendering strategy | **Tiled, async, cached** | Viewport requests tiles at the current zoom; one render thread, the engine pool, renders them off the UI thread; images are cached by what the page draws (its render key) and the tile, so a reorder, a save or an edit to another page re-renders nothing, and a page shows its last image until its new one lands. Low-res preview tile first, then full-res. This is the single biggest "feels fast" lever. |
 | Text / OCR | PDFium text extraction. OCR is a **core feature** behind an `OcrEngine` trait with two engines compiled in by default: **Tesseract 5** (built from source, linked statically) and **PaddleOCR PP-OCRv5** on ONNX Runtime (`oar-ocr`, with Microsoft's runtime library loaded on demand from `ocr/lib`). | Both engines are native C/C++, so OCR can't live in a WASM plugin; the trait keeps engines swappable, and plugins get OCR as a host capability. Judged on scanned tax forms, not purity. |
-| Save model | Incremental update by default; Save As is a save to another file | Preserves originals, fast saves on large files (one mark on a 500 MB scan in about 21 ms). Clean rewrite available for size reduction / "Export Clean Copy". A save is an output: it writes the version on screen and records what it wrote, and the document, its undo history and what the screen shows stay as they were. sheaf plans each save: back at what the file holds, nothing is written; otherwise an incremental update, journaled so a crash mid-write is undone at the next open, unless something was removed (a page, a mark, a reply, a bookmark, OCR text replaced), the file can't take one, or the update would leave removed text readable, when the file is rewritten whole, so what was removed isn't left in an earlier revision; the save says why. A file another program changed since sheaf opened or last saved it is never overwritten unasked: Save As…, Overwrite or Cancel, and a document recovered after a crash is checked against its file the same way. A signed or certified file keeps its signatures when what changed is within what they allow (a certification's permissions, Reader's usage rights), Save As included; otherwise sheaf asks: Append Anyway (an update that leaves the signed bytes as they were, what it removed still readable in the earlier revision), Rewrite (which breaks them) or Cancel. No save or copy carries a page it doesn't keep: links, named destinations, the open action, form fields, tags and article threads that pointed at one are dropped or pruned. |
+| Save model | Incremental update by default; Save As is a save to another file | Preserves originals, fast saves on large files (one mark on a 500 MB scan in about 21 ms). Clean rewrite available for size reduction / "Export Clean Copy". A save is an output: it writes the version on screen and records what it wrote, and the document, its undo history and what the screen shows stay as they were. sheaf plans each save: back at what the file holds, nothing is written; otherwise an incremental update, journaled so a crash mid-write is undone at the next open, unless something was removed (a page, a mark, a reply, a bookmark) or text the file already holds was replaced (a comment's text, a bookmark's title, OCR text; a regenerated page number aside), the file can't take one, or the update would leave removed text readable, when the file is rewritten whole, so what was removed or replaced isn't left in an earlier revision; the save says why. A file another program changed since sheaf opened or last saved it is never overwritten unasked: Save As…, Overwrite or Cancel, and a document recovered after a crash is checked against its file the same way. A signed or certified file keeps its signatures when what changed is within what they allow (a certification's permissions, Reader's usage rights), Save As included; otherwise sheaf asks: Append Anyway (an update that leaves the signed bytes as they were, what it removed still readable in the earlier revision), Rewrite (which breaks them) or Cancel. No save or copy carries a page it doesn't keep: links, named destinations, the open action, form fields, tags and article threads that pointed at one are dropped or pruned. |
 | Undo | A tree of versions, each with the edits that made it | Every edit is an op (`sheaf_edit::Op`), lowered in a transaction into the changes it makes. A version keeps a snapshot (cheap, structure-shared) and those changes from its parent; undo, redo and jumps move between versions, an edit after undo starts a branch instead of discarding, and a trimmed snapshot is rebuilt by replaying them. An OCR run or a plugin command is one undo step, however many results it lands, and an edit planned in the background (an insert, a crop, a dialog's change) lands on whatever you did meanwhile, or tells you what it conflicts with and changes nothing. History is kept within 256 MB, the oldest versions going first. Per-document. |
 
 ### Efficiency principles
@@ -237,8 +252,8 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Comment summary and export | ✅ File > Comments, or the panel's Export menu: what the panel lists, filtered and sorted as it is, as a summary PDF (the comments numbered and threaded; or each page beside its list, with the numbers on the page), a CSV (columns chosen in the Export menu: number, page, page label, type, author, dates, status, checked, color, text, reply-to) or text. `sheaf comments` |
 | Import / export comments (FDF, XFDF) | ✅ File > Comments > Import… takes FDF, XFDF or another PDF's comments: one that's here already (by its `/NM`) is updated, the rest added, as one undo step, and kinds sheaf can't hold are listed. Export XFDF or FDF of what the panel lists, or (panel's Export menu) what's selected. `sheaf comments import`/`export` |
 | Edit other tools' comments | ✅ Another tool's note, highlight, shape, line, ink, text box, callout, text edit or stamp becomes a sheaf mark when it's edited: drag it, double-click it (or F2 in the panel) to edit its text, or right-click > Make Editable in the Comments panel. It keeps its name, so its replies stay with it, and a save puts it where it was |
-| Flatten annotations | ✅ File > Export Flattened Copy… (links and form fields kept) |
-| Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | ✅ File > Export Clean Copy; keeps links, form fields, bookmarks |
+| Flatten annotations | ✅ File > Export Flattened Copy…: every comment, mark and form field shown drawn into its page as viewers show it (hidden ones left out), so it looks the same anywhere and can't be edited; links kept. `flatten-annotations` in `sheaf edit` |
+| Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | ✅ File > Export Clean Copy; keeps links, form fields, bookmarks, and none of sheaf's own data (its names for marks, an older sheaf's watermark settings) |
 | Measurement tools (distance, area, perimeter, scale) | ✅ Tools > Measure: Distance (Ctrl+Shift+D, a drag), Perimeter (Ctrl+Shift+P) and Area (Ctrl+Shift+A, corner by corner, as Polyline and Polygon). The scale bar takes a scale as typed ("1 in = 10 ft", "1/8 in = 1 ft", "1:100") and the decimals; Calibrate (Ctrl+Shift+C) is a line of known length, then its real length. The status bar shows the measurement while drawing; Shift keeps to 45°, and points snap to the grid and guides when they show. Written as Acrobat's dimension annotations (`/Measure`), with the value on the mark; the comment CSV has Measurement and Scale columns |
 
 ### Content editing
@@ -370,9 +385,15 @@ cargo run -p sheaf-app           # the GPUI window
 default; `--no-default-features` leaves out wasmtime too). The bundled
 plugins build for `wasm32-wasip2`, which `rust-toolchain.toml` installs;
 debug builds pick them up from `target/plugins`. The API is
-`sheaf:plugin` 0.3, which has every kind of mark and a plugin's own
-section of `settings.toml`; plugins built for 0.2 still load. Writing
-your own: [`docs/plugins.md`](docs/plugins.md).
+`sheaf:plugin` 0.4, the only one served: plugins edit with sheaf's own
+ops (`sheaf_edit::Op`, as JSON) and place things in each page's own
+space. A plugin call's edits are one undo step, landing when it returns
+on whatever you did meanwhile that it didn't read, and taken back if it
+fails. A plugin isn't told who wrote what: authors are "you", "plugin
+<id>" or "other", and `<<name>>` stays as written, unless you allow it
+(its manifest asks for `identity`). It is told the document's path,
+which may hold your login name. Writing your own:
+[`docs/plugins.md`](docs/plugins.md).
 
 **OCR engines and build time.** Both engines are on by default. The first
 build compiles Tesseract 5 and Leptonica from source (CMake and a C++17
@@ -568,7 +589,7 @@ remembers for itself goes in a local state directory: `~/.local/state/sheaf`,
     `date_format` and `time_format` for dynamic stamps (strftime codes;
     `%m/%d/%Y` and `%-I:%M %p`).
   - `[plugins.<id>]`: a plugin's own settings, whatever it documents; only
-    that plugin reads them (as JSON, through API 0.3). A key its manifest
+    that plugin reads them (as JSON, through API 0.4). A key its manifest
     doesn't name is pointed out in Plugins → Manage Plugins….
 - `state.json` (state directory) — written by the app: window placement,
   dock layout (which panels sit where, tab order, sizes, open state), and
@@ -626,8 +647,12 @@ file's too), about a kilobyte for a mark on a 500 MB scan. The file
 itself is never touched until you save. If sheaf didn't exit cleanly, the
 next open offers to recover, as long as the file is still the one the
 sidecar was written against, and the recovered document's first save
-checks the file again and appends the recovered edits with its own.
-Saving, or choosing Don't Save, removes the sidecar.
+checks the file again and appends the recovered edits with its own, or
+rewrites the file when they removed or replaced text it holds. When no
+update can follow the file (it can't take one, or the edits need what a
+save pruned from it), the sidecar holds the whole document instead, and
+its first save is a rewrite. Saving, or choosing Don't Save, removes the
+sidecar.
 
 ## Name
 

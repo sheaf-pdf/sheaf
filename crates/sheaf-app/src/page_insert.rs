@@ -7,8 +7,8 @@
 //!   is lowered on a snapshot ([`plan_insert`], [`plan_replace`]); on the
 //!   UI thread it lands ([`DocView::land`]), lowered again on the current
 //!   version if the document has moved on (`Stale::Relower`). Pages with no
-//!   file of their own become PDFs in the generated-file cache
-//!   (`sheaf_doc::generated`) first.
+//!   file of their own, blank or of images, are made in memory as the op
+//!   is lowered (M10.5 §3.9): nothing is written to disk.
 //! - **Crop Pages** changes pages' boxes alone (M10.5 slice 15). Margins
 //!   are one op, committed on the version the dialog opened on
 //!   (`Stale::Validate`): an edit since to a page's boxes is a conflict,
@@ -44,16 +44,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use anyhow::Context as _;
 use gpui::Context;
-use sheaf_doc::images::PageFit;
 use sheaf_doc::labels::Style;
-use sheaf_doc::tx::LowerCx;
+use sheaf_doc::tx::{LowerCx, Made};
 use sheaf_doc::{
     Actor, Blob, Commit, CommitOpts, DocState, Document, EditError, JobKind, PageId, Snapshot, Src,
     Stale, Store, Tx, VersionId,
 };
 use sheaf_edit::{
-    BlobSel, BoxSpec, Bring, FormBring, Margins, Op, OutlineBring, PageLabelRange, PageRef,
+    BlobSel, BoxSpec, Bring, Fit, FormBring, Margins, Op, OutlineBring, PageLabelRange, PageRef,
     PageSel, PageSize, PageSource, Patch, RangeSet, Z,
 };
 use sheaf_ops::crop::{self, Trimmed};
@@ -140,8 +140,7 @@ fn bring_in(
 /// Every page of the file at `path` inserted before `before` (None: at the
 /// end) of the document `snap` is of, planned off the UI thread
 /// ([`bring_in`]), as `cx` lowers it: with its bookmarks merged by title,
-/// and its marks and form brought, when `bookmarks`; pages sheaf made
-/// (blank, images) bring nothing more.
+/// and its marks and form brought, when `bookmarks`.
 pub(crate) fn plan_insert(
     snap: &Snapshot,
     store: &Store,
@@ -173,6 +172,42 @@ pub(crate) fn plan_insert(
     tx.apply(insert, p)?;
     Ok(PlannedInsert {
         src,
+        tx,
+        on: snap.version,
+    })
+}
+
+/// Pages made in memory, `from` (blank, or of images), inserted before
+/// `before` (None: at the end) of the document `snap` is of, planned off
+/// the UI thread as `cx` lowers it: made, interned and lowered on the
+/// snapshot, the transaction holding `pins` (the images they're made of)
+/// until it's committed.
+pub(crate) fn plan_made(
+    snap: &Snapshot,
+    cx: Arc<LowerCx>,
+    from: PageSource,
+    pins: Vec<Blob>,
+    before: Option<PageId>,
+    p: &dyn Progress,
+) -> anyhow::Result<PlannedInsert> {
+    let mut tx = Document::tx_at(snap, cx);
+    for blob in pins {
+        tx.pin(blob);
+    }
+    let insert = Op::InsertPages {
+        from,
+        pages: None,
+        before: before.map(PageRef::Id),
+        bring: Bring::default(),
+        locals: Vec::new(),
+    };
+    let made = tx.apply(insert, p)?.made;
+    let src = match made.first() {
+        Some(&Made::Page(id)) => tx.state().def(id).map(|def| def.base.src.clone()),
+        _ => None,
+    };
+    Ok(PlannedInsert {
+        src: src.context("no pages were made")?,
         tx,
         on: snap.version,
     })
@@ -265,17 +300,24 @@ impl DocView {
         bookmarks: bool,
         cx: &mut Context<Self>,
     ) {
-        self.insert_made(name, before, bookmarks, move || Ok(path), cx);
+        let plan = move |snap: &Snapshot, store: &Store, lower, p: &Tracker| {
+            plan_insert(snap, store, lower, &path, before, bookmarks, p)
+        };
+        self.insert_planned(name, bookmarks, plan, cx);
     }
 
-    /// [`insert_file`](Self::insert_file) of the file `make` makes, off
-    /// the UI thread.
-    fn insert_made(
+    /// The insert `plan` plans off the UI thread, on a snapshot of the
+    /// document, its store and a transaction's lowering, landed as one undo
+    /// step labelled "Insert `name`". Its notice counts the pages and the
+    /// bookmarks merged when `counted`; else `name` says it all (blank
+    /// pages, images).
+    fn insert_planned(
         &mut self,
         name: String,
-        before: Option<PageId>,
-        bookmarks: bool,
-        make: impl FnOnce() -> anyhow::Result<PathBuf> + Send + 'static,
+        counted: bool,
+        plan: impl FnOnce(&Snapshot, &Store, Arc<LowerCx>, &Tracker) -> anyhow::Result<PlannedInsert>
+        + Send
+        + 'static,
         cx: &mut Context<Self>,
     ) {
         if self.still_opening(cx) {
@@ -289,10 +331,7 @@ impl DocView {
         let lower = doc.model.lower_cx(Actor::Job(JobKind::Insert));
         let label = format!("Insert {name}");
         let (timing, t) = (self.timing, Instant::now());
-        let work = move |p: &Tracker| {
-            let path = make()?;
-            plan_insert(&snap, &store, lower, &path, before, bookmarks, p)
-        };
+        let work = move |p: &Tracker| plan(&snap, &store, lower, p);
         let land = {
             let label = label.clone();
             move |v: &mut DocView, plan: PlannedInsert, cx: &mut Context<DocView>| {
@@ -307,8 +346,7 @@ impl DocView {
                 };
                 let added = commit.created.pages().count();
                 let merged = doc.model.state().bookmark_count().saturating_sub(had);
-                let mut notice = if !bookmarks {
-                    // Pages sheaf made (blank, images): name says it all.
+                let mut notice = if !counted {
                     format!("Inserted {name}")
                 } else {
                     format!(
@@ -336,28 +374,31 @@ impl DocView {
         self.run_planner(&label, work, |_| None, land, cx);
     }
 
+    /// `count` blank pages the size `size` says, made in memory.
     pub(crate) fn insert_blank(
         &mut self,
-        count: usize,
+        count: u32,
         size: Size,
         at: Where,
         cx: &mut Context<Self>,
     ) {
-        let s = self.size_of(size);
+        let size = self.size_of(size);
         let before = self.before_for(at);
         let name = if count == 1 {
             "blank page".to_string()
         } else {
             format!("{count} blank pages")
         };
-        let make = move || {
-            let pdf = sheaf_doc::generated::blank_pages(s.width, s.height, count)?;
-            sheaf_doc::generated::store(&pdf)
+        let from = PageSource::Blank { size, count };
+        let plan = move |snap: &Snapshot, _: &Store, lower, p: &Tracker| {
+            plan_made(snap, lower, from, Vec::new(), before, p)
         };
-        self.insert_made(name, before, false, make, cx);
+        self.insert_planned(name, false, plan, cx);
     }
 
-    /// Images as pages, fitted to `size` (None: each image's own size).
+    /// Images as pages, fitted to `size` (None: each image's own size),
+    /// made in memory: each file read into the document's store off the UI
+    /// thread, and held until the pages land.
     pub(crate) fn insert_images(
         &mut self,
         files: Vec<PathBuf>,
@@ -366,12 +407,12 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let fit = match size.map(|s| self.size_of(s)) {
-            Some(s) => PageFit::Paper {
+            Some(s) => Fit::Paper {
                 width: s.width.min(s.height),
                 height: s.width.max(s.height),
                 margin: 0.0,
             },
-            None => PageFit::Original,
+            None => Fit::Original,
         };
         let before = self.before_for(at);
         let name = match files.as_slice() {
@@ -381,11 +422,17 @@ impl DocView {
                 .unwrap_or_default(),
             many => format!("{} images", many.len()),
         };
-        let make = move || {
-            let pdf = sheaf_doc::images::files_to_pdf(&files, fit)?;
-            sheaf_doc::generated::store(&pdf)
+        let plan = move |snap: &Snapshot, store: &Store, lower, p: &Tracker| {
+            let images = (files.iter())
+                .map(|path| store.read_image(path))
+                .collect::<anyhow::Result<Vec<Blob>>>()?;
+            let from = PageSource::Images {
+                images: images.iter().map(|b| BlobSel::Id(b.id())).collect(),
+                fit,
+            };
+            plan_made(snap, lower, from, images, before, p)
         };
-        self.insert_made(name, before, false, make, cx);
+        self.insert_planned(name, false, plan, cx);
     }
 
     /// Replace `ids` with pages `range` (0-based) of the PDF at `path`, as

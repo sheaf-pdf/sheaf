@@ -58,7 +58,7 @@ fn close(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 fn round_trip(a: &Annot, turn: Rotation) {
     let a = &Annot { turn, ..a.clone() };
     let mut pdf = Pdf::with_version("1.7");
-    let mut main = crate::annot::to_pdf(a, &mut pdf).main;
+    let mut main = crate::serialize::built::to_pdf(a, &mut pdf).main;
     main.remove(b"SheafAnnot");
     let back = convert(&pdf, &main, turn, Options::default())
         .unwrap_or_else(|e| panic!("{:?}: {e:?}", a.kind));
@@ -277,6 +277,9 @@ fn replies_statuses_and_replacements_keep_their_threads() {
     assert_eq!(out[6], Err(NotAMark::Unsupported("Sound".into())));
 }
 
+/// A stamp keeps its appearance as a one-page PDF: interned and held
+/// through the conversion's `files`, or, converted ahead of need with
+/// none, named by the stem the same page would have, nothing interned.
 #[test]
 fn a_stamp_keeps_its_appearance() {
     let mut pdf = Pdf::with_version("1.7");
@@ -292,7 +295,12 @@ fn a_stamp_keeps_its_appearance() {
         "Rect" => vec![100.into(), 600.into(), 200.into(), 640.into()],
         "AP" => dictionary! { "N" => form },
     };
-    let a = convert(&pdf, &dict, Rotation::R0, Options::default()).unwrap();
+    let store = Store::new();
+    let interned = Interned::new(&store);
+    let files = Options {
+        files: Some(&interned),
+    };
+    let a = convert(&pdf, &dict, Rotation::R0, files).unwrap();
     let AnnotKind::PageStamp {
         stamp, name, rect, ..
     } = &a.kind
@@ -301,8 +309,16 @@ fn a_stamp_keeps_its_appearance() {
     };
     assert_eq!(name, "Approved");
     assert_eq!(*rect, b(100.0, 600.0, 100.0, 40.0));
-    let page = Pdf::load(crate::generated::path_of(stamp).unwrap()).unwrap();
-    assert_eq!(page.get_pages().len(), 1);
+    let [page] = &interned.into_held()[..] else {
+        panic!("one page held")
+    };
+    assert_eq!(page.id().stem(), *stamp);
+    let library = crate::store::Origin::Memory(crate::store::MemoryKind::Library);
+    assert!(matches!(page.kind(), BlobKind::Pdf { origin, .. } if *origin == library));
+    assert_eq!(Pdf::load_mem(page.bytes()).unwrap().get_pages().len(), 1);
+    // Ahead of need, with nowhere to intern it: the same stem.
+    let ahead = convert(&pdf, &dict, Rotation::R0, Options::default()).unwrap();
+    assert!(matches!(&ahead.kind, AnnotKind::PageStamp { stamp: s, .. } if s == stamp));
     // With no appearance, its name in a frame.
     let mut bare = dict.clone();
     bare.remove(b"AP");

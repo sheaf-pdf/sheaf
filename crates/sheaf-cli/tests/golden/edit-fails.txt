@@ -1,0 +1,29 @@
+$ sheaf-cli edit $DIR/in.pdf --edits $DIR/edit-fails.json -o $DIR/fails.pdf
+--- edits
+{
+  "ops": [
+    {
+      "by": 90,
+      "op": "rotate-pages",
+      "pages": {
+        "ids": [
+          {
+            "pos": 1
+          }
+        ]
+      }
+    },
+    {
+      "op": "delete-pages",
+      "pages": {
+        "positions": "9"
+      }
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 1
+--- stdout
+--- stderr
+editing…
+error: delete-pages: page 9 of 4 isn't there

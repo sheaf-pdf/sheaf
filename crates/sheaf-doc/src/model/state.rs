@@ -10,18 +10,18 @@ use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use im::Vector;
-use lopdf::ObjectId;
 use sheaf_edit::{Rotation, Z};
 
 use super::{
-    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, GenId, Generator, Mark, OutlineId,
-    PageDef, PageId, Scope, Terminal, Widget,
+    AnnotBody, AnnotRec, Bookmark, FieldNode, Foreign, FormDoc, FormRef, GenId, Generator, Mark,
+    OutlineId, PageDef, PageId, Scope, Static, Terminal, Widget,
 };
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::forms::{FieldId, full_name_of};
 use crate::geom::Geom;
 use crate::labels::{LabelRange, LabelSpec};
 use crate::prim::{Key, Mismatch, Val};
+use crate::source::PageObj;
 use crate::store::BlobId;
 use crate::text_layer::TextLayer;
 
@@ -55,6 +55,12 @@ pub struct DocState {
     /// became of them since: whose blocks in its pages are its own
     /// ([`DocState::backs`]). Never changed by an edit.
     opened_generators: Arc<Opened>,
+    /// The version an export's pages are numbered in, when it keeps them
+    /// as that version numbers them (`PageNumbering::AsDocument`): what a
+    /// generator's page tokens read of a page it has
+    /// ([`DocState::numbered_in`]). None, a version's own and an
+    /// extract's: as this one numbers them. Never changed by an edit.
+    numbered_in: Option<Arc<DocState>>,
     /// Every node of the form's field tree: [`Key::Field`].
     fields: im::OrdMap<FieldId, Arc<FieldNode>>,
     /// The form as a whole: [`Key::Form`].
@@ -141,8 +147,8 @@ impl Laid {
 }
 
 /// A copy of a source page, as [`DocState::page_showing`] finds the page
-/// showing it: the source, the page's object and the copy.
-type Shown = (BlobId, ObjectId, u32);
+/// showing it: the page and the copy.
+type Shown = (PageObj, u32);
 
 /// The hash the indexes key a name by: the same in every state.
 fn name_hash(name: &str) -> u64 {
@@ -211,6 +217,7 @@ impl PartialEq for DocState {
             labels,
             generators,
             opened_generators,
+            numbered_in,
             fields,
             form,
             idx: _,
@@ -225,6 +232,7 @@ impl PartialEq for DocState {
             && *labels == other.labels
             && *generators == other.generators
             && *opened_generators == other.opened_generators
+            && *numbered_in == other.numbered_in
             && *fields == other.fields
             && *form == other.form
     }
@@ -366,6 +374,7 @@ impl DocState {
                 labels: None,
                 generators: im::OrdMap::new(),
                 opened_generators: Arc::default(),
+                numbered_in: None,
                 fields: im::OrdMap::new(),
                 form: Arc::default(),
                 idx: Indexes::default(),
@@ -556,6 +565,27 @@ impl DocState {
         &self.idx.laid
     }
 
+    /// The version whose numbering page `id`'s page tokens (`<<1>>`,
+    /// `<<N>>`, `<<label>>`) read, and the page's position there: for a
+    /// page of an export that keeps its pages as the version it keeps them
+    /// from numbers them ([`DocState::number_in`]), that version, or the
+    /// one it numbers its pages in in turn. None when this one numbers it:
+    /// a version's own page, an extract's, or a page the version an export
+    /// keeps them from hasn't got. O(1) once that version has found its
+    /// positions.
+    pub fn numbered_in(&self, id: PageId) -> Option<(&DocState, usize)> {
+        let from = self.numbered_in.as_deref()?;
+        (from.numbered_in(id)).or_else(|| Some((from, from.pos_of(id)?)))
+    }
+
+    /// Its pages numbered as `from` numbers them, where `from` has them
+    /// ([`DocState::numbered_in`]), or as it numbers them itself (None):
+    /// what an export's `KeepPages` leaves, `from` the version it kept them
+    /// from when they're numbered as the document numbers them.
+    pub(crate) fn number_in(&mut self, from: Option<DocState>) {
+        self.numbered_in = from.map(Arc::new);
+    }
+
     /// Page `id`'s label: its number when the document has no labels.
     /// O(1) once a state of this order and these labels has found one.
     pub fn label_of(&self, id: PageId) -> Option<Arc<str>> {
@@ -577,34 +607,28 @@ impl DocState {
             .collect()
     }
 
-    /// The page showing copy `copy` of the page whose object is `object` in
-    /// source `blob`: of two that do, the first in order. O(1) once a state
-    /// of this order and these pages has found one.
-    pub fn page_showing(&self, blob: BlobId, object: ObjectId, copy: u32) -> Option<PageId> {
-        self.shown_pages().get(&(blob, object, copy)).copied()
+    /// The page showing copy `copy` of source page `page`: of two that do,
+    /// the first in order. O(1) once a state of this order and these pages
+    /// has found one.
+    pub fn page_showing(&self, page: PageObj, copy: u32) -> Option<PageId> {
+        self.shown_pages().get(&(page, copy)).copied()
     }
 
-    /// The page a reference to the page whose object is `object` in source
-    /// `blob`, read as copy `copy` of it, names: the page showing that copy,
-    /// else the lowest copy any page shows; None when none does. What a
-    /// copied reference to a page is written as
-    /// ([`page_named`](crate::materialize::copy::page_named)), found as
-    /// [`page_showing`](Self::page_showing) finds a page.
-    pub(crate) fn page_named(&self, blob: BlobId, object: ObjectId, copy: u32) -> Option<PageId> {
-        crate::materialize::copy::page_named(self.shown_pages(), blob, object, copy)
+    /// The page a reference to source page `page`, read as copy `copy` of
+    /// it, names: the page showing that copy, else the lowest copy any page
+    /// shows; None when none does. What a copied reference to a page is
+    /// written as ([`page_named`](crate::materialize::copy::page_named)),
+    /// found as [`page_showing`](Self::page_showing) finds a page.
+    pub(crate) fn page_named(&self, page: PageObj, copy: u32) -> Option<PageId> {
+        crate::materialize::copy::page_named(self.shown_pages(), page, copy)
     }
 
-    /// The pages showing copies of the page whose object is `object` in
-    /// source `blob`, by copy: what a group of the realizer finds its
-    /// pages by (M10.5 §10.1). O(log n) and those, once the page map is
-    /// built.
-    pub(crate) fn pages_showing(
-        &self,
-        blob: BlobId,
-        object: ObjectId,
-    ) -> impl Iterator<Item = PageId> + '_ {
-        let copies = (blob, object, 0)..=(blob, object, u32::MAX);
-        self.shown_pages().range(copies).map(|(_, &page)| page)
+    /// The pages showing copies of source page `page`, by copy: what a
+    /// group of the realizer finds its pages by (M10.5 §10.1). O(log n) and
+    /// those, once the page map is built.
+    pub(crate) fn pages_showing(&self, page: PageObj) -> impl Iterator<Item = PageId> + '_ {
+        let copies = (page, 0)..=(page, u32::MAX);
+        self.shown_pages().range(copies).map(|(_, &id)| id)
     }
 
     fn shown_pages(&self) -> &BTreeMap<Shown, PageId> {
@@ -615,9 +639,8 @@ impl DocState {
     fn map_shown(&self) -> BTreeMap<Shown, PageId> {
         let mut shows = BTreeMap::new();
         for (id, def, _) in self.pages() {
-            if let Some(facts) = def.base.src.page(def.base.index) {
-                let shown = (def.base.src.id(), facts.id, def.copy);
-                shows.entry(shown).or_insert(id);
+            if let Some(page) = def.base.src.page_obj(def.base.index) {
+                shows.entry((page, def.copy)).or_insert(id);
             }
         }
         shows
@@ -642,6 +665,8 @@ impl DocState {
             generators,
             // Read through `backs`.
             opened_generators: _,
+            // Read through `numbered_in`, as the positions are.
+            numbered_in: _,
             fields,
             form,
             idx: _,
@@ -1071,6 +1096,8 @@ impl DocState {
             labels,
             generators,
             opened_generators: _,
+            // Another version, its own invariants checked as it was made.
+            numbered_in: _,
             fields,
             form,
             idx,
@@ -1107,6 +1134,18 @@ impl DocState {
                     def.copy
                 ))
             })?;
+            // What's drawn over it names no annotation or field: a mark it
+            // drew is pinned by value.
+            let placed = (def.content.over.iter()).flat_map(|l| match &l.body {
+                Static::Placements(placed) => &placed[..],
+                Static::OcrText(_) => &[],
+            });
+            for p in placed {
+                let named = matches!(&p.form, FormRef::Pinned(ap) if ap.inputs.names_annotation());
+                hold(!named, || {
+                    Invariant::Pages(format!("{id:?} draws a mark that names an annotation"))
+                })?;
+            }
         }
 
         // The annotations.
@@ -1492,6 +1531,8 @@ impl DocState {
             generators,
             // One for every version, which none changes.
             opened_generators: _,
+            // An export's alone, never a version's.
+            numbered_in: _,
             fields,
             form: _,
             idx,
@@ -1655,8 +1696,8 @@ mod tests {
         let header = st.header_footer().unwrap();
         assert_eq!(header.frozen.bates_number(p0), Some(100));
         let def = st.def(p0).unwrap();
-        let object = def.base.src.page(def.base.index).unwrap().id;
-        assert_eq!(st.page_showing(def.base.src.id(), object, 0), Some(p0));
+        let page = def.base.src.page_obj(def.base.index).unwrap();
+        assert_eq!(st.page_showing(page, 0), Some(p0));
         assert_eq!(st.check_invariants(), Ok(()));
         let (mark, rec) = st.annots_on(p0).find(|(_, a)| a.mark().is_some()).unwrap();
         let named = nm_key(mark, rec).unwrap();
@@ -1766,11 +1807,10 @@ mod tests {
             .unwrap();
         let st = d.state();
         let copy = st.page_at(st.pos_of(ids[2]).unwrap() + 1).unwrap();
-        let def = st.def(ids[2]).unwrap();
-        let (blob, object) = (def.base.src.id(), def.base.src.page(2).unwrap().id);
-        assert_eq!(st.page_showing(blob, object, 0), Some(ids[2]));
-        assert_eq!(st.page_showing(blob, object, 1), Some(copy));
-        assert_eq!(st.page_showing(blob, object, 2), None);
+        let page = st.def(ids[2]).unwrap().base.src.page_obj(2).unwrap();
+        assert_eq!(st.page_showing(page, 0), Some(ids[2]));
+        assert_eq!(st.page_showing(page, 1), Some(copy));
+        assert_eq!(st.page_showing(page, 2), None);
         // A tree that lists its first page again, as copy 1 of it, and a
         // duplicate of the first, copy 1 too: of the two, the first in
         // order is found, before a move and after; a page shown from
@@ -1792,21 +1832,25 @@ mod tests {
         let copy = d.page(1).unwrap();
         let st = d.state();
         let blob = d.primary().id();
+        let first = PageObj { blob, id: first };
         assert_eq!(st.def(again).unwrap().copy, 1);
-        assert_eq!(st.page_showing(blob, first, 0), Some(p0));
-        assert_eq!(st.page_showing(blob, first, 1), Some(copy));
+        assert_eq!(st.page_showing(first, 0), Some(p0));
+        assert_eq!(st.page_showing(first, 1), Some(copy));
         d.commit_ops(vec![move_pages(&[again], Some(p0))], "Move")
             .unwrap();
-        assert_eq!(d.state().page_showing(blob, first, 1), Some(again));
-        let second = f.pages[1];
-        assert_eq!(d.state().page_showing(blob, second, 0), Some(p1));
+        assert_eq!(d.state().page_showing(first, 1), Some(again));
+        let second = PageObj {
+            blob,
+            id: f.pages[1],
+        };
+        assert_eq!(d.state().page_showing(second, 0), Some(p1));
         let other = crate::store::blank(d.store(), 1);
         let replace = crate::tx::fixture::replace(&[p1], &other, [0], "b.pdf");
         d.commit_ops(vec![replace], "Replace").unwrap();
         let st = d.state();
-        assert_eq!(st.page_showing(blob, second, 0), None);
-        let shown = other.page(0).unwrap().id;
-        assert_eq!(st.page_showing(other.id(), shown, 0), Some(p1));
+        assert_eq!(st.page_showing(second, 0), None);
+        let shown = other.page_obj(0).unwrap();
+        assert_eq!(st.page_showing(shown, 0), Some(p1));
         assert_eq!(st.check_invariants(), Ok(()));
     }
 }

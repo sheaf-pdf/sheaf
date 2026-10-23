@@ -375,7 +375,7 @@ fn a_file_held_as_an_attachment_draws_as_a_watermark() {
         .store()
         .intern(bytes.clone().into(), BlobKind::Attachment)
         .unwrap();
-    let pdf_bytes = crate::generated::blank_pages(300.0, 200.0, 3).unwrap();
+    let pdf_bytes = crate::memory::blank_pages(300.0, 200.0, 3).unwrap();
     let pdf = (d.store())
         .intern(pdf_bytes.clone().into(), BlobKind::Attachment)
         .unwrap();

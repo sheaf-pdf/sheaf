@@ -20,7 +20,7 @@ use crate::prim::Rec;
 /// `rules`: the state it makes, and what they did.
 fn lowered_with(d: &Document, op: &Op, rules: &[Rule]) -> (DocState, Vec<Cascade>) {
     let tx = d.tx(Actor::User);
-    let (mut resolved, _) = tx.resolve(op).unwrap();
+    let (mut resolved, _) = tx.resolve(op, true).unwrap();
     let state = Rec::new(tx.state().clone());
     let mut lw = Lower::new(state, &tx.cx, &NoProgress, resolved.name());
     lower_op(&mut lw, &mut resolved).unwrap();
@@ -536,7 +536,7 @@ fn what_cant_be_done_is_invalid() {
 /// [`note`]: crate::forms::fixture::note
 fn replied_to() -> Vec<u8> {
     let mut f = crate::forms::fixture::Form::new(3);
-    let written = crate::annot::to_pdf(&crate::forms::fixture::note(), &mut f.pdf).main;
+    let written = crate::serialize::built::to_pdf(&crate::forms::fixture::note(), &mut f.pdf).main;
     let note = f.pdf.add_object(written);
     let reply = f.pdf.add_object(dictionary! {
         "Type" => "Annot", "Subtype" => "Text", "IRT" => note, "NM" => Object::string_literal("theirs"),

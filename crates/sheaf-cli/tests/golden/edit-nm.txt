@@ -1,0 +1,75 @@
+$ sheaf-cli edit $DIR/in.pdf --edits $DIR/edit-nm.json -o $DIR/nm.pdf
+--- edits
+{
+  "label": "Answer Ann",
+  "ops": [
+    {
+      "mark": {
+        "contents": "Tied",
+        "kind": {
+          "type": "reply"
+        },
+        "style": {
+          "color": [
+            220,
+            40,
+            40
+          ],
+          "opacity": 1,
+          "stroke": 1
+        }
+      },
+      "op": "add-mark",
+      "page": {
+        "pos": 1
+      },
+      "reply_to": {
+        "nm": "n1"
+      }
+    },
+    {
+      "annots": [
+        {
+          "nm": "h1",
+          "page": {
+            "pos": 3
+          }
+        }
+      ],
+      "op": "delete-annotations"
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 0
+--- stdout
+{
+  "created": {
+    "locals": {},
+    "ops": [
+      [
+        {
+          "annot": {
+            "nm": "sheaf:#",
+            "page": 1
+          }
+        }
+      ],
+      []
+    ]
+  },
+  "lines": [
+    {
+      "removes": false,
+      "text": "Reply on page 1"
+    },
+    {
+      "removes": true,
+      "text": "Delete a comment on page 3"
+    }
+  ],
+  "strategy": "rewrite",
+  "version": "Answer Ann"
+}
+--- stderr
+editing…

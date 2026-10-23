@@ -24,7 +24,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-use sheaf_edit::Z;
+use sheaf_edit::{MarkupKeep, Z};
 
 use super::append::Refused;
 use super::emit::content;
@@ -317,6 +317,67 @@ pub struct SaveTarget {
 pub struct Profile {
     pub encryption: Encryption,
     pub numbering: Numbering,
+    pub private: Private,
+    pub unheld: Unheld,
+}
+
+/// Which of the pages' annotations the records don't hold an output keeps:
+/// a screen, a sound, a watermark annotation, a widget outside the form.
+/// (A pop-up goes with what opens it either way.)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Unheld {
+    /// Each, as its page has it: saves, and every export that keeps the
+    /// markup.
+    #[default]
+    Keep,
+    /// The links and widgets among them, as `MarkupKeep` says: what a
+    /// markup removal leaves (`RemoveMarkup`), which sets it.
+    Only(MarkupKeep),
+}
+
+impl Unheld {
+    /// Whether an annotation the records don't hold is written, a `link`,
+    /// a `widget` or neither.
+    pub fn keeps(self, link: bool, widget: bool) -> bool {
+        match self {
+            Unheld::Keep => true,
+            Unheld::Only(keep) => (link && keep.links) || (widget && keep.widgets),
+        }
+    }
+}
+
+/// Whether an output holds sheaf's private data (§15).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Private {
+    /// As sheaf writes it, so it reads the file back: saves, and every
+    /// export but those that take it out.
+    #[default]
+    Keep,
+    /// None of it ([`private::KEYS`]): what sheaf draws is written
+    /// unmarked, its marks with neutral names and without their JSON, the
+    /// catalog without the generators; what the file holds, a transform
+    /// takes out (`RemovePrivateData`'s [`Filter::StripLegacy`]); and the
+    /// file is checked for any left before it's written, failing closed
+    /// (§11.9). Clean Copy's. Only a Rewrite writes it.
+    ///
+    /// [`private::KEYS`]: crate::private::KEYS
+    /// [`Filter::StripLegacy`]: crate::model::Filter::StripLegacy
+    Strip,
+    /// As [`Private::Strip`] writes it, but what a transform couldn't take
+    /// out of what the file holds (on a page whose content can't be read,
+    /// in a list that can't be written again) is said in a note, not a
+    /// failure: print's without markup, whose file is for a printer or a
+    /// page image, which mustn't fail for what an older sheaf left in it
+    /// (§16 row 27).
+    Scrub,
+}
+
+impl Private {
+    /// Whether what sheaf writes is written without it: [`Private::Strip`]
+    /// and [`Private::Scrub`].
+    pub fn strips(self) -> bool {
+        self != Private::Keep
+    }
 }
 
 /// Whether an output is encrypted.
@@ -430,6 +491,33 @@ impl SavePlan {
 /// dropping an XFA part whose datasets hold values. Its transforms are
 /// save policy's ([`rules::plan`]).
 pub fn plan(input: &SaveInput, target: &SaveTarget) -> SavePlan {
+    planned(input, target, CopyWhen::Signed)
+}
+
+/// What a save of `input` to `target` that the reader asked to append
+/// does (the command line's `-o … --append`, proposal 40): [`plan`]'s
+/// decision, but another path is an Append onto a copy of the saved file
+/// whenever the file is still as sheaf read or wrote it, signed or not.
+/// What stops an Append still makes it a Rewrite, with what that asks: a
+/// file that can't take an update, what an update would leave readable,
+/// no record of the file.
+pub fn appending(input: &SaveInput, target: &SaveTarget) -> SavePlan {
+    planned(input, target, CopyWhen::Whenever)
+}
+
+/// When a save to another path than the saved file's appends onto a copy
+/// of it.
+#[derive(Clone, Copy)]
+enum CopyWhen {
+    /// When the primary's signatures or usage rights hold: Save As.
+    Signed,
+    /// Whenever the copy can be made: an Append asked for.
+    Whenever,
+}
+
+/// [`plan`], a save to another path copying the saved file as `copy`
+/// says.
+fn planned(input: &SaveInput, target: &SaveTarget, copy: CopyWhen) -> SavePlan {
     let changed = target.same_file
         && (target.stamp.as_ref()).is_some_and(|stamp| !stamp.holds(&target.path).unwrap_or(false));
     let mut asks = Vec::new();
@@ -450,9 +538,13 @@ pub fn plan(input: &SaveInput, target: &SaveTarget) -> SavePlan {
         return rewritten(input, why, asks, None);
     };
     let record = &saved.record;
+    let copied = match copy {
+        CopyWhen::Signed => copies(input, record),
+        CopyWhen::Whenever => record.stamp.holds(&record.path).unwrap_or(false),
+    };
     let onto = match target.same_file {
         true => Some(Onto::Saved),
-        false => copies(input, record).then_some(Onto::CopyOf),
+        false => copied.then_some(Onto::CopyOf),
     };
     if onto.is_none() {
         why.push(Why::OtherTarget);

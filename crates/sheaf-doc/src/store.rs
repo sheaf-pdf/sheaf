@@ -55,12 +55,27 @@ impl BlobKind {
         sheaf_image::io::sniff(bytes).map(BlobKind::Image)
     }
 
+    /// A PDF sheaf made in memory, as `kind` says.
+    pub fn memory(kind: MemoryKind) -> BlobKind {
+        BlobKind::Pdf {
+            password: None,
+            origin: Origin::Memory(kind),
+        }
+    }
+
     /// A page stamp's one-page PDF: a library stamp's, or one made from a
     /// placed stamp's page.
     pub fn stamp() -> BlobKind {
+        BlobKind::memory(MemoryKind::Library)
+    }
+
+    /// Comments to read or write as data (`exchange::Comments`), opened
+    /// with `password`: another PDF's, or a PDF of no pages made of a data
+    /// file's or of a document's.
+    pub fn comments(password: Option<&str>) -> BlobKind {
         BlobKind::Pdf {
-            password: None,
-            origin: Origin::Memory(MemoryKind::Library),
+            password: password.map(|p| Zeroizing::new(p.to_owned())),
+            origin: Origin::Memory(MemoryKind::Comments),
         }
     }
 
@@ -100,6 +115,23 @@ pub enum MemoryKind {
     /// §11.10): its bytes on disk with the sidecar's sections after them,
     /// or a Full sidecar's whole document.
     Recovered,
+    /// Blank pages an insert brings ([`memory::blank`]).
+    ///
+    /// [`memory::blank`]: crate::memory::blank
+    Blank,
+    /// Images as pages, which an insert brings ([`memory::images`]).
+    ///
+    /// [`memory::images`]: crate::memory::images
+    Images,
+    /// A comment summary's pages (sheaf-ops' `comments::summary`).
+    Summary,
+    /// Comments as dictionaries, read or gathered to be written as data
+    /// ([`exchange::Comments`]): a PDF of no pages made of an FDF or XFDF
+    /// file's, or of a document's, or another PDF, read for its comments.
+    /// Opened in a store of its own, and never a document's pages.
+    ///
+    /// [`exchange::Comments`]: crate::exchange::Comments
+    Comments,
 }
 
 /// Two different byte strings with one [`BlobId`]: the second isn't
@@ -204,13 +236,7 @@ impl Store {
     /// after every one has dropped. The page table walks the whole tree,
     /// so this runs off the UI thread.
     pub fn source(&self, blob: &Blob) -> Result<Src, OpenError> {
-        let mut pdf = blob.0.pdf.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(source) = pdf.upgrade() {
-            return Ok(Src(source));
-        }
-        let source = Arc::new(Source::open(blob.clone(), &self.limits)?);
-        *pdf = Arc::downgrade(&source);
-        Ok(Src(source))
+        blob.source(&self.limits)
     }
 
     /// `bytes` interned as a blob of `kind`, as [`intern`](Self::intern)
@@ -238,6 +264,17 @@ impl Store {
         let src = (self.open(bytes, BlobKind::file(path, password)))
             .with_context(|| format!("opening {}", path.display()))?;
         Ok((src, stamp))
+    }
+
+    /// The image file at `path`, read once and interned: an error when
+    /// it isn't an image sheaf reads.
+    pub fn read_image(&self, path: &Path) -> anyhow::Result<Blob> {
+        use anyhow::Context as _;
+        let reading = || format!("reading {}", path.display());
+        let bytes = sheaf_util::read_file(path).with_context(reading)?;
+        let kind = BlobKind::image(&bytes)
+            .with_context(|| format!("{} isn't an image sheaf reads", path.display()))?;
+        Ok(self.intern(bytes, kind)?)
     }
 
     /// The sources parsed now, by their blobs' ids: what a mark naming a
@@ -278,8 +315,7 @@ impl Store {
 /// parsed into `store`.
 #[cfg(any(test, feature = "fixtures"))]
 pub fn blank(store: &Store, pages: u32) -> Src {
-    let bytes = crate::generated::blank_pages(612.0, 792.0, pages as usize)
-        .expect("blank pages are written");
+    let bytes = crate::memory::blank_pages(612.0, 792.0, pages).expect("blank pages are written");
     let kind = BlobKind::file(Path::new("a.pdf"), None);
     store.open(bytes.into(), kind).expect("blank pages open")
 }
@@ -323,6 +359,21 @@ impl Blob {
             } => Some(file_name(path)),
             _ => None,
         }
+    }
+
+    /// It parsed under `limits`, as [`Store::source`] parses it, which
+    /// reads under its store's: the source that's live of it, else a new
+    /// one. What reads a blob's pages where its store isn't to hand (a
+    /// stamp's page, a watermark's) reads under [`Limits::DEFAULT`], every
+    /// document's.
+    pub(crate) fn source(&self, limits: &Limits) -> Result<Src, OpenError> {
+        let mut pdf = self.0.pdf.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(source) = pdf.upgrade() {
+            return Ok(Src(source));
+        }
+        let source = Arc::new(Source::open(self.clone(), limits)?);
+        *pdf = Arc::downgrade(&source);
+        Ok(Src(source))
     }
 
     /// The password a PDF blob was opened with.

@@ -395,6 +395,64 @@
         }
       ]
     },
+    "Fit": {
+      "description": "How big each page made from an image is.",
+      "oneOf": [
+        {
+          "const": "original",
+          "description": "The image's own size at its resolution.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A sheet of this size in points (portrait; a landscape image turns\nit landscape), the image scaled to fit inside `margin` and centered.",
+          "properties": {
+            "paper": {
+              "additionalProperties": false,
+              "properties": {
+                "height": {
+                  "format": "float",
+                  "type": "number"
+                },
+                "margin": {
+                  "format": "float",
+                  "type": "number"
+                },
+                "width": {
+                  "format": "float",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "width",
+                "height",
+                "margin"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "paper"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FlattenSet": {
+      "description": "Which annotations a flatten draws into their pages.",
+      "oneOf": [
+        {
+          "const": "all",
+          "description": "Every one shown: sheaf's marks, others' comments and the form's\nwidgets.",
+          "type": "string"
+        },
+        {
+          "const": "printable",
+          "description": "Those a printout shows: with the Print flag.",
+          "type": "string"
+        }
+      ]
+    },
     "FontChoice": {
       "description": "A face text is drawn in: one of the standard 14 fonts' text faces,\nwhich every reader has, so none is embedded.",
       "enum": [
@@ -2121,6 +2179,28 @@
             "pages"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The annotations on `pages` that `which` says drawn into the pages\nas their appearances show them, and taken off: what they drew\nstays, as the page's own, and nothing of them can be edited. Links\nstay, and so do annotations hidden or never shown (Hidden, NoView),\nwhich draw nothing. A widget draws the appearance its state (`/AS`)\nnames, or nothing when it has states and none is named, and goes\nwith its field when it was the field's last. Each page's drawing is\na layer over what's there: flattening again adds another.",
+          "properties": {
+            "op": {
+              "const": "flatten-annotations",
+              "type": "string"
+            },
+            "pages": {
+              "$ref": "#/$defs/PageSel"
+            },
+            "which": {
+              "$ref": "#/$defs/FlattenSet"
+            }
+          },
+          "required": [
+            "op",
+            "pages",
+            "which"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -2280,8 +2360,26 @@
         }
       ]
     },
+    "PageSize": {
+      "description": "A size in PDF points (1/72 inch).",
+      "properties": {
+        "height": {
+          "format": "float",
+          "type": "number"
+        },
+        "width": {
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
     "PageSource": {
-      "description": "Where inserted pages come from.",
+      "description": "Where inserted pages come from: a PDF, or pages made in memory, which\ncome in as a PDF's would.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -2302,6 +2400,55 @@
             "type",
             "file",
             "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`count` blank pages of `size`.",
+          "properties": {
+            "count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "size": {
+              "$ref": "#/$defs/PageSize"
+            },
+            "type": {
+              "const": "blank",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size",
+            "count"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A page for each image in `images`, image files (a TIFF may hold\nseveral), in order, each page as `fit` says.",
+          "properties": {
+            "fit": {
+              "$ref": "#/$defs/Fit"
+            },
+            "images": {
+              "items": {
+                "$ref": "#/$defs/BlobSel"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "images",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "images",
+            "fit"
           ],
           "type": "object"
         }

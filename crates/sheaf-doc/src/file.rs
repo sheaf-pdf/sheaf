@@ -425,6 +425,10 @@ pub struct ForeignAnnot {
     /// What it is as one of our marks, when sheaf can hold it: what
     /// editing it makes it (M9 decision 5). Read when the file is.
     pub mark: Option<Box<Annot>>,
+    /// For a stamp whose `mark` is a page stamp, the form its appearance
+    /// is (`/AP /N`): the page that mark names by stem, which it holds
+    /// once it's made.
+    pub stamp: Option<ObjectId>,
 }
 
 impl ForeignAnnot {
@@ -792,6 +796,7 @@ pub fn annots_in<P: Objects + ?Sized>(
                         [v(0), v(1), v(2)]
                     }),
                 mark: None,
+                stamp: None,
             };
             found.push(InFile {
                 object,
@@ -802,9 +807,12 @@ pub fn annots_in<P: Objects + ?Sized>(
         if !dicts.is_empty() {
             let (at, dicts): (Vec<usize>, Vec<&lopdf::Dictionary>) = dicts.into_iter().unzip();
             let marks = crate::import::convert_page(pdf, &dicts, turn, Default::default());
-            for (i, m) in at.into_iter().zip(marks) {
+            for ((i, dict), m) in at.into_iter().zip(dicts).zip(marks) {
                 if let Found::Foreign(f) = &mut found[i].found {
                     f.mark = m.ok().map(Box::new);
+                    f.stamp = (f.mark.as_deref())
+                        .filter(|m| matches!(m.kind, crate::annot::AnnotKind::PageStamp { .. }))
+                        .and_then(|_| crate::import::appearance(pdf, dict));
                 }
             }
         }
@@ -966,7 +974,7 @@ mod tests {
             turn: Rotation::R0,
             name: String::new(),
         };
-        let main = crate::annot::to_pdf(&ours, &mut pdf).main;
+        let main = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
         let main = pdf.add_object(main);
         let part = pdf.add_object(dictionary! {
             "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
@@ -1053,7 +1061,7 @@ mod tests {
                 at,
             },
         );
-        let written = crate::annot::to_pdf(&replace, &mut pdf);
+        let written = crate::serialize::built::to_pdf(&replace, &mut pdf);
         let caret = pdf.add_object(written.main);
         let [mut strike] = <[_; 1]>::try_from(written.companions).ok().unwrap();
         strike.set("IRT", caret);
@@ -1066,7 +1074,7 @@ mod tests {
                 pos: Pt { x: 1.0, y: 2.0 },
             },
         );
-        let note = crate::annot::to_pdf(&note, &mut pdf).main;
+        let note = crate::serialize::built::to_pdf(&note, &mut pdf).main;
         let note = pdf.add_object(note);
         let grouped = |pdf: &mut lopdf::Document, under| {
             pdf.add_object(dictionary! {
@@ -1152,7 +1160,7 @@ mod tests {
             turn: Rotation::R0,
             name: String::new(),
         };
-        let dict = crate::annot::to_pdf(&ours, &mut pdf).main;
+        let dict = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
         let mine = pdf.add_object(dict);
         let page = pdf.add_object(dictionary! {
             "Type" => "Page",
@@ -1218,7 +1226,7 @@ mod tests {
             turn: Rotation::R0,
             name: String::new(),
         };
-        let main = crate::annot::to_pdf(&ours, &mut pdf).main;
+        let main = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
         let main = pdf.add_object(main);
         let part = pdf.add_object(dictionary! {
             "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),

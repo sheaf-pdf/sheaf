@@ -34,6 +34,7 @@ use lopdf::xref::XrefType;
 use lopdf::{
     Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, ReadLimits, Stream, dictionary,
 };
+use sheaf_doc::export::{Export, print_preview};
 use sheaf_doc::forms::fixture::{Form, every_mark_kind, write_marks};
 use sheaf_doc::model::Mark;
 use sheaf_doc::realize::{EngineKey, GROUP, OcgOverride, PageView, Realization, ViewInputs};
@@ -42,7 +43,7 @@ use sheaf_doc::serialize::fixture::{
 };
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture as fx;
-use sheaf_doc::{Document, PageId, TextLayer};
+use sheaf_doc::{Actor, Document, PageId, TextLayer};
 use sheaf_edit::{BlobSel, GridPos, Margins, Rotation, Turn, WatermarkContent, WatermarkSpec, Z};
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_ocr::job::{EngineFactory, HAS_TEXT_MIN_CHARS};
@@ -111,7 +112,7 @@ fn drawn(
 
 /// `d` as a Rewrite saves it.
 fn saved(d: &Document) -> Vec<u8> {
-    sheaf_doc::save::rewrite(&d.snapshot()).unwrap()
+    sheaf_doc::save::rewrite(d).unwrap()
 }
 
 /// Page `index` of `bytes`, appearances only.
@@ -511,7 +512,7 @@ fn a_source_pdfium_refuses_prints() {
     d.commit_ops(ops, "Edit").unwrap();
     let pages: Vec<PageId> = d.state().order().iter().copied().collect();
     let print = |markup| {
-        let printed = sheaf_doc::save::print_pdf(&d.snapshot(), &pages, markup).unwrap();
+        let printed = d.export_bytes(|f, _| Export::print(f, &pages, markup));
         PdfiumEngine::open_bytes(printed.into(), None).unwrap()
     };
     let job = Job::Page {
@@ -529,6 +530,108 @@ fn a_source_pdfium_refuses_prints() {
     }
     let [with, without] = [&marked, &bare].map(|e| page(e, 0).unwrap());
     assert!(differing(&with, &without) > 0, "the mark prints");
+}
+
+/// Print preview draws what prints (§16 row 28): what it realizes of a
+/// page ([`print_preview`]) under print's inputs ([`ViewInputs::print`]),
+/// with markup and without, draws as the print file ([`Export::print`])
+/// draws the page. On the page another tool's comment that prints, one
+/// hidden, one never shown on screen (NoView), one that doesn't print, a
+/// filled field, and a check box whose state names no appearance, which
+/// the print file draws nothing of with markup (M10 bug 10) where PDFium's
+/// form filler draws a box of its own: the preview draws it flattened.
+#[test]
+fn print_preview_draws_what_prints() {
+    let mut f = Form::new(1);
+    let name = f.text("Name", 0, [72.0, 700.0, 272.0, 720.0]);
+    f.fill(name, "Ann");
+    let boxed = f.check_box("Box", 0, [300.0, 700.0, 320.0, 720.0], true);
+    f.dict(boxed).remove(b"AS");
+    let page = f.pages[0];
+    let mut annots = f.annots(0);
+    for (flags, y) in [(4, 100), (4 | 2, 200), (4 | 32, 300), (0, 400)] {
+        let form = f.pdf.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 100.into(), 40.into()],
+            },
+            b"0 0 1 rg 0 0 100 40 re f".to_vec(),
+        ));
+        annots.push(f.pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Square", "P" => page, "F" => flags,
+            "Rect" => vec![72.into(), y.into(), 172.into(), (y + 40).into()],
+            "AP" => dictionary! { "N" => form },
+        }));
+    }
+    f.set_annots(0, &annots);
+    let d = opened(f.bytes(), "form.pdf", None);
+    let first = d.page(0).unwrap();
+    let views = views();
+    let job = Job::Page {
+        width: WIDTH,
+        rotation: Rotation::R0,
+    };
+    for markup in [true, false] {
+        let st = print_preview(&d.export_from(Actor::User), first, markup).unwrap();
+        let (inputs, format) = (ViewInputs::print(markup), PixelFormat::Rgba);
+        let rx = views.render(&st, first, &inputs, job, format, 0, Budget::Screen);
+        let preview = block_on(rx).unwrap().unwrap().raster;
+        let printed = d.export_bytes(|f, _| Export::print(f, &[first], markup));
+        let printed = live(&printed, None, 0, Rotation::R0);
+        let differ = differing(&preview, &printed);
+        assert_eq!(differ, 0, "markup {markup}: {differ} px differ");
+    }
+}
+
+/// Print preview of pages printed from the middle draws what prints (Greg,
+/// 2026-10-22): pages 5 and 6 of 10 under a header of their labels, "Page
+/// <<1>> of <<N>>" and Bates numbers, a mark on page 5, print as the
+/// preview shows them, "Page 5 of 10" and "Page 6 of 10", with markup and
+/// without: each previewed page draws as the print file's page does.
+#[test]
+fn print_preview_of_pages_from_the_middle_draws_what_prints() {
+    let mut d = opened(file(10, XrefType::CrossReferenceTable), "ten.pdf", None);
+    let (fifth, sixth) = (d.page(4).unwrap(), d.page(5).unwrap());
+    let mut spec = fx::header("<<label>>");
+    spec.texts[2] = "<<bates>>".into();
+    spec.texts[4] = "Page <<1>> of <<N>>".into();
+    spec.bates = Some(sheaf_edit::BatesSpec {
+        prefix: "SHF".into(),
+        suffix: String::new(),
+        digits: 4,
+        start: 1,
+    });
+    let labels = sheaf_edit::Op::SetPageLabels {
+        ranges: Some(vec![fx::label(
+            d.page(0).unwrap(),
+            sheaf_edit::LabelStyle::LowerRoman,
+            "",
+            1,
+        )]),
+    };
+    let ops = vec![
+        fx::set_header(spec, None),
+        labels,
+        fx::add(fifth, &every_mark_kind()[3]),
+    ];
+    d.commit_ops(ops, "Edit").unwrap();
+    let views = views();
+    let job = Job::Page {
+        width: WIDTH,
+        rotation: Rotation::R0,
+    };
+    for markup in [true, false] {
+        let printed = d.export_bytes(|f, _| Export::print(f, &[fifth, sixth], markup));
+        for (at, page) in [fifth, sixth].into_iter().enumerate() {
+            let st = print_preview(&d.export_from(Actor::User), page, markup).unwrap();
+            let (inputs, format) = (ViewInputs::print(markup), PixelFormat::Rgba);
+            let rx = views.render(&st, page, &inputs, job, format, 0, Budget::Screen);
+            let preview = block_on(rx).unwrap().unwrap().raster;
+            let print = live(&printed, None, at as u32, Rotation::R0);
+            let differ = differing(&preview, &print);
+            assert_eq!(differ, 0, "markup {markup}, page {at}: {differ} px differ");
+        }
+    }
 }
 
 /// `bytes` behind 2,000 bytes of junk: sheaf finds the header wherever it

@@ -3,9 +3,10 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use sheaf_plugin_api::types::{AnnotKind, Box2};
+use sheaf_plugin_api::sheaf_edit::Box2;
+use sheaf_plugin_api::types::{AnnotKind, AnnotView, PageInfo};
 use sheaf_plugin_api::ui::{self, PanelRow, RowAction};
-use sheaf_plugin_api::{Batch, FormBuilder, Plugin, document, text};
+use sheaf_plugin_api::{FormBuilder, Ops, Plugin, document, text, view};
 
 /// Money as written in returns and statements: "$1,234.56", "(1,234)",
 /// "12,500", "980.10". Bare integers without a separator are too noisy
@@ -15,6 +16,9 @@ const AMOUNT: &str = r"\(?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d{2})?\)?|\(?\$?\s?\d+\.
 const PANEL: &str = "pairs";
 /// Connector side, as sheaf's own connector tool draws them.
 const CONNECTOR: f32 = 22.0;
+/// Why pairs found before the document was opened again aren't linked:
+/// its pages' ids aren't theirs.
+const REOPENED: &str = "the document was opened again; find again";
 
 /// An amount in cents, from its text. Parentheses mean negative.
 pub fn parse_amount(s: &str) -> Option<i64> {
@@ -56,6 +60,7 @@ pub struct Seen {
     pub page: u64,
     /// Display index, for labels.
     pub index: usize,
+    /// In PageSpace, as its text was found.
     pub rect: Box2,
 }
 
@@ -106,24 +111,42 @@ fn overlaps(a: &Box2, b: &Box2) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-/// The connector square just right of an amount.
-pub fn connector_rect(amount: &Box2) -> Box2 {
-    Box2 {
-        x: amount.x + amount.w + 3.0,
-        y: amount.y + amount.h / 2.0 - CONNECTOR / 2.0,
+/// The connector square just right of an amount on `page`, as the page
+/// shows: both in PageSpace.
+pub fn connector_rect(page: &PageInfo, amount: &Box2) -> Box2 {
+    let shown = view::box_to_view(page, *amount);
+    let square = Box2 {
+        x: shown.right() + 3.0,
+        y: shown.y + shown.h / 2.0 - CONNECTOR / 2.0,
         w: CONNECTOR,
         h: CONNECTOR,
-    }
+    };
+    view::box_from_view(page, square)
 }
 
-/// Pairs waiting in the panel, for the document they were found in.
-static PENDING: Mutex<Option<(Option<String>, Vec<Pair>)>> = Mutex::new(None);
+/// Pairs waiting in the panel, and the document they were found in: its
+/// path, and the instance of it open then, whose pages their ids name.
+struct Waiting {
+    path: Option<String>,
+    instance: Option<u64>,
+    pairs: Vec<Pair>,
+}
 
-fn pending() -> Vec<Pair> {
-    let path = document::path();
+static PENDING: Mutex<Option<Waiting>> = Mutex::new(None);
+
+/// The document the call reads: its path and instance.
+fn this_document() -> (Option<String>, Option<u64>) {
+    (document::path(), document::version().map(|v| v.instance))
+}
+
+/// The pairs waiting for this document: none for another, and refused
+/// when it was opened again since they were found.
+fn pending() -> Result<Vec<Pair>, String> {
+    let (path, instance) = this_document();
     match &*PENDING.lock().unwrap() {
-        Some((p, pairs)) if *p == path => pairs.clone(),
-        _ => Vec::new(),
+        Some(w) if w.path == path && w.instance == instance => Ok(w.pairs.clone()),
+        Some(w) if w.path == path && !w.pairs.is_empty() => Err(REOPENED.into()),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -151,36 +174,52 @@ fn set_pending(pairs: Vec<Pair>) {
         })
         .collect();
     ui::set_panel(PANEL, &rows);
-    *PENDING.lock().unwrap() = Some((document::path(), pairs));
+    let (path, instance) = this_document();
+    *PENDING.lock().unwrap() = Some(Waiting {
+        path,
+        instance,
+        pairs,
+    });
 }
 
-/// The next free connector number in the document.
-fn next_label() -> u32 {
-    document::pages()
-        .iter()
-        .flat_map(|p| document::annotations(p.id))
-        .filter_map(|a| match a.kind {
-            AnnotKind::Connector(c) => c.label.trim().parse::<u32>().ok(),
-            _ => None,
+/// The connectors on `page`: their labels and squares.
+fn connectors(page: u64) -> Vec<(String, Box2)> {
+    (document::annotations(page).into_iter())
+        .filter_map(|a| match a {
+            AnnotView::Mark(m) => match m.kind {
+                AnnotKind::Connector(c) => Some((c.label, c.rect.into())),
+                _ => None,
+            },
+            AnnotView::Comment(_) => None,
         })
+        .collect()
+}
+
+/// The next free connector number among `pages`.
+fn next_label(pages: &[PageInfo]) -> u32 {
+    (pages.iter())
+        .flat_map(|p| connectors(p.id))
+        .filter_map(|(label, _)| label.trim().parse::<u32>().ok())
         .max()
         .unwrap_or(0)
         + 1
 }
 
-/// One connector pair per pair, numbered from the next free label.
-fn link(label: String, pairs: &[Pair]) -> Batch {
-    let first = next_label();
-    pairs
-        .iter()
-        .enumerate()
-        .fold(Batch::new(label), |b, (i, p)| {
-            b.connector(
-                (p.a.page, connector_rect(&p.a.rect)),
-                (p.b.page, connector_rect(&p.b.rect)),
-                &(first + i as u32).to_string(),
-            )
-        })
+/// One connector pair per pair, numbered from the next free label,
+/// submitted as `label`.
+fn link(label: &str, pairs: &[Pair]) -> Result<(), String> {
+    let pages = document::pages();
+    let end = |s: &Seen| {
+        let gone = "a page of that match is gone; find again";
+        let page = (pages.iter().find(|p| p.id == s.page)).ok_or(gone)?;
+        Ok::<_, String>((s.page, connector_rect(page, &s.rect)))
+    };
+    let first = next_label(&pages);
+    let mut ops = Ops::new();
+    for (i, p) in pairs.iter().enumerate() {
+        ops = ops.connector(end(&p.a)?, end(&p.b)?, &(first + i as u32).to_string());
+    }
+    ops.submit(label).map(|_| ()).map_err(|f| f.message)
 }
 
 fn find() -> Result<(), String> {
@@ -208,21 +247,16 @@ fn find() -> Result<(), String> {
         if !scan.contains(&p.id) {
             continue;
         }
-        let connectors: Vec<Box2> = document::annotations(p.id)
-            .into_iter()
-            .filter_map(|a| match a.kind {
-                AnnotKind::Connector(c) => Some(c.rect),
-                _ => None,
-            })
-            .collect();
+        let there = connectors(p.id);
         for m in text::pattern_search(p.id, AMOUNT)? {
             let (Some(cents), Some(rect)) = (parse_amount(&m.text), m.rects.first().copied())
             else {
                 continue;
             };
+            let rect = rect.into();
             // Already cross-referenced: a connector sits where ours would.
-            let ours = connector_rect(&rect);
-            if connectors.iter().any(|c| overlaps(c, &ours)) {
+            let ours = connector_rect(p, &rect);
+            if there.iter().any(|(_, c)| overlaps(c, &ours)) {
                 continue;
             }
             seen.push((
@@ -253,16 +287,13 @@ impl Plugin for AmountCrossref {
         match id.as_str() {
             "find" => find(),
             "link-all" => {
-                let pairs = pending();
+                let pairs = pending()?;
                 if pairs.is_empty() {
                     return Err("nothing to link; run Find Matching Amounts first".into());
                 }
                 let n = pairs.len();
-                link(
-                    format!("Link {n} amount{}", if n == 1 { "" } else { "s" }),
-                    &pairs,
-                )
-                .submit();
+                let label = format!("Link {n} amount{}", if n == 1 { "" } else { "s" });
+                link(&label, &pairs)?;
                 set_pending(Vec::new());
                 Ok(())
             }
@@ -274,7 +305,7 @@ impl Plugin for AmountCrossref {
         if panel != PANEL {
             return Err(format!("unknown panel {panel}"));
         }
-        let mut pairs = pending();
+        let mut pairs = pending()?;
         let at = pairs
             .iter()
             .position(|p| p.key() == row)
@@ -282,10 +313,9 @@ impl Plugin for AmountCrossref {
         let pair = pairs.remove(at);
         match action.as_str() {
             "link" => link(
-                format!("Link {}", format_amount(pair.cents)),
+                &format!("Link {}", format_amount(pair.cents)),
                 std::slice::from_ref(&pair),
-            )
-            .submit(),
+            )?,
             "dismiss" => {}
             other => return Err(format!("unknown action {other}")),
         }
@@ -348,9 +378,41 @@ mod tests {
         assert_eq!(with_round.len(), 3);
     }
 
+    /// A Letter page as sheaf describes one, upright or turned 90°: its
+    /// view matrices.
+    fn letter(turned: bool) -> PageInfo {
+        use sheaf_plugin_api::types::{Affine, Box2, Rotation};
+        let (m, rotate) = match turned {
+            false => ([1.0, 0.0, 0.0, -1.0, 0.0, 792.0], Rotation::R0),
+            true => ([0.0, 1.0, 1.0, 0.0, 0.0, 0.0], Rotation::R90),
+        };
+        let [a, b, c, d, e, f] = m;
+        let m = Affine { a, b, c, d, e, f };
+        let letter = Box2 {
+            x: 0.0,
+            y: 0.0,
+            w: 612.0,
+            h: 792.0,
+        };
+        PageInfo {
+            id: 1,
+            media: letter,
+            crop: letter,
+            rotate,
+            label: "1".into(),
+            to_view: m,
+            from_view: m,
+        }
+    }
+
+    /// The connector sits right of the amount as its page shows: up the
+    /// page in PageSpace on an upright one, and along it on a turned one.
     #[test]
-    fn connectors_sit_right_of_the_amount() {
-        let r = connector_rect(&seen(1, 0).rect);
-        assert_eq!((r.x, r.y, r.w), (13.0, -6.0, CONNECTOR));
+    fn connectors_sit_right_of_the_amount_as_shown() {
+        let amount = seen(1, 0).rect;
+        let r = connector_rect(&letter(false), &amount);
+        assert_eq!((r.x, r.y, r.w, r.h), (13.0, -6.0, CONNECTOR, CONNECTOR));
+        let r = connector_rect(&letter(true), &amount);
+        assert_eq!((r.x, r.y, r.w, r.h), (-6.0, 13.0, CONNECTOR, CONNECTOR));
     }
 }

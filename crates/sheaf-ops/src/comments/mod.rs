@@ -1,6 +1,7 @@
 //! A document's comments as the Comments panel lists them: threaded,
-//! filtered and sorted. Written out as a summary PDF ([`summary_pdf`]),
-//! CSV ([`csv`]) or text ([`text`]), the same list in the same order.
+//! filtered and sorted. Written out as a summary PDF ([`summary`]), CSV
+//! ([`csv`]) or text ([`text`]), the same list in the same order, never
+//! over the document's own file ([`summary_to`], [`write_to`]).
 //!
 //! A comment is one of sheaf's marks or another tool's comment (a
 //! [`Foreign`](sheaf_doc::Foreign) record, whose summary is a
@@ -13,11 +14,15 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
+use in_progress::NoProgress;
 use sheaf_doc::annot::{COLORS, MARKED};
 use sheaf_doc::file::ForeignAnnot;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DocState, Document, PageId};
+use sheaf_doc::serialize::durable;
+use sheaf_doc::{Actor, Annot, AnnotId, AnnotKind, Box2, CommitOpts, DocState, PageId};
 
-pub use summary::{Layout, summary_pdf};
+use crate::session::Session;
+
+pub use summary::{Layout, summary, summary_to};
 
 /// A comment: one of our marks, or another tool's.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -750,10 +755,19 @@ pub fn numbers(thread: &Thread, n: usize) -> Vec<String> {
         .collect()
 }
 
-/// A document from a file, with our marks and the other tools' comments
-/// in it: what [`list`] lists.
-pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
-    Ok(sheaf_doc::open::file(path, password)?.doc)
+/// A file opened, with our marks and the other tools' comments in it:
+/// what [`list`] lists, and what [`import`] brings comments into.
+pub fn open(path: &Path, password: Option<&str>) -> Result<Session> {
+    Session::open(path, password, &NoProgress)
+}
+
+/// `bytes`, an export of `snap`'s comments (a CSV, text or data file),
+/// put at `path` durably: never over the file `snap`'s document was opened
+/// from, which no export replaces (§12.1).
+pub fn write_to(snap: &sheaf_doc::Snapshot, path: &Path, bytes: &[u8]) -> Result<()> {
+    sheaf_doc::export::not_its_file(snap, path)?;
+    durable::write(path, bytes, None)
+        .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))
 }
 
 /// A comments data file's format.
@@ -828,6 +842,30 @@ pub fn import_data(
 ) -> Result<sheaf_doc::exchange::Imported> {
     let comments = sheaf_doc::exchange::read(bytes, password)?;
     Ok(sheaf_doc::exchange::import(snap, store, &comments))
+}
+
+/// The comments in an FDF, XFDF or PDF file (`bytes`, a PDF opened with
+/// `password`) brought into `session`'s document as one version of the
+/// command line's (M10.5 §6.8): those it has by `/NM` already updated
+/// (`PatchMarks` by `AnnotRef::Nm`), the rest added (`AddMark`), each
+/// keeping its own name, dates and author (`imported`), a reply in its
+/// thread by name. What it did, as a line ([`Imported::summary`]).
+///
+/// [`Imported::summary`]: sheaf_doc::exchange::Imported::summary
+pub fn import(session: &mut Session, bytes: &[u8], password: Option<&str>) -> Result<String> {
+    let doc = &session.doc;
+    let got = import_data(&doc.snapshot(), doc.store(), bytes, password)?;
+    let said = got.summary();
+    // What the marks hold is held in the transaction until they're added.
+    let mut tx = session.tx(Actor::Cli);
+    let ops = got.ops_in(&mut tx);
+    if !ops.is_empty() {
+        tx.apply_batch(ops, &NoProgress)?;
+        session
+            .doc
+            .commit(tx, CommitOpts::labelled("Import comments"))?;
+    }
+    Ok(said)
 }
 
 /// A column of the CSV export.

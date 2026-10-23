@@ -54,7 +54,9 @@ use sheaf_util::Checksum;
 
 pub use inputs::{MarkDraw, OcgOverride, ViewInputs};
 pub use key::{RenderKey, render_key, render_reads};
-pub(crate) use key::{form_digest, layout_reads, page_digest, recipe_digest};
+pub(crate) use key::{
+    form_digest, form_ref_digest, layout_reads, page_digest, pinned_digest, recipe_digest,
+};
 #[cfg(any(test, feature = "fixtures"))]
 pub use untouched::emission_is_base;
 pub use untouched::untouched;
@@ -588,10 +590,10 @@ fn find(st: &DocState, src: &Src, group: GroupKey, inputs: &ViewInputs) -> Membe
     sum.write(&[u8::from(off.is_some())]);
     sum.write(&off.unwrap_or_default().to_le_bytes());
     for index in start..end {
-        let Some(facts) = src.page(index) else {
+        let Some(object) = src.page_obj(index) else {
             continue;
         };
-        for page in st.pages_showing(src.id(), facts.id) {
+        for page in st.pages_showing(object) {
             let at_index = st.def(page).is_some_and(|def| def.base.index == index);
             if !at_index || on_base(st, page, inputs) {
                 continue;

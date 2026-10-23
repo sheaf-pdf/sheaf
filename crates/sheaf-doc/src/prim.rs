@@ -35,9 +35,9 @@ use crate::labels::LabelSpec;
 use crate::measure::Scale;
 use crate::model::{
     AnnotBody, AnnotRec, Bookmark, ContentStack, DocState, FieldNode, FieldProps, Filter, Foreign,
-    FormDoc, FormInst, Frozen, GenId, GenSpec, Generator, Layer, LegacySel, Mark, MarkedSel,
-    OutlineId, PageDef, PageId, Scope, ScriptState, Static, Target, Terminal, WatermarkContent,
-    WatermarkGen, Widget, WidgetProps,
+    FormDoc, FormInst, FormRef, Frozen, GenId, GenSpec, Generator, Layer, LegacySel, Mark,
+    MarkedSel, OutlineId, PageDef, PageId, PinnedAp, Placement, Scope, ScriptState, Static, Target,
+    Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps,
 };
 use crate::tape::{Row, Tape};
 use crate::text_layer::TextLayer;
@@ -629,6 +629,20 @@ impl HeapSize for Static {
     fn heap_size(&self) -> usize {
         match self {
             Static::OcrText(text) => size_of::<TextLayer>() + text.heap_size(),
+            Static::Placements(placed) => placed.heap_size(),
+        }
+    }
+}
+
+/// A pinned appearance's inputs, which its form is drawn from: not a
+/// source's form or a blob's page, whose bytes the store counts.
+impl HeapSize for Placement {
+    fn heap_size(&self) -> usize {
+        match &self.form {
+            FormRef::Base(_) | FormRef::Blob(_) => 0,
+            FormRef::Pinned(ap) => {
+                size_of::<PinnedAp>() + ap.inputs.kind.heap_size() + ap.inputs.contents.heap_size()
+            }
         }
     }
 }
@@ -647,7 +661,8 @@ impl HeapSize for Filter {
             Filter::DropMarked(sel) | Filter::StripLegacy(LegacySel::Marked(sel)) => {
                 sel.heap_size()
             }
-            Filter::DropStreams(_) => 0,
+            Filter::DropStreams(_)
+            | Filter::StripLegacy(LegacySel::Streams | LegacySel::Resources) => 0,
         }
     }
 }
@@ -763,7 +778,8 @@ impl HeapSize for ResolvedOp {
             | R::SetPageBoxes { pages, .. }
             | R::ClearOcrText { pages }
             | R::RemoveWatermark { pages, .. }
-            | R::RemoveHeaderFooter { pages, .. } => pages.heap_size(),
+            | R::RemoveHeaderFooter { pages, .. }
+            | R::FlattenAnnotations { pages, .. } => pages.heap_size(),
             R::DuplicatePages { pages, locals } => pages.heap_size() + buf(locals),
             R::InsertPages {
                 name,

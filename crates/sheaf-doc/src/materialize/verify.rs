@@ -23,8 +23,11 @@
 //! - **Reachability**: the pages and page tree nodes the file reaches are
 //!   the written tree's and the page templates `/Names /Templates` names
 //!   (which `keep_only` keeps), and every page of the tree is there
-//!   ([`links`]). An export's post-pass runs after these, and they're
-//!   checked again on the graph it leaves.
+//!   ([`links`]).
+//! - **Private data**, for a file written without it (`Private::Strip`):
+//!   none of sheaf's private names is left anywhere, in any dictionary or
+//!   page's content ([`private`]); under `Private::Scrub`, what's left is
+//!   said in a note ([`private_left`]).
 //!
 //! On the written bytes ([`output`]):
 //! - **Forms**: when the file has a form the save wrote any of anew (its
@@ -73,12 +76,62 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use anyhow::{Result, bail};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
+use super::Note;
 use super::graph::Graph;
 use super::key::ObjKey;
 use super::record::SaveRecord;
 use crate::forms::{Finding, Report};
 use crate::model::DocState;
 use crate::source::Source;
+
+/// A Rewrite's `graph`, to be written without sheaf's private data
+/// ([`Private::Strip`]), holds none (§15): no name of
+/// [`private::KEYS`], legacy ones among them, as a key or a name in an
+/// object or in the content of a page, a form or a pattern, and no mark
+/// named as sheaf names one ([`private::found`]). The data of a stream
+/// made as it's written isn't in the graph, which holds it empty: it's a
+/// block or a form the emitter draws, unmarked under Strip. The rest of
+/// its page is read.
+///
+/// [`Private::Strip`]: super::Private::Strip
+/// [`private::KEYS`]: crate::private::KEYS
+/// [`private::found`]: crate::private::found
+pub(crate) fn private(graph: &Graph) -> Result<()> {
+    let found = crate::private::found(&graph.pdf);
+    let Some(first) = found.first() else {
+        return Ok(());
+    };
+    let more = match found.len() {
+        1 => String::new(),
+        n => format!(" and {} more", n - 1),
+    };
+    bail!(
+        "it would hold sheaf's private data: {} in object {} {}{more}",
+        String::from_utf8_lossy(&first.name),
+        first.at.0,
+        first.at.1,
+    )
+}
+
+/// What of sheaf's private data a Rewrite's `graph`, written as
+/// [`Private::Scrub`] writes it, still holds, as [`private`] finds it: a
+/// note saying where, or none.
+///
+/// [`Private::Scrub`]: super::Private::Scrub
+pub(crate) fn private_left(graph: &Graph) -> Option<Note> {
+    let found = crate::private::found(&graph.pdf);
+    let first = found.first()?;
+    let more = match found.len() {
+        1 => String::new(),
+        n => format!(" and {} more", n - 1),
+    };
+    Some(Note(format!(
+        "some of sheaf's private data couldn't be taken out: {} in object {} {}{more}",
+        String::from_utf8_lossy(&first.name),
+        first.at.0,
+        first.at.1,
+    )))
+}
 
 /// The primary a Rewrite's graph was made over, as the checks see it.
 pub(crate) struct Primary<'a> {
@@ -170,7 +223,7 @@ pub(crate) fn copied(
 /// resolved, and the pages reached the tree's (`tree`, its pages and
 /// nodes) and the templates. `encrypt` is where the encryption dictionary
 /// goes, when there's one.
-pub(crate) fn links(
+fn links(
     graph: &Graph,
     primary: &Primary,
     tree: &HashSet<ObjectId>,

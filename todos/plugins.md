@@ -105,10 +105,10 @@ Not yet: the `ocr` host capability from the architecture section isn't in any sl
 
 ### Slice 5: SDK, docs, CI, packaging — done 2026-10-13
 Landed: `ocr` host interface (`recognize`, `page-text-layer`; the engine's time isn't charged to the plugin); SDK `Plugin` trait (only `run_command` required, blanket `Guest` impl), `FormBuilder`/`Answers`, `Batch`, `info`/`warn` — the bundled plugins use them; `docs/plugins.md` (guide, manifest reference, API, limits, versioning, trust model, bundled plugins); CI checks fmt/clippy/unit tests of `plugins/*` and the fixture and stages them; the release workflow installs the WASI target since `package.sh` builds the bundled plugins; README M6 row, building and configuration notes.
-Still open: the "host keeps N-1 worlds" policy has nothing to keep yet (0.1.0 is the first world); the manual GUI check below hasn't been run (no display in the session that built this), nor the Windows build.
+Still open: the "host keeps N-1 worlds" policy has nothing to keep yet (0.1.0 is the first world; superseded: since M10.5 slice 20 the host serves one world, 0.4, with an exact-minor manifest check and `edit-schema` until alpha, so 0.2 and 0.3 aren't served); the manual GUI check below hasn't been run (no display in the session that built this), nor the Windows build.
 - `ocr` host interface (`recognize(page, options)`, `page-text-layer(page)`), proxied to `sheaf_ocr`. Not in the original slices; added here so the architecture section's capability exists.
 - `sheaf-plugin-api` polished.
-- `docs/plugins.md`: authoring guide, API versioning policy (semver on the WIT package; the host keeps N-1 worlds), and the trust model.
+- `docs/plugins.md`: authoring guide, API versioning policy (semver on the WIT package; the host keeps N-1 worlds, superseded by M10.5 slice 20's one world, exact-minor manifest check and `edit-schema` until alpha), and the trust model.
 - CI builds the example plugins on ubuntu and windows and runs host integration tests against them on both.
 - `package.sh` ships the example plugins.
 - README milestone table: M6 row.

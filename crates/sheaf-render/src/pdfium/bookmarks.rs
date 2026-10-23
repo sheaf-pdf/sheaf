@@ -203,7 +203,7 @@ fn positions_round_trip_through_pdfium_and_the_source() {
         ],
         Box::new(FixedCount(5)),
     );
-    let out = sheaf_doc::save::rewrite(&model.snapshot()).unwrap();
+    let out = sheaf_doc::save::rewrite(&model).unwrap();
 
     let engine = PdfiumEngine::open_bytes(out.clone().into(), None).unwrap();
     let through_pdfium: Vec<(String, Option<u32>, Option<DestView>)> = bookmarks(&engine)

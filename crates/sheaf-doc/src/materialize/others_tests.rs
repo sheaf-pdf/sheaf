@@ -22,9 +22,10 @@ use sheaf_edit::{Op, Z};
 use super::header_tests::{ACROBAT_HEADER, AUTHORED, older_header_file};
 use super::recognized_tests::{contents, depth, drawn, everything, pages, stream};
 use super::removal_tests::{opened, scratch, text_file};
-use super::{How, Onto, Profile, SaveInput, SaveTarget, StrategyKind, Why};
+use super::{How, Onto, Profile, SaveHow, SaveInput, SaveTarget, StrategyKind, Why};
 use crate::content::{Balance, PagOrigin, PaginationKind};
 use crate::effects::{Flags, Removed, RemovedKind};
+use crate::export::Export;
 use crate::generate::{fixture as older, header};
 use crate::model::{Document, Filter, LegacySel, MarkedSel, PageDef, PageId, StreamSel};
 use crate::prim::{Key, Val};
@@ -220,9 +221,10 @@ fn acrobat_s_replaced(how: How) {
             assert!(!holds_acrobat_s(&pdf), "{layout}: the form is gone");
             assert!(!everything(&pdf).contains("ACROBAT"), "{layout}");
         }
-        let report = super::save(
+        let report = super::save_with(
             &mut doc,
             &path,
+            SaveHow::Planned,
             &Default::default(),
             &in_progress::NoProgress,
         )
@@ -254,9 +256,10 @@ fn only_its_own_kind_is_replaced() {
     let (path, mut doc) = opened(&dir, "a.pdf", &acrobat_file(&[&[BODY]]));
     doc.commit_ops(vec![watermark("MINE")], "watermark")
         .unwrap();
-    let report = super::save(
+    let report = super::save_with(
         &mut doc,
         &path,
+        SaveHow::Planned,
         &Default::default(),
         &in_progress::NoProgress,
     )
@@ -521,40 +524,62 @@ fn stripped(doc: &Document, pages: &[PageId], how: How) -> (Vec<u8>, Vec<String>
 }
 
 /// Pages an older sheaf drew a watermark and a background on, as it wrote
-/// them, the image's path in the background's settings: a clean copy
-/// keeps what they draw and takes out what it kept in them, so no object
-/// of the copy holds the settings or the path. The two pages that shared
-/// their streams share the copies, and a page with none draws its own as
-/// it was.
+/// them, the image's path in the background's settings: a clean copy, and
+/// a print without markup (§16 row 27), keep what they draw and take out
+/// what it kept in them, and what it drew with is named anew, so no object
+/// of the copy holds the settings, the path or a name of sheaf's. The two
+/// pages that shared their streams share the copies, and a page with none
+/// draws its own as it was.
 #[test]
 fn a_clean_copy_takes_out_what_an_older_sheaf_kept() {
     let dir = scratch();
     let marked: &[&[u8]] = &[older::Q, older::BACKGROUND, BODY, older::WATERMARK];
     let other: &[u8] = b"BT /F1 12 Tf 72 700 Td (other) Tj ET";
     let (_, doc) = opened(&dir, "a.pdf", &older_file(&[marked, marked, &[other]]));
-    let out = dir.join("clean.pdf");
-    crate::save::export_clean_copy(&doc.snapshot(), &out).unwrap();
-    let pdf = Pdf::load(&out).unwrap();
-    let all = everything(&pdf);
-    for gone in ["SheafSettings", "SheafStamp", "/home/someone"] {
-        assert!(!all.contains(gone), "{gone}");
+    let every = all(&doc);
+    let made = [
+        ("clean copy", doc.export_bytes(Export::clean_copy)),
+        (
+            "printed",
+            doc.export_bytes(|f, _| Export::print(f, &every, false)),
+        ),
+    ];
+    for (what, bytes) in made {
+        let pdf = Pdf::load_mem(&bytes).unwrap();
+        let all = everything(&pdf);
+        for gone in ["SheafSettings", "SheafStamp", "SheafWM", "/home/someone"] {
+            assert!(!all.contains(gone), "{what}: {gone}");
+        }
+        assert_eq!(crate::private::found(&pdf), [], "{what}");
+        let [first, second, third] = pages(&pdf)[..] else {
+            panic!("{what}: three pages")
+        };
+        let text = drawn(&pdf, first);
+        for kept in [
+            "/Subtype/Background>> BDC",
+            "(body) Tj",
+            "/Subtype/Watermark>> BDC",
+            "(DRAFT) Tj",
+        ] {
+            assert!(text.contains(kept), "{what}: {kept}: {text}");
+        }
+        // Each name it drew with, given a new one the page binds.
+        for (kind, op) in [
+            ("XObject", " Do"),
+            ("ExtGState", " gs"),
+            ("Font", " 72.00 Tf"),
+        ] {
+            let names = bound(&pdf, first, kind);
+            let used = (names.iter()).find(|n| text.contains(&format!("/{n}{op}")));
+            assert!(
+                used.is_some_and(|n| n.starts_with("Sh")),
+                "{what}: {kind}: {names:?}: {text}"
+            );
+        }
+        assert_eq!(depth(&pdf, first).1, Balance::default(), "{what}");
+        assert_eq!(contents(&pdf, first), contents(&pdf, second), "{what}");
+        assert_eq!(drawn(&pdf, third), String::from_utf8_lossy(other), "{what}");
     }
-    let [first, second, third] = pages(&pdf)[..] else {
-        panic!("three pages")
-    };
-    let text = drawn(&pdf, first);
-    for kept in [
-        "/Subtype/Background>> BDC",
-        "/SheafWMim Do",
-        "(body) Tj",
-        "/Subtype/Watermark>> BDC",
-        "(DRAFT) Tj",
-    ] {
-        assert!(text.contains(kept), "{kept}: {text}");
-    }
-    assert_eq!(depth(&pdf, first).1, Balance::default());
-    assert_eq!(contents(&pdf, first), contents(&pdf, second));
-    assert_eq!(drawn(&pdf, third), String::from_utf8_lossy(other));
 }
 
 /// Three blank pages share one stream, which holds a background an older
@@ -595,7 +620,8 @@ crate::both_ways!(
 
 /// An older sheaf's watermark whose settings are in a list the resources
 /// name, `/P0`, which no rewrite of the content reaches, keeps them, and
-/// the save is made, a note counting it.
+/// the save is made, a note counting it. A clean copy, which takes them
+/// out of the lists the resources name too, holds none.
 #[test]
 fn settings_a_list_cant_lose_stay_and_are_counted() {
     let dir = scratch();
@@ -612,8 +638,9 @@ fn settings_a_list_cant_lose_stay_and_are_counted() {
     let (_, doc) = opened(&dir, "a.pdf", &file);
     for how in [How::Rewritten, How::Appended] {
         let (bytes, notes) = stripped(&doc, &[doc.page(0).unwrap()], how);
-        let note = "1 watermark or background an older sheaf drew on page 1 keeps the settings \
-                    it kept in it, which can't be taken out of it as it's written.";
+        let note = "1 watermark, background, header or footer an older sheaf drew on page 1 \
+                    keeps the settings it kept in it, which can't be taken out of it as it's \
+                    written.";
         assert_eq!(notes, [note], "{how:?}");
         let pdf = Pdf::load_mem(&bytes).unwrap();
         assert!(
@@ -621,6 +648,9 @@ fn settings_a_list_cant_lose_stay_and_are_counted() {
             "{how:?}"
         );
     }
+    let pdf = Pdf::load_mem(&doc.export_bytes(Export::clean_copy)).unwrap();
+    assert_eq!(crate::private::found(&pdf), []);
+    assert!(drawn(&pdf, pages(&pdf)[0]).contains("(NAMED) Tj"));
 }
 
 /// Every page of `doc`, in order.

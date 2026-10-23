@@ -19,8 +19,8 @@ use sheaf_edit::{BookmarkPatch, Turn, Z};
 use super::removal_tests::{layer, note, opened, said, scratch, text_file, warned};
 use super::rewrite_tests::says;
 use super::{
-    AppendAnyway, Ask, AskAnswers, Note, Onto, SavePlan, SaveReport, SaveStop, Strategy,
-    StrategyKind, Why, append, plan, save,
+    AppendAnyway, Ask, AskAnswers, Note, Onto, SaveHow, SavePlan, SaveReport, SaveStop, Strategy,
+    StrategyKind, Why, append, plan, save_with,
 };
 use crate::effects::{Flags, PathEffects, Removed, RemovedKind, SigClass, misjudged};
 use crate::forms::fixture::{Form, row};
@@ -39,7 +39,7 @@ fn planned(doc: &Document, path: &Path) -> SavePlan {
 
 /// `doc` saved to `path` as the plan says, with `answers`.
 fn saved(doc: &mut Document, path: &Path, answers: AskAnswers) -> Result<SaveReport, SaveStop> {
-    save(doc, path, &answers, &NoProgress)
+    save_with(doc, path, SaveHow::Planned, &answers, &NoProgress)
 }
 
 /// Append anyway, what the offer says stays readable too.

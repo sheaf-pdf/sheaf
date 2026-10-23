@@ -25,6 +25,12 @@
 //! its effects ([`StepEffects`]) and its cascades; the commit tells the
 //! reader its [`Notice`]s.
 //!
+//! A plugin's call hands out what its ops made as they're applied
+//! ([`Tx::apply_said`]), before they're committed, so lowered again they
+//! must make the same ([`Tx::mark_handed_out`]). What it's answered is
+//! sheaf-edit's [`reply`](sheaf_edit::reply) types, made from a
+//! [`Preview`] and an [`EditError`].
+//!
 //! [`Document::commit`]: crate::model::Document::commit
 //! [`Document::tx_at`]: crate::model::Document::tx_at
 //! [`Document::lower_cx`]: crate::model::Document::lower_cx
@@ -56,10 +62,12 @@ use crate::store::{Blob, BlobRef, Src, Store};
 pub(crate) mod bookmarks;
 pub mod caps;
 pub mod cascade;
-mod content;
+pub(crate) mod content;
 pub mod error;
+pub mod export;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
+mod flatten;
 pub(crate) mod forms;
 pub(crate) mod marks;
 pub(crate) mod pages;
@@ -80,10 +88,11 @@ pub(crate) mod tests;
 #[cfg(test)]
 mod watermark_tests;
 
-pub use caps::{Actor, Cap, JobKind, Target, actor_allows, cap_of};
+pub use caps::{Actor, Cap, JobKind, Target, actor_allows, actor_exports, cap_of, transform_cap};
 pub use cascade::{Cascade, Rule};
 pub use content::others_on;
 pub use error::{EditError, Notice, notice_text};
+pub use export::ExportTx;
 pub use marks::{mark_changes, mark_kind, mark_patch, mark_style};
 pub use resolve::{
     At, BookmarkChange, OthersFound, ResolvedOp, incoming, op_name, ready_to_insert,
@@ -159,14 +168,21 @@ impl HostAttrs {
 }
 
 /// What a transaction lowers with: the document's store and primary, its
-/// id allocator, the host's attributes, and the actor. Only
-/// [`Document::lower_cx`](crate::model::Document::lower_cx) makes one.
+/// id allocator, the host's attributes, and the actor.
+/// [`Document::lower_cx`](crate::model::Document::lower_cx) makes one for
+/// any actor, and [`Published::plugin_tx`](crate::model::Published::plugin_tx)
+/// one for a plugin: nothing else does.
 pub struct LowerCx {
     pub(crate) store: Arc<Store>,
     pub(crate) primary: Src,
     pub(crate) alloc: Arc<IdAlloc>,
     pub(crate) host: HostAttrs,
     pub(crate) actor: Actor,
+    /// A plugin may learn who the user is (its manifest's `identity`
+    /// permission, granted): its marks' `<<name>>` and `<<initials>>` are
+    /// filled in. Only a plugin's transaction has it (§6.8); anyone
+    /// else's are filled in regardless.
+    pub(crate) identity: bool,
     /// The document's file has opened: until then every op is refused
     /// before it's lowered ([`EditError::NotReady`]).
     pub(crate) ready: bool,
@@ -191,13 +207,9 @@ pub enum Grant {
     Stamp { stem: String, form: FormRef },
 }
 
-/// Something an op made, which a local can name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Made {
-    Page(PageId),
-    Bookmark(OutlineId),
-    Annot(AnnotId),
-}
+/// Something an op made, which a local can name: sheaf-edit's, as a
+/// plugin is told it.
+pub use sheaf_edit::Made;
 
 /// What a transaction's ops made: each op's, in order, and what each
 /// local names.
@@ -273,7 +285,10 @@ pub enum Stale {
     /// Its ops lowered again on the current version, each drawing the ids
     /// it drew before, so what it made keeps its ids: a planner's, a plugin
     /// call's. A reference that no longer resolves is the op's error, and
-    /// a position once the order has moved is a Conflict.
+    /// a position once the order has moved is a Conflict. So is making
+    /// something else than they made first, in number, kind, id or local,
+    /// once that was handed out ([`Tx::mark_handed_out`]): a plugin's ids
+    /// stay true or its call fails.
     Relower,
 }
 
@@ -286,6 +301,12 @@ pub struct CommitOpts {
     pub stale: Stale,
     /// The group it's of, whose version it joins when it may (§8.4).
     pub group: Option<GroupId>,
+    /// How far down a chain of answers it is, as its change says
+    /// ([`ChangeSet::depth`]): 0 for an edit answering none, one more
+    /// than the change a plugin's event answered for the plugin's edit.
+    /// The plugin host refuses an edit of depth 2 (§14.3), so plugins
+    /// answering each other's changes stop.
+    pub depth: u8,
 }
 
 impl CommitOpts {
@@ -332,24 +353,55 @@ pub struct Commit {
 }
 
 /// What a transaction would do, committed on the version it was made on
-/// (§8.6): its lines, what its steps did together, and what its ops made.
+/// (§8.6): its lines, what its steps did together, what its ops made, and
+/// what each op needs of whoever makes it, in order.
 #[derive(Debug, Clone)]
 pub struct Preview {
     pub lines: Vec<crate::describe::Line>,
     pub effects: StepEffects,
     pub created: Created,
+    pub caps: Vec<Cap>,
+}
+
+impl From<Preview> for sheaf_edit::Applied {
+    /// What a plugin's submit is answered: what its ops made and their
+    /// lines.
+    fn from(p: Preview) -> sheaf_edit::Applied {
+        sheaf_edit::Applied {
+            created: p.created.ops,
+            locals: p.created.locals,
+            lines: p.lines.into_iter().map(|l| l.text).collect(),
+        }
+    }
+}
+
+impl From<Preview> for sheaf_edit::Previewed {
+    /// What a plugin's preview is answered: what a submit would be, what
+    /// each op needs, and whether they'd remove something.
+    fn from(p: Preview) -> sheaf_edit::Previewed {
+        let removes = (p.effects.effects.flags).contains(crate::effects::Flags::REMOVES);
+        sheaf_edit::Previewed {
+            lines: p.lines.into_iter().map(|l| l.text).collect(),
+            created: p.created.ops,
+            locals: p.created.locals,
+            caps: p.caps,
+            removes,
+        }
+    }
 }
 
 /// An op as a transaction took it, kept to lower it again on another
-/// version ([`Stale::Relower`]): the op, the ids lowering it drew, and
-/// whether resolving it read the order (a position, a span, every page).
-/// The op is kept as it came, not boxed: a transaction may keep thousands
-/// (OCR's 7,000 pages), and a box each is an allocation more an op.
+/// version ([`Stale::Relower`]): the op, the ids lowering it drew, whether
+/// resolving it read the order (a position, a span, every page), and what
+/// it needed of its actor, as its preview says. The op is kept as it came,
+/// not boxed: a transaction may keep thousands (OCR's 7,000 pages), and a
+/// box each is an allocation more an op.
 #[derive(Debug)]
 pub(crate) struct Entry {
     op: Op,
     drawn: Drawn,
     positional: bool,
+    cap: Cap,
 }
 
 /// The ids an op's lowering drew, of each kind in order: what lowering it
@@ -379,6 +431,11 @@ impl Drawn {
 
 /// Ops against a version, lowered as they come (§6.3). Send and
 /// `'static`: it can be built off the UI thread.
+///
+/// What its ops made may be handed out before it's committed, as a
+/// plugin's submit is answered ([`mark_handed_out`](Self::mark_handed_out)):
+/// lowered again on another version ([`Stale::Relower`]), they must make
+/// the same, or the commit is a Conflict.
 pub struct Tx {
     /// The document and version it's based on.
     instance: u64,
@@ -407,6 +464,10 @@ pub struct Tx {
     pins: Vec<Blob>,
     grants: Vec<Grant>,
     named: HashMap<String, usize>,
+    /// Its ops were read from a file ([`ops_from_file`](Tx::ops_from_file)).
+    from_file: bool,
+    /// What its ops made was handed out ([`mark_handed_out`](Tx::mark_handed_out)).
+    handed_out: bool,
     cx: Arc<LowerCx>,
 }
 
@@ -441,8 +502,40 @@ impl Tx {
             pins: Vec::new(),
             grants: Vec::new(),
             named: HashMap::new(),
+            from_file: false,
+            handed_out: false,
             cx,
         }
+    }
+
+    /// Its ops come from a file, as `sheaf edit`'s do (M10.5 §14.2): they
+    /// name things as a person sees them, by position, title path, `/NM`
+    /// and the names the command line gave its files, never by id. A
+    /// session's ids mean nothing outside it, so an op naming a page, a
+    /// bookmark, an annotation or a blob by id is
+    /// [`Invalid`](EditError::Invalid).
+    pub fn ops_from_file(&mut self) {
+        self.from_file = true;
+    }
+
+    /// What its ops made has been handed out, as a plugin's submit answers
+    /// with it (§8.5): lowered again on another version, they must make
+    /// the same, in the same order, with the same ids and locals, or the
+    /// commit is an [`EditError::Conflict`]. What a plugin was told stays
+    /// true.
+    pub fn mark_handed_out(&mut self) {
+        self.handed_out = true;
+    }
+
+    /// The version it's made on, which its commit names
+    /// ([`Base::At`]).
+    pub fn base(&self) -> VersionId {
+        self.base
+    }
+
+    /// No op has been applied: a commit of it would change nothing.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     /// `op`, lowered: all of it, or nothing and why not. Canceled by `p`,
@@ -460,14 +553,15 @@ impl Tx {
         p: &dyn Progress,
     ) -> Result<OpResult, EditError> {
         self.ready()?;
-        let (resolved, reads) = self.resolve(&op)?;
-        self.allowed(&resolved)?;
+        let (resolved, reads) = self.resolve(&op, true)?;
+        let cap = self.allowed(&resolved)?;
         let positional = reads.contains(&Key::Order);
         let (made, drawn) = self.lower(resolved, reads, pins, p)?;
         self.entries.push(Entry {
             op,
             drawn,
             positional,
+            cap,
         });
         Ok(made)
     }
@@ -493,17 +587,44 @@ impl Tx {
         Ok(out)
     }
 
+    /// [`apply_batch`](Self::apply_batch), and what `ops` did, as a
+    /// plugin's submit is answered: their lines and effects, what they
+    /// made, what the locals they gave name, and what each needed.
+    pub fn apply_said(&mut self, ops: Vec<Op>, p: &dyn Progress) -> Result<Preview, EditError> {
+        let (at, locals) = (self.steps.len(), self.locals.clone());
+        self.apply_batch(ops, p)?;
+        Ok(self.said_since(at, &locals))
+    }
+
+    /// What `ops` would do, applied now, as [`apply_said`](Self::apply_said)
+    /// says, with the transaction left as it was: its state, steps,
+    /// locals and reads. The ids lowering them drew stay drawn, never
+    /// handed out again (§8.5).
+    pub fn preview_batch(&mut self, ops: Vec<Op>, p: &dyn Progress) -> Result<Preview, EditError> {
+        let back = self.checkpoint();
+        let said = self.apply_said(ops, p);
+        self.rewind(back);
+        said
+    }
+
     /// Whether `op` could be applied now: its references resolve, and the
-    /// actor may make it. Nothing is lowered, and no id is drawn.
+    /// actor may make it. Nothing is lowered, no id is drawn, and pages an
+    /// insert makes in memory aren't made.
     pub fn check(&self, op: &Op) -> Result<(), EditError> {
         self.ready()?;
-        let (resolved, _) = self.resolve(op)?;
-        self.allowed(&resolved)
+        let (resolved, _) = self.resolve(op, false)?;
+        self.allowed(&resolved).map(|_| ())
     }
 
     /// A decision read: the caller based its ops on `key`'s value.
     pub fn read(&mut self, key: Key) {
         self.reader().note(key);
+    }
+
+    /// For tests: the slots its caller decided by.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn decided(&self) -> BTreeSet<Key> {
+        self.decided.keys().copied().collect()
     }
 
     /// The transaction's state, as a caller deciding its ops reads it:
@@ -556,14 +677,24 @@ impl Tx {
 
     /// What a commit of it on the version it was made on would do.
     pub fn preview(&self) -> Preview {
-        let effects: Vec<&StepEffects> = self.steps.iter().map(|s| &s.effects).collect();
+        self.said_since(0, &im::HashMap::new())
+    }
+
+    /// What its ops from the `at`th on did, when the locals named
+    /// `locals`: those steps' lines and effects, what they made, the
+    /// locals they gave, and what each op needed.
+    fn said_since(&self, at: usize, locals: &im::HashMap<Local, Made>) -> Preview {
+        let steps = &self.steps[at..];
+        let effects: Vec<&StepEffects> = steps.iter().map(|s| &s.effects).collect();
+        let given = (self.locals.iter()).filter(|&(l, m)| locals.get(l) != Some(m));
         Preview {
-            lines: crate::describe::lines(&self.steps),
+            lines: crate::describe::lines(steps),
             effects: StepEffects::union(&effects),
             created: Created {
-                locals: self.locals.iter().map(|(&l, &m)| (l, m)).collect(),
-                ..self.created.clone()
+                ops: self.created.ops[at..].to_vec(),
+                locals: given.map(|(&l, &m)| (l, m)).collect(),
             },
+            caps: self.entries[at..].iter().map(|e| e.cap).collect(),
         }
     }
 
@@ -576,26 +707,29 @@ impl Tx {
     }
 
     /// `op` with its references resolved against the state as it is, and
-    /// the slots resolving read.
-    fn resolve(&self, op: &Op) -> Result<(ResolvedOp, BTreeSet<Key>), EditError> {
+    /// the slots resolving read; the pages an insert makes in memory made
+    /// and interned when `build` ([`Resolver::build`](resolve::Resolver)).
+    fn resolve(&self, op: &Op, build: bool) -> Result<(ResolvedOp, BTreeSet<Key>), EditError> {
         let mut r = resolve::Resolver {
             st: &self.state,
             locals: &self.locals,
             cx: &self.cx,
             grants: &self.grants,
             named: &self.named,
+            from_file: self.from_file,
             op: op_name(op),
+            build,
             reads: BTreeSet::new(),
         };
         let resolved = r.op(op)?;
         Ok((resolved, r.reads))
     }
 
-    /// Whether the actor may make `op`.
-    fn allowed(&self, op: &ResolvedOp) -> Result<(), EditError> {
+    /// Whether the actor may make `op`: what it needs when so.
+    fn allowed(&self, op: &ResolvedOp) -> Result<Cap, EditError> {
         let cap = cap_of(op, &caps::targets(op, &self.state));
         match actor_allows(&self.cx.actor, cap, op) {
-            true => Ok(()),
+            true => Ok(cap),
             false => Err(EditError::Refused(cap)),
         }
     }
@@ -711,6 +845,8 @@ impl Tx {
             pins: self.pins,
             grants: self.grants,
             named: self.named,
+            from_file: self.from_file,
+            handed_out: self.handed_out,
             cx: self.cx,
         }
     }
@@ -731,6 +867,8 @@ pub(crate) struct TxParts {
     pins: Vec<Blob>,
     grants: Vec<Grant>,
     named: HashMap<String, usize>,
+    from_file: bool,
+    pub(crate) handed_out: bool,
     cx: Arc<LowerCx>,
 }
 
@@ -756,6 +894,8 @@ impl TxParts {
         tx.pins = self.pins;
         tx.grants = self.grants;
         tx.named = self.named;
+        tx.from_file = self.from_file;
+        tx.handed_out = self.handed_out;
         for Entry { op, drawn, .. } in self.entries {
             tx.apply_pinned(op, drawn, &in_progress::NoProgress)?;
         }
@@ -1137,6 +1277,14 @@ fn lower_op(lw: &mut Lower, op: &mut ResolvedOp) -> Result<(), EditError> {
             others,
         } => {
             *others = content::remove_header_footer(lw, pages, *include_authored)?;
+            Ok(())
+        }
+        R::FlattenAnnotations {
+            pages,
+            which,
+            flattened,
+        } => {
+            *flattened = flatten::flatten(lw, pages, *which)?;
             Ok(())
         }
         R::Revert { .. } => Err(EditError::internal(

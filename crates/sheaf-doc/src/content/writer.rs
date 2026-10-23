@@ -257,6 +257,29 @@ impl Reserved {
         self.names.remove(&(kind, name.to_vec()));
     }
 
+    /// Every name it keeps, each in its category.
+    pub fn names(&self) -> impl Iterator<Item = (ResKind, &[u8])> {
+        (self.names.keys()).map(|(kind, name)| (*kind, name.as_slice()))
+    }
+
+    /// `name` in `kind` given a new one, kept in its place: what it binds
+    /// named as [`ContentWriter::finish`] names a resource, clear of every
+    /// other name kept (one bound to the same resource is used again).
+    /// What binds something it can't tell is named by a digest of its old
+    /// name. None when it keeps no `name`.
+    pub fn rename(&mut self, kind: ResKind, name: &[u8]) -> Option<Vec<u8>> {
+        let ids = self.names.remove(&(kind, name.to_vec()))?;
+        let id = (ids.first().copied()).unwrap_or_else(|| ResId(sheaf_util::checksum(name)));
+        let new = fresh(kind, id, self, &BTreeSet::new());
+        let bound = self.names.entry((kind, new.clone())).or_default();
+        for id in ids {
+            if !bound.contains(&id) {
+                bound.push(id);
+            }
+        }
+        Some(new)
+    }
+
     /// Whether `name` may name `id` in `kind`.
     fn allows(&self, kind: ResKind, name: &[u8], id: ResId) -> bool {
         self.names
@@ -492,23 +515,19 @@ impl<'f> ContentWriter<'f> {
     /// the box its matrix makes of its bbox fills `target`. A form whose
     /// box has no area draws nothing, and isn't drawn.
     pub fn place_form(&mut self, form: Res, bbox: Rect, matrix: Affine, target: Box2) {
-        let frame = matrix.bounds(bbox);
-        let (w, h) = (frame.width(), frame.height());
-        let draws = w > 0.0 && h > 0.0;
-        if !draws {
+        let Some(onto) = Affine::onto(matrix.bounds(bbox), target) else {
             return;
-        }
-        let (sx, sy) = (target.w / w, target.h / h);
+        };
         self.save();
-        self.transform(Affine {
-            a: sx,
-            d: sy,
-            e: target.x - frame.x0 * sx,
-            f: target.y - frame.y0 * sy,
-            ..Affine::IDENTITY
-        });
+        self.transform(onto);
         self.draw(form);
         self.restore();
+    }
+
+    /// `BMC`: content tagged `tag`, with no property list.
+    pub fn begin_tagged(&mut self, tag: &str) {
+        object::name(&mut self.out, tag.as_bytes());
+        self.out.extend_from_slice(b" BMC\n");
     }
 
     /// `BDC`: content tagged `tag`, with property list `props`, named in

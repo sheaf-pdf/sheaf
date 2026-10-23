@@ -511,6 +511,45 @@ fn a_list_written_again_goes_with_what_s_taken_out() {
     );
 }
 
+/// Each name an older sheaf gave a resource is written again as its new
+/// one wherever content draws with it, by its category: every other byte
+/// stays, a name of another category among them, and an inline image's
+/// is left. A name written with an escape is one too.
+#[test]
+fn renamed_resources_are_written_again() {
+    let renamed = [
+        (ResKind::Font, b"SheafHF".to_vec(), b"ShAAAAAA".to_vec()),
+        (
+            ResKind::XObject,
+            b"SheafWMim".to_vec(),
+            b"ShBBBBBB".to_vec(),
+        ),
+        (
+            ResKind::ExtGState,
+            b"SheafWMgs".to_vec(),
+            b"ShCCCCCC".to_vec(),
+        ),
+    ];
+    let rewritten = |streams: &[&[u8]]| {
+        let c = Concat::new(streams);
+        let rewrites = renames(&c, &ResCx::none(), LIM, &renamed).unwrap();
+        content_with(&c, &[], &rewrites)
+    };
+    let s: &[u8] = b"q /SheafWMgs gs /SheafWMim Do Q BT /Sheaf#48F 9 Tf (SheafHF) Tj ET \
+        /SheafHF Do % /SheafHF 9 Tf\n";
+    assert_eq!(
+        rewritten(&[s]),
+        [
+            &b"q /ShCCCCCC gs /ShBBBBBB Do Q BT /ShAAAAAA 9 Tf (SheafHF) Tj ET \
+            /SheafHF Do % /SheafHF 9 Tf\n"[..]
+        ]
+    );
+    let image: &[u8] = b"BI /W 1 /H 1 /CS /SheafWMgs /BPC 8 ID x EI";
+    assert_eq!(rewritten(&[image]), [image]);
+    let c = Concat::new(&[s]);
+    assert_eq!(renames(&c, &ResCx::none(), LIM, &[]).unwrap(), []);
+}
+
 #[test]
 fn names_used_are_by_category() {
     let s: &[u8] = b"/GS0 gs /F1 9 Tf /CS0 cs /DeviceRGB CS /P0 scn 0.5 /P1 SCN /Im1 Do \
@@ -615,8 +654,7 @@ fn sheafs_blocks_are_found_by_their_markers() {
         ]
     );
     assert_eq!(&*blocks.isolation, &[ids[0], ids[2]]);
-    // A stream's dictionary alone says what it is, but a block of
-    // placements flattened, which is the page's own content.
+    // A stream's dictionary alone says what it is.
     let marker = |id: ObjectId| Marker::of(&pdf.get_object(id).unwrap().as_stream().unwrap().dict);
     let header = Marker::Gen {
         id: GenId(0x1f),
@@ -632,7 +670,7 @@ fn sheafs_blocks_are_found_by_their_markers() {
             Some(Marker::Isolate),
             Some(header),
             Some(Marker::Ocr(BlockId(0x2b))),
-            None,
+            Some(Marker::Flat(BlockId(0x2c))),
         ]
     );
     assert_eq!(

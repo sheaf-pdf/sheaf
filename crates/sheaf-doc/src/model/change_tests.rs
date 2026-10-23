@@ -275,6 +275,42 @@ fn an_amend_changes_its_own_keys() {
     assert_eq!((c.change.cause, &*c.change.keys), (Cause::Amend, &both));
 }
 
+/// A commit's change is as deep as its commit says, and so is an amend's
+/// in its group; an undo and a redo are the user's, answering nothing, so
+/// a plugin's answer to them is never deeper than one (M10.5 §14.3).
+#[test]
+fn a_change_is_as_deep_as_its_commit() {
+    let mut d = doc();
+    let (p0, p1) = (id_at(&d, 0), id_at(&d, 1));
+    let g = d.begin_group(GroupKind::PluginCall {
+        plugin: "tax".into(),
+    });
+    let commit = |d: &mut Document, page: PageId, depth: u8| {
+        let mut tx = d.tx(Actor::Plugin {
+            id: "tax".into(),
+            version: "1.0".into(),
+        });
+        tx.apply(fx::rotate(&[page], Turn::Quarter), &NoProgress)
+            .unwrap();
+        let opts = CommitOpts {
+            group: Some(g),
+            depth,
+            ..CommitOpts::labelled("Tax")
+        };
+        d.commit(tx, opts).unwrap()
+    };
+    let c = commit(&mut d, p0, 1);
+    assert_eq!((c.change.cause, c.change.depth), (Cause::Commit, 1));
+    let c = commit(&mut d, p1, 2);
+    assert_eq!((c.change.cause, c.change.depth), (Cause::Amend, 2));
+    d.end_group(g);
+    assert_eq!(d.undo().unwrap().unwrap().depth, 0);
+    assert_eq!(d.redo().unwrap().unwrap().depth, 0);
+    let c = d.commit_ops(vec![fx::rotate(&[p0], Turn::Half)], "Rotate");
+    let c = c.unwrap();
+    assert_eq!(c.change.depth, 0, "the user's");
+}
+
 /// Labels, a header and a form's page each say what they changed, and so
 /// does each one's undo: the page labels, the generators, and the form
 /// with its field.

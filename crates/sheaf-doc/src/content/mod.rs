@@ -12,17 +12,19 @@
 //!   `q`/`Q` balance and the resource names it uses; [`kept`], the last
 //!   two of what's left once ranges are taken out.
 //! - [`splice`]: its streams with ranges taken out, byte for byte, when
-//!   that's safe, and refused when it isn't; and [`without_keys`], a
-//!   marked range's property list written again without some keys.
+//!   that's safe, and refused when it isn't; [`without_keys`], a marked
+//!   range's property list written again without some keys; and
+//!   [`renames`], the resource names it draws with written again as
+//!   others.
 //! - [`PageBlocks`]: its pagination artifacts and who drew them, and
 //!   sheaf's own blocks.
 //! - [`text_bag`]: the words it draws, decoded through its fonts.
 //! - [`Font`]: what sheaf draws text in, [`Std14`] and [`Glyphless`], and
 //!   [`FontRes`], a font as a page resource named by its [`ResId`].
 //! - [`ContentWriter`]: content written, its resources ([`Res`]) named at
-//!   the end, and [`ResObjects`], which writes them for the old writers.
-//! - [`sink`]: where content's resources are written, the old writers'
-//!   lopdf document or the emitter.
+//!   the end.
+//! - [`sink`]: where content's resources are written: the emitter, or a
+//!   PDF built in memory ([`serialize::built`](crate::serialize::built)).
 
 mod balance;
 mod blocks;
@@ -43,7 +45,6 @@ mod tests;
 mod text_bag;
 #[cfg(test)]
 mod text_bag_tests;
-mod to_lopdf;
 mod writer;
 #[cfg(test)]
 mod writer_tests;
@@ -59,9 +60,8 @@ pub use marked::{Marked, PropertiesDict, Props, marked};
 pub use names::{Kept, NameSet, ResKind, kept, names_used};
 pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, contents};
 pub use res::{Res, ResBody, ResId};
-pub use splice::{Rewrite, SpliceError, Spliced, splice, splice_each, without_keys};
+pub use splice::{Rewrite, SpliceError, Spliced, renames, splice, splice_each, without_keys};
 pub use text_bag::{FontDecoders, TextBag, text_bag};
-pub use to_lopdf::ResObjects;
 pub use writer::{
     Blend, Color, ContentWriter, FillRule, GState, LineCap, LineJoin, Need, Paint, Reserved,
     ResourceNeeds, TextMode, write_string,

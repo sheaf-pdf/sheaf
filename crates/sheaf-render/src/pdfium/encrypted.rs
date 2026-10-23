@@ -165,7 +165,7 @@ fn an_aes256_object_stream_base_rewrites() {
     assert!(holds(&base, b"/ObjStm"));
     let path = put(&dir, "object-streams.pdf", &base);
     let doc = sheaf_doc::open::file(&path, Some(USER)).unwrap().doc;
-    let bytes = sheaf_doc::save::rewrite(&doc.snapshot()).unwrap();
+    let bytes = sheaf_doc::save::rewrite(&doc).unwrap();
     assert!(!holds(&bytes, b"/ObjStm"));
     for text in FORM_SECRETS {
         assert!(!holds(&bytes, text), "{:?}", String::from_utf8_lossy(text));

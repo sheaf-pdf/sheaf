@@ -85,15 +85,16 @@ use lopdf::{Dictionary, Object, ObjectId};
 
 use super::copy::{Closure, Pages, Scope};
 use super::key::{NameTree, ObjKey};
-use super::plan::{Note, SaveTransform};
+use super::plan::{Note, Private, SaveTransform, Unheld};
 use super::record::{DrawnBlocks, SaveRecord};
-use crate::annot::{Annot, AnnotId, StampForm};
+use crate::annot::{Annot, AnnotId};
 use crate::content::sink::{self, Sink};
 use crate::content::{GenId, Res, ResBody, Reserved};
 use crate::forms::field::annot_flags;
 use crate::model::{AnnotBody, DocState, FormRef, PageId};
 use crate::realize::{MarkDraw, ViewInputs};
-use crate::source::ObjRef;
+use crate::serialize::built::StampForm;
+use crate::source::{ObjRef, PageObj};
 use crate::store::{BlobId, Src};
 
 /// The generation a placeholder reference carries. No object in use has
@@ -111,8 +112,10 @@ pub struct Emission {
     pub syms: Syms,
     /// The PDF version the emitted objects need: the primary's at least.
     pub version: PdfVersion,
-    /// Annotations of the base the emission leaves out. None yet: the
-    /// pages' `/Annots` are the base's.
+    /// The primary's annotations its pages list that the pages written as
+    /// those pages leave out, and nothing writes at their numbers: a
+    /// flatten's, a delete's. What `keep_only` takes out of what still
+    /// names them (the structure tree's object references, §12.2).
     pub removed_annots: Vec<ObjRef>,
     /// The saved file's blocks a save's section may unlink though they're
     /// derived (§11.9): live redraws, each the block a generator drew on a
@@ -241,10 +244,14 @@ pub enum EmitBase<'a> {
     /// new tree, the root objects' unowned keys from the primary. `drawn`
     /// is what the saved file's blocks are, when it's known: a block of it
     /// a generator draws otherwise now from the same recipe is a live
-    /// redraw ([`Emission::allowed_drops`]).
+    /// redraw ([`Emission::allowed_drops`]). `private` says whether it
+    /// holds sheaf's private data (§15), and `unheld` which annotations
+    /// the records don't hold it keeps.
     Rewrite {
         primary: &'a Src,
         drawn: Option<&'a DrawnBlocks>,
+        private: Private,
+        unheld: Unheld,
     },
     /// The saved file an Append writes after, `primary` the file it was,
     /// as `record` says it is: the node each page written goes under, its
@@ -403,6 +410,13 @@ pub(crate) struct Cx<'a> {
     pub(crate) overlay: Option<&'a Overlay<'a>>,
     /// What save policy does to the form as it's written.
     pub(crate) transforms: &'a [SaveTransform],
+    /// Whether what it writes holds sheaf's private data: under
+    /// [`Private::Strip`], what it draws is unmarked, its marks have
+    /// neutral names and no JSON, and the catalog doesn't say the
+    /// generators (§15).
+    pub(crate) private: Private,
+    /// Which annotations of the pages the records don't hold it writes.
+    pub(crate) unheld: Unheld,
     pub(crate) primary: &'a Src,
     /// The sources the pages are written from, by their blobs: what a
     /// placeholder to a source's object is read from.
@@ -447,9 +461,10 @@ pub(crate) struct Cx<'a> {
     /// stays, as a splice refuses it or a legacy layer's stream has lost
     /// its `q`.
     pub(crate) text_stayed: Vec<PageId>,
-    /// The pages where watermarks or backgrounds an older sheaf drew keep
-    /// the settings a filter takes out, as their property lists can't be
-    /// written again without them, and how many on each.
+    /// The pages where watermarks, backgrounds, headers or footers an
+    /// older sheaf drew keep the settings a filter takes out, as their
+    /// property lists can't be written again without them, and how many on
+    /// each.
     pub(crate) settings_kept: Vec<(PageId, usize)>,
     /// Every annotation read from a file, by the object it was read as and
     /// which copy of it it is: what a reply's `/IRT` names.
@@ -467,6 +482,10 @@ pub(crate) struct Cx<'a> {
     pub(crate) allowed: BTreeSet<ObjKey>,
     /// [`AllowedDrops::redrawn`] so far.
     pub(crate) redrawn: HashSet<(PageId, GenId)>,
+    /// The primary's annotations its pages list that the pages written as
+    /// copy 0 of them leave out ([`Emission::removed_annots`] once nothing
+    /// is written at their numbers).
+    pub(crate) left_out: Vec<ObjectId>,
 }
 
 impl<'a> Cx<'a> {
@@ -485,6 +504,8 @@ impl<'a> Cx<'a> {
             append: None,
             overlay: None,
             transforms,
+            private: Private::Keep,
+            unheld: Unheld::Keep,
             primary,
             srcs: HashMap::new(),
             shown: HashMap::new(),
@@ -513,6 +534,7 @@ impl<'a> Cx<'a> {
             drawn: HashMap::new(),
             allowed: BTreeSet::new(),
             redrawn: HashSet::new(),
+            left_out: Vec::new(),
         }
     }
 
@@ -520,6 +542,11 @@ impl<'a> Cx<'a> {
     /// [`Closure::sym`]).
     pub(crate) fn sym(&mut self, obj: &Object, scope: &Scope) -> Object {
         self.closure.sym(&mut self.syms, obj, scope)
+    }
+
+    /// Whether it leaves sheaf's private data out ([`Private::strips`]).
+    pub(crate) fn strips(&self) -> bool {
+        self.private.strips()
     }
 
     /// A placeholder reference to `key`'s object.
@@ -593,6 +620,12 @@ impl<'a> Cx<'a> {
     /// another tool's comment is ([`draws`](Self::draws)).
     pub(crate) fn draws_unmodeled(&self, widget: bool) -> bool {
         widget || self.overlay.is_none_or(|o| o.inputs.foreign)
+    }
+
+    /// Whether an annotation of a page the records don't hold, a `link`, a
+    /// `widget` or neither, is kept ([`Unheld`]).
+    pub(crate) fn keeps_unheld(&self, link: bool, widget: bool) -> bool {
+        self.unheld.keeps(link, widget)
     }
 
     /// Whether an overlay writes annotation `aid` hidden: its view hides
@@ -722,6 +755,21 @@ impl<'a> Cx<'a> {
         None
     }
 
+    /// The stream `make` makes pushed under `key`, its data made as it's
+    /// written ([`Deferred`]), unless it was already, or an Append's saved
+    /// file has it: the placeholder.
+    pub(crate) fn push_deferred(
+        &mut self,
+        key: ObjKey,
+        make: impl FnOnce(&mut Self) -> Deferred,
+    ) -> ObjectId {
+        if self.writes(&key) && self.made.insert(key) {
+            let stream = make(self);
+            self.objects.push((key, SymObject::Deferred(stream)));
+        }
+        self.syms.id(key)
+    }
+
     /// `obj` pushed under `key` unless it was already, or an Append's saved
     /// file has it: the placeholder.
     pub(crate) fn push_once(
@@ -804,6 +852,16 @@ fn part(cx: &mut Cx, obj: &Object, key: &dyn Fn(usize) -> ObjKey) -> Object {
     obj
 }
 
+/// `data` deflated, as a stream whose `/Filter` is `/FlateDecode` holds
+/// it: what a [`Deferred`] stream's data is made as, whatever its size, as
+/// its dictionary says so before it's made.
+pub(crate) fn deflated(data: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write as _;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    z.write_all(data)?;
+    Ok(z.finish()?)
+}
+
 /// What each page of `st` is written as ([`Shown`]): its base page, as
 /// its copy.
 pub(crate) fn shown(st: &DocState) -> HashMap<PageId, Shown> {
@@ -820,19 +878,18 @@ pub(crate) fn shown(st: &DocState) -> HashMap<PageId, Shown> {
 }
 
 /// The page of `st` each source page's copy is written as, shown as
-/// `shown` says, by the source's blob, the page's object and the copy: the
-/// first in order that shows it. What a reference to a source's page from
-/// that source's objects is written as ([`Closure`]).
+/// `shown` says, by the source page and the copy: the first in order that
+/// shows it. What a reference to a source's page from that source's
+/// objects is written as ([`Closure`]).
 pub(crate) fn written_pages(
     st: &DocState,
     shown: &HashMap<PageId, Shown>,
-) -> BTreeMap<(BlobId, ObjectId, u32), PageId> {
+) -> BTreeMap<(PageObj, u32), PageId> {
     let mut pages = BTreeMap::new();
     for (id, _, _) in st.pages() {
         let page = &shown[&id];
-        if let Some(facts) = page.src.page(page.index) {
-            let at = (page.src.id(), facts.id, page.copy);
-            pages.entry(at).or_insert(id);
+        if let Some(at) = page.src.page_obj(page.index) {
+            pages.entry((at, page.copy)).or_insert(id);
         }
     }
     pages
@@ -849,8 +906,16 @@ pub fn emit(
     transforms: &[SaveTransform],
     p: &dyn Progress,
 ) -> Result<Emission> {
-    let (primary, keys, saved, prior) = match (&scope, base) {
-        (EmitScope::All, EmitBase::Rewrite { primary, drawn }) => (primary, None, None, drawn),
+    let (primary, keys, saved, prior, private, unheld) = match (&scope, base) {
+        (
+            EmitScope::All,
+            EmitBase::Rewrite {
+                primary,
+                drawn,
+                private,
+                unheld,
+            },
+        ) => (primary, None, None, drawn, private, unheld),
         (
             EmitScope::Keys(keys),
             EmitBase::Saved {
@@ -865,6 +930,8 @@ pub fn emit(
             Some(&**keys),
             Some((record, parents, tree, relinked)),
             Some(&*record.drawn),
+            Private::Keep,
+            Unheld::Keep,
         ),
         (EmitScope::Pages(pages), EmitBase::Overlay(overlay)) => {
             return emit_overlay(st, pages, overlay, (true, true), p);
@@ -892,6 +959,8 @@ pub fn emit(
         closure.saved(record.map.clone(), relinked);
     }
     let mut cx = Cx::new(st, primary, closure, transforms);
+    cx.private = private;
+    cx.unheld = unheld;
     cx.prior = prior;
     cx.append = keys
         .zip(saved)
@@ -1040,13 +1109,13 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
         let pages = crate::describe::pages_text(&on, cx.st);
         let (n, keep, it, is) = match cx.settings_kept.iter().map(|&(_, n)| n).sum::<usize>() {
             1 => (
-                "1 watermark or background".to_string(),
+                "1 watermark, background, header or footer".to_string(),
                 "keeps",
                 "it",
                 "it's",
             ),
             n => (
-                format!("{n} watermarks or backgrounds"),
+                format!("{n} watermarks, backgrounds, headers or footers"),
                 "keep",
                 "them",
                 "they're",
@@ -1064,11 +1133,19 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
     let form_keys = std::mem::take(&mut cx.form.keys);
     let form_touched = cx.form.touched;
     let allowed_drops = AllowedDrops::of(cx.st, cx.prior, cx.allowed, cx.redrawn);
+    let written: HashSet<ObjectId> = cx.owned.values().copied().collect();
+    let removed_annots = (cx.left_out.iter())
+        .filter(|id| !written.contains(id))
+        .map(|&id| ObjRef {
+            src: cx.primary.clone(),
+            id,
+        })
+        .collect();
     Ok(Emission {
         objects: cx.objects,
         syms: cx.syms,
         version: cx.version,
-        removed_annots: Vec::new(),
+        removed_annots,
         allowed_drops,
         drawn: cx.drawn,
         notes: cx.notes,

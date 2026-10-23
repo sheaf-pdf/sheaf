@@ -29,6 +29,7 @@ use lopdf::{Object, dictionary};
 use crate::annot::{Box2, Pt};
 use crate::content::{BlockId, ContentWriter, Glyphless, Reserved, ResourceNeeds, TextMode};
 use crate::geom::{Affine, Geom};
+use crate::materialize::Private;
 
 pub use sheaf_edit::{OcrWord, TextLayer};
 
@@ -110,14 +111,16 @@ pub(crate) fn overlaps_line(line: Box2, r: Box2) -> bool {
 /// text, one `Tj` per word, fitted to the word's box by horizontal scaling,
 /// in [`Glyphless`]; marked `/ShOCR` with a property list that names its
 /// block (`<< /SheafOcrBlock (b…) >>`), so a stream another tool merges it
-/// into still says what it is; and in a `q` of its own, so the text mode
-/// it sets reaches nothing drawn after it. Text runs along the upright
-/// frame's x, so it's turned by [`TextLayer::upright`]. The names it draws
-/// with, the font's and the list's, are kept clear of `reserved`.
+/// into still says what it is, or with none when `private` strips that
+/// (§15); and in a `q` of its own, so the text mode it sets reaches
+/// nothing drawn after it. Text runs along the upright frame's x, so it's
+/// turned by [`TextLayer::upright`]. The names it draws with, the font's
+/// and the list's, are kept clear of `reserved`.
 pub(crate) fn block(
     layer: &TextLayer,
     id: BlockId,
     reserved: &Reserved,
+    private: Private,
 ) -> (Vec<u8>, ResourceNeeds) {
     let to_user = Affine::upright(layer.upright).inverse();
     let theta = layer.upright.degrees() as f32;
@@ -134,8 +137,13 @@ pub(crate) fn block(
         }
     };
     let mut w = ContentWriter::new();
-    let list = dictionary! { "SheafOcrBlock" => Object::string_literal(id.to_string()) };
-    w.begin_marked("ShOCR", list);
+    match private {
+        Private::Keep => {
+            let list = dictionary! { "SheafOcrBlock" => Object::string_literal(id.to_string()) };
+            w.begin_marked("ShOCR", list);
+        }
+        Private::Strip | Private::Scrub => w.begin_tagged("ShOCR"),
+    }
     w.save();
     w.begin_text();
     w.text_mode(TextMode::Invisible);
@@ -183,8 +191,9 @@ mod tests {
     use sheaf_edit::Rotation;
 
     use super::*;
-    use crate::content::{Font, Need, Res, ResKind, ResObjects};
+    use crate::content::{Font, Need, Res, ResKind};
     use crate::geom::Rect;
+    use crate::serialize::built::ResObjects;
 
     const ROTATIONS: [Rotation; 4] = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
 
@@ -293,7 +302,7 @@ mod tests {
 
     /// [`block`] of `l` with no names taken, as block 0x2a.
     fn written(l: &TextLayer) -> (Vec<u8>, ResourceNeeds) {
-        block(l, BlockId(0x2a), &Reserved::default())
+        block(l, BlockId(0x2a), &Reserved::default(), Private::Keep)
     }
 
     #[test]
@@ -339,10 +348,25 @@ mod tests {
             &fixture::layer(),
             BlockId(fixture::BLOCK_ID),
             &Reserved::default(),
+            Private::Keep,
         );
         assert_eq!(c, fixture::OCR_BLOCK, "{}", String::from_utf8_lossy(&c));
         let names: Vec<&[u8]> = needs.0.iter().map(|n| &n.name[..]).collect();
         assert_eq!(names, [fixture::OCR_LIST, fixture::OCR_FONT]);
+    }
+
+    /// Without sheaf's private data, a block is marked `/ShOCR` with no
+    /// list, and draws its words as it does with one.
+    #[test]
+    fn a_block_without_private_data_has_no_list() {
+        let (l, id) = (fixture::layer(), BlockId(fixture::BLOCK_ID));
+        let (kept, _) = block(&l, id, &Reserved::default(), Private::Keep);
+        let (stripped, needs) = block(&l, id, &Reserved::default(), Private::Strip);
+        assert!(stripped.starts_with(b"/ShOCR BMC\nq\n"));
+        let kinds: Vec<ResKind> = needs.0.iter().map(|n| n.kind).collect();
+        assert_eq!(kinds, [ResKind::Font]);
+        let words = |c: &[u8]| c[c.windows(2).position(|w| w == b"q\n").unwrap()..].to_vec();
+        assert_eq!(words(&stripped), words(&kept));
     }
 
     /// The names a block draws with keep clear of those the page binds to
@@ -359,7 +383,7 @@ mod tests {
                 })
                 .collect(),
         ));
-        let (_, clear) = block(&two_lines(), BlockId(0x2a), &reserved);
+        let (_, clear) = block(&two_lines(), BlockId(0x2a), &reserved, Private::Keep);
         for (was, now) in needs.0.iter().zip(&clear.0) {
             assert_eq!((was.kind, &was.res), (now.kind, &now.res));
             assert_ne!(was.name, now.name);

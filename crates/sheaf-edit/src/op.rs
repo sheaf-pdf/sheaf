@@ -12,7 +12,7 @@ use crate::header_footer::HeaderFooterSpec;
 use crate::ids::Local;
 use crate::labels::PageLabelRange;
 use crate::mark::{Anchor, Color, Imported, MarkPatch, NewMark, Style};
-use crate::page::{BoxSpec, DestView, Rotation, TextStyle};
+use crate::page::{BoxSpec, DestView, Fit, PageSize, Rotation, TextStyle};
 use crate::patch::Patch;
 use crate::refs::{AnnotRef, BlobSel, BookmarkRef, PageRef, PageSel, RangeSet, ScopeSel};
 use crate::text_layer::TextLayer;
@@ -212,6 +212,26 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         include_authored: bool,
     },
+    /// The annotations on `pages` that `which` says drawn into the pages
+    /// as their appearances show them, and taken off: what they drew
+    /// stays, as the page's own, and nothing of them can be edited. Links
+    /// stay, and so do annotations hidden or never shown (Hidden, NoView),
+    /// which draw nothing. A widget draws the appearance its state (`/AS`)
+    /// names, or nothing when it has states and none is named, and goes
+    /// with its field when it was the field's last. Each page's drawing is
+    /// a layer over what's there: flattening again adds another.
+    FlattenAnnotations { pages: PageSel, which: FlattenSet },
+}
+
+/// Which annotations a flatten draws into their pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlattenSet {
+    /// Every one shown: sheaf's marks, others' comments and the form's
+    /// widgets.
+    All,
+    /// Those a printout shows: with the Print flag.
+    Printable,
 }
 
 /// A turn of a page from where it is, clockwise. In JSON, degrees: 90,
@@ -313,13 +333,19 @@ pub struct BookmarkPatch {
     pub style: Option<TextStyle>,
 }
 
-/// Where inserted pages come from.
+/// Where inserted pages come from: a PDF, or pages made in memory, which
+/// come in as a PDF's would.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum PageSource {
     /// A PDF: `file`, by the `name` the user picked it by, which renames
     /// and notices say (never a name the bytes came with).
     File { file: BlobSel, name: String },
+    /// `count` blank pages of `size`.
+    Blank { size: PageSize, count: u32 },
+    /// A page for each image in `images`, image files (a TIFF may hold
+    /// several), in order, each page as `fit` says.
+    Images { images: Vec<BlobSel>, fit: Fit },
 }
 
 /// What comes in with inserted pages besides the pages. Other tools'

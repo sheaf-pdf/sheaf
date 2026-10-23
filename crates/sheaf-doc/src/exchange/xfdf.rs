@@ -7,12 +7,13 @@
 //! data goes beside them as `<fields>`.
 
 use anyhow::{Context, Result, bail};
-use lopdf::{Dictionary, Document as Pdf, Object, StringFormat};
+use lopdf::{Dictionary, LazyPdf, Object, StringFormat};
 use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
 
 use super::Comments;
 use crate::file::pdf_text;
+use crate::serialize::built::Built;
 
 const NS: &str = "http://ns.adobe.com/xfdf/";
 
@@ -61,7 +62,7 @@ const STYLES: [(&str, &[u8]); 5] = [
 
 /// `comments` as an XFDF document.
 pub fn write(comments: &Comments) -> Result<Vec<u8>> {
-    let pdf = &comments.pdf;
+    let pdf = comments.src.pdf();
     let mut out = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xfdf xmlns=\"{NS}\" xml:space=\"preserve\">\n<annots>\n"
     );
@@ -257,7 +258,9 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
 pub fn read(bytes: &[u8]) -> Result<Comments> {
     let text = std::str::from_utf8(bytes).context("XFDF that isn't UTF-8")?;
     let mut reader = quick_xml::Reader::from_str(text);
-    let mut out = Comments::new();
+    let mut built = Built::new();
+    let mut annots = Vec::new();
+    let mut file = None;
     // The annotation being read: its page and keys; the child being read
     // and its text so far; the strokes of an ink.
     let mut current: Option<(u32, Dictionary)> = None;
@@ -288,7 +291,7 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
                     ("xfdf", _) => saw_xfdf = true,
                     ("annots", _) => in_annots = !empty,
                     ("f", None) => {
-                        out.file = attrs
+                        file = attrs
                             .iter()
                             .find(|(k, _)| k == "href")
                             .map(|(_, v)| v.clone());
@@ -297,8 +300,8 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
                         if let Some(&(sub, _)) = ELEMENTS.iter().find(|(_, el)| *el == tag) {
                             let (page, dict) = annotation(sub, &attrs);
                             if empty {
-                                let id = out.pdf.add_object(Object::Dictionary(dict));
-                                out.annots.push((page, id));
+                                let id = built.pdf().add_object(Object::Dictionary(dict));
+                                annots.push((page, id));
                             } else {
                                 current = Some((page, dict));
                             }
@@ -361,8 +364,8 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
                         .iter()
                         .any(|(sub, el)| *el == tag && crate::import::subtype(d) == *sub)
                 }) {
-                    let id = out.pdf.add_object(Object::Dictionary(dict));
-                    out.annots.push((page, id));
+                    let id = built.pdf().add_object(Object::Dictionary(dict));
+                    annots.push((page, id));
                 }
             }
             Event::Eof => break,
@@ -372,7 +375,7 @@ pub fn read(bytes: &[u8]) -> Result<Comments> {
     if !saw_xfdf {
         bail!("not XFDF: no <xfdf> element");
     }
-    Ok(out)
+    Comments::built(built, annots, file)
 }
 
 /// An annotation's dictionary, from its element's attributes.
@@ -480,12 +483,12 @@ fn annotation(subtype: &str, attrs: &[(String, String)]) -> (u32, Dictionary) {
     (page, d)
 }
 
-fn numbers(pdf: &Pdf, d: &Dictionary, key: &[u8]) -> Option<Vec<f32>> {
+fn numbers(pdf: &LazyPdf, d: &Dictionary, key: &[u8]) -> Option<Vec<f32>> {
     let (_, o) = pdf.dereference(d.get(key).ok()?).ok()?;
     Some(floats(pdf, o.as_array().ok()?))
 }
 
-fn floats(pdf: &Pdf, a: &[Object]) -> Vec<f32> {
+fn floats(pdf: &LazyPdf, a: &[Object]) -> Vec<f32> {
     a.iter()
         .map(|o| {
             pdf.dereference(o)

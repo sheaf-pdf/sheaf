@@ -4,12 +4,12 @@
 //! - **sheaf's marks** are written through their appearances
 //!   ([`annot::emission`]): the stamp a page stamp holds as a form
 //!   ([`FormRef::Base`] the source's object, [`FormRef::Blob`] its one-page
-//!   PDF made a form, once a file), an attachment's file from its blob, a
-//!   replacement's StrikeOut beside its Caret, grouped under it (`/IRT`,
-//!   `/RT /Group`) and marked no other way. A mark read from the primary
-//!   keeps its object's number; one the state holds as it was read, on its
-//!   own page, is the file's object as it is, with its appearance and
-//!   companion.
+//!   PDF made a form, [`FormRef::Pinned`] drawn from its inputs, once a
+//!   file), an attachment's file from its blob, a replacement's StrikeOut
+//!   beside its Caret, grouped under it (`/IRT`, `/RT /Group`) and marked
+//!   no other way. A mark read from the primary keeps its object's number;
+//!   one the state holds as it was read, on its own page, is the file's
+//!   object as it is, with its appearance and companion.
 //! - **Another tool's comment or link** is its source dictionary, its
 //!   references copied with the page (`/P` the page as written), a link to
 //!   a page that isn't written dropped by `keep_only`. Copy 0 of one in the
@@ -33,9 +33,21 @@
 //!   outside the form and an entry with no subtype are kept as the page
 //!   has them, copied with it. sheaf's old marks and companions are left
 //!   out: their records were written.
+//! - **What's left out**: an annotation the primary's page lists that its
+//!   copy 0 doesn't write now, and nothing writes at its number (a
+//!   flatten's, a delete's), is one of the emission's removed annotations
+//!   (`Emission::removed_annots`), which a Rewrite's `keep_only` takes out
+//!   of what still names it, as the structure tree does.
 //! - **`/StructParent`** stays only where the page keeps its
 //!   `/StructParents` (copy 0 of a primary page): the structure tree of a
 //!   copy or of another file isn't written (proposal 24).
+//!
+//! **Without sheaf's private data** (`Private::Strip`, §15), a mark is
+//! always written anew, without `/SheafAnnot`, and the name sheaf gave it,
+//! its StrikeOut's and a comment's a reply made here named, is a neutral
+//! one ([`private::neutral_nm`]); `/IRT`, `/RT /Group` and a connector's
+//! `/Dest` refer to objects, and follow. Another tool's comment loses any
+//! key of sheaf's it holds.
 //!
 //! An overlay writes what its view draws ([`Cx::draws`]): sheaf's marks
 //! only when PDFium draws them, others' comments and links (and what else
@@ -48,17 +60,21 @@
 //! [`Cx::hidden`]: super::Cx::hidden
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use lopdf::{Dictionary, Object, ObjectId, Stream, dictionary};
 
 use super::{Cx, Shown};
-use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted, Held, StampForm};
-use crate::content::Res;
+use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted};
+use crate::content::{Res, ResId};
 use crate::file::PageAnnots;
+use crate::geom::{Affine, Rect};
 use crate::materialize::copy::{self, Scope};
 use crate::materialize::key::{ObjKey, Part};
-use crate::model::{AnnotBody, DocState, Foreign, FormRef, Mark, PageId};
+use crate::model::{AnnotBody, DocState, Foreign, FormRef, Mark, PageId, PinnedAp};
 use crate::open::FileBody;
+use crate::private;
+use crate::serialize::built::{Held, StampForm};
 use crate::source::ObjRef;
 use crate::store::Src;
 
@@ -125,6 +141,20 @@ pub(crate) fn page(cx: &mut Cx, id: PageId, shown: &Shown, tags: bool) -> Option
         };
     }
     let list = p.list(cx, &ids);
+    // What the primary's page lists that its copy 0 now leaves out.
+    if shown.copy == 0 && shown.src.id() == cx.primary.id() {
+        let written: HashSet<ObjectId> = (list.iter())
+            .filter_map(|entry| entry.as_reference().ok())
+            .filter_map(|r| cx.number_known(cx.syms.key(r)?))
+            .collect();
+        for entry in &base {
+            if let Object::Reference(r) = entry
+                && !written.contains(r)
+            {
+                cx.left_out.push(*r);
+            }
+        }
+    }
     (!list.is_empty()).then_some(Object::Array(list))
 }
 
@@ -243,15 +273,20 @@ impl Page<'_> {
     }
 
     /// An annotation of the page the records don't hold, as written: None
-    /// for a pop-up, which goes with what opens it, and for what the view
-    /// doesn't draw.
+    /// for a pop-up, which goes with what opens it, for what the view
+    /// doesn't draw, and for what a markup removal takes off
+    /// ([`Unheld`](crate::materialize::Unheld)).
     fn unmodeled(&self, cx: &mut Cx, entry: &Object) -> Option<Object> {
         let shown = self.shown;
         let pdf = shown.src.pdf();
         let (_, dict) = pdf.dereference(entry).ok()?;
         let dict = dict.as_dict().ok()?;
         let widget = is(dict, b"Subtype", b"Widget");
-        if is(dict, b"Subtype", b"Popup") || !cx.draws_unmodeled(widget) {
+        let link = is(dict, b"Subtype", b"Link");
+        if is(dict, b"Subtype", b"Popup")
+            || !cx.draws_unmodeled(widget)
+            || !cx.keeps_unheld(link, widget)
+        {
             return None;
         }
         let scope = Scope {
@@ -348,6 +383,7 @@ impl Page<'_> {
             && self.refs_kept(cx, dict, parent)
             && (dict.has(b"NM") || !named())
             && !cx.hides(aid)
+            && !(cx.strips() && private::in_annot(dict))
         {
             cx.push_raw(key, r.clone());
             return (vec![cx.placeholder(key)], rect);
@@ -374,6 +410,9 @@ impl Page<'_> {
         }
         if !dict.has(b"NM") && named() {
             out.set("NM", Object::string_literal(name.as_str()));
+        }
+        if cx.strips() {
+            private::strip_annot(&mut out);
         }
         cx.hidden(aid, &mut out);
         let Some(r) = &f.src else {
@@ -472,6 +511,7 @@ impl Page<'_> {
     ) -> (Vec<Object>, Option<Object>) {
         let key = ObjKey::Annot(aid);
         if !cx.hides(aid)
+            && !cx.strips()
             && let Some(kept) = self.as_read(cx, aid, m, parent.as_ref().map(|(k, _)| *k))
         {
             return kept;
@@ -483,8 +523,14 @@ impl Page<'_> {
         let Emitted {
             mut main,
             appearance,
-            companions,
+            mut companions,
         } = annot::emission(&m.annot, held);
+        if cx.strips() {
+            private::strip_annot(&mut main);
+            for (dict, _) in &mut companions {
+                private::strip_annot(dict);
+            }
+        }
         let page = cx.placeholder(ObjKey::Page(self.id));
         main.set("P", page.clone());
         // An appearance an Append doesn't write isn't drawn.
@@ -750,10 +796,10 @@ pub(crate) fn is(dict: &Dictionary, key: &[u8], name: &[u8]) -> bool {
 }
 
 impl Cx<'_> {
-    /// Page stamp `m`'s page as a form in the file: the source's form a
-    /// [`FormRef::Base`] names, copied when it isn't the primary's, or a
-    /// [`FormRef::Blob`]'s page made a form, once a file. None, said once,
-    /// when it can't be had.
+    /// Page stamp `m`'s page as a form in the file ([`form_of`]). None,
+    /// said once, when it can't be had.
+    ///
+    /// [`form_of`]: Self::form_of
     pub(crate) fn stamp_form(&mut self, m: &Mark) -> Option<StampForm> {
         let AnnotKind::PageStamp { stamp, name, .. } = &m.annot.kind else {
             return None;
@@ -762,6 +808,21 @@ impl Cx<'_> {
             log::warn!("stamp {name} ({stamp}) is drawn without its page: it holds none");
             return None;
         };
+        self.form_of(form, |e| {
+            log::warn!("stamp {name} ({stamp}) is drawn without its page: {e:#}");
+        })
+    }
+
+    /// `form` as a form in the file, once a file: the source's form a
+    /// [`FormRef::Base`] names, copied when it isn't the primary's, or a
+    /// [`FormRef::Blob`]'s page made a form, or a [`FormRef::Pinned`]
+    /// appearance drawn from its inputs ([`Cx::pinned`]). None when it
+    /// can't be had, which `said` is told the first time.
+    pub(crate) fn form_of(
+        &mut self,
+        form: &FormRef,
+        said: impl FnOnce(&anyhow::Error),
+    ) -> Option<StampForm> {
         if let Some(&made) = self.stamps.get(form) {
             return made;
         }
@@ -776,22 +837,61 @@ impl Cx<'_> {
                     .map(|(bbox, matrix)| (id, bbox, matrix))
                     .ok_or_else(|| anyhow::anyhow!("a form with no box"))
             }
-            FormRef::Blob(page) => blob_form(page.bytes(), 0).map(|(objects, bbox, matrix)| {
+            FormRef::Blob(page) => blob_form(page.blob(), 0).map(|(objects, bbox, matrix)| {
                 let id = self.resource_of(objects);
                 (Object::Reference(id), bbox, matrix)
             }),
+            FormRef::Pinned(ap) => Ok(self.pinned(ap)),
         };
         let made = made
             .and_then(|(id, bbox, matrix)| {
                 let id = id
                     .as_reference()
                     .map_err(|_| anyhow::anyhow!("not an object"))?;
-                Ok(StampForm { id, bbox, matrix })
+                Ok(StampForm::written(id, bbox, matrix))
             })
-            .inspect_err(|e| log::warn!("stamp {name} ({stamp}) is drawn without its page: {e:#}"))
+            .inspect_err(said)
             .ok();
         self.stamps.insert(form.clone(), made);
         made
+    }
+
+    /// Pinned appearance `ap` as a form in the file, drawn from its inputs
+    /// as the mark it was drawn from is ([`annot::appearance`]), with the
+    /// stamp's page it holds: its dictionary now, its content as it's
+    /// written ([`ObjKey::Pinned`], once a file), the same each time. Its
+    /// placeholder, `/BBox` and `/Matrix`.
+    fn pinned(&mut self, ap: &Arc<PinnedAp>) -> (Object, Rect, Affine) {
+        let inputs = &ap.inputs;
+        // The stamp's page named by its form, not its number, which an
+        // Append and a Rewrite give it apart: the same appearance either way.
+        let page = match (&inputs.kind, &inputs.stamp) {
+            (AnnotKind::PageStamp { stamp, name, .. }, Some(page)) => self
+                .form_of(page, |e| {
+                    log::warn!("stamp {name} ({stamp}) is drawn without its page: {e:#}");
+                })
+                .map(|form| StampForm {
+                    res: ResId(page.digest()),
+                    ..form
+                }),
+            _ => None,
+        };
+        let drawn = annot::appearance(&inputs.annot(), page);
+        let bbox = drawn.bbox();
+        let id = self.push_deferred(ObjKey::Pinned(ap.digest), |cx| {
+            let mut dict = drawn.form_dict(cx);
+            dict.set("Filter", "FlateDecode");
+            let ap = ap.clone();
+            let data = move || {
+                let drawn = annot::appearance(&ap.inputs.annot(), page);
+                super::deflated(&drawn.into_content())
+            };
+            super::Deferred {
+                dict,
+                data: Arc::new(data),
+            }
+        });
+        (Object::Reference(id), bbox, Affine::IDENTITY)
     }
 
     /// Attachment `m`'s file as an embedded file stream in the file, from
@@ -897,18 +997,17 @@ impl Cx<'_> {
     }
 }
 
-/// Page `index` (from 0) of the PDF `bytes` made a form, as a resource's
-/// objects (the form first, a reference `(i, 0)` to the `i`th), with its
-/// `/BBox` and `/Matrix`: a page stamp's one page, or a watermark's page.
+/// Page `index` (from 0) of the PDF `blob`, read as a source, made a
+/// form, as a resource's objects (the form first, a reference `(i, 0)` to
+/// the `i`th), with its `/BBox` and `/Matrix`: a page stamp's one page, or
+/// a watermark's page.
 pub(crate) fn blob_form(
-    bytes: &[u8],
+    blob: &crate::store::Blob,
     index: u32,
 ) -> anyhow::Result<(Vec<Object>, crate::geom::Rect, crate::geom::Affine)> {
-    let src = lopdf::Document::load_mem(bytes)?;
+    let src = blob.source(&crate::source::Limits::DEFAULT)?;
     let mut dst = lopdf::Document::new();
-    let page = (src.get_pages().get(&(index + 1)).copied())
-        .ok_or_else(|| anyhow::anyhow!("the file has no page {}", index + 1))?;
-    let form = (crate::stamp_lib::page_forms(&src, &[page], &mut dst)?).remove(0);
+    let form = (crate::stamp_lib::page_forms(&src, &[index], &mut dst)?).remove(0);
     let order: Vec<ObjectId> = std::iter::once(form.id)
         .chain(dst.objects.keys().copied().filter(|&id| id != form.id))
         .collect();

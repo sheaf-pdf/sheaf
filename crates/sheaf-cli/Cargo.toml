@@ -22,7 +22,10 @@ sheaf-image.workspace = true
 sheaf-ops.workspace = true
 in-progress.workspace = true
 sheaf-doc.workspace = true
+sheaf-edit.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
 log.workspace = true
 env_logger.workspace = true
 clap = { version = "4", features = ["derive"] }

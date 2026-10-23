@@ -8,12 +8,13 @@
 //! A page is untouched under some inputs when it's copy 0 of its base
 //! page, at the page's own object, with its boxes (its turn is the job's),
 //! no filter on its content, nothing drawn over it that the inputs draw
-//! (recognized text with `ocr_over`), its own content as the emitter keeps
-//! it as it is ([`content::intact`]: the blocks of the document's
-//! generators its file holds, by their streams' markers, the generators
-//! on it laid out alike there, which with `generators` must hold one for
-//! each, and without hold none, and the recognized text it holds, if any,
-//! after its isolated content), and, as far as the render's flags draw
+//! (recognized text with `ocr_over`, and what a flatten drew under any),
+//! its own content as the emitter keeps it as it is ([`content::intact`]:
+//! the blocks of the document's generators its file holds, by their
+//! streams' markers, the generators on it laid out alike there, which with
+//! `generators` must hold one for each, and without hold none, and the
+//! recognized text and flattened annotations it holds, if any, after its
+//! isolated content), and, as far as the render's flags draw
 //! them ([`ViewInputs::draws_annots`] the annotations, `widgets` the
 //! form's widgets), the annotations of its base page as they are: each
 //! drawn record as read from its own entry there, none hidden or dragged,
@@ -57,6 +58,7 @@ pub fn untouched(st: &DocState, page: PageId, inputs: &ViewInputs) -> bool {
     let drawn_over = !def.content.filters.is_empty()
         || (def.content.over.iter()).any(|layer| match &layer.body {
             Static::OcrText(_) => inputs.ocr_over,
+            Static::Placements(_) => true,
         });
     let boxes_kept = geom.media == facts.geom.media
         && geom.crop == facts.geom.crop

@@ -4,8 +4,9 @@ use std::collections::HashMap;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use sheaf_plugin_api::types::{DestView, DestXyz, NewOutlineItem, OutlineItem};
-use sheaf_plugin_api::{Batch, FormBuilder, Plugin, document, patterns, storage, text, ui};
+use sheaf_plugin_api::sheaf_edit::{BookmarkRef, DestView, Local, OutlineId};
+use sheaf_plugin_api::types::PageInfo;
+use sheaf_plugin_api::{FormBuilder, Ops, Plugin, document, patterns, storage, text, ui, view};
 
 /// Where new bookmarks go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,18 +118,15 @@ pub fn group_names(re: &Regex) -> HashMap<String, usize> {
 pub struct Found {
     pub title: String,
     pub page: u64,
-    /// Displayed-space top of the match.
+    /// The top of the match as its page shows it.
     pub top: f32,
 }
 
-/// Where a bookmark for a match at `top` lands: a little above it, so the
-/// match isn't flush with the window's edge.
-pub fn view_for(top: f32) -> DestView {
-    DestView::Xyz(DestXyz {
-        left: None,
-        top: Some((top - 12.0).max(0.0)),
-        zoom: None,
-    })
+/// Where a bookmark for a match `top` points down `page` as it shows
+/// lands: a little above it, so the match isn't flush with the window's
+/// edge, the viewer's other coordinate kept.
+pub fn view_for(page: &PageInfo, top: f32) -> DestView {
+    view::dest_from_view(page, None, Some((top - 12.0).max(0.0)))
 }
 
 /// Drop matches already bookmarked (same title, same page) and repeats
@@ -150,25 +148,6 @@ pub fn new_only(found: Vec<Found>, existing: &[(String, Option<u64>)]) -> (Vec<F
         }
     }
     (out, skipped)
-}
-
-/// The last top-level bookmark, and the last direct child of each bookmark
-/// (to insert after), from the pre-order outline.
-pub fn last_children(outline: &[OutlineItem]) -> (Option<u64>, HashMap<u64, u64>) {
-    let mut last_top = None;
-    let mut last_child: HashMap<u64, u64> = HashMap::new();
-    let mut path: Vec<u64> = Vec::new();
-    for item in outline {
-        path.truncate(item.depth as usize);
-        match path.last() {
-            Some(&parent) => {
-                last_child.insert(parent, item.id);
-            }
-            None => last_top = Some(item.id),
-        }
-        path.push(item.id);
-    }
-    (last_top, last_child)
 }
 
 fn load_settings() -> Settings {
@@ -286,7 +265,8 @@ fn run() -> Result<(), String> {
             if title.is_empty() {
                 continue;
             }
-            let top = m.rects.iter().map(|r| r.y).fold(f32::INFINITY, f32::min);
+            let shown = m.rects.iter().map(|r| view::box_to_view(p, (*r).into()));
+            let top = shown.map(|r| r.y).fold(f32::INFINITY, f32::min);
             found.push(Found {
                 title,
                 page: p.id,
@@ -311,25 +291,22 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    let (last_top, last_child) = last_children(&outline);
-    let item = |f: &Found, depth| NewOutlineItem {
-        title: f.title.clone(),
-        target: Some(f.page),
-        view: Some(view_for(f.top)),
-        depth,
+    let page = |id: u64| pages.iter().find(|p| p.id == id).expect("a page scanned");
+    let add = |ops: Ops, parent: Option<BookmarkRef>, f: &Found, local| {
+        let view = view_for(page(f.page), f.top);
+        ops.bookmark_in(parent, &f.title, Some(f.page), Some(view), local)
     };
-    let (parent, after, items) = match placement {
-        Placement::TopLevel => (None, last_top, found.iter().map(|f| item(f, 0)).collect()),
+    let each = |ops: Ops, parent: Option<BookmarkRef>| {
+        (found.iter()).fold(ops, |ops, f| add(ops, parent.clone(), f, None))
+    };
+    let ops = match placement {
+        Placement::TopLevel => each(Ops::new(), None),
         Placement::Under => {
             let i = a
                 .choice("parent")
                 .ok_or("there are no bookmarks to put them under")?;
             let parent = outline.get(i).ok_or("that bookmark is gone")?.id;
-            (
-                Some(parent),
-                last_child.get(&parent).copied(),
-                found.iter().map(|f| item(f, 0)).collect(),
-            )
+            each(Ops::new(), Some(BookmarkRef::Id(OutlineId(parent))))
         }
         Placement::NewHeading => {
             let title = if !heading_text.is_empty() {
@@ -339,24 +316,19 @@ fn run() -> Result<(), String> {
             } else {
                 "Matches".to_string()
             };
-            let first = &found[0];
-            let mut items = vec![NewOutlineItem {
+            // The heading, named for the matches to go under it.
+            let heading = Local(1);
+            let first = Found {
                 title,
-                target: Some(first.page),
-                view: Some(view_for(first.top)),
-                depth: 0,
-            }];
-            items.extend(found.iter().map(|f| item(f, 1)));
-            (None, last_top, items)
+                ..found[0].clone()
+            };
+            let ops = add(Ops::new(), None, &first, Some(heading));
+            each(ops, Some(BookmarkRef::New(heading)))
         }
     };
     let n = found.len();
-    Batch::new(format!(
-        "Bookmark {n} match{}",
-        if n == 1 { "" } else { "es" }
-    ))
-    .bookmark_tree(parent, after, items)
-    .submit();
+    let label = format!("Bookmark {n} match{}", if n == 1 { "" } else { "es" });
+    ops.submit(&label).map_err(|f| f.message)?;
     if skipped > 0 {
         ui::notice(&format!(
             "{n} bookmarks added; {skipped} were already there"
@@ -420,39 +392,64 @@ mod tests {
         assert_eq!(skipped, 2);
     }
 
-    fn item(id: u64, depth: u16) -> OutlineItem {
-        OutlineItem {
-            id,
-            title: String::new(),
-            target: None,
-            view: None,
-            color: None,
-            depth,
+    /// A page as sheaf describes one: Letter, upright, or turned 90° as
+    /// it shows.
+    fn letter(turned: bool) -> PageInfo {
+        use sheaf_plugin_api::types::{Affine, Box2, Rotation};
+        let (to_view, from_view, rotate) = match turned {
+            false => {
+                let m = Affine {
+                    a: 1.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: -1.0,
+                    e: 0.0,
+                    f: 792.0,
+                };
+                (m, m, Rotation::R0)
+            }
+            true => {
+                let m = Affine {
+                    a: 0.0,
+                    b: 1.0,
+                    c: 1.0,
+                    d: 0.0,
+                    e: 0.0,
+                    f: 0.0,
+                };
+                (m, m, Rotation::R90)
+            }
+        };
+        let letter = Box2 {
+            x: 0.0,
+            y: 0.0,
+            w: 612.0,
+            h: 792.0,
+        };
+        PageInfo {
+            id: 1,
+            media: letter,
+            crop: letter,
+            rotate,
+            label: "1".into(),
+            to_view,
+            from_view,
         }
     }
 
     #[test]
-    fn insertion_points_from_the_outline() {
-        // 1 { 2 { 3 }, 4 }, 5
-        let o = [item(1, 0), item(2, 1), item(3, 2), item(4, 1), item(5, 0)];
-        let (top, children) = last_children(&o);
-        assert_eq!(top, Some(5));
-        assert_eq!(children[&1], 4);
-        assert_eq!(children[&2], 3);
-        assert!(!children.contains_key(&5));
-    }
-
-    #[test]
     fn views_sit_a_little_above_the_match() {
-        assert_eq!(
-            view_for(100.0),
-            DestView::Xyz(DestXyz {
-                left: None,
-                top: Some(88.0),
-                zoom: None
-            })
-        );
-        assert!(matches!(view_for(3.0), DestView::Xyz(DestXyz { top: Some(t), .. }) if t == 0.0));
+        let xyz = |left, top| DestView::Xyz {
+            left,
+            top,
+            zoom: None,
+        };
+        // 12 points above a match 100 down the page as it shows: 704 up
+        // from its foot.
+        assert_eq!(view_for(&letter(false), 100.0), xyz(None, Some(704.0)));
+        assert_eq!(view_for(&letter(false), 3.0), xyz(None, Some(792.0)));
+        // Turned, the shown top runs along PageSpace's x.
+        assert_eq!(view_for(&letter(true), 100.0), xyz(Some(88.0), None));
     }
 
     #[test]

@@ -1,0 +1,168 @@
+$ sheaf-cli edit $DIR/in.pdf --edits $DIR/edit-with.json --with appendix=$DIR/appendix.pdf --with logo=$DIR/logo.png -o $DIR/with.pdf
+--- edits
+{
+  "label": "Add the appendix",
+  "ops": [
+    {
+      "before": {
+        "pos": 1
+      },
+      "from": {
+        "file": {
+          "with": "appendix"
+        },
+        "name": "appendix.pdf",
+        "type": "file"
+      },
+      "locals": [
+        "$1"
+      ],
+      "op": "insert-pages"
+    },
+    {
+      "from": {
+        "fit": "original",
+        "images": [
+          {
+            "with": "logo"
+          }
+        ],
+        "type": "images"
+      },
+      "op": "insert-pages"
+    },
+    {
+      "op": "set-watermark",
+      "scope": "all",
+      "spec": {
+        "content": {
+          "image": {
+            "with": "logo"
+          },
+          "opacity": 0.3,
+          "scale": 0.5,
+          "type": "image"
+        }
+      },
+      "z": "under"
+    },
+    {
+      "op": "set-header-footer",
+      "scope": {
+        "pages": {
+          "positions": "2-5"
+        }
+      },
+      "spec": {
+        "bates": {
+          "digits": 4,
+          "prefix": "ACME-",
+          "start": 1,
+          "suffix": ""
+        },
+        "color": [
+          0,
+          0,
+          0
+        ],
+        "first_number": 1,
+        "margins": {
+          "bottom": 36,
+          "left": 36,
+          "right": 36,
+          "top": 36
+        },
+        "size": 9,
+        "texts": [
+          "",
+          "",
+          "",
+          "",
+          "<<bates>>",
+          ""
+        ]
+      }
+    },
+    {
+      "mark": {
+        "contents": "See the appendix",
+        "kind": {
+          "pos": {
+            "x": 300,
+            "y": 400
+          },
+          "type": "note"
+        },
+        "style": {
+          "color": [
+            220,
+            40,
+            40
+          ],
+          "opacity": 1,
+          "stroke": 1
+        }
+      },
+      "op": "add-mark",
+      "page": {
+        "pos": 1
+      }
+    }
+  ],
+  "v": "1.0"
+}
+--- exit 0
+--- stdout
+{
+  "created": {
+    "locals": {
+      "$1": {
+        "page": 1
+      }
+    },
+    "ops": [
+      [
+        {
+          "page": 1
+        }
+      ],
+      [
+        {
+          "page": 6
+        }
+      ],
+      [],
+      [],
+      [
+        {
+          "annot": {
+            "nm": "sheaf:#",
+            "page": 1
+          }
+        }
+      ]
+    ]
+  },
+  "lines": [
+    {
+      "removes": false,
+      "text": "Insert 2 pages"
+    },
+    {
+      "removes": false,
+      "text": "Add a background to all pages"
+    },
+    {
+      "removes": false,
+      "text": "Set the header and footer"
+    },
+    {
+      "removes": false,
+      "text": "Add a sticky note on page 1"
+    }
+  ],
+  "strategy": "rewrite",
+  "version": "Add the appendix"
+}
+--- stderr
+editing…

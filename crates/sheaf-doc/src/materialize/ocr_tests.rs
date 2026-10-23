@@ -23,7 +23,7 @@ use super::recognized_tests::{
 use super::removal;
 use super::removal_tests::{opened, scratch, text_file};
 use super::rewrite_tests::{make_pdf, open, read_pages, tempdir};
-use super::{AskAnswers, How, StrategyKind, Why, save};
+use super::{AskAnswers, How, SaveHow, StrategyKind, Why, save_with};
 use crate::content::{Balance, BlockId, Concat, FontDecoders, Marker, ResCx, text_bag};
 use crate::effects::{Removed, RemovedKind};
 use crate::history::FixedCount;
@@ -162,7 +162,7 @@ fn rewrite_writes_invisible_text_layer() {
     let id = (model.state().def(ids[1]).unwrap().content.ocr_layer())
         .unwrap()
         .id;
-    let bytes = rewrite(&model.snapshot()).unwrap();
+    let bytes = rewrite(&model).unwrap();
     assert_eq!(
         read_pages(&bytes),
         vec![("A 0".into(), 0), ("A 1".into(), 0), ("A 2".into(), 0)]
@@ -243,7 +243,13 @@ fn an_append_writes_a_layer_in_an_unchanged_order() {
     assert_eq!(glyphless_fonts(&pdf), 1);
     // Saved in place, as planned (a layer added removes nothing), the file
     // reopens with the layer.
-    let report = save(&mut model, &a, &AskAnswers::default(), &NoProgress);
+    let report = save_with(
+        &mut model,
+        &a,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    );
     assert_eq!(report.unwrap().strategy, Some(StrategyKind::Append));
     let saved = Pdf::load(&a).unwrap();
     let p0 = saved.get_pages()[&1];
@@ -294,7 +300,7 @@ fn ocr_pages_share_one_font() {
             "ocr",
         )
         .unwrap();
-    let bytes = rewrite(&model.snapshot()).unwrap();
+    let bytes = rewrite(&model).unwrap();
     let pdf = Pdf::load_mem(&bytes).unwrap();
     assert_eq!(glyphless_fonts(&pdf), 1);
     let pages = pages(&pdf);
@@ -329,7 +335,7 @@ fn duplicate_shares_layer_and_is_not_double_rotated() {
     model
         .commit_ops(vec![fx::duplicate(&[ids[0]])], "dup")
         .unwrap();
-    let bytes = rewrite(&model.snapshot()).unwrap();
+    let bytes = rewrite(&model).unwrap();
     assert_eq!(
         read_pages(&bytes),
         vec![("A 0".into(), 90), ("A 0".into(), 90), ("A 1".into(), 0)]
@@ -367,7 +373,14 @@ fn empty_layer_writes_nothing(how: How) {
     let page = pages(&pdf)[0];
     assert_eq!(contents(&pdf, page).len(), 1);
     assert_eq!(glyphless_fonts(&pdf), 0);
-    let report = save(&mut doc, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(report.strategy, None, "{how:?}: nothing to write");
 }
 
@@ -430,7 +443,7 @@ fn saved_text() -> Vec<(&'static str, Vec<u8>)> {
     let page = doc.page(0).unwrap();
     doc.commit_ops(fx::ocr([(page, Arc::new(saved::layer()))]), "ocr")
         .unwrap();
-    let ours = rewrite(&doc.snapshot()).unwrap();
+    let ours = rewrite(&doc).unwrap();
     vec![
         ("legacy", bytes(saved::legacy_page())),
         ("block", bytes(saved::block_page())),
@@ -471,7 +484,14 @@ fn replacing_a_saved_layer_rewrites_without_the_old_words() {
         let id = (doc.state().def(p0).unwrap().content.ocr_layer())
             .unwrap()
             .id;
-        let report = save(&mut doc, &path, &AskAnswers::default(), &NoProgress).unwrap();
+        let report = save_with(
+            &mut doc,
+            &path,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Rewrite), "{name}");
         assert_eq!(report.why, replaced_text(), "{name}");
         let pdf = Pdf::load(&path).unwrap();
@@ -486,7 +506,7 @@ fn replacing_a_saved_layer_rewrites_without_the_old_words() {
         assert_eq!(depth(&pdf, page).1, Balance::default(), "{name}");
         // Opened again, it's what's saved: the block stays.
         let (_, doc) = opened(&dir, "b.pdf", &std::fs::read(&path).unwrap());
-        let again = Pdf::load_mem(&rewrite(&doc.snapshot()).unwrap()).unwrap();
+        let again = Pdf::load_mem(&rewrite(&doc).unwrap()).unwrap();
         assert_eq!(ocr_blocks(&again, pages(&again)[0]).len(), 1, "{name}");
     }
 }
@@ -509,7 +529,14 @@ fn clear_removes_a_saved_layer() {
         let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
         let p0 = doc.page(0).unwrap();
         doc.commit_ops(vec![fx::clear_ocr(&[p0])], "clear").unwrap();
-        let report = save(&mut doc, &path, &AskAnswers::default(), &NoProgress).unwrap();
+        let report = save_with(
+            &mut doc,
+            &path,
+            SaveHow::Planned,
+            &AskAnswers::default(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(report.strategy, Some(StrategyKind::Rewrite), "{name}");
         assert_eq!(report.why, replaced_text(), "{name}");
         let pdf = Pdf::load(&path).unwrap();
@@ -669,7 +696,14 @@ fn a_legacy_layer_without_its_q_stays() {
     let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
     let p0 = doc.page(0).unwrap();
     doc.commit_ops(vec![fx::clear_ocr(&[p0])], "clear").unwrap();
-    let report = save(&mut doc, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     let notes: Vec<String> = report.notes.iter().map(|n| n.to_string()).collect();
     let note = "Recognized text sheaf wrote earlier stays on page 1: taking it out would change \
                 what else the page draws.";
@@ -875,7 +909,14 @@ fn an_append_over_a_saved_block_vetoes_nothing() {
     let set = fx::set_header(bigger, Some(&[doc.page(0).unwrap()]));
     doc.commit_ops(vec![set], "header").unwrap();
     let before = removal::vetoes_here();
-    let report = save(&mut doc, &path, &AskAnswers::default(), &NoProgress).unwrap();
+    let report = save_with(
+        &mut doc,
+        &path,
+        SaveHow::Planned,
+        &AskAnswers::default(),
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(report.strategy, Some(StrategyKind::Append));
     assert_eq!(removal::vetoes_here(), before);
     let pdf = Pdf::load(&path).unwrap();

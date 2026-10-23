@@ -87,7 +87,7 @@ fn rewritten(f: &mut Form, items: &[FlatOutlineItem]) -> Vec<u8> {
         items,
         Box::new(FixedCount(5)),
     );
-    crate::save::rewrite(&doc.snapshot()).unwrap()
+    crate::save::rewrite(&doc).unwrap()
 }
 
 #[test]

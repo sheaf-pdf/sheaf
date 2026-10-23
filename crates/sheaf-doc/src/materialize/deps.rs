@@ -58,6 +58,7 @@ use crate::annot::{AnnotId, AnnotKind};
 use crate::content::GenId;
 use crate::model::{AnnotBody, AnnotRec, CtxNeeds, DocState, Frozen, Generator, OutlineId, PageId};
 use crate::prim::{Key, same};
+use crate::source::PageObj;
 use crate::store::{BlobId, Src};
 
 /// An Append's scope.
@@ -299,8 +300,8 @@ struct Deps<'a> {
 }
 
 /// The pages written as each copy of each source page ([`emit::written_pages`]),
-/// by the source's blob, the page's object and the copy.
-type Written = BTreeMap<(BlobId, ObjectId, u32), PageId>;
+/// by the source page and the copy.
+type Written = BTreeMap<(PageObj, u32), PageId>;
 
 /// How the pages of sources are written in the saved state and the
 /// target, when any is written as another page, or none, now: what a
@@ -327,9 +328,10 @@ impl Relinking {
     /// there); from anything else the page written as that copy, else as
     /// its lowest copy written ([`copy::page_named`]).
     fn names(&self, pages: &Written, blob: BlobId, page: ObjectId, copy: u32) -> Option<PageId> {
+        let at = PageObj { blob, id: page };
         match blob == self.primary && copy == 0 {
-            true => pages.get(&(blob, page, 0)).copied(),
-            false => copy::page_named(pages, blob, page, copy),
+            true => pages.get(&(at, 0)).copied(),
+            false => copy::page_named(pages, at, copy),
         }
     }
 
@@ -357,11 +359,12 @@ impl Relinking {
     /// its number names a page outside the tree. (One that's another page's copy 0 now is
     /// written there, or `append::held` refuses, as a Rewrite writes it.)
     fn went(&self, blob: BlobId, page: ObjectId, copy: u32) -> bool {
+        let at = (PageObj { blob, id: page }, 0);
         blob == self.primary
             && copy == 0
             && self.gone.contains(&(blob, page))
-            && self.then.contains_key(&(blob, page, 0))
-            && !self.now.contains_key(&(blob, page, 0))
+            && self.then.contains_key(&at)
+            && !self.now.contains_key(&at)
     }
 
     /// Whether a link read from `blob` as `copy` of it can name page
@@ -834,7 +837,7 @@ impl<'a> Deps<'a> {
             .filter(|&(at, page)| {
                 then.get(at) != Some(page) || now.get(at) != Some(page) || renumbered.contains(page)
             })
-            .map(|(&(blob, obj, _), _)| (blob, obj))
+            .map(|(&(at, _), _)| (at.blob, at.id))
             .collect();
         if gone.is_empty() {
             return;

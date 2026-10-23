@@ -13,6 +13,7 @@ use gpui::{
 };
 use sheaf_doc::Snapshot;
 use sheaf_edit::Z;
+use sheaf_ops::session::Session;
 use sheaf_ui::frame;
 use sheaf_ui::menu_bar::MenuBar;
 use sheaf_ui::palette::{Palette, PaletteEvent};
@@ -738,6 +739,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Show `session`'s document, made and saved to `path` (Combine's):
+    /// as it is, in this window, which is empty, with `notice` what it was
+    /// told as it was made.
+    fn adopt(
+        &mut self,
+        path: PathBuf,
+        session: Session,
+        notice: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (timing, launched) = (self.timing, self.launched);
+        let doc = cx.new(|cx| DocView::adopt(path, session, notice, timing, launched, cx));
+        self.watch(&doc, window, cx);
+        doc.update(cx, |d, cx| d.adopted(cx));
+        self.doc = Some(doc);
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     /// Whether this window's document is this file.
     fn shows(&self, path: &Path, cx: &App) -> bool {
         self.doc
@@ -1163,13 +1184,18 @@ impl Workspace {
             |ws, _, ev: &crate::combine_dialog::CombineEvent, window, cx| {
                 ws.combine = None;
                 ws.focus_active(window, cx);
-                if let crate::combine_dialog::CombineEvent::Created { path, params } = ev {
+                if let crate::combine_dialog::CombineEvent::Created {
+                    path,
+                    combined,
+                    params,
+                } = ev
+                {
                     let params = params.clone();
                     crate::state::update(cx, |s| s.combine = params);
                     let origin = window.window_handle().downcast::<Workspace>();
-                    let path = path.clone();
-                    if let Some(origin) = origin {
-                        cx.defer(move |cx| open_paths(origin, vec![path], cx));
+                    if let (Some(origin), Some((session, report))) = (origin, combined.take()) {
+                        let path = path.clone();
+                        cx.defer(move |cx| show_made(origin, path, session, report.notice, cx));
                     }
                 }
                 cx.notify();
@@ -3147,6 +3173,39 @@ fn open_paths(origin: WindowHandle<Workspace>, paths: Vec<PathBuf>, cx: &mut App
                 .ok();
         }
     }
+}
+
+/// `session`'s document, made and saved to `path` (Combine's, M10.5
+/// §14.1), shown as it is, nothing read again: in `origin` if it's empty,
+/// else in a window of its own. `notice` is what it was told as it was
+/// made.
+fn show_made(
+    origin: WindowHandle<Workspace>,
+    path: PathBuf,
+    session: Session,
+    notice: Option<String>,
+    cx: &mut App,
+) {
+    let empty = origin.read(cx).is_ok_and(|ws| ws.doc.is_none());
+    let window = match empty {
+        true => Ok(origin),
+        false => crate::open_workspace(Launch::file(None), None, cx),
+    };
+    let shown = window.and_then(|handle| {
+        handle.update(cx, |ws, window, cx| {
+            ws.adopt(path, session, notice, window, cx);
+            window.activate_window();
+        })
+    });
+    if let Err(e) = shown {
+        log::error!("showing the combined file: {e:#}");
+    }
+}
+
+/// Whether a window shows the file at `path`: what one view of a file
+/// keeps to (see [`open_paths`]).
+pub(crate) fn is_open(path: &Path, cx: &App) -> bool {
+    find_open(path, cx).is_some()
 }
 
 /// Files another launch handed over, or Finder opened: as File > Open, one

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, bail};
 use clap::{Args, ValueEnum};
 use sheaf_ops::export::{ExportJob, Format, TiffMode, existing, stem_of};
+use sheaf_ops::session::Session;
 
 #[derive(Args)]
 #[command(about = "Export pages as PNG, JPEG, TIFF or text")]
@@ -97,8 +98,10 @@ pub fn run(args: ExportArgs, quiet: bool) -> anyhow::Result<()> {
             args.name.clone().unwrap_or_else(|| stem_of(&args.input)),
         ),
     };
-    let doc = sheaf_doc::open::file(&args.input, args.password.as_deref())?.doc;
-    let snapshot = doc.snapshot();
+    let session = crate::progress::run("opening", quiet, |p| {
+        Session::open(&args.input, args.password.as_deref(), p)
+    })?;
+    let snapshot = session.doc.snapshot();
     let pages = sheaf_ops::pages::ids(&snapshot, args.pages.as_deref())
         .map_err(anyhow::Error::msg)
         .context("--pages")?;
@@ -121,8 +124,9 @@ pub fn run(args: ExportArgs, quiet: bool) -> anyhow::Result<()> {
             }
         );
     }
+    let from = session.export_from();
     let files = crate::progress::run("exporting", quiet, |p| {
-        sheaf_ops::export::run(&snapshot, &job, p)
+        sheaf_ops::export::run(&from, &job, p)
     })?;
     for f in files {
         println!("{}", f.display());

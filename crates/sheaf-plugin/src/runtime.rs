@@ -1,8 +1,6 @@
 //! The wasmtime side: one shared engine, one worker thread and `Store` per
 //! plugin, and the host half of the WIT interfaces.
 
-use std::cell::OnceCell;
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -11,14 +9,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, anyhow};
 use arc_swap::ArcSwap;
 use futures::channel::oneshot;
-use sheaf_doc::prim::Key;
-use sheaf_doc::{Document, EditError, Grant, PageId, Snapshot, TextService, Tx, ViewInputs};
-use sheaf_edit::Op;
+use sheaf_doc::{PageId, Published, Snapshot, TextService, Tx, ViewInputs};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::api;
+use crate::change::ChangeInfo;
+use crate::landing::Committer;
 use crate::manifest::{Grants, Manifest, WASM_NAME};
 use crate::storage::Storage;
 use crate::ui::Ui;
@@ -45,8 +43,9 @@ impl Default for Limits {
 
 /// Runs OCR for plugins. The app implements it over `sheaf_ocr`.
 pub trait OcrSource: Send + Sync {
-    /// Recognize page `page` of `snap`, the call's base, as it shows
-    /// (`Snapshot::geom`), from its content alone.
+    /// Recognize page `page` of `snap`, as the call reads the document, as
+    /// it shows (`Snapshot::geom`), from its content alone: its words in
+    /// PageSpace.
     fn recognize(
         &self,
         snap: &Snapshot,
@@ -60,8 +59,8 @@ pub trait OcrSource: Send + Sync {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DocEvent {
     Opened,
-    /// The undo label.
-    Edited(String),
+    /// What changed, and why (M10.5 §14.3).
+    Changed(ChangeInfo),
     /// The path saved to.
     Saved(String),
     SelectionChanged,
@@ -72,6 +71,10 @@ pub enum DocEvent {
         rect: sheaf_doc::Box2,
     },
     RegionCleared,
+    /// A call's edits didn't land, and why ([`follow_ups`]).
+    ///
+    /// [`follow_ups`]: crate::landing::follow_ups
+    EditRefused(String),
 }
 
 impl DocEvent {
@@ -79,11 +82,12 @@ impl DocEvent {
         use crate::manifest::EventKind;
         match self {
             DocEvent::Opened => EventKind::Opened,
-            DocEvent::Edited(_) => EventKind::Edited,
+            DocEvent::Changed(_) => EventKind::Changed,
             DocEvent::Saved(_) => EventKind::Saved,
             DocEvent::SelectionChanged => EventKind::SelectionChanged,
             DocEvent::Closed => EventKind::Closed,
             DocEvent::Region { .. } | DocEvent::RegionCleared => EventKind::Region,
+            DocEvent::EditRefused(_) => EventKind::EditRefused,
         }
     }
 }
@@ -117,10 +121,13 @@ pub struct CallContext {
     /// Where the plugin's `progress` tasks report, and how the call is
     /// cancelled. None: tasks report nowhere and are never cancelled.
     pub progress: Option<in_progress::Tracker>,
-    /// The plugin's section of the user's `settings.toml`, as JSON (API
-    /// 0.3's `storage.preferences`), taken when the call starts so it
-    /// stays the same throughout. Empty for none.
+    /// The plugin's section of the user's `settings.toml`, as JSON
+    /// (`storage.preferences`), taken when the call starts so it stays the
+    /// same throughout. Empty for none.
     pub preferences: String,
+    /// The installed plugins' ids: a mark one of them made is told as
+    /// theirs, by its role (`plugin <id>`).
+    pub plugins: Arc<[String]>,
 }
 
 /// One entry point into a plugin.
@@ -153,11 +160,11 @@ impl std::fmt::Display for Call {
 #[derive(Clone)]
 pub struct DocContext {
     pub path: PathBuf,
-    /// The document as it is now, which the app swaps at every change: a
-    /// call takes its base from it at its first read or submit (M10.5
-    /// §14.3), so one that waited in the queue, or on a form, reads the
-    /// document as it is by then.
-    pub cell: Arc<ArcSwap<Snapshot>>,
+    /// The document as it is now, which the app publishes at every change:
+    /// a call makes its transaction on it at its first read or submit
+    /// (M10.5 §14.3), so one that waited in the queue, or on a form, reads
+    /// the document as it is by then.
+    pub cell: Arc<ArcSwap<Published>>,
     /// In document order.
     pub selection: Vec<PageId>,
     pub current_page: Option<PageId>,
@@ -167,88 +174,39 @@ pub struct DocContext {
     pub ocr: Option<Arc<dyn OcrSource>>,
     /// None: `render` reports that rendering isn't available.
     pub render: Option<Arc<dyn crate::render::RenderSource>>,
+    /// Where a call's `edits.commit` lands its edits before it returns.
+    /// None: it can't, and says so.
+    pub committer: Option<Arc<dyn Committer>>,
 }
 
-/// What one `edits.submit` asked for, as ops: one undo step, called
-/// `label`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EditBatch {
-    pub label: String,
-    pub ops: Vec<Op>,
-    /// What the ops' marks hold, by the stems the plugin named them by:
-    /// what `BlobSel::Asset(n)` names is the `n`th, which the host finds
-    /// ([`lowered`](Self::lowered)).
-    pub held: Vec<Held>,
-    /// An edit no op says (a bookmark tree whose depths skip a level): the
-    /// batch fails with it.
-    pub invalid: Option<EditError>,
-}
-
-/// What a plugin's mark holds, by the stem its API names it by.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Held {
-    /// A page stamp's page.
-    Stamp(String),
-    /// An attached file, `size` bytes long.
-    File { stem: String, size: u64 },
-}
-
-impl EditBatch {
-    /// The batch's ops lowered into `tx`, a transaction of the plugin's on
-    /// `doc` that holds no grants yet, what they hold found where the host
-    /// finds it in `doc`: all of them, or none and why.
-    pub fn lowered(self, tx: &mut Tx, doc: &Document) -> Result<(), EditError> {
-        if let Some(e) = self.invalid {
-            return Err(e);
-        }
-        let missing = |what: String| EditError::NotFound {
-            op: "add-mark",
-            what,
-        };
-        for held in self.held {
-            let grant = match held {
-                Held::Stamp(stem) => {
-                    let form = doc.find_stamp(&stem);
-                    let form = form.ok_or_else(|| missing(format!("the stamp {stem}")))?;
-                    Grant::Stamp { stem, form }
-                }
-                Held::File { stem, size } => {
-                    let file = doc.find_file(&stem, size);
-                    Grant::Blob(file.ok_or_else(|| missing(format!("the attached file {stem}")))?)
-                }
-            };
-            tx.grant(grant);
-        }
-        tx.apply_batch(self.ops, &in_progress::NoProgress)?;
-        Ok(())
-    }
-}
-
+/// What a call left to land ([`Landing::finish`]).
+///
+/// [`Landing::finish`]: crate::landing::Landing::finish
 #[derive(Default)]
 pub struct CallOutput {
-    /// In submission order. Committed by the app after the call returns.
-    pub batches: Vec<EditBatch>,
-    /// The document the call read and said its batches against: the
-    /// cell's at its first read or submit ([`DocContext::cell`]). None
-    /// when it did neither, or no document was open.
-    pub base: Option<Arc<Snapshot>>,
-    /// What it read there, as the slots it decided by (M10.5 §14.3): its
-    /// pages' order, what they show and their boxes; a page's annotations
-    /// and each mark it was shown; the outline and each bookmark; what a
-    /// page draws as the file will, for a render, and what of it is text,
-    /// for its text or search; what it shows, for OCR; a mark its update
-    /// keeps parts of. Its first batch commits only while each holds what
-    /// it held in `base`. Recorded for the 0.2 and 0.3 reads until API 0.4
-    /// records them in the call's transaction (slice 20).
-    pub reads: BTreeSet<Key>,
+    /// Its edits since its last commit, in the plugin's transaction, made
+    /// on the cell's document at its first read or submit, or on the one
+    /// its last commit made; what it read there recorded in it as decision
+    /// reads (M10.5 §14.3). None when it submitted none.
+    pub tx: Option<Tx>,
+    /// What its edits are called: its first submit's label.
+    pub label: Option<String>,
+    /// Why its edits were refused, each told once: it answered an undo, or
+    /// another plugin's answer to a change. Never why an answer to
+    /// `edit-refused` was, which its submits told it.
+    pub refused: Vec<String>,
+    /// How far down a chain of answers its edits are: one deeper than the
+    /// change a `changed` event told of, else 0.
+    pub depth: u8,
 }
 
 impl std::fmt::Debug for CallOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CallOutput")
-            .field("batches", &self.batches)
-            .field("base", &self.base.as_ref().map(|s| s.version))
-            .field("reads", &self.reads)
+            .field("tx", &self.tx.as_ref().map(|tx| tx.base()))
+            .field("label", &self.label)
+            .field("refused", &self.refused)
+            .field("depth", &self.depth)
             .finish()
     }
 }
@@ -302,10 +260,7 @@ impl Runtime {
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(anyhow::Error::from)?;
         wasmtime_wasi_http::p2::add_only_http_to_linker_sync(&mut linker)
             .map_err(anyhow::Error::from)?;
-        // Both worlds: a plugin links to the one it was built for.
-        api::v03::World::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)
-            .map_err(anyhow::Error::from)?;
-        api::v02::World::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)
+        api::World::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)
             .map_err(anyhow::Error::from)?;
         let token = Arc::new(());
         let alive = Arc::downgrade(&token);
@@ -332,12 +287,10 @@ impl Runtime {
     pub fn load(self: &Arc<Self>, dir: PathBuf, manifest: Manifest, opts: LoadOptions) -> Plugin {
         let (tx, rx) = mpsc::channel::<Request>();
         let status = Arc::new(Mutex::new(Status::Loading));
-        let (rt, st, id) = (self.clone(), status.clone(), manifest.id.clone());
-        let panels = manifest.panels.iter().map(|p| p.id.clone()).collect();
-        let v02 = !manifest.api.matches(&crate::API_VERSION);
+        let (rt, st, who) = (self.clone(), status.clone(), manifest.clone());
         let spawned = thread::Builder::new()
-            .name(format!("plugin-{id}"))
-            .spawn(move || worker(rt, dir, id, panels, v02, opts, st, rx));
+            .name(format!("plugin-{}", manifest.id))
+            .spawn(move || worker(rt, dir, who, opts, st, rx));
         if let Err(e) = spawned {
             *status.lock().unwrap() = Status::Failed(format!("starting its thread: {e}"));
         }
@@ -407,19 +360,17 @@ impl Plugin {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn worker(
     rt: Arc<Runtime>,
     dir: PathBuf,
-    id: String,
-    panels: Vec<String>,
-    v02: bool,
+    manifest: Manifest,
     opts: LoadOptions,
     status: Arc<Mutex<Status>>,
     rx: mpsc::Receiver<Request>,
 ) {
     let set = |s: Status| *status.lock().unwrap() = s;
-    let mut inst = match Instance::start(&rt, &dir, &id, panels, v02, opts) {
+    let id = manifest.id.clone();
+    let mut inst = match Instance::start(&rt, &dir, manifest, opts) {
         Ok(i) => {
             set(Status::Ready);
             i
@@ -456,63 +407,12 @@ fn worker(
 
 struct Instance {
     store: Option<Store<HostState>>,
-    world: Option<World>,
+    world: Option<api::World>,
     timeout: Duration,
 }
 
-/// A plugin's instance, in the API it was built for.
-enum World {
-    V03(api::v03::World),
-    V02(api::v02::World),
-}
-
-impl World {
-    fn activate(&self, store: &mut Store<HostState>) -> wasmtime::Result<Result<(), String>> {
-        match self {
-            World::V03(w) => w.call_activate(store),
-            World::V02(w) => w.call_activate(store),
-        }
-    }
-
-    fn run(
-        &self,
-        store: &mut Store<HostState>,
-        call: &Call,
-    ) -> wasmtime::Result<Result<(), String>> {
-        match (self, call) {
-            (World::V03(w), Call::Command { id, args }) => {
-                w.call_run_command(store, id, args.as_deref())
-            }
-            (World::V02(w), Call::Command { id, args }) => {
-                w.call_run_command(store, id, args.as_deref())
-            }
-            (World::V03(w), Call::PanelAction { panel, row, action }) => {
-                w.call_panel_action(store, panel, row, action)
-            }
-            (World::V02(w), Call::PanelAction { panel, row, action }) => {
-                w.call_panel_action(store, panel, row, action)
-            }
-            (World::V03(w), Call::Event(e)) => {
-                let e = api::v03::event_to_wit(store.data(), e);
-                w.call_on_event(store, &e)
-            }
-            (World::V02(w), Call::Event(e)) => {
-                let e = api::v02::event_to_wit(store.data(), e);
-                w.call_on_event(store, &e)
-            }
-        }
-    }
-}
-
 impl Instance {
-    fn start(
-        rt: &Runtime,
-        dir: &std::path::Path,
-        id: &str,
-        panels: Vec<String>,
-        v02: bool,
-        opts: LoadOptions,
-    ) -> Result<Self> {
+    fn start(rt: &Runtime, dir: &std::path::Path, m: Manifest, opts: LoadOptions) -> Result<Self> {
         let wasm = dir.join(WASM_NAME);
         let component = Component::from_file(&rt.engine, &wasm)
             .map_err(anyhow::Error::from)
@@ -525,21 +425,28 @@ impl Instance {
             limits: StoreLimitsBuilder::new()
                 .memory_size(rt.limits.memory_bytes)
                 .build(),
-            plugin: id.to_string(),
-            panels,
+            plugin: m.id,
+            version: m.version.to_string().into(),
+            edit_schema: m.edit_schema,
+            identity: opts.grants.identity,
+            panels: m.panels.into_iter().map(|p| p.id).collect(),
             storage: Storage::new(opts.data_dir),
             http: wasmtime_wasi_http::WasiHttpCtx::new(),
             net: NetHooks {
-                grants: opts.grants.clone(),
+                grants: opts.grants,
                 credit: credit.clone(),
             },
             credit,
             render_handles: Default::default(),
             task_handles: Vec::new(),
             call: None,
-            base: OnceCell::new(),
-            reads: BTreeSet::new(),
-            batches: Vec::new(),
+            call_tx: None,
+            base: None,
+            label: None,
+            uploads: Vec::new(),
+            refusal: None,
+            refused: Vec::new(),
+            depth: 0,
             deadline: Instant::now() + rt.limits.call_timeout,
         };
         let mut store = Store::new(&rt.engine, state);
@@ -556,17 +463,13 @@ impl Instance {
             })
         });
         store.set_epoch_deadline(1);
-        let world = if v02 {
-            api::v02::World::instantiate(&mut store, &component, &rt.linker).map(World::V02)
-        } else {
-            api::v03::World::instantiate(&mut store, &component, &rt.linker).map(World::V03)
-        }
-        .map_err(anyhow::Error::from)
-        .context("instantiating")?;
+        let world = api::World::instantiate(&mut store, &component, &rt.linker)
+            .map_err(anyhow::Error::from)
+            .context("instantiating")?;
         store.data_mut().deadline = Instant::now() + rt.limits.call_timeout;
         store.set_epoch_deadline(1);
         world
-            .activate(&mut store)
+            .call_activate(&mut store)
             .map_err(|e| anyhow!(describe_trap(&e, rt.limits.call_timeout)))
             .context("activate")?
             .map_err(|e| anyhow!("activate: {e}"))?;
@@ -588,28 +491,66 @@ impl Instance {
         };
         let data = store.data_mut();
         data.call = Some(ctx);
-        data.batches.clear();
-        data.base = OnceCell::new();
-        data.reads.clear();
+        (data.depth, data.refusal) = answering(call);
         data.deadline = Instant::now() + self.timeout;
         data.credit.store(0, std::sync::atomic::Ordering::Relaxed);
         store.set_epoch_deadline(1);
-        let result = world.run(store, call);
+        let result = match call {
+            Call::Command { id, args } => world.call_run_command(&mut *store, id, args.as_deref()),
+            Call::PanelAction { panel, row, action } => {
+                world.call_panel_action(&mut *store, panel, row, action)
+            }
+            Call::Event(e) => world.call_on_event(&mut *store, &api::event_to_wit(e)),
+        };
         let data = store.data_mut();
         data.drop_render_handles();
         data.drop_task_handles();
         data.call = None;
-        let batches = std::mem::take(&mut data.batches);
-        let (base, reads) = (data.base.take(), std::mem::take(&mut data.reads));
+        data.base = None;
+        data.uploads.clear();
+        data.refusal = None;
+        let refused = std::mem::take(&mut data.refused);
+        let out = CallOutput {
+            tx: data.call_tx.take().filter(|tx| !tx.is_empty()),
+            label: data.label.take(),
+            // An answer to a refusal is told why it's refused as it
+            // submits: told again by an event, it would answer again.
+            refused: match call {
+                Call::Event(DocEvent::EditRefused(_)) => Vec::new(),
+                _ => refused,
+            },
+            depth: data.depth,
+        };
         match result {
-            Ok(Ok(())) => Ok(CallOutput {
-                batches,
-                base,
-                reads,
-            }),
+            Ok(Ok(())) => Ok(out),
             Ok(Err(msg)) => Err(PluginError::Failed(msg)),
             Err(e) => Err(PluginError::Trapped(describe_trap(&e, self.timeout))),
         }
+    }
+}
+
+/// How far down a chain of answers the edits `call` makes are, and why
+/// they're refused, if they are (M10.5 §14.3). A change's answer is one
+/// deeper than the change, and refused when the change was the user
+/// moving through history, or a failed call's edits taken back, which it
+/// would fight, or was itself an answer to a change: answers to answers
+/// stop. An answer to `edit-refused` would make again what was just
+/// refused, so it's refused too.
+fn answering(call: &Call) -> (u8, Option<String>) {
+    let why = |why: &str| Some(why.to_string());
+    match call {
+        Call::Event(DocEvent::Changed(change)) => {
+            let refused = if change.undone {
+                why("the user undid this")
+            } else if change.depth >= 1 {
+                why("it answers a plugin's answer to a change, and those stop there")
+            } else {
+                None
+            };
+            (change.depth.saturating_add(1), refused)
+        }
+        Call::Event(DocEvent::EditRefused(_)) => (0, why("it answers a refusal of its edits")),
+        _ => (0, None),
     }
 }
 
@@ -709,6 +650,12 @@ pub(crate) struct HostState {
     pub(crate) table: ResourceTable,
     limits: StoreLimits,
     pub(crate) plugin: String,
+    /// Its version, as its transactions' actor says.
+    version: Arc<str>,
+    /// The Op JSON version its manifest says its edits are written in.
+    pub(crate) edit_schema: Option<String>,
+    /// The user let it know who they are ([`Grants::identity`]).
+    pub(crate) identity: bool,
     /// Panel ids the manifest declares.
     pub(crate) panels: Vec<String>,
     pub(crate) storage: Storage,
@@ -721,11 +668,22 @@ pub(crate) struct HostState {
     /// `progress.task` handles this call made, freed when it returns.
     pub(crate) task_handles: Vec<u32>,
     pub(crate) call: Option<CallContext>,
-    /// The running call's base ([`HostState::base`]).
-    base: OnceCell<Arc<Snapshot>>,
-    /// What the running call read of it ([`CallOutput::reads`]).
-    reads: BTreeSet<Key>,
-    pub(crate) batches: Vec<EditBatch>,
+    /// The running call's transaction ([`HostState::tx`]).
+    pub(crate) call_tx: Option<Tx>,
+    /// What it's made on, or the next one will be: the cell's document at
+    /// the call's first read or submit, then what each commit published.
+    pub(crate) base: Option<Arc<Published>>,
+    /// What the call's edits are called: its first submit's label.
+    pub(crate) label: Option<String>,
+    /// What the call uploaded, granted in order in each of its
+    /// transactions.
+    pub(crate) uploads: Vec<api::Upload>,
+    /// Why the call's edits are refused ([`answering`]), if they are.
+    pub(crate) refusal: Option<String>,
+    /// The refusals it was answered with, each once ([`CallOutput::refused`]).
+    pub(crate) refused: Vec<String>,
+    /// How far down a chain of answers its edits are ([`CallOutput::depth`]).
+    pub(crate) depth: u8,
     /// When the running call times out.
     pub(crate) deadline: Instant,
 }
@@ -743,17 +701,86 @@ impl HostState {
         self.call.as_ref()?.ui.clone()
     }
 
-    /// The document as the call reads it: the cell's at its first read or
-    /// submit, and the same one for every one after (M10.5 §14.3). None
-    /// when no document is open.
-    pub(crate) fn base(&self) -> Option<&Snapshot> {
-        let d = self.doc()?;
-        Some(self.base.get_or_init(|| d.cell.load_full()))
+    /// The call's transaction, and what it's made on: made at the call's
+    /// first read or submit on the document as the cell has it then (M10.5
+    /// §14.3), or after a commit on what the commit published, with what
+    /// the call uploaded granted in it. Reads record their decision reads
+    /// in it and see its own edits. None when no document is open.
+    pub(crate) fn tx(&mut self) -> Option<(&mut Tx, &Published)> {
+        if self.call_tx.is_none() {
+            let base = match &self.base {
+                Some(base) => base.clone(),
+                None => self.doc()?.cell.load_full(),
+            };
+            let id = self.plugin.as_str().into();
+            let mut tx = base.plugin_tx(id, self.version.clone(), self.identity);
+            for upload in &self.uploads {
+                tx.pin(upload.blob.clone());
+                tx.grant(upload.grant.clone());
+            }
+            self.base = Some(base);
+            self.call_tx = Some(tx);
+        }
+        Some((self.call_tx.as_mut()?, self.base.as_deref()?))
     }
 
-    /// The call decided by what `keys` hold in its base.
-    pub(crate) fn read(&mut self, keys: impl IntoIterator<Item = Key>) {
-        self.reads.extend(keys);
+    /// Page `page` as the call's transaction draws it under `inputs`: text
+    /// as the file will draw it ([`ViewInputs::plugin_text`]), a render
+    /// with or without markup, OCR its content alone
+    /// ([`ViewInputs::content_only`]). Read: what it draws so. The call's
+    /// document, the snapshot it reads, the call's own edits in it, and
+    /// the page.
+    pub(crate) fn drawn(
+        &mut self,
+        page: u64,
+        inputs: &ViewInputs,
+    ) -> Result<(&DocContext, Snapshot, PageId), String> {
+        let id = PageId(page);
+        let (tx, base) = self.tx().ok_or("no document is open")?;
+        tx.read_render(id, inputs);
+        (tx.state().def(id)).ok_or_else(|| format!("no page {page}"))?;
+        let snap = Snapshot {
+            state: tx.state().clone(),
+            ..base.snap.clone()
+        };
+        Ok((self.doc().expect("a document's call"), snap, id))
+    }
+
+    /// How the plugin is told who made what (M10.5 §6.8).
+    pub(crate) fn roles(&self) -> Roles {
+        Roles {
+            plugin: self.plugin.clone(),
+            installed: self
+                .call
+                .as_ref()
+                .map(|c| c.plugins.clone())
+                .unwrap_or_default(),
+            identity: self.identity,
+        }
+    }
+}
+
+/// How a plugin is told who made a mark or a comment: an installed
+/// plugin by its role, and, granted `identity`, anyone else by name;
+/// without it, the user as "you" and everyone else as "other".
+pub(crate) struct Roles {
+    plugin: String,
+    installed: Arc<[String]>,
+    identity: bool,
+}
+
+impl Roles {
+    /// `author`'s, in the document `base` is of.
+    pub(crate) fn of(&self, base: &Published, author: &str) -> String {
+        if author == self.plugin || self.installed.iter().any(|id| id == author) {
+            format!("plugin {author}")
+        } else if self.identity {
+            author.to_string()
+        } else if base.is_user(author) {
+            "you".into()
+        } else {
+            "other".into()
+        }
     }
 }
 
@@ -773,28 +800,5 @@ impl wasmtime_wasi_http::WasiHttpView for HostState {
             table: &mut self.table,
             hooks: &mut self.net,
         }
-    }
-}
-
-impl HostState {
-    /// The call's document and base, and page `page`, which the call reads
-    /// as it draws under `inputs`: text as the file will draw it
-    /// ([`ViewInputs::plugin_text`]), OCR its content alone
-    /// ([`ViewInputs::content_only`]). Read: what it draws so.
-    pub(crate) fn page_base(
-        &mut self,
-        page: u64,
-        inputs: &ViewInputs,
-    ) -> Result<(&DocContext, &Snapshot, PageId), String> {
-        let id = PageId(page);
-        let reads = (self.base()).map(|s| sheaf_doc::render_reads(&s.state, id, inputs));
-        self.read(reads.into_iter().flatten());
-        let (Some(d), Some(snap)) = (self.doc(), self.base()) else {
-            return Err("no document is open".into());
-        };
-        snap.state
-            .def(id)
-            .ok_or_else(|| format!("no page {page}"))?;
-        Ok((d, snap, id))
     }
 }
