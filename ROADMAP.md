@@ -759,11 +759,33 @@ Clicking a link annotation does nothing today. That covers internal
 destinations, URLs (which should get a warning before opening, like the
 attachments panel's) and links in files from other tools. Connectors jump
 only through sheaf's own code. Found while planning M9.
-- **Overlap:** M13 link editing (create, edit, delete) builds on this.
-  M9 connector groups write `/Dest` cycles that Acrobat follows; sheaf
-  doesn't follow them.
-- **Open:** small enough to ride along an M9 slice (connector groups), or
-  an M7 follow-up.
+- **Shift+click follows a link** (Greg, 2026-10-23). A plain click
+  stays a click in the text (placing, selecting), so following a link is
+  never an accident. Hovering a link shows its target and "Shift+click to
+  open"; the right-click menu has Open Link and Copy Link.
+- **URLs in the page's text are links too, without changing the file,**
+  as Acrobat's "Create links from URLs" preference makes them (added
+  2026-10-23). Web addresses and email addresses in the text, OCR text
+  included, follow with Shift+click like a real link. PDFium finds them
+  (`FPDFLink_LoadWebLinks`: each URL and its rectangles; pdfium-render
+  has only the raw binding), or a pattern over the page's words does.
+  `settings.toml` can turn it off.
+- **What Shift+click does today:**
+  - **Shift+drag** selects a region with any tool. A Shift+click without
+    a drag doesn't, so it's free on a link.
+  - **With the Select tool, Shift+click on a mark** adds it to the
+    selection. A highlight over a URL is common, so the mark keeps
+    Shift+click and the link opens from the right-click menu.
+  - Shift+click doesn't extend a text selection in sheaf, so nothing is
+    lost there; it would rule that convention out later.
+- **Keyboard:** reaching and opening links without a mouse belongs to
+  M17.
+- **Overlap:** M13 link editing (create, edit, delete) builds on this,
+  and its "create links from URLs in text" writes real links where this
+  only shows them. M9 connector groups write `/Dest` cycles that Acrobat
+  follows; sheaf doesn't follow them.
+- **Open:** where it lands: a small change on its own, or M13's first
+  link slice.
 
 ### File contention: more than one process editing a PDF
 
