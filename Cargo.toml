@@ -10,7 +10,6 @@ members = [
     "crates/sheaf-ops",
     "crates/sheaf-image",
     "crates/sheaf-cli",
-    "crates/sheaf-instance",
     "crates/sheaf-doc",
     "crates/sheaf-render",
     "crates/sheaf-ui",
@@ -41,7 +40,6 @@ sheaf-plugin = { path = "crates/sheaf-plugin" }
 sheaf-ops = { path = "crates/sheaf-ops" }
 sheaf-image = { path = "crates/sheaf-image" }
 sheaf-cli = { path = "crates/sheaf-cli" }
-sheaf-instance = { path = "crates/sheaf-instance" }
 
 # GPUI comes from gpui-pre: Longbridge's weekly crates.io snapshot of Zed
 # main, its crates renamed gpui-pre-*. 0.3.9 is zed@93d7456. The sources are
@@ -80,6 +78,11 @@ schemars = { version = "1", default-features = false, features = ["derive", "std
 # Progress and cooperative cancel for ops, the CLI bar and plugin tasks:
 # sheaf's own crate, published as sheaf-pdf/in-progress.
 in-progress = "0.1"
+# One sheaf per user and state folder: a later launch hands its files to
+# the running sheaf. sheaf's own crate, published as
+# sheaf-pdf/instance-handoff. Pinned exactly, as its README asks: until
+# 0.1.0 a later alpha may change the API and what two builds share.
+instance-handoff = "=0.1.0-alpha.1"
 
 # Zed's workspace patches for crates GPUI uses, mirrored from the
 # [patch.crates-io] of Zed's Cargo.toml at the snapshot's rev.

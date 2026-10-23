@@ -33,7 +33,9 @@ file manager or with `sheaf file.pdf`, hands it to the running sheaf
 instead of starting another: a file that's already open comes forward, and
 the rest open in windows of their own. Each user on a machine has their
 own. `sheaf --new-instance` runs a separate sheaf beside it, which doesn't
-remember window layout or recent files.
+remember window layout or recent files. The hand-off is
+[instance-handoff](https://crates.io/crates/instance-handoff), sheaf's own
+crate, published on its own.
 
 ### Command line
 
@@ -132,7 +134,9 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  sheaf-app          GPUI application, views, commands    │
+│  sheaf-app          GPUI application, views, commands;   │
+│                     one process per user: the            │
+│                     instance-handoff crate               │
 ├────────────────────────────┬────────────────────────────┤
 │  sheaf-cli (no GUI)        │  sheaf-ops: operations     │
 │  clap subcommands          │  shared by app and CLI;    │

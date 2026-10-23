@@ -3646,6 +3646,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "instance-handoff"
+version = "0.1.0-alpha.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d5d8b8eea8cc503be6b816bbbcab7150d374d10a7a1046abf32ce1fb4d363f"
+dependencies = [
+ "libc",
+ "log",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "interpolate_name"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6568,6 +6579,7 @@ dependencies = [
  "gpui-pre-platform",
  "im",
  "image",
+ "instance-handoff",
  "log",
  "lopdf",
  "regex",
@@ -6580,7 +6592,6 @@ dependencies = [
  "sheaf-doc",
  "sheaf-edit",
  "sheaf-image",
- "sheaf-instance",
  "sheaf-ocr",
  "sheaf-ops",
  "sheaf-plugin",
@@ -6672,21 +6683,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tiff",
-]
-
-[[package]]
-name = "sheaf-instance"
-version = "0.1.0-alpha.1"
-dependencies = [
- "anyhow",
- "futures",
- "libc",
- "log",
- "serde",
- "serde_json",
- "tempfile",
- "uds_windows",
- "windows 0.61.3",
 ]
 
 [[package]]

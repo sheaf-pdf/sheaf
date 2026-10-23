@@ -407,9 +407,9 @@ fn main() {
     let launched = Instant::now();
     let cli = parse_cli();
     let mode = if cli.separate() {
-        sheaf_instance::Mode::Separate
+        instance::Mode::Separate
     } else {
-        sheaf_instance::Mode::Join
+        instance::Mode::Join
     };
     // Exits here when a running sheaf takes the files.
     let instance = instance::start(mode, &cli.paths);
@@ -423,7 +423,7 @@ fn main() {
             .filter_map(|u| instance::file_url_path(u))
             .collect();
         if !paths.is_empty() {
-            let _ = finder.unbounded_send(sheaf_instance::Request::new(paths));
+            let _ = finder.unbounded_send(paths);
         }
     });
     app.run(move |cx: &mut App| {

@@ -161,9 +161,16 @@ and the approval card.
   sends SIGINT, SIGTERM after 100 ms, then SIGKILL.
 - **Stripped environments:** Codex and the MCP TypeScript SDK pass stdio
   servers a minimal environment, without `XDG_RUNTIME_DIR` (both) or
-  `TMPDIR` (the TS SDK). `sheaf_instance::default_dir()` reads those, so
-  `sheaf mcp` would look in `/tmp/sheaf-<uid>` while the GUI is in
-  `/run/user/<uid>/sheaf`.
+  `TMPDIR` (the TS SDK). sheaf-instance read those, so `sheaf mcp` would
+  have looked in `/tmp/sheaf-<uid>` while the GUI was in
+  `/run/user/<uid>/sheaf`. instance-handoff, which replaced it, doesn't:
+  its app folder is `/run/user/<uid>/sheaf` on Linux with systemd, and
+  the per-user temporary folder from `confstr` on macOS, whatever the
+  environment. What can still differ is the state folder the instance
+  folder is named after: `sheaf_ops::dirs::state_dir()` follows
+  `XDG_STATE_HOME` (and `SHEAF_CONFIG_DIR`), which a stripped
+  environment drops, so a relay that computes another state folder finds
+  no sheaf.
 - **Local HTTP has a record.** The spec requires Origin validation (403
   when invalid), and says local servers SHOULD bind to 127.0.0.1 and
   SHOULD authenticate. SDK defaults got this wrong: CVE-2025-66414 and
@@ -189,7 +196,7 @@ and the approval card.
 | # | Option | Verdict |
 |---|---|---|
 | 1 | **stdio relay plus a socket of its own:** `sheaf mcp` relays to `agent.sock` in the runtime folder; rmcp runs in the app | **Recommended** |
-| 2 | The same over `instance.sock`, extended | Workable, no gain |
+| 2 | The same over `instance.sock`, extended | Gone: that socket is instance-handoff's |
 | 3 | The app hosts Streamable HTTP on 127.0.0.1 | Defer |
 | 4 | Streamable HTTP over the socket | VS Code only; skip |
 | 5 | A headless `sheaf mcp` that opens files itself | Not for M16 |
@@ -197,20 +204,24 @@ and the approval card.
 | 7 | The relay speaks MCP; a private RPC to the app | Two protocols; no |
 
 1. **Recommended.** Nothing listens on the network and browsers can't
-   open Unix sockets. On Linux and macOS it gets `sheaf-instance`'s
-   protections: a 0700 runtime folder the user must own, and a peer uid
-   check on every connection. One MCP implementation lives in the
-   process that owns the documents, undo and the approval card, and the
-   same handler can later sit behind option 3 or 6. The instance
-   socket's hand-off protocol is left alone. Unity ships this shape: a
-   stdio relay to the Editor over a Unix socket or named pipe, with
-   in-app approval of each client.
-2. **The instance socket, extended.** A `{v: 2, kind: "mcp"}` first line
-   switches the connection to MCP. A v2 owner can keep accepting v1
-   opens, so hand-offs needn't break. But the listener is serial, with 2
-   s timeouts and a 1 MiB request cap built for one-shot hand-offs, so it
-   needs reworking for long-lived connections, and a second socket file
-   costs nothing.
+   open Unix sockets. `agent.sock` goes in the runtime folder
+   instance-handoff makes and checks: `Builder::runtime_dir()` names it
+   (private, the user's alone, no links on the way), and
+   `Builder::probe()` says whether a sheaf serves there before the relay
+   connects. The crate exports no listener and no peer check, so the
+   same-user check on every connection to `agent.sock` is M16's work:
+   on Unix a few lines (`SO_PEERCRED`, `getpeereid`, as the crate checks
+   its own socket); on Windows new work (the Windows amendment below).
+   One MCP implementation lives in the process that owns the documents,
+   undo and the approval card, and the same handler can later sit behind
+   option 3 or 6. The hand-off protocol is left alone. Unity ships this
+   shape: a stdio relay to the Editor over a Unix socket or named pipe,
+   with in-app approval of each client.
+2. **The instance socket, extended.** No longer open: since sheaf moved
+   to instance-handoff, the hand-off socket is the crate's. Its scope
+   leaves general IPC out (its ADR 0001) and puts replies beyond "taken"
+   off to 0.2 (ADR 0005), and each connection carries one payload, with
+   a commit point, not a stream.
 3. **Localhost HTTP.** No relay for clients that speak HTTP, and several
    can connect at once (JetBrains, Figma and Sketch host localhost
    servers; JetBrains' `McpStdioRunner` bridges stdio to it). But it puts
@@ -243,9 +254,11 @@ and the approval card.
   them as tool arguments. "Revert this turn" and "Always for this
   command in this thread" need a turn and a thread that sheaf defines,
   for example per session handle or per committed plan.
-- **Find the runtime folder without the environment:** `/run/user/<uid>`
-  when it exists and the user owns it, `confstr(_CS_DARWIN_USER_TEMP_DIR)`
-  on macOS. Windows is fine (both lists keep `LOCALAPPDATA`).
+- **Find the runtime folder without the environment:**
+  instance-handoff's `Builder::runtime_dir()` does (`/run/user/<uid>`
+  with systemd, `confstr(_CS_DARWIN_USER_TEMP_DIR)` on macOS; Windows is
+  fine, both lists keep `LOCALAPPDATA`), as long as the relay names the
+  GUI's state folder (Stripped environments, above).
 - **The relay survives a missing or restarting sheaf.** A pure byte
   relay can't answer discovery when sheaf isn't running, and Claude Code
   doesn't reconnect stdio servers. So the relay is slightly MCP-aware: it
@@ -271,23 +284,70 @@ and the approval card.
   form cancels the first (`Workspace::plugin_ui`).
 - **Cancellation and shutdown** (`notifications/cancelled`, stdin EOF,
   a closed socket) withdraw any open card.
-- **Windows:** the socket has no peer check today, only the profile
-  folder's ACL, and that has to change before document content flows.
-  Either bridge `uds_windows` into tokio with a reader and a writer
-  thread per connection, or use a per-user named pipe. A pipe name is
-  machine-wide, so it needs the user's SID in the name,
-  `FILE_FLAG_FIRST_PIPE_INSTANCE`, and a check of the server's SID by
-  the relay before it sends anything (against another user squatting the
-  name).
+- **Windows:** sheaf-instance's socket had no peer check, only the
+  profile folder's ACL. instance-handoff's pipe has a user-only access
+  list, an integrity label and a token check on both ends, but that's
+  the crate's own, not exported, so `agent.sock` needs new work before
+  document content flows. Either bridge `uds_windows` into tokio with a
+  reader and a writer thread per connection, or use a per-user named
+  pipe. A pipe name is machine-wide, so it needs the user's SID in the
+  name, `FILE_FLAG_FIRST_PIPE_INSTANCE`, and a check of the server's SID
+  by the relay before it sends anything (against another user squatting
+  the name). The crate's `src/sys/windows.rs` does all of this for its
+  pipe (a random name published in a labelled folder instead of the
+  SID), and is the reference.
 - **Other environments:** WSL2 (a Linux `sheaf` can't reach a Windows
   AF_UNIX socket, so docs point at `sheaf.exe mcp`), VS Code's sandbox
   for stdio servers, and Flatpak or Snap packaging all change what the
   relay can see.
 
+### Every open document, and opening more (Greg, 2026-10-22)
+
+Greg's direction for M16, not settled design. Every sheaf window shares
+one process with the MCP server (option 1: `sheaf mcp` is a stdio relay
+to sheaf's own `agent.sock`, not the instance-handoff socket), so the
+agent can reach **all open documents**, and **open more**, which come
+back to it as handles in its MCP session. One process holds the
+documents, their undo and the approval cards, so two processes never
+edit one file (what sank option 5).
+
+Recommendations that go with it, not yet decided:
+- **Handles.** Tools take a document handle and a version token, and
+  `list_documents` lists the handles.
+- **Consent per document, the listing included.** §7216 consent stays
+  per document, even for the listing, since file names reveal clients:
+  `list_documents` shows only the documents shared with the session,
+  plus a count of the rest. Grants belong to the agent session (the
+  handle sheaf issues), not the connection.
+- **`open_document`** goes down the path handed-over files take
+  (`workspace::open_from_launch`), its path resolved against the
+  relay's working directory, as a launch's is against its own. It opens
+  a visible window without taking focus, and nothing auto-saves or
+  auto-closes it.
+- **Opening a path needs its own approval card,** never "always":
+  otherwise a sandboxed agent (Codex, Claude Code) reads files outside
+  its sandbox through sheaf. Under Flatpak the path has to come through
+  the document portal.
+
+**Threads: an avenue to explore, not a decision** (Greg's words).
+Rather than one thread per document or per window, maybe a pool like
+the engine pool (`sheaf-render/src/pool.rs`):
+- a thread is a conversation plus its granted documents, and any window
+  can show it;
+- live agent processes are pooled per agent kind (one process, many ACP
+  sessions), pinned while a panel shows one of theirs and while a turn
+  or a plan is open, and closed least recently used past a budget;
+- a closed thread reopens from its transcript (ACP `session/load` where
+  the agent offers it);
+- MCP clients own their own threads: for them sheaf keeps only the
+  grants, keyed by the agent-session handle.
+
 ### Decisions at kickoff
 
-1. A socket of its own, or a new request on `instance.sock`?
-   Recommended: its own.
+1. A socket of its own: settled by the move to instance-handoff, whose
+   socket can't carry MCP (option 2). Still open: the folder
+   `runtime_dir()` names, or one beside it, and how the relay finds it
+   in a stripped environment.
 2. Windows: bridge threads, or a per-user named pipe? And which peer
    check lands before client data flows?
 3. With no sheaf running, does `sheaf mcp` start one, or fail with a
@@ -327,7 +387,9 @@ and the approval card.
   JetBrains' [`McpStdioRunner.kt`](https://github.com/JetBrains/intellij-community/blob/master/plugins/mcp-server/mcpserver.stdio/src/McpStdioRunner.kt).
 - sheaf: `crates/sheaf-instance/src/lib.rs` (`PROTOCOL`, the timeouts,
   `default_dir`, `serve`, `hand_off`), and the M10.5 plan's proposal 36
-  and §20.
+  and §20. sheaf-instance has since been replaced by instance-handoff
+  0.1.0-alpha.1 (`Builder::runtime_dir`, `Builder::probe`; its
+  `docs/design` ADRs 0001 and 0005).
 
 ## Tools
 
@@ -356,10 +418,10 @@ while OCR runs. When something it read has changed, the write is
 refused and the agent reads again; a plan expires on conflict.
 
 **From the edit API** (M10.5 §20): the agent comes with its own
-transport and approval UI, not the sheaf-instance socket (M10.5 proposal
-36; [Transport](#transport-researched-2026-10-20) above); semantic ops
-only at first (M10.5 decision 6); and field values behind its
-per-document consent ([Permissions](#permissions)).
+transport and approval UI, not the instance-handoff socket (M10.5
+proposal 36; [Transport](#transport-researched-2026-10-20) above);
+semantic ops only at first (M10.5 decision 6); and field values behind
+its per-document consent ([Permissions](#permissions)).
 
 ## Running commands live
 
@@ -508,7 +570,9 @@ about 90 built-in commands are the bulk.
 - How far each adapter lets sheaf limit the agent to sheaf's tools.
 - MCP over ACP or `sheaf mcp` inside the panel: `sheaf mcp` until an
   adapter supports MCP over ACP ([Transport](#transport-researched-2026-10-20)).
-- Threads: per document or per window, how long they're kept.
+- Threads: per document, per window or pooled
+  ([Every open document](#every-open-document-and-opening-more-greg-2026-10-22)),
+  and how long they're kept.
 - §7216 consent: wording, scope, and whether the send log is kept.
 - Page images: caps on size and count.
 - Commands an agent should never run.

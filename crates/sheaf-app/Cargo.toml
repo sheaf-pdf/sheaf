@@ -29,7 +29,7 @@ sheaf-print.workspace = true
 sheaf-ops.workspace = true
 sheaf-image.workspace = true
 sheaf-cli.workspace = true
-sheaf-instance.workspace = true
+instance-handoff.workspace = true
 sheaf-plugin = { workspace = true, optional = true }
 # The document a plugin call reads ([`sheaf_plugin::DocContext`]).
 arc-swap = { workspace = true, optional = true }
