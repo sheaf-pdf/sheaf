@@ -34,9 +34,10 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 | M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | Planned | M10.5; M10 slice 15, for flattening in Remove Hidden Information; M10 slices 23–26 if sanitize removes field scripts rather than whole fields (open) |
 | M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | Sketched | M10.5; M10 slices 23–26 if signing creates new signature fields (open) |
 | M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | Sketched | M10.5; M11 (content interpreter, image editing) |
-| M14 | **Document processing**: compare, optimize, PDF/A, accessibility | Archival and output parity | Sketched | M10.5; M11 (content interpreter), for optimize |
+| M14 | **Document processing**: compare, optimize, PDF/A | Archival and output parity | Sketched | M10.5; M11 (content interpreter), for optimize |
 | M15 | **Automation**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | Sketched; CLI groundwork shipped | Batch: M10.5, plus each step's milestone (M10's `sheaf form` for fill and flatten, M11 for redact by pattern, M14 for optimize). Parity audit and stabilization: last, after everything else |
 | M16 | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from any combination of ops, with approval | Agents work on documents through sheaf's own ops | Sketched | M10.5 |
+| M17 | **Accessibility**: sheaf itself usable with a screen reader and the keyboard; PDF/UA documents: tags, validation, a review view | People who use assistive technology can use sheaf and read what it writes | Sketched | The app: nothing unbuilt. Documents: M10.5; M11 (content interpreter), for tagging content; M14's PDF/A validator, if PDF/UA's rules share it (open) |
 
 **Depends on** lists the unbuilt work a milestone needs first, or the part
 of it named after "for": it uses that work's code, types or
@@ -65,6 +66,8 @@ graph LR
   M15a["M15: batch actions and CLI"]
   M15b["M15: parity audit and stabilization (last)"]
   M16["M16 Agent tools (MCP)"]
+  M17a["M17: the app, with a screen reader and the keyboard"]
+  M17b["M17: PDF/UA documents"]
   Panel["Agent panel (Pending)"]
 
   fin --> M10_5
@@ -85,7 +88,10 @@ graph LR
   M10_5 --> M16
   M16 --> Panel
   M16 -.-|"shared: command schemas"| M15a
-  M5r & M10b & M12 & M13 & M15a & M16 -.-> M15b
+  M10_5 --> M17b
+  M11 -->|"content interpreter"| M17b
+  M14 -.-|"shared: validator (open)"| M17b
+  M5r & M10b & M12 & M13 & M15a & M16 & M17a & M17b -.-> M15b
 
   classDef done fill:#e4e4e4,stroke:#8a8a8a,color:#555
   classDef active fill:#fff1c2,stroke:#b08900,color:#333
@@ -447,8 +453,8 @@ Builds on M11's content interpreter.
     signatures.
   - **Checked** with `qpdf --check-linearization`.
 - PDF/A convert and validate ❓.
-- Accessibility: tags tree, reading order, alt text, accessibility checker ❓.
 - Preflight-lite (font embedding, color spaces, transparency checks) ❓.
+- Accessibility and PDF/UA moved to [M17](#m17-accessibility).
 
 **Decide at kickoff:** how far to go on the ❓ items. They matter for
 archival requirements but not for daily binder work.
@@ -533,6 +539,76 @@ Slices: read tools, history and commands → plans and approval → command
 schemas and the dialog fallback → consent, settings and the send log →
 docs.
 
+### M17: Accessibility
+
+Added 2026-10-23, taking over M14's accessibility item. It has two parts
+that can run apart: the app, which needs nothing unbuilt, and the
+documents, which wait on M11's content interpreter.
+
+**The app, with a screen reader and the keyboard**
+- **Screen readers.** GPUI (gpui-pre 0.3.9) reports its UI through
+  AccessKit on macOS, Windows and Linux (AT-SPI). An element with an id
+  and a role (`.role(Role::Button)`) is reported with its label; one
+  without a role isn't. sheaf-app sets no roles today, so a screen
+  reader finds nothing in it.
+  - Roles, labels and states for every control: sheaf-ui's widgets
+    (`TextInput`, `TextArea`, buttons, menus, lists, dialogs, the
+    palette), the panels and the toolbar.
+  - Announce what changes out of sight: progress, a finished OCR or
+    save, an error.
+  - **The page view** is drawn, so it needs a tree of its own: the
+    page's text in reading order (from the tags tree when the file has
+    one), marks as objects with their contents, and form fields as
+    controls. A screen-reader user reads the PDF through it.
+- **Keyboard only:** every command, panel and dialog reachable without a
+  mouse, with a visible focus. The hard parts are placing and moving
+  marks and selecting text on a page.
+- **Seeing:** a high-contrast theme, and following the system's text
+  size and reduced-motion settings.
+- **Checked** against WCAG 2.2 as applied to software (Section 508, EN
+  301 549), with NVDA and Narrator on Windows, VoiceOver on macOS and
+  Orca on Linux. A firm that answers to Section 508 may ask for a
+  conformance report (a VPAT).
+- **Open:** how to test it. GPUI has an `a11y` debug module, and
+  AccessKit trees can be read back; neither is explored yet.
+
+**Documents: PDF/UA** (ISO 14289: UA-1 on PDF 1.7, UA-2 on PDF 2.0) as
+the target ❓
+- **Structure:** the tags tree in the model (`Key::StructElem` and
+  `/ParentTree`, the M10.5 plan's §20), alt text, reading order, table
+  headers, the document's language and its title shown. M11's content
+  interpreter ties content to tags (marked content and MCIDs).
+- **Validate** PDF/UA's rules that software can check, as M14 does
+  PDF/A's. The Matterhorn Protocol lists PDF/UA's failure conditions;
+  veraPDF validates both standards, and is the reference to compare
+  against.
+- **Review what only a person can judge:** whether alt text says what
+  the figure shows, whether the reading order makes sense, whether a
+  heading is tagged as one. Software can't check these, so they need a
+  view of their own: the tags tree beside the page, the reading order
+  drawn over it, the text as a screen reader would read it, and the
+  manual checks to tick off. Acrobat has its Reading Order tool and
+  Tags panel; PAC has a screen-reader preview.
+- **Tag an untagged file:** layout detection with reading order on each
+  page (oar-ocr's PP-DocLayoutV2 orders the regions it finds), then a
+  person checks it in the review view. Scans get it after OCR.
+- **Keep a tagged file tagged:** what sheaf writes into a PDF/UA file
+  (marks, headers and footers, watermarks, OCR text, form fields) is
+  tagged or marked as an artifact, so an edit keeps the claim. Today
+  M10.5 adds a Note when a change breaks a PDF/A or PDF/UA claim
+  (proposal 39).
+- **Tests:** `../pdf-corpus/conformance/` has PDF/UA claims (backlog
+  F9).
+- **Open:** the review as a panel in the main window, or a review mode
+  of its own, as Acrobat's Reading Order tool is.
+
+**Decide at kickoff:** which part goes first (the app's can run beside
+other milestones), and how far to go on PDF/UA.
+
+Slices: roles and labels on sheaf-ui's widgets → panels, dialogs and
+keyboard paths → the page view's tree → the tags tree in the model →
+validation → the review view → tagging untagged files.
+
 ---
 
 ## Parity checklist
@@ -584,7 +660,9 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | Compare documents | M14 |
 | Optimize / reduce file size | M14 |
 | Fast Web View (linearize on save) | M14 |
-| Preflight / accessibility checker ❓ | M14 |
+| Preflight / accessibility checker ❓ | M14 (preflight), M17 (accessibility) |
+| PDF/UA validate, and a review view for the manual checks ❓ | M17 |
+| sheaf itself with a screen reader and the keyboard | M17 |
 | Batch actions / scripting | M15 |
 
 ## Pending
@@ -614,7 +692,7 @@ notes, wikis and LLM tools. Bookmarks could supply the heading structure.
 - **Overlap:**
   - M7 Export text (plain done; "with layout ❓" left open). This would be
     another format in that same export dialog and `sheaf export`.
-  - M14 accessibility (tags tree, reading order). Tagged PDFs give the
+  - M17 accessibility (tags tree, reading order). Tagged PDFs give the
     structure directly, and both need a reading-order model.
   - M5 OCR. Scans need a text layer first.
 - **Approach:** born-digital pages use PDFium's text plus heuristics
@@ -736,6 +814,88 @@ the approvals, and launching the agent over ACP. Decisions and research
   - Client data leaving the machine: IRC §7216 consent and a firm-wide
     off switch in `settings.toml`.
 
+### Search across files
+
+Find and Patterns over files and folders that aren't open, as Acrobat's
+Advanced Search does: "which of this client's PDFs has this EIN?"
+- **The CLI first, and soon** (Greg, 2026-10-23): `sheaf search` over
+  files and folders, by text, regular expression or a Patterns preset
+  (`patterns.json`). It prints the file, page and matched text, or JSON,
+  and exits as grep does (0 found, 1 none, 2 error).
+  - Each file opens as a `Session` and runs `Text::search` (M10.5 slice
+    19), so it searches what sheaf shows, OCR text layers included.
+  - Pages with no text are counted, not OCR'd.
+  - Encrypted files are listed and skipped unless a password is given.
+- **The GUI is open.** With one document per window, the results need a
+  window of their own: hits grouped by file, each opening its file at the
+  page. Open: where it starts (File menu, palette, recent files), and
+  whether it also searches open windows' unsaved changes.
+- **Overlap:** M15's batch actions (a search's files as a batch's input)
+  and M11's redact by pattern, both over many files; M16 (an agent could
+  call it).
+- **Where:** the CLI is small and can follow M10.5's PR 6 (slice 19's
+  `Session`) directly; it needn't wait for M15.
+
+### Spell check
+
+Underline misspelled words as they're typed, with suggestions and "Add
+to dictionary" on right-click, as Acrobat checks comments and form
+fields. Notes, comments and filled forms go to clients.
+- **Where:** sheaf-ui's `TextInput` and `TextArea` (every panel and
+  dialog), notes, replies and free-text marks, and form fields once M10
+  fills them on the page. Not number fields.
+- **Engines:**
+  - Windows' `ISpellChecker` and macOS's `NSSpellChecker`: the user's
+    own languages and dictionary, for free.
+  - spellbook (Helix's pure-Rust, Hunspell-compatible checker; MPL-2.0,
+    alpha, no phonetic suggestions) with Hunspell dictionaries: the same
+    on every system, and the only choice on Linux, where
+    `/usr/share/hunspell` has the system's dictionaries.
+  - zspell (pure Rust); its license and suggestion API are unchecked.
+- **Dictionaries:** which to ship, each with its own license, plus a
+  word list of tax and accounting terms (EIN, 1099-NEC, K-1, form names)
+  so they aren't flagged.
+- **Open:**
+  - Where "Add to dictionary" writes. Settings are hand-edited files
+    sheaf never writes, and `state.json` is disposable, so a user's word
+    list is a third kind of file. A firm may want one list for everyone.
+  - Which milestone: dialogs and notes could have it before M10's form
+    filling does.
+
+### Drag pages between windows
+
+Drag thumbnails from one window to another to copy pages, or with a
+modifier to move them. Nice but not a priority (Greg, 2026-10-23).
+- **Why:** with one document per window, it's the direct way to move
+  pages between binders. The prior art's list of what's useful asks for
+  it, after Preview
+  ([prior-art/README.md](docs/prior-art/README.md)).
+- **Overlap:** M8's insert from file and Combine (the ops exist), and
+  M2's thumbnail drag within a window.
+- **Open:** drags between GPUI windows, and to and from the file manager,
+  are unexplored. Both windows are in one sheaf process, so the pages
+  can come from the source's current state, unsaved edits included.
+
+### A binder index page
+
+Make an index page from the bookmarks: titles with page numbers or
+labels, each a link, kept current as pages move, as headers and footers
+are. Very low priority, and probably a plugin rather than core (Greg,
+2026-10-23).
+- **Overlap:** M13's links; M8's header and footer fields, which update
+  as pages move.
+- **As a plugin, it needs:** a way to insert pages (in M10.5's ops,
+  `insert-pages` is the user's alone) and an op that creates links (none
+  yet; see backlog F16).
+
+### Document properties and the initial view
+
+Edit the title, author, subject and keywords, and set how the file
+opens: bookmarks panel shown, page layout and zoom, and the title in the
+window bar instead of the file name. File > Properties is read-only
+today (M7). Revisit after M17's PDF/UA work, which sets the title shown
+and the language anyway (Greg, 2026-10-23).
+
 ## Not planned
 
 - **XFA forms.** Dynamic XFA is deprecated and effectively Adobe-only.
@@ -751,3 +911,7 @@ the approvals, and launching the agent over ACP. Decisions and research
   fit for a plugin (M6).
 - **General-purpose document JavaScript.** Only the form-scripting subset in
   M10; everything else goes through plugins.
+- **Rolling a binder forward to next year** (next year's binder started
+  from this one's bookmarks, with statuses and tickmarks cleared). Mostly
+  not how binders are used. A plugin for year-end transitions might come
+  up much later (Greg, 2026-10-23).

@@ -446,8 +446,9 @@ phase; they're triaged between phases.
   listed there, as taken or as left out.
 - **Notes:** the behavior needs pinning down. CCH's own example
   (500 × 10% = 25000) is wrong, and adding machines differ. A new op
-  needs a serde-compatible addition to the tape's stored lines and a text
-  form for `/Contents`.
+  is a new `Op` variant (in the ops JSON schema too) and a text form for
+  `/Contents`, so other viewers show it. Tapes saved by earlier builds
+  needn't read: sheaf is pre-release.
 
 ### F3: Put a calculator result on the page as text
 
@@ -674,9 +675,9 @@ phase; they're triaged between phases.
     signature asks must be right (B5). Today's signed-file tests use
     the 322 `/DocMDP` forms.
   - `conformance/`: the PDF/A save Note (M10.5 slice 16), PDF/A
-    convert and validate (M14), accessibility (M14).
+    convert and validate (M14), PDF/UA (M17).
 - **Overlap:** M10.5 slice 19's exports and signature asks; M12
-  (digital signatures); M14.
+  (digital signatures); M14; M17.
 - **Notes:** each needs a `Corpus::` reader for its manifest, like
   `scans()`, and a tier with its own `SHEAF_…_ONLY` narrowing.
   - **Progress (M10.5 slice 19):** `Corpus::signatures()` reads
@@ -791,6 +792,197 @@ phase; they're triaged between phases.
   over the open (293 MB today against 220.5) rather than the process's
   peak; decide with the design. Slice 19's notes have the five runs.
 
+### F10: Redo OCR: replace another tool's text layer
+
+- **Found:** 2026-10-22, Greg, comparing sheaf's OCR with Acrobat's and
+  ocrmypdf's, during M10.5
+- **What:** a third choice in Recognize Text (OCR)…, beside skipping
+  pages with text and recognizing every page: redo. On each page, take
+  out the invisible text another tool's OCR left (text render mode 3:
+  Acrobat's Searchable Image, ocrmypdf, ABBYY, a scanner's own), keep
+  the visible text, and write sheaf's layer in its place.
+- **Why:**
+  - With skip off, sheaf's layer goes on top of the old one, so the page
+    draws its words twice, invisibly: Find hits each word twice, and
+    selection, copy and plugins' page text are doubled. A plugin's
+    `recognize` always runs with skip off
+    (`crates/sheaf-app/src/plugins.rs:898`).
+  - With skip on (the default), a page whose layer came from a weak
+    engine or a scanner can't be improved. Acrobat's only way is to
+    rasterize the page, which loses its real text.
+  - A page under `HAS_TEXT_MIN_CHARS` (20, `crates/sheaf-ocr/src/job.rs`)
+    is recognized even with skip on, so a short foreign layer or a saved
+    Bates number comes out twice.
+- **Overlap:**
+  - [F8](#f8-a-command-to-remove-recognized-text) removes sheaf's own
+    layer on its own; redo is that plus recognizing again, for any
+    tool's layer. [B7](#b7-clear-ocr-text-silently-does-nothing-on-a-damaged-old-layer)
+    is the case where even sheaf's own old layer can't be taken out.
+  - Sheaf already replaces its own layer: `text_layer::install` strips
+    streams marked `/SheafOcrLayer` before writing
+    (`crates/sheaf-doc/src/text_layer.rs`), and slice 18's OCR blocks
+    (`/SheafOcrBlock`, `todos/m10.5-edit-api.md` decision 26) keep that a
+    dict edit. This entry is the foreign case, which has no marker, so
+    the page's own streams must be decoded and rewritten. Sheaf never
+    does that today.
+  - M11's true content removal and Remove Hidden Information
+    (`todos/m11.md`) take text out of a page's streams. Redo needs the
+    same operation for invisible text alone, so it probably follows M11
+    or shares its machinery.
+- **Notes:**
+  - **Prior art:** ocrmypdf's `--redo-ocr` (now `--mode redo`) strips
+    invisible text and recognizes again, keeping visible text;
+    `--force-ocr` rasterizes instead, and `--skip-text` is sheaf's
+    default. Acrobat refuses a page with "renderable text" (hidden text
+    counts) and has no redo. ABBYY has a setting to force OCR. Foxit's
+    behavior is unconfirmed.
+  - **Which invisible text is OCR:** not all of it is. Authors use
+    render mode 3 for search-only or copy-only text too. Strip every
+    mode-3 run, or only those over a page-sized image?
+  - **Pages with visible text:** the page's render shows that text, so
+    OCR reads it again. Either recognize only outside PDFium's
+    character boxes, or drop recognized words that overlap them.
+    Check how ocrmypdf's redo handles this.
+
+### F11: Plugin memory and time limits in settings.toml
+
+- **Found:** 2026-10-22, Greg, discussing a wasm build of qpdf as a
+  repair plugin, during M10.5
+- **What:** the plugin limits, today fixed at 256 MiB of linear memory
+  and 30 s a call (`Limits::default()`,
+  `crates/sheaf-plugin/src/runtime.rs:37`), set in `settings.toml` for
+  every plugin, and possibly overridden plugin by plugin.
+- **Why:**
+  - A plugin that works on a whole file, such as a qpdf repair or
+    another document transform, needs more than 256 MiB for a large
+    binder, and more than 30 s.
+  - A user on a small machine may want them lower.
+  - Today, changing them means rebuilding sheaf.
+- **Overlap:**
+  - `todos/plugins/document-transforms.md`, Open: may a transform
+    declare raised limits (up to about 3.5 GiB and 15 minutes), shown
+    at consent? That is the plugin asking. This entry is the user
+    setting them, and the two need one rule for which wins.
+  - `docs/plugins.md`, Limits, documents today's fixed values.
+- **Notes:**
+  - **Where per-plugin values go:** not in `[plugins.<id>]`. That
+    section is the plugin's own: it's handed to the plugin as JSON
+    (`Prefs::plugin_json`), and keys its manifest doesn't name are
+    reported as typos. A separate table such as `[plugin-limits]` with
+    `[plugin-limits.<id>]` keeps the host's settings out of the
+    plugin's reach.
+  - **Plumbing:** the runtime is made once with one `Limits`
+    (`crates/sheaf-app/src/plugins.rs:358`), but each plugin has its own
+    store (`Instance::start`, `runtime.rs`), so a per-plugin value can
+    come in through `LoadOptions`.
+  - **Changes while running:** settings are re-read when the file
+    changes. A timeout can apply from the next call; a memory limit is
+    set when the store is made, so it applies when the plugin is
+    reloaded.
+  - **Bounds:** wasm32 memory can't pass 4 GiB. A value out of range is
+    clamped and reported, as other settings problems are, never fatal.
+  - The timeout already leaves out time spent waiting on the user and
+    on OCR. Keep that.
+
+### F12: A qpdf plugin
+
+- **Found:** 2026-10-22, Greg, discussing PDF repair, during M10.5
+- **What:** qpdf built for wasm as a plugin of its own, kept in its own
+  repository and installed as an archive (Plugins > Install, through
+  `install_archive`), not bundled with sheaf. Commands such as:
+  - check a file (`--check`), as a second opinion beside sheaf's reader;
+  - linearize, and pack object streams, before M14 does them natively;
+  - rewrite a damaged file, as Save As does today, by qpdf's rules;
+  - dump the file's objects (`--qdf`, `--json`) for debugging.
+- **Why:** it brings qpdf's checks and writer options to sheaf users
+  now. It would also be the first plugin built outside this
+  repository, and the first real user of the document-transform API:
+  if a qpdf plugin works end to end, that API is probably right.
+- **Overlap:**
+  - `todos/plugins/document-transforms.md`, whose "What can't work"
+    says a tool like qpdf needs a wasm build. It also records the `gc`
+    requirement below.
+  - M14 Optimize (`ROADMAP.md`): linearization and object streams,
+    which make the plugin's versions a bridge, not the long-term path.
+    M14's Fast Web View entry rules out a transform plugin as the way
+    sheaf linearizes, since a plugin parses and writes the whole file
+    again; that cost is acceptable for a stopgap.
+  - [F11](#f11-plugin-memory-and-time-limits-in-settingstoml).
+- **Notes:**
+  - **Needs, in order:**
+    1. wasmtime's `gc` feature in sheaf's build. qpdf uses C++
+       exceptions throughout, and wasm exception handling needs `gc` in
+       wasmtime 49. Without it the component is rejected at load.
+    2. The document's bytes. Today's API has no way to hand a plugin
+       the whole file; the document-transform API would add it. Until
+       then, a file field in a plugin form returns a path, and the
+       plugin can open it only inside the folders its manifest's
+       read/write permissions grant (preopened in
+       `crates/sheaf-plugin/src/runtime.rs`). So it can work on files
+       on disk, not on the open document.
+    3. Higher memory and time limits (F11): 256 MiB and 30 s won't hold
+       a large file.
+  - **Why not in this repository:** the build needs a C++ wasm
+    toolchain (wasi-sdk, libc++ built with exceptions, and zlib and
+    libjpeg built for wasm). Sheaf's CI and `package.sh` build only
+    Rust plugins.
+  - **License:** qpdf is Apache-2.0, so the plugin ships qpdf's NOTICE.
+
+### F16: Turn QR codes into links
+
+- **Found:** 2026-10-23, Greg, during M10.5
+- **What:** a plugin command that finds the QR codes on a document's
+  pages, decodes them, and puts a link over each one that holds a web
+  address, so clicking the code opens what scanning it would. Before
+  adding anything, it lists what it found (the page, the decoded text,
+  and whether it will become a link) for the user to choose from.
+  - `http`, `https` and `mailto` addresses become links. Other schemes
+    (`javascript:`, `file:`, app links) are listed and skipped.
+  - Other content (plain text, a contact card, Wi-Fi details, a payment
+    code) doesn't become a link. The plugin can offer to put it in a
+    note mark beside the code instead.
+- **Why:** QR codes on invoices, statements, letters and tax notices
+  lead to payment portals and sign-in pages. On screen, the only way to
+  follow one is to point a phone at the monitor. A link helps
+  screen-reader users too, who can't scan a code at all. And seeing the
+  decoded address before it's linked shows a preparer where a code
+  really goes before trusting it.
+- **Overlap:**
+  - M13 link editing (`ROADMAP.md`), whose "create links from URLs in
+    text" is this feature's text-based sibling.
+  - Pending's "Follow links in the page view". Sheaf doesn't follow
+    links yet, so until it does, these work only in other viewers.
+  - M5's separator sheets read barcodes. `todos/m5-intake.md` ("Reading
+    and writing codes", on the `m5-intake` branch) benchmarked rxing and
+    zxing-cpp; both read QR codes with 0.34 mm modules in every
+    1-bit case tested at 200 and 150 dpi.
+- **Notes:**
+  - **How:** render each page in gray through the plugin API's `render`
+    interface, decode QR codes only with rxing (pure Rust, Apache-2.0,
+    builds for wasm), and turn each code's corners into the link's
+    rectangle with `image.to-page`. Read QR only: in M5's bench,
+    reading every format over a whole page found false codes on about
+    22 of 150 real scans. Check the false-read rate with QR alone.
+  - **Needs, in order:**
+    1. An op that creates a link. The edit vocabulary has none: plugins
+       add marks and connectors, and a link is only something they may
+       not delete. A plugin-made link that opens an address may need the
+       user's approval (`approval`), or the plugin's own confirmation
+       list may be enough. Decide when the op is designed, probably
+       with M13's link editing.
+    2. Seeing the links already there. `annotations()` never lists a
+       link, so a second run can't tell which codes are already linked
+       and would stack duplicates. Either the document interface lists
+       links (rectangle and target), or the op skips a link with the
+       same target over the same area.
+  - **Where the decoder lives:** in the plugin, or, once M5 puts a
+    reader in sheaf, in a host `barcodes` interface beside `ocr`, which
+    saves every plugin from bundling rxing.
+  - **Home:** an in-repo plugin beside `subtotal` and `amount-crossref`.
+    rxing is pure Rust, so the build needs nothing new.
+  - **Size:** the plugin is small; the link op is the real work.
+  - **When:** revisit after M13 lands (Greg, 2026-10-23).
+
 ## Closed
 
 ### B1: Calculator keys don't match PDFlyer's
@@ -842,3 +1034,16 @@ done twice.
       menu.
 
     Prefer `docs/prior-art/pdflyer.md`, which cites CCH's help.
+- **2026-10-22: OCR on pages that already have text.** Adobe's
+  [renderable text](https://helpx.adobe.com/acrobat/kb/error-could-perform-recognition-acrobat.html)
+  note, ocrmypdf's
+  [advanced docs](https://ocrmypdf.readthedocs.io/en/stable/advanced.html)
+  (skip, redo, force) and ABBYY's
+  [incorrect text layer](https://support.abbyy.com/hc/en-us/articles/360020818320-Recognition-of-the-document-that-has-incorrect-text-layer)
+  article. Foxit's documentation didn't say. It produced F10.
+- **2026-10-23: QR codes to links.** Neither Acrobat nor Foxit appears
+  to do it. Foxit
+  [turns URLs in text into links](https://resource-cms.foxit.com/tutorials/how-add-hyperlinks-pdfs-seamless-navigation-and-interactivity),
+  and an Adobe forum
+  [question asking for this](https://community.adobe.com/t5/acrobat/make-clickable-hyperlinks-from-qr-or-zappar-codes-in-pdf-how/m-p/9981646)
+  has no answer. It produced F16.

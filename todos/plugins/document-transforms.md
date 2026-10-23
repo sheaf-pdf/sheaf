@@ -120,6 +120,24 @@ optimizers, and outside cleanup or redaction tools built for wasm.
 - **What can't work:**
   - a wasm plugin can't run qpdf or Ghostscript; it needs a wasm build
     of the tool, or the bytes go out under a network grant;
+    - **a C++ build needs wasm exceptions, which sheaf's runtime can't
+      load yet.** qpdf throws and catches throughout, its repair path
+      included, so a WASI build of it uses the exception-handling
+      proposal. Wasmtime 49 supports that only when built with its `gc`
+      feature (`Config::wasm_exceptions` is behind `cfg(feature =
+      "gc")`, and exceptions are on by default when it is). sheaf builds
+      wasmtime with `default-features = false` and no `gc`
+      (`crates/sheaf-plugin/Cargo.toml`), so such a component is
+      rejected at load. Enabling `gc` should be enough on the host side;
+      its cost in binary size and build time isn't measured. The
+      plugin's side needs a wasi-sdk whose libc++ supports
+      `-fwasm-exceptions` (which release first did is unchecked).
+      Emscripten's builds of qpdf don't apply: sheaf runs WASI
+      components with no JavaScript host;
+    - qpdf's other needs fit: zlib and libjpeg are plain C, its native
+      crypto avoids OpenSSL, it reads and writes buffers in memory, and
+      it's Apache-2.0. Ghostscript also builds for wasm but is AGPL;
+      backlog F12 is a qpdf plugin;
   - files near 4 GiB can't be loaded whole by a plugin.
 
 ## The export destination
