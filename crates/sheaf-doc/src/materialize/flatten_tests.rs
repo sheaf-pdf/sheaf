@@ -3,7 +3,8 @@
 //! after the page's isolated content, and the annotation gone. Print,
 //! Hidden and NoView are honored, links stay, a widget draws the state its
 //! `/AS` names and nothing without one, while another tool's comment draws
-//! its first; a mark is drawn again from what it's pinned to, with nothing
+//! what PDFium shows, its `/V`'s state or its `/Off`, never its first; a
+//! mark is drawn again from what it's pinned to, with nothing
 //! of it left. Opened again, the block is the file's, kept in its slot,
 //! and a second flatten adds another after it.
 
@@ -35,7 +36,8 @@ struct Held {
     unprinted: ObjectId,
     hidden: ObjectId,
     unviewed: ObjectId,
-    /// Another tool's comment whose appearance has states and none named.
+    /// Another tool's comment whose appearance has states, `/Off` the
+    /// second, and none named.
     stated: ObjectId,
     link: ObjectId,
 }
@@ -78,7 +80,7 @@ fn annotated(tagged: bool) -> (Vec<u8>, Held) {
     let unviewed = square(&mut f, "unviewed", 4 | 32, 400);
     let [first, second] =
         ["1 0 0 rg 0 0 50 25 re f", "0 1 0 rg 0 0 50 25 re f"].map(|ops| form(&mut f, ops));
-    let states = dictionary! { "Red" => first, "Green" => second };
+    let states = dictionary! { "Red" => first, "Off" => second };
     let stated = annot(&mut f, "stated", 4, 72, dictionary! { "N" => states });
     f.dict(stated)
         .set("Rect", vec![72.into(), 300.into(), 172.into(), 350.into()]);
@@ -201,9 +203,9 @@ fn appearance(pdf: &Pdf, id: ObjectId, state: Option<&[u8]>) -> ObjectId {
 /// they're pinned to, a replacement's caret and struck text both; the
 /// form's widgets by the state their `/AS` names, the one with states and
 /// none named drawing nothing; another tool's comment with states and none
-/// named by its first, as the file lists them. The hidden and the never
-/// shown stay, as does the link, and nothing on the other page changes.
-/// Fields left with no widgets go.
+/// named by its `/Off`, as PDFium shows it, not its first. The hidden and
+/// the never shown stay, as does the link, and nothing on the other page
+/// changes. Fields left with no widgets go.
 #[test]
 fn flatten_takes_what_shows_and_leaves_the_rest() {
     let dir = scratch();
@@ -235,7 +237,7 @@ fn flatten_takes_what_shows_and_leaves_the_rest() {
         Some(appearance(&pdf, held.text, None)),
         Some(appearance(&pdf, held.printed, None)),
         Some(appearance(&pdf, held.unprinted, None)),
-        Some(appearance(&pdf, held.stated, Some(b"Red"))),
+        Some(appearance(&pdf, held.stated, Some(b"Off"))),
         None,
         None,
         None,
@@ -299,9 +301,88 @@ fn printable_leaves_what_isnt_printed() {
         appearance(&pdf, held.on, Some(b"Yes")),
         appearance(&pdf, held.text, None),
         appearance(&pdf, held.printed, None),
-        appearance(&pdf, held.stated, Some(b"Red")),
+        appearance(&pdf, held.stated, Some(b"Off")),
     ]
     .map(Some);
+    assert_eq!(forms, want);
+}
+
+/// Another tool's comment whose appearance has states draws the one PDFium
+/// shows, as the page view does: its `/AS`'s, else the one its `/V` (or
+/// its parent's) names, else its `/Off`, else nothing; never its first,
+/// nor one made of its border or fill, as pdf.js makes. A string names a
+/// state as a name does, and an `/AS` naming none draws nothing.
+#[test]
+fn a_comment_with_states_draws_the_one_pdfium_shows() {
+    let mut f = Form::new(1);
+    let page = f.pages[0];
+    let cases: [(&[&str], Dictionary, Option<&str>); 9] = [
+        (&["Red", "Green"], dictionary! {}, None),
+        (
+            &["Red", "Green"],
+            dictionary! { "BS" => dictionary! { "W" => 4 } },
+            None,
+        ),
+        (
+            &["Red", "Green"],
+            dictionary! { "IC" => vec![0.into(), 1.into(), 0.into()] },
+            None,
+        ),
+        (&["Red", "Off"], dictionary! {}, Some("Off")),
+        (
+            &["Red", "Green"],
+            dictionary! { "V" => "Green" },
+            Some("Green"),
+        ),
+        (
+            &["Red", "Green"],
+            dictionary! { "Parent" => dictionary! { "V" => "Green" } },
+            Some("Green"),
+        ),
+        (&["Red", "Off"], dictionary! { "V" => "Blue" }, Some("Off")),
+        (&["Red", "Off"], dictionary! { "AS" => "Blue" }, None),
+        (
+            &["Red", "Green"],
+            dictionary! { "AS" => Object::string_literal("Green") },
+            Some("Green"),
+        ),
+    ];
+    let mut want = Vec::new();
+    for (i, (states, extra, shows)) in cases.into_iter().enumerate() {
+        let mut ap = Dictionary::new();
+        for (n, state) in states.iter().enumerate() {
+            let dict = dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 50.into(), 25.into()],
+            };
+            let ops = format!("{n} 0 0 rg 0 0 50 25 re f");
+            let form = f.pdf.add_object(Stream::new(dict, ops.into_bytes()));
+            ap.set(*state, form);
+            if shows == Some(*state) {
+                want.push(Some(form));
+            }
+        }
+        let y = 700 - 60 * i as i64;
+        let mut dict = dictionary! {
+            "Type" => "Annot", "Subtype" => "Square", "P" => page, "F" => 4,
+            "Rect" => vec![72.into(), y.into(), 172.into(), (y + 50).into()],
+            "NM" => Object::string_literal(format!("square{i}")),
+            "AP" => dictionary! { "N" => ap },
+        };
+        for (k, v) in extra.iter() {
+            dict.set(k.clone(), v.clone());
+        }
+        let id = f.pdf.add_object(dict);
+        let mut annots = f.annots(0);
+        annots.push(id);
+        f.set_annots(0, &annots);
+    }
+    let dir = scratch();
+    let (_, mut doc) = opened(&dir, "a.pdf", &f.bytes());
+    let p0 = doc.page(0).unwrap();
+    let commit = (doc.commit_ops(vec![fx::flatten(&[p0], FlattenSet::All)], "flatten")).unwrap();
+    assert_eq!(commit.lines[0].text, "Flatten 9 annotations on page 1");
+    let forms: Vec<Option<ObjectId>> = placements(&doc, p0).iter().map(base).collect();
     assert_eq!(forms, want);
 }
 

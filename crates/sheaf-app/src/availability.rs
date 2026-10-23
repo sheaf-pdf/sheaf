@@ -329,6 +329,7 @@ pub fn builtin(id: &str) -> Builtin {
         "workspace::ToggleToolbar" => (&[], None, Some(|f| f.toolbar)),
         "workspace::RecognizeText" => (READY, Some(|f| !f.ocr_running), None),
         "docview::CancelOcr" => (DOC, Some(|f| f.ocr_running), None),
+        "docview::RemoveRecognizedText" => (READY, Some(|f| !f.ocr_running), None),
         "tools::ToolSelect" => (DOC, None, Some(|f| f.tool == Some(Tool::Select))),
         "tools::ToolNote" => (READY, None, Some(|f| f.tool == Some(Tool::Note))),
         "tools::ToolHighlight" => (READY, None, Some(|f| f.tool == Some(Tool::Highlight))),

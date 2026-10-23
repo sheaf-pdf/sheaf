@@ -224,34 +224,29 @@ impl Export {
     /// document's labels, which the file doesn't keep. With `markup`,
     /// every printed comment and mark is drawn into its page, and so is the
     /// form's widgets' look, so any printing system shows it; without, the
-    /// markup is left out, and sheaf's private data with it, as a clean
-    /// copy leaves them (§16 row 27), but what of it can't be taken out is
-    /// a note, not a failure ([`Private::Scrub`]), the form printing as it
-    /// is. Unencrypted: the bytes go to a printer or a page image, never to
-    /// a file someone keeps (§12.3). Its asks are answered
+    /// markup is left out, the form printing as it is. Either way sheaf's
+    /// private data is left out, as a clean copy leaves it (§16 row 27),
+    /// but what of it can't be taken out is a note, not a failure
+    /// ([`Private::Scrub`]): what sheaf drew is plain content, so the file
+    /// opened in sheaf again says what it printed, its header numbered as
+    /// the document numbered it, not against the file's own pages.
+    /// Unencrypted: the bytes go to a printer or a page image, never to a
+    /// file someone keeps (§12.3). Its asks are answered
     /// ([`PRINT_ANSWERS`]).
     pub fn print(from: ExportFrom, pages: &[PageId], markup: bool) -> Export {
         let keep = keep(pages, OutlinePolicy::Drop, false, PageNumbering::AsDocument);
-        let mut transforms = vec![keep];
-        let private = match markup {
-            true => {
-                transforms.push(flatten(FlattenSet::Printable));
-                Private::Keep
-            }
-            false => {
-                transforms.push(Transform::RemoveMarkup {
-                    keep: MarkupKeep::LINKS_AND_WIDGETS,
-                });
-                transforms.push(Transform::RemovePrivateData);
-                Private::Scrub
-            }
+        let markup = match markup {
+            true => flatten(FlattenSet::Printable),
+            false => Transform::RemoveMarkup {
+                keep: MarkupKeep::LINKS_AND_WIDGETS,
+            },
         };
         Export {
             from,
-            transforms,
+            transforms: vec![keep, markup, Transform::RemovePrivateData],
             profile: Profile {
                 encryption: Encryption::None,
-                private,
+                private: Private::Scrub,
                 ..EXPORT
             },
             out: Out::Bytes,

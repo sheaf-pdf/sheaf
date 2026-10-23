@@ -36,6 +36,7 @@ use lopdf::{
 };
 use sheaf_doc::export::{Export, print_preview};
 use sheaf_doc::forms::fixture::{Form, every_mark_kind, write_marks};
+use sheaf_doc::layers::LayerId;
 use sheaf_doc::model::Mark;
 use sheaf_doc::realize::{EngineKey, GROUP, OcgOverride, PageView, Realization, ViewInputs};
 use sheaf_doc::serialize::fixture::{
@@ -688,7 +689,7 @@ fn a_sound_base_pdfium_refuses_draws_from_its_groups() {
     let (p0, blob) = (d.page(0).unwrap(), d.primary().id());
     let inputs = ViewInputs {
         ocg_off: Some(Arc::new(OcgOverride {
-            off: [(blob, [blue].into())].into(),
+            off: [(blob, [LayerId::new(blue)].into())].into(),
         })),
         ..ViewInputs::screen()
     };
@@ -783,7 +784,7 @@ fn a_hidden_layer_s_patch_hides_its_content() {
     let p0 = d.page(0).unwrap();
     let blob = d.primary().id();
     let off = OcgOverride {
-        off: [(blob, [blue].into())].into(),
+        off: [(blob, [LayerId::new(blue)].into())].into(),
     };
     let inputs = ViewInputs {
         ocg_off: Some(Arc::new(off)),

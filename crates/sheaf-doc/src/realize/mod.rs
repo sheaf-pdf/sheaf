@@ -483,9 +483,8 @@ fn layers_off<'a>(src: &Source, inputs: &'a ViewInputs) -> Option<&'a BTreeSet<L
 /// A digest of the layers `off`: [`EngineKey::SourcePatch`]'s.
 fn layers_digest(off: &BTreeSet<LayerId>) -> u128 {
     let mut sum = Checksum::new();
-    for (n, g) in off {
-        sum.write(&n.to_le_bytes());
-        sum.write(&g.to_le_bytes());
+    for layer in off {
+        sum.write(&layer.to_le_bytes());
     }
     sum.finish()
 }

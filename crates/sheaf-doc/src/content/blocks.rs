@@ -265,6 +265,13 @@ pub struct PageBlocks {
     /// The streams marked `/SheafBlock << /K /Isolate >>`.
     pub isolation: Arc<[ObjectId]>,
     pub legacy_ocr: Option<LegacyOcr>,
+    /// Whether a layer stream an older sheaf wrote, marked
+    /// `/SheafOcrLayer` and not a `q`, is outside [`legacy_ocr`]'s pair:
+    /// one another tool took the `q` from, or a second. Its first `Q` is
+    /// the page's own then, so it can't be taken out.
+    ///
+    /// [`legacy_ocr`]: Self::legacy_ocr
+    pub legacy_ocr_stays: bool,
     /// Whether a stream of its content is marked as sheaf's
     /// ([`STREAM_KEYS`](crate::private::STREAM_KEYS)): `/SheafBlock`, or an
     /// older sheaf's `/SheafOcrLayer`, whatever else it says.
@@ -427,6 +434,7 @@ impl PageBlocks {
         let nested_in_forms = forms
             .into_iter()
             .any(|form| known.nested(objects, form, resources, lim, &mut budget));
+        let legacy_ocr = legacy_ocr(content, &marks);
         Ok(PageBlocks {
             marked: marked
                 .into_iter()
@@ -435,7 +443,8 @@ impl PageBlocks {
             pagination,
             sheaf: sheaf.into(),
             isolation,
-            legacy_ocr: legacy_ocr(content, &marks),
+            legacy_ocr,
+            legacy_ocr_stays: legacy_ocr_stays(content, &marks, legacy_ocr),
             sheaf_marked: (content.dicts().iter())
                 .any(|d| (d.iter()).any(|(k, _)| crate::private::STREAM_KEYS.contains(&&k[..]))),
             balance,
@@ -609,6 +618,16 @@ fn legacy_ocr(content: &PageContent, marks: &[StreamMark]) -> Option<LegacyOcr> 
     Some(LegacyOcr {
         q: content.ids()[q],
         layer: content.ids()[layer],
+    })
+}
+
+/// Whether a stream `marks` says is a legacy OCR layer's, other than a
+/// `q`, isn't `pair`'s layer ([`PageBlocks::legacy_ocr_stays`]).
+fn legacy_ocr_stays(content: &PageContent, marks: &[StreamMark], pair: Option<LegacyOcr>) -> bool {
+    (marks.iter().enumerate()).any(|(i, m)| {
+        matches!(m, StreamMark::OcrLayer)
+            && content.concat().stream(i).trim_ascii() != b"q"
+            && pair.is_none_or(|p| p.layer != content.ids()[i])
     })
 }
 

@@ -226,7 +226,7 @@ fn toggling_a_layer_changes_the_keys_of_its_source_s_pages_only() {
     let before = keys(st, &screen);
     for (source, layer) in [(d.primary().id(), (9, 0)), (other.id(), (4, 0))] {
         let off = OcgOverride {
-            off: BTreeMap::from([(source, BTreeSet::from([layer]))]),
+            off: BTreeMap::from([(source, BTreeSet::from([LayerId::new(layer)]))]),
         };
         let toggled = ViewInputs {
             ocg_off: Some(Arc::new(off)),

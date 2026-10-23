@@ -853,6 +853,76 @@ pub fn with_marks(pages: usize, marks: &[(usize, Vec<Annot>)]) -> Vec<u8> {
     f.bytes()
 }
 
+/// A comment of [`stated_squares`]: where it is, and the color PDFium shows
+/// it in (None: nothing).
+pub struct Stated {
+    pub rect: Rect,
+    pub shows: Option<[u8; 3]>,
+}
+
+/// Another tool's comments whose appearances have states and none named
+/// (backlog B12): a one-page file with a Square in each [`row`], each of
+/// its states a fill of a color of its own, beside what PDFium, the page
+/// view's engine, shows of it. States Red and Green, plain, with a border,
+/// and with a fill, draw nothing; Red and Off draw Off's blue; Red and
+/// Green with `/V /Green`, green. Never the first.
+pub fn stated_squares() -> (Vec<u8>, Vec<Stated>) {
+    /// A state and the fill it draws.
+    type State = (&'static str, &'static str);
+    const RED: State = ("Red", "1 0 0 rg");
+    const GREEN: State = ("Green", "0 1 0 rg");
+    const OFF: State = ("Off", "0 0 1 rg");
+    let cases: [([State; 2], Dictionary, Option<[u8; 3]>); 5] = [
+        ([RED, GREEN], dictionary! {}, None),
+        (
+            [RED, GREEN],
+            dictionary! { "BS" => dictionary! { "W" => 4 } },
+            None,
+        ),
+        (
+            [RED, GREEN],
+            dictionary! { "IC" => vec![0.into(), 1.into(), 0.into()] },
+            None,
+        ),
+        ([RED, OFF], dictionary! {}, Some([0, 0, 255])),
+        (
+            [RED, GREEN],
+            dictionary! { "V" => "Green" },
+            Some([0, 255, 0]),
+        ),
+    ];
+    let mut f = Form::new(1);
+    let page = f.pages[0];
+    let mut stated = Vec::new();
+    for (i, (states, extra, shows)) in cases.into_iter().enumerate() {
+        let mut normal = Dictionary::new();
+        for (state, fill) in states {
+            let dict = dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 200.into(), 20.into()],
+            };
+            let ops = format!("{fill} 0 0 200 20 re f").into_bytes();
+            normal.set(state, f.pdf.add_object(Stream::new(dict, ops)));
+        }
+        let rect = row(i);
+        let mut dict = dictionary! {
+            "Type" => "Annot", "Subtype" => "Square", "P" => page, "F" => 4,
+            "Rect" => rect.iter().map(|&v| Object::from(v)).collect::<Vec<_>>(),
+            "NM" => Object::string_literal(format!("stated{i}")),
+            "AP" => dictionary! { "N" => normal },
+        };
+        for (k, v) in extra.iter() {
+            dict.set(k.clone(), v.clone());
+        }
+        let id = f.pdf.add_object(dict);
+        let mut annots = f.annots(0);
+        annots.push(id);
+        f.set_annots(0, &annots);
+        stated.push(Stated { rect, shows });
+    }
+    (f.bytes(), stated)
+}
+
 /// The note [`every_fact`] puts on its second page, as sheaf reads it.
 pub fn note() -> Annot {
     Annot {

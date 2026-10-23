@@ -843,8 +843,8 @@ impl DocView {
     /// lowering reads each page's content off the UI thread (§6.5), and it
     /// commits on `opened`. The notice is its line, which counts what it
     /// found of others' by who drew them, and what it left in place (D61),
-    /// or `none` when it changed nothing.
-    fn plan_removal(
+    /// or `none` when it changed nothing, with what the commit tells.
+    pub(crate) fn plan_removal(
         &mut self,
         opened: Snapshot,
         remove: Op,
@@ -874,14 +874,13 @@ impl DocView {
 }
 
 /// What the reader is told of a watermark's or a header and footer's
-/// `commit`: its line, with its notices, or `none` when it changed nothing.
+/// `commit`, or a removal's: its line, or `none` when it changed nothing,
+/// with its notices either way (recognized text that stays, say).
 fn line_notice(commit: &Commit, none: &str) -> String {
     let line = commit.lines.first().filter(|_| commit.version.is_some());
-    let Some(line) = line else {
-        return none.to_string();
-    };
+    let said = line.map_or(none, |line| line.text.as_str());
     match sheaf_doc::notice_text(&commit.notices) {
-        Some(told) => format!("{}. {told}", line.text),
-        None => line.text.clone(),
+        Some(told) => format!("{said}. {told}"),
+        None => said.to_string(),
     }
 }

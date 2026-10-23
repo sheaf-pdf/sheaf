@@ -4468,7 +4468,16 @@ Flattened}`).
   MarkedSel::SheafOcr)` for blocks another tool merged into a stream,
   once a splice is shown to take them together. Both record a read of
   the page's `Page(p)`, so a flush that changes nothing still conflicts
-  with a change to the page under `Validate`.
+  with a change to the page under `Validate`. An older sheaf's layer
+  stream that lost its `q`, or a second one, can't be taken out (its `Q`
+  ends the page's own; `PageBlocks::legacy_ocr_stays`): beside text a
+  filter takes out, a save says it stays; on a page with nothing else to
+  take out, no filter is added and the commit says it instead
+  (`Notice::OcrStays`, since the backlog-fixes PR, B7).
+- **In the app** (since the backlog-fixes PR, F8): Document > Remove
+  Recognized Text… asks whether the selected pages or every page, then
+  runs `ClearOcrText` as a planner (`ocr_clear.rs`), one undo step. On
+  the command line it's `sheaf edit`'s `clear-ocr-text`.
 - **`EditError::Content { op, page, why }`** (§6.4): a page whose content
   can't be read, or whose merged block a splice refuses, fails the op,
   naming it, the page's position and why (`ContentError::on_page`). Where
@@ -4730,7 +4739,7 @@ profile (§12.3, proposal 10):
 |---|---|---|
 | `whole`: a save's bytes (`save::rewrite`, for tests) | none | Keep, Stable, Keep |
 | `extract`: Extract Pages, a split's part | `KeepPages { Headings, labels, AsKept }` | Keep, Dense, Keep |
-| `print(pages, true)`: print, page images, Save as PDF | `KeepPages { Drop, AsDocument }`, `FlattenAnnotations { Printable }` | None, Dense, Keep |
+| `print(pages, true)`: print, page images, Save as PDF | `KeepPages { Drop, AsDocument }`, `FlattenAnnotations { Printable }`, `RemovePrivateData` | None, Dense, Scrub |
 | `print(pages, false)`: the same without markup (§16 row 27) | `KeepPages { Drop, AsDocument }`, `RemoveMarkup { links, widgets }`, `RemovePrivateData` | None, Dense, Scrub |
 | `flattened`: Export Flattened | `FlattenAnnotations { All }` | Keep, Dense, Keep |
 | `clean_copy`: Clean Copy | `RemoveMarkup { links, widgets }`, `RemovePrivateData` | Keep, Dense, Strip |
@@ -4779,8 +4788,12 @@ placed through a matrix:
   box, onto its `/Rect`, ISO 32000-1 12.5.5). A widget draws the state
   its `/AS` names, and one with states and none named draws nothing (no
   first-state fallback, M10 bug 10); another tool's comment with none
-  named draws its first, as the old flatten did. Its dictionary and form
-  are read unkept, and its bounding box once.
+  named draws what PDFium, the page view's engine, shows: the state its
+  `/V` (or its parent's) names, else its `/Off`, else nothing. Until the
+  backlog-fixes PR (B12) it drew its first, as the old flatten did, so
+  print, print preview and page images showed it where the page view
+  didn't. Its dictionary and form are read unkept, and its bounding box
+  once.
 - **A sheaf mark:** `FormRef::Pinned(PinnedAp)`, its appearance pinned
   by what it's drawn from (`MarkAp`: kind, a connector's without its
   partner, color, opacity, stroke, contents, fill, dash, cloud, turn and
@@ -4841,11 +4854,14 @@ read whole is read a stream at a time, and content that can't be lexed
 or a stream that can't be decoded but says `/Sheaf` counts, as does a
 stream past the content limit), and a Strip output whose graph holds
 any fails (`verify::private`, §11.9 item 4), so a clean copy can't hold
-them. A Scrub output (print without markup) is written as Strip writes
-it, and what's left is a note (`verify::private_left`): a printer's or
-a page image's file, or text read from it, mustn't fail for what an
-older sheaf left on a page sheaf can't read. Everything else sheaf
-writes is standard keys.
+them. A Scrub output (print, with markup or without) is written as Strip
+writes it, and what's left is a note (`verify::private_left`): a
+printer's or a page image's file, or text read from it, mustn't fail for
+what an older sheaf left on a page sheaf can't read. Print with markup
+kept sheaf's private data until the backlog-fixes PR (B13): its header
+stayed live in `/SheafGenerators`, so the file opened in sheaf again
+numbered it against its own pages ("Page 1 of 2" for pages 5 and 6 of
+10). Everything else sheaf writes is standard keys.
 
 | Name | Where | Written | Under Strip |
 |---|---|---|---|
@@ -4929,12 +4945,14 @@ directory, `SHEAF_CACHE_DIR`) is gone.
 - **`memory::empty`** is a file of no pages, `Memory(Blank)`, which a
   `Session::new_empty` starts from; `Source::open` accepts no pages from
   that origin only, and a user's file with none is still `NoPages`.
+  `memory::titled` is the same with an `/Info` (its title, `/Producer`
+  sheaf, `/CreationDate` now), which `Session::new_titled` starts from.
 - **A scan and Images to PDF** insert one `Memory(Images)` blob made by
   `images::to_pdf` (`scan::made_pages`; `--dpi` overrides the images'
   resolution, which no op field says), into a new session, with the OCR
   run's text set as `Actor::Job(Ocr)`, then saved: `scan::add_text`, its
   throwaway Document and the `.images.part` file went.
-- **The comment summary** is a session: `new_empty`, then an insert of
+- **The comment summary** is a session: `new_titled`, then an insert of
   its pages, a `Memory(Summary)` blob written by `write_built`. Its Pages
   layout built its pages as an eager lopdf graph until slice 20 (it bound
   resources through `ResObjects` and copied the printed pages with
@@ -4942,19 +4960,21 @@ directory, `SHEAF_CACHE_DIR`) is gone.
   from slice 20 it opens its printed bytes as a source and builds its
   sheets with `serialize::built::Built`, each page form copied from the
   source (PDFs made in memory, in Plugin API 0.4). Its `/Info` is the
-  empty primary's: no Title, Producer or CreationDate.
+  empty primary's, which a save keeps: until the backlog-fixes PR (B8)
+  it had none, and since then the primary is `memory::titled`'s, so the
+  summary has its Title, Producer and CreationDate again.
 
 ### Sessions and saves
 
 A `Session` is a document with no window: `open(path, pw, p)` through
 `open::read` (`open::file`'s body with progress, a torn save undone and
-said), `new_empty()`, `From<Document>`; `intern`, `hold` and `name` for
-the files its ops name (`{"with": NAME}`); `tx(actor)` with those names
-granted; `commit`/`commit_as` (`Actor::Cli`, or a job's); `edit` and
-`preview` for ops read from a file; `save(SaveTo, answers, p)`;
-`export_from()` and `export`. `view` keeps what the open read beside the
-state (attachments, portfolio, layers, form facts) for a window that
-takes it.
+said), `new_empty()` and `new_titled(title)`, `From<Document>`; `intern`,
+`hold` and `name` for the files its ops name (`{"with": NAME}`);
+`tx(actor)` with those names granted; `commit`/`commit_as`
+(`Actor::Cli`, or a job's); `edit` and `preview` for ops read from a
+file; `save(SaveTo, answers, p)`; `export_from()` and `export`. `view`
+keeps what the open read beside the state (attachments, portfolio,
+layers, form facts) for a window that takes it.
 
 - **`save_with(doc, path, SaveHow, answers, p)`** is the save core
   (`materialize::save` went), over the private `saved_as` with a planner
@@ -5555,20 +5575,23 @@ the graph it built. lopdf's writer writes nothing outside tests.
 Rule 7's "no id is an ObjectId" is held by sheaf-doc's
 `tests/object_ids.rs`: a `syn` walk from lib.rs that follows `mod`
 declarations as the compiler does, leaving out what's built only for
-tests or the `fixtures` feature, and fails on any path or type ending in
-`ObjectId`, a `use` of it (renamed too) and the name in a macro's
-tokens, outside an allowlist with a reason for each entry. The
+tests or the `fixtures` feature, and fails on any path or type with
+`ObjectId` as a segment, a `use` of it (renamed too) and the name in a
+macro's tokens, outside an allowlist with a reason for each entry. It
+sees through type aliases: an alias that names `ObjectId`, in any file,
+or names such an alias, fails as `ObjectId` does. The
 allowlist is the plan's directories (`source/`, `materialize/`,
 `serialize/`, `content/`, `forms/`) and the file-level readers that read
 a file's objects by number: the open's fact readers (`open/annots.rs`,
 `open/outline.rs`, `attachments.rs`, `labels.rs`, `layers.rs`,
 `portfolio.rs`, `properties.rs`, `file.rs`, `import.rs`), `realize/`'s
 `alloc.rs`, `assemble.rs` and `untouched.rs`, `private.rs`,
-`stamp_lib.rs`, `exchange/mod.rs` and `generate/saved.rs`. Three more
+`stamp_lib.rs`, `exchange/mod.rs` and `generate/saved.rs`. Four more
 tests check that every `.rs` file is walked or built only for tests,
 that each entry still names `ObjectId` and none covers `model.rs`,
-`model/`, `tx/` or annot.rs, and, on a probe crate in memory, that a hit
-is caught where it should be and nowhere else. To pass it:
+`model/`, `tx/` or annot.rs, and, on probe crates in memory, that a hit
+is caught where it should be and nowhere else, an alias's included. To
+pass it:
 
 - **`source::PageObj { blob, id }`** (`Source::page_obj(index)`) keys a
   page's object: `DocState::page_showing(PageObj, copy)`,
@@ -5588,8 +5611,10 @@ is caught where it should be and nowhere else. To pass it:
   `generate::{Saved, read}`; generate.rs itself is checked.
 - **`materialize::kept`** is `keep_only`, moved from the crate root.
 
-`layers::LayerId` is an alias of `ObjectId` (`ViewInputs::off`, the
-layers panel), which the walk can't see through.
+`layers::LayerId` was an alias of `ObjectId` (`ViewInputs::off`, the
+layers panel), which the walk couldn't see through. Since the
+backlog-fixes PR (B21) it's sheaf's own, a type over the group's object
+that only layers.rs reads, and the walk follows aliases.
 
 ### Docs and tests
 

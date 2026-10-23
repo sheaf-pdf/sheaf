@@ -59,12 +59,12 @@ use crate::{
     CancelOcr, CloseSearch, CopySelection, CycleTextMarkup, DeletePage, DuplicatePages,
     ExportCleanCopy, ExportFlattened, ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown,
     LineUp, NewBookmark, NextPage, NextPane, PasteMarks, PasteMarksInPlace, PrevPage, Redo,
-    RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save, SaveAs, ScreenDown, ScreenUp,
-    SearchNext, SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous, SplitView,
-    ToggleCheckmark, ToggleComments, ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse,
-    ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolSquiggly,
-    ToolStamp, ToolStrikeOut, ToolTextEdit, ToolTick, ToolUnderline, TwoUp, TwoUpContinuous, Undo,
-    ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    RemoveRecognizedText, RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save, SaveAs,
+    ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous,
+    SplitView, ToggleCheckmark, ToggleComments, ToggleCoverPage, ToolArrow, ToolConnector,
+    ToolEllipse, ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare,
+    ToolSquiggly, ToolStamp, ToolStrikeOut, ToolTextEdit, ToolTick, ToolUnderline, TwoUp,
+    TwoUpContinuous, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -5266,6 +5266,9 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &NewBookmark, window, cx| v.new_bookmark(window, cx)))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
             .on_action(cx.listener(|v, _: &Redo, _, cx| v.redo(cx)))
+            .on_action(cx.listener(|v, _: &RemoveRecognizedText, window, cx| {
+                v.remove_recognized_text_prompt(window, cx)
+            }))
             // Only while a run exists, so the menu item greys out otherwise.
             .when(self.ocr_running(), |d| {
                 d.on_action(cx.listener(|v, _: &CancelOcr, _, cx| {
@@ -7653,6 +7656,134 @@ mod tests {
                             let said = doc.notice.as_deref();
                             assert_eq!(said, Some("No background to remove"));
                             assert_eq!(doc.model.undo_label(), Some("Remove watermark"));
+                        })
+                    });
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// Document > Remove Recognized Text…, answered: the text comes off
+    /// the pages chosen, as a planner, in one undo step called "Remove
+    /// recognized text", the notice its line; an undo puts it back. Every
+    /// page then, and again, when there's none left, it says so.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn removing_recognized_text_is_one_undo_step() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = blank_file(3);
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        let texts = |v: &mut DocView| -> Vec<bool> {
+            let doc = shown(v);
+            let st = doc.model.state();
+            (st.order().iter())
+                .map(|&p| st.ocr_text(p).is_some())
+                .collect()
+        };
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                view.update(cx, |v, cx| {
+                    let doc = shown(v);
+                    let pages = order(doc);
+                    let ops = (pages.iter()).flat_map(|&p| recognized(doc, p)).collect();
+                    let tx = v.lower(ops, "OCR", cx).unwrap();
+                    v.commit(tx, CommitOpts::labelled("OCR"), cx).unwrap();
+                    assert_eq!(texts(v), [true; 3]);
+                    let opened = v.model_snapshot().unwrap();
+                    v.remove_recognized_text(opened, vec![pages[1]], cx);
+                    assert_eq!(v.planners.len(), 1, "a planner");
+                    assert_eq!(texts(v), [true; 3], "not landed yet");
+                });
+                cx.spawn(async move |cx| {
+                    planned(&view, cx).await;
+                    cx.update(|cx| {
+                        view.update(cx, |v, cx| {
+                            assert_eq!(texts(v), [true, false, true]);
+                            let doc = shown(v);
+                            let said = doc.notice.as_deref();
+                            assert_eq!(said, Some("Remove recognized text from page 2"));
+                            assert_eq!(doc.model.undo_label(), Some("Remove recognized text"));
+                            v.undo(cx);
+                            assert_eq!(texts(v), [true; 3], "one undo puts it back");
+                            let opened = v.model_snapshot().unwrap();
+                            let all = order(shown(v));
+                            v.remove_recognized_text(opened, all, cx);
+                        })
+                    });
+                    planned(&view, cx).await;
+                    cx.update(|cx| {
+                        view.update(cx, |v, cx| {
+                            assert_eq!(texts(v), [false; 3]);
+                            let said = shown(v).notice.as_deref();
+                            assert_eq!(said, Some("Remove recognized text from pages 1–3"));
+                            let opened = v.model_snapshot().unwrap();
+                            let all = order(shown(v));
+                            v.remove_recognized_text(opened, all, cx);
+                        })
+                    });
+                    planned(&view, cx).await;
+                    cx.update(|cx| {
+                        view.update(cx, |v, _| {
+                            let doc = shown(v);
+                            let said = doc.notice.as_deref();
+                            assert_eq!(said, Some("No recognized text to remove"));
+                            assert_eq!(doc.model.undo_label(), Some("Remove recognized text"));
+                        })
+                    });
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// Removing recognized text from a page whose only layer is an older
+    /// sheaf's that lost its `q` changes nothing, and the notice says the
+    /// layer stays.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn removing_recognized_text_says_what_stays() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut pdf = sheaf_doc::text_layer::fixture::legacy_page();
+        let id = pdf.get_pages()[&1];
+        let page = pdf.get_dictionary_mut(id).unwrap();
+        let contents = page.get(b"Contents").unwrap().as_array().unwrap()[1..].to_vec();
+        page.set("Contents", contents);
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("legacy.pdf");
+        pdf.save(&path).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let view = view_of(model, &path, cx);
+                let version = view.update(cx, |v, cx| {
+                    let opened = v.model_snapshot().unwrap();
+                    let version = opened.version;
+                    let all = order(shown(v));
+                    v.remove_recognized_text(opened, all, cx);
+                    version
+                });
+                cx.spawn(async move |cx| {
+                    planned(&view, cx).await;
+                    cx.update(|cx| {
+                        view.update(cx, |v, _| {
+                            let doc = shown(v);
+                            assert_eq!(doc.model.current_version(), version);
+                            let said = "No recognized text to remove. Recognized text sheaf \
+                                        wrote earlier stays on page 1: taking it out would \
+                                        change what else the page draws";
+                            assert_eq!(doc.notice.as_deref(), Some(said));
                         })
                     });
                     ran.store(true, Ordering::Relaxed);

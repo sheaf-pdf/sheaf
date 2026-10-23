@@ -740,6 +740,7 @@ fn sheafs_own_from_before_are_legacy() {
             layer: streams[4]
         })
     );
+    assert!(!blocks.legacy_ocr_stays, "its layer is the pair's");
     // The body's own `q`, which it leaves open.
     assert_eq!(
         blocks.balance,

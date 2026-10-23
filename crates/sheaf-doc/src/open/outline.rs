@@ -12,7 +12,6 @@
 use std::collections::{HashMap, HashSet};
 
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
-use serde::{Deserialize, Serialize};
 use sheaf_edit::{DestView, TextStyle};
 
 use crate::Source;
@@ -31,46 +30,28 @@ const MAX_ITEMS: usize = 200_000;
 /// A bookmark as read from a file: pre-order with depth. A fact of its
 /// source, so it names its object as the file numbers it; the bookmark
 /// made of it holds an [`ObjRef`](crate::ObjRef).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FlatOutlineItem {
     pub title: String,
     pub page: Option<u32>,
     pub depth: u16,
     /// Where on `page` it lands, in PageSpace; None is the top of the
     /// page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<DestView>,
     /// `/C` and `/F`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
-    #[serde(default, skip_serializing_if = "TextStyle::is_plain")]
     pub style: TextStyle,
     /// Its `/Count` isn't negative (see
     /// [`Bookmark::open`](crate::Bookmark::open)).
-    #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub open: bool,
     /// The item's object in its file, which its bookmark keeps as its
     /// [`Bookmark::src`](crate::Bookmark::src).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object: Option<ObjectId>,
     /// It goes somewhere sheaf keeps as read
     /// ([`Target::Kept`](crate::Target::Kept)): an action other than a
     /// GoTo to a page here, or a destination that isn't a page here.
     /// `page` is None.
-    #[serde(default, skip_serializing_if = "is_no")]
     pub kept: bool,
-}
-
-fn yes() -> bool {
-    true
-}
-
-fn is_yes(b: &bool) -> bool {
-    *b
-}
-
-fn is_no(b: &bool) -> bool {
-    !*b
 }
 
 /// `src`'s bookmarks in pre-order: the catalog's `/Outlines`, each item

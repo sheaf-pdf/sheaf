@@ -156,3 +156,27 @@ fn an_inherited_box_survives_the_flatten() {
         "{flat:?} {live:?}"
     );
 }
+
+/// Another tool's comment whose appearance has states and none named shows
+/// as PDFium picks a state, which sheaf's flatten follows (backlog B12):
+/// the one its `/V` names, else its `/Off`, else nothing, never its first,
+/// and no appearance PDFium makes of its border or fill.
+#[test]
+fn the_page_view_shows_a_comment_s_value_s_state_or_its_off() {
+    let (bytes, shows) = sheaf_doc::forms::fixture::stated_squares();
+    let engine = PdfiumEngine::open_bytes(bytes.into(), None).unwrap();
+    let job = Job::Page {
+        width: 612,
+        rotation: Rotation::R0,
+    };
+    let screen = engine.render(PageIndex(0), job, PixelFormat::Rgba).unwrap();
+    for (i, stated) in shows.into_iter().enumerate() {
+        let [x0, y0, x1, y1] = stated.rect;
+        let (x, y) = (
+            ((x0 + x1) / 2.0) as usize,
+            (792.0 - (y0 + y1) / 2.0) as usize,
+        );
+        let p = &screen.data[(y * screen.width as usize + x) * 4..][..3];
+        assert_eq!(p, stated.shows.unwrap_or([255; 3]), "row {i}");
+    }
+}

@@ -77,8 +77,9 @@ const FOOTER: f32 = 22.0;
 
 /// The comments of `from`'s version, listed as `cf` and `needle` list them
 /// (see [`list`]), as a summary titled `title`: a document of its own,
-/// made in memory, its pages inserted into one of no pages (M10.5 §3.9),
-/// for the caller to save where the reader says.
+/// made in memory, its pages inserted into one of no pages (M10.5 §3.9)
+/// whose `/Info` gives its title, sheaf as its producer and when it was
+/// made, for the caller to save where the reader says.
 pub fn summary(
     from: &ExportFrom,
     cf: &CommentFilter,
@@ -87,7 +88,7 @@ pub fn summary(
     title: &str,
 ) -> Result<Session> {
     let pdf = summary_bytes(from, cf, needle, layout, title)?;
-    let mut session = Session::new_empty();
+    let mut session = Session::new_titled(title);
     let kind = BlobKind::memory(MemoryKind::Summary);
     let src = session.doc.store().open(pdf.into(), kind)?;
     session.hold(src.blob().clone());

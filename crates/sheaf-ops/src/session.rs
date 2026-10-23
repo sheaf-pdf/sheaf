@@ -16,6 +16,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use in_progress::{Level, Progress};
@@ -25,7 +26,7 @@ use sheaf_doc::forms::sigs::{Pending, SigImpact, sig_impact};
 use sheaf_doc::materialize::{Ask, AskAnswers, SaveHow, SaveReport, SaveStop, save_with};
 use sheaf_doc::model::DocState;
 use sheaf_doc::open::ViewFacts;
-use sheaf_doc::store::BlobKind;
+use sheaf_doc::store::{BlobKind, Src};
 use sheaf_doc::{
     Actor, Blob, Commit, CommitOpts, Document, EditError, Grant, Preview, Store, Tx, open,
 };
@@ -80,17 +81,30 @@ impl Session {
         })
     }
 
-    /// A document of no pages, made in memory: what a scan, Images to PDF
-    /// and the comment summary insert their pages into. Its first save is
-    /// a Rewrite to the path it's given.
+    /// A document of no pages, made in memory: what a scan and Images to
+    /// PDF insert their pages into. Its first save is a Rewrite to the
+    /// path it's given.
     pub fn new_empty() -> Session {
         let store = Store::new();
         let empty = sheaf_doc::memory::empty(&store).expect("a file of no pages reads");
+        Session::of_empty(store, empty, "Untitled")
+    }
+
+    /// [`new_empty`](Self::new_empty), its `/Info` saying it's `title`,
+    /// made by sheaf, now, which its saves keep: what the comment summary
+    /// inserts its pages into.
+    pub fn new_titled(title: &str) -> Session {
+        let store = Store::new();
+        let empty = sheaf_doc::memory::titled(&store, title).expect("a file of no pages reads");
+        Session::of_empty(store, empty, title)
+    }
+
+    fn of_empty(store: Arc<Store>, empty: Src, name: &str) -> Session {
         let facts = open::finish(&empty, &in_progress::NoProgress);
         let mut doc = open::start(
             store,
             empty,
-            "Untitled".into(),
+            name.into(),
             None,
             sheaf_doc::history::default_policy(),
         );

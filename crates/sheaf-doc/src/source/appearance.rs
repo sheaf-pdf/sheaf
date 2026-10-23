@@ -13,11 +13,12 @@ use crate::geom::{Affine, Rect};
 use crate::store::Src;
 
 /// What an annotation's dictionary says that a flatten reads: its flags
-/// (`/F`), the state it shows (`/AS`) and its normal appearance (`/AP
-/// /N`), as written.
+/// (`/F`), the state it shows (`/AS`), its value (`/V`, or its parent's),
+/// and its normal appearance (`/AP /N`), as written.
 pub(crate) struct Shows {
     pub(crate) flags: u32,
     pub(crate) state: Option<Vec<u8>>,
+    value: Option<Vec<u8>>,
     normal: Option<Object>,
 }
 
@@ -38,15 +39,28 @@ impl Shows {
         Some(Shows::of(src.pdf(), dict))
     }
 
-    /// What `dict`, an annotation of `pdf`, says.
+    /// What `dict`, an annotation of `pdf`, says. A state or a value is a
+    /// name, or a string, as PDFium reads either; an empty one is none.
     fn of(pdf: &LazyPdf, dict: &Dictionary) -> Shows {
-        let value = |key: &[u8]| -> Option<Object> {
+        let read = |dict: &Dictionary, key: &[u8]| -> Option<Object> {
             match dict.get(key).ok()? {
                 Object::Reference(r) => Some((*unkept(pdf, *r)?.1).clone()),
                 direct => Some(direct.clone()),
             }
         };
+        let value = |key: &[u8]| read(dict, key);
+        let named = |o: Object| -> Option<Vec<u8>> {
+            let name = match o {
+                Object::Name(n) | Object::String(n, _) => n,
+                _ => return None,
+            };
+            (!name.is_empty()).then_some(name)
+        };
         let flags = value(b"F").and_then(|f| f.as_i64().ok()).unwrap_or(0);
+        let parent = || {
+            let parent = value(b"Parent")?;
+            read(parent.as_dict().ok()?, b"V").and_then(named)
+        };
         // `/N` alone, the appearance dictionary read in place.
         let n = |ap: &Object| ap.as_dict().ok()?.get(b"N").ok().cloned();
         let normal = match dict.get(b"AP").ok() {
@@ -56,16 +70,20 @@ impl Shows {
         };
         Shows {
             flags: u32::try_from(flags).unwrap_or(0),
-            state: value(b"AS").and_then(|s| s.as_name().ok().map(<[u8]>::to_vec)),
+            state: value(b"AS").and_then(named),
+            value: value(b"V").and_then(named).or_else(parent),
             normal,
         }
     }
 
     /// The form its normal appearance, read from `src`, shows: the stream
-    /// it names, or of a dictionary of states, the one `state` names; with
-    /// none named, the first when `first` says so (another tool's comment,
-    /// never a widget, M10 bug 10). None when there's none.
-    pub(crate) fn form(&self, src: &Src, state: Option<&[u8]>, first: bool) -> Option<ObjRef> {
+    /// it names, or of a dictionary of states, the one `state` names. With
+    /// none named and `by_value` (another tool's comment, never a widget,
+    /// M10 bug 10), the one PDFium shows, the page view's engine: the state
+    /// its value names, else `/Off`; never the first. None when there's
+    /// none, which PDFium shows as nothing (it makes no appearance of its
+    /// own where `/AP /N` is; pdf.js does, for some kinds).
+    pub(crate) fn form(&self, src: &Src, state: Option<&[u8]>, by_value: bool) -> Option<ObjRef> {
         let pdf = src.pdf();
         let at = |id| ObjRef {
             src: src.clone(),
@@ -87,7 +105,10 @@ impl Shows {
         };
         let state = match state {
             Some(state) => state,
-            None if first => states.iter().next()?.0.as_slice(),
+            None if by_value => match self.value.as_deref() {
+                Some(value) if states.has(value) => value,
+                _ => b"Off",
+            },
             None => return None,
         };
         let id = states.get(state).ok()?.as_reference().ok()?;

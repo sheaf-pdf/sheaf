@@ -8,9 +8,10 @@
 //! them, each file parsed with `syn`, leaving out what only tests build:
 //! an item under `#[cfg(test)]` (or the `fixtures` feature), and a module
 //! declared so, its file and everything under it. A file the allowlist
-//! doesn't name fails on any path or type whose last segment is
-//! `ObjectId`, a `use` of it (renamed too), and the name in a macro's
-//! tokens.
+//! doesn't name fails on any path or type with `ObjectId` as a segment, a
+//! `use` of it (renamed too), and the name in a macro's tokens. A type
+//! alias that names it, in any file, is seen through: the alias's name
+//! fails as `ObjectId` does, and so does an alias of that alias.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,9 @@ use std::path::{Path, PathBuf};
 use proc_macro2::{TokenStream, TokenTree};
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
-use syn::{Attribute, Expr, ExprLit, Ident, ImplItem, Item, Lit, Meta, TraitItem, UseTree};
+use syn::{
+    Attribute, Expr, ExprLit, Ident, ImplItem, Item, ItemType, Lit, Meta, TraitItem, UseTree,
+};
 
 /// The files and directories (ending in `/`), from `src/`, that may name
 /// `ObjectId`, each with why.
@@ -103,12 +106,14 @@ const NEVER: &[&str] = &["model.rs", "model/", "tx/", "annot.rs"];
 
 #[test]
 fn only_a_source_s_readers_and_writers_name_an_object_id() {
-    let hits = crate_walk().hits();
+    let walk = crate_walk();
+    let hits = walk.hits();
     assert!(
         hits.is_empty(),
-        "model-level code names lopdf's ObjectId (M10.5 §2, rule 7): name a source's \
-         object by an ObjRef or a PageObj, or allowlist a reader of a file's facts with \
-         its reason:\n{}",
+        "model-level code names lopdf's ObjectId (M10.5 §2, rule 7), or an alias of it \
+         ({:?}): name a source's object by an ObjRef or a PageObj, or allowlist a reader \
+         of a file's facts with its reason:\n{}",
+        walk.aliases,
         hits.join("\n")
     );
 }
@@ -215,6 +220,56 @@ fn built(_: lopdf::ObjectId) {}
     );
 }
 
+/// An alias of `ObjectId` declared where it may be named, a source's, is
+/// seen through where it may not: its uses, a path through it, and an
+/// alias of it. An alias only tests build isn't, nor one of something
+/// else.
+#[test]
+fn an_alias_of_an_object_id_is_seen_through() {
+    let files = [
+        ("lib.rs", "pub mod model;\npub mod source;\n"),
+        (
+            "source/mod.rs",
+            r#"pub type Id = lopdf::ObjectId;
+pub type Ids = Vec<(Id, u8)>;
+type Mine = ObjectId;
+#[cfg(test)]
+pub type Probe = lopdf::ObjectId;
+pub type Count = u32;
+"#,
+        ),
+        (
+            "model.rs",
+            r#"use crate::source::Id;
+pub struct Held(crate::source::Ids);
+pub fn f() -> Count { crate::source::Id::default().1 }
+pub struct Probe;
+pub type Again = Held;
+pub type Renamed = Id;
+fn g(_: Renamed, _: Count, _: Probe) {}
+"#,
+        ),
+    ];
+    let read = |path: &Path| {
+        (files.iter())
+            .find(|(f, _)| Path::new(f) == path)
+            .map(|(_, src)| src.to_string())
+    };
+    let walk = Walk::of(&read);
+    assert_eq!(
+        walk.hits(),
+        [
+            "model.rs:1",
+            "model.rs:2",
+            "model.rs:3",
+            "model.rs:6",
+            "model.rs:7"
+        ]
+    );
+    let aliases: Vec<&str> = walk.aliases.iter().map(String::as_str).collect();
+    assert_eq!(aliases, ["Id", "Ids", "Mine", "Renamed"]);
+}
+
 /// Whether the allowlist covers `file`, a path from `src/`.
 fn allowed(file: &Path) -> bool {
     ALLOWED.iter().any(|&(entry, _)| covers(entry, file))
@@ -260,22 +315,56 @@ fn rust_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
 /// files.
 struct Walk {
     /// Each file read, by its path from `src/`, with the lines that name
-    /// `ObjectId`.
+    /// `ObjectId` or an alias of it.
     files: Vec<(PathBuf, Vec<usize>)>,
     /// The files, and the directories of their modules, that only tests
     /// build: never read.
     tests: Vec<PathBuf>,
+    /// The type aliases that name `ObjectId`, or another of them.
+    aliases: BTreeSet<String>,
+}
+
+/// A file of the walk: its path from `src/`, what it holds, and where the
+/// files of the modules it declares are.
+struct Parsed {
+    path: PathBuf,
+    file: syn::File,
+    dir: PathBuf,
 }
 
 impl Walk {
     /// The crate whose files, by their paths from `src/`, `read` gives.
     fn of(read: &dyn Fn(&Path) -> Option<String>) -> Walk {
-        let mut walk = Walk {
-            files: Vec::new(),
-            tests: Vec::new(),
-        };
-        walk.module(read, Path::new("lib.rs"), Path::new(""));
-        walk
+        let (mut parsed, mut tests) = (Vec::new(), Vec::new());
+        module(
+            read,
+            Path::new("lib.rs"),
+            Path::new(""),
+            &mut parsed,
+            &mut tests,
+        );
+        // `ObjectId` and its aliases, until no alias names one not yet
+        // known.
+        let mut names = BTreeSet::from(["ObjectId".to_string()]);
+        loop {
+            let scans: Vec<Scan> = (parsed.iter())
+                .map(|p| Scan::of(&p.file, &p.dir, &names))
+                .collect();
+            let aliases: BTreeSet<String> = (scans.iter())
+                .flat_map(|s| s.aliases.iter().cloned())
+                .collect();
+            if aliases.is_subset(&names) {
+                let files = (parsed.iter().zip(scans))
+                    .map(|(p, scan)| (p.path.clone(), scan.hits.into_iter().collect()))
+                    .collect();
+                return Walk {
+                    files,
+                    tests,
+                    aliases,
+                };
+            }
+            names.extend(aliases);
+        }
     }
 
     /// Each line naming `ObjectId` in a file the allowlist doesn't cover,
@@ -286,56 +375,87 @@ impl Walk {
             .flat_map(|(file, lines)| lines.iter().map(move |l| format!("{}:{l}", shown(file))))
             .collect()
     }
+}
 
-    /// The module in file `path`, whose modules' files are in `dir`.
-    fn module(&mut self, read: &dyn Fn(&Path) -> Option<String>, path: &Path, dir: &Path) {
-        let src = read(path).unwrap_or_else(|| panic!("{} can't be read", path.display()));
-        let file = syn::parse_file(&src).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let mut scan = Scan {
-            dir: dir.to_path_buf(),
-            hits: BTreeSet::new(),
-            mods: Vec::new(),
-        };
-        scan.visit_file(&file);
-        self.files
-            .push((path.to_path_buf(), scan.hits.into_iter().collect()));
-        for (dir, name, tests) in scan.mods {
-            let (file, kids) = (dir.join(format!("{name}.rs")), dir.join(&name));
-            if tests {
-                self.tests.extend([file, kids]);
-                continue;
-            }
-            let file = match read(&file) {
-                Some(_) => file,
-                None => kids.join("mod.rs"),
-            };
-            self.module(read, &file, &kids);
+/// The module in file `path`, whose modules' files are in `dir`, and the
+/// modules it declares, parsed into `out`; what only tests build, into
+/// `tests`.
+fn module(
+    read: &dyn Fn(&Path) -> Option<String>,
+    path: &Path,
+    dir: &Path,
+    out: &mut Vec<Parsed>,
+    tests: &mut Vec<PathBuf>,
+) {
+    let src = read(path).unwrap_or_else(|| panic!("{} can't be read", path.display()));
+    let file = syn::parse_file(&src).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mods = Scan::of(&file, dir, &BTreeSet::new()).mods;
+    out.push(Parsed {
+        path: path.to_path_buf(),
+        file,
+        dir: dir.to_path_buf(),
+    });
+    for (dir, name, only_tests) in mods {
+        let (file, kids) = (dir.join(format!("{name}.rs")), dir.join(&name));
+        if only_tests {
+            tests.extend([file, kids]);
+            continue;
         }
+        let file = match read(&file) {
+            Some(_) => file,
+            None => kids.join("mod.rs"),
+        };
+        module(read, &file, &kids, out, tests);
     }
 }
 
-/// One file's code that isn't only for tests: the lines naming
-/// `ObjectId`, and the modules it declares in files of their own.
-struct Scan {
+/// One file's code that isn't only for tests: the lines naming one of
+/// `names`, the aliases that name one, and the modules it declares in
+/// files of their own.
+struct Scan<'a> {
+    /// `ObjectId` and the aliases of it known so far.
+    names: &'a BTreeSet<String>,
     /// Where the files of the modules declared here are: an inline
     /// module's under its parent's.
     dir: PathBuf,
     hits: BTreeSet<usize>,
+    aliases: BTreeSet<String>,
     /// Each module declared in a file of its own: the directory its file
     /// is in, its name, and whether only tests build it.
     mods: Vec<(PathBuf, String, bool)>,
 }
 
-impl Scan {
+impl<'a> Scan<'a> {
+    /// `file`, whose modules' files are in `dir`, scanned for `names`.
+    fn of(file: &syn::File, dir: &Path, names: &'a BTreeSet<String>) -> Scan<'a> {
+        let mut scan = Scan::new(dir, names);
+        scan.visit_file(file);
+        scan
+    }
+
+    fn new(dir: &Path, names: &'a BTreeSet<String>) -> Scan<'a> {
+        Scan {
+            names,
+            dir: dir.to_path_buf(),
+            hits: BTreeSet::new(),
+            aliases: BTreeSet::new(),
+            mods: Vec::new(),
+        }
+    }
+
+    fn named(&self, ident: &Ident) -> bool {
+        self.names.iter().any(|n| ident == n)
+    }
+
     fn hit(&mut self, at: &Ident) {
         self.hits.insert(at.span().start().line);
     }
 
-    /// The name in `tokens`, a macro's, at any depth.
+    /// A name in `tokens`, a macro's, at any depth.
     fn tokens(&mut self, tokens: TokenStream) {
         for token in tokens {
             match token {
-                TokenTree::Ident(i) if i == "ObjectId" => self.hit(&i),
+                TokenTree::Ident(i) if self.named(&i) => self.hit(&i),
                 TokenTree::Group(g) => self.tokens(g.stream()),
                 _ => {}
             }
@@ -343,7 +463,7 @@ impl Scan {
     }
 }
 
-impl<'ast> Visit<'ast> for Scan {
+impl<'ast> Visit<'ast> for Scan<'_> {
     fn visit_item(&mut self, item: &'ast Item) {
         let tests = tests_only(item_attrs(item));
         match item {
@@ -411,19 +531,29 @@ impl<'ast> Visit<'ast> for Scan {
         }
     }
 
+    /// An alias that names one is one: its uses count as its type's.
+    fn visit_item_type(&mut self, t: &'ast ItemType) {
+        let mut ty = Scan::new(&self.dir, self.names);
+        ty.visit_type(&t.ty);
+        if !ty.hits.is_empty() {
+            self.aliases.insert(t.ident.to_string());
+        }
+        visit::visit_item_type(self, t);
+    }
+
     fn visit_path(&mut self, p: &'ast syn::Path) {
-        if let Some(last) = p.segments.last()
-            && last.ident == "ObjectId"
-        {
-            self.hit(&last.ident);
+        for seg in &p.segments {
+            if self.named(&seg.ident) {
+                self.hit(&seg.ident);
+            }
         }
         visit::visit_path(self, p);
     }
 
     fn visit_use_tree(&mut self, tree: &'ast UseTree) {
         match tree {
-            UseTree::Name(n) if n.ident == "ObjectId" => self.hit(&n.ident),
-            UseTree::Rename(r) if r.ident == "ObjectId" => self.hit(&r.ident),
+            UseTree::Name(n) if self.named(&n.ident) => self.hit(&n.ident),
+            UseTree::Rename(r) if self.named(&r.ident) => self.hit(&r.ident),
             _ => {}
         }
         visit::visit_use_tree(self, tree);

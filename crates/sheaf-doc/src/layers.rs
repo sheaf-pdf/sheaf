@@ -11,14 +11,36 @@ use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text;
 use crate::source::Source;
 
-/// An optional content group: its object number in the file.
-pub type LayerId = ObjectId;
+/// An optional content group of a source: sheaf's name for a layer. It is
+/// the group's object in its file, which only this module reads, so the
+/// view and its inputs never handle a file's object numbers (M10.5 §2,
+/// rule 7). A source's layers are told apart by it; which source they're
+/// of, the [`OcgOverride`](crate::OcgOverride) says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LayerId(ObjectId);
+
+impl LayerId {
+    /// The layer of the group `id`, as a test names it.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn new(id: ObjectId) -> LayerId {
+        LayerId(id)
+    }
+
+    /// What a digest of the layers a view turns off takes of it.
+    pub(crate) fn to_le_bytes(self) -> [u8; 6] {
+        let (n, g) = self.0;
+        let mut out = [0; 6];
+        out[..4].copy_from_slice(&n.to_le_bytes());
+        out[4..].copy_from_slice(&g.to_le_bytes());
+        out
+    }
+}
 
 /// One row of the layers list: a group, or a heading in `/Order`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layer {
     /// The optional content group; None for a heading.
-    pub id: Option<ObjectId>,
+    pub id: Option<LayerId>,
     pub name: String,
     /// Shown in the default configuration.
     pub on: bool,
@@ -86,7 +108,7 @@ pub fn layers_in<P: Objects + ?Sized>(pdf: &P) -> Vec<Layer> {
             Some(id) if groups.contains(&id) || pdf.get_dictionary(id).is_ok() => {
                 if listed.insert(id) {
                     out.push(Layer {
-                        id: Some(id),
+                        id: Some(LayerId(id)),
                         name: name(id),
                         on: visible(&id),
                         locked: locked.contains(&id),
@@ -107,7 +129,7 @@ pub fn layers_in<P: Objects + ?Sized>(pdf: &P) -> Vec<Layer> {
     for id in groups {
         if listed.insert(id) {
             out.push(Layer {
-                id: Some(id),
+                id: Some(LayerId(id)),
                 name: name(id),
                 on: visible(&id),
                 locked: locked.contains(&id),
@@ -185,7 +207,9 @@ pub fn ocg_patch(src: &Source, off: &BTreeSet<LayerId>) -> Option<Object> {
         .cloned()
         .unwrap_or_default();
     let refs = |hidden: bool| -> Object {
-        let listed = groups.iter().filter(|g| off.contains(g) == hidden);
+        let listed = groups
+            .iter()
+            .filter(|&&g| off.contains(&LayerId(g)) == hidden);
         Object::Array(listed.map(|&g| Object::Reference(g)).collect())
     };
     d.set("BaseState", Object::Name(b"ON".to_vec()));
@@ -234,10 +258,11 @@ mod tests {
         let l = layers_in(&pdf);
         // Read from a source, as a file opens: the same rows.
         assert_eq!(layers_in(crate::open::tests::lazily(&mut pdf).pdf()), l);
-        let rows: Vec<(Option<ObjectId>, &str, bool, bool, u16)> = l
+        let rows: Vec<(Option<LayerId>, &str, bool, bool, u16)> = l
             .iter()
             .map(|l| (l.id, l.name.as_str(), l.on, l.locked, l.depth))
             .collect();
+        let [a, b, c] = [a, b, c].map(LayerId);
         assert_eq!(
             rows,
             [
@@ -255,7 +280,7 @@ mod tests {
     fn a_patch_shows_every_layer_but_those_off() {
         let (mut pdf, a, _, c) = sample();
         let src = crate::open::tests::lazily(&mut pdf);
-        let props = ocg_patch(&src, &[a, c].into()).unwrap();
+        let props = ocg_patch(&src, &[LayerId(a), LayerId(c)].into()).unwrap();
         pdf.catalog_mut().unwrap().set("OCProperties", props);
         let on: Vec<(String, bool)> = layers_in(&pdf)
             .into_iter()

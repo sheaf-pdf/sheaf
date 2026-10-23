@@ -27,6 +27,7 @@ use crate::file::ForeignAnnot;
 use crate::forms::FieldId;
 use crate::forms::field::{Action, Border, Choice, Color, Mk, Trigger, Value};
 use crate::geom::{Affine, Geom, Rect};
+use crate::layers::LayerId;
 use crate::materialize::emit::Shown;
 use crate::materialize::emit::annots::{LinkTo, base_annots};
 use crate::materialize::emit::content;
@@ -563,6 +564,12 @@ impl Feed for ObjRef {
     fn feed(&self, sum: &mut Sum) {
         let ObjRef { src, id } = self;
         sum.feed(src).feed(id);
+    }
+}
+
+impl Feed for LayerId {
+    fn feed(&self, sum: &mut Sum) {
+        sum.0.write(&self.to_le_bytes());
     }
 }
 

@@ -31,23 +31,50 @@ pub(crate) fn set_ocr(
     page: PageId,
     layer: &Arc<TextLayer>,
 ) -> Result<(), EditError> {
-    put_ocr(lw, page, (!layer.is_empty()).then(|| layer.clone()))
+    let stays = put_ocr(lw, page, (!layer.is_empty()).then(|| layer.clone()))?;
+    told_stays(lw, stays.as_slice());
+    Ok(())
 }
 
-/// Page `page`'s recognized text taken off, its stack's and its file's
-/// ([`put_ocr`]).
-pub(crate) fn clear_ocr(lw: &mut Lower, page: PageId) -> Result<(), EditError> {
-    put_ocr(lw, page, None)
+/// The recognized text of `pages` taken off, each page's stack's and its
+/// file's ([`put_ocr`]), a page at a time, with progress.
+pub(crate) fn clear_ocr(lw: &mut Lower, pages: &[PageId]) -> Result<(), EditError> {
+    let mut stays = Vec::new();
+    for (i, &page) in pages.iter().enumerate() {
+        lw.pages_done(i, pages.len())?;
+        stays.extend(put_ocr(lw, page, None)?);
+    }
+    told_stays(lw, &stays);
+    Ok(())
+}
+
+/// The reader told that the layer an older sheaf wrote stays on `pages`,
+/// where nothing else of their text is taken out of their files, so no
+/// save says so ([`Notice::OcrStays`]).
+fn told_stays(lw: &mut Lower, pages: &[PageId]) {
+    if !pages.is_empty() {
+        let pages = crate::describe::pages_text(pages, &lw.rec);
+        lw.notices.push(Notice::OcrStays { pages });
+    }
 }
 
 /// Page `page`'s recognized text: `text` in place of what it has, or none.
 /// A layer it replaces on the page's stack, saved or not, keeps its
 /// block's id, and a new one draws one; what its file holds is filtered
 /// out ([`saved_ocr`]). Nothing is put when that leaves the page as it is.
-fn put_ocr(lw: &mut Lower, page: PageId, text: Option<Arc<TextLayer>>) -> Result<(), EditError> {
+/// `page` when a layer an older sheaf wrote stays in its file and nothing
+/// else there is filtered out: a save, which notes what such a filter
+/// leaves, has nothing to say of it.
+fn put_ocr(
+    lw: &mut Lower,
+    page: PageId,
+    text: Option<Arc<TextLayer>>,
+) -> Result<Option<PageId>, EditError> {
     lw.read(Key::Page(page));
     let def = lw.rec.def(page).expect("resolved").clone();
-    let filters = saved_ocr(lw, page, &def)?;
+    let (filters, legacy_stays) = saved_ocr(lw, page, &def)?;
+    let drops = Filter::DropStreams(StreamSel::SheafOcr);
+    let stays = (legacy_stays && !filters.contains(&drops)).then_some(page);
     let kept = def.content.ocr_layer().map(|l| l.id);
     let layer = text.map(|text| Layer {
         id: kept.unwrap_or_else(|| lw.block_id()),
@@ -58,11 +85,11 @@ fn put_ocr(lw: &mut Lower, page: PageId, text: Option<Arc<TextLayer>>) -> Result
         content = content.with_filters(filters);
     }
     if content == def.content {
-        return Ok(());
+        return Ok(stays);
     }
     let def = PageDef::new(def.base.clone(), def.copy, content);
     lw.rec.put(Key::Page(page), Some(Val::Page(Arc::new(def))));
-    Ok(())
+    Ok(stays)
 }
 
 /// The filters that take the recognized text sheaf wrote in the file of
@@ -70,11 +97,14 @@ fn put_ocr(lw: &mut Lower, page: PageId, text: Option<Arc<TextLayer>>) -> Result
 /// stream of its own, and the layer an older sheaf wrote, with its `q`
 /// ([`StreamSel::SheafOcr`]); and the blocks another tool merged into a
 /// stream ([`MarkedSel::SheafOcr`]), once a splice is shown to take them
-/// out as a save cuts them. None when it holds none. Read from the page's
-/// blocks, a fact of its source read once; a page whose content can't be
-/// read, or whose merged blocks a splice refuses, is
-/// [`EditError::Content`].
-fn saved_ocr(lw: &Lower, page: PageId, def: &PageDef) -> Result<Vec<Filter>, EditError> {
+/// out as a save cuts them. None when it holds none. Beside them, whether
+/// a layer an older sheaf wrote stays, without a `q` to take out with it
+/// ([`PageBlocks::legacy_ocr_stays`]). Read from the page's blocks, a fact
+/// of its source read once; a page whose content can't be read, or whose
+/// merged blocks a splice refuses, is [`EditError::Content`].
+///
+/// [`PageBlocks::legacy_ocr_stays`]: crate::content::PageBlocks::legacy_ocr_stays
+fn saved_ocr(lw: &Lower, page: PageId, def: &PageDef) -> Result<(Vec<Filter>, bool), EditError> {
     let (src, index) = (&def.base.src, def.base.index);
     let blocks = src.blocks(index).map_err(|e| lw.content(e, page))?;
     let ocr = (blocks.sheaf.iter()).filter(|b| matches!(b.block, SheafBlock::Ocr(_)));
@@ -93,7 +123,7 @@ fn saved_ocr(lw: &Lower, page: PageId, def: &PageDef) -> Result<Vec<Filter>, Edi
         cut_together(src, index, &merged).map_err(|e| lw.content(e, page))?;
         filters.push(Filter::DropMarked(MarkedSel::SheafOcr));
     }
-    Ok(filters)
+    Ok((filters, blocks.legacy_ocr_stays))
 }
 
 /// The filters that take sheaf's private data out of the content of page
