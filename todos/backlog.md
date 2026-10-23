@@ -412,6 +412,21 @@ phase; they're triaged between phases.
   workspace, and they pin the type's shape for no reader.
 - **Expected:** drop them, or say who reads it.
 
+### B23: A fuzz test's wall-clock budget fails when the machine is busy
+
+- **Found:** 2026-10-23, the instance-handoff migration's workspace run
+  (pre-existing)
+- **Where:** `source::fuzz::tests::fuzz_bodies_survive_mutated_fixtures`
+  (`crates/sheaf-doc/src/source/fuzz.rs:1394`), `took < 60 s`
+- **Severity:** annoyance (a flaky test)
+- **What happens:** at load average ~60 it took 70.9 s and failed; run
+  alone it passes in 6.25 s. A slow CI runner could trip it too.
+- **Expected:** the test bounds the work, not the wall clock: a cap on
+  steps or bytes per mutated body (what it really guards against is
+  unbounded work), or CPU time rather than elapsed time.
+- **Notes:** the 7k gates measure time on a quiet machine on purpose;
+  a unit test in the default suite shouldn't depend on load.
+
 ## Features
 
 ### F1: Basic calculator

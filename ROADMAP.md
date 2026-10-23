@@ -29,24 +29,23 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 | M7 | **Viewing & output**: page modes, split view, panels, print, image/TIFF/text export | Viewing and printing never need Acrobat | Done | — |
 | M8 | **Page tools**: split, insert/replace, crop, labels, headers/footers, Bates, watermarks | Binder assembly is complete | Done | — |
 | M9 | **Markup completion**: mark editing, remaining annotation types, custom stamps, replies and status, PDFlyer stamps/connectors/tape, FDF/XFDF, measurement | Review workflow parity | Done | — |
-| M10 | **Forms**: fill, calculate, create, import/export, flatten | Tax forms are filled and calculated in sheaf | Paused after slice 5 | All of M10.5 (a ruling: M10.5 proposal 11) |
-| M10.5 | **The edit API**: page content in the model, one op vocabulary over one primitive, saves as outputs, one emitter for screen and file | M11–M15 edit content without reworking the core | In progress: slices 1–12 merged | — |
-| M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | Planned | M10.5; M10 slice 15, for flattening in Remove Hidden Information; M10 slices 23–26 if sanitize removes field scripts rather than whole fields (open) |
-| M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | Sketched | M10.5; M10 slices 23–26 if signing creates new signature fields (open) |
-| M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | Sketched | M10.5; M11 (content interpreter, image editing) |
-| M14 | **Document processing**: compare, optimize, PDF/A | Archival and output parity | Sketched | M10.5; M11 (content interpreter), for optimize |
-| M15 | **Automation**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | Sketched; CLI groundwork shipped | Batch: M10.5, plus each step's milestone (M10's `sheaf form` for fill and flatten, M11 for redact by pattern, M14 for optimize). Parity audit and stabilization: last, after everything else |
-| M16 | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from any combination of ops, with approval | Agents work on documents through sheaf's own ops | Sketched | M10.5 |
-| M17 | **Accessibility**: sheaf itself usable with a screen reader and the keyboard; PDF/UA documents: tags, validation, a review view | People who use assistive technology can use sheaf and read what it writes | Sketched | The app: nothing unbuilt. Documents: M10.5; M11 (content interpreter), for tagging content; M14's PDF/A validator, if PDF/UA's rules share it (open) |
+| M10 | **Forms**: fill, calculate, create, import/export, flatten | Tax forms are filled and calculated in sheaf | Paused after slice 5; resumes next, after between-milestones work: the move to instance-handoff, a bug-fix PR and the content interpreter | Nothing unbuilt (it waited, by a ruling, for all of M10.5: done) |
+| M10.5 | **The edit API**: page content in the model, one op vocabulary over one primitive, saves as outputs, one emitter for screen and file | M11–M15 edit content without reworking the core | Done | — |
+| M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | Planned | M10 slice 15, for flattening in Remove Hidden Information; M10 slices 23–26 if sanitize removes field scripts rather than whole fields (open) |
+| M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | Sketched | M10 slices 23–26 if signing creates new signature fields (open) |
+| M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | Sketched | M11 (content interpreter, image editing) |
+| M14 | **Document processing**: compare, optimize, PDF/A | Archival and output parity | Sketched | M11 (content interpreter), for optimize |
+| M15 | **Automation**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | Sketched; CLI groundwork shipped | Batch: each step's milestone (M10's `sheaf form` for fill and flatten, M11 for redact by pattern, M14 for optimize). Parity audit and stabilization: last, after everything else |
+| M16 | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from any combination of ops, with approval | Agents work on documents through sheaf's own ops | Sketched | Nothing unbuilt |
+| M17 | **Accessibility**: sheaf itself usable with a screen reader and the keyboard; PDF/UA documents: tags, validation, a review view | People who use assistive technology can use sheaf and read what it writes | Sketched | The app: nothing unbuilt. Documents: M11 (content interpreter), for tagging content; M14's PDF/A validator, if PDF/UA's rules share it (open) |
 
 **Depends on** lists the unbuilt work a milestone needs first, or the part
 of it named after "for": it uses that work's code, types or
 infrastructure. When only part of another milestone is needed, that part
-is named. Finished work isn't listed. Two entries are rulings rather than
-code: M10 resumes only after all of M10.5, and M15's parity audit comes
-last. "(open)" marks an edge that waits on a decision. Release numbers
-aren't tracked: everything here is pre-release, so dependencies decide the
-order.
+is named. Finished work isn't listed. One entry is a ruling rather than
+code: M15's parity audit comes last. "(open)" marks an edge that waits on
+a decision. Release numbers aren't tracked: everything here is
+pre-release, so dependencies decide the order.
 
 The work that's left, by dependency. Arrows run from a milestone to the
 work it unblocks: solid arrows are needed, dotted ones are soft, open or
@@ -54,8 +53,7 @@ work it unblocks: solid arrows are needed, dotted ones are soft, open or
 
 ```mermaid
 graph LR
-  fin["Done: M5 except two slices, M6–M9, M10 slices 1–5"]
-  M10_5["M10.5 The edit API"]
+  fin["Done: M5 except two slices, M6–M9, M10 slices 1–5, M10.5"]
   M5r["M5: scanner intake, separator sheets"]
   M10a["M10 slices 6–17: appearances, filling, flatten, form data"]
   M10b["M10 slices 18–29: calculation, Prepare Form, detection, plugin API"]
@@ -70,25 +68,24 @@ graph LR
   M17b["M17: PDF/UA documents"]
   Panel["Agent panel (Pending)"]
 
-  fin --> M10_5
-  M10_5 --> M10a --> M10b
-  M10_5 -.->|"slice 19 rebuilds scan and insert"| M5r
-  M10_5 --> M11
+  fin --> M10a --> M10b
+  fin --> M5r
+  fin --> M11
   M10a -->|"slice 15: flatten fields"| M11
   M10b -.->|"slices 23–26: field scripts (open)"| M11
-  M10_5 --> M12
+  fin --> M12
   M10b -.->|"slices 23–26: signature fields (open)"| M12
   M11 -->|"content interpreter"| M13
   M11 -->|"content interpreter"| M14
   M13 -.-|"shared: all-uses index"| M14
-  M10_5 --> M15a
+  fin --> M15a
   M10a -->|"sheaf form"| M15a
   M11 -->|"redact by pattern"| M15a
   M14 -->|"optimize"| M15a
-  M10_5 --> M16
+  fin --> M16
   M16 --> Panel
   M16 -.-|"shared: command schemas"| M15a
-  M10_5 --> M17b
+  fin --> M17b
   M11 -->|"content interpreter"| M17b
   M14 -.-|"shared: validator (open)"| M17b
   M5r & M10b & M12 & M13 & M15a & M16 & M17a & M17b -.-> M15b
@@ -97,7 +94,6 @@ graph LR
   classDef active fill:#fff1c2,stroke:#b08900,color:#333
   classDef pending stroke-dasharray:5 5
   class fin done
-  class M10_5 active
   class Panel pending
 ```
 
@@ -525,9 +521,11 @@ inside sheaf stays under [Pending](#agent-panel-claude-and-codex).
   watermark and flatten need a manifest permission for plugins, and
   inserting and replacing pages is the user's alone. Also whether
   "semantic edits only, at first" (M10.5 decision 6) still holds.
-- **How `sheaf mcp` reaches the running sheaf.** `agent.md` planned on
-  the single-instance socket. M10.5 left the transport to this milestone
-  (proposal 36).
+- **How `sheaf mcp` reaches the running sheaf.** `agent.md` recommends
+  a stdio relay to sheaf's own `agent.sock` (its option 1), not the
+  instance-handoff socket, which carries only launches (the crate's ADRs
+  0001 and 0005: no general IPC, no replies before 0.2). M10.5 left the
+  transport to this milestone (proposal 36).
 - **Commands an agent should never run,** and writes that never get
   "always allow": saves, exports and anything else that writes files.
 

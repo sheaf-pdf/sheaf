@@ -229,6 +229,10 @@ fn spawn_writer(path: PathBuf) -> Option<Sender<Job>> {
 
 fn writer(rx: Receiver<Job>, path: &Path) {
     let save = |state: &State| {
+        // An owner that lost its lock or its state folder writes no more.
+        if !crate::instance::owns_state() {
+            return;
+        }
         if let Err(e) = write(path, state) {
             log::warn!("saving {}: {e:#}", path.display());
         }
