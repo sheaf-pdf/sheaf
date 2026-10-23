@@ -206,6 +206,17 @@ phase; they're triaged between phases.
     unencrypted files in `signatures/` have such a signature);
   - a file written with `sheaf … --signatures break` asks again on its
     next edit (`append_anyway: true`, "… removed since the last save").
+- **The digest check, spiked** (2026-10-23, the build-or-adopt audit;
+  [build-or-adopt.md](build-or-adopt.md), entry 93):
+  - cms 0.3.0-rc.0, der 0.8 (`ber`), sha1 and sha2, pinned exactly:
+    about 40 lines at the core. The stable cms 0.2.3 can't read the 138
+    of the corpus's 593 signatures that are BER.
+  - 546 of the 593 are checkable. It agrees with pyHanko on
+    `0008830.pdf` and `0010094.pdf`: neither is intact.
+  - Unknown algorithms, no signed attributes (28) and parse failures
+    keep asking; only a clear mismatch counts as broken.
+  - Hash lazily, once per source, cancellable: N signatures cost N
+    hashes of nearly the whole file.
 
 ### B9: A radio group keeps its value when its chosen button's page is removed
 
@@ -330,6 +341,136 @@ phase; they're triaged between phases.
   unbounded work), or CPU time rather than elapsed time.
 - **Notes:** the 7k gates measure time on a quiet machine on purpose;
   a unit test in the default suite shouldn't depend on load.
+
+(B23 is on PR #32, the move to instance-handoff.)
+
+### B24: G4 encoding truncates images wider than 65,535 pixels
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **Where:** `sheaf_image::encode::g4`
+  (`crates/sheaf-image/src/encode.rs:128-143`), behind images-to-pdf,
+  Combine, image inserts, the intake's G4 pages and TIFF export
+- **Severity:** wrong output
+- **What happens:** `enc.encode_line(pels, w as u16)` (`:136`) encodes
+  each row at the width modulo 65,536, while `/Columns` (or the TIFF's
+  `ImageWidth`) keeps the true width, so the image decodes as garbage. A
+  600 dpi scan over 109 in wide is enough. Nothing in `sheaf_image::io`
+  caps width.
+- **Expected:** the image is encoded at its width, or refused with a
+  message.
+- **Repro:** a black-and-white PNG 70,000 × 100 px through
+  `sheaf images-to-pdf`.
+- **Notes:** `fax` 0.3.0 (2026-07-13) takes `u32` widths: bump it, or
+  refuse widths it can't take. The test helper's `decode_g4(…, w as u16,
+  …)` (`:160-161`) has the same cast. [build-or-adopt.md](build-or-adopt.md), entry 38.
+
+### B25: Fax TIFFs (CCITT Group 3, Modified Huffman) are refused
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **Where:** `sheaf_image::io` (TIFF reading), through tiff 0.11.3
+- **Severity:** annoyance (input refused)
+- **What happens:** tiff 0.11.3 decodes only `Fax4` among the fax
+  compressions. `Fax3` (3) and `Huffman` (2) fail with
+  `UnsupportedCompressionMethod`
+  (`tiff-0.11.3/src/decoder/image.rs:604-620`), and `io.rs` has no
+  fallback. Fax software's TIFFs (Class F) are G3.
+- **Expected:** they open, as G4 TIFFs do.
+- **Repro:** a G3 TIFF from a fax service in `sheaf images-to-pdf` (not
+  reproduced; found by reading the decoder).
+- **Notes:** decode the strips with `hayro-ccitt` (G3 1D and 2D, with
+  T4Options' EOL and byte-align flags), which M11's image decoder also
+  wants. B15 (on the `m5-intake` branch) lists the other TIFF kinds
+  sheaf refuses; triage them together. tiff decodes planar data itself
+  (`decoder/mod.rs:1147-1222`), so B15's planar case is sheaf's own
+  refusal. [build-or-adopt.md](build-or-adopt.md), entry 16.
+
+### B26: The Flate backend depends on which crates are in the build
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **Where:** `flate2` feature unification: `crates/sheaf-app/Cargo.toml:38`
+  (`zip` with `deflate-flate2-zlib-rs`) against `flate2 = "1"` everywhere
+  else
+- **Severity:** annoyance (output differs between builds)
+- **What happens:** the shipped `sheaf` binary compresses with zlib-rs.
+  The `sheaf-cli` binary, per-crate test runs (`cargo test -p
+  sheaf-doc`) and builds without the plugins feature use miniz_oxide.
+  On the same data the two give different bytes and sizes at levels 1, 6
+  and 9 (measured with flate2 1.1.10; at level 1, 435,764 bytes against
+  643,987). So a test that pins compressed bytes or sizes passes or
+  fails by how it's run.
+- **Expected:** one backend, named once in the workspace, in every
+  build.
+- **Repro:** compress the same buffer with flate2 built with default
+  features and with `zlib-rs`, and compare.
+- **Notes:** memory sources rely on "the same inputs make the same
+  bytes" (`sheaf-doc/src/memory.rs:5-6`); check whether anything replays
+  one across builds or versions. The audit recommends zlib-rs, which
+  ships today ([build-or-adopt.md](build-or-adopt.md), D4).
+
+### B27: Nothing checks dependencies for advisories or licenses
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **Where:** CI (`.github/workflows/`); there's no `deny.toml`
+- **Severity:** annoyance (a missing check)
+- **What happens:** no advisory or license check runs. The audit found
+  by hand that wasmtime 49.0.2 sat behind a critical sandbox-escape
+  advisory (GHSA-mghf-wjfp-p5xm; PR #33 bumps it), and checked the
+  dependency licenses it met (BSL-1.0, ISC, MPL-2.0, GPL) one by one.
+  M12 brings crypto crates with live advisories (`rsa`:
+  RUSTSEC-2023-0071, unpatched).
+- **Expected:** CI runs `cargo deny check advisories licenses` (or
+  `cargo audit`) with a reviewed ignore list, so a new advisory or a
+  license change fails a build.
+- **Repro:** `ls deny.toml`; `rg -i 'deny|audit' .github/workflows/`.
+- **Notes:** small. Start with licenses and advisories; bans later.
+  Overlap: `todos/code-signing.md` (release hygiene). The license check
+  covers crates, not data files (F18). [build-or-adopt.md](build-or-adopt.md), D7.
+
+### B28: Printing may not work in the Flatpak build
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **Where:** sheaf-print's CUPS path (`crates/sheaf-print/src/lib.rs:5-9`;
+  `todos/m7.md:23-37`), in the Flatpak
+- **Severity:** annoyance (unverified: printing may fail outright)
+- **What happens:** M7 prints through CUPS's command-line tools
+  (`lpstat`, `lpoptions`, `lp -`) and chose them over the print portal
+  because the portal is "sandbox-only" (`todos/m7.md:29-30`). But the
+  Flatpak build is sandboxed: inside it, `lp` must be in the runtime or
+  bundled, and the app needs `--socket=cups` (Flatpak 1.6 and later).
+  Whether org.freedesktop.Platform includes `lp` is unverified.
+- **Expected:** printing works in the Flatpak.
+- **Repro:** not run: print from the Flatpak build.
+- **Notes:** bundle the CUPS client tools with `--socket=cups`, or use
+  the print portal in the Flatpak only, if bundling is awkward. Overlap:
+  packaging (`todos/installer.md`), M7. Sources:
+  [flatpak-run](https://www.mankier.com/1/flatpak-run),
+  [KDE's `--socket=cups`](https://phabricator.kde.org/R256:2415ebe0b7ed42a2eed468c9da10d3924dd9b1c1).
+  [build-or-adopt.md](build-or-adopt.md), entry 95.
+
+### B29: Search misses ligatures, compatibility forms and NFD text
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **Where:** Find, Patterns and `sheaf search`:
+  `crates/sheaf-doc/src/page_chars.rs:68-80` (`Query::literal`,
+  case-insensitive by the regex crate's simple case folding)
+- **Severity:** wrong output (a missed match)
+- **What happens:** neither the page text nor the query is normalized.
+  So "file" may not match text drawn with a ﬁ ligature (U+FB01, from a
+  ToUnicode or OCR), full-width digits in an EIN don't match digits, and
+  an NFD query (macOS input) doesn't match NFC text, or the reverse.
+  Whether PDFium's text page already expands U+FB01 is unverified.
+- **Expected:** they match, and match offsets map back to characters.
+- **Repro:** not run: a fixture with a ﬁ ligature, with and without a
+  ToUnicode; search "file".
+- **Notes:** born-digital statements and OCR layers carry ligatures and
+  compatibility forms, so a missed EIN or name is a missed redaction or
+  a wrong answer from the agent. Normalize the page text and the query
+  (NFKC, or a narrower ligature map) and map offsets back; `PageChars`
+  already maps byte offsets to characters, and unicode-normalization is
+  already a dependency. Full case folding (ß/ss) would need `caseless` or
+  `icu_casemap`. Overlap: M10.5 slice 19's `Query::literal`; Pending
+  "Search across files"; M11 search and redact, whose marks must still
+  land on the right glyphs. [build-or-adopt.md](build-or-adopt.md), entry 85.
 
 ## Features
 
@@ -589,6 +730,12 @@ phase; they're triaged between phases.
     `signatures/`'s manifest; sheaf-cli's `tests/edit.rs` uses it (an
     `--append` onto signed files keeps their signatures). No tier sweeps
     the collection yet, and `conformance/` is still unread.
+  - **veraPDF** (2026-10-23, the build-or-adopt audit): the
+    `conformance/` tier compares sheaf's checks with veraPDF 1.30's JSON
+    (`--format json`, flavours `1a`…`4f`, `ua1`, `ua2`). veraPDF needs
+    Java, which this machine doesn't have, or the `verapdf/cli` Docker
+    image, so the tier skips without it, as corpus tiers do without the
+    corpus ([build-or-adopt.md](build-or-adopt.md), D3).
 
 ### F13: In-house what sheaf uses of lopdf and drop the dependency
 
@@ -639,6 +786,20 @@ phase; they're triaged between phases.
   - `/EFF`;
   - V4+ filter names and `/Identity`;
   - the set in `traverse_objects` and `prune_objects`.
+- **Upstream since** (2026-10-23, the build-or-adopt audit, read in
+  `J-F-Liu/lopdf` main at `d0b3abf`, not run; [build-or-adopt.md](build-or-adopt.md), entry 2):
+  - 0.46.0 (2026-10-21) has #598 and the stream-dictionary strings
+    (#603, `2f497f8`).
+  - Merged since: V4+ `/Identity` defaults (#624) and
+    `traverse_objects` and `prune_objects` in linear time (#630), both
+    still to confirm as the same fixes as sheaf's; caps in object
+    streams and predictors (#625); rebuilding files that have only
+    cross-reference streams (#613, which the audit placed both in 0.46.0
+    and after it).
+  - Still to send: `/EFF`, `/Encrypt null`, white space around
+    `startxref`, and each xref stream read once and lenient `/XRefStm`,
+    if still needed.
+  - Diff each `sheaf:` hunk against upstream main before writing its PR.
 - **Overlap:** `vendor/lopdf/SHEAF.md`, "Going back to crates.io";
   F15 (a Rewrite that doesn't load the file whole) would remove the
   largest use of the eager `Document`.
@@ -658,6 +819,11 @@ phase; they're triaged between phases.
       and markers.
   - Make it an internal crate with a clean boundary first; decide on
     publishing after an ecosystem survey.
+  - **The survey** (2026-10-23, the build-or-adopt audit): no published
+    crate offers an owned, f64, order-keeping, lazy, capped object layer
+    with byte spans, so a crate of that layer would have a real niche.
+    The nearest are hayro-syntax (read-only, borrowed objects) and lopdf
+    (eager, f32).
 - **Deferred** (Greg, 2026-10-22): revisit after more milestones, since
   what sheaf needs from this layer may change as later scopes dig in.
   Upstream fixes go ahead meanwhile.
@@ -887,6 +1053,118 @@ phase; they're triaged between phases.
     rxing is pure Rust, so the build needs nothing new.
   - **Size:** the plugin is small; the link op is the real work.
   - **When:** revisit after M13 lands (Greg, 2026-10-23).
+
+(F17 is on the content interpreter PR.)
+
+### F18: Notices for the data and code sheaf ships
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **What:** `packaging/licenses` carries each notice as its item
+  arrives:
+  - Unicode-3.0, for unicode-normalization from 0.1.26 (which declares
+    it) and ICU4X data;
+  - Adobe's BSD-3 notice for hayro-cmap's CMap bundle (the content
+    interpreter PR brings it);
+  - the OFL for Noto Sans and Liberation (M10 slices 7 and 11);
+  - BSD-3 for Foxit's Symbol and Dingbats, if M14 takes them;
+  - the IJG notice ("based in part on the work of the Independent JPEG
+    Group") for jpeg-encoder, if M11 takes it;
+  - SCOWL's notice, if spell check ships en_US.
+- **Why:** each license requires its notice in binary distributions;
+  today `packaging/licenses` has none of these.
+- **Overlap:** M10 slices 7 and 11 (`m10.md:1469`, `:1597`); M11's
+  content interpreter (CMaps) and slice 6 (JPEG); M14's embed-all
+  profile; Spell check (Pending); B27, whose license check covers crates,
+  not data files.
+- **Notes:** the lockfile is at unicode-normalization 0.1.25, whose
+  license field is still MIT OR Apache-2.0; the next `cargo update`
+  brings 0.1.26. [build-or-adopt.md](build-or-adopt.md), entries 19, 21, 26, 35, 63 and 84.
+
+### F19: Wipe file keys, not only passwords
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **What:** keep an encrypted file's key in `Zeroizing` memory from
+  derivation to drop. lopdf's `EncryptionState` holds it in a plain
+  `Vec`, and `serialize::crypt::Crypt` keeps an HMAC keyed with it.
+  Passwords are already `Zeroizing` (`store.rs:42`).
+- **Why:** hygiene. A key in a crash dump or swap opens the file without
+  the password.
+- **Overlap:** F13 (in-house encryption on the RustCrypto crates); M12's
+  PINs and keys (secrecy comes with cryptoki).
+- **Notes:** best-effort, since GPUI's text input and PDFium's copies of
+  the password can't be wiped; say so in the docs. [build-or-adopt.md](build-or-adopt.md), entries 29 and
+  43.
+
+### F20: Upstream: cms `CertificateChoices` alternatives for attribute certificates
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **What:** cms 0.3.0-rc.0's `CertificateChoices` has only
+  `Certificate` and `other [3]` (`src/cert.rs:30-35`), so a SignedData
+  whose certificate set holds an old attribute certificate (`[1]`,
+  `[2]`) fails to decode. One of the corpus's 593 signatures does, in
+  the audit's B5 spike. Send a fix to RustCrypto/formats.
+- **Why:** M12's verify panel, and B5, would otherwise report "can't
+  read" for such a signature.
+- **Overlap:** B5; M12 slice 3.
+- **Notes:** small: an issue first, then a PR. [build-or-adopt.md](build-or-adopt.md), entry 44.
+
+### F21: Try PP-OCRv6 in the PaddleOCR engine
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **What:** offer PaddleOCR's PP-OCRv6 models (tiny, small or medium) in
+  place of, or beside, the PP-OCRv5 mobile models `sheaf-ocr` loads
+  today (`crates/sheaf-ocr/src/data.rs:101-111`).
+- **Why:** PP-OCRv6 (2026-06-11) claims +5.1% recognition and +4.6%
+  detection over PP-OCRv5_server (vendor figures). oar-ocr 0.10.0, which
+  sheaf already uses, has a `pp_ocrv6` preset, so this is a model and
+  dictionary swap, not a new dependency.
+- **Overlap:** M5 OCR (done); `todos/ocr.md`'s model sets; F10 (Redo
+  OCR).
+- **Notes:** measure on `../pdf-corpus/scans/`: accuracy against
+  PP-OCRv5 and Tesseract, time per page, model size. The v6 weights'
+  license is unverified. `scripts/fetch-ocr-data.sh` would fetch the new
+  files. [build-or-adopt.md](build-or-adopt.md), entry 13.
+
+### F22: Check what sheaf writes against the Arlington PDF Model
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **What:** a test-only checker that reads the Arlington PDF Model's TSV
+  files
+  ([pdf-association/arlington-pdf-model](https://github.com/pdf-association/arlington-pdf-model),
+  Apache-2.0) and checks every object sheaf builds: annotations,
+  appearance streams' resource dictionaries, form fields, the catalog
+  and trailer keys it writes, and later StructElems and output intents.
+  It checks keys, types, required entries and version predicates. Run it
+  over the emission in the existing save tiers.
+- **Why:** PDF interoperability is required, and viewers are lenient, so
+  a malformed key can pass PDFium and pdf.js and still fail Acrobat or a
+  validator. krilla runs Arlington in CI for the same reason.
+- **Overlap:** F9 (`conformance/`); M14 PDF/A; M17 PDF/UA; the interop
+  tests with qpdf and pdf.js.
+- **Notes:** no Rust implementation exists; TestGrammar (C++) and
+  veraPDF's Arlington service do. The TSVs are data: vendor a pinned
+  copy under the test fixtures with its license, or read them from
+  `../pdf-corpus/tools`. Start with the objects sheaf creates, not every
+  object it copies. [build-or-adopt.md](build-or-adopt.md), entry 94.
+
+### F23: hayro-syntax as a second reader in the lazy-reader corpus test
+
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **What:** a dev-dependency on hayro-syntax 0.8, and a corpus tier that
+  compares sheaf's lazy reads (object by object, or at least each page's
+  resources and contents) with hayro-syntax's, with the known
+  differences listed, as `source::lazy_tests` does for the eager reader.
+- **Why:** F13 in-houses the parser and the reading of cross-references.
+  Today the only in-process comparison is lopdf's eager reader, which
+  shares sheaf's code. An independent pure-Rust reader catches
+  regressions a shared code path can't.
+- **Overlap:** F13; `source::lazy_tests`; F17 (hayro-interpret as a
+  second corpus oracle, from the content interpreter PR); the hayro
+  "oracle only" rule (M10.5's Not in M10.5).
+- **Notes:** Apache-2.0 OR MIT, `no_std` + alloc, no unsafe by default.
+  It needs whole-file bytes (an mmap works). Its repair differs from
+  PDFium's, so expect a triage list. Decide at F13's triage, not
+  mid-milestone. [build-or-adopt.md](build-or-adopt.md), entry 1.
 
 ## Closed
 
@@ -1180,3 +1458,7 @@ done twice.
 - **2026-10-23: an appearance with states and no `/AS`.** pdf.js's
   `src/core/annotation.js` (6.4.299) and PDFium, on hand-made files, and
   Acrobat's documentation, which doesn't say. It's in B12's notes.
+- **2026-10-23: the build-or-adopt audit** ([build-or-adopt.md](build-or-adopt.md)): crates.io, docs.rs
+  and GitHub for every need in the milestones and the backlog, by four
+  researchers. It produced B24–B29 and F18–F23, and lines on B5, F9 and
+  F13.
