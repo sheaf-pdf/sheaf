@@ -85,9 +85,16 @@ impl Session {
     /// PDF insert their pages into. Its first save is a Rewrite to the
     /// path it's given.
     pub fn new_empty() -> Session {
+        Session::new_empty_named("Untitled")
+    }
+
+    /// [`Session::new_empty`] under `name`: what the document goes by, and
+    /// what a header's or a footer's `<<file>>` says until it's saved (an
+    /// untitled document's, M5 proposal 2).
+    pub fn new_empty_named(name: &str) -> Session {
         let store = Store::new();
         let empty = sheaf_doc::memory::empty(&store).expect("a file of no pages reads");
-        Session::of_empty(store, empty, "Untitled")
+        Session::of_empty(store, empty, name)
     }
 
     /// [`new_empty`](Self::new_empty), its `/Info` saying it's `title`,

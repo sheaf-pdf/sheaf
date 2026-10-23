@@ -209,13 +209,23 @@ pub enum WriteError {
 /// and the link kept, and the new file has the old one's permissions. No
 /// temp file is left, whatever happens.
 pub fn write(path: &Path, bytes: &[u8], expect: Option<&FileStamp>) -> Result<(), WriteError> {
+    write_parts(path, &[bytes], expect)
+}
+
+/// [`write()`] of `parts` one after another, the file they make, with no
+/// copy of them made whole.
+pub fn write_parts(
+    path: &Path,
+    parts: &[&[u8]],
+    expect: Option<&FileStamp>,
+) -> Result<(), WriteError> {
     let io_at = |path: &Path| {
         let path = path.to_path_buf();
         move |source| WriteError::Io { path, source }
     };
     let target = resolve(path).map_err(io_at(path))?;
     let (tmp, file) = temp_beside(&target).map_err(io_at(&target))?;
-    match replace(file, &tmp, &target, bytes, expect) {
+    match replace(file, &tmp, &target, parts, expect) {
         Ok(true) => {}
         Ok(false) => {
             let _ = fs::remove_file(&tmp);
@@ -233,16 +243,18 @@ pub fn write(path: &Path, bytes: &[u8], expect: Option<&FileStamp>) -> Result<()
     Ok(())
 }
 
-/// Write `bytes` to `file`, the temp `tmp`, and rename it over `target`
+/// Write `parts` to `file`, the temp `tmp`, and rename it over `target`
 /// when `expect` still holds there: whether it did.
 fn replace(
     mut file: File,
     tmp: &Path,
     target: &Path,
-    bytes: &[u8],
+    parts: &[&[u8]],
     expect: Option<&FileStamp>,
 ) -> io::Result<bool> {
-    file.write_all(bytes)?;
+    for part in parts {
+        file.write_all(part)?;
+    }
     keep_permissions(&file, target)?;
     file.sync_all()?;
     drop(file);

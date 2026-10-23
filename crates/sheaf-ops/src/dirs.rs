@@ -8,7 +8,10 @@
 //! - **State:** what sheaf remembers for itself (`state.json`, recent
 //!   files). Local to the machine and safe to delete:
 //!   `%LOCALAPPDATA%\sheaf\state`, `~/.local/state/sheaf`, and
-//!   `~/Library/Application Support/sheaf/state`.
+//!   `~/Library/Application Support/sheaf/state`. Its `recovery/` is the
+//!   exception: it keeps the crash-recovery sidecars of documents no file
+//!   holds yet ([`recovery_dir`]), whose unsaved pages go with them (a
+//!   file's sidecar is beside the file).
 //!
 //! `SHEAF_CONFIG_DIR` moves both, state to `<config>/state`, so tests and
 //! scripts stay clear of the user's own files.
@@ -21,7 +24,8 @@ fn var(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn home() -> Option<PathBuf> {
+/// The user's home folder.
+pub fn home() -> Option<PathBuf> {
     var("HOME").or_else(|| var("USERPROFILE"))
 }
 
@@ -55,4 +59,10 @@ pub fn state_dir() -> PathBuf {
             .or_else(|| home().map(|h| h.join(".local/state/sheaf")))
     };
     dir.unwrap_or_else(|| config_dir().join("state"))
+}
+
+/// The state folder's `recovery/`: the crash-recovery sidecars of
+/// untitled documents (M5 proposal 2), which have no file to sit beside.
+pub fn recovery_dir() -> PathBuf {
+    state_dir().join("recovery")
 }

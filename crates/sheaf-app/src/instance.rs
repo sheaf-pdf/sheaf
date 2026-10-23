@@ -38,7 +38,9 @@ static OWNS_STATE: AtomicBool = AtomicBool::new(true);
 
 /// Whether this process may write sheaf's state (`state.json`, recent
 /// files). Only the owner does; a process running alone beside it writes
-/// nothing, and an owner that lost its lock or its state folder stops.
+/// nothing but its own untitled documents' crash-recovery sidecars, each
+/// claimed by name (see untitled.rs) so a crash never loses their pages,
+/// and an owner that lost its lock or its state folder stops.
 pub fn owns_state() -> bool {
     OWNS_STATE.load(Ordering::Relaxed)
 }

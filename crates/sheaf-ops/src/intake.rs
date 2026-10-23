@@ -7,9 +7,12 @@
 //! batches ([`Batching`], by default 8 pages or 2 seconds since the last
 //! landing) through a [`Landing`]: a Session's ([`SessionLanding`])
 //! commits each as the scan job's, in one group, so an intake is one undo
-//! step however many batches it took, and undoing it stops it. Whatever
-//! stops an intake but its landing (a cancel, a page that can't be read,
-//! cleaned or recognized), the pages it had ready land first.
+//! step however many batches it took, and undoing it stops it. Every
+//! landing makes a batch's pages one source ([`batch_source`]) and puts
+//! them in a transaction with their text ([`apply_batch`]), a Session's
+//! or the app's. Whatever stops an intake but its landing (a cancel, a
+//! page that can't be read, cleaned or recognized), the pages it had ready
+//! land first.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,9 +21,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use in_progress::{Level, NoProgress, Progress};
 use sheaf_doc::images::placement;
-use sheaf_doc::store::{BlobKind, MemoryKind};
+use sheaf_doc::store::{BlobKind, MemoryKind, Src, Store};
 use sheaf_doc::tx::Made;
-use sheaf_doc::{Actor, Box2, CommitOpts, GroupId, GroupKind, JobKind, PAGES, PageId};
+use sheaf_doc::{Actor, Box2, CommitOpts, GroupId, GroupKind, JobKind, PAGES, PageId, Tx};
 use sheaf_edit::{BlobSel, Bring, Fit, Op, PageRef, PageSource};
 use sheaf_image::clean::Mode;
 use sheaf_image::io::{Frames, PageImage};
@@ -188,33 +191,10 @@ impl<'a> SessionLanding<'a> {
 
 impl Landing for SessionLanding<'_> {
     fn land(&mut self, batch: Batch, p: &dyn Progress) -> Result<()> {
-        let insert = made_pages(self.session, &batch.pages, batch.fit, "scan")?;
+        let src = batch_source(self.session.doc.store(), &batch.pages, batch.fit)?;
+        self.session.hold(src.blob().clone());
         let mut tx = self.session.tx(Actor::Job(JobKind::Scan));
-        let made = tx.apply(insert, p)?.made;
-        if let Some(words) = batch.words {
-            let pages: Vec<PageId> = (made.into_iter())
-                .filter_map(|m| match m {
-                    Made::Page(id) => Some(id),
-                    _ => None,
-                })
-                .collect();
-            anyhow::ensure!(
-                pages.len() == words.len(),
-                "a batch of {} images made {} pages",
-                words.len(),
-                pages.len()
-            );
-            // As the app's OCR gives a page its text.
-            for (id, words) in pages.into_iter().zip(words) {
-                let geom = (tx.state().geom(id).cloned()).context("an inserted page's boxes")?;
-                let layer = sheaf_doc::text_layer::from_engine(words, &geom, &batch.engine);
-                let set = Op::SetOcrText {
-                    page: PageRef::Id(id),
-                    layer: Arc::new(layer),
-                };
-                tx.apply(set, p)?;
-            }
-        }
+        apply_batch(&mut tx, &src, batch.words, &batch.engine, p)?;
         let opts = CommitOpts {
             group: Some(self.group),
             ..CommitOpts::labelled(self.label.clone())
@@ -332,22 +312,60 @@ pub fn intake(
 }
 
 /// `pages` made one PDF in memory ([`sheaf_doc::images::to_pdf`], each as
-/// `fit` says), interned as a [`MemoryKind::Images`] source held by
-/// `session`: the insert of all its pages at the end, under `name`. The
+/// `fit` says), interned in `store` and parsed: a [`MemoryKind::Images`]
+/// source, which whoever lands it holds until its insert is committed. The
 /// pages are made from images already read, decoded and cleaned, so they
 /// go in as they're made, rather than as image files the insert reads
 /// again.
-pub(crate) fn made_pages(
-    session: &mut Session,
-    pages: &[PageImage],
-    fit: Fit,
-    name: &str,
-) -> Result<Op> {
+pub fn batch_source(store: &Store, pages: &[PageImage], fit: Fit) -> Result<Src> {
     let bytes = sheaf_doc::images::to_pdf(pages, fit)?;
-    let kind = BlobKind::memory(MemoryKind::Images);
-    let src = session.doc.store().open(bytes.into(), kind)?;
-    session.hold(src.blob().clone());
-    Ok(Op::InsertPages {
+    Ok(store.open(bytes.into(), BlobKind::memory(MemoryKind::Images))?)
+}
+
+/// A batch put into `tx`: every page of `src`, its source
+/// ([`batch_source`]), inserted at the end, then, when OCR ran, each given
+/// its `words`, in points on its page, as `engine` (its name and version)
+/// read them. Words that aren't a list for each page it made are an
+/// error.
+pub fn apply_batch(
+    tx: &mut Tx,
+    src: &Src,
+    words: Option<Vec<Vec<sheaf_doc::OcrWord>>>,
+    engine: &str,
+    p: &dyn Progress,
+) -> Result<()> {
+    let made = tx.apply(insert_at_end(src, "scan"), p)?.made;
+    let Some(words) = words else {
+        return Ok(());
+    };
+    let pages: Vec<PageId> = (made.into_iter())
+        .filter_map(|m| match m {
+            Made::Page(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    anyhow::ensure!(
+        pages.len() == words.len(),
+        "a batch of {} images made {} pages",
+        words.len(),
+        pages.len()
+    );
+    // As the app's OCR gives a page its text.
+    for (id, words) in pages.into_iter().zip(words) {
+        let geom = (tx.state().geom(id).cloned()).context("an inserted page's boxes")?;
+        let layer = sheaf_doc::text_layer::from_engine(words, &geom, engine);
+        let set = Op::SetOcrText {
+            page: PageRef::Id(id),
+            layer: Arc::new(layer),
+        };
+        tx.apply(set, p)?;
+    }
+    Ok(())
+}
+
+/// The insert of all of `src`'s pages at the end, under `name`.
+pub(crate) fn insert_at_end(src: &Src, name: &str) -> Op {
+    Op::InsertPages {
         from: PageSource::File {
             file: BlobSel::Id(src.id()),
             name: name.to_string(),
@@ -356,7 +374,7 @@ pub(crate) fn made_pages(
         before: None,
         bring: Bring::default(),
         locals: Vec::new(),
-    })
+    }
 }
 
 /// An engine's words on a cleaned image, in points on its page.

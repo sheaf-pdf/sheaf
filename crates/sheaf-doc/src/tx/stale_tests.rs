@@ -131,6 +131,65 @@ fn a_relowered_insert_lands_beside_a_move_with_the_ids_it_drew() {
     assert_eq!(order, [p1, p2, new[0], new[1], p3, p4, p0]);
 }
 
+/// A scan's batch (M5 proposal 1), its pages inserted at the end with
+/// their recognized text, in the scan job's group, made on a version
+/// before the user inserted, deleted and moved pages, lands lowered again
+/// after the pages as they are now, with the ids it drew and its text: an
+/// insert at the end names no position, so it reads no order, and nothing
+/// the user does to the pages conflicts with it.
+#[test]
+fn a_relowered_insert_at_the_end_lands_beside_an_insert_a_delete_and_a_move() {
+    let mut d = doc_of(3, &[]);
+    let batch = crate::store::blank(d.store(), 2);
+    let other = crate::store::blank(d.store(), 1);
+    let [p0, p1, p2] = pages(&d);
+    let group = d.begin_group(crate::model::GroupKind::Scan);
+    let snap = d.snapshot();
+    let mut tx = Document::tx_at(&snap, d.lower_cx(Actor::Job(JobKind::Scan)));
+    let end = Op::InsertPages {
+        from: fx::file(&batch, "scan"),
+        pages: None,
+        before: None,
+        bring: Bring::default(),
+        locals: Vec::new(),
+    };
+    let made = tx.apply(end, &NoProgress).unwrap().made;
+    let new: Vec<PageId> = (made.iter())
+        .filter_map(|m| match m {
+            Made::Page(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(new.len(), 2);
+    for &page in &new {
+        let page = PageRef::Id(page);
+        let set = Op::SetOcrText {
+            page,
+            layer: layer("scanned"),
+        };
+        tx.apply(set, &NoProgress).unwrap();
+    }
+    let created = tx.preview().created;
+    let insert = fx::insert(&other, [0], "b.pdf", Some(p1));
+    d.commit_ops(vec![insert], "Insert b.pdf").unwrap();
+    let inserted = d.page(1).unwrap();
+    d.commit_ops(vec![fx::delete(&[p2])], "Delete page 4")
+        .unwrap();
+    d.commit_ops(vec![fx::move_pages(&[p0], None)], "Move page 1")
+        .unwrap();
+    let opts = CommitOpts {
+        group: Some(group),
+        ..on(snap.version, Stale::Relower)
+    };
+    let c = d.commit(tx, opts).unwrap();
+    assert_eq!(c.created, created, "the ids the first lowering drew");
+    let order: Vec<PageId> = d.state().order().iter().copied().collect();
+    assert_eq!(order, [inserted, p1, p0, new[0], new[1]]);
+    for page in new {
+        assert_eq!(d.state().ocr_text(page).unwrap().words[0].text, "scanned");
+    }
+}
+
 /// An insert of a file with a form, our marks, other tools' comments and
 /// an outline, then a header, lowered again beside a turn of another page:
 /// every id they draw, the fields' and widgets' too, is the one they drew

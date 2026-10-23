@@ -856,7 +856,10 @@ Snapshots win. Undo/redo cannot be wrong because there is no inverse logic;
 moves 50 pages pushes one version at the end of the gesture. Dirty tracking
 is `cursor != saved` (and a restored document is dirty while its recovery
 sidecar's sections are pending, M10.5 slice 10). "Revert to saved" is
-`cursor = saved`.
+`cursor = saved`. A document made in memory opens saved at its first
+version, with no record; `Document::never_saved` (M5 slice 2, for an
+untitled document's recovery) leaves it with no saved version, so every
+version is dirty until its first save, a Rewrite.
 
 History also keeps what each edit changed (M10.5 slice 1), so a snapshot
 dropped to save memory is rebuilt exactly, never by running the edit again:
@@ -2116,6 +2119,10 @@ below).
   the background (`write_file`), then `record_save` (`Doc::take_save`),
   or `abandon_save` when the reader cancels or the write fails; a
   FileChanged found at the rename asks again, the version still sealed.
+  From M5 slice 2 a view's place is a file or an untitled document
+  (`Place`): Save of an untitled one is Save As (`DocView::save`),
+  suggesting "<name>.pdf" in its images' folder, and once it's written
+  the place is the file, whose name the window's title and dialogs take.
   A second save while one is sealed is refused ("Already saving…"), since
   its base would be the first's file. Nothing is reopened or re-read
   after a save, and no rendered image is dropped: images are cached by
@@ -2144,7 +2151,25 @@ below).
   a hybrid form leaves no XFA in it). `find` takes one only while its
   base is still the file (`FileStamp::holds`), and removes a stale,
   malformed or format-1 one. `restore` checks the base again and opens
-  from memory (`MemoryKind::Recovered`) under the file's name. Format 1,
+  from memory (`MemoryKind::Recovered`) under the file's name. From M5
+  slice 2 a document no file holds yet (an untitled one) has a third
+  kind, `sheaf-recovery 2\nuntitled\n`, the folder its Save As starts in
+  (UTF-8 hex, empty for none) and the whole document, as Full's is
+  written (`recovery::write_untitled`, its parts written in turn by
+  `durable::write_parts`, no copy made whole), in a folder of the
+  caller's (the app's `state_dir()/recovery/`) as `<name>.sheaf-recovery`.
+  Its name is claimed (`recovery::Claim`, `claim_untitled`): a lock on
+  `.<name>.sheaf-lock` there, taken and let go under the folder's `.lock`
+  so a lock file is removed only while no one has it open, held by the
+  one view of the document for its life and by each write in flight for
+  the write's, in any sheaf process; only the holder writes or removes
+  the sidecar. `find_untitled` takes the sidecars no one holds, claimed,
+  sorted by name, reading their heads alone, removing what isn't one and
+  an unheld name's temp files and lock file, and `find` beside a file
+  takes none. `restore_untitled` reads the body once into the shared
+  buffer and opens it from memory with no record, and
+  `Document::never_saved` leaves it with no saved version, so it's dirty
+  and its first save is a Rewrite. Format 1,
   an update section over the original and its temp-file primary, is
   gone. In slice 9 every sidecar was the whole file (about 0.5 s and the
   file's size written per autosave on the scanned 7k), and
@@ -4976,7 +5001,7 @@ directory, `SHEAF_CACHE_DIR`) is gone.
   `memory::titled` is the same with an `/Info` (its title, `/Producer`
   sheaf, `/CreationDate` now), which `Session::new_titled` starts from.
 - **Images to PDF** inserts one `Memory(Images)` blob made by
-  `images::to_pdf` (`intake::made_pages`; `--dpi` overrides the images'
+  `images::to_pdf` (`intake::batch_source`; `--dpi` overrides the images'
   resolution, which no op field says) into a new session, then saves it.
   **A scan** goes through the intake (`sheaf_ops::intake`, M5 slice 1),
   a page at a time, each encoded once it's cleaned: every batch of pages
@@ -4985,7 +5010,11 @@ directory, `SHEAF_CACHE_DIR`) is gone.
   undo step. A black and white page is held as its CCITT G4 bytes from
   the moment it's made (`Pixels::G4`, encoded by `PageImage::from_image`
   and written as they are), not as 8-bit pixels. `scan::add_text`, its
-  throwaway Document and the `.images.part` file went.
+  throwaway Document and the `.images.part` file went. From M5 slice 2 a
+  landing makes the blob in any store (`intake::batch_source`) and puts
+  the insert and the text into any transaction (`intake::apply_batch`),
+  so the app's landing shares them; `made_pages`, a Session's alone,
+  went.
 - **The comment summary** is a session: `new_titled`, then an insert of
   its pages, a `Memory(Summary)` blob written by `write_built`. Its Pages
   layout built its pages as an eager lopdf graph until slice 20 (it bound
@@ -5002,7 +5031,9 @@ directory, `SHEAF_CACHE_DIR`) is gone.
 
 A `Session` is a document with no window: `open(path, pw, p)` through
 `open::read` (`open::file`'s body with progress, a torn save undone and
-said), `new_empty()` and `new_titled(title)`, `From<Document>`; `intern`,
+said), `new_empty()`, `new_empty_named(name)` (an untitled document's,
+M5 slice 2, so `<<file>>` says its name until it's saved) and
+`new_titled(title)`, `From<Document>`; `intern`,
 `hold` and `name` for the files its ops name (`{"with": NAME}`);
 `tx(actor)` with those names granted; `commit`/`commit_as`
 (`Actor::Cli`, or a job's); `edit` and `preview` for ops read from a
@@ -5066,6 +5097,49 @@ when it has no document, else a new one: `DocView::adopt`, whose core
 store, the same version, its notices and scripts state as built, history
 at the combined version, `file()` the output. The dialog refuses an
 output open in a window (`workspace::is_open`).
+
+**Create from Scans** (M5 slice 2) writes nothing until the user saves.
+The dialog hands its images and choices to the window
+(`ScanEvent::Scan`), which shows a new untitled document of no pages
+(`DocView::untitled`: `Session::new_empty_named` through `adopting`,
+kept at `Place::Untitled` under the first "Untitled scan N" no view in
+any sheaf claims, `untitled.rs`), in the origin window when it has no
+document, else
+in a new one, and scans into it (`scan_run.rs`). The intake runs as the
+view's job on a background thread; its landing makes each batch's
+source in the document's store (`intake::batch_source`), asks the view
+for the version to plan on with the scan job's lowering, plans the batch
+there (`Document::tx_at`, `intake::apply_batch`), and hands it back to
+be committed on the UI thread with `Base::At` and `Relower` in the
+scan's group (`GroupKind::Scan`). An insert at the end reads no order,
+so no edit of the user's meanwhile conflicts with it. A view that's gone
+answers nothing, which stops the intake, and the group ends whatever
+stops it. Until it's saved the view has no `path()`, and what dialogs
+suggest is named after it (`stem`, `folder`: its images' folder); Save
+is Save As there (`DocView::save`), after which its place is the file.
+
+Its crash-recovery sidecar is the untitled kind, the whole document, in
+the state folder's `recovery/` under its name (`dirs::recovery_dir`),
+which the view claims (names skip the ones claimed or with a sidecar
+there), in every sheaf process, a standalone one's too. Each batch that
+lands starts its write at once, or as soon as the write in flight ends
+(`DocView::write_recovery_at_once`), and autosave writes it after other
+edits, as a file's; it's removed when nothing is unsaved, with Don't
+Save, when the view closes with nothing unsaved, and once the document
+is saved to a file, whose own sidecar then follows it. A write still in
+flight then removes what it wrote (the view's `sidecar_unwanted`, shared
+with it), even once the view is gone, holding the name's claim till
+it's done. At launch the process that owns sheaf's state
+(`instance::owns_state`) offers each one no live view holds back in its
+first window (`workspace::offer_untitled_recoveries` over `offered`):
+Recover shows it in an empty window or a new one
+(`DocView::recovered_untitled`: the body read in the background, then
+shown as a file opens, its pages first and `finish_open` after them,
+never saved once it's ready, so dirty, Save As its first save, starting
+in the folder its head says); Discard removes it. The close prompt's
+Save stops a scan running and waits for it to end before saving
+(`DocView::save_to_close`), and closes only when nothing is unsaved
+after the save.
 
 ### `sheaf edit` and `sheaf inspect`
 

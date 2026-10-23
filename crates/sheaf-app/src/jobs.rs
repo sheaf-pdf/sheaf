@@ -245,7 +245,7 @@ impl DocView {
             return;
         };
         let from = doc.model.export_from(sheaf_doc::Actor::User);
-        let stem = sheaf_ops::export::stem_of(&self.path);
+        let stem = self.stem();
         let rx = crate::file_dialog::open(
             cx,
             gpui::PathPromptOptions {

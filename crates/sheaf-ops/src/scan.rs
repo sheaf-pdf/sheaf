@@ -1,10 +1,11 @@
-//! Photos and scans of paper to a clean PDF (`sheaf scan`, File > Create >
-//! From Scans/Photos): the image files' pages through the intake
-//! ([`crate::intake`]) into a document of no pages, then written whole.
-//! Each page is cleaned up (`sheaf_image::clean`), its steps as its
-//! [`Profile`] starts them, and can be OCRed so the text is searchable;
-//! OCR reads the very image that becomes the page, so the text lines up
-//! with it.
+//! Photos and scans of paper to a clean PDF. `sheaf scan` ([`scan`])
+//! takes the image files' pages through the intake ([`crate::intake`])
+//! into a document of no pages, then writes it whole; File > Create > From
+//! Scans/Photos streams them into an untitled document in the app, with
+//! the same options and engine ([`engine`]). Each page is cleaned up
+//! (`sheaf_image::clean`), its steps as its [`Profile`] starts them, and
+//! can be OCRed so the text is searchable; OCR reads the very image that
+//! becomes the page, so the text lines up with it.
 
 use std::path::{Path, PathBuf};
 
@@ -232,6 +233,16 @@ pub const BATCHING: Batching = Batching {
     wait: None,
 };
 
+/// The engine `ocr` sets up, checked and built once, that an intake
+/// recognizes its pages with when `opts.ocr` is on; None when it's off.
+pub fn engine(opts: &ScanOptions, ocr: &OcrConfig) -> Result<Option<Box<dyn OcrEngine>>> {
+    if !opts.ocr {
+        return Ok(None);
+    }
+    sheaf_ocr::check_engine(ocr.engine, ocr)?;
+    Ok(Some(sheaf_ocr::build_engine(ocr.engine, ocr)?))
+}
+
 /// Clean up `inputs` and write them to `out` as a PDF, a page each (a
 /// TIFF's pages each a page). `ocr` is the engine setup to use when
 /// `opts.ocr` is on.
@@ -243,12 +254,7 @@ pub fn scan(
     progress: &dyn Progress,
 ) -> Result<ScanReport> {
     let mut files = Files::new(inputs)?;
-    let mut engine = if opts.ocr {
-        sheaf_ocr::check_engine(ocr.engine, ocr)?;
-        Some(sheaf_ocr::build_engine(ocr.engine, ocr)?)
-    } else {
-        None
-    };
+    let mut engine = engine(opts, ocr)?;
     // The pages made in memory, which a document of no pages takes in, the
     // recognized text its own (M10.5 §3.9).
     let mut session = Session::new_empty();

@@ -432,8 +432,11 @@ pub struct Document {
     root: VersionId,
     cursor: VersionId,
     /// The saved version, or what a save needs of it once it was pruned.
-    /// None when no file holds the document: one made in memory, before
-    /// its first save.
+    /// A document made in memory opens saved, its opened version having
+    /// no record, so it's clean until it's edited. None when no version
+    /// is: one [`never_saved`](Self::never_saved) (a recovered untitled
+    /// document), or one made in memory once pruning took its saved
+    /// version, until a save. Either is dirty.
     saved: Option<SavedVersion>,
     next_version: u64,
     /// Who the user is, as the host fills marks in (the app sets it).
@@ -600,6 +603,14 @@ impl Document {
     /// Whether the file's facts are in: until then edits are refused.
     pub fn is_ready(&self) -> bool {
         self.ready
+    }
+
+    /// No version is saved: the document is dirty until its first save,
+    /// a Rewrite, makes one so. What an untitled document recovered from
+    /// its sidecar is ([`crate::recovery::restore_untitled`]), made in
+    /// memory but holding the reader's unsaved pages.
+    pub fn never_saved(&mut self) {
+        self.saved = None;
     }
 
     /// The opened version's state: its pages, and what `facts` say about

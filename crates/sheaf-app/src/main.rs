@@ -67,6 +67,7 @@ mod recent;
 mod region;
 mod rulers;
 mod scan_dialog;
+mod scan_run;
 mod script;
 mod set_status;
 mod shapes;
@@ -77,6 +78,7 @@ mod state;
 mod text_select;
 mod toolbar;
 mod toolbar_dialog;
+mod untitled;
 mod watermark_dialog;
 mod workspace;
 
@@ -727,7 +729,9 @@ fn main() {
             cx,
         )
         .expect("open window");
-        if let Some(path) = cli.script.take() {
+        let script = cli.script.take();
+        let scripted = script.is_some();
+        if let Some(path) = script {
             script::start(path, first, cx);
         }
         for path in windows {
@@ -736,6 +740,11 @@ fn main() {
             launch.launched = launched;
             launch.password = password.clone();
             open_workspace(launch, None, cx).expect("open window");
+        }
+        // What a crash left of documents no file held yet, but not over a
+        // script's window, whose keys a prompt would take.
+        if !scripted {
+            workspace::offer_untitled_recoveries(first, cx);
         }
         // No windows means nothing to do (macOS keeps apps alive without
         // windows, but sheaf has no dock-menu life yet).

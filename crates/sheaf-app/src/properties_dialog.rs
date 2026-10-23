@@ -19,8 +19,11 @@ pub const KEY_CONTEXT: &str = "PropertiesDialog";
 
 /// What the document view knows that the file doesn't say.
 pub struct PropertiesContext {
-    /// The document's path, as shown.
-    pub path: PathBuf,
+    /// The document's file, as shown; None when it has none yet.
+    pub path: Option<PathBuf>,
+    /// The name the view shows the document by: File's, when it has no
+    /// file yet.
+    pub name: String,
     /// The source to read: the file's (another, when showing recovered
     /// changes).
     pub source: Src,
@@ -94,18 +97,15 @@ impl PropertiesDialog {
     }
 
     fn description(&self, p: &Properties) -> Vec<AnyElement> {
-        let file_name = self
-            .ctx
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        let full = std::path::absolute(&self.ctx.path).unwrap_or_else(|_| self.ctx.path.clone());
-        let folder = full
-            .parent()
-            .map(|d| d.display().to_string())
-            .unwrap_or_default();
+        let (file_name, folder) = match &self.ctx.path {
+            Some(path) => {
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                let full = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+                let folder = full.parent().map(|d| d.display().to_string());
+                (name.to_string(), folder.unwrap_or_default())
+            }
+            None => (self.ctx.name.clone(), "Not saved yet".into()),
+        };
         let size = self
             .ctx
             .page_size

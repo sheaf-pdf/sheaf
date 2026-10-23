@@ -24,7 +24,8 @@ use std::time::Duration;
 use anyhow::Result;
 use image::{GrayImage, Luma, Rgb, RgbImage};
 use lopdf::Document as Pdf;
-use sheaf_doc::materialize::AskAnswers;
+use sheaf_doc::materialize::{AskAnswers, StrategyKind};
+use sheaf_doc::recovery;
 use sheaf_doc::{Actor, EditError, JobKind, TextLayer};
 use sheaf_edit::{Op, PageRef, PageSel, PageSize, PageSource, Rotation, Turn};
 use sheaf_image::clean::Mode;
@@ -329,6 +330,56 @@ fn an_intake_is_one_undo_step() {
     session.doc.undo().unwrap();
     assert_eq!(session.doc.page_count(), 0);
     assert!(!session.doc.can_undo());
+}
+
+/// An intake's document no file holds, written as an untitled sidecar
+/// (M5 proposal 2), is found in its folder once its claim is let go and
+/// comes back as the app opens it, under its name: never saved, so dirty
+/// with nothing to undo, its first save a Rewrite that leaves it clean,
+/// and its pages the intake's, as PDFium reads them, rendered, as text and
+/// as character boxes.
+#[test]
+fn an_intake_s_untitled_sidecar_comes_back() {
+    let dir = scratch("untitled");
+    let mut session = Session::new_empty_named("Untitled scan 1");
+    let gray = opts(Mode::Gray);
+    take(&mut session, &mut made(10), &gray, true, every(3)).unwrap();
+    let folder = dir.join("recovery");
+    let claim = recovery::claim_untitled(&folder, "Untitled scan 1")
+        .unwrap()
+        .unwrap();
+    let input = session.doc.recovery_input();
+    recovery::write_untitled(&input, &claim, &dir, &NoProgress).unwrap();
+    drop(claim);
+    let found = recovery::find_untitled(&folder);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].folder, dir);
+    let store = sheaf_doc::Store::new();
+    let src = recovery::restore_untitled(&store, &found[0].claim).unwrap();
+    let name = found[0].claim.name().into();
+    let policy = sheaf_doc::history::default_policy();
+    let mut doc = sheaf_doc::open::start(store, src.clone(), name, None, policy);
+    doc.ready(sheaf_doc::open::finish(&src, &NoProgress))
+        .unwrap();
+    doc.never_saved();
+    let mut back = Session::from(doc);
+    assert_eq!(**back.doc.name(), *"Untitled scan 1");
+    assert_eq!(back.doc.page_count(), 10);
+    assert!(back.doc.is_dirty() && !back.doc.can_undo());
+    let to = SaveTo::File {
+        path: dir.join("recovered.pdf"),
+        append: false,
+    };
+    let report = (back.save(to, &AskAnswers::default(), &NoProgress)).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    assert!(!back.doc.is_dirty());
+    let recovered = read(&std::fs::read(dir.join("recovered.pdf")).unwrap());
+    let scanned = read(&save(&mut session, &dir.join("scanned.pdf")));
+    assert_eq!(recovered.len(), 10);
+    for (i, (page, scanned)) in recovered.iter().zip(&scanned).enumerate() {
+        assert!(page == scanned, "page {i}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The user's page 1 turned a quarter.

@@ -1337,22 +1337,13 @@ impl DocView {
     /// File > Export Comments, or the panel's Export menu: ask where, then
     /// write what the panel lists.
     pub(crate) fn export_comments_prompt(&mut self, kind: ExportKind, cx: &mut Context<Self>) {
-        let dir = self
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let stem = self
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("document");
+        let stem = self.stem();
         let suggested = match kind {
             ExportKind::Summary(Layout::Pages) => format!("{stem} - comments with pages.pdf"),
             ExportKind::Data(..) => format!("{stem}.{}", kind.extension()),
             _ => format!("{stem} - comments.{}", kind.extension()),
         };
-        let rx = crate::file_dialog::save(cx, &dir, Some(&suggested));
+        let rx = crate::file_dialog::save(cx, &self.folder(), Some(&suggested));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |view, cx| view.export_comments_to(kind, path, cx))
@@ -1375,11 +1366,12 @@ impl DocView {
         }
         let needle = self.comment_needle(cx);
         let columns = csv_columns(cx);
-        let title = self
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let title = match self.path() {
+            Some(path) => (path.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            None => self.file_name(),
+        };
         let State::Ready(doc) = &mut self.state else {
             return;
         };

@@ -1044,6 +1044,14 @@ const RETIRED_M5: &[(&str, u8)] = &[
     // A black and white page is held as its CCITT G4 bytes from the
     // moment it's made, not as 8-bit pixels until it's written.
     ("io::Pixels::Bilevel", 1),
+    // A batch's source is made in any document's store and put into any
+    // transaction with its text (`intake::batch_source`, `apply_batch`),
+    // a Session's or the app's, not into a Session alone.
+    ("intake::made_pages", 2),
+    // Create from Scans streams its pages into an untitled document
+    // (`ScanEvent::Scan`): the dialog no longer writes a file for the
+    // window to open again (backlog B11).
+    ("scan_dialog::ScanEvent::Created", 2),
 ];
 
 /// The ledgers, with the words a hit names its slice by.
@@ -1126,6 +1134,11 @@ const QUALIFIED_ONLY: &[&str] = &[
     "Saved",
     "SaveStop",
     "Ask",
+    // Combine's event (`CombineEvent::Created`): not the scan dialog's.
+    "Created",
+    // An intake's pages ready to land (`intake::Batch`, M5 slice 1): not
+    // a plugin call's edits (`batch::Batch`).
+    "Batch",
     "inherited_attrs",
     "copy_page_dict",
     "is_page_node",

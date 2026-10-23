@@ -13,6 +13,8 @@ use gpui::{
 };
 use sheaf_doc::Snapshot;
 use sheaf_edit::Z;
+use sheaf_ops::intake::Batching;
+use sheaf_ops::scan::ScanOptions;
 use sheaf_ops::session::Session;
 use sheaf_ui::frame;
 use sheaf_ui::menu_bar::MenuBar;
@@ -20,9 +22,10 @@ use sheaf_ui::palette::{Palette, PaletteEvent};
 use sheaf_ui::theme;
 
 use crate::commands::{PanelAction, Run, ShowPluginPanel};
-use crate::docview::{DocEvent, DocView};
+use crate::docview::{DocEvent, DocView, Place};
 use crate::ocr_dialog::{OcrDialog, OcrDialogContext, OcrDialogEvent, OcrSpec};
 use crate::state::{DockLayout, DockState, WindowPlacement};
+use crate::untitled::Untitled;
 use crate::{
     About, ActivateMenuBar, CloseDocument, CloseWindow, CommandPalette, NewWindow, OpenFile, Quit,
     RecognizeText, ShowCalc, ShowComments, ShowOutline, ShowPatterns, ShowThumbnails,
@@ -751,9 +754,58 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let (timing, launched) = (self.timing, self.launched);
-        let doc = cx.new(|cx| DocView::adopt(path, session, notice, timing, launched, cx));
+        let place = Place::File(path);
+        let doc = cx.new(|cx| DocView::adopt(place, session, notice, timing, launched, cx));
         self.watch(&doc, window, cx);
         doc.update(cx, |d, cx| d.adopted(cx));
+        self.doc = Some(doc);
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Show `untitled`, a new document no file holds, in this window,
+    /// which is empty, and scan `files` into it as `opts` says: its pages
+    /// stream in as they're cleaned up (Create from Scans, M5 proposal 2),
+    /// recognized as the OCR settings say when `opts` asks.
+    fn scan_untitled(
+        &mut self,
+        untitled: Untitled,
+        files: Vec<PathBuf>,
+        opts: ScanOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (timing, launched) = (self.timing, self.launched);
+        let who = crate::prefs::get(cx).doc_identity();
+        let scale = (crate::state::get(cx).measure_scale.clone()).unwrap_or_default();
+        let ocr = crate::prefs::ocr_config(cx);
+        let doc = cx.new(|cx| {
+            let batching = Batching::DEFAULT;
+            DocView::scan_untitled(
+                untitled, files, opts, ocr, batching, who, scale, timing, launched, cx,
+            )
+        });
+        self.watch(&doc, window, cx);
+        doc.update(cx, |d, cx| d.adopted(cx));
+        self.doc = Some(doc);
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Show the untitled document `rec` recovers, what a crash left of one,
+    /// in this window, which is empty: read from its sidecar, then shown
+    /// as it was, unsaved (M5 proposal 2).
+    fn recovered_untitled(
+        &mut self,
+        rec: sheaf_doc::recovery::Untitled,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (timing, launched) = (self.timing, self.launched);
+        let who = crate::prefs::get(cx).doc_identity();
+        let scale = (crate::state::get(cx).measure_scale.clone()).unwrap_or_default();
+        let doc = cx.new(|cx| DocView::recovered_untitled(rec, who, scale, timing, launched, cx));
+        self.watch(&doc, window, cx);
         self.doc = Some(doc);
         self.focus_active(window, cx);
         cx.notify();
@@ -763,7 +815,7 @@ impl Workspace {
     fn shows(&self, path: &Path, cx: &App) -> bool {
         self.doc
             .as_ref()
-            .is_some_and(|d| same_file(&d.read(cx).path, path))
+            .is_some_and(|d| d.read(cx).path().is_some_and(|p| same_file(p, path)))
     }
 
     pub fn focus_active(&self, window: &mut Window, cx: &mut App) {
@@ -896,8 +948,10 @@ impl Workspace {
     }
 
     /// Acrobat's "Save changes?" prompt for one document. Resolves to true
-    /// once the document may be closed: either it was saved, or the user
-    /// chose to discard the changes.
+    /// once the document may be closed: either it was saved, a scan into
+    /// it stopped first, with nothing unsaved after the save
+    /// ([`DocView::save_to_close`]), or the user chose to discard the
+    /// changes.
     fn confirm_close(
         &mut self,
         doc: Entity<DocView>,
@@ -918,7 +972,10 @@ impl Workspace {
             ],
         );
         cx.spawn(async move |_, cx| match rx.await {
-            Ok(0) => cx.update(|cx| doc.update(cx, |d, cx| d.save(cx))).await,
+            Ok(0) => {
+                cx.update(|cx| doc.update(cx, |d, cx| d.save_to_close(cx)))
+                    .await
+            }
             Ok(1) => {
                 cx.update(|cx| doc.read(cx).discard_recovery());
                 true
@@ -1253,21 +1310,20 @@ impl Workspace {
             |ws, _, ev: &crate::scan_dialog::ScanEvent, window, cx| {
                 ws.scan = None;
                 ws.focus_active(window, cx);
-                if let crate::scan_dialog::ScanEvent::Created {
-                    path,
+                if let crate::scan_dialog::ScanEvent::Scan {
+                    files,
                     profile,
                     opts,
                 } = ev
                 {
-                    let (profile, opts) = (*profile, opts.clone());
+                    let (files, profile, opts) = (files.clone(), *profile, opts.clone());
                     crate::state::update(cx, |s| {
                         s.scan.profile = profile;
-                        s.scan.set(profile, opts);
+                        s.scan.set(profile, opts.clone());
                     });
                     let origin = window.window_handle().downcast::<Workspace>();
-                    let path = path.clone();
                     if let Some(origin) = origin {
-                        cx.defer(move |cx| open_paths(origin, vec![path], cx));
+                        cx.defer(move |cx| show_untitled_scan(origin, files, opts, cx));
                     }
                 }
                 cx.notify();
@@ -3208,6 +3264,101 @@ fn show_made(
     });
     if let Err(e) = shown {
         log::error!("showing the combined file: {e:#}");
+    }
+}
+
+/// Create from Scans' new untitled document, `files`' pages streaming in
+/// as `opts` cleans them up (M5 proposal 2): in `origin` if it's empty,
+/// else in a window of its own.
+fn show_untitled_scan(
+    origin: WindowHandle<Workspace>,
+    files: Vec<PathBuf>,
+    opts: ScanOptions,
+    cx: &mut App,
+) {
+    let untitled = crate::untitled::for_scan(&files);
+    let empty = origin.read(cx).is_ok_and(|ws| ws.doc.is_none());
+    let window = match empty {
+        true => Ok(origin),
+        false => crate::open_workspace(Launch::file(None), None, cx),
+    };
+    let shown = window.and_then(|handle| {
+        handle.update(cx, |ws, window, cx| {
+            ws.scan_untitled(untitled, files, opts, window, cx);
+            window.activate_window();
+        })
+    });
+    if let Err(e) = shown {
+        log::error!("showing the scan: {e:#}");
+    }
+}
+
+/// What a crash left of documents no file held yet (M5 proposal 2),
+/// their sidecars in the state folder, offered back one at a time in
+/// `first`, a window of the launch's ([`offered`]): each recovered in an
+/// empty window or a new one, or discarded. One left unanswered (its
+/// window closed) is offered again at the next launch.
+pub fn offer_untitled_recoveries(first: WindowHandle<Workspace>, cx: &mut App) {
+    let owns = crate::instance::owns_state();
+    cx.spawn(async move |cx| {
+        let found = cx
+            .background_executor()
+            .spawn(async move { offered(&sheaf_ops::dirs::recovery_dir(), owns) })
+            .await;
+        for rec in found {
+            let asked = first.update(cx, |_, window, cx| {
+                sheaf_ui::prompts::ask(
+                    window,
+                    cx,
+                    PromptLevel::Warning,
+                    &format!("Recover the unsaved scan \"{}\"?", rec.claim.name()),
+                    Some(
+                        "sheaf closed before these pages were saved. Recovered pages stay unsaved \
+                         until you save them.",
+                    ),
+                    &[PromptButton::ok("Recover"), PromptButton::new("Discard")],
+                )
+            });
+            let Ok(answer) = asked else {
+                return;
+            };
+            match answer.await {
+                Ok(0) => cx.update(|cx| show_recovered(rec, cx)),
+                Ok(_) => sheaf_doc::recovery::discard_untitled(&rec.claim),
+                Err(_) => return,
+            }
+        }
+    })
+    .detach();
+}
+
+/// The untitled documents a launch offers back from `dir`: the sidecars
+/// no live view holds, a crash's, claimed until they're answered
+/// ([`sheaf_doc::recovery::find_untitled`]). None unless this process
+/// `owns` sheaf's state: one running beside the owner leaves the state
+/// folder to it, discards included.
+pub(crate) fn offered(dir: &Path, owns: bool) -> Vec<sheaf_doc::recovery::Untitled> {
+    match owns {
+        true => sheaf_doc::recovery::find_untitled(dir),
+        false => Vec::new(),
+    }
+}
+
+/// The untitled document `rec` recovers, shown in an empty window, or else
+/// in a window of its own.
+fn show_recovered(rec: sheaf_doc::recovery::Untitled, cx: &mut App) {
+    let window = match find_empty(cx) {
+        Some(handle) => Ok(handle),
+        None => crate::open_workspace(Launch::file(None), None, cx),
+    };
+    let shown = window.and_then(|handle| {
+        handle.update(cx, |ws, window, cx| {
+            ws.recovered_untitled(rec, window, cx);
+            window.activate_window();
+        })
+    });
+    if let Err(e) = shown {
+        log::error!("showing the recovered scan: {e:#}");
     }
 }
 

@@ -1,11 +1,12 @@
 //! File > Create > From Scans/Photos…: photos or scans of paper to a
-//! clean PDF (`sheaf_ops::scan`, as `sheaf scan` does). The images are
+//! clean PDF, cleaned up as `sheaf scan` cleans them. The images are
 //! picked first; the dialog sets the options and previews each cleanup
 //! step on one image at a time. Its first row says where the pages come
 //! from, photos or a scanner or copier, which starts the cleanup steps as
 //! that profile does (`sheaf_ops::scan::Profile`); each profile's choices
-//! are kept apart. Create asks where to save, runs with progress (Escape
-//! stops it), and opens the result.
+//! are kept apart. Create hands the images and the options to the window,
+//! which scans them into a new untitled document, its pages coming in as
+//! they're cleaned up (scan_run.rs); nothing is written until it's saved.
 //!
 //! Tab moves between rows, Left/Right change, Enter creates, Escape
 //! cancels.
@@ -16,14 +17,14 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, MouseButton, ObjectFit,
-    RenderImage, Task, Window, div, img, prelude::*, px, relative,
+    RenderImage, Task, Window, div, img, prelude::*, px,
 };
 use image::RgbImage;
 use sheaf_image::clean::{Mode, Stage};
 use sheaf_ocr::OcrConfig;
+use sheaf_ops::NoProgress;
 use sheaf_ops::images::Paper;
 use sheaf_ops::scan::{Profile, ScanChoices, ScanOptions};
-use sheaf_ops::{NoProgress, Tracker, was_cancelled};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::{dialog, theme};
 
@@ -50,10 +51,10 @@ const PAPERS: [(Paper, &str); 3] = [
 ];
 
 pub enum ScanEvent {
-    /// The PDF is written; `profile` and its `opts` are worth
-    /// remembering.
-    Created {
-        path: PathBuf,
+    /// Scan `files` into a new document as `opts`, `profile`'s, say: both
+    /// are worth remembering.
+    Scan {
+        files: Vec<PathBuf>,
         profile: Profile,
         opts: ScanOptions,
     },
@@ -121,9 +122,6 @@ pub struct ScanDialog {
     preview_error: Option<String>,
     generation: u64,
     _preview_task: Option<Task<()>>,
-    running: Option<Tracker>,
-    status: Option<String>,
-    error: Option<String>,
 }
 
 impl EventEmitter<ScanEvent> for ScanDialog {}
@@ -165,9 +163,6 @@ impl ScanDialog {
             preview_error: None,
             generation: 0,
             _preview_task: None,
-            running: None,
-            status: None,
-            error: None,
         };
         d.opts = d.usable(d.opts.clone());
         d.refresh_preview(cx);
@@ -236,9 +231,6 @@ impl ScanDialog {
     }
 
     fn adjust(&mut self, by: i64, cx: &mut Context<Self>) {
-        if self.running.is_some() {
-            return;
-        }
         fn cycle<T: Copy + PartialEq>(items: &[T], current: T, by: i64) -> T {
             let i = items.iter().position(|x| *x == current).unwrap_or(0) as i64;
             items[(i + by).rem_euclid(items.len() as i64) as usize]
@@ -294,7 +286,6 @@ impl ScanDialog {
             }
             _ => return,
         }
-        self.error = None;
         self.refresh_preview(cx);
         cx.notify();
     }
@@ -360,98 +351,13 @@ impl ScanDialog {
         }));
     }
 
-    /// Ask where to save, then run.
-    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.running.is_some() {
-            return;
-        }
-        let first = &self.files[0];
-        let dir = first.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        let suggested = if self.files.len() == 1 {
-            format!("{}.pdf", sheaf_ops::export::stem_of(first))
-        } else {
-            "Scans.pdf".to_string()
-        };
-        let rx = crate::file_dialog::save(cx, &dir, Some(&suggested));
-        let handle = window.window_handle();
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(path))) = rx.await else {
-                return;
-            };
-            handle
-                .update(cx, |_, _, cx| {
-                    this.update(cx, |d, cx| d.run(path, cx)).ok();
-                })
-                .ok();
-        })
-        .detach();
-    }
-
-    fn run(&mut self, out: PathBuf, cx: &mut Context<Self>) {
-        use futures::FutureExt;
-        let tracker = Tracker::new();
-        self.running = Some(tracker.clone());
-        self.error = None;
-        self.status = Some("Starting…".into());
-        cx.notify();
-        let (files, opts, ocr) = (self.files.clone(), self.opts.clone(), self.ocr.clone());
-        let progress = tracker.clone();
-        let target = out.clone();
-        let work = cx
-            .background_executor()
-            .spawn(async move { sheaf_ops::scan::scan(&files, &opts, &ocr, &target, &progress) });
-        cx.spawn(async move |this, cx| {
-            let mut work = work.fuse();
-            let result = loop {
-                let mut tick = cx
-                    .background_executor()
-                    .timer(Duration::from_millis(100))
-                    .fuse();
-                futures::select_biased! {
-                    r = work => break r,
-                    _ = tick => {}
-                }
-                let snap = tracker.snapshot();
-                let alive = this.update(cx, |d, cx| {
-                    if !snap.cancelled {
-                        let n = d.files.len();
-                        let page = ((snap.fraction.unwrap_or(0.0) * n as f32) as usize + 1).min(n);
-                        d.status = Some(format!("Page {page} of {n}…"));
-                    }
-                    cx.notify();
-                });
-                if alive.is_err() {
-                    tracker.cancel();
-                }
-            };
-            this.update(cx, |d, cx| {
-                d.running = None;
-                d.status = None;
-                match result {
-                    Ok(_) => cx.emit(ScanEvent::Created {
-                        path: out,
-                        profile: d.choices.profile,
-                        opts: d.opts.clone(),
-                    }),
-                    Err(e) if was_cancelled(&e) => d.error = Some("Stopped".into()),
-                    Err(e) => d.error = Some(format!("{e:#}")),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn cancel(&mut self, cx: &mut Context<Self>) {
-        match &self.running {
-            Some(t) => {
-                t.cancel();
-                self.status = Some("Stopping after this page…".into());
-                cx.notify();
-            }
-            None => cx.emit(ScanEvent::Dismiss),
-        }
+    /// Scan the images as the options stand.
+    fn create(&mut self, cx: &mut Context<Self>) {
+        cx.emit(ScanEvent::Scan {
+            files: self.files.clone(),
+            profile: self.choices.profile,
+            opts: self.opts.clone(),
+        });
     }
 
     fn row_el(&self, index: usize, label: &str, content: AnyElement) -> AnyElement {
@@ -476,12 +382,9 @@ impl ScanDialog {
                 Chip::new((name, i), label)
                     .selected(v == current)
                     .on_click(cx.listener(move |d, _, _, cx| {
-                        if d.running.is_none() {
-                            set(d, v);
-                            d.error = None;
-                            d.set_row(row, cx);
-                            d.refresh_preview(cx);
-                        }
+                        set(d, v);
+                        d.set_row(row, cx);
+                        d.refresh_preview(cx);
                     }))
             }))
             .into_any_element()
@@ -586,7 +489,6 @@ fn to_render(im: &RgbImage) -> Arc<RenderImage> {
 impl Render for ScanDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let o = self.opts.clone();
-        let running = self.running.is_some();
         let profile = self.chips(
             "profile",
             ROW_PROFILE,
@@ -771,14 +673,6 @@ impl Render for ScanDialog {
                 d.child(self.row_el(ROW_IMAGE, "Preview", image_row))
             })
             .child(self.row_el(ROW_VIEW, if n > 1 { "" } else { "Preview" }, view_chips));
-        let bar = self.running.as_ref().map(|t| {
-            let frac = t.snapshot().fraction.unwrap_or(0.0);
-            div()
-                .h(px(4.0))
-                .w_full()
-                .bg(theme::BACKGROUND)
-                .child(div().h_full().w(relative(frac)).bg(theme::ACCENT))
-        });
         dialog::backdrop("scan-backdrop")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
@@ -786,15 +680,11 @@ impl Render for ScanDialog {
             .on_action(cx.listener(|d, _: &DialogPrev, _, cx| d.step_row(-1, cx)))
             .on_action(cx.listener(|d, _: &DialogLeft, _, cx| d.adjust(-1, cx)))
             .on_action(cx.listener(|d, _: &DialogRight, _, cx| d.adjust(1, cx)))
-            .on_action(cx.listener(|d, _: &DialogRun, window, cx| d.create(window, cx)))
-            .on_action(cx.listener(|d, _: &DialogCancel, _, cx| d.cancel(cx)))
+            .on_action(cx.listener(|d, _: &DialogRun, _, cx| d.create(cx)))
+            .on_action(cx.listener(|_, _: &DialogCancel, _, cx| cx.emit(ScanEvent::Dismiss)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|d, _, _, cx| {
-                    if d.running.is_none() {
-                        cx.emit(ScanEvent::Dismiss)
-                    }
-                }),
+                cx.listener(|_, _, _, cx| cx.emit(ScanEvent::Dismiss)),
             )
             .child(
                 dialog::card("scan-dialog", px(900.0))
@@ -807,29 +697,19 @@ impl Render for ScanDialog {
                         )),
                     )
                     .child(div().flex().gap_4().child(options).child(picture))
-                    .children(bar)
-                    .when_some(self.status.clone(), |d, s| {
-                        d.child(dialog::message(s, false))
-                    })
-                    .when_some(self.error.clone(), |d, e| d.child(dialog::message(e, true)))
                     .child(
                         dialog::footer()
-                            .child(dialog::hint(if running {
-                                "Esc stops"
-                            } else {
-                                "Tab moves, ←/→ change, Enter creates"
-                            }))
+                            .child(dialog::hint("Tab moves, ←/→ change, Enter creates"))
                             .child(
-                                Button::new("scan-cancel", if running { "Stop" } else { "Cancel" })
-                                    .on_click(cx.listener(|d, _, _, cx| d.cancel(cx))),
+                                Button::new("scan-cancel", "Cancel").on_click(
+                                    cx.listener(|_, _, _, cx| cx.emit(ScanEvent::Dismiss)),
+                                ),
                             )
-                            .when(!running, |d| {
-                                d.child(
-                                    Button::new("scan-go", "Create…").primary().on_click(
-                                        cx.listener(|d, _, window, cx| d.create(window, cx)),
-                                    ),
-                                )
-                            }),
+                            .child(
+                                Button::new("scan-go", "Create")
+                                    .primary()
+                                    .on_click(cx.listener(|d, _, _, cx| d.create(cx))),
+                            ),
                     ),
             )
             .text_color(theme::TEXT_SOFT)

@@ -171,12 +171,7 @@ impl DocView {
         let Some(a) = self.attachments().get(i).cloned() else {
             return;
         };
-        let dir = self
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let rx = crate::file_dialog::save(cx, &dir, Some(&a.name));
+        let rx = crate::file_dialog::save(cx, &self.folder(), Some(&a.name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |v, cx| v.with_attachment(a, Then::SaveTo(path), cx))

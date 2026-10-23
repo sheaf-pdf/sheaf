@@ -282,7 +282,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 |---|---|
 | Export pages to PNG / JPEG | ✅ File > Export Pages (Ctrl+Shift+E): resolution, JPEG quality, page range, marks included or not; Esc stops a running export. Also `sheaf export` on the command line |
 | Export to multi-page TIFF (PDFlyer) | ✅ File > Export Pages > TIFF: one file, black-and-white (CCITT G4), grayscale or color |
-| Create PDF from images | ✅ File > Create > From Scans/Photos…: phone photos cleaned up (page found and straightened, upright, deskewed, shadows and color casts evened out) or a scanner's or copier's pages (upright and deskewed), each kind's choices remembered apart, color/gray/black-and-white, Letter/A4/as photographed, optional OCR, blank pages left out if asked (the preview dims them), with a preview of each step. `sheaf scan` and `sheaf images-to-pdf` on the command line |
+| Create PDF from images | ✅ File > Create > From Scans/Photos…: phone photos cleaned up (page found and straightened, upright, deskewed, shadows and color casts evened out) or a scanner's or copier's pages (upright and deskewed), each kind's choices remembered apart, color/gray/black-and-white, Letter/A4/as photographed, optional OCR, blank pages left out if asked (the preview dims them), with a preview of each step; the pages stream into a new untitled document as they're cleaned up, and nothing is written until it's saved. `sheaf scan` and `sheaf images-to-pdf` on the command line |
 | OCR (searchable text layer) | ✅ Document > Recognize Text (OCR)… (Ctrl+Shift+T): Tesseract or PaddleOCR, whole binder / current / selected / range, skips pages that already have text, progress + Esc to stop, one undo step; Find and Patterns see the text before the first save. Document > Remove Recognized Text… takes it off the selected pages or every page, saved or not (one undo step); `clear-ocr-text` in `sheaf edit` |
 | Export text | ✅ File > Export Pages > Text: one UTF-8 file, a form feed between pages (unsaved OCR text included) |
 | Print | ✅ File > Print (Ctrl+P): own dialog with sheet preview; printer, copies, pages (all/current/selected/bookmark/range), Fit/Actual/Shrink, orientation, paper, two-sided, comments on/off; CUPS on Linux/macOS, GDI on Windows; Save as PDF |
@@ -605,6 +605,9 @@ remembers for itself goes in a local state directory: `~/.local/state/sheaf`,
   Safe to delete; a copy that doesn't parse is set aside as
   `state.json.bad`. Only the sheaf that owns the instance writes it.
 - `recent.json` (state directory) — File > Open Recent.
+- `recovery/` (state directory) — the crash-recovery sidecars of documents
+  no file holds yet (see Crash recovery, below), with an empty lock file
+  for each one open and `.lock`. Deleting one loses its unsaved pages.
 - `patterns.json` — the Patterns panel's presets, seeded from the built-ins on
   first run. Edit, delete, or add them from the panel (right-click a chip;
   "+ Save…" stores the current pattern) or by hand.
@@ -658,7 +661,15 @@ rewrites the file when they removed or replaced text it holds. When no
 update can follow the file (it can't take one, or the edits need what a
 save pruned from it), the sidecar holds the whole document instead, and
 its first save is a rewrite. Saving, or choosing Don't Save, removes the
-sidecar.
+sidecar. A document no file holds yet (Create from Scans makes one)
+keeps its sidecar, the whole document, in the state directory's
+`recovery/` (see Configuration), its write started as each batch of
+pages comes in (or as soon as the write before it ends), so a crash
+mid-scan loses at most the pages that came in since the last write
+finished; the next launch offers each one back. Every sheaf keeps its
+own untitled documents' sidecars there, a second one started beside a
+running sheaf too, each claimed by its name while the document is open,
+so none is offered back while its sheaf still runs.
 
 ## Name
 

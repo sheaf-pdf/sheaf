@@ -38,9 +38,12 @@ geometry walk (a source's open: its cross-reference sections and page
 table), open, render, saves, crop, Bates and flatten on the three
 fixtures, and history at scale, and prints each beside slice 2's
 baseline; from M5 slice 1, a scan of 500 black and white Letter pages
-too, with no baseline. The walk (from slice 3), history and the scan's
-memory assert their gates. It makes a fixture that's missing or older
-than `gen.py` (in `$SHEAF_GATE_DIR`, else `target/gate-7k/`):
+too, with no baseline, and from M5 slice 2 the untitled recovery sidecar
+of the document it scans (written once, and what one a batch would write
+in all, in black and white and from a sample in color), with no gate.
+The walk (from slice 3), history and the scan's memory assert their
+gates. It makes a fixture that's missing or older than `gen.py` (in
+`$SHEAF_GATE_DIR`, else `target/gate-7k/`):
 
 ```sh
 cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1
