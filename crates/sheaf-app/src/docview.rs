@@ -2158,7 +2158,9 @@ impl DocView {
                 append_anyway,
                 reason,
             } => {
-                let n = impact.len();
+                // Those it breaks or flags: one broken already isn't asked
+                // about.
+                let n = impact.iter().filter(|i| i.verdict.asks()).count();
                 let s = if n == 1 { "" } else { "s" };
                 let mut detail = match reason {
                     _ if exports => {

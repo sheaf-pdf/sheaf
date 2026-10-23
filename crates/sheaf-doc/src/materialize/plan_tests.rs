@@ -806,6 +806,41 @@ fn a_section_writing_the_catalog_unplanned_asks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The same section over a certification whose bytes changed after it was
+/// signed (B5): nothing's left for the catalog's write to break, so the
+/// Append it was planned as is written, asking nothing, rather than
+/// refused again by a guard with nothing to guard.
+#[test]
+fn a_section_writing_the_catalog_over_a_broken_signature_appends() {
+    let dir = scratch();
+    let mut f = Form::new(1);
+    f.text("t", 0, row(0));
+    let sig = f.signature("sig", 0, row(1));
+    f.certify(sig, 3);
+    let mut bytes = f.signed_bytes(crate::forms::fixture::detached);
+    let at = (bytes.windows(8)).position(|w| w == b"(Page 1)").unwrap();
+    bytes[at + 6] = b'7';
+    let (path, mut doc) = opened(&dir, "p3-broken.pdf", &bytes);
+    let signed = &doc.primary().signatures().signed[0];
+    assert!(signed.integrity().is_broken());
+    let labels = fx::labels(&[crate::labels::LabelSpec {
+        start: doc.page(0).unwrap(),
+        style: crate::labels::Style::LowerRoman,
+        prefix: String::new(),
+        first: 1,
+    }]);
+    doc.commit_ops(vec![labels], "labels").unwrap();
+    misjudged(comments_alone, || {
+        let planned = planned(&doc, &path);
+        assert_eq!(planned.strategy, Strategy::Append { onto: Onto::Saved });
+        assert_eq!(planned.asks, []);
+        let report = saved(&mut doc, &path, AskAnswers::default()).unwrap();
+        assert_eq!(report.strategy, Some(StrategyKind::Append));
+        assert!(std::fs::read(&path).unwrap().starts_with(&bytes));
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// What the reader is told a Rewrite is for (§7.3): what it removes or
 /// replaces, counted, why an Append couldn't be written, or that a
 /// recovered document's sections removed text.

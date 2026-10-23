@@ -129,10 +129,12 @@ fn scope(names: &Names, scope: &Scope) -> Value {
 
 /// The form: its fields (those holding a value) and their widgets on
 /// pages, its XFA part (none, static, or dynamic: the XFA is the form),
-/// and the file's signatures.
+/// and the file's signatures, and of them those whose signed bytes
+/// changed (their digests checked, `Signature::integrity`).
 fn form(session: &Session, st: &DocState) -> Value {
     let form = st.form();
     let widgets: usize = st.terminals().map(|(_, _, t)| t.widgets.len()).sum();
+    let signatures = session.doc.primary().signatures();
     let xfa = match (form.xfa.present, form.xfa.dynamic) {
         (false, _) => "none",
         (true, false) => "static",
@@ -142,6 +144,7 @@ fn form(session: &Session, st: &DocState) -> Value {
         "fields": st.terminals().count(),
         "widgets": widgets,
         "xfa": xfa,
-        "signatures": session.doc.primary().signatures().signed.len(),
+        "signatures": signatures.signed.len(),
+        "signatures_broken": signatures.signed.iter().filter(|s| s.integrity().is_broken()).count(),
     })
 }

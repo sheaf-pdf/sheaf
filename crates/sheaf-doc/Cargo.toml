@@ -41,6 +41,18 @@ zeroize = "1.9"
 # AES IVs a save writes are keyed hashes of what they encrypt (M10.5 §11.7).
 hmac = "0.13"
 sha2 = "0.11"
+# Whether a signature still signs the file's bytes (B5): its CMS read as
+# BER, which real files need (cms 0.2's DER rules refuse a quarter of the
+# corpus's), and its /ByteRange hashed by the algorithm it names. cms 0.3
+# is a pre-release, so pinned exactly: revisit at M12's kickoff, which
+# builds signing and verifying on the same line.
+cms = { version = "=0.3.0-rc.0", default-features = false }
+der = { version = "0.8", features = ["ber", "alloc", "oid", "derive"] }
+sha1 = "0.11"
+md-5 = "0.11"
+# RSA's public operation, which opens a signature value with no signed
+# attributes to the digest it holds (B5); in the tree already, imageproc's.
+num-bigint = { version = "0.4", default-features = false }
 # Text in a mark's staleness digest is NFC, whatever another tool wrote
 # (M10.5 §3.6).
 unicode-normalization = "0.1"

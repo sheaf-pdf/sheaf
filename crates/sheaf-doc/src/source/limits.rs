@@ -26,7 +26,9 @@ pub struct PageTreeLimits {
 }
 
 /// The caps on reading a form (`forms::read`): past one, the form is
-/// damaged. The form check and the XFA reader read within the same ones.
+/// damaged. The form check and the XFA reader read within the same ones,
+/// and so do the checks of signatures' digests, past whose caps a
+/// signature is one that can't be checked (`forms::sigs::Integrity`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FormLimits {
     /// How deep the field tree may go.
@@ -55,6 +57,12 @@ pub struct FormLimits {
     pub scripts: usize,
     /// The most of an XFA copy read, decompressed.
     pub xfa: usize,
+    /// Signatures whose digests a source checks, each a hash of nearly
+    /// the whole file: a real file has a few.
+    pub signatures: usize,
+    /// The longest `/Contents` read as a signature's CMS. Real ones are
+    /// tens of KiB, more with revocation data in them.
+    pub cms: usize,
 }
 
 /// The caps on reading a page's content (`content`): past one, the content
@@ -94,6 +102,8 @@ impl Limits {
             da: 1024,
             scripts: 100_000,
             xfa: 64 << 20,
+            signatures: 256,
+            cms: 4 << 20,
         },
         content: ContentLimits {
             decompressed: 256 << 20,

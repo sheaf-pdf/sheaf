@@ -249,7 +249,8 @@ fn dry_run(session: &Session, edits: &Envelope, previewed: &Previewed) -> Value 
 
 /// What the edits do to the file, in words: what a save of them removes
 /// or replaces, and what they'd do to its signatures appended (written
-/// whole, a file loses every one).
+/// whole, a file loses every one), and those whose signed bytes changed
+/// already, which it doesn't ask about.
 fn consequences(previewed: &Previewed) -> Vec<String> {
     let mut out: Vec<String> = (previewed.removed.iter())
         .map(|r| match r.kind.is_text() {
@@ -267,14 +268,21 @@ fn consequences(previewed: &Previewed) -> Vec<String> {
         all => format!("{n} of the file's {all} signatures"),
     };
     let (breaks, flags) = (count(Verdict::Invalid), count(Verdict::Flagged));
+    let broken = count(Verdict::AlreadyBroken);
     if breaks > 0 {
         out.push(format!("breaks {}, even appended", of(breaks)));
     }
     if flags > 0 {
         out.push(format!("appended, {} would flag the change", of(flags)));
     }
-    if breaks + flags < sigs.len() {
-        let kept = sigs.len() - breaks - flags;
+    if broken > 0 {
+        out.push(format!(
+            "finds {} broken already: the signed bytes changed",
+            of(broken)
+        ));
+    }
+    if breaks + flags + broken < sigs.len() {
+        let kept = sigs.len() - breaks - flags - broken;
         out.push(format!(
             "keeps {} only appended (--append or --in-place)",
             of(kept)

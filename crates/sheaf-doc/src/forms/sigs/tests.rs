@@ -31,6 +31,7 @@ fn approval(field: &str) -> Signature {
         certifies: false,
         locks: Vec::new(),
         unreadable: false,
+        check: Arc::new(Check::unknown(Unchecked::Cms)),
     }
 }
 

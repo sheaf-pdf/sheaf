@@ -181,43 +181,6 @@ phase; they're triaged between phases.
   - Render keys still include the generators for such a page: extra
     re-renders, never wrong pixels.
 
-### B5: A file whose signatures were broken still asks about them on a reorder
-
-- **Found:** 2026-10-22, M10.5 slice 17's corpus tier (pre-existing)
-- **Where:** `forms::sigs::sig_impact` (`crates/sheaf-doc/src/forms/sigs.rs:187`)
-- **Severity:** annoyance
-- **What happens:** a file rewritten with `break_signatures` (the user
-  already agreed to break them) still gets the signature ask when its
-  pages are reordered. `sig_impact` judges by `/V` and the permissions,
-  not by whether the signed bytes still verify. This is 25 of the
-  62-file sample's 100 reorder Appends.
-- **Expected:** a signature whose digest no longer matches its bytes
-  doesn't ask again.
-- **Repro:** append_corpus's header tier (slice 17) on a signed form
-  after a forced Rewrite, then reorder.
-- **Notes:** probably needs the digest check pyHanko does
-  (`../pdf-corpus/signatures/` has files changed after signing and
-  digest mismatches to test against; see F9).
-- **Also (M10.5 slice 19):** the exports' and the command line's
-  signature ask reuse `sig_impact`, so:
-  - a signature already invalid when the file was opened still asks:
-    `signatures/safedocs/0008830.pdf` and `0010094.pdf`, which pyHanko
-    finds neither intact nor valid, exit 3 on a mark add (37
-    unencrypted files in `signatures/` have such a signature);
-  - a file written with `sheaf … --signatures break` asks again on its
-    next edit (`append_anyway: true`, "… removed since the last save").
-- **The digest check, spiked** (2026-10-23, the build-or-adopt audit;
-  [build-or-adopt.md](build-or-adopt.md), entry 93):
-  - cms 0.3.0-rc.0, der 0.8 (`ber`), sha1 and sha2, pinned exactly:
-    about 40 lines at the core. The stable cms 0.2.3 can't read the 138
-    of the corpus's 593 signatures that are BER.
-  - 546 of the 593 are checkable. It agrees with pyHanko on
-    `0008830.pdf` and `0010094.pdf`: neither is intact.
-  - Unknown algorithms, no signed attributes (28) and parse failures
-    keep asking; only a clear mismatch counts as broken.
-  - Hash lazily, once per source, cancellable: N signatures cost N
-    hashes of nearly the whole file.
-
 ### B9: A radio group keeps its value when its chosen button's page is removed
 
 - **Found:** 2026-10-22, M10.5 slice 19's export corpus tier
@@ -325,7 +288,7 @@ phase; they're triaged between phases.
   `qpdf --show-object=trailer out.pdf`: `<< /Root 3 0 R /Size 7 >>`.
 - **Notes:** M5's intake rework (`m5-intake`) owns scan; leave scan.rs to
   it. B8's `Session::new_titled`, an empty primary with an `/Info`, is
-  the likely fix. (B24–B29 are on another branch.)
+  the likely fix.
 
 ### B23: A fuzz test's wall-clock budget fails when the machine is busy
 
@@ -341,8 +304,6 @@ phase; they're triaged between phases.
   unbounded work), or CPU time rather than elapsed time.
 - **Notes:** the 7k gates measure time on a quiet machine on purpose;
   a unit test in the default suite shouldn't depend on load.
-
-(B23 is on PR #32, the move to instance-handoff.)
 
 ### B24: G4 encoding truncates images wider than 65,535 pixels
 
@@ -471,6 +432,29 @@ phase; they're triaged between phases.
   `icu_casemap`. Overlap: M10.5 slice 19's `Query::literal`; Pending
   "Search across files"; M11 search and redact, whose marks must still
   land on the right glyphs. [build-or-adopt.md](build-or-adopt.md), entry 85.
+
+### B31: sheaf and pyHanko count a file's signatures differently
+
+- **Found:** 2026-10-23, the B5 PR's tier over `signatures/`
+  (`the_corpus_s_signatures_agree_with_pyhanko`, which tolerates it as
+  "counted otherwise")
+- **Where:** `forms::sigs::read` (which signature fields sheaf
+  enumerates), against `signatures/manifest.tsv`'s count
+- **Severity:** unknown until it's understood
+- **What happens:** in 5 files the counts differ: 0055607 (sheaf 2,
+  pyHanko 22), 0064423 (2 vs 6), 0053329 and 0055217 (1 vs 2), 0014092
+  (2 vs 1). Each file's latest revision holds sheaf's number of
+  signature fields, so the difference is in which fields are
+  enumerated (earlier revisions, or kids sharing one `/V`), not in the
+  digests.
+- **Expected:** sheaf's count is the one a save's ask should give. If
+  pyHanko is counting signatures from earlier revisions that a later
+  one dropped from the form, a Rewrite breaks those too, and the ask
+  should say so.
+- **Repro:** `SHEAF_SIGS_ONLY=signatures/safedocs/0055607.pdf cargo
+  test -p sheaf-doc --lib the_corpus_s_signatures_agree_with_pyhanko --
+  --nocapture` (all 5 under `signatures/safedocs/`).
+- **Notes:** `qpdf --json` on each shows its fields by revision.
 
 ## Features
 
@@ -728,8 +712,12 @@ phase; they're triaged between phases.
   `scans()`, and a tier with its own `SHEAF_…_ONLY` narrowing.
   - **Progress (M10.5 slice 19):** `Corpus::signatures()` reads
     `signatures/`'s manifest; sheaf-cli's `tests/edit.rs` uses it (an
-    `--append` onto signed files keeps their signatures). No tier sweeps
-    the collection yet, and `conformance/` is still unread.
+    `--append` onto signed files keeps their signatures).
+  - **Progress (B5):** the first tier over `signatures/`, sheaf-doc's
+    `the_corpus_s_signatures_agree_with_pyhanko` (every signed file's
+    digests against pyHanko's `intact`; a few seconds, so not ignored;
+    `SHEAF_SIGS_ONLY` narrows it). The Append and signature-ask tiers
+    over the collection, and `conformance/`, are still to come.
   - **veraPDF** (2026-10-23, the build-or-adopt audit): the
     `conformance/` tier compares sheaf's checks with veraPDF 1.30's JSON
     (`--format json`, flavours `1a`…`4f`, `ua1`, `ua2`). veraPDF needs
@@ -1191,6 +1179,94 @@ phase; they're triaged between phases.
 
 - **Notes:** M9 slice 13 chose the memory order without PDFlyer's table
   to hand (`todos/m9.md`).
+
+### B5: A file whose signatures were broken still asks about them on a reorder
+
+- **Closed:** 2026-10-23, fixed in the B5 PR. A
+  signature a save would break or flag is checked first
+  (`forms::sigs::integrity`, `Signature::integrity`): its `/ByteRange`
+  hashed from the source's bytes against the digest its CMS signed (the
+  messageDigest signed attribute, a document timestamp's messageImprint,
+  or for no signed attributes the DigestInfo its RSA PKCS#1 v1.5 value
+  opens to with the signer's certificate's key). One that no longer
+  matches is `Verdict::AlreadyBroken` and doesn't ask; one that can't be
+  checked (`Integrity::Unknown`: no signed attributes and not RSA, GOST,
+  a CMS that can't be read) still asks. The form check reports one that
+  fits its revision as `BrokenSignature`; `sheaf inspect --json` counts
+  them (`signatures_broken`). Tests: sheaf-doc
+  `forms::sigs::integrity::tests` (`a_signature_is_intact_until_a_byte_it_signs_changes`,
+  `a_timestamp_is_checked_by_its_imprint`,
+  `an_rsa_signature_with_no_signed_attributes_is_opened`,
+  `what_can_t_be_checked_is_unknown_and_asks`,
+  `byte_ranges_are_hashed_as_given_and_cut_at_the_end`,
+  `a_byte_range_that_isn_t_pairs_is_unknown`, `bytes_before_the_header`,
+  `ber_is_read`,
+  `hostile_cms_is_unknown_not_a_crash`, `checks_are_shared_capped_and_lazy`,
+  `a_broken_signature_asks_nothing`, and the first tier over
+  `signatures/`, `the_corpus_s_signatures_agree_with_pyhanko`),
+  `forms::tests::a_signature_whose_bytes_changed_is_found`,
+  `materialize::plan_tests::a_section_writing_the_catalog_over_a_broken_signature_appends`;
+  sheaf-ops `forms_saves::a_signature_a_rewrite_broke_isn_t_asked_about_again`
+  (the repro); sheaf-cli `edit::a_signature_broken_already_isn_t_asked_about`
+  (0008830, 0010094, and a file `--signatures break` wrote). The header
+  tier on 62 signed forms (the first in `forms/`'s order with a signed
+  field): 72 of the 74 reorders asked about the signatures (and were
+  appended anyway), now 36. The 36 that stopped asking are 35 reorders
+  after a forced Rewrite and 0008830's reorder of the file as it came
+  (its signatures were broken already); the 36 that still ask reorder
+  a file as it came, with its signatures intact.
+  The mark tier: 359 ask, from 360; 7334180's signature, whose
+  `/ByteRange` doesn't span its own `/Contents`, no longer asks before
+  its Rewrite (`BaseUnsound`). The crop tier: 1104 ask, from 1121; the 17 that
+  stopped (each signature stale or broken when it came) append, but
+  7334180, rewritten (`BaseUnsound`). The form check's comparison
+  (`Report::added_since`) counts a signature it found stale or broken
+  before the save as nothing new, whatever the file's size after
+  (`forms::check::tests::a_signature_broken_already_is_nothing_new`).
+
+- **Found:** 2026-10-22, M10.5 slice 17's corpus tier (pre-existing)
+- **Where:** `forms::sigs::sig_impact` (`crates/sheaf-doc/src/forms/sigs.rs:187`)
+- **Severity:** annoyance
+- **What happens:** a file rewritten with `break_signatures` (the user
+  already agreed to break them) still gets the signature ask when its
+  pages are reordered. `sig_impact` judges by `/V` and the permissions,
+  not by whether the signed bytes still verify. This is 25 of the
+  62-file sample's 100 reorder Appends.
+- **Expected:** a signature whose digest no longer matches its bytes
+  doesn't ask again.
+- **Repro:** append_corpus's header tier (slice 17) on a signed form
+  after a forced Rewrite, then reorder.
+- **Notes:** probably needs the digest check pyHanko does
+  (`../pdf-corpus/signatures/` has files changed after signing and
+  digest mismatches to test against; see F9).
+- **Also (M10.5 slice 19):** the exports' and the command line's
+  signature ask reuse `sig_impact`, so (both fixed with it):
+  - a signature already invalid when the file was opened still asks:
+    `signatures/safedocs/0008830.pdf` and `0010094.pdf`, which pyHanko
+    finds neither intact nor valid, exit 3 on a mark add (37
+    unencrypted files in `signatures/` have such a signature). Both
+    are signed with no signed attributes, so their digests are opened
+    from their RSA values. Of `signatures/`, pyHanko gives a verdict of
+    not intact to 17 signatures in 15 files, and sheaf finds exactly
+    those broken; the manifest's other not-intact signatures are
+    pyHanko's errors (59 document timestamps its run refuses, GOST
+    digests, asn1crypto parse errors);
+  - a file written with `sheaf … --signatures break` asks again on its
+    next edit (`append_anyway: true`, "… removed since the last save").
+- **The digest check, spiked** (2026-10-23, the build-or-adopt audit;
+  [build-or-adopt.md](build-or-adopt.md), entry 93):
+  - cms 0.3.0-rc.0, der 0.8 (`ber`), sha1 and sha2, pinned exactly:
+    about 40 lines at the core. The stable cms 0.2.3 can't read the 138
+    of the corpus's 593 signatures that are BER.
+  - 546 of the 593 are checkable. It agrees with pyHanko on
+    `0008830.pdf` and `0010094.pdf`: neither is intact.
+  - Unknown algorithms, no signed attributes (28) and parse failures
+    keep asking; only a clear mismatch counts as broken.
+  - Hash lazily, once per source, cancellable: N signatures cost N
+    hashes of nearly the whole file.
+  - The fix went further than the spike: with no signed attributes, an
+    RSA PKCS#1 v1.5 value is opened to its DigestInfo, as 0008830 and
+    0010094 need; other algorithms still keep asking.
 
 ### B6: sheaf-app's clippy fails without default features
 

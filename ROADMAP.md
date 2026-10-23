@@ -404,6 +404,12 @@ Signing appends: it must never rewrite earlier revisions, and M10.5's
 Append (slice 10) provides that. On a signed file, a save that has to
 rewrite already asks first.
 
+At the kickoff, revisit what backlog B5's digest check
+(`forms::sigs::integrity`) built on: cms 0.3.0-rc.0, a pre-release pinned
+exactly, with der 0.8; and its RSA PKCS#1 v1.5 opening of a signature
+value with no signed attributes, by num-bigint, which M12's verification
+may replace.
+
 Follow-up: certificate encryption ❓ (`/Adobe.PubSec`; moved from M11
 2026-10-14). It needs the certificate stores built here, and sheaf has
 to decrypt these files itself because PDFium only opens password
