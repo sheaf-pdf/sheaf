@@ -182,16 +182,33 @@ fn summary(doc: &sheaf_doc::Document, cf: &CommentFilter, layout: Layout, path: 
     std::fs::read(path).unwrap()
 }
 
+/// `bytes`, a summary, with its `/CreationDate`'s digits zeroed: the one
+/// thing in it that's the time's.
+fn undated(mut bytes: Vec<u8>) -> Vec<u8> {
+    let key = b"/CreationDate(D:";
+    let at = bytes
+        .windows(key.len())
+        .position(|w| w == key)
+        .expect("the summary is dated")
+        + key.len();
+    for b in bytes[at..].iter_mut().take_while(|b| b.is_ascii_digit()) {
+        *b = b'0';
+    }
+    bytes
+}
+
 /// The same summary gives the same file, twice and on two threads, byte
-/// for byte: it's made in memory and saved, and nothing in it is the
-/// time's.
+/// for byte but for its `/CreationDate`: it's made in memory and saved,
+/// and nothing else in it is the time's. Compared whole, writes either
+/// side of a second's turn differed.
 #[test]
 fn the_summary_writes_the_same_pages_every_time() {
     let dir = scratch("same");
     let doc = opened(&dir);
     let write = |n: usize| {
         let path = dir.join(format!("summary {n}.pdf"));
-        summary(&doc, &CommentFilter::default(), Layout::Pages, &path)
+        let bytes = summary(&doc, &CommentFilter::default(), Layout::Pages, &path);
+        undated(bytes)
     };
     let first = write(0);
     assert_eq!(write(1), first);
