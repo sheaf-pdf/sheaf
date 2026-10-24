@@ -424,6 +424,10 @@ exactly, with der 0.8; and its RSA PKCS#1 v1.5 opening of a signature
 value with no signed attributes, by num-bigint, which M12's verification
 may replace.
 
+**Oracles** (Greg, 2026-10-23; [docs/oracles.md](docs/oracles.md#by-milestone)):
+pyHanko for signing and PAdES levels B-B to B-LTA, `openssl cms -verify`
+for each signature's CMS, and EU DSS, the EU's reference validator.
+
 Follow-up: certificate encryption ❓ (`/Adobe.PubSec`; moved from M11
 2026-10-14). It needs the certificate stores built here, and sheaf has
 to decrypt these files itself because PDFium only opens password
@@ -474,6 +478,9 @@ Builds on M11's content interpreter.
 
 **Decide at kickoff:** how far to go on the ❓ items. They matter for
 archival requirements but not for daily binder work.
+
+**Oracles** (Greg, 2026-10-23; [docs/oracles.md](docs/oracles.md#by-milestone)):
+veraPDF for PDF/A, and OpenJPEG for JPX images sheaf re-encodes.
 
 ### M15: Automation
 
@@ -616,7 +623,8 @@ the target ❓
   M10.5 adds a Note when a change breaks a PDF/A or PDF/UA claim
   (proposal 39).
 - **Tests:** `../pdf-corpus/conformance/` has PDF/UA claims (backlog
-  F9).
+  F9). veraPDF is the oracle for UA-1 and UA-2, with PAC's Matterhorn
+  checks by hand ([docs/oracles.md](docs/oracles.md#by-milestone)).
 - **Open:** the review as a panel in the main window, or a review mode
   of its own, as Acrobat's Reading Order tool is.
 
