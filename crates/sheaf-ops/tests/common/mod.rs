@@ -3,7 +3,8 @@
 //! its [`How`], run twice by `sheaf_doc::both_ways!`: by a Rewrite, and by
 //! an Append. And what the realization, text and blank-page tests share: a
 //! file of pages saying "page i", opened as the app opens it, views over a
-//! pool of their own, and an OCR engine that reads nothing.
+//! pool of their own, and an OCR engine that reads nothing. And a page
+//! drawn as M5's separators are found, for the codes tests and the gate.
 
 #![allow(dead_code)]
 // The tests' scratch files go in the temp directory, which clippy.toml
@@ -15,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use anyhow::Context;
+use image::GrayImage;
 use lopdf::xref::XrefType;
 use lopdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::export::{Export, ExportFrom, Out};
@@ -25,10 +28,12 @@ pub use sheaf_doc::materialize::{How, StrategyKind};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{Actor, CommitOpts, Document, FixedCount, PageId, Src, Stale, Store};
-use sheaf_edit::Margins;
-use sheaf_image::raster::Raster;
+use sheaf_edit::{Margins, Rotation};
+use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_ocr::{EngineInfo, EngineKind, InputKind, OcrEngine, OcrImage, OcrWord};
 use sheaf_ops::views::Views;
+use sheaf_render::pdfium::PdfiumEngine;
+use sheaf_render::{Draw, Job, PageIndex, Renderer};
 
 /// Half of a row's inside, in pixels.
 pub const HALF_A_ROW: usize = 196 * 26 / 2;
@@ -565,4 +570,21 @@ impl OcrEngine for Blind {
             languages: Vec::new(),
         }
     }
+}
+
+/// `engine`'s page `page` drawn as M5's separators are found (proposal
+/// 15): its content alone, at `dpi`, in gray. Slice 5's `separate::find`
+/// draws the same picture through `Views`.
+pub fn drawn(engine: &PdfiumEngine, page: u32, dpi: f32) -> anyhow::Result<GrayImage> {
+    let size = engine.page_size(PageIndex(page))?;
+    let job = Job::Page {
+        width: (size.width * dpi / 72.0).round() as u32,
+        rotation: Rotation::R0,
+    };
+    let draw = Draw {
+        annots: false,
+        forms: false,
+    };
+    let raster = engine.render_with(PageIndex(page), job, PixelFormat::Rgba, draw)?;
+    raster.to_gray().context("a render with its pixels short")
 }

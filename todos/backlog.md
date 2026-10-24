@@ -624,6 +624,24 @@ phase; they're triaged between phases.
   `signatures_read`, so the integrity tier filters it out, and no test
   reads `note`. Any new reader of these columns would see it.
 
+### B39: imageproc's Otsu threshold overflows on large one-gray images
+
+- **Found:** 2026-10-23, M5 slice 3 (pre-existing)
+- **Where:** imageproc 0.27's `contrast::otsu_level`, called by
+  `sheaf_image::clean` (`crates/sheaf-image/src/clean.rs:289` and `:466`)
+- **Severity:** wrong output (a panic in debug builds)
+- **What happens:** `otsu_level` multiplies in `u32`
+  (`threshold as u32 * hist_count`, and `width * height`). On an image
+  with more than about 16.8 million pixels of one gray level it panics
+  in debug builds and gives a wrong threshold in release. A blank 600 dpi
+  Legal page is 42.8 million pixels.
+- **Expected:** a threshold computed in `u64`, as slice 3's patch reader
+  now does (`codes/patch.rs`'s own `otsu_level`).
+- **Notes:** step 3 of slice 3 saw clean.rs call it on reduced images
+  only, but didn't trace every caller. Either use the patch reader's
+  `u64` version in clean.rs too, or check each call's image size. The
+  bug is upstream's: worth an issue or a PR to imageproc.
+
 ## Features
 
 ### F1: Basic calculator

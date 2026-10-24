@@ -176,10 +176,24 @@
 //! written once and timed, and what one written as each batch lands would
 //! write in all, in black and white and, from a sample, in color: rows
 //! with no gate.
+//!
+//! From M5 slice 3, alone in `codes_on_a_page_with_none`, a Letter page
+//! with no code read for separators on one thread (`codes::read`: its
+//! patch bars, then its barcode), each row the median of
+//! [`CODES_RUNS`], beside the M5 bench's times: read for sheaf's sheet and
+//! patch codes at 150 dpi, sheaf-image's page of glyph-like strokes in
+//! gray and in black and white and the synthetic and heavy 7k's first
+//! pages drawn as separators are found (their content alone, in gray),
+//! the four rows asserted within [`CODES_GATE`] when [`CODES`] is set;
+//! and, measured only, the stroke page read for every symbology at 150
+//! dpi in gray and at 200 in black and white, and its patch bars alone.
+//! Every row first reads the page and must find nothing.
 
 // A test crate of its own, whose scratch files go in the temp directory
 // clippy.toml bans outside tests.
 #![allow(clippy::disallowed_methods)]
+
+mod common;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -189,7 +203,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::executor::block_on;
-use image::{Rgb, RgbImage};
+use image::{GrayImage, Rgb, RgbImage};
 use in_progress::{Level, Progress, Unit};
 use lopdf::{Dictionary, Object, ObjectId};
 use sheaf_doc::content::Marker;
@@ -211,6 +225,9 @@ use sheaf_edit::{
     Anchor, BatesSpec, BlobSel, GridPos, HeaderFooterSpec, Margins, Op, PageRef, Rotation, Style,
     Turn, WatermarkContent, WatermarkSpec, Z,
 };
+use sheaf_image::codes::fixture::Degradation::{Dpi, Threshold};
+use sheaf_image::codes::fixture::{degrade, text_page};
+use sheaf_image::codes::{self, PageCodes, Symbology};
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
 use sheaf_ops::blank::{self, BlankParams};
@@ -422,6 +439,14 @@ const INTAKE_ADDED: u64 = 400 << 20;
 /// The pages scanned in color for M5 slice 2's untitled sidecar rows,
 /// whose sidecar is scaled up to [`INTAKE_PAGES`]: a batch.
 const COLOR_SAMPLE: u64 = 8;
+/// Set to assert M5 slice 3's gate: a Letter page with no code, read for
+/// sheaf's sheet (its QR code) and patch codes at 150 dpi on one thread,
+/// in at most [`CODES_GATE`], the median of [`CODES_RUNS`] (the M5 bench:
+/// 44 ms for the decode, about 5 for the patches). The rows are measured
+/// on every run; their times need a quiet machine.
+const CODES: &str = "SHEAF_GATE_CODES";
+const CODES_GATE: Duration = Duration::from_millis(60);
+const CODES_RUNS: usize = 21;
 /// Letter at 300 dpi, in pixels.
 const LETTER_300: (u32, u32) = (2550, 3300);
 
@@ -3293,6 +3318,108 @@ fn letter_scan(seed: u64) -> RgbImage {
         }
     }
     img
+}
+
+/// M5 slice 3's gate: a Letter page with no code read as separators are
+/// found (`codes::read`: its patch bars, then its barcode), on one thread,
+/// each row the median of [`CODES_RUNS`] after a first read, which must
+/// find nothing. Read for sheaf's sheet (QR) and patch codes, and
+/// asserted within [`CODES_GATE`] when [`CODES`] is set: sheaf-image's
+/// page of glyph-like strokes (`codes::fixture::text_page`, the bench's
+/// kind of page) drawn at 150 dpi in gray and in black and white, and the
+/// synthetic and heavy 7k's first pages, real glyphs (Helvetica, and the
+/// heavy's embedded DejaVu), drawn as separators are found: their content
+/// alone at 150 dpi in gray. Measured only: the stroke page read for every
+/// symbology at 150 dpi in gray and at 200 in black and white (a rule's
+/// 1D codes), and its patch bars alone. The baselines are the M5 bench's:
+/// its text page decoded for every separator symbology at 150 dpi in
+/// black and white (44 ms) and at 200 (70 ms), and its patch reader
+/// (about 5 ms).
+#[test]
+#[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
+fn codes_on_a_page_with_none() {
+    let stroke = text_page(42, None);
+    let (gray, _) = degrade(&stroke, 300, &[Dpi(150)]);
+    let (bw, _) = degrade(&gray, 150, &[Threshold(128)]);
+    let (bw_200, _) = degrade(&stroke, 300, &[Dpi(200), Threshold(128)]);
+    let (synthetic, heavy) = (content_at_150(Kind::Synthetic), content_at_150(Kind::Heavy));
+    let gate = format!("≤ {} ms, asserted with {CODES}", CODES_GATE.as_millis());
+    let mut rows = Vec::new();
+    let mut over = Vec::new();
+    for (page, image) in [
+        ("stroke page, 150 dpi gray", &gray),
+        ("stroke page, 150 dpi 1-bit", &bw),
+        ("synthetic's page 1, 150 dpi", &synthetic),
+        ("heavy's page 1, 150 dpi", &heavy),
+    ] {
+        let what = format!("{page}, QR + patches");
+        let took = read_timed(&what, image, 150.0, &[Symbology::Qr]);
+        if took > CODES_GATE {
+            over.push(format!("{what}: {:.1} ms", ms(took)));
+        }
+        rows.push(Row::time(&what, took, 44.0, &gate));
+    }
+    // Measured only: every symbology, as rules read them beside sheaf's
+    // sheet, and the patch bars alone (`Rxing` reads nothing for none).
+    let mut measured = |what: &str, image, dpi, symbologies: &[Symbology], bench| {
+        let took = read_timed(what, image, dpi, symbologies);
+        rows.push(Row::time(what, took, bench, ""));
+    };
+    let all = &Symbology::ALL;
+    measured(
+        "stroke page, 150 dpi gray, all + patches",
+        &gray,
+        150.0,
+        all,
+        44.0,
+    );
+    measured(
+        "stroke page, 200 dpi 1-bit, all + patches",
+        &bw_200,
+        200.0,
+        all,
+        70.0,
+    );
+    measured(
+        "stroke page, 150 dpi gray, patches alone",
+        &gray,
+        150.0,
+        &[],
+        5.0,
+    );
+    print_table(
+        "codes on a Letter page with none, one thread (M5 slice 3)",
+        "bench",
+        &rows,
+    );
+    if std::env::var_os(CODES).is_some() {
+        assert!(
+            over.is_empty(),
+            "over {} ms: {}",
+            CODES_GATE.as_millis(),
+            over.join("; ")
+        );
+    }
+}
+
+/// [`codes::read`] of `page`, at `dpi`, for `symbologies`, which must
+/// find nothing: the median of [`CODES_RUNS`] reads after that first one.
+fn read_timed(what: &str, page: &GrayImage, dpi: f32, symbologies: &[Symbology]) -> Duration {
+    let read = || codes::read(page, dpi, symbologies, &|_| true, &codes::Rxing);
+    let nothing = PageCodes {
+        patch: None,
+        code: None,
+    };
+    assert_eq!(read(), nothing, "{what}");
+    median((0..CODES_RUNS).map(|_| timed(read).0).collect())
+}
+
+/// The `kind` fixture's first page drawn as separators are found (M5
+/// proposal 15): its content alone, at 150 dpi, in gray.
+fn content_at_150(kind: Kind) -> GrayImage {
+    let bytes = sheaf_util::read_file(&fixture(kind)).unwrap();
+    let engine = PdfiumEngine::open_bytes(bytes, None).unwrap();
+    common::drawn(&engine, 0, 150.0).unwrap()
 }
 
 /// The workspace's root: this crate is two below it.

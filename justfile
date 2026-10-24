@@ -269,10 +269,11 @@ precommit: (_steps "precommit" "markers fmt-check locks corpus interop propertie
 
 # Before a PR merges: the ignored corpus tiers, in full (append_corpus's,
 # the export tier, realize_corpus's pixels and predicate, PDFium's resave
-# of a watermark, the content lexer against PDFium). An hour or more.
+# of a watermark, the content lexer against PDFium, codes over scans/).
+# An hour or more.
 [doc("Before a PR merges: every ignored corpus tier (an hour or more)")]
 [group('local')]
-premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer _corpus-ran")
+premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-codes _corpus-ran")
 
 [doc("No merge-conflict markers in tracked or untracked files (git grep; binaries and ignored files skipped)")]
 [group('local')]
@@ -352,6 +353,13 @@ tier-watermark:
 [group('corpus')]
 tier-lexer:
     scripts/test-capped.sh cargo test -p sheaf-render --test content_lexer -- --ignored --nocapture
+
+# Every page of scans/ drawn at 150 dpi and read for codes: no sheaf
+# separator and no patch code; the other barcodes listed (M5 slice 3).
+[doc("Codes over scans/: no separator or patch code found (SHEAF_CODES_ONLY narrows it)")]
+[group('corpus')]
+tier-codes:
+    scripts/test-capped.sh cargo test -p sheaf-ops --test codes -- --ignored --nocapture
 
 # ----- Gates ---------------------------------------------------------------
 
