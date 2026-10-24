@@ -29,8 +29,9 @@ impl Document {
     }
 
     /// `ops` as group `g`'s next commit, labelled `label`, by whom the
-    /// group's kind takes commits from: the OCR job, or the plugin called
-    /// (as version 1.0). One in a group that has ended is the user's.
+    /// group's kind takes commits from: the OCR or scan job, or the plugin
+    /// called (as version 1.0). One in a group that has ended is the
+    /// user's.
     pub fn commit_ops_in_group(
         &mut self,
         g: GroupId,
@@ -39,6 +40,7 @@ impl Document {
     ) -> Result<Commit, EditError> {
         let actor = match self.group_kind(g) {
             Some(GroupKind::Ocr) => Actor::Job(JobKind::Ocr),
+            Some(GroupKind::Scan) => Actor::Job(JobKind::Scan),
             Some(GroupKind::PluginCall { plugin }) => Actor::Plugin {
                 id: plugin.clone(),
                 version: "1.0".into(),

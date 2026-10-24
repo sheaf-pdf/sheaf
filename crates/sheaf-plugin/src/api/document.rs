@@ -10,7 +10,9 @@ use crate::runtime::HostState;
 
 impl super::api::document::Host for HostState {
     fn path(&mut self) -> Option<String> {
-        self.doc().map(|d| d.path.display().to_string())
+        self.doc()
+            .and_then(|d| d.path.as_ref())
+            .map(|p| p.display().to_string())
     }
 
     fn version(&mut self) -> Option<w::Version> {

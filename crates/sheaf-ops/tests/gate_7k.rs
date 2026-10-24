@@ -163,6 +163,19 @@
 //! neither a baseline nor a gate. From slice 20 the snapshot gate holds
 //! for `Document::published` too, which the app publishes for plugin calls
 //! at every change.
+//!
+//! From M5 slice 1, alone in `scan_of_500_black_and_white_pages`, the
+//! intake's memory: 500 synthetic black and white Letter pages at 300 dpi
+//! scanned a page at a time, as `sheaf scan` scans them, under the photo
+//! profile and the scanner's, landed in a document of no pages and
+//! written whole, each with its pages a second, its peak RSS and the file
+//! it writes, and what it added to the RSS asserted under
+//! [`INTAKE_ADDED`] on every run, a memory gate needing no quiet machine;
+//! before the intake every page was held to the end as 8-bit pixels. From
+//! M5 slice 2, after each, the untitled sidecar of the document scanned,
+//! written once and timed, and what one written as each batch lands would
+//! write in all, in black and white and, from a sample, in color: rows
+//! with no gate.
 
 // A test crate of its own, whose scratch files go in the temp directory
 // clippy.toml bans outside tests.
@@ -176,6 +189,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::executor::block_on;
+use image::{Rgb, RgbImage};
 use in_progress::{Level, Progress, Unit};
 use lopdf::{Dictionary, Object, ObjectId};
 use sheaf_doc::content::Marker;
@@ -201,6 +215,9 @@ use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
 use sheaf_ops::blank::{self, BlankParams};
 use sheaf_ops::crop::{self, Urgency, trim_white};
+use sheaf_ops::intake::{Batching, Pages, RawPage, SessionLanding, intake};
+use sheaf_ops::scan;
+use sheaf_ops::session::{Decided, SaveTo, Session};
 use sheaf_ops::text::{Found, Text};
 use sheaf_ops::views::Views;
 use sheaf_render::pdfium::PdfiumEngine;
@@ -397,6 +414,16 @@ const KIND: &str = "SHEAF_GATE_KIND";
 /// What the default policy keeps history to: 200 OCR versions at 1,000
 /// pages hold no more (slice 12).
 const HISTORY_BUDGET: usize = 256 << 20;
+/// The pages M5 slice 1's memory gate scans, and what scanning them in
+/// black and white may add to the RSS the process started from: before
+/// the intake every page was held to the end, as 8-bit pixels, 4.2 GB.
+const INTAKE_PAGES: u64 = 500;
+const INTAKE_ADDED: u64 = 400 << 20;
+/// The pages scanned in color for M5 slice 2's untitled sidecar rows,
+/// whose sidecar is scaled up to [`INTAKE_PAGES`]: a batch.
+const COLOR_SAMPLE: u64 = 8;
+/// Letter at 300 dpi, in pixels.
+const LETTER_300: (u32, u32) = (2550, 3300);
 
 /// A fixture's numbers on slice 2's code, each the median of three runs
 /// of the harness: milliseconds, megabytes (MiB) and pages a second. An
@@ -3026,6 +3053,246 @@ fn history_of_200_ocr_versions_at_1000_pages() {
         "history held {:.1} MB",
         mb(most as u64)
     );
+}
+
+/// M5 slice 1's memory gate: [`INTAKE_PAGES`] black and white Letter
+/// pages at 300 dpi ([`letter_scan`]) scanned as `sheaf scan --mode bw`
+/// scans them, under the photo profile (the command's default) and then
+/// the scanner's, orientation off and no OCR: a page at a time through the
+/// intake into a document of no pages, landed as the command lands them
+/// ([`scan::BATCHING`]), then written whole to a file beside the fixtures.
+/// Each row's peak RSS is the process's over the intake and the Rewrite;
+/// what it added to the RSS it started from is asserted under
+/// [`INTAKE_ADDED`] for both, after the table prints.
+///
+/// After each row, outside its measurement, M5 slice 2's untitled sidecar
+/// of the document scanned ([`untitled_rows`]); then the same for
+/// [`COLOR_SAMPLE`] pages scanned in color under the scanner profile (JPEG,
+/// at the intake's quality of 80), scaled up to [`INTAKE_PAGES`]. Neither
+/// is a gate: the plan names none.
+#[test]
+#[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
+fn scan_of_500_black_and_white_pages() {
+    let mut rows = Vec::new();
+    let mut added = Vec::new();
+    let count = |what: String, now: f64, unit| Row {
+        what,
+        now: Some(now),
+        unit,
+        baseline: f64::NAN,
+        gate: String::new(),
+    };
+    for profile in [scan::Profile::Photo, scan::Profile::Scanner] {
+        let name = format!("{profile:?} profile").to_lowercase();
+        let mut opts = profile.options();
+        opts.clean.mode = sheaf_image::clean::Mode::Bw;
+        opts.clean.orient = false;
+        let out = gate_dir().join(format!("scan-{INTAKE_PAGES}-{profile:?}.pdf"));
+        let ((took, (report, session)), mem) = with_mem(|| {
+            timed(|| {
+                let mut session = Session::new_empty();
+                let report = scan_into(&mut session, INTAKE_PAGES, &opts);
+                let to = SaveTo::File {
+                    path: out.clone(),
+                    append: false,
+                };
+                let saved = session.save(to, &AskAnswers::default(), &NoProgress);
+                saved.decided().unwrap();
+                (report, session)
+            })
+        });
+        assert_eq!(report.pages as u64, INTAKE_PAGES, "{name}");
+        let written = lopdf::Document::load(&out).unwrap();
+        assert_eq!(written.get_pages().len() as u64, INTAKE_PAGES, "{name}");
+        let bytes = std::fs::metadata(&out).unwrap().len();
+        std::fs::remove_file(&out).unwrap();
+        let rate = report.pages as f64 / took.as_secs_f64();
+        rows.extend([
+            count(format!("{name}, pages"), report.pages as f64, ""),
+            count(
+                format!("{name}, cleaned, landed and written"),
+                rate,
+                "pages/s",
+            ),
+            Row::peak(&name, mem, f64::NAN, ""),
+            Row::added(&name, mem, f64::NAN, "< 400 MB, asserted"),
+            count(format!("{name}, written"), mb(bytes), "MB"),
+        ]);
+        rows.extend(untitled_rows(&name, &session, INTAKE_PAGES, rate));
+        added.extend(mem.map(|m| (name, m.peak.saturating_sub(m.start))));
+    }
+    let name = "color sample".to_string();
+    let mut opts = scan::Profile::Scanner.options();
+    opts.clean.mode = sheaf_image::clean::Mode::Color;
+    opts.clean.orient = false;
+    let mut session = Session::new_empty();
+    let (took, report) = timed(|| scan_into(&mut session, COLOR_SAMPLE, &opts));
+    assert_eq!(report.pages as u64, COLOR_SAMPLE, "{name}");
+    let rate = report.pages as f64 / took.as_secs_f64();
+    rows.extend([
+        count(format!("{name}, pages"), report.pages as f64, ""),
+        count(format!("{name}, cleaned and landed"), rate, "pages/s"),
+    ]);
+    rows.extend(untitled_rows(&name, &session, COLOR_SAMPLE, rate));
+    print_table(
+        &format!(
+            "scan: {INTAKE_PAGES} black and white Letter pages at 300 dpi, a page at a time (M5 slice 1); untitled sidecars (M5 slice 2)"
+        ),
+        "baseline",
+        &rows,
+    );
+    for (name, added) in added {
+        assert!(
+            added < INTAKE_ADDED,
+            "the {name} added {:.0} MB to the RSS",
+            mb(added)
+        );
+    }
+}
+
+/// [`LetterScans`]' first `pages` scanned into `session` as `sheaf scan`
+/// scans them: a page at a time, landed by [`scan::BATCHING`] in one
+/// group.
+fn scan_into(session: &mut Session, pages: u64, opts: &scan::ScanOptions) -> scan::ScanReport {
+    let mut landing = SessionLanding::new(session, "Scan");
+    let mut pages = LetterScans(0..pages);
+    let report = intake(
+        &mut pages,
+        opts,
+        None,
+        &mut landing,
+        scan::BATCHING,
+        &NoProgress,
+    );
+    let report = report.unwrap();
+    landing.finish();
+    report
+}
+
+/// M5 slice 2's untitled sidecar of `session`'s document, `pages` pages
+/// scanned at `rate` a second: written once whole beside the fixtures
+/// (timed, then removed) and its size, and what sidecars written as each
+/// batch lands would write in all over a scan of [`INTAKE_PAGES`]
+/// ([`sidecars_in_all`]), in the command line's batches and in the app's
+/// at that pace ([`app_batch`]). A sample of fewer pages is scaled up to
+/// them by its pages' share. The app writes no sidecar while one is being
+/// written, so what it writes in all is at most that.
+fn untitled_rows(name: &str, session: &Session, pages: u64, rate: f64) -> Vec<Row> {
+    let folder = gate_dir().join("recovery");
+    let claim = sheaf_doc::recovery::claim_untitled(&folder, "Untitled scan 1").unwrap();
+    let claim = claim.expect("no other claim");
+    let input = session.doc.recovery_input();
+    let write = || sheaf_doc::recovery::write_untitled(&input, &claim, &folder, &NoProgress);
+    let (wrote, size) = timed(|| write().unwrap());
+    drop(claim);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let size = size as u64;
+    let whole = size * INTAKE_PAGES / pages;
+    let row = |what: String, bytes: u64| Row {
+        what: format!("{name}, {what}"),
+        now: Some(mb(bytes)),
+        unit: "MB",
+        baseline: f64::NAN,
+        gate: String::new(),
+    };
+    let (cli, app) = (scan::BATCHING.pages as u64, app_batch(rate));
+    let mut rows = vec![
+        Row::time(
+            &format!("{name}, untitled sidecar written"),
+            wrote,
+            f64::NAN,
+            "",
+        ),
+        row("untitled sidecar".into(), size),
+    ];
+    if pages != INTAKE_PAGES {
+        rows.push(row(format!("{INTAKE_PAGES} pages' sidecar, scaled"), whole));
+    }
+    rows.extend([
+        row(
+            format!("sidecars in all, {cli} a batch"),
+            sidecars_in_all(whole, INTAKE_PAGES, cli),
+        ),
+        row(
+            format!("the app's in all, {app} a batch"),
+            sidecars_in_all(whole, INTAKE_PAGES, app),
+        ),
+    ]);
+    rows
+}
+
+/// What untitled sidecars, one written as each batch of `batch` pages
+/// lands, write in all over a scan of `pages` pages whose whole sidecar
+/// is `whole` bytes: each the document so far, its pages' share of the
+/// whole.
+fn sidecars_in_all(whole: u64, pages: u64, batch: u64) -> u64 {
+    let batches = pages.div_ceil(batch);
+    (1..=batches)
+        .map(|k| whole * (k * batch).min(pages) / pages)
+        .sum()
+}
+
+/// The pages a batch holds in the app ([`Batching::DEFAULT`]) when they
+/// come at `rate` a second: as many as come within its wait, up to its
+/// count.
+fn app_batch(rate: f64) -> u64 {
+    let batching = Batching::DEFAULT;
+    let wait = batching.wait.map_or(f64::INFINITY, |w| w.as_secs_f64());
+    ((wait * rate).ceil() as u64).clamp(1, batching.pages as u64)
+}
+
+/// [`letter_scan`]'s pages of the seeds in the range, each made as the
+/// intake asks for it.
+struct LetterScans(std::ops::Range<u64>);
+
+impl Pages for LetterScans {
+    fn next(&mut self, _: &dyn Progress) -> anyhow::Result<Option<RawPage>> {
+        Ok(self.0.next().map(|seed| RawPage {
+            image: letter_scan(seed),
+            name: format!("page {seed}"),
+        }))
+    }
+
+    fn count(&self) -> Option<usize> {
+        Some(self.0.end as usize)
+    }
+}
+
+/// A Letter page scanned at 300 dpi: off-white paper with a little sensor
+/// noise, lines of words of "letters" (some with ascenders), skewed by up
+/// to a degree either way. The noise, the words, the lines' lengths and
+/// the skew come from `seed`, so no two pages are alike, nor any two
+/// batches: alike batches would be one source in the store, and measure
+/// less than a scan holds.
+fn letter_scan(seed: u64) -> RgbImage {
+    let mut rng = fastrand::Rng::with_seed(seed);
+    let (w, h) = LETTER_300;
+    let mut img = RgbImage::from_fn(w, h, |_, _| {
+        let v = 236 + rng.u8(0..9);
+        Rgb([v, v, v.saturating_sub(4)])
+    });
+    // Each column of ink lower by `slope` a pixel to the right of the
+    // middle: a skew, for straightening to take out.
+    let slope = (rng.f32() * 2.0 - 1.0).to_radians().tan();
+    for line in 0..36u32 {
+        let (bottom, end) = (360 + line * 76, rng.u32(1500..2100));
+        let mut x = 300;
+        while x < end {
+            for _ in 0..rng.u32(2..10) {
+                let (lw, lh) = (rng.u32(14..30), if rng.u8(0..4) == 0 { 40 } else { 28 });
+                for xx in x..x + lw {
+                    let drop = ((xx as f32 - w as f32 / 2.0) * slope).round() as i32;
+                    let foot = bottom.saturating_add_signed(drop);
+                    for yy in foot - lh..foot {
+                        img.put_pixel(xx, yy, Rgb([30, 30, 30]));
+                    }
+                }
+                x += lw + 5;
+            }
+            x += rng.u32(24..40);
+        }
+    }
+    img
 }
 
 /// The workspace's root: this crate is two below it.

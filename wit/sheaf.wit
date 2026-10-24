@@ -310,8 +310,9 @@ interface types {
 /// first shows a form reads the document as the user left it), then as the
 /// call's own submits change it. What each read returns is what the call
 /// decides by: when the call's edits land, each must hold as it was read,
-/// or they don't, and the plugin is told. With no document open, `path`
-/// and `version` are none and the lists are empty.
+/// or they don't, and the plugin is told. `path` is none for a document
+/// with no file yet. With no document open, `path` and `version` are none
+/// and the lists are empty.
 interface document {
     use types.{page-id, page-info, outline-item, annot-view, version as doc-version};
 

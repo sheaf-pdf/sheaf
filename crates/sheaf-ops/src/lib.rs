@@ -15,6 +15,7 @@ pub mod crop;
 pub mod dirs;
 pub mod export;
 pub mod images;
+pub mod intake;
 pub mod pages;
 pub mod prefs;
 pub mod scan;

@@ -1,15 +1,17 @@
 //! Image files in: decoded, turned upright, with their resolution, and
 //! kept as compact as they allow. A JPEG keeps its bytes (and its EXIF
-//! turn), a black-and-white image is marked as such, a multi-page TIFF
+//! turn), a black-and-white image is held as CCITT G4, a multi-page TIFF
 //! gives one image per page.
 
-use std::io::Cursor;
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufReader, Cursor, Read, Seek};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use image::{
     DynamicImage, ImageDecoder, ImageFormat, ImageReader, RgbImage, metadata::Orientation,
 };
+use tiff::tags::Tag;
 
 /// Resolution assumed when an image doesn't record one.
 pub const DEFAULT_DPI: f32 = 96.0;
@@ -35,13 +37,16 @@ pub enum Pixels {
     Gray(Vec<u8>),
     /// 8-bit RGB, row by row.
     Rgb(Vec<u8>),
-    /// Black and white: 8-bit gray with every pixel 0 or 255.
-    Bilevel(Vec<u8>),
+    /// Black and white, CCITT Group 4 as [`crate::encode::g4`] writes it
+    /// (K -1, `width` columns, `height` rows): encoded once, when the page
+    /// is made.
+    G4(Vec<u8>),
 }
 
 impl PageImage {
     /// Pixels the caller already has (a cleaned-up scan, say). Gray
-    /// images whose pixels are all 0 or 255 are stored as black and white.
+    /// images whose pixels are all 0 or 255 are stored as black and white,
+    /// encoded as G4 at once.
     pub fn from_image(image: DynamicImage, dpi: f32) -> PageImage {
         let (width, height) = (image.width(), image.height());
         let pixels = if image.color().has_color() {
@@ -49,7 +54,7 @@ impl PageImage {
         } else {
             let gray = flatten_alpha(image).into_luma8().into_raw();
             if gray.iter().all(|&v| v == 0 || v == 255) {
-                Pixels::Bilevel(gray)
+                Pixels::G4(crate::encode::g4(&gray, width, height))
             } else {
                 Pixels::Gray(gray)
             }
@@ -238,102 +243,135 @@ fn png_dpi(b: &[u8]) -> Option<(f32, f32)> {
     None
 }
 
-/// Every image in a TIFF.
+/// Every page in a TIFF.
 fn tiff_pages(bytes: &[u8]) -> Result<Vec<PageImage>> {
-    use tiff::ColorType as C;
-    use tiff::decoder::{Decoder, DecodingResult as D};
-    use tiff::tags::Tag;
-    let mut dec = Decoder::new(Cursor::new(bytes))?;
+    let mut dec = tiff_decoder(Cursor::new(bytes))?;
     let mut out = Vec::new();
     loop {
-        let (w, h) = dec.dimensions()?;
-        let color = dec.colortype()?;
-        let res = |dec: &mut Decoder<_>, tag| {
-            dec.find_tag(tag)
-                .ok()
-                .flatten()
-                .and_then(resolution)
-                .filter(|v| *v > 0.0)
-        };
-        let unit = dec
-            .find_tag_unsigned::<u16>(Tag::ResolutionUnit)?
-            .unwrap_or(2);
-        let dpi = match (
-            res(&mut dec, Tag::XResolution),
-            res(&mut dec, Tag::YResolution),
-        ) {
-            (Some(x), y) => {
-                let y = y.unwrap_or(x);
-                match unit {
-                    3 => (x * 2.54, y * 2.54),
-                    2 => (x, y),
-                    _ => (DEFAULT_DPI, DEFAULT_DPI),
-                }
-            }
-            _ => (DEFAULT_DPI, DEFAULT_DPI),
-        };
-        let n = (w * h) as usize;
-        let image = match (color, dec.read_image()?) {
-            (C::Gray(1), D::U8(packed)) => {
-                let row = w.div_ceil(8) as usize;
-                let mut gray = Vec::with_capacity(n);
-                for r in packed.chunks(row).take(h as usize) {
-                    gray.extend((0..w as usize).map(|x| {
-                        if r[x / 8] & (0x80 >> (x % 8)) != 0 {
-                            255
-                        } else {
-                            0
-                        }
-                    }));
-                }
-                DynamicImage::ImageLuma8(image::GrayImage::from_raw(w, h, gray).context("size")?)
-            }
-            (C::Gray(8), D::U8(v)) => {
-                DynamicImage::ImageLuma8(image::GrayImage::from_raw(w, h, v).context("size")?)
-            }
-            (C::Gray(16), D::U16(v)) => {
-                DynamicImage::ImageLuma16(image::ImageBuffer::from_raw(w, h, v).context("size")?)
-            }
-            (C::GrayA(8), D::U8(v)) => {
-                DynamicImage::ImageLumaA8(image::ImageBuffer::from_raw(w, h, v).context("size")?)
-            }
-            (C::RGB(8), D::U8(v)) => {
-                DynamicImage::ImageRgb8(image::RgbImage::from_raw(w, h, v).context("size")?)
-            }
-            (C::RGB(16), D::U16(v)) => {
-                DynamicImage::ImageRgb16(image::ImageBuffer::from_raw(w, h, v).context("size")?)
-            }
-            (C::RGBA(8), D::U8(v)) => {
-                DynamicImage::ImageRgba8(image::RgbaImage::from_raw(w, h, v).context("size")?)
-            }
-            (C::RGBA(16), D::U16(v)) => {
-                DynamicImage::ImageRgba16(image::ImageBuffer::from_raw(w, h, v).context("size")?)
-            }
-            (C::CMYK(8), D::U8(v)) => {
-                let rgb: Vec<u8> = v
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .flat_map(|p| {
-                        let k = 255 - p[3] as u16;
-                        [0, 1, 2].map(|c| ((255 - p[c] as u16) * k / 255) as u8)
-                    })
-                    .collect();
-                DynamicImage::ImageRgb8(image::RgbImage::from_raw(w, h, rgb).context("size")?)
-            }
-            (c, _) => bail!(
-                "TIFF image {} is {c:?}, which sheaf can't read",
-                out.len() + 1
-            ),
-        };
+        let (image, dpi) = tiff_image(&mut dec, out.len() + 1)?;
         let mut page = PageImage::from_image(image, dpi.0);
         page.dpi = dpi;
         out.push(page);
-        if !dec.more_images() {
+        if !next_page(&mut dec)? {
             return Ok(out);
         }
-        dec.next_image()?;
     }
+}
+
+/// How much a TIFF's decode may allocate: image's own default limit, which
+/// [`load`] reads within (tiff's own stops at 256 MiB, under a 1200 dpi
+/// Letter page in color).
+const TIFF_LIMIT: usize = 512 << 20;
+
+/// A TIFF decoder over `r`, at its first image, within [`TIFF_LIMIT`].
+fn tiff_decoder<R: Read + Seek>(r: R) -> tiff::TiffResult<tiff::decoder::Decoder<R>> {
+    let mut limits = tiff::decoder::Limits::default();
+    limits.decoding_buffer_size = TIFF_LIMIT;
+    limits.intermediate_buffer_size = TIFF_LIMIT;
+    limits.ifd_value_size = TIFF_LIMIT;
+    Ok(tiff::decoder::Decoder::new(r)?.with_limits(limits))
+}
+
+/// `dec` moved on to its TIFF's next page, past reduced-resolution images
+/// (NewSubfileType bit 0: a thumbnail, a pyramid's smaller levels); false
+/// when there's none. The first image is always a page, as [`load`] reads
+/// it.
+fn next_page<R: Read + Seek>(dec: &mut tiff::decoder::Decoder<R>) -> tiff::TiffResult<bool> {
+    while dec.more_images() {
+        dec.next_image()?;
+        let kind = (dec.find_tag(Tag::NewSubfileType).ok().flatten())
+            .and_then(|v| v.into_u32().ok())
+            .unwrap_or(0);
+        if kind & 1 == 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The TIFF image `dec` is at, image `number` (from 1) of its file: its
+/// pixels as stored, not turned, and its resolution.
+fn tiff_image<R: Read + Seek>(
+    dec: &mut tiff::decoder::Decoder<R>,
+    number: usize,
+) -> Result<(DynamicImage, (f32, f32))> {
+    use tiff::ColorType as C;
+    use tiff::decoder::{Decoder, DecodingResult as D};
+    let (w, h) = dec.dimensions()?;
+    let color = dec.colortype()?;
+    let res = |dec: &mut Decoder<R>, tag| {
+        dec.find_tag(tag)
+            .ok()
+            .flatten()
+            .and_then(resolution)
+            .filter(|v| *v > 0.0)
+    };
+    let unit = (dec.find_tag(Tag::ResolutionUnit).ok().flatten())
+        .and_then(|v| v.into_u16().ok())
+        .unwrap_or(2);
+    let dpi = match (res(dec, Tag::XResolution), res(dec, Tag::YResolution)) {
+        (Some(x), y) => {
+            let y = y.unwrap_or(x);
+            match unit {
+                3 => (x * 2.54, y * 2.54),
+                2 => (x, y),
+                _ => (DEFAULT_DPI, DEFAULT_DPI),
+            }
+        }
+        _ => (DEFAULT_DPI, DEFAULT_DPI),
+    };
+    let n = w as usize * h as usize;
+    let image = match (color, dec.read_image()?) {
+        (C::Gray(1), D::U8(packed)) => {
+            let row = w.div_ceil(8) as usize;
+            let mut gray = Vec::with_capacity(n);
+            for r in packed.chunks(row).take(h as usize) {
+                gray.extend((0..w as usize).map(|x| {
+                    if r[x / 8] & (0x80 >> (x % 8)) != 0 {
+                        255
+                    } else {
+                        0
+                    }
+                }));
+            }
+            DynamicImage::ImageLuma8(image::GrayImage::from_raw(w, h, gray).context("size")?)
+        }
+        (C::Gray(8), D::U8(v)) => {
+            DynamicImage::ImageLuma8(image::GrayImage::from_raw(w, h, v).context("size")?)
+        }
+        (C::Gray(16), D::U16(v)) => {
+            DynamicImage::ImageLuma16(image::ImageBuffer::from_raw(w, h, v).context("size")?)
+        }
+        (C::GrayA(8), D::U8(v)) => {
+            DynamicImage::ImageLumaA8(image::ImageBuffer::from_raw(w, h, v).context("size")?)
+        }
+        (C::RGB(8), D::U8(v)) => {
+            DynamicImage::ImageRgb8(image::RgbImage::from_raw(w, h, v).context("size")?)
+        }
+        (C::RGB(16), D::U16(v)) => {
+            DynamicImage::ImageRgb16(image::ImageBuffer::from_raw(w, h, v).context("size")?)
+        }
+        (C::RGBA(8), D::U8(v)) => {
+            DynamicImage::ImageRgba8(image::RgbaImage::from_raw(w, h, v).context("size")?)
+        }
+        (C::RGBA(16), D::U16(v)) => {
+            DynamicImage::ImageRgba16(image::ImageBuffer::from_raw(w, h, v).context("size")?)
+        }
+        (C::CMYK(8), D::U8(v)) => {
+            let rgb: Vec<u8> = v
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| {
+                    let k = 255 - p[3] as u16;
+                    [0, 1, 2].map(|c| ((255 - p[c] as u16) * k / 255) as u8)
+                })
+                .collect();
+            DynamicImage::ImageRgb8(image::RgbImage::from_raw(w, h, rgb).context("size")?)
+        }
+        (c, _) => bail!("TIFF image {number} is {c:?}, which sheaf can't read"),
+    };
+    Ok((image, dpi))
 }
 
 /// A TIFF resolution tag's value. TIFF stores it as a RATIONAL, which
@@ -408,6 +446,117 @@ pub fn load(path: &Path) -> Result<RgbImage> {
     Ok(image.into_rgb8())
 }
 
+/// The pages in an image file, in order: a TIFF's read one at a time from
+/// the file, which is never held whole, and any other file's one image.
+/// The first is [`load`]'s image, byte for byte, whatever kind of TIFF it
+/// is. A TIFF's later pages are decoded as images-to-pdf decodes them
+/// (CMYK made RGB by its integer sums, which can come out one below
+/// `load`'s; a kind it can't read, planar or CMYK16 say, an error), each
+/// turned upright by its Orientation tag as `load` turns the first;
+/// reduced-resolution images (thumbnails) aren't pages. The type is told
+/// by the file's first bytes.
+pub fn frames(path: &Path) -> Result<Frames> {
+    let opening = || format!("opening {}", path.display());
+    let mut file = File::open(path).with_context(opening)?;
+    let mut head = Vec::with_capacity(16);
+    (&mut file)
+        .take(16)
+        .read_to_end(&mut head)
+        .with_context(opening)?;
+    let next = if sniff(&head) == Some(ImageFormat::Tiff) {
+        file.rewind().with_context(opening)?;
+        let dec = tiff_decoder(BufReader::new(file))
+            .with_context(|| format!("reading {}", path.display()))?;
+        Next::Tiff {
+            dec: Box::new(dec),
+            given: 0,
+        }
+    } else {
+        Next::Load
+    };
+    Ok(Frames {
+        path: path.to_path_buf(),
+        next,
+    })
+}
+
+/// How many pages [`frames`] gives for `path`: a TIFF's, counted from its
+/// images' headers without decoding them, or 1.
+pub fn count_frames(path: &Path) -> Result<usize> {
+    let Next::Tiff { mut dec, .. } = frames(path)?.next else {
+        return Ok(1);
+    };
+    let mut n = 1;
+    while next_page(&mut dec).with_context(|| format!("reading {}", path.display()))? {
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// An image file's pages, read as they're asked for: see [`frames`].
+pub struct Frames {
+    path: PathBuf,
+    next: Next,
+}
+
+enum Next {
+    /// Not a TIFF: [`load`]'s image, not read yet.
+    Load,
+    /// A TIFF, `given` of its pages given so far, `dec` at the last.
+    Tiff {
+        dec: Box<tiff::decoder::Decoder<BufReader<File>>>,
+        given: usize,
+    },
+    Done,
+}
+
+impl Iterator for Frames {
+    type Item = Result<RgbImage>;
+
+    /// The next page; after an error, none.
+    fn next(&mut self) -> Option<Result<RgbImage>> {
+        match std::mem::replace(&mut self.next, Next::Done) {
+            Next::Done => None,
+            Next::Load => Some(load(&self.path)),
+            Next::Tiff { mut dec, given } => {
+                let frame = if given == 0 {
+                    load(&self.path)
+                } else {
+                    match next_page(&mut dec) {
+                        Ok(false) => return None,
+                        Ok(true) => tiff_frame(&mut dec, given + 1),
+                        Err(e) => Err(e.into()),
+                    }
+                    .with_context(|| format!("reading {}, page {}", self.path.display(), given + 1))
+                };
+                if frame.is_ok() {
+                    self.next = Next::Tiff {
+                        dec,
+                        given: given + 1,
+                    };
+                }
+                Some(frame)
+            }
+        }
+    }
+}
+
+/// The TIFF image `dec` is at, image `number` of its file, as RGB, turned
+/// upright by its Orientation tag; a tag that isn't one value from 1 to 8
+/// is ignored, as `load` ignores it.
+fn tiff_frame<R: Read + Seek>(
+    dec: &mut tiff::decoder::Decoder<R>,
+    number: usize,
+) -> Result<RgbImage> {
+    let orientation = (dec.find_tag(Tag::Orientation).ok().flatten())
+        .and_then(|v| v.into_u16().ok())
+        .and_then(|v| Orientation::from_exif(v.min(255) as u8))
+        .unwrap_or(Orientation::NoTransforms);
+    let (mut image, _) = tiff_image(dec, number)?;
+    image.apply_orientation(orientation);
+    Ok(image.into_rgb8())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,6 +598,357 @@ mod tests {
         let pages = read_bytes(out.into_inner()).unwrap();
         assert_eq!(pages.len(), 2);
         assert_eq!((pages[1].width, pages[1].height), (50, 40));
+    }
+
+    #[test]
+    fn a_black_and_white_page_is_held_as_g4() {
+        // Letter at 300 dpi: white, with black bars where lines of text go.
+        let (w, h) = (2550, 3300);
+        let gray = image::GrayImage::from_fn(w, h, |x, y| {
+            let ink = (300..2250).contains(&x) && (300..3000).contains(&y) && y % 100 < 30;
+            image::Luma([if ink { 0 } else { 255 }])
+        });
+        let page = PageImage::from_image(DynamicImage::ImageLuma8(gray.clone()), 300.0);
+        let Pixels::G4(bytes) = &page.pixels else {
+            panic!("a black and white page should be held as G4");
+        };
+        assert_eq!(*bytes, crate::encode::g4(gray.as_raw(), w, h));
+        assert!(
+            bytes.len() * 100 < (w * h) as usize,
+            "{} bytes of G4",
+            bytes.len()
+        );
+    }
+
+    fn write(dir: &tempfile::TempDir, name: &str, bytes: Vec<u8>) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_tiff_gives_its_pages_one_at_a_time() {
+        use tiff::encoder::{TiffEncoder, colortype};
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Cursor::new(Vec::new());
+        let mut enc = TiffEncoder::new(&mut out).unwrap();
+        let a = gradient(30, 20).into_rgb8();
+        enc.write_image::<colortype::RGB8>(30, 20, a.as_raw())
+            .unwrap();
+        let b = image::GrayImage::from_fn(50, 40, |x, y| image::Luma([(x * 5 + y) as u8]));
+        enc.write_image::<colortype::Gray8>(50, 40, b.as_raw())
+            .unwrap();
+        let path = write(&dir, "two.tif", out.into_inner());
+        let pages: Vec<RgbImage> = frames(&path).unwrap().collect::<Result<_>>().unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0], a);
+        assert_eq!(pages[1], DynamicImage::ImageLuma8(b).into_rgb8());
+    }
+
+    /// An image's tags: tag, type, values.
+    type Tags = Vec<(u16, u16, Vec<u32>)>;
+
+    /// A little-endian TIFF made by hand, for what tiff's encoder won't
+    /// write: each image its tags (tag, type, values; 3 SHORT, 4 LONG, 8
+    /// SSHORT) and its strips, whose offsets and byte counts are added.
+    fn by_hand(images: &[(Tags, Vec<Vec<u8>>)]) -> Vec<u8> {
+        let mut out = b"II*\0\0\0\0\0".to_vec();
+        let mut link = 4;
+        for (tags, strips) in images {
+            let mut tags = tags.clone();
+            let mut offsets = Vec::new();
+            for strip in strips {
+                offsets.push(out.len() as u32);
+                out.extend(strip);
+            }
+            tags.push((273, 4, offsets));
+            tags.push((279, 4, strips.iter().map(|s| s.len() as u32).collect()));
+            tags.sort_by_key(|t| t.0);
+            let mut entries = Vec::new();
+            for (tag, kind, values) in tags {
+                let bytes: Vec<u8> = (values.iter())
+                    .flat_map(|&v| match kind {
+                        3 | 8 => (v as u16).to_le_bytes().to_vec(),
+                        _ => v.to_le_bytes().to_vec(),
+                    })
+                    .collect();
+                let field = if bytes.len() <= 4 {
+                    let mut b = bytes;
+                    b.resize(4, 0);
+                    b
+                } else {
+                    out.resize(out.len().next_multiple_of(2), 0);
+                    let at = out.len() as u32;
+                    out.extend(bytes);
+                    at.to_le_bytes().to_vec()
+                };
+                entries.push((tag, kind, values.len() as u32, field));
+            }
+            out.resize(out.len().next_multiple_of(2), 0);
+            let ifd = out.len() as u32;
+            out[link..link + 4].copy_from_slice(&ifd.to_le_bytes());
+            out.extend((entries.len() as u16).to_le_bytes());
+            for (tag, kind, count, field) in entries {
+                out.extend(tag.to_le_bytes());
+                out.extend(kind.to_le_bytes());
+                out.extend(count.to_le_bytes());
+                out.extend(field);
+            }
+            link = out.len();
+            out.extend([0; 4]);
+        }
+        out
+    }
+
+    /// An uncompressed image's tags made by hand: `w` x `h`, `bits` a
+    /// sample, as `photometric` says, its samples `planar` or interleaved.
+    fn hand_tags(w: u32, h: u32, bits: &[u32], photometric: u32, planar: bool) -> Tags {
+        vec![
+            (256, 4, vec![w]),
+            (257, 4, vec![h]),
+            (258, 3, bits.to_vec()),
+            (259, 3, vec![1]),
+            (262, 3, vec![photometric]),
+            (277, 3, vec![bits.len() as u32]),
+            (278, 4, vec![h]),
+            (284, 3, vec![if planar { 2 } else { 1 }]),
+        ]
+    }
+
+    /// TIFFs of each kind `load` reads that the tests try, in `dir`: one
+    /// image, or `first` and then the kind's image when there's a `first`.
+    fn kinds(dir: &tempfile::TempDir, first: Option<&image::GrayImage>) -> Vec<PathBuf> {
+        use crate::encode::{TiffPage, TiffWriter};
+        use tiff::encoder::{DirectoryEncoder, TiffEncoder, TiffKindStandard, colortype};
+        type Enc<'a> = TiffEncoder<&'a mut Cursor<Vec<u8>>>;
+        type Dir<'a, 'b> = DirectoryEncoder<'a, &'b mut Cursor<Vec<u8>>, TiffKindStandard>;
+        let prefix = if first.is_some() { "two-" } else { "" };
+        let rgb = gradient(40, 30).into_rgb8();
+        let gray = DynamicImage::ImageRgb8(rgb.clone()).into_luma8();
+        let bw = image::GrayImage::from_fn(40, 30, |x, y| {
+            image::Luma([if (x * y) % 7 < 3 { 0 } else { 255 }])
+        });
+        let mut files = Vec::new();
+        for (name, page) in [
+            ("rgb.tif", TiffPage::Rgb(&rgb)),
+            ("gray.tif", TiffPage::Gray(&gray)),
+            ("bw.tif", TiffPage::Bilevel(&bw)),
+        ] {
+            let mut out = Cursor::new(Vec::new());
+            let mut w = TiffWriter::new(&mut out, 300, 1 + first.is_some() as usize).unwrap();
+            if let Some(first) = first {
+                w.add(TiffPage::Gray(first)).unwrap();
+            }
+            w.add(page).unwrap();
+            files.push(write(dir, &format!("{prefix}{name}"), out.into_inner()));
+        }
+        let encoded = |name: &str, f: &dyn Fn(&mut Enc)| {
+            let mut out = Cursor::new(Vec::new());
+            let mut enc = TiffEncoder::new(&mut out).unwrap();
+            if let Some(first) = first {
+                (enc.write_image::<colortype::Gray8>(
+                    first.width(),
+                    first.height(),
+                    first.as_raw(),
+                ))
+                .unwrap();
+            }
+            f(&mut enc);
+            write(dir, &format!("{prefix}{name}"), out.into_inner())
+        };
+        let wide: Vec<u16> = (0..40 * 30).map(|i| (i * 53) as u16).collect();
+        files.push(encoded("gray16.tif", &|enc| {
+            enc.write_image::<colortype::Gray16>(40, 30, &wide).unwrap();
+        }));
+        // Stored on its side; Orientation 6 shows it turned a quarter
+        // clockwise. Then the tag as two values, and as a signed one,
+        // which aren't an orientation.
+        let tagged = |name: &str, tag: &dyn Fn(&mut Dir)| {
+            encoded(name, &|enc| {
+                let mut im = enc.new_image::<colortype::RGB8>(40, 30).unwrap();
+                tag(im.encoder());
+                im.write_data(rgb.as_raw()).unwrap();
+            })
+        };
+        let turned = tagged("turned.tif", &|d| {
+            d.write_tag(Tag::Orientation, 6u16).unwrap()
+        });
+        if first.is_none() {
+            assert_eq!(load(&turned).unwrap().dimensions(), (30, 40));
+        }
+        files.push(turned);
+        files.push(tagged("orientation-pair.tif", &|d| {
+            d.write_tag(Tag::Orientation, &[6u16, 1][..]).unwrap()
+        }));
+        files.push(tagged("signed-orientation.tif", &|d| {
+            d.write_tag(Tag::Orientation, 6i16).unwrap()
+        }));
+        let cmyk: Vec<u8> = (0..40 * 30 * 4).map(|i| (i * 37 % 256) as u8).collect();
+        files.push(encoded("cmyk.tif", &|enc| {
+            enc.write_image::<colortype::CMYK8>(40, 30, &cmyk).unwrap();
+        }));
+        let cmyk16: Vec<u16> = (0..40 * 30 * 4).map(|i| (i * 4099) as u16).collect();
+        files.push(encoded("cmyk16.tif", &|enc| {
+            enc.write_image::<colortype::CMYK16>(40, 30, &cmyk16)
+                .unwrap();
+        }));
+        let float: Vec<f32> = rgb.as_raw().iter().map(|&v| v as f32 / 255.0).collect();
+        files.push(encoded("float.tif", &|enc| {
+            enc.write_image::<colortype::RGB32Float>(40, 30, &float)
+                .unwrap();
+        }));
+        // RGB stored a plane a strip.
+        let planes: Vec<Vec<u8>> = (0..3)
+            .map(|c| rgb.pixels().map(|p| p[c]).collect())
+            .collect();
+        let mut images = Vec::new();
+        if let Some(first) = first {
+            let tags = hand_tags(first.width(), first.height(), &[8], 1, false);
+            images.push((tags, vec![first.as_raw().clone()]));
+        }
+        images.push((hand_tags(40, 30, &[8, 8, 8], 2, true), planes));
+        files.push(write(dir, &format!("{prefix}planar.tif"), by_hand(&images)));
+        files
+    }
+
+    /// The kinds images-to-pdf can't read, which a TIFF's later page is
+    /// refused for.
+    const FIRST_ONLY: [&str; 3] = ["cmyk16.tif", "float.tif", "planar.tif"];
+
+    /// A TIFF's first page is `load`'s image, whatever its kind: those
+    /// images-to-pdf can't read (CMYK16, float RGB,
+    /// planar), CMYK whose integer sums differ, an Orientation tag that
+    /// isn't one value; and nothing follows it.
+    #[test]
+    fn a_tiff_s_first_page_is_load_s_image() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in kinds(&dir, None) {
+            let mut pages = frames(&path).unwrap();
+            let page = pages.next().unwrap().unwrap();
+            assert!(page == load(&path).unwrap(), "{}", path.display());
+            assert!(pages.next().is_none());
+            assert_eq!(count_frames(&path).unwrap(), 1);
+        }
+    }
+
+    /// A TIFF's later pages read as `load` reads each alone: CMYK within 1
+    /// of it, by `tiff_image`'s integer sums, and the rest exactly, an
+    /// Orientation tag that isn't one value ignored as `load` ignores it;
+    /// the kinds images-to-pdf can't read an error, never another image.
+    #[test]
+    fn a_tiff_s_later_pages_read_as_load_reads_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = image::GrayImage::from_fn(20, 10, |x, y| image::Luma([(x * 9 + y) as u8]));
+        let alone = kinds(&dir, None);
+        for (path, alone) in kinds(&dir, Some(&first)).iter().zip(&alone) {
+            let name = alone.file_name().unwrap().to_str().unwrap();
+            assert_eq!(count_frames(path).unwrap(), 2, "{name}");
+            let mut pages = frames(path).unwrap();
+            let page = pages.next().unwrap().unwrap();
+            assert!(page == DynamicImage::ImageLuma8(first.clone()).into_rgb8());
+            let page = pages.next().unwrap();
+            if FIRST_ONLY.contains(&name) {
+                assert!(page.is_err(), "{name}");
+                continue;
+            }
+            let (page, loaded) = (page.unwrap(), load(alone).unwrap());
+            assert!(pages.next().is_none());
+            assert_eq!(page.dimensions(), loaded.dimensions(), "{name}");
+            if name == "cmyk.tif" {
+                let mut off = page.iter().zip(loaded.iter());
+                assert!(off.all(|(a, b)| a.abs_diff(*b) <= 1), "{name}");
+            } else {
+                assert!(page == loaded, "{name}");
+            }
+        }
+    }
+
+    /// An image marked reduced-resolution (a thumbnail) isn't a page, in
+    /// `frames` or in images-to-pdf's read.
+    #[test]
+    fn a_tiff_s_thumbnail_is_not_a_page() {
+        use tiff::encoder::{TiffEncoder, colortype};
+        let dir = tempfile::tempdir().unwrap();
+        let rgb = gradient(40, 30).into_rgb8();
+        let gray = image::GrayImage::from_fn(50, 40, |x, y| image::Luma([(x * 5 + y) as u8]));
+        let mut out = Cursor::new(Vec::new());
+        let mut enc = TiffEncoder::new(&mut out).unwrap();
+        enc.write_image::<colortype::RGB8>(40, 30, rgb.as_raw())
+            .unwrap();
+        let small = image::imageops::thumbnail(&rgb, 10, 8);
+        let mut im = enc.new_image::<colortype::RGB8>(10, 8).unwrap();
+        im.encoder().write_tag(Tag::NewSubfileType, 1u32).unwrap();
+        im.write_data(small.as_raw()).unwrap();
+        enc.write_image::<colortype::Gray8>(50, 40, gray.as_raw())
+            .unwrap();
+        let bytes = out.into_inner();
+        let path = write(&dir, "thumbnail.tif", bytes.clone());
+        let pages: Vec<RgbImage> = frames(&path).unwrap().collect::<Result<_>>().unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(count_frames(&path).unwrap(), 2);
+        assert!(pages[1] == DynamicImage::ImageLuma8(gray).into_rgb8());
+        let read = read_bytes(bytes).unwrap();
+        assert_eq!((read.len(), read[1].width), (2, 50));
+    }
+
+    /// A page bigger than tiff's own 256 MiB limit and inside image's 512,
+    /// as `load` reads it: a white 9500 x 9500 RGB page, 271 MB, second in
+    /// its file (the first is `load`'s own).
+    #[test]
+    fn a_tiff_page_past_256_mib_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (w, h) = (9500u32, 9500u32);
+        // PackBits: each row 222 runs of 128 bytes of 255, then 84.
+        let mut row = Vec::new();
+        for _ in 0..222 {
+            row.extend([0x81, 0xFF]);
+        }
+        row.extend([(1i8 - 84) as u8, 0xFF]);
+        let packed = row.repeat(h as usize);
+        let mut big = hand_tags(w, h, &[8, 8, 8], 2, false);
+        big[3].2 = vec![32773];
+        let path = write(
+            &dir,
+            "big.tif",
+            by_hand(&[
+                (hand_tags(2, 2, &[8], 1, false), vec![vec![0; 4]]),
+                (big, vec![packed]),
+            ]),
+        );
+        let mut pages = frames(&path).unwrap();
+        pages.next().unwrap().unwrap();
+        let page = pages.next().unwrap().unwrap();
+        assert_eq!(page.dimensions(), (w, h));
+        assert!(page.iter().all(|&v| v == 255));
+    }
+
+    /// A page too big for any limit is an error, not a multiply that
+    /// overflows: 70000 x 70000 gray, its header alone.
+    #[test]
+    fn a_tiff_page_too_big_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = by_hand(&[
+            (hand_tags(2, 2, &[8], 1, false), vec![vec![0; 4]]),
+            (hand_tags(70000, 70000, &[8], 1, false), vec![vec![0; 4]]),
+        ]);
+        let path = write(&dir, "huge.tif", bytes.clone());
+        let mut pages = frames(&path).unwrap();
+        pages.next().unwrap().unwrap();
+        assert!(pages.next().unwrap().is_err());
+        assert!(read_bytes(bytes).is_err());
+    }
+
+    #[test]
+    fn any_other_image_is_one_frame_as_load_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "page.png",
+            encode(&gradient(40, 30), ImageFormat::Png),
+        );
+        let mut pages = frames(&path).unwrap();
+        assert!(pages.next().unwrap().unwrap() == load(&path).unwrap());
+        assert!(pages.next().is_none());
     }
 
     #[test]

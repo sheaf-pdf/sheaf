@@ -211,8 +211,9 @@ PageSpace that corner is its bottom-left.
 
 **`document`**: `path`, `version`, `pages`, `outline`, `annotations(page)`,
 `selection`, `current-page`. Ids are opaque and stable while the document
-is open; they aren't page numbers. With no document open, `path` and
-`version` are none and the lists are empty.
+is open; they aren't page numbers. `path` is none for a document with no
+file yet (a scan not saved). With no document open, `path` and `version`
+are none and the lists are empty.
 - `pages` gives each page's id, its media and crop boxes, how it's
   turned as it shows (`rotate`: the file's `/Rotate` with any turn added
   in sheaf), its label (its page label, or its number) and its two

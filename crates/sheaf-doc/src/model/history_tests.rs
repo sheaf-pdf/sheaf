@@ -530,6 +530,7 @@ impl Run {
                     self.lower(&mut tx, rng.u8(..KINDS), rng, &mut Locals::default());
                     (tx, label("group"))
                 }
+                GroupKind::Scan => unreachable!("the runs made here are OCR's and plugins'"),
             };
             let opts = CommitOpts {
                 group: Some(id),

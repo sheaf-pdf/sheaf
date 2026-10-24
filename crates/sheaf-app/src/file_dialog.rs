@@ -10,7 +10,7 @@ type Dialog<T> = oneshot::Receiver<Result<Option<T>>>;
 /// Dev: `SHEAF_SCRIPT_PICK` answers every picker with that path, so UI
 /// scripts (see script.rs) can get past them. `SHEAF_SCRIPT_SAVE`, when
 /// set, answers save pickers instead, so a script that picks an input
-/// doesn't also write over it.
+/// doesn't also write over it; set empty, it cancels them.
 fn scripted() -> Option<PathBuf> {
     std::env::var_os("SHEAF_SCRIPT_PICK").map(PathBuf::from)
 }
@@ -91,6 +91,11 @@ pub fn open_filtered(cx: &App, options: PathPromptOptions, filter: Filter) -> Di
 
 pub fn save(cx: &App, directory: &Path, suggested_name: Option<&str>) -> Dialog<PathBuf> {
     if let Some(p) = scripted_save() {
+        if p.as_os_str().is_empty() {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Ok(None));
+            return rx;
+        }
         return answer(p);
     }
     let rx = cx.prompt_for_new_path(directory, suggested_name);

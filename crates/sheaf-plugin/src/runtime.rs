@@ -159,7 +159,8 @@ impl std::fmt::Display for Call {
 
 #[derive(Clone)]
 pub struct DocContext {
-    pub path: PathBuf,
+    /// The document's file; None when it has no file yet.
+    pub path: Option<PathBuf>,
     /// The document as it is now, which the app publishes at every change:
     /// a call makes its transaction on it at its first read or submit
     /// (M10.5 §14.3), so one that waited in the queue, or on a form, reads

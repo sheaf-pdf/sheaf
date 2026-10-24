@@ -220,23 +220,6 @@ phase; they're triaged between phases.
   file.
 - **Notes:** none found in the corpus runs; read from the code.
 
-### B11: Create from Scans still writes a file and reopens it
-
-- **Found:** 2026-10-22, M10.5 slice 19
-- **Where:** `Workspace::create_from_scans`
-  (`crates/sheaf-app/src/workspace.rs`), `open_paths`
-- **Severity:** annoyance
-- **What happens:** scan builds a Session now, but the app writes its
-  result to a file and opens that file, where Combine hands its
-  Document to a window as made.
-- **Expected:** the scan's Session handed to a window, as Combine does:
-  no file until the user saves.
-- **Repro:** Create from Scans in the app.
-- **Notes:** M5's scanner intake (ROADMAP) reworks this path; do it
-  there.
-
-(B14–B18 are on the M5 branch, `m5-intake`, found by M5 slice 1.)
-
 ### B19: A bookmark selection isn't tracked, so a re-lowered edit can land on other pages
 
 - **Found:** 2026-10-23, M10.5 slice 20
@@ -455,6 +438,165 @@ phase; they're triaged between phases.
   test -p sheaf-doc --lib the_corpus_s_signatures_agree_with_pyhanko --
   --nocapture` (all 5 under `signatures/safedocs/`).
 - **Notes:** `qpdf --json` on each shows its fields by revision.
+
+### B14: A TIFF's Orientation tag is ignored by images-to-pdf, Combine and image inserts
+
+- **Found:** 2026-10-23, M5 slice 1
+- **Where:** `sheaf_image::io::tiff_pages`
+  (`crates/sheaf-image/src/io.rs`), behind `sheaf images-to-pdf`,
+  Combine's images and `PageSource::Images`
+- **Severity:** wrong output
+- **What happens:** a TIFF whose Orientation tag says the image is
+  turned or mirrored comes out unturned. `io::load`, `decoded` and slice
+  1's `frames` (what `sheaf scan` reads) do turn it, so the same file
+  looks different scanned and inserted.
+- **Expected:** every reader honors the tag, as `load` does.
+- **Repro:** a TIFF with Orientation 6 (turned 90°); `sheaf
+  images-to-pdf` it, and `sheaf scan` it; compare.
+- **Notes:** `tiff_pages` must keep its output byte for byte otherwise
+  (its CMYK conversion is pinned); apply the tag after decoding, as
+  `frames` does for later pages.
+
+### B15: Some TIFF kinds are refused: CMYK16, float RGB/RGBA, planar
+
+- **Found:** 2026-10-23, M5 slice 1
+- **Where:** `sheaf_image::io::tiff_image`, behind images-to-pdf,
+  Combine's images, `PageSource::Images`, and a scan's TIFF pages after
+  the first
+- **Severity:** annoyance
+- **What happens:** these kinds fail with an error. The image crate's
+  `load` reads them, so `sheaf scan` reads such a TIFF's first page (it
+  uses `load` for it) but refuses its later pages.
+- **Expected:** read them, or say which kind isn't supported.
+- **Repro:** a planar RGB TIFF in `sheaf images-to-pdf`.
+- **Notes:** rare from scanners and fax software. Two-sample gray
+  (tiff 0.11's `Multiband`) is refused by both paths; `tiff_image`'s
+  `GrayA` arms are unreachable.
+
+### B16: The command line hangs if its work panics
+
+- **Found:** 2026-10-23, M5 slice 1's review
+- **Where:** `sheaf-cli`'s `progress::run`
+- **Severity:** crash (shows as a hang)
+- **What happens:** a panic in the work unwinds before
+  `done.store(true)`, so `thread::scope` waits forever for the progress
+  drawing thread, at 0% CPU. A debug build's overflow on a huge TIFF
+  header found it (that overflow is fixed).
+- **Expected:** the panic ends the command with its message and a
+  failing exit code.
+- **Repro:** any subcommand whose work panics, run through
+  `progress::run`.
+- **Notes:** set `done` from a drop guard.
+
+### B17: The Combine dialog decodes every image just to count its pages
+
+- **Found:** 2026-10-23, M5 slice 1
+- **Where:** `combine_dialog.rs` (the background `inspect`, around line
+  119)
+- **Severity:** annoyance (slow)
+- **What happens:** to show each item's page count, it decodes every
+  image in full, and since slice 1 G4-encodes the black and white ones
+  too. A folder of large scans takes a long time to list.
+- **Expected:** count a TIFF's images from its headers (slice 1's
+  `count_frames`) and treat other images as one page, without decoding.
+
+### B18: images-to-pdf holds every gray and color page's pixels until it writes
+
+- **Found:** 2026-10-23, M5 slice 1
+- **Where:** `sheaf_ops::images::images_to_pdf` (`read` collects a
+  `Vec<PageImage>`)
+- **Severity:** annoyance (memory)
+- **What happens:** every image is read before anything is written.
+  Black and white pages are G4 bytes from slice 1 on, but gray and color
+  pages (a PNG's pixels) are held raw: 100 color Letter pages at 300 dpi
+  are about 2.5 GB.
+- **Expected:** a page at a time, as `sheaf scan` now runs (M5's
+  intake), or each page encoded as it's read.
+- **Notes:** images-to-pdf doesn't clean pages, so it could run on the
+  intake with no cleanup step.
+
+### B32: An untitled document's recovery sidecar is never encrypted
+
+- **Found:** 2026-10-23, M5 slice 2
+- **Where:** `sheaf_doc::recovery::write_untitled`, the app's
+  `DocView::write_recovery` (untitled arm)
+- **Severity:** privacy
+- **What happens:** a document made in memory has no encryption, so its
+  sidecar in `state_dir()/recovery/` is written in the clear. Pages
+  inserted into an untitled document from an encrypted PDF then sit
+  unencrypted in the state folder until it's saved or closed.
+- **Expected:** what a Save As would write anyway, so arguably fine. But
+  a user who opened an encrypted file may not expect its pages to
+  persist in the clear while a document has no file.
+- **Notes:** options: carry the source's encryption into the untitled
+  document's sidecar, or say so when pages from an encrypted file land
+  in one. Overlap: M10.5 §11.10 (recovery).
+
+### B33: Opening a file in the recovery folder can delete an untitled sidecar
+
+- **Found:** 2026-10-23, M5 slice 2
+- **Where:** `sheaf_doc::recovery::find` (`crates/sheaf-doc/src/recovery.rs:313`)
+- **Severity:** annoyance (an extreme edge case)
+- **What happens:** `find` beside a file removes an untitled sidecar as
+  malformed. So opening a file named `state_dir()/recovery/Untitled scan
+  1` (no extension) deletes that document's crash recovery.
+- **Expected:** `find` beside a file ignores an untitled sidecar rather
+  than removing it.
+- **Notes:** tiny; nobody opens files in the state folder on purpose.
+
+### B34: A file's recovery sidecar can outlive an undo to its saved version
+
+- **Found:** 2026-10-23, M5 slice 2 (pre-existing)
+- **Where:** `DocView::write_recovery`'s file arm
+  (`crates/sheaf-app/src/docview.rs:1537`) and its completion
+- **Severity:** annoyance
+- **What happens:** the clean-document discard runs before the
+  `sidecar_writing` check, and the completion keeps a sidecar while its
+  base is unchanged. A write that takes over 3 s and lands after the
+  document was undone to its saved version, or closed clean, stays. The
+  next open then offers to recover undone edits.
+- **Expected:** a write that completes on a clean document removes its
+  sidecar, as the untitled arm (slice 2) already does.
+- **Repro:** a large file, an edit, then an undo while its first sidecar
+  write is still running; close; reopen.
+- **Notes:** slice 2's untitled arm checks dirtiness when a write
+  completes. Slice 7 (Insert from Scanner into an open file) reworks the
+  file arm's writes, so it may be the place to fix it.
+
+### B35: Opening a file reads its whole recovery sidecar and holds it until answered
+
+- **Found:** 2026-10-23, M5 slice 2 (pre-existing)
+- **Where:** `sheaf_doc::recovery::find`
+- **Severity:** annoyance (memory)
+- **What happens:** `find` beside a file reads the whole sidecar at open
+  and holds it until the Recover / Discard prompt is answered. A large
+  Full sidecar (a Rewrite of a big file) costs its size in memory for as
+  long as the prompt is up.
+- **Expected:** read the head to offer, and the body on Recover, as
+  slice 2's `find_untitled` and `restore_untitled` now do.
+
+### B36: sheaf-doc's tests leave scratch folders in /tmp on every run
+
+- **Found:** 2026-10-23, M5 slice 2 (pre-existing)
+- **Where:** `crates/sheaf-doc/src/model.rs:4119` (`sheaf-model-<pid>-<n>`)
+  and `materialize/rewrite_tests.rs:2886` (`sheaf-save-…`)
+- **Severity:** annoyance (tests)
+- **What happens:** neither removes its folder, so they pile up: 7,041
+  `sheaf-model-*` and 38,367 `sheaf-*` entries at slice 2's wrap-up. On a
+  machine whose /tmp is RAM (tmpfs), that's memory.
+- **Expected:** a temp dir that removes itself on drop, or cleanup at
+  the end of each test. (sheaf-doc has no `tempfile` dev-dependency
+  today.)
+
+### B37: A stray doc comment above `open_recent` in workspace.rs
+
+- **Found:** 2026-10-23, M5 slice 2 (pre-existing)
+- **Where:** `crates/sheaf-app/src/workspace.rs:1172`
+- **Severity:** cosmetic
+- **What happens:** `/// Document > Recognize Text (OCR)…: open the
+  options card…` sits above `open_recent`'s own doc comment, so rustdoc
+  shows it on the wrong function.
+- **Expected:** it moves to the OCR action it describes, or goes.
 
 ## Features
 
@@ -815,21 +957,6 @@ phase; they're triaged between phases.
 - **Deferred** (Greg, 2026-10-22): revisit after more milestones, since
   what sheaf needs from this layer may change as later scopes dig in.
   Upstream fixes go ahead meanwhile.
-
-### F14: An automated test of `sheaf scan --ocr`
-
-- **Found:** 2026-10-22, M10.5 slice 19 (step 5, scan as a Session)
-- **What:** a CLI test that runs `sheaf scan --ocr` on a few images and
-  checks the output's text layer: the words found, one OCR block a page,
-  one font.
-- **Why:** slice 19 moved scan onto a Session (an empty session plus an
-  insert of the images, then OCR). Only a hand run checks the `--ocr`
-  path; the OCR op itself is tested in sheaf-doc and the corpus tiers.
-- **Overlap:** M5's scanner intake (ROADMAP), which reworks scan.
-- **Notes:** the worry was that Tesseract may be missing in CI. Check
-  what `--ocr` needs (sheaf-ocr's default engine vs the `tesseract`
-  feature, used only for orientation) and either run it everywhere or
-  install what it needs in CI. Don't make it skip silently.
 
 ### F15: A Rewrite that doesn't load the whole file (the flatten export's memory gate)
 
@@ -1492,6 +1619,43 @@ phase; they're triaged between phases.
   free.
 - **Notes:** small: a command and a confirmation. The op, its Notes
   and the Rewrite it plans exist.
+
+### F14: An automated test of `sheaf scan --ocr`
+
+- **Closed:** 2026-10-23. Fixed in M5 slice 1 (`4481573`):
+  `crates/sheaf-cli/tests/scan.rs`. It runs in `cargo test --workspace`
+  on every CI runner (sheaf-cli's default features build Tesseract, and
+  CI fetches the OCR data); without them the scan fails, never skips.
+- **Found:** 2026-10-22, M10.5 slice 19 (step 5, scan as a Session)
+- **What:** a CLI test that runs `sheaf scan --ocr` on a few images and
+  checks the output's text layer: the words found, one OCR block a page,
+  one font.
+- **Why:** slice 19 moved scan onto a Session (an empty session plus an
+  insert of the images, then OCR). Only a hand run checks the `--ocr`
+  path; the OCR op itself is tested in sheaf-doc and the corpus tiers.
+- **Overlap:** M5's scanner intake (ROADMAP), which reworks scan.
+- **Notes:** the worry was that Tesseract may be missing in CI. Check
+  what `--ocr` needs (sheaf-ocr's default engine vs the `tesseract`
+  feature, used only for orientation) and either run it everywhere or
+  install what it needs in CI. Don't make it skip silently.
+
+### B11: Create from Scans still writes a file and reopens it
+
+- **Closed:** 2026-10-23. Fixed in M5 slice 2: Create from Scans streams
+  its pages into an untitled document in a new or empty window; nothing
+  is written until Save, which is Save As.
+- **Found:** 2026-10-22, M10.5 slice 19
+- **Where:** `Workspace::create_from_scans`
+  (`crates/sheaf-app/src/workspace.rs`), `open_paths`
+- **Severity:** annoyance
+- **What happens:** scan builds a Session now, but the app writes its
+  result to a file and opens that file, where Combine hands its
+  Document to a window as made.
+- **Expected:** the scan's Session handed to a window, as Combine does:
+  no file until the user saves.
+- **Repro:** Create from Scans in the app.
+- **Notes:** M5's scanner intake (ROADMAP) reworks this path; do it
+  there.
 
 ## Sources checked
 

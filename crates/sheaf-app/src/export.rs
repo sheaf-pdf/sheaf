@@ -44,18 +44,13 @@ impl crate::docview::DocView {
             dpi: spec.dpi,
             format: spec.format,
             dir: PathBuf::new(),
-            stem: stem_of(&self.path),
+            stem: self.stem(),
         };
         let window_handle = window.window_handle();
         if job.format.single_file() {
             // One file: ask for its name (the picker confirms replacing).
-            let dir = self
-                .path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_default();
             let suggested = format!("{}.{}", job.stem, job.format.extension());
-            let rx = crate::file_dialog::save(cx, &dir, Some(&suggested));
+            let rx = crate::file_dialog::save(cx, &self.folder(), Some(&suggested));
             cx.spawn(async move |this, cx| {
                 let Ok(Ok(Some(path))) = rx.await else {
                     return;

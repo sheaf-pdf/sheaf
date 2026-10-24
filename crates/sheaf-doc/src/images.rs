@@ -13,7 +13,6 @@ use std::io::Write;
 use anyhow::{Result, bail};
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_edit::Fit;
-use sheaf_image::encode::g4;
 use sheaf_image::io::{PageImage, Pixels};
 
 /// Where an image goes on its page, as shown (upright, top-left origin,
@@ -122,14 +121,14 @@ pub(crate) fn image_stream(page: &PageImage) -> Result<Stream> {
         }
         Pixels::Gray(v) => flate(base("DeviceGray", 8), v)?,
         Pixels::Rgb(v) => flate(base("DeviceRGB", 8), v)?,
-        Pixels::Bilevel(v) => {
+        Pixels::G4(bytes) => {
             let mut d = base("DeviceGray", 1);
             d.set("Filter", "CCITTFaxDecode");
             d.set(
                 "DecodeParms",
                 dictionary! { "K" => -1, "Columns" => w, "Rows" => h },
             );
-            Stream::new(d, g4(v, page.width, page.height)).with_compression(false)
+            Stream::new(d, bytes.clone()).with_compression(false)
         }
     })
 }
@@ -222,7 +221,7 @@ mod tests {
             image::Luma([if (x + y) % 3 == 0 { 0 } else { 255 }])
         }));
         let pages = read_bytes(encode(&bw, ImageFormat::Png)).unwrap();
-        assert!(matches!(pages[0].pixels, Pixels::Bilevel(_)));
+        assert!(matches!(pages[0].pixels, Pixels::G4(_)));
         let pdf = to_pdf(&pages, Fit::Original).unwrap();
         assert_eq!(page_facts(&pdf)[0].2, "CCITTFaxDecode");
         let rgb = read_bytes(encode(&gradient(10, 10), ImageFormat::Png)).unwrap();

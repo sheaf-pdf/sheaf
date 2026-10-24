@@ -336,7 +336,7 @@ impl Shared {
     /// What a call reads, `text` its pages' text.
     fn context(&self, path: &str, text: Arc<dyn TextService>) -> DocContext {
         DocContext {
-            path: path.into(),
+            path: Some(path.into()),
             cell: self.0.cell.clone(),
             selection: Vec::new(),
             current_page: None,
@@ -448,6 +448,16 @@ fn plugin_sees_the_call_context() {
         format!(
             r#"path=Some("return.pdf") version=Some({v}) selection=[{p1}] current=Some({p0}) args=Some("{{\"x\":1}}")"#
         )
+    );
+    // A document with no file yet: no path, and its pages as they are.
+    let mut untitled = ctx(&d);
+    untitled.doc.as_mut().unwrap().path = None;
+    let err = run(&p, "context", None, untitled).unwrap_err();
+    assert_eq!(
+        err,
+        PluginError::Failed(format!(
+            "path=None version=Some({v}) selection=[{p1}] current=Some({p0}) args=None"
+        ))
     );
     // No document: empty answers, not errors.
     let err = run(&p, "context", None, CallContext::default()).unwrap_err();

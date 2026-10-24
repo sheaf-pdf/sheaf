@@ -129,6 +129,8 @@ below are a first cut.
   "Target Sheets". Includes inserting separator sheets into an existing
   PDF above chosen pages, so it can be re-run (PDFlyer's Insert Target
   Sheets; moved here from Pending 2026-10-14).
+- Scanner intake and separator sheets: design in
+  [`todos/m5-intake.md`](todos/m5-intake.md) (planning).
 
 Slices: OCR engine + text layer ✅ → batch OCR over binder ✅ → image import ✅
 → cleanup filters ✅ (with camera capture) → scanner intake → separator sheets.

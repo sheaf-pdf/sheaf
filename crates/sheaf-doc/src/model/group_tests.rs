@@ -1,21 +1,22 @@
-//! Groups (M10.5 §8.4): an OCR run's flushes and a plugin call's batches
-//! as one undo step, or as fragments around the user's edits; a commit in
-//! a group whose edits were undone changes nothing; History's "Undo all
-//! of …" and a failed call's rollback take a group's versions back, and
-//! keep what was edited between them, or refuse and change nothing.
+//! Groups (M10.5 §8.4): an OCR run's flushes, an intake's batches and a
+//! plugin call's as one undo step, or as fragments around the user's
+//! edits; a commit in a group whose edits were undone changes nothing;
+//! History's "Undo all of …" and a failed call's rollback take a group's
+//! versions back, and keep what was edited between them, or refuse and
+//! change nothing.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use in_progress::NoProgress;
-use sheaf_edit::{Op, Turn};
+use sheaf_edit::{Local, Op, PageRef, PageSize, PageSource, Turn};
 
 use super::tests::{doc, id_at, record_for, tl};
 use super::*;
 use crate::history::{FixedCount, MAX_VERSIONS};
 use crate::realize::ViewInputs;
 use crate::tx::fixture::{self as fx, ids};
-use crate::tx::{Base, JobKind, Stale};
+use crate::tx::{Base, Cap, JobKind, Stale};
 
 /// An OCR run: its group, and the version its pages were rendered from.
 struct Ocr {
@@ -464,18 +465,11 @@ fn pruning_a_group_s_latest_ends_it_or_leaves_it_none() {
     assert_eq!(d.groups[&run.group].latest, Some(d.current_version()));
 }
 
-/// A group takes the commits of the job or plugin its kind says, and
-/// another's is a bug: a debug build stops there, and a release build
+/// `tx` committed in group `g`, whose kind doesn't take its actor's
+/// commits: a bug, so a debug build stops there, and a release build
 /// changes nothing.
-#[test]
-fn a_commit_in_a_group_by_another_actor_is_a_bug() {
-    let mut d = doc();
-    let p0 = id_at(&d, 0);
-    let g = d.begin_group(GroupKind::Ocr);
-    let mut tx = d.tx(Actor::User);
-    tx.apply(fx::rotate(&[p0], Turn::Quarter), &NoProgress)
-        .unwrap();
-    let at = where_at(&d);
+fn commit_is_a_bug(d: &mut Document, g: GroupId, tx: Tx) {
+    let at = where_at(d);
     let opts = CommitOpts {
         group: Some(g),
         ..CommitOpts::default()
@@ -490,5 +484,79 @@ fn a_commit_in_a_group_by_another_actor_is_a_bug() {
     if let Ok(r) = refused {
         assert!(matches!(r, Err(EditError::Internal { .. })), "{r:?}");
     }
-    assert_eq!(where_at(&d), at);
+    assert_eq!(where_at(d), at);
+}
+
+/// A group takes the commits of the job or plugin its kind says, and
+/// another's is a bug.
+#[test]
+fn a_commit_in_a_group_by_another_actor_is_a_bug() {
+    let mut d = doc();
+    let p0 = id_at(&d, 0);
+    let g = d.begin_group(GroupKind::Ocr);
+    let mut tx = d.tx(Actor::User);
+    tx.apply(fx::rotate(&[p0], Turn::Quarter), &NoProgress)
+        .unwrap();
+    commit_is_a_bug(&mut d, g, tx);
+}
+
+/// A batch of an intake's: a blank page inserted at the end, its
+/// recognized text `text`, the page named by its local or, when `by_pos`,
+/// by its position.
+fn batch(d: &Document, text: &str, by_pos: bool) -> Vec<Op> {
+    let page = match by_pos {
+        true => PageRef::Pos(d.state().page_count() as u32 + 1),
+        false => PageRef::New(Local(0)),
+    };
+    let size = PageSize {
+        width: 612.0,
+        height: 792.0,
+    };
+    vec![
+        Op::InsertPages {
+            from: PageSource::Blank { size, count: 1 },
+            pages: None,
+            before: None,
+            bring: Default::default(),
+            locals: vec![Local(0)],
+        },
+        Op::SetOcrText {
+            page,
+            layer: tl(text),
+        },
+    ]
+}
+
+/// An intake's batches, the scan job's, amend one version, which one undo
+/// takes back. The scan job inserts its pages and sets their text, and is
+/// refused anything else; another job's commit in its group is a bug.
+#[test]
+fn a_scan_group_takes_the_scan_job_s_batches() {
+    let mut d = doc();
+    let (at, n, st) = where_at(&d);
+    let g = d.begin_group(GroupKind::Scan);
+    for (i, text) in ["a", "b", "c"].into_iter().enumerate() {
+        let ops = batch(&d, text, i == 1);
+        let c = d.commit_ops_in_group(g, ops, "Scan").unwrap();
+        assert_eq!(c.amended, i > 0, "batch {i}");
+        assert_eq!(c.change.actor, Actor::Job(JobKind::Scan));
+    }
+    assert_eq!(d.version_count(), n + 1);
+    let made: Vec<PageId> = (6..9).map(|i| id_at(&d, i)).collect();
+    assert_eq!(recognized(&d), made);
+    let texts: Vec<_> = (made.iter())
+        .map(|&p| d.state().ocr_text(p).unwrap().clone())
+        .collect();
+    assert_eq!(texts, ["a", "b", "c"].map(tl));
+    let p0 = id_at(&d, 0);
+    let mut tx = d.tx(Actor::Job(JobKind::Ocr));
+    tx.apply_batch(fx::ocr([(p0, tl("x"))]), &NoProgress)
+        .unwrap();
+    commit_is_a_bug(&mut d, g, tx);
+    let scanned = where_at(&d);
+    let delete = d.commit_ops_in_group(g, vec![fx::delete(&[p0])], "Scan");
+    assert_eq!(delete.unwrap_err(), EditError::Refused(Cap::Plugin));
+    assert_eq!(where_at(&d), scanned);
+    d.undo().unwrap();
+    assert_eq!(where_at(&d), (at, n + 1, st));
 }

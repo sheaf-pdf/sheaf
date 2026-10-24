@@ -496,6 +496,7 @@ fn caps_cover_every_op_target_and_actor() {
         Actor::Job(JobKind::Trim),
         Actor::Job(JobKind::Import),
         Actor::Job(JobKind::Insert),
+        Actor::Job(JobKind::Scan),
         plugin(),
     ];
     for op in &ops {
@@ -531,6 +532,9 @@ fn caps_cover_every_op_target_and_actor() {
                         matches!(op, R::SetOcrText { .. } | R::ClearOcrText { .. })
                     }
                     Actor::Job(JobKind::Trim) => matches!(op, R::SetPageBoxes { .. }),
+                    Actor::Job(JobKind::Scan) => {
+                        matches!(op, R::InsertPages { .. } | R::SetOcrText { .. })
+                    }
                     Actor::Plugin { .. } => cap == Cap::Plugin,
                     _ => true,
                 };

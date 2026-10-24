@@ -60,15 +60,23 @@ pub fn read_file(path: &std::path::Path) -> std::io::Result<std::sync::Arc<[u8]>
 pub fn read_file_and_metadata(
     path: &std::path::Path,
 ) -> std::io::Result<(std::sync::Arc<[u8]>, std::fs::Metadata)> {
-    use std::io::Read as _;
     let mut file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
     let len = usize::try_from(metadata.len()).map_err(std::io::Error::other)?;
+    Ok((read_shared(&mut file, len)?, metadata))
+}
+
+/// The next `len` bytes of `reader`, read into one shared buffer, with no
+/// second copy.
+pub fn read_shared(
+    reader: &mut impl std::io::Read,
+    len: usize,
+) -> std::io::Result<std::sync::Arc<[u8]>> {
     // SAFETY: zeroed bytes are bytes.
     let mut bytes = unsafe { std::sync::Arc::<[u8]>::new_zeroed_slice(len).assume_init() };
     let buffer = std::sync::Arc::get_mut(&mut bytes).expect("nothing else holds a new buffer");
-    file.read_exact(buffer)?;
-    Ok((bytes, metadata))
+    reader.read_exact(buffer)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]

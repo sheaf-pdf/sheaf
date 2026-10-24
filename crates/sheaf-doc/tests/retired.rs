@@ -1,7 +1,8 @@
 //! The retired-symbols ledger (M10.5 §17): every name the edit API took
-//! out, with the slice that took it out. Nothing under `crates/` may define
-//! one again or refer to it. Each slice adds its rows in the commit that
-//! deletes the names.
+//! out, with the slice that took it out ([`RETIRED`]), and every name a
+//! later milestone's slice took out, in a table of the milestone's own
+//! ([`RETIRED_M5`]). Nothing under `crates/` may define one again or refer
+//! to it. Each slice adds its rows in the commit that deletes the names.
 //!
 //! A row is a path from its crate's root, such as
 //! `model::Document::marginal`. Every `.rs` file under `crates/` (but not
@@ -30,7 +31,7 @@ use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Expr, Ident, ImplItem, Member, Pat, TraitItem, Type, UseTree};
 
-/// Every retired name, with the slice that retired it.
+/// Every name M10.5 retired, with the slice that retired it.
 const RETIRED: &[(&str, u8)] = &[
     ("model::Ids", 1),
     ("model::Step::ids", 1),
@@ -1034,6 +1035,28 @@ const RETIRED: &[(&str, u8)] = &[
     ("tx::flatten::unkept", 20),
 ];
 
+/// Every name M5 retired, with the slice of `todos/m5-intake.md` that
+/// retired it.
+const RETIRED_M5: &[(&str, u8)] = &[
+    // A scan is `intake` over the files' frames, a page at a time: the
+    // file-at-a-time cleanup had no caller left.
+    ("scan::clean_one", 1),
+    // A black and white page is held as its CCITT G4 bytes from the
+    // moment it's made, not as 8-bit pixels until it's written.
+    ("io::Pixels::Bilevel", 1),
+    // A batch's source is made in any document's store and put into any
+    // transaction with its text (`intake::batch_source`, `apply_batch`),
+    // a Session's or the app's, not into a Session alone.
+    ("intake::made_pages", 2),
+    // Create from Scans streams its pages into an untitled document
+    // (`ScanEvent::Scan`): the dialog no longer writes a file for the
+    // window to open again (backlog B11).
+    ("scan_dialog::ScanEvent::Created", 2),
+];
+
+/// The ledgers, with the words a hit names its slice by.
+const LEDGERS: &[(&[(&str, u8)], &str)] = &[(RETIRED, "slice"), (RETIRED_M5, "M5 slice")];
+
 /// Last segments only a path matches: names the new design uses again
 /// (§17), and words common enough to name other things.
 const QUALIFIED_ONLY: &[&str] = &[
@@ -1111,6 +1134,11 @@ const QUALIFIED_ONLY: &[&str] = &[
     "Saved",
     "SaveStop",
     "Ask",
+    // Combine's event (`CombineEvent::Created`): not the scan dialog's.
+    "Created",
+    // An intake's pages ready to land (`intake::Batch`, M5 slice 1): not
+    // a plugin call's edits (`batch::Batch`).
+    "Batch",
     "inherited_attrs",
     "copy_page_dict",
     "is_page_node",
@@ -1377,6 +1405,9 @@ const QUALIFIED_ONLY: &[&str] = &[
     "FlatOutlineItem",
     "Shows",
     "unkept",
+    // A black and white page of a TIFF being written
+    // (`encode::TiffPage::Bilevel`): not a page held as 8-bit pixels.
+    "Bilevel",
 ];
 
 #[test]
@@ -1392,9 +1423,13 @@ fn nothing_retired_is_back() {
     for file in &files {
         let shown = file.strip_prefix(&root).unwrap().display();
         let src = std::fs::read_to_string(file).unwrap();
-        let found = scan(&src, module_of(file), RETIRED);
-        for (line, row, slice) in found.unwrap_or_else(|e| panic!("{shown}: {e}")) {
-            hits.push(format!("{shown}:{line}: {row} (retired in slice {slice})"));
+        let parsed = syn::parse_file(&src).unwrap_or_else(|e| panic!("{shown}: {e}"));
+        for &(rows, slices) in LEDGERS {
+            for (line, row, slice) in scan_file(&parsed, module_of(file), rows) {
+                hits.push(format!(
+                    "{shown}:{line}: {row} (retired in {slices} {slice})"
+                ));
+            }
         }
     }
     assert!(
@@ -1570,14 +1605,22 @@ fn scan(
     module: Vec<String>,
     rows: &'static [(&'static str, u8)],
 ) -> syn::Result<Vec<(usize, &'static str, u8)>> {
-    let file = syn::parse_file(src)?;
+    Ok(scan_file(&syn::parse_file(src)?, module, rows))
+}
+
+/// [`scan`] of a file already parsed.
+fn scan_file(
+    file: &syn::File,
+    module: Vec<String>,
+    rows: &'static [(&'static str, u8)],
+) -> Vec<(usize, &'static str, u8)> {
     let mut scan = Scan {
         rows,
         module,
         hits: BTreeSet::new(),
     };
-    scan.visit_file(&file);
-    Ok(scan.hits.into_iter().collect())
+    scan.visit_file(file);
+    scan.hits.into_iter().collect()
 }
 
 struct Scan {

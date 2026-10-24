@@ -20,3 +20,4 @@ imageproc = { version = "0.27", default-features = false, features = ["rayon"] }
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile = "3"

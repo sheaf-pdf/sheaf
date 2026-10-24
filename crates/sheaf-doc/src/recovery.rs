@@ -1,11 +1,16 @@
 //! Crash recovery (M10.5 §11.10). A document's unsaved state is kept in a
 //! sidecar next to its file (`<name>.pdf.sheaf-recovery`), written a few
-//! seconds after edits stop and whenever a save leaves edits after it.
+//! seconds after edits stop and whenever a save leaves edits after it. A
+//! document no file holds yet (an untitled one, M5 proposal 2) keeps its
+//! sidecar in a folder of its own instead, the app's state folder's
+//! `recovery/`, named for the document ([`untitled_path`]) and claimed by
+//! the one view of it ([`Claim`]).
 //!
 //! The sidecar is format 2:
 //!
 //! ```text
 //! sheaf-recovery 2\n<append|full>\n<base len>\n<base stamp hex>\n<flags>\n<bytes>
+//! sheaf-recovery 2\nuntitled\n<folder>\n<bytes>
 //! ```
 //!
 //! - **The base** is the file as sheaf last read or wrote it
@@ -32,6 +37,19 @@
 //!   change for the base's signatures; and `field:` with a field's full
 //!   name in UTF-8 hex, for each field they touch. A Full sidecar's first
 //!   save is a Rewrite, and it has none.
+//! - **Untitled** is the whole document, as Full is, with no base: no file
+//!   holds it. Its head says the folder its Save As starts in, the folder
+//!   of what it was made from, as UTF-8 hex (empty when it has none, or
+//!   its path isn't UTF-8). [`find`] beside a file takes none, and
+//!   [`find_untitled`] takes nothing else.
+//!
+//! An untitled sidecar is its document's by name, and nothing but the
+//! name ties the two together, so each name is claimed ([`Claim`]): by a
+//! lock on `.<name>.sheaf-lock` beside it, which the one view of the
+//! document holds for its life (and each write of its sidecar in flight
+//! for the write's), in whichever sheaf process it's in. A name another
+//! holds is no new document's, and a sidecar another holds is no crash's;
+//! the system lets go of a dead process's locks.
 //!
 //! A restored document opens from memory
 //! ([`MemoryKind::Recovered`](crate::store::MemoryKind::Recovered)): the
@@ -39,10 +57,15 @@
 //! document. Its record is the file's with the sidecar pending
 //! ([`SaveRecord::restored`]), so it isn't what the file holds until a
 //! save writes the sections: its first save appends them, then its own,
-//! unless they removed text (`Why::RecoveredRemovals`).
+//! unless they removed text (`Why::RecoveredRemovals`). An untitled
+//! document's opens the same way, with no record ([`restore_untitled`]);
+//! once it's ready, [`never_saved`](crate::Document::never_saved) leaves
+//! it with no saved version, so it's dirty, and its first save is a
+//! Rewrite to wherever the reader saves it.
 
-use std::fs::File;
-use std::io::Read as _;
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::{self, BufRead as _, BufReader, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -60,6 +83,21 @@ use crate::store::{BlobKind, Src, Store};
 /// The first line of a sidecar in this format.
 const FORMAT: &[u8] = b"sheaf-recovery 2\n";
 pub const SUFFIX: &str = ".sheaf-recovery";
+
+/// The kind of an untitled document's sidecar, which has no base.
+const UNTITLED: &str = "untitled";
+
+/// The longest head an untitled sidecar has: its kind, and its folder's
+/// path in hex. A longer one isn't this format.
+const HEAD_MAX: u64 = 64 * 1024;
+
+/// The file in the untitled sidecars' folder that's locked a moment
+/// whenever a name's lock file is opened or removed there, so none is
+/// removed while another has it open.
+const GUARD: &str = ".lock";
+
+/// What a claimed name's lock file, `.<name>` and this, ends in.
+const LOCK: &str = ".sheaf-lock";
 
 /// The flag of sections that remove or replace text their base has.
 const REMOVES: &str = "removes";
@@ -105,21 +143,56 @@ pub fn write(input: &SaveInput, file: &Path, base: &FileStamp, p: &dyn Progress)
             return Ok(0);
         }
         Some((flags, sections)) => ("append", words(&flags), sections),
-        None => {
-            // A Rewrite's plan, for its transforms: a sidecar asks nothing,
-            // and is never the saved file.
-            let plan = materialize::forced_rewrite(input, &target);
-            let out = materialize::materialize(input, &plan, target, p)?;
-            ("full", String::new(), out.bytes)
-        }
+        None => ("full", String::new(), whole(input, target, p)?),
     };
     let head = format!("{kind}\n{}\n{stamp}\n{flags}\n", base.len);
-    let mut bytes = Vec::with_capacity(FORMAT.len() + head.len() + body.len());
-    bytes.extend_from_slice(FORMAT);
-    bytes.extend_from_slice(head.as_bytes());
-    bytes.extend_from_slice(&body);
-    durable::write(&sidecar_path(file), &bytes, None)?;
-    Ok(bytes.len())
+    durable::write_parts(&sidecar_path(file), &[FORMAT, head.as_bytes(), &body], None)?;
+    Ok(FORMAT.len() + head.len() + body.len())
+}
+
+/// The sidecar of the untitled document `name` in `dir`, the folder that
+/// keeps them: `<dir>/<name>.sheaf-recovery`.
+pub fn untitled_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}{SUFFIX}"))
+}
+
+/// Write `input`, the state of a document no file holds
+/// ([`recovery_input`]), to the sidecar `claim` holds as the untitled
+/// kind: `folder`, where its Save As starts, and the whole document, as a
+/// Rewrite writes it. Its folder is made when it isn't there. Returns its
+/// size.
+///
+/// [`recovery_input`]: crate::Document::recovery_input
+pub fn write_untitled(
+    input: &SaveInput,
+    claim: &Claim,
+    folder: &Path,
+    p: &dyn Progress,
+) -> Result<usize> {
+    let sidecar = claim.sidecar();
+    // No file is the document's: a Rewrite reads nothing at the path, and
+    // names it only in its output's record, which a sidecar drops.
+    let target = SaveTarget {
+        path: sidecar.as_path().into(),
+        same_file: false,
+        profile: Profile::default(),
+        stamp: None,
+    };
+    let body = whole(input, target, p)?;
+    let folder = folder.to_str().map(hex).unwrap_or_default();
+    let head = format!("{UNTITLED}\n{folder}\n");
+    std::fs::create_dir_all(&claim.dir)
+        .with_context(|| format!("making {}", claim.dir.display()))?;
+    durable::write_parts(&sidecar, &[FORMAT, head.as_bytes(), &body], None)?;
+    Ok(FORMAT.len() + head.len() + body.len())
+}
+
+/// The whole of `input`'s current version, written as a save to `target`
+/// writes it: a Rewrite's plan, for its transforms, though a sidecar asks
+/// nothing and is never the saved file.
+fn whole(input: &SaveInput, target: SaveTarget, p: &dyn Progress) -> Result<Vec<u8>> {
+    let plan = materialize::forced_rewrite(input, &target);
+    Ok(materialize::materialize(input, &plan, target, p)?.bytes)
 }
 
 /// The sections a sidecar of `input` holds after the saved file, at
@@ -182,10 +255,26 @@ fn words(flags: &TailFlags) -> String {
         }
     }
     for name in &flags.fields {
-        let hex: String = name.bytes().map(|b| format!("{b:02x}")).collect();
-        words.push(format!("{FIELD}{hex}"));
+        words.push(format!("{FIELD}{}", hex(name)));
     }
     words.join(" ")
+}
+
+/// `text`'s UTF-8 in hex, as a sidecar's head says a name or a path.
+fn hex(text: &str) -> String {
+    text.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The text [`hex`] says as `hex`, when that's all it says.
+fn unhex(hex: &str) -> Option<String> {
+    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(bytes).ok()
 }
 
 /// The flags `line` says, when it says nothing else.
@@ -197,13 +286,7 @@ fn flags_of(line: &str) -> Option<TailFlags> {
         } else if let Some(&(_, class)) = CLASSES.iter().find(|(w, _)| *w == word) {
             flags.sig |= class;
         } else {
-            let hex = (word.strip_prefix(FIELD))
-                .filter(|hex| hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_hexdigit()))?;
-            let bytes = (0..hex.len())
-                .step_by(2)
-                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).ok())
-                .collect::<Option<Vec<u8>>>()?;
-            flags.fields.insert(String::from_utf8(bytes).ok()?);
+            flags.fields.insert(unhex(word.strip_prefix(FIELD)?)?);
         }
     }
     Some(flags)
@@ -253,7 +336,7 @@ pub fn find(pdf: &Path) -> Option<Recovery> {
 }
 
 /// The sidecar's base, whether it's Full, its flags and its bytes, when
-/// it's this format and says nothing it doesn't know.
+/// it's this format, a file's, and says nothing it doesn't know.
 fn parse(bytes: &[u8]) -> Option<(FileStamp, bool, TailFlags, &[u8])> {
     let mut rest = bytes.strip_prefix(FORMAT)?;
     let mut line = || {
@@ -265,6 +348,7 @@ fn parse(bytes: &[u8]) -> Option<(FileStamp, bool, TailFlags, &[u8])> {
     let whole = match line()? {
         "append" => false,
         "full" => true,
+        // An untitled document's has no base, and is no file's.
         _ => return None,
     };
     let len: u64 = line()?.parse().ok()?;
@@ -328,6 +412,214 @@ pub fn restore(
 /// Remove the sidecar, if any.
 pub fn discard(pdf: &Path) {
     let _ = std::fs::remove_file(sidecar_path(pdf));
+}
+
+/// The untitled document `name`'s sidecar in `dir`, claimed by one view
+/// of it in one process ([`claim_untitled`]): its lock file's lock, held
+/// for the claim's life. Its sidecar is written and removed only by the
+/// claim's holder, so another document never takes its name, nor the next
+/// launch its sidecar, while it's held. Let go, its lock file goes.
+#[derive(Debug)]
+pub struct Claim {
+    dir: PathBuf,
+    name: String,
+    /// The lock file, locked; taken as the claim is let go.
+    lock: Option<File>,
+}
+
+impl Claim {
+    /// The document's name, its sidecar's without [`SUFFIX`].
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The sidecar it claims ([`untitled_path`]).
+    pub fn sidecar(&self) -> PathBuf {
+        untitled_path(&self.dir, &self.name)
+    }
+}
+
+impl Drop for Claim {
+    /// The lock file is removed while it's still locked and the guard is
+    /// held, so no one has it open meanwhile: one opened later is a new
+    /// file, and no two claims ever lock two files of one name. Without
+    /// the guard, the file is left for the next claim.
+    fn drop(&mut self) {
+        let guard = guard(&self.dir);
+        if guard.is_ok() {
+            let _ = std::fs::remove_file(lock_path(&self.dir, &self.name));
+        }
+        drop(self.lock.take());
+    }
+}
+
+/// The lock file of the untitled document `name` in `dir`.
+fn lock_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!(".{name}{LOCK}"))
+}
+
+/// `dir`'s guard ([`GUARD`]), locked until it's dropped.
+fn guard(dir: &Path) -> io::Result<File> {
+    let guard = (OpenOptions::new().read(true).write(true))
+        .create(true)
+        .truncate(false)
+        .open(dir.join(GUARD))?;
+    guard.lock()?;
+    Ok(guard)
+}
+
+/// Claim the untitled document `name`'s sidecar in `dir` (made when it
+/// isn't there): None while a view holds it, in this process or another.
+/// Whether a sidecar is there already is the caller's to see, once it
+/// holds the claim.
+pub fn claim_untitled(dir: &Path, name: &str) -> io::Result<Option<Claim>> {
+    std::fs::create_dir_all(dir)?;
+    let _guard = guard(dir)?;
+    let lock = (OpenOptions::new().read(true).write(true))
+        .create(true)
+        .truncate(false)
+        .open(lock_path(dir, name))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(Claim {
+            dir: dir.to_path_buf(),
+            name: name.to_string(),
+            lock: Some(lock),
+        })),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
+}
+
+/// An untitled document's recovery data, found in the folder that keeps
+/// them, claimed while it's asked about: its body is read only once it's
+/// restored.
+#[derive(Debug)]
+pub struct Untitled {
+    pub claim: Claim,
+    /// Where its Save As starts, as its head says: empty when it says
+    /// none.
+    pub folder: PathBuf,
+}
+
+/// The untitled documents' sidecars in `dir` that no view holds, a
+/// crash's, by name and claimed; none when there's no such folder. Each
+/// is read only as far as its head. One that isn't this format's
+/// untitled kind is removed, and so are the temp files writes of an
+/// unheld name left and its lock file; a sidecar that can't be read now
+/// and anything else are left.
+pub fn find_untitled(dir: &Path) -> Vec<Untitled> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    // Each name's files: whether it has a sidecar, and its temp files.
+    let mut names: BTreeMap<String, (bool, Vec<PathBuf>)> = BTreeMap::new();
+    for entry in entries.flatten() {
+        let Some(file) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if let Some(name) = file.strip_suffix(SUFFIX) {
+            names.entry(name.into()).or_default().0 = true;
+        } else if let Some(name) = temp_of(&file) {
+            names.entry(name.into()).or_default().1.push(entry.path());
+        } else if let Some(name) = file.strip_prefix('.').and_then(|f| f.strip_suffix(LOCK)) {
+            names.entry(name.into()).or_default();
+        }
+    }
+    (names.into_iter())
+        .filter_map(|(name, (sidecar, temps))| {
+            // Held: a live document's, whose writes these are.
+            let claim = claim_untitled(dir, &name).ok().flatten()?;
+            for temp in temps {
+                let _ = std::fs::remove_file(temp);
+            }
+            if !sidecar {
+                return None;
+            }
+            match untitled_folder(&claim.sidecar()) {
+                Ok(Some(folder)) => Some(Untitled { claim, folder }),
+                Ok(None) => {
+                    let _ = std::fs::remove_file(claim.sidecar());
+                    None
+                }
+                Err(_) => None,
+            }
+        })
+        .collect()
+}
+
+/// The untitled document whose sidecar's temp file `file` is
+/// (`.<name>.sheaf-recovery.<random>.sheaf-tmp`), when its name is whole.
+fn temp_of(file: &str) -> Option<&str> {
+    let (sidecar, random) = (file.strip_prefix('.')?)
+        .strip_suffix(".sheaf-tmp")?
+        .rsplit_once('.')?;
+    let random = random.len() == 16 && random.bytes().all(|b| b.is_ascii_hexdigit());
+    random.then(|| sidecar.strip_suffix(SUFFIX)).flatten()
+}
+
+/// The folder the untitled sidecar at `sidecar` says, read from its head
+/// alone, when it's this format's untitled kind and holds a document.
+fn untitled_folder(sidecar: &Path) -> io::Result<Option<PathBuf>> {
+    let file = File::open(sidecar)?;
+    let len = file.metadata()?.len();
+    let head = untitled_head(&mut BufReader::new(file))?;
+    Ok(head.filter(|&(_, at)| at < len).map(|(folder, _)| folder))
+}
+
+/// The folder an untitled sidecar's head says, and where its document
+/// starts, when it's this format's untitled kind: read from `reader`,
+/// which is left there.
+fn untitled_head(reader: &mut impl io::BufRead) -> io::Result<Option<(PathBuf, u64)>> {
+    let mut head = reader.take(HEAD_MAX);
+    let mut lines = Vec::with_capacity(3);
+    let mut at = 0;
+    for _ in 0..3 {
+        let mut line = Vec::new();
+        let n = head.read_until(b'\n', &mut line)?;
+        if line.pop() != Some(b'\n') {
+            return Ok(None);
+        }
+        at += n as u64;
+        lines.push(line);
+    }
+    let kind = (lines[0].as_slice(), lines[1].as_slice());
+    if kind != (&FORMAT[..FORMAT.len() - 1], UNTITLED.as_bytes()) {
+        return Ok(None);
+    }
+    let folder = std::str::from_utf8(&lines[2]).ok().and_then(unhex);
+    Ok(folder.map(|folder| (PathBuf::from(folder), at)))
+}
+
+/// The document the untitled sidecar `claim` holds, opened from memory
+/// into `store`: its body read whole, once. It has no record: once it's
+/// ready, it's [`never_saved`], so it's dirty and its first save is a
+/// Rewrite.
+///
+/// [`never_saved`]: crate::Document::never_saved
+pub fn restore_untitled(store: &Store, claim: &Claim) -> Result<Src> {
+    let sidecar = claim.sidecar();
+    let reading = || format!("reading {}", sidecar.display());
+    let file = File::open(&sidecar).with_context(reading)?;
+    let len = file.metadata().with_context(reading)?.len();
+    let mut file = BufReader::new(file);
+    let at = untitled_head(&mut file)
+        .with_context(reading)?
+        .map(|(_, at)| at);
+    let Some(body) = at.and_then(|at| len.checked_sub(at)).filter(|&n| n > 0) else {
+        bail!(
+            "{} isn't an untitled document's recovery data",
+            sidecar.display()
+        );
+    };
+    let body = usize::try_from(body).context("recovery data too large")?;
+    let bytes = sheaf_util::read_shared(&mut file, body).with_context(reading)?;
+    (store.open(bytes, BlobKind::recovered(None)))
+        .with_context(|| format!("opening the recovery data of {}", claim.name))
+}
+
+/// Remove the untitled document's sidecar `claim` holds, if it's there.
+pub fn discard_untitled(claim: &Claim) {
+    let _ = std::fs::remove_file(claim.sidecar());
 }
 
 #[cfg(test)]
@@ -1235,6 +1527,286 @@ pub(crate) mod tests {
         assert!(!findings.iter().any(stale), "{findings:?}");
         assert_eq!(recovered.file().unwrap().0.as_ref(), copy.as_path());
         assert!(!recovered.is_dirty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A document made in memory, as an untitled one starts: blank pages
+    /// `widths` points wide and Letter's height, the second given the
+    /// recognized word "Hello", as `sidecar_carries_ocr_layers` gives it.
+    fn untitled(widths: &[f32]) -> Document {
+        use crate::annot::Box2;
+        use crate::text_layer::OcrWord;
+        use sheaf_edit::{Bring, PageSize, PageSource};
+        let store = Store::new();
+        let empty = crate::memory::empty(&store).unwrap();
+        let policy = crate::history::default_policy();
+        let mut doc = crate::open::start(store, empty.clone(), "Untitled".into(), None, policy);
+        doc.ready(crate::open::finish(&empty, &NoProgress)).unwrap();
+        let blank = |&width: &f32| Op::InsertPages {
+            from: PageSource::Blank {
+                size: PageSize {
+                    width,
+                    height: 792.0,
+                },
+                count: 1,
+            },
+            pages: None,
+            before: None,
+            bring: Bring::default(),
+            locals: Vec::new(),
+        };
+        doc.commit_ops(widths.iter().map(blank).collect(), "blank")
+            .unwrap();
+        let p1 = doc.page(1).unwrap();
+        let layer = crate::text_layer::from_engine(
+            vec![OcrWord {
+                text: "Hello".into(),
+                rect: Box2 {
+                    x: 72.0,
+                    y: 100.0,
+                    w: 100.0,
+                    h: 12.0,
+                },
+                confidence: 1.0,
+            }],
+            &crate::geom::Geom::read(None, None, 0),
+            "test",
+        );
+        doc.commit_ops(fx::ocr([(p1, Arc::new(layer))]), "ocr")
+            .unwrap();
+        doc
+    }
+
+    /// The text page `index` (from 0) of `bytes` draws, its content's
+    /// streams as one.
+    fn page_text(bytes: &[u8], index: u32) -> String {
+        let pdf = Pdf::load_mem(bytes).unwrap();
+        let page = pdf.get_pages()[&(index + 1)];
+        String::from_utf8_lossy(&pdf.get_page_content(page)).into_owned()
+    }
+
+    /// What follows the head of the untitled sidecar at `sidecar`: its
+    /// document.
+    fn untitled_body(sidecar: &Path) -> Vec<u8> {
+        let bytes = std::fs::read(sidecar).unwrap();
+        let mut reader = bytes.as_slice();
+        let (_, at) = untitled_head(&mut reader).unwrap().unwrap();
+        bytes[at as usize..].to_vec()
+    }
+
+    /// The temp files in `dir`.
+    fn temps(dir: &Path) -> Vec<PathBuf> {
+        (std::fs::read_dir(dir).unwrap())
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().ends_with(".sheaf-tmp"))
+            .collect()
+    }
+
+    /// An untitled document's sidecar is the whole document, in the folder
+    /// that keeps them, named for it, with the folder its Save As starts
+    /// in: found there by that name once its claim is let go, it restores
+    /// from memory with no record, its pages the sizes they were, the
+    /// recognized word where it was. Never saved, it's dirty with nothing
+    /// to undo, pruned too, and its first save is a Rewrite that leaves it
+    /// clean, the file its own from then on.
+    #[test]
+    fn an_untitled_sidecar_round_trips() {
+        let dir = scratch();
+        let doc = untitled(&[612.0, 595.0, 612.0]);
+        let folder = dir.join("recovery");
+        let claim = claim_untitled(&folder, "Untitled scan 1").unwrap().unwrap();
+        let sidecar = untitled_path(&folder, "Untitled scan 1");
+        assert_eq!(claim.sidecar(), sidecar);
+        let images = dir.join("images ü");
+        let n = write_untitled(&doc.recovery_input(), &claim, &images, &NoProgress).unwrap();
+        assert_eq!(std::fs::metadata(&sidecar).unwrap().len() as usize, n);
+        assert!(temps(&folder).is_empty(), "nothing of it in a temp file");
+        assert!(
+            find_untitled(&folder).is_empty(),
+            "claimed, it's no crash's"
+        );
+        drop(claim);
+        let found = find_untitled(&folder);
+        let [rec] = found.as_slice() else {
+            panic!("one sidecar: {found:?}")
+        };
+        assert_eq!(rec.claim.name(), "Untitled scan 1");
+        assert_eq!(rec.claim.sidecar(), sidecar);
+        assert_eq!(rec.folder, images);
+
+        let store = Store::new();
+        let src = restore_untitled(&store, &rec.claim).unwrap();
+        let body = untitled_body(&sidecar);
+        assert!(body.starts_with(b"%PDF-"));
+        assert_eq!(**src.blob().bytes(), *body);
+        let origin = match src.blob().kind() {
+            BlobKind::Pdf { origin, .. } => origin.clone(),
+            BlobKind::Image(_) | BlobKind::Attachment => unreachable!("a PDF"),
+        };
+        assert_eq!(origin, Origin::Memory(MemoryKind::Recovered));
+        let policy = crate::history::default_policy();
+        let name = rec.claim.name().into();
+        let mut back = crate::open::start(store, src.clone(), name, None, policy);
+        back.ready(crate::open::finish(&src, &NoProgress)).unwrap();
+        back.never_saved();
+        let sizes = |d: &Document| {
+            (0..d.page_count())
+                .map(|i| d.page_size(d.page(i).unwrap()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sizes(&back), sizes(&doc));
+        let hello = "<00480065006C006C006F>";
+        let texts: Vec<String> = (0..3).map(|i| page_text(&body, i)).collect();
+        assert!(
+            texts[1].contains("3 Tr") && texts[1].contains(hello),
+            "{texts:?}"
+        );
+        assert!(!texts[0].contains(hello) && !texts[2].contains(hello));
+        assert_eq!(**back.name(), *"Untitled scan 1");
+        assert!(back.is_dirty() && !back.can_undo());
+        assert!(back.saved_record().is_none() && back.file().is_none());
+
+        // Pruned to its last edit, it's no less dirty.
+        turn(&mut back, 0);
+        assert!(back.forget_before_cursor());
+        assert!(back.is_dirty() && !back.can_undo());
+        let path = dir.join("saved.pdf");
+        let none = AskAnswers::default();
+        let report = save_with(&mut back, &path, SaveHow::Planned, &none, &NoProgress).unwrap();
+        assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+        assert!(!back.is_dirty());
+        assert_eq!(back.file().unwrap().0.as_ref(), path.as_path());
+        let saved = std::fs::read(&path).unwrap();
+        assert_eq!(Pdf::load_mem(&saved).unwrap().get_pages().len(), 3);
+        assert!(page_text(&saved, 1).contains(hello));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name is one claim's at a time: another claim of it is refused
+    /// while it's held, by this process too (the lock is the open file's),
+    /// and its sidecar and its writes' temp files aren't a crash's then.
+    /// Let go, its lock file goes, and the name is free again. A sidecar
+    /// with no folder says so.
+    #[test]
+    fn a_claimed_name_is_no_one_else_s() {
+        let dir = scratch();
+        let held = claim_untitled(&dir, "Untitled scan 1").unwrap().unwrap();
+        let lock = lock_path(&dir, "Untitled scan 1");
+        assert!(lock.exists());
+        assert!(claim_untitled(&dir, "Untitled scan 1").unwrap().is_none());
+        let input = untitled(&[612.0, 612.0]).recovery_input();
+        write_untitled(&input, &held, Path::new(""), &NoProgress).unwrap();
+        let temp = dir.join(".Untitled scan 1.sheaf-recovery.0123456789abcdef.sheaf-tmp");
+        std::fs::write(&temp, "%PDF-").unwrap();
+        assert!(find_untitled(&dir).is_empty());
+        assert!(held.sidecar().exists() && temp.exists());
+        let other = claim_untitled(&dir, "Untitled scan 2").unwrap().unwrap();
+        drop(held);
+        assert!(!lock.exists());
+        assert!(lock_path(&dir, "Untitled scan 2").exists());
+        let found = find_untitled(&dir);
+        let [rec] = found.as_slice() else {
+            panic!("one sidecar: {found:?}")
+        };
+        assert_eq!(rec.claim.name(), "Untitled scan 1");
+        assert_eq!(rec.folder, PathBuf::new());
+        assert!(!temp.exists(), "a dead write's temp file goes");
+        assert!(claim_untitled(&dir, "Untitled scan 1").unwrap().is_none());
+        drop(found);
+        assert!(claim_untitled(&dir, "Untitled scan 1").unwrap().is_some());
+        drop(other);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The folder's sidecars are found by name, from their heads alone: one
+    /// whose document isn't a PDF is found, and fails as it's restored.
+    /// What isn't an untitled sidecar of this format goes: one with nothing
+    /// after its head, or a head cut short, one of the format before, a
+    /// file's, one of a kind it doesn't know, one whose folder isn't hex.
+    /// The temp file and the lock file of a name no one holds go too. One
+    /// it can't read is left, and so are a temp file whose name was cut
+    /// short and anything not named as a sidecar's. A folder that isn't
+    /// there has none.
+    #[test]
+    fn find_untitled_removes_what_it_can_t_read() {
+        let dir = scratch();
+        assert!(find_untitled(&dir.join("recovery")).is_empty());
+        let input = untitled(&[612.0, 612.0]).recovery_input();
+        for name in ["Untitled scan 2", "Untitled scan 1"] {
+            let claim = claim_untitled(&dir, name).unwrap().unwrap();
+            write_untitled(&input, &claim, &dir, &NoProgress).unwrap();
+        }
+        let bad = [
+            ("Empty", "sheaf-recovery 2\nuntitled\n\n"),
+            ("Short", "sheaf-recovery 2\nuntitled\n"),
+            ("Old", "sheaf-recovery 1\n12\n%PDF-"),
+            ("A file's", "sheaf-recovery 2\nfull\n5\n00\n\n%PDF-"),
+            ("Another", "sheaf-recovery 2\nuntitled2\n\n%PDF-"),
+            ("Not hex", "sheaf-recovery 2\nuntitled\n2f7\n%PDF-"),
+        ];
+        for (name, bytes) in bad {
+            std::fs::write(untitled_path(&dir, name), bytes).unwrap();
+        }
+        let garbled = untitled_path(&dir, "Garbled");
+        std::fs::write(&garbled, "sheaf-recovery 2\nuntitled\n\nnot a PDF").unwrap();
+        let gone = [
+            dir.join(".Untitled scan 3.sheaf-recovery.0123456789abcdef.sheaf-tmp"),
+            lock_path(&dir, "Untitled scan 4"),
+        ];
+        let left = [
+            dir.join("notes.txt"),
+            dir.join(".Untitled scan 3.sheaf-recov.0123456789abcdef.sheaf-tmp"),
+        ];
+        for path in gone.iter().chain(&left) {
+            std::fs::write(path, "%PDF-").unwrap();
+        }
+        let unreadable = untitled_path(&dir, "A folder");
+        std::fs::create_dir(&unreadable).unwrap();
+
+        let found = find_untitled(&dir);
+        let names: Vec<&str> = found.iter().map(|u| u.claim.name()).collect();
+        assert_eq!(names, ["Garbled", "Untitled scan 1", "Untitled scan 2"]);
+        assert!(found.iter().skip(1).all(|u| u.folder == dir));
+        for (name, _) in bad {
+            assert!(!untitled_path(&dir, name).exists(), "{name}");
+        }
+        assert!(gone.iter().all(|path| !path.exists()), "{gone:?}");
+        assert!(left.iter().all(|path| path.exists()));
+        assert!(unreadable.is_dir());
+        let store = Store::new();
+        assert!(restore_untitled(&store, &found[0].claim).is_err());
+        assert!(garbled.exists(), "left for the caller to drop");
+        discard_untitled(&found[1].claim);
+        discard_untitled(&found[1].claim); // no-op when gone
+        drop(found);
+        let found = find_untitled(&dir);
+        let names: Vec<&str> = found.iter().map(|u| u.claim.name()).collect();
+        assert_eq!(names, ["Garbled", "Untitled scan 2"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An untitled sidecar beside a file is no recovery of the file's:
+    /// `find` removes it as malformed, even one whose bytes after its head
+    /// read as the file's base.
+    #[test]
+    fn find_beside_a_file_takes_no_untitled_sidecar() {
+        let dir = scratch();
+        let pdf = dir.join("doc.pdf");
+        two_page_pdf(&pdf);
+        let mut model = crate::open::file(&pdf, None).unwrap().doc;
+        turn(&mut model, 1);
+        let claim = claim_untitled(&dir, "doc.pdf").unwrap().unwrap();
+        assert_eq!(claim.sidecar(), sidecar_path(&pdf));
+        write_untitled(&model.recovery_input(), &claim, &dir, &NoProgress).unwrap();
+        assert_eq!(kind_of(&pdf), UNTITLED);
+        assert!(find(&pdf).is_none());
+        assert!(!sidecar_path(&pdf).exists());
+        let base = FileStamp::read(&pdf).unwrap();
+        let stamp = base.hex().unwrap();
+        let like_a_base = format!("sheaf-recovery 2\nuntitled\n{}\n{stamp}\n\n%PDF-", base.len);
+        std::fs::write(sidecar_path(&pdf), like_a_base).unwrap();
+        assert!(find(&pdf).is_none());
+        assert!(!sidecar_path(&pdf).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

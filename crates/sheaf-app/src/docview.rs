@@ -14,7 +14,8 @@
 //! images.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -43,7 +44,9 @@ use sheaf_ui::theme;
 use crate::markup_tools::{Drag, Tool, arrow_head, stroke_canvas, stroke_canvas_dashed};
 pub(crate) use crate::pane::Zoom;
 use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Shown, Spread};
+use crate::untitled::Untitled;
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
+use sheaf_doc::recovery::Claim;
 use sheaf_doc::tx::{CommitOpts, Grant, Rule, Tx, mark_kind, mark_style};
 use sheaf_doc::{
     Actor, Cause, ChangeSet, Commit, Document, EditError, Identity, OutlineId, PageId, Src, Store,
@@ -726,9 +729,21 @@ pub enum DocEvent {
 
 impl gpui::EventEmitter<DocEvent> for DocView {}
 
+/// Where a view's document is kept.
+pub(crate) enum Place {
+    /// Its file: the one it was read from, or last saved to.
+    File(PathBuf),
+    /// No file yet (M5 proposal 2): made in memory, as Create from Scans
+    /// makes one, until Save As gives it one.
+    Untitled(Untitled),
+}
+
 pub struct DocView {
     pub(crate) focus_handle: FocusHandle,
-    pub(crate) path: PathBuf,
+    /// Where the document is kept: its file, or none yet. Read through
+    /// [`Self::path`] and the names made of it, outside the open, recovery
+    /// and save code that keeps it.
+    place: Place,
     pub(crate) timing: bool,
     pub(crate) launched: Instant,
     pub(crate) state: State,
@@ -750,6 +765,8 @@ pub struct DocView {
     pub(crate) pending_history_focus: bool,
     /// A Recognize Text run in progress (see ocr_run.rs).
     pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
+    /// A scan streaming pages in (see scan_run.rs).
+    pub(crate) scan: Option<crate::scan_run::ScanRun>,
     /// A background job in progress: Export Pages, Split (see jobs.rs).
     pub(crate) job: Option<crate::jobs::Job>,
     /// The planners in progress, oldest first: inserts, Trim Whites,
@@ -803,6 +820,14 @@ pub struct DocView {
     sidecar_of: Option<sheaf_doc::VersionId>,
     /// A sidecar is being written: the next waits for it.
     sidecar_writing: bool,
+    /// Pages landed while an untitled document's sidecar was being
+    /// written: the next write starts as soon as that one ends, not on
+    /// autosave's clock ([`Self::write_recovery_at_once`]).
+    sidecar_due: bool,
+    /// An untitled document's sidecar is wanted no more: discarded with
+    /// its changes, or left for a file's once it was saved. A write still
+    /// in flight then removes what it wrote, even once the view is gone.
+    sidecar_unwanted: Arc<AtomicBool>,
     pub(crate) tool: Tool,
     pub(crate) tick_glyph: String,
     /// The Select tool is over text (the pointer is an I-beam).
@@ -928,10 +953,22 @@ impl DocView {
         launched: Instant,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::placed(Place::File(path), password, timing, launched, cx)
+    }
+
+    /// A view of the document kept at `place`, showing none yet.
+    fn placed(
+        place: Place,
+        password: Option<String>,
+        timing: bool,
+        launched: Instant,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.on_release(|view, _| view.released()).detach();
         Self {
             focus_handle: cx.focus_handle(),
             password,
-            path,
+            place,
             timing,
             launched,
             state: State::Loading,
@@ -942,6 +979,7 @@ impl DocView {
             pending_calc_focus: None,
             comments: None,
             ocr: None,
+            scan: None,
             job: None,
             planners: Vec::new(),
             blank_review: None,
@@ -973,6 +1011,8 @@ impl DocView {
             autosave_since: None,
             sidecar_of: None,
             sidecar_writing: false,
+            sidecar_due: false,
+            sidecar_unwanted: Arc::default(),
             tool: Tool::Select,
             tick_glyph: "✓".into(),
             text_hover: false,
@@ -993,21 +1033,50 @@ impl DocView {
         }
     }
 
-    /// The file's name, without the dirty marker.
+    /// The document's name, without the dirty marker: its file's, or an
+    /// untitled one's own.
     pub fn file_name(&self) -> String {
-        self.path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?")
-            .to_string()
+        match &self.place {
+            Place::File(path) => (path.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string(),
+            Place::Untitled(u) => u.name.clone(),
+        }
+    }
+
+    /// The document's file: none while it's untitled.
+    pub(crate) fn path(&self) -> Option<&Path> {
+        match &self.place {
+            Place::File(path) => Some(path),
+            Place::Untitled(_) => None,
+        }
+    }
+
+    /// The folder a file dialog for this document starts in: its file's,
+    /// or an untitled one's, that of what it was made from, or the home
+    /// folder when it was made from none (or its sidecar couldn't say).
+    pub(crate) fn folder(&self) -> PathBuf {
+        match &self.place {
+            Place::File(path) => path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            Place::Untitled(u) if u.dir.as_os_str().is_empty() => {
+                sheaf_ops::dirs::home().unwrap_or_default()
+            }
+            Place::Untitled(u) => u.dir.clone(),
+        }
+    }
+
+    /// The document's name without its file's extension, which the names a
+    /// dialog suggests begin with.
+    pub(crate) fn stem(&self) -> String {
+        match &self.place {
+            Place::File(path) => sheaf_ops::export::stem_of(path),
+            Place::Untitled(u) => u.name.clone(),
+        }
     }
 
     pub fn title(&self) -> SharedString {
-        let name = self
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?");
+        let name = self.file_name();
         let dirty = matches!(&self.state, State::Ready(d) if d.model.is_dirty());
         if dirty {
             format!("{name} •").into()
@@ -1017,7 +1086,9 @@ impl DocView {
     }
 
     fn open(&mut self, cx: &mut Context<Self>) {
-        let path = self.path.clone();
+        let Some(path) = self.path().map(Path::to_path_buf) else {
+            return;
+        };
         let password = self.password.clone();
         self.forget_planners();
         self.state = State::Loading;
@@ -1117,14 +1188,11 @@ impl DocView {
         let recovered = matches!(came, Came::Restored { .. });
         let who = crate::prefs::get(cx).doc_identity();
         let model = opening_model(store, primary, name, Some(came), who);
-        self.sidecar_of = None;
-        let opened = self.path.clone();
-        cx.defer(move |cx| crate::recent::add(&opened, cx));
+        if let Some(opened) = self.path().map(Path::to_path_buf) {
+            cx.defer(move |cx| crate::recent::add(&opened, cx));
+        }
         let measure_scale = (crate::state::get(cx).measure_scale.clone()).unwrap_or_default();
-        let doc = Doc::new(model, cx.focus_handle(), measure_scale);
-        self.state = State::Ready(Box::new(doc));
-        self.ask_form_type(cx);
-        self.finish_open(src, recovered, cx);
+        self.show_opening(model, src, recovered, measure_scale, cx);
         if let Some(src) = self.initial_pattern.take() {
             self.run_initial_pattern(src, cx);
         }
@@ -1134,14 +1202,33 @@ impl DocView {
         }
     }
 
-    /// A view of `session`'s document, made and saved to `path`, its file,
-    /// elsewhere (Combine's, M10.5 §14.1): shown as it is, nothing read
-    /// again, its history where the session left it. Its marks are made by
-    /// the user from now on, measured at their scale, and the file is
-    /// among the recent ones. `notice` is what it was told as it was made.
-    /// [`Self::adopted`] tells the listeners it opened, once they listen.
+    /// Show `model` as its primary, `src`, opens, measured at `scale`, and
+    /// read the rest of it on a background thread ([`Self::finish_open`]),
+    /// a `recovered` one staying unsaved; its engine opens on the render
+    /// worker, asked its form ([`Self::ask_form_type`]).
+    fn show_opening(
+        &mut self,
+        model: Document,
+        src: Src,
+        recovered: bool,
+        scale: sheaf_doc::measure::Scale,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidecar_of = None;
+        self.state = State::Ready(Box::new(Doc::new(model, cx.focus_handle(), scale)));
+        self.ask_form_type(cx);
+        self.finish_open(src, recovered, cx);
+    }
+
+    /// A view of `session`'s document, made elsewhere and kept at `place`:
+    /// the file it was saved to (Combine's, M10.5 §14.1). It's shown as it
+    /// is, nothing read again, its history where the session left it. Its
+    /// marks are made by the user from now on, measured at their scale, and
+    /// a file is among the recent ones. `notice` is what it was told as it
+    /// was made. [`Self::adopted`] tells the listeners it opened, once they
+    /// listen.
     pub(crate) fn adopt(
-        path: PathBuf,
+        place: Place,
         session: sheaf_ops::session::Session,
         notice: Option<String>,
         timing: bool,
@@ -1150,15 +1237,17 @@ impl DocView {
     ) -> Self {
         let who = crate::prefs::get(cx).doc_identity();
         let scale = (crate::state::get(cx).measure_scale.clone()).unwrap_or_default();
-        let opened = path.clone();
-        cx.defer(move |cx| crate::recent::add(&opened, cx));
-        Self::adopting(path, session, notice, who, scale, timing, launched, cx)
+        if let Place::File(path) = &place {
+            let opened = path.clone();
+            cx.defer(move |cx| crate::recent::add(&opened, cx));
+        }
+        Self::adopting(place, session, notice, who, scale, timing, launched, cx)
     }
 
     /// [`Self::adopt`] with the user `who` and the measure `scale` given.
     #[allow(clippy::too_many_arguments)]
     fn adopting(
-        path: PathBuf,
+        place: Place,
         session: sheaf_ops::session::Session,
         notice: Option<String>,
         who: Identity,
@@ -1167,19 +1256,108 @@ impl DocView {
         launched: Instant,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self::unopened(path, None, timing, launched, cx);
+        let mut this = Self::placed(place, None, timing, launched, cx);
+        this.show_session(session, notice, who, scale, cx);
+        this
+    }
+
+    /// `session`'s document shown as it is, nothing read again, its marks
+    /// made by the user `who` from now on, measured at `scale`, with
+    /// `notice` what it was told as it was made.
+    fn show_session(
+        &mut self,
+        session: sheaf_ops::session::Session,
+        notice: Option<String>,
+        who: Identity,
+        scale: sheaf_doc::measure::Scale,
+        cx: &mut Context<Self>,
+    ) {
         let sheaf_ops::session::Session { mut doc, view, .. } = session;
         doc.set_identity(who);
         let drawn = doc.primary().page_count() > 0;
-        this.state = State::Ready(Box::new(Doc::new(doc, cx.focus_handle(), scale)));
-        this.take_view(view);
-        if let (Some(notice), State::Ready(doc)) = (notice, &mut this.state) {
+        self.state = State::Ready(Box::new(Doc::new(doc, cx.focus_handle(), scale)));
+        self.take_view(view);
+        if let (Some(notice), State::Ready(doc)) = (notice, &mut self.state) {
             doc.notice = Some(notice);
         }
         // A primary of no pages, made in memory, draws nothing.
         if drawn {
-            this.ask_form_type(cx);
+            self.ask_form_type(cx);
         }
+    }
+
+    /// A view of `u`, a new untitled document of no pages, which pages come
+    /// into as they're made (Create from Scans, M5 proposal 2): it's clean
+    /// until they do, its marks are made by the user `who`, measured at
+    /// `scale`. [`Self::adopted`] tells the listeners it opened, once they
+    /// listen.
+    pub(crate) fn untitled(
+        u: Untitled,
+        who: Identity,
+        scale: sheaf_doc::measure::Scale,
+        timing: bool,
+        launched: Instant,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let session = sheaf_ops::session::Session::new_empty_named(&u.name);
+        let place = Place::Untitled(u);
+        Self::adopting(place, session, None, who, scale, timing, launched, cx)
+    }
+
+    /// A view of the untitled document `rec` recovers, what a crash left of
+    /// one (M5 proposal 2), under its name and claim: its sidecar read in
+    /// the background, then shown as a file opens, its pages first and
+    /// the rest read after them ([`Self::show_opening`]); once it's ready,
+    /// it's never saved, so it's dirty and Save is Save As, starting in the
+    /// folder its sidecar says, and its sidecar is kept until it's saved or
+    /// its changes are dropped. Its marks are made by the user `who`,
+    /// measured at `scale`. A sidecar that can't be read is left, and the
+    /// view says why.
+    pub(crate) fn recovered_untitled(
+        rec: sheaf_doc::recovery::Untitled,
+        who: Identity,
+        scale: sheaf_doc::measure::Scale,
+        timing: bool,
+        launched: Instant,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let claim = Arc::new(rec.claim);
+        let u = Untitled {
+            name: claim.name().to_string(),
+            dir: rec.folder,
+            claim: Some(claim.clone()),
+        };
+        let this = Self::placed(Place::Untitled(u), None, timing, launched, cx);
+        cx.spawn(async move |this, cx| {
+            let t = Instant::now();
+            let restored = cx
+                .background_executor()
+                .spawn(async move {
+                    let store = Store::new();
+                    let src = sheaf_doc::recovery::restore_untitled(&store, &claim)?;
+                    anyhow::Ok((store, src, claim))
+                })
+                .await;
+            this.update(cx, |v, cx| {
+                match restored {
+                    Ok((store, src, claim)) => {
+                        let name = claim.name().into();
+                        let model = opening_model(store, src.clone(), name, None, who);
+                        v.show_opening(model, src, true, scale, cx);
+                        if timing {
+                            eprintln!("[timing] recovered unsaved pages in {:?}", t.elapsed());
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("recovering an untitled document: {e:#}");
+                        v.state = State::Failed(format!("{e:#} (its recovery data is kept)"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         this
     }
 
@@ -1255,6 +1433,9 @@ impl DocView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(path) = self.path().map(Path::to_path_buf) else {
+            return;
+        };
         let name = self.file_name();
         let rx = sheaf_ui::prompts::ask(
             window,
@@ -1269,7 +1450,6 @@ impl DocView {
                 gpui::PromptButton::new("Discard"),
             ],
         );
-        let path = self.path.clone();
         cx.spawn(async move |this, cx| match rx.await {
             Ok(0) => {
                 this.update(cx, |v, cx| v.recover(rec, cx)).ok();
@@ -1285,7 +1465,9 @@ impl DocView {
     /// save writes them, which checks that the file is still the one the
     /// sidecar was written against (M10.5 §11.10).
     fn recover(&mut self, rec: sheaf_doc::recovery::Recovery, cx: &mut Context<Self>) {
-        let path = self.path.clone();
+        let Some(path) = self.path().map(Path::to_path_buf) else {
+            return;
+        };
         let password = self.password.clone();
         self.forget_planners();
         self.state = State::Loading;
@@ -1350,11 +1532,22 @@ impl DocView {
     /// (its record's), unless the last sidecar holds it already. It waits
     /// for a save in flight, whose file it would be written against, and
     /// for the sidecar being written. A document no file of this path holds
-    /// has none. A sidecar is encrypted as its file is.
-    fn write_recovery(&mut self, cx: &mut Context<Self>) {
+    /// has none. A sidecar is encrypted as its file is. An untitled
+    /// document's is its whole state, in the state folder
+    /// ([`Self::write_untitled_recovery`]).
+    pub(crate) fn write_recovery(&mut self, cx: &mut Context<Self>) {
         self.autosave = None;
         self.autosave_since = None;
-        let path = self.path.clone();
+        let path = match &self.place {
+            Place::File(path) => path.clone(),
+            Place::Untitled(u) => {
+                let (claim, folder) = (u.claim.clone(), u.dir.clone());
+                if let Some(claim) = claim {
+                    self.write_untitled_recovery(claim, folder, cx);
+                }
+                return;
+            }
+        };
         let State::Ready(doc) = &self.state else {
             return;
         };
@@ -1425,16 +1618,122 @@ impl DocView {
         .detach();
     }
 
+    /// [`Self::write_recovery`] as pages land (a scan's batch): at once,
+    /// or, while the sidecar is being written, as soon as that write ends,
+    /// so the sidecar is behind them only while it's written.
+    pub(crate) fn write_recovery_at_once(&mut self, cx: &mut Context<Self>) {
+        self.sidecar_due = true;
+        self.write_recovery(cx);
+    }
+
+    /// [`Self::write_recovery`] of an untitled document, whose sidecar
+    /// `claim` holds, its Save As starting in `folder`: gone when it has
+    /// nothing unsaved (no pages yet, or all of them undone); otherwise the
+    /// current version, the whole document, written in the background
+    /// unless the last sidecar holds it, as a file's is, waiting as a
+    /// file's waits, and written again as soon as it's done when pages
+    /// landed meanwhile ([`Self::write_recovery_at_once`]). Nothing is
+    /// done while it's still being read from a sidecar. Once the sidecar is
+    /// wanted no more (`sidecar_unwanted`), none is written, and a write in
+    /// flight removes what it wrote: a view whose changes were dropped may
+    /// be gone by then, and the write holds the claim until it's done, so
+    /// no other document has the name meanwhile. One that lands once the
+    /// document was saved to a file, or has nothing unsaved, goes too.
+    fn write_untitled_recovery(
+        &mut self,
+        claim: Arc<Claim>,
+        folder: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        if self.sidecar_unwanted.load(Ordering::SeqCst) || doc.reading.is_some() {
+            return;
+        }
+        if !doc.model.is_dirty() {
+            sheaf_doc::recovery::discard_untitled(&claim);
+            self.sidecar_of = None;
+            return;
+        }
+        if doc.saving || self.sidecar_writing {
+            self.schedule_autosave(cx);
+            return;
+        }
+        let of = doc.model.current_version();
+        if self.sidecar_of == Some(of) {
+            return;
+        }
+        let input = doc.model.recovery_input();
+        let (timing, unwanted) = (self.timing, self.sidecar_unwanted.clone());
+        self.sidecar_writing = true;
+        self.sidecar_due = false;
+        cx.spawn(async move |this, cx| {
+            let written = cx
+                .background_executor()
+                .spawn({
+                    let claim = claim.clone();
+                    async move {
+                        let t = Instant::now();
+                        let written = sheaf_doc::recovery::write_untitled(
+                            &input,
+                            &claim,
+                            &folder,
+                            &sheaf_ops::NoProgress,
+                        );
+                        // Set before the sidecar is removed, so a write
+                        // that lands after the removal sees it.
+                        if unwanted.load(Ordering::SeqCst) {
+                            sheaf_doc::recovery::discard_untitled(&claim);
+                        }
+                        (written, t.elapsed())
+                    }
+                })
+                .await;
+            this.update(cx, |v, cx| {
+                v.sidecar_writing = false;
+                let (n, took) = match written {
+                    (Ok(n), took) => (n, took),
+                    (Err(e), _) => {
+                        log::warn!("writing recovery sidecar: {e:#}");
+                        return;
+                    }
+                };
+                if timing {
+                    eprintln!("[timing] untitled recovery sidecar: {n} bytes in {took:?}");
+                }
+                let ours =
+                    |c: &Option<Arc<Claim>>| c.as_ref().is_some_and(|c| Arc::ptr_eq(c, &claim));
+                let kept = matches!(&v.place, Place::Untitled(u) if ours(&u.claim))
+                    && !v.sidecar_unwanted.load(Ordering::SeqCst)
+                    && matches!(&v.state, State::Ready(doc) if doc.model.is_dirty());
+                if kept {
+                    v.sidecar_of = Some(of);
+                    if std::mem::take(&mut v.sidecar_due) {
+                        v.write_recovery(cx);
+                    }
+                } else {
+                    // Saved to a file meanwhile, or undone to nothing: the
+                    // document's place says what's due now.
+                    sheaf_doc::recovery::discard_untitled(&claim);
+                    v.write_recovery(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// [`Self::write_recovery`] on this thread, at once: what a save does
     /// as it ends. A sidecar already being written was begun against the
     /// file the save replaced, and, stale when it's done, writes this one
     /// again after it, in the background.
     fn write_recovery_now(&mut self, cx: &mut Context<Self>) {
-        let path = self.path.clone();
+        let path = self.path().map(Path::to_path_buf);
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let file = (doc.model.file()).filter(|(file, _)| &***file == path.as_path());
+        let file = (doc.model.file()).filter(|(file, _)| Some(&***file) == path.as_deref());
         let (Some((file, base)), false, true) = (file, self.sidecar_writing, doc.model.is_dirty())
         else {
             return self.write_recovery(cx);
@@ -1455,9 +1754,32 @@ impl DocView {
         }
     }
 
-    /// The user chose to drop unsaved changes: the sidecar goes with them.
+    /// The user chose to drop unsaved changes: the sidecar goes with them,
+    /// beside the file, or an untitled document's in the state folder,
+    /// which is wanted no more, so a write of it still in flight goes too.
     pub fn discard_recovery(&self) {
-        sheaf_doc::recovery::discard(&self.path);
+        match &self.place {
+            Place::File(path) => sheaf_doc::recovery::discard(path),
+            Place::Untitled(u) => {
+                self.sidecar_unwanted.store(true, Ordering::SeqCst);
+                if let Some(claim) = &u.claim {
+                    sheaf_doc::recovery::discard_untitled(claim);
+                }
+            }
+        }
+    }
+
+    /// The view is gone: an untitled document with nothing unsaved keeps
+    /// no sidecar, not even one a write still in flight lands (its pages
+    /// undone just before it closed). One with unsaved changes was asked
+    /// about before it closed, and one still being read from its sidecar
+    /// keeps that for the next launch.
+    fn released(&mut self) {
+        let clean = matches!(&self.state,
+            State::Ready(doc) if !doc.model.is_dirty() && doc.reading.is_none());
+        if clean && matches!(self.place, Place::Untitled(_)) {
+            self.discard_recovery();
+        }
     }
 
     /// Read what `src`, the primary file, says besides its pages on a
@@ -1502,7 +1824,8 @@ impl DocView {
     /// close can come between), they make its opened version, and the
     /// view takes what it shows beside the model; then listeners hear the
     /// file opened, and the dev hooks that edit or save run. A `recovered`
-    /// file says it stays unsaved until it's saved.
+    /// file says it stays unsaved until it's saved, and a recovered
+    /// untitled document is never saved, so it's dirty.
     fn ready(
         &mut self,
         blob: sheaf_doc::BlobId,
@@ -1543,7 +1866,14 @@ impl DocView {
             doc.notice = renamed_notice(renamed);
         }
         if recovered {
-            doc.notice = Some("Recovered unsaved changes — Ctrl+S to keep them".into());
+            doc.notice = Some(match self.place {
+                Place::File(_) => "Recovered unsaved changes — Ctrl+S to keep them".into(),
+                // What a crash left of an untitled document was never saved.
+                Place::Untitled(_) => {
+                    doc.model.never_saved();
+                    "Recovered unsaved pages — Ctrl+S to save them".into()
+                }
+            });
         }
         self.on_change(&opened, cx);
         if let Some(p) = self.selftest_save.take() {
@@ -1773,7 +2103,7 @@ impl DocView {
             .copied()
             .collect();
         Some(sheaf_plugin::DocContext {
-            path: self.path.clone(),
+            path: self.path().map(Path::to_path_buf),
             cell: doc.plugin_cell.clone(),
             selection,
             current_page: doc.page_id(doc.current_page()),
@@ -1987,26 +2317,26 @@ impl DocView {
 
     // ----- save --------------------------------------------------------------
 
-    /// Save As: ask for a path, then save there.
-    fn save_as(&mut self, cx: &mut Context<Self>) {
-        let dir = self
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let suggested = self
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(String::from);
-        let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
+    /// Save As: ask for a path, suggesting the file's name, or an untitled
+    /// document's with ".pdf", then save there. Resolves to whether it
+    /// saved: false when the picker is cancelled.
+    fn save_as(&mut self, cx: &mut Context<Self>) -> Task<bool> {
+        let suggested = match &self.place {
+            Place::File(path) => (path.file_name())
+                .and_then(|s| s.to_str())
+                .map(String::from),
+            Place::Untitled(u) => Some(format!("{}.pdf", u.name)),
+        };
+        let rx = crate::file_dialog::save(cx, &self.folder(), suggested.as_deref());
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(path))) = rx.await {
-                this.update(cx, |view, cx| view.save_to(path, cx).detach())
-                    .ok();
+            let Ok(Ok(Some(path))) = rx.await else {
+                return false;
+            };
+            match this.update(cx, |view, cx| view.save_to(path, cx)) {
+                Ok(saving) => saving.await,
+                Err(_) => false,
             }
         })
-        .detach();
     }
 
     /// Unsaved changes, or a save still in flight.
@@ -2014,10 +2344,32 @@ impl DocView {
         matches!(&self.state, State::Ready(d) if d.model.is_dirty() || d.saving)
     }
 
-    /// Plain Save: to the document's own path.
+    /// Plain Save: to the document's file, or, while it's untitled, Save
+    /// As. Resolves to whether it saved.
     pub fn save(&mut self, cx: &mut Context<Self>) -> Task<bool> {
-        let path = self.path.clone();
-        self.save_to(path, cx)
+        match &self.place {
+            Place::File(path) => {
+                let path = path.clone();
+                self.save_to(path, cx)
+            }
+            Place::Untitled(_) => self.save_as(cx),
+        }
+    }
+
+    /// Save before closing, as the close prompt's Save asks: a scan still
+    /// running is stopped first, keeping its pages, and once it has ended
+    /// and its last batch landed, the document is saved ([`Self::save`]).
+    /// Resolves to whether it may close: it saved, and nothing is unsaved
+    /// after the save (an edit made while Save As asked where, say).
+    pub(crate) fn save_to_close(&mut self, cx: &mut Context<Self>) -> Task<bool> {
+        let scan_ended = self.stop_scan(cx);
+        cx.spawn(async move |this, cx| {
+            scan_ended.await;
+            let Ok(saving) = this.update(cx, |v, cx| v.save(cx)) else {
+                return false;
+            };
+            saving.await && this.read_with(cx, |v, _| !v.is_dirty()).unwrap_or(false)
+        })
     }
 
     /// Save to `path`: the document's own path for plain Save, any other
@@ -2262,7 +2614,7 @@ impl DocView {
                 match (asking, choice) {
                     (Asking::Save(saving), Some(Choice::SaveAs)) => {
                         view.abandon_save(saving, cx);
-                        view.save_as(cx);
+                        view.save_as(cx).detach();
                     }
                     (Asking::Save(saving), None) => view.abandon_save(saving, cx),
                     (Asking::Save(saving), _) => view.go_on_saving(saving, cx).detach(),
@@ -2405,11 +2757,12 @@ impl DocView {
                 report.strategy,
             );
         }
-        if path != self.path {
-            // Save As: the file the document was is no longer its file, and
-            // keeps no sidecar of it.
-            sheaf_doc::recovery::discard(&self.path);
-            self.path = path.clone();
+        if self.path() != Some(path.as_path()) {
+            // Save As, or an untitled document's first save: where the
+            // document was kept is no longer its place, and keeps no
+            // sidecar of it.
+            self.discard_recovery();
+            self.place = Place::File(path.clone());
         }
         let saved_path = path.clone();
         cx.defer(move |cx| crate::recent::add(&saved_path, cx));
@@ -2863,17 +3216,8 @@ impl DocView {
         if ids.is_empty() {
             return;
         }
-        let dir = self
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let suggested = self
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("{s} - pages.pdf"));
-        let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
+        let suggested = format!("{} - pages.pdf", self.stem());
+        let rx = crate::file_dialog::save(cx, &self.folder(), Some(&suggested));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |view, cx| view.extract_to(ids, path, cx))
@@ -2909,17 +3253,8 @@ impl DocView {
     // ----- export flattened copy ----------------------------------------------
 
     fn flattened_copy_prompt(&mut self, cx: &mut Context<Self>) {
-        let dir = self
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let suggested = self
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("{s} - flattened.pdf"));
-        let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
+        let suggested = format!("{} - flattened.pdf", self.stem());
+        let rx = crate::file_dialog::save(cx, &self.folder(), Some(&suggested));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |view, cx| view.flattened_copy_to(path, cx))
@@ -2981,17 +3316,8 @@ impl DocView {
     /// File > Export Clean Copy: ask for a path, then write the document
     /// there with all markup removed.
     fn clean_copy_prompt(&mut self, cx: &mut Context<Self>) {
-        let dir = self
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let suggested = self
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("{s} - clean.pdf"));
-        let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
+        let suggested = format!("{} - clean.pdf", self.stem());
+        let rx = crate::file_dialog::save(cx, &self.folder(), Some(&suggested));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |view, cx| view.export_clean_to(path, cx))
@@ -3815,17 +4141,8 @@ impl DocView {
         let n = req.pages.len();
         let pages = format!("{n} page{}", if n == 1 { "" } else { "s" });
         if req.save_pdf {
-            let dir = self
-                .path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_default();
-            let suggested = self
-                .path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| format!("{s} - print.pdf"));
-            let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
+            let suggested = format!("{} - print.pdf", self.stem());
+            let rx = crate::file_dialog::save(cx, &self.folder(), Some(&suggested));
             cx.spawn(async move |this, cx| {
                 let Ok(Ok(Some(path))) = rx.await else { return };
                 // The save dialog asked before it named a file there.
@@ -3883,7 +4200,8 @@ impl DocView {
             return None;
         };
         Some(crate::properties_dialog::PropertiesContext {
-            path: self.path.clone(),
+            path: self.path().map(Path::to_path_buf),
+            name: self.file_name(),
             source: doc.model.primary().clone(),
             page_size: doc
                 .shown_ref(doc.current_page())
@@ -4991,6 +5309,12 @@ impl Render for DocView {
             status_notice = notice;
             status
         } else {
+            // The password prompt's, read before the state is borrowed.
+            let locked = (self.path())
+                .and_then(Path::file_name)
+                .and_then(|s| s.to_str())
+                .unwrap_or("This file")
+                .to_string();
             match &mut self.state {
                 State::Loading => "Opening…".into(),
                 State::Failed(e) => format!("Failed: {e}").into(),
@@ -5002,7 +5326,7 @@ impl Render for DocView {
                         div()
                             .id("locked")
                             .size_full()
-                            .child(locked_card(&self.path, l, cx))
+                            .child(locked_card(&locked, l, cx))
                             .into_any_element(),
                     );
                     "Password required".into()
@@ -5013,6 +5337,7 @@ impl Render for DocView {
         let review = self.render_blank_review(cx);
         let ocr_progress = self
             .ocr_progress()
+            .or_else(|| self.scan_progress())
             .or_else(|| self.job_progress())
             .or_else(|| {
                 let (_, t) = self.plugin_run.as_ref()?;
@@ -5099,6 +5424,8 @@ impl Render for DocView {
                     v.close_search(window, cx)
                 } else if v.cancel_ocr(cx) {
                     // Esc during a Recognize Text run stops it.
+                } else if v.cancel_scan(cx) {
+                    // And a scan streaming pages in.
                 } else if v.close_blank_review(cx) {
                     // Esc closes the blank-page review.
                 } else if v.cancel_planner(cx) {
@@ -5188,7 +5515,7 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &DuplicatePages, _, cx| v.duplicate_current(cx)))
             .on_action(cx.listener(|v, _: &SelectAllPages, _, cx| v.select_all(cx)))
             .on_action(cx.listener(|v, _: &Save, _, cx| v.save(cx).detach()))
-            .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx)))
+            .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx).detach()))
             .on_action(cx.listener(|v, _: &ExportCleanCopy, _, cx| v.clean_copy_prompt(cx)))
             .on_action(cx.listener(|v, _: &ExportFlattened, _, cx| v.flattened_copy_prompt(cx)))
             .on_action(cx.listener(|v, _: &crate::SummarizeComments, _, cx| {
@@ -6191,12 +6518,8 @@ pub(crate) fn annot_elements(
 const NOTE_GLYPH: f32 = 12.0;
 
 /// The password prompt shown in place of the pages for an encrypted file.
-fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) -> AnyElement {
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("This file")
-        .to_string();
+/// The password prompt for the file called `name`.
+fn locked_card(name: &str, l: &Locked, cx: &mut Context<DocView>) -> AnyElement {
     let input = l.input.clone();
     div()
         .size_full()
@@ -6294,8 +6617,60 @@ fn reveal_bookmarks(
     }
 }
 
+/// What the headless app tests elsewhere share with this module's, which
+/// run on Linux only.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// The document `view` shows.
+    pub(crate) fn shown(view: &mut DocView) -> &mut Doc {
+        match &mut view.state {
+            State::Ready(doc) => doc,
+            _ => panic!("ready"),
+        }
+    }
+
+    /// Whether `view`'s recovery sidecar is being written.
+    pub(crate) fn sidecar_writing(view: &DocView) -> bool {
+        view.sidecar_writing
+    }
+
+    /// The version `view`'s last recovery sidecar holds, while it's the
+    /// one to keep.
+    pub(crate) fn sidecar_of(view: &DocView) -> Option<sheaf_doc::VersionId> {
+        view.sidecar_of
+    }
+
+    /// Whether `view`'s untitled sidecar is wanted no more, shared with
+    /// each write of it in flight, which drops it once it's done.
+    pub(crate) fn sidecar_unwanted(view: &DocView) -> Arc<AtomicBool> {
+        view.sidecar_unwanted.clone()
+    }
+
+    /// Set in the process a test runs alone in, to the file it opens.
+    pub(crate) const ALONE: &str = "SHEAF_APP_ALONE";
+
+    /// Runs test `name` again in a process of its own, [`ALONE`] set to
+    /// `path` and each of `env` set too, which must pass.
+    pub(crate) fn alone(name: &str, path: &std::path::Path, env: &[(&str, &std::path::Path)]) {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(ALONE, path)
+            .envs(env.iter().copied())
+            .output()
+            .unwrap();
+        let said = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        let (stdout, stderr) = (said(&out.stdout), said(&out.stderr));
+        assert!(out.status.success(), "{}\n{stdout}{stderr}", out.status);
+        assert!(stdout.contains("1 passed"), "{stdout}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::test_support::{ALONE, alone, shown};
     use super::*;
     use anyhow::Context as _;
     use sheaf_edit::{BookmarkRef, Local, Sibling};
@@ -6568,15 +6943,6 @@ mod tests {
             layout: doc.layout,
         };
         doc.panes[0].layout = Some(Layout::build(spec, &doc.model));
-    }
-
-    /// The document `view` shows.
-    #[cfg(target_os = "linux")]
-    fn shown(view: &mut DocView) -> &mut Doc {
-        match &mut view.state {
-            State::Ready(doc) => doc,
-            _ => panic!("ready"),
-        }
     }
 
     /// A 1×1 image, standing in for a render.
@@ -7030,7 +7396,7 @@ mod tests {
                     let who = Identity::default();
                     let (scale, at) = (Default::default(), Instant::now());
                     DocView::adopting(
-                        out.clone(),
+                        Place::File(out.clone()),
                         session,
                         notice.clone(),
                         who,
@@ -7051,7 +7417,7 @@ mod tests {
                     assert_eq!(heard.take(), [DocEvent::Opened]);
                     cx.update(|cx| {
                         view.update(cx, |v, _| {
-                            assert_eq!(v.path, out);
+                            assert_eq!(v.path(), Some(out.as_path()));
                             let doc = shown(v);
                             let model = &doc.model;
                             assert!(Arc::ptr_eq(model.store(), &store), "the same document");
@@ -8262,26 +8628,6 @@ mod tests {
         let mut bytes = Vec::new();
         pdf.save_to(&mut bytes).unwrap();
         bytes
-    }
-
-    /// Set in the process a test runs alone in, to the file it opens.
-    #[cfg(target_os = "linux")]
-    const ALONE: &str = "SHEAF_APP_ALONE";
-
-    /// Runs test `name` again in a process of its own, [`ALONE`] set to
-    /// `path` and each of `env` set too, which must pass.
-    #[cfg(target_os = "linux")]
-    fn alone(name: &str, path: &std::path::Path, env: &[(&str, &std::path::Path)]) {
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([name, "--exact", "--nocapture", "--test-threads=1"])
-            .env(ALONE, path)
-            .envs(env.iter().copied())
-            .output()
-            .unwrap();
-        let said = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-        let (stdout, stderr) = (said(&out.stdout), said(&out.stderr));
-        assert!(out.status.success(), "{}\n{stdout}{stderr}", out.status);
-        assert!(stdout.contains("1 passed"), "{stdout}");
     }
 
     /// Layers write no file (M10.5 §10.6): in a process of its own, its
