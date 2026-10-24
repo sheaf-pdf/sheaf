@@ -401,8 +401,26 @@ lists them):
 - `just gates` runs the 7k gates, waiting for a quiet machine first.
 
 Tests run under a memory cap where Linux has a user systemd
-(`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off). The corpus
-tests read `../pdf-corpus`, or `$SHEAF_CORPUS`.
+(`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off).
+
+**The test corpus.** The corpus tests read about 16,000 real-world and
+test-suite PDFs from `../pdf-corpus` beside this checkout, or
+`$SHEAF_CORPUS`, and skip without them. The PDFs aren't in this
+repository: [fetch-pdf-corpus](https://github.com/sheaf-pdf/fetch-pdf-corpus)
+rebuilds the corpus byte for byte from where each file was published,
+checking each one's sha256:
+
+```sh
+cargo install --locked --git https://github.com/sheaf-pdf/fetch-pdf-corpus --tag v0.1.1
+fetch-pdf-corpus fetch --out ../pdf-corpus        # 4.3 GB
+fetch-pdf-corpus fetch --out ../pdf-corpus pool   # 1.9 GB more: the pool files the
+                                                  #   ignored realize and lexer tiers
+                                                  #   and bench/real.py read
+```
+
+A rerun resumes, and `fetch-pdf-corpus verify --dir ../pdf-corpus`
+checks a folder. `parsing/unsafe/` holds files made to break parsers:
+read them as bytes, or in a process you can lose.
 
 **Plugins.** sheaf runs WebAssembly plugins (the `plugins` feature, on by
 default; `--no-default-features` leaves out wasmtime too). The bundled

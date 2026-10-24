@@ -8,12 +8,16 @@
 //!
 //! Tests look in `$SHEAF_CORPUS`, then in `../pdf-corpus` beside the
 //! workspace, and skip, passing with a message, when neither is there
-//! (CI has no corpus). A folder that is there without
-//! `forms/manifest.tsv` fails them instead: a corpus laid out before the
-//! manifests moved into their categories, or a wrong `$SHEAF_CORPUS`,
-//! would otherwise pass every corpus test by running none. Nothing is
-//! assumed about what it holds. Files marked `restricted` are read in
-//! place: no copy, excerpt or rendering of them is committed.
+//! (CI has no corpus). The corpus's files aren't published:
+//! [fetch-pdf-corpus] rebuilds it, byte for byte, from where each was.
+//! A folder that is there without `forms/manifest.tsv` fails them
+//! instead: a corpus laid out before the manifests moved into their
+//! categories, or a wrong `$SHEAF_CORPUS`, would otherwise pass every
+//! corpus test by running none. Nothing is assumed about what it holds.
+//! Files marked `restricted` are read in place: no copy, excerpt or
+//! rendering of them is committed.
+//!
+//! [fetch-pdf-corpus]: https://github.com/sheaf-pdf/fetch-pdf-corpus
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -90,7 +94,10 @@ impl Corpus {
     /// [`Corpus::find`], or a line saying the test skips.
     pub fn or_skip() -> Option<Corpus> {
         Corpus::find().or_else(|| {
-            eprintln!("skipped: no corpus (set SHEAF_CORPUS, or check out ../pdf-corpus)");
+            eprintln!(
+                "skipped: no corpus (fetch-pdf-corpus fetch --out ../pdf-corpus, or set \
+                 SHEAF_CORPUS; README.md's Building says how)"
+            );
             None
         })
     }
@@ -104,7 +111,8 @@ impl Corpus {
         if !root.join(FORMS).is_file() {
             anyhow::bail!(
                 "{} has no {FORMS}: not a corpus, or one from before the manifests moved \
-                 into their categories (update ../pdf-corpus, or fix SHEAF_CORPUS)",
+                 into their categories (fetch it again with fetch-pdf-corpus, or fix \
+                 SHEAF_CORPUS)",
                 root.display()
             );
         }

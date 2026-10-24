@@ -147,7 +147,7 @@ doctor:
     echo "Corpus:"
     corpus=${SHEAF_CORPUS:-$(dirname "{{justfile_directory()}}")/pdf-corpus}
     if [ -e "$corpus/forms/manifest.tsv" ]; then printf '  %-16s %s\n' "pdf-corpus" "$corpus"
-    else printf '  %-16s %s\n' "pdf-corpus" "MISSING at $corpus: the corpus tests need it (SHEAF_CORPUS, else ../pdf-corpus)"; fi
+    else printf '  %-16s %s\n' "pdf-corpus" "MISSING at $corpus: the corpus tests need it (fetch-pdf-corpus fetch --out $corpus; README.md, Building)"; fi
     echo "Test memory cap:"
     if [ "$(uname -s)" = Linux ] && systemctl --user show-environment >/dev/null 2>&1; then echo "  on (scripts/test-capped.sh, MemoryMax ${SHEAF_TEST_MEMORY_MAX:-48G})"; else echo "  off (no user systemd)"; fi
 
