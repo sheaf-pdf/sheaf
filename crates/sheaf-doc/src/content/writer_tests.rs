@@ -126,6 +126,31 @@ fn text_is_written_in_its_font() {
     assert_eq!(glyphless.res, Glyphless.resource().into());
 }
 
+/// An operator content read gives is written as it is, its operands
+/// before it, a line of its own, an inline image whole; it names no
+/// resource, and what it does isn't followed: the font text draws in is
+/// the one `font` set, a `Tf` or a `Q` so written notwithstanding.
+#[test]
+fn an_operator_read_is_written_as_it_is() {
+    let mut w = ContentWriter::new();
+    w.font(&Std14::Helvetica, 9.0);
+    w.operation([&b"/F1"[..], b"12"], b"Tf");
+    w.operation([&b"[(a) -250 <62>]"[..]], b"TJ");
+    w.operation([], b"BI /W 1 /H 1 /CS /G /BPC 8 ID \xff EI");
+    w.operation([], b"Q");
+    w.text("é");
+    let (bytes, needs) = w.finish(&Reserved::default());
+    let [helvetica] = &needs.0[..] else {
+        panic!("{needs:?}")
+    };
+    let mut want = format!("/{} 9 Tf\n", String::from_utf8_lossy(&helvetica.name)).into_bytes();
+    want.extend_from_slice(
+        b"/F1 12 Tf\n[(a) -250 <62>] TJ\nBI /W 1 /H 1 /CS /G /BPC 8 ID \xff EI\n",
+    );
+    want.extend_from_slice(b"Q\n(\xe9) Tj\n");
+    assert_eq!(bytes, want, "{}", String::from_utf8_lossy(&bytes));
+}
+
 /// Property lists are named, never inline; an ExtGState is a resource.
 #[test]
 fn marked_content_names_its_list() {

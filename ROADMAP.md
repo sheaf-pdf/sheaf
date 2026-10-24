@@ -33,11 +33,11 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 | M10.5 | **The edit API**: page content in the model, one op vocabulary over one primitive, saves as outputs, one emitter for screen and file | M11–M15 edit content without reworking the core | Done | — |
 | M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | Planned | M10 slice 15, for flattening in Remove Hidden Information; M10 slices 23–26 if sanitize removes field scripts rather than whole fields (open) |
 | M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | Sketched | M10 slices 23–26 if signing creates new signature fields (open) |
-| M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | Sketched | M11 (content interpreter, image editing) |
-| M14 | **Document processing**: compare, optimize, PDF/A | Archival and output parity | Sketched | M11 (content interpreter), for optimize |
+| M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | Sketched | M11 (image editing) |
+| M14 | **Document processing**: compare, optimize, PDF/A | Archival and output parity | Sketched | Nothing unbuilt |
 | M15 | **Automation**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | Sketched; CLI groundwork shipped | Batch: each step's milestone (M10's `sheaf form` for fill and flatten, M11 for redact by pattern, M14 for optimize). Parity audit and stabilization: last, after everything else |
 | M16 | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from any combination of ops, with approval | Agents work on documents through sheaf's own ops | Sketched | Nothing unbuilt |
-| M17 | **Accessibility**: sheaf itself usable with a screen reader and the keyboard; PDF/UA documents: tags, validation, a review view | People who use assistive technology can use sheaf and read what it writes | Sketched | The app: nothing unbuilt. Documents: M11 (content interpreter), for tagging content; M14's PDF/A validator, if PDF/UA's rules share it (open) |
+| M17 | **Accessibility**: sheaf itself usable with a screen reader and the keyboard; PDF/UA documents: tags, validation, a review view | People who use assistive technology can use sheaf and read what it writes | Sketched | The app: nothing unbuilt. Documents: M14's PDF/A validator, if PDF/UA's rules share it (open) |
 
 **Depends on** lists the unbuilt work a milestone needs first, or the part
 of it named after "for": it uses that work's code, types or
@@ -53,7 +53,7 @@ work it unblocks: solid arrows are needed, dotted ones are soft, open or
 
 ```mermaid
 graph LR
-  fin["Done: M5 except two slices, M6–M9, M10 slices 1–5, M10.5"]
+  fin["Done: M5 except two slices, M6–M9, M10 slices 1–5, M10.5, the content interpreter (M11 slice 3)"]
   M5r["M5: separator sheets, scanners (deferred)"]
   M10a["M10 slices 6–17: appearances, filling, flatten, form data"]
   M10b["M10 slices 18–29: calculation, Prepare Form, detection, plugin API"]
@@ -75,8 +75,8 @@ graph LR
   M10b -.->|"slices 23–26: field scripts (open)"| M11
   fin --> M12
   M10b -.->|"slices 23–26: signature fields (open)"| M12
-  M11 -->|"content interpreter"| M13
-  M11 -->|"content interpreter"| M14
+  M11 -->|"image editing"| M13
+  fin --> M14
   M13 -.-|"shared: all-uses index"| M14
   fin --> M15a
   M10a -->|"sheaf form"| M15a
@@ -86,7 +86,6 @@ graph LR
   M16 --> Panel
   M16 -.-|"shared: command schemas"| M15a
   fin --> M17b
-  M11 -->|"content interpreter"| M17b
   M14 -.-|"shared: validator (open)"| M17b
   M5r & M10b & M12 & M13 & M15a & M16 & M17a & M17b -.-> M15b
 
@@ -389,17 +388,21 @@ kickoff and the bugs found, is in [`todos/m11.md`](todos/m11.md).
 - Certificate encryption: moved to after M12 (decided 2026-10-14), which
   builds the certificate stores it needs.
 
-Slices: encryption kept → Security dialog → content interpreter →
-redaction marks → apply: text and OCR → apply: images, line art,
-annotations → Export Redacted Copy → search and redact → remove hidden
-information → plugin API and docs.
+Slices: encryption kept → Security dialog → content interpreter ✅
+(landed early, between milestones, 2026-10-23) → redaction marks →
+apply: text and OCR → apply: images, line art, annotations → Export
+Redacted Copy → search and redact → remove hidden information → plugin
+API and docs.
 
 Deleted pages that stayed in saved files, found while planning, are fixed
 in M9 (deleting means deleted) rather than here.
 
 **Shared infrastructure:** M10.5 slice 6 built the content lexer and
-writer. The content interpreter built here on them is the base for M13
-content editing and M14 optimize.
+writer. The content interpreter on them, this plan's slice 3, landed
+early, in a PR of its own between milestones (2026-10-23): it's the
+base for M11's redaction, M13 content editing, M14 optimize and M17's
+tagged documents, none of which waits on the rest of M11 for it. Each
+may change it as real use finds what it needs.
 
 ### M12: Signatures
 
@@ -447,7 +450,8 @@ encryption.
 Slices: object selection + move/delete → add text/image → image edit/replace →
 text edit within a line → block reflow → links.
 
-Builds on M11's content interpreter.
+Builds on the content interpreter (M11's slice 3, landed early), and
+on M11's image redaction for image editing.
 
 ### M14: Document processing
 
@@ -568,7 +572,8 @@ docs.
 
 Added 2026-10-23, taking over M14's accessibility item. It has two parts
 that can run apart: the app, which needs nothing unbuilt, and the
-documents, which wait on M11's content interpreter.
+documents, which build on the content interpreter (M11's slice 3,
+landed early).
 
 **The app, with a screen reader and the keyboard**
 - **Screen readers.** GPUI (gpui-pre 0.3.9) reports its UI through
@@ -601,8 +606,9 @@ documents, which wait on M11's content interpreter.
 the target ❓
 - **Structure:** the tags tree in the model (`Key::StructElem` and
   `/ParentTree`, the M10.5 plan's §20), alt text, reading order, table
-  headers, the document's language and its title shown. M11's content
-  interpreter ties content to tags (marked content and MCIDs).
+  headers, the document's language and its title shown. The content
+  interpreter (M11's slice 3) ties content to tags: it reports each
+  marked range with its MCID, in each form use.
 - **Validate** PDF/UA's rules that software can check, as M14 does
   PDF/A's. The Matterhorn Protocol lists PDF/UA's failure conditions;
   veraPDF validates both standards, and is the reference to compare

@@ -162,7 +162,12 @@
 //! page's content for sheaf's private data, and that read alone, with
 //! neither a baseline nor a gate. From slice 20 the snapshot gate holds
 //! for `Document::published` too, which the app publishes for plugin calls
-//! at every change.
+//! at every change. M11's slice 3, pulled forward, adds the content
+//! interpreter's, in a process of its own: every page of the fixture
+//! interpreted, its forms drawn and each glyph laid out with its box, a
+//! font cache afresh each run, with the process's peak RSS, against a
+//! budget the row proposes ([`InterpBudget`]), asserted only when
+//! [`INTERP`] is set.
 //!
 //! From M5 slice 1, alone in `scan_of_500_black_and_white_pages`, the
 //! intake's memory: 500 synthetic black and white Letter pages at 300 dpi
@@ -196,6 +201,7 @@
 mod common;
 
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -206,7 +212,8 @@ use futures::executor::block_on;
 use image::{GrayImage, Rgb, RgbImage};
 use in_progress::{Level, Progress, Unit};
 use lopdf::{Dictionary, Object, ObjectId};
-use sheaf_doc::content::Marker;
+use sheaf_doc::content::interp::{self, Opts, interpret};
+use sheaf_doc::content::{Fonts, Marker, PageContent};
 use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
@@ -309,6 +316,35 @@ const ACCEPTED: &str = "accepted miss (Greg, 2026-10-22); option A, a lead windo
 /// is set, for Greg to rule on.
 const FLATTEN: &str = "SHEAF_GATE_FLATTEN";
 const UNATTAINABLE: &str = "unattainable by construction (the open alone peaks near it)";
+/// Set to assert the content interpreter's budgets (M11 slice 3), every
+/// page of a fixture interpreted ([`interp_part`]): the plan set none, so
+/// the row proposes one, about twice what it measured on a quiet machine
+/// ([`InterpBudget`]), asserted only when this is set until Greg rules.
+const INTERP: &str = "SHEAF_GATE_INTERP";
+
+/// What interpreting every page of a fixture may take, proposed (M11
+/// slice 3): the median time, and the process's peak RSS, the source
+/// read included (on the scanned, mostly its 474 MB of bytes). Each is
+/// about twice the median of five processes at load 4 to 7 (2026-10-23):
+/// 1,052 ms and 31 MB on the synthetic, 739 ms and 88 MB on the heavy,
+/// 73.7 ms and 516 MB on the scanned.
+struct InterpBudget {
+    ms: f64,
+    peak_mb: f64,
+}
+
+const INTERP_SYNTHETIC: InterpBudget = InterpBudget {
+    ms: 2000.0,
+    peak_mb: 64.0,
+};
+const INTERP_HEAVY: InterpBudget = InterpBudget {
+    ms: 1500.0,
+    peak_mb: 180.0,
+};
+const INTERP_SCANNED: InterpBudget = InterpBudget {
+    ms: 150.0,
+    peak_mb: 1024.0,
+};
 
 /// Proposal 8's rows and the everyday triggers of a live redraw (slice
 /// 17's follow-up): a page drawn after "Page n of N" is set on every page,
@@ -686,6 +722,14 @@ impl Kind {
         }
     }
 
+    fn interp_budget(self) -> &'static InterpBudget {
+        match self {
+            Kind::Synthetic => &INTERP_SYNTHETIC,
+            Kind::Heavy => &INTERP_HEAVY,
+            Kind::Scanned => &INTERP_SCANNED,
+        }
+    }
+
     /// The fixture's length in bytes when slice 2 measured it (gen.py's
     /// docstring). The heavy's depends on the font gen.py embeds.
     fn bytes(self) -> u64 {
@@ -724,7 +768,7 @@ fn gates_on_the_scanned_7k() {
 /// filter that names no test fails rather than passing with nothing run.
 fn run(kind: Kind) {
     let test = format!("gates_on_the_{}_7k", kind.name());
-    let mut parts = vec!["gates", "flatten", "clean"];
+    let mut parts = vec!["gates", "flatten", "clean", "interp"];
     if kind != Kind::Scanned {
         parts.extend(REWRITE_PARTS);
     }
@@ -746,6 +790,7 @@ fn run_parts(test: &str, kind: Kind, parts: &[&str]) {
         match std::env::var(PART).as_deref() {
             Ok("flatten") => flatten(kind),
             Ok("clean") => clean_part(kind),
+            Ok("interp") => interp_part(kind),
             Ok("rewrite") => rewrite_part(kind),
             Ok("trim") => trim_part(kind),
             _ => gates(kind),
@@ -2080,6 +2125,105 @@ fn clean_part(kind: Kind) {
             Row::time("its private data read alone", check, f64::NAN, ""),
         ],
     );
+}
+
+/// The content interpreter's rows on the `kind` fixture, in a process of
+/// its own (M11 slice 3): every page's content read and interpreted, its
+/// forms drawn and each glyph laid out with its box, as redaction will
+/// read a page, on the source as read, each run with a font cache of its
+/// own, so each reads its fonts afresh. Its budgets ([`InterpBudget`])
+/// are proposed, and asserted only when [`INTERP`] is set.
+fn interp_part(kind: Kind) {
+    let path = fixture(kind);
+    let store = Store::new();
+    let bytes = sheaf_util::read_file(&path).unwrap();
+    let blob = store.intern(bytes, BlobKind::file(&path, None)).unwrap();
+    let src = store.source(&blob).unwrap();
+    let (pdf, lim) = (src.pdf(), src.limits());
+    let (mut operators, mut glyphs) = (0, 0);
+    let (time, mem) = measure(QUICK_RUNS, || {
+        let fonts = Fonts::default();
+        timed(|| {
+            (operators, glyphs) = (0, 0);
+            for page in src.pages() {
+                let content = PageContent::read(pdf, &page.contents, lim).unwrap();
+                let resources = page.resources.as_deref();
+                let summary = interpret(
+                    pdf,
+                    content.concat(),
+                    resources,
+                    lim,
+                    &fonts,
+                    Opts::default(),
+                    |e| {
+                        if let interp::Kind::Text(show) = e.kind {
+                            for g in show.glyphs() {
+                                std::hint::black_box(g.quad);
+                            }
+                        }
+                        ControlFlow::Continue(())
+                    },
+                )
+                .unwrap();
+                operators += summary.operators;
+                glyphs += summary.glyphs;
+            }
+        })
+        .0
+    });
+    let budget = kind.interp_budget();
+    let proposed = |what: String| format!("{what}, proposed, asserted with {INTERP}");
+    print_table(
+        &format!(
+            "{} 7k, every page interpreted in a process of its own",
+            kind.name()
+        ),
+        "",
+        &[
+            Row::time(
+                "every page interpreted",
+                time,
+                f64::NAN,
+                proposed(format!("≤ {} ms", budget.ms)),
+            ),
+            Row::peak(
+                "every page interpreted",
+                mem,
+                f64::NAN,
+                proposed(format!("≤ {} MB", budget.peak_mb)),
+            ),
+            Row::added("every page interpreted", mem, f64::NAN, ""),
+            Row {
+                what: "operators interpreted".into(),
+                now: Some(operators as f64),
+                unit: "",
+                baseline: f64::NAN,
+                gate: String::new(),
+            },
+            Row {
+                what: "glyphs laid out".into(),
+                now: Some(glyphs as f64),
+                unit: "",
+                baseline: f64::NAN,
+                gate: String::new(),
+            },
+        ],
+    );
+    if std::env::var_os(INTERP).is_some() {
+        assert!(
+            ms(time) <= budget.ms,
+            "interpreting every page took {time:?}, over the {} ms proposed",
+            budget.ms
+        );
+        if let Some(mem) = mem {
+            let peak = mb(mem.peak);
+            assert!(
+                peak <= budget.peak_mb,
+                "interpreting every page peaked at {peak:.1} MB, over the {} MB proposed",
+                budget.peak_mb
+            );
+        }
+    }
 }
 
 /// The Rewrite of the `kind` fixture as opened, by `materialize` from its

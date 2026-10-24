@@ -69,17 +69,42 @@ pub struct FormLimits {
 /// can't be read, and an op that needs it fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContentLimits {
-    /// What a page's streams decompress to, together.
+    /// What a page's streams decompress to, together; where content is
+    /// interpreted, with the forms and fonts it draws.
     pub decompressed: usize,
     /// Operands before an operator. PDFium keeps the last 16; a real
     /// operator takes at most 33 (`scn` with DeviceN's 32 components and
     /// a pattern), but a stream may hold runs of numbers no operator ends.
     pub operands: usize,
     /// How deep arrays and dictionaries nest (PDFium's cap), and marked
-    /// content. `q` isn't capped: its balance is only counted.
+    /// content.
     pub depth: usize,
     /// An inline image's data, in bytes.
     pub inline_image: usize,
+    /// How deep Form XObjects are drawn within each other: PDFium's
+    /// `kMaxFormLevel`. A use deeper than this is skipped and reported,
+    /// as PDFium skips it, and the rest of the page is drawn; so is a use
+    /// of a form it's drawn within, at once, where PDFium draws it to
+    /// this depth.
+    pub form_depth: usize,
+    /// Graphics states `q` saved and `Q` hasn't restored, where content is
+    /// interpreted; elsewhere their balance is only counted. PDFium has no
+    /// cap, so this one only bounds the memory they take, far above any
+    /// real page's.
+    pub states: usize,
+    /// Operators interpreted on a page, and the codes its strings show,
+    /// counted across every use of the forms it draws, so a form drawn
+    /// many times costs each time.
+    pub operators: usize,
+    pub glyphs: usize,
+    /// Bytes of content interpreted on a page, counted as `operators` are,
+    /// so a form of whitespace or comments, which has few operators, still
+    /// costs its length each time it's drawn.
+    pub interpreted: usize,
+    /// Path segments: of a path being built, and of all those a page's
+    /// content paints or makes the clip, counted as `operators` are, which
+    /// bounds the memory a path and the clip take.
+    pub segments: usize,
 }
 
 impl Limits {
@@ -110,6 +135,12 @@ impl Limits {
             operands: 1 << 16,
             depth: 512,
             inline_image: 64 << 20,
+            form_depth: 40,
+            states: 1 << 16,
+            operators: 1 << 24,
+            glyphs: 1 << 24,
+            interpreted: 1 << 30,
+            segments: 1 << 23,
         },
     };
 }

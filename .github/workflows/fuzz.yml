@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lazy_reader, page_tree, sheaf_annot, lexer, splice, op_json, sheaf_generators]
+        target: [lazy_reader, page_tree, sheaf_annot, lexer, splice, interp, op_json, sheaf_generators]
     steps:
       - uses: actions/checkout@v4
 
@@ -49,8 +49,10 @@ jobs:
       # repository holds no PDF: from nothing, libFuzzer seldom gets past a
       # file's header and cross-reference sections. sheaf_annot's are a
       # page's annotation objects, lexer's and splice's page content,
-      # op_json's Op JSON envelopes, sheaf_generators' files sheaf saved
-      # with watermarks, the others' six files. Tests run in their crate's
+      # interp's the same page content, the content interpreter's pages'
+      # and two of those with the fonts' parts after them, op_json's Op
+      # JSON envelopes, sheaf_generators' files sheaf saved with
+      # watermarks, the others' six files. Tests run in their crate's
       # directory, hence the absolute path.
       - name: Seed the corpus
         env:

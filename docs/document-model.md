@@ -763,9 +763,12 @@ lint ledger) keeps them out of everything but tests.
   tape's picture), one object a resource a document.
 - **Fonts** (`content::Font`: `encode`, `advance`, `wrap`, `covers`,
   `resource`). `Std14` is the 14 standard fonts with Adobe's Core 14 AFM
-  widths (`crates/sheaf-doc/assets/afm`, with Adobe's notice) and exact
-  encoders: WinAnsi as cp1252, and Symbol's and ZapfDingbats' own, glyph
-  names read by the Adobe Glyph List; text is composed (NFC) first.
+  widths, glyph boxes and heights (`crates/sheaf-doc/assets/afm`, with
+  Adobe's notice) and exact encoders: WinAnsi as cp1252, and Symbol's
+  and ZapfDingbats' own, glyph names read by the Adobe Glyph List; text
+  is composed (NFC) first. `Std14::named` reads a file's `/BaseFont` as
+  PDFium does: the 14's names, and the alternates PDFium takes for them
+  (`Arial,Bold`, `TimesNewRomanPSMT`).
   `Glyphless` is the OCR layer's: Tesseract's glyphless font, each UTF-16
   code unit a CID, read back through its ToUnicode, so it draws any
   text. A font sheaf embeds keeps its glyph ids (CID = GID); Glyphless,
@@ -792,7 +795,12 @@ lint ledger) keeps them out of everything but tests.
   and `/Differences`, else Symbol's or ZapfDingbats' own, else the code
   as it is) and counted as NFC words, so the same text in two subsets
   with different codes gives equal bags. Slice 10's removal check
-  compares them.
+  compares them. From M11's slice 3 the decoder is the one a file's
+  fonts read text through (`Foreign::code_text`, below), and `text_bag`
+  keeps its own walk of the content rather than the interpreter's: the
+  two give equal bags on every stream the removal check reads, but the
+  interpreter, which lays out every glyph, was slower (The content
+  interpreter, below).
 - **Marks hold their stamps and attachments** (M10.5 slice 8). A mark
   names its stamp's page and its attachment's file by a stem, a blob's
   name (`BlobId::stem`), and holds them: `Mark.stamp` is a `FormRef`,
@@ -840,6 +848,206 @@ in the test profile; classifying every page of the 7k fixtures, cold,
 takes 141 ms (synthetic), 203 ms (heavy) and 77 ms (scanned), which was
 most of what a first Bates apply cost there until slice 17 made it one
 op that reads no page's content (under 1 ms).
+
+### The content interpreter (M11 slice 3, between milestones)
+
+M11's slice 3 landed early, on its own between M10.5 and M10's return
+(2026-10-23), since M11's redaction, M13's content editing, M14's
+optimize and M17's tagged documents all build on it. `content::interp`
+reads content as PDFium interprets it (`CPDF_StreamContentParser`), so
+where it says a glyph is, PDFium draws it. It lexes through the toolkit,
+never lopdf's `Content`.
+
+- **What it reads, and hands on.** `interpret(objects, &Concat,
+  resources, &Limits, &Fonts, Opts, visit)` hands each event to a
+  visitor in order, with the state before it and the marked ranges it's
+  in (`Event { at, state, marks, kind }`):
+  - every operator, inline images among them (`Kind::Op`; `At`: where,
+    and the operands as written);
+  - each string shown (`Text(TextShow)`), its glyphs laid out when asked
+    (`Glyph`: bytes, code, CID, origin, advance, quad, pen, what's
+    guessed, and `tm()`, the absolute `Tm` that starts a string there);
+  - each form use (`FormBegin` and `FormEnd`, a `FormUse` with its
+    matrix, `/BBox` and `/OC`, named by a `UseId`, the chain of `Do`
+    offsets that reach it) or refusal (`FormRefused`);
+  - each path painted or made the clip, in PageSpace (`Path`, `Seg`),
+    its bounds as far as a stroke paints (half the line width, √2 times
+    that at square caps, the miter limit's at a join or curve, 0.5 pt
+    for a zero width, as PDFium draws it);
+  - each image, an XObject or inline (`ImageDrawn`: the unit square
+    through the CTM, and its stencil, soft mask, stencil mask and `/OC`,
+    read without decoding its data); each shading `sh` paints
+    (`ShadingDrawn`, bounded by the clip within its `/BBox`); an XObject
+    PDFium doesn't draw (`Ignored`);
+  - marked content (`MarkedBegin`, `MarkedEnd`, `MarkedPoint`: a `Mark`
+    with its tag, properties, `/MCID`, `/ActualText` decoded, its `/OC`
+    list, the form use it's in and where its operator is).
+
+  `Summary` counts operators, glyphs, bytes of content lexed, path
+  segments, form uses and refusals, and the deepest forms, `q` and
+  marked content went. With `Forms::Report` no form is drawn and no
+  XObject read, a `Do` being an operator like another, as where each is
+  judged on its own (the removal check's, should `text_bag` move onto
+  it).
+- **State as PDFium keeps it.** `State` holds the CTM, the line's width,
+  cap, join and miter limit, the clip, and `TextState` (font and size,
+  `Tc`, `Tw`, `Tz`, `TL`, `Ts`, `Tr`, the text matrix, where the line
+  starts and the pen, and whether a width guessed earlier on the line
+  moved it). What PDFium does its own way, so does this: an operand that
+  isn't a number is 0, and a non-finite one leaves the state as it was;
+  `Tz` is taken with one operand only; a `Q` with nothing saved is
+  passed over, and `q` saves the text position too; `Tw` widens a code
+  32 that's one byte by its CMap's measure (`CPDF_CMap::GetCharSize`,
+  so never in Identity-H); a `TJ` is laid out as one text object
+  (`TextShow.offset`), the pen moving after it, and one that passes over
+  an empty string loses its last adjustment, as PDFium looks for it
+  past the strings it kept; a `Tf` naming a font the resources haven't got draws
+  in PDFium's stock Helvetica (`TextShow.stock`, `Fonts::stock`, built
+  once); an ExtGState's `/Font` is looked up by name; paths are built in
+  user space and placed by the CTM at the painting operator, with
+  PDFium's reading of path operators after an `m`; a resource category a
+  form's resources lack is looked up in the page's (`FindResourceHolder`);
+  and a form starts in PDFium's `AddForm` state, `Tz`, `TL`, `Ts` and
+  the text matrix reset.
+- **Fonts give glyph boxes.** `Foreign::read` reads a file's font as
+  PDFium does, failing only past the budget it decompresses within
+  (`TooLarge`): its kind (Type1, MMType1, TrueType, Type3, or Type0 over
+  CIDFontType0 or 2); its codes (`codes`, split as PDFium's
+  `CPDF_CMap::GetNextChar` splits them: by an embedded CMap's codespace,
+  a byte each by one range but two where it's of two bytes, by more each
+  code by PDFium's mixed rule, 0 for bytes no range begins; Identity-H
+  and -V by name; a code of two bytes cut off at a string's end padded
+  with a 0; a `/UseCMap` chain followed through streams, guessed where
+  it can't be read whole) and CIDs; its widths (`/Widths` from
+  `/FirstChar`, `/MissingWidth`, CID `/W`, `/DW`, `/W2` and `/DW2`, kept
+  as the ranges they're given in, the first for a CID winning, so no
+  array expands past its own length; cut to whole numbers as PDFium cuts
+  them); its heights and `/FontBBox` (`metrics`); a Type3 font's
+  `/FontMatrix` and each CharProc's `d1` box (`glyph_box`), rounded as
+  PDFium rounds them; and each code's text (`code_text`, through the
+  decoder `text_bag` uses). The standard 14 have Adobe's AFM widths, glyph boxes and
+  heights, and the names PDFium takes for them (`Std14::named`); a glyph
+  PDFium's own faces draw that Adobe's metrics lack, or draw at another
+  width (`Std14::drawn_otherwise`), has its width guessed
+  (`width_guessed`). What's guessed is said (`FontApprox`: codes,
+  widths, heights, boxes), and per glyph (`Glyph.approx`, whose widths
+  also means moved by a guess before it on its line). PDFium takes
+  heights from the face it draws in wherever a descriptor has no
+  `/FontBBox` that isn't all 0, and that face varies by OS (its own,
+  Arial, Helvetica), so only a descriptor with a box and its `Ascent`
+  and `Descent` is exact; and predefined CJK CMaps (`UniJIS-UCS2-H`)
+  aren't bundled, so their CIDs are unknown. A standard 14 font without
+  `/Widths` or a program has PDFium's own faces' widths, and so does
+  PDFium only where it draws in them: on a system that has Arial or
+  Helvetica, it takes widths from those, as it does heights (the default
+  PDFium tests give their standard 14 fonts `/Widths`). A glyph's quad is PDFium's
+  loose character box without the outline (`GetLooseBounds`' metric
+  box: the advance from descent to ascent through the character's
+  matrix), and in vertical writing the em-wide column its advance spans.
+  Simple fonts whose codes are bytes are laid out by a fast path that
+  makes the same sums in the same order (`Foreign::byte_widths`). `Fonts`
+  keeps a source's fonts by object, each read once (`Fonts::get`), and
+  `FontScope` one interpretation's picks by owner and name. What a font's
+  streams decompress to (its `/ToUnicode`, its CMap's chain and its
+  CharProcs, each stream once) is charged to the page's budget, with its
+  content and forms: once an interpretation for a font by object, cached
+  or not, so a page costs the same whichever page read it first, and
+  each time for one written in the resources as a dictionary.
+- **Forms per use, refused as PDFium skips them.** Each `Do` of a form is
+  interpreted where it's drawn, in a state of its own: its matrix, its
+  `/BBox` clipping, its resources its own, else those of what draws it;
+  each form is read once an interpretation. A use deeper than
+  `ContentLimits.form_depth` (40, PDFium's `kMaxFormLevel`) is refused
+  (`Refused::Depth`) and the page goes on, as PDFium skips it; so is a
+  use within itself (`Refused::Cycle`), at once. PDFium's own cycle check
+  compares the buffers it reads each use into, which it makes afresh for
+  every use of a stream read from a file, filtered or not, so it draws a
+  form that draws itself 40 deep: a cycle refused means the interpreter
+  reports less than PDFium draws, and redaction fails closed on any
+  refusal.
+- **Clipping and marked content.** `W` and `W*` wait for the path to
+  end; text shown in modes 4–7 (never in a Type3 font) clips at `ET`,
+  within PDFium's 1,024 text objects; each form's `/BBox` clips its
+  content. The clip (`Clip`, `ClipPart::{Path, Text}`) is a shared list
+  of parts with PageSpace bounds (`State::clip_bounds`), a part within
+  the last rectangle replacing it as PDFium merges them, dropped without
+  recursion. A text clip's bounds are its glyphs' quads, which an
+  outline may pass. Marked content is read as PDFium reads it, not as
+  `marked` does (strictly): a `BDC` whose name `/Properties` lacks opens
+  nothing, a stray `EMC` is passed over, a range left open ends where
+  its content does, and a form's `EMC`s can't end what its drawer
+  opened.
+- **Bounded.** `ContentLimits` gains `form_depth` (40); `states`, the
+  `q`s saved at once (65,536: PDFium has no cap, so this one bounds
+  memory only); `operators` and `glyphs` (2²⁴ each), `interpreted`, the
+  bytes of content lexed (2³⁰), and `segments`, path segments (2²³: of
+  a path being built, and of all painted or made the clip, which bounds
+  what paths and the clip hold), each counted across every form use, so
+  a form drawn many times costs each time, one of whitespace too. The
+  lexer's `operands` cap is the operand stack, `depth` caps marked
+  nesting (`Cap::Marked`), and forms and fonts decompress within what
+  the page's streams leave of `decompressed`. Text in a clipping mode
+  past the 1,024 objects PDFium's clip takes keeps no glyphs. Past a cap
+  is `InterpError::Limit(Cap)`, never a partial answer; a form that
+  can't be read is `InterpError::XObject`; and geometry an `f32` can't
+  hold (a CTM, a form's matrix, the line, a glyph's box by a bound
+  worked from its font's extent, a path, an image's corners, a shading)
+  is `InterpError::NotFinite`. It never panics or recurses past
+  `form_depth`. The most any page of the corpus comes to: 1,217,210
+  operators (13.8× under the cap), 41,050 glyphs, 17,864,912 bytes
+  lexed, 995,739 path segments, 745 form uses, forms 10 deep, 67 states
+  saved, marked content 9 deep.
+- **Written again** (`interp::encode`, giving `Encoded { content, forms
+  }`): the page's operators as one stream, and once each the content of
+  every form it draws, as written (`ContentWriter::operation`), but
+  `Td`, `TD` and `T*` as a `Tm` of the text matrix and a `Td` from its
+  origin to the line they move to, `'` as those and a `Tj`, and `"` as
+  `Tw`, `Tc`, those and a `Tj`. A `Td` that moves nothing stays as
+  written, since any operator ends PDFium's reading of path operators
+  after an `m`. Numbers so worked out are written as the state holds
+  them (`object::real`), so positions come out to the bit, and no line
+  depends on the leading or an earlier line: a line can be taken out
+  without moving the lines after it. Strings on one line still follow
+  each other, so where glyphs are taken out of one, the next on its line
+  needs a `Tm` and an absolute `Td` of its own (M11 slice 5). What can't read back the
+  same is refused (`EncodeError::Unwritable`): a line that isn't finite,
+  and an inline image whose `/L` isn't its data's length
+  (`lex::image_length`), whose end would move with what follows it.
+- **Tests and the corpus.** `content::fixture` (in other crates' tests
+  through the `fixtures` feature) builds a page for each operator, font
+  kind, nesting of forms, kind of image, clip and marked range, each
+  with its boxes worked by hand (`every()`); PDFium places every glyph
+  and image of them where the interpreter does, and renders each page
+  written again pixel for pixel as before; their standard 14 fonts have
+  `/Widths`, so PDFium lays them out the same on every OS. The `interp`
+  fuzz target draws two streams on `fixture::fuzz_page`, with the fonts'
+  CMap, a CharProc, `/W` and `/FontMatrix` from the input where it gives
+  them, and checks that what it writes draws the same, every glyph,
+  path, image and form where it was to the bit. Three ignored tiers in sheaf-render's
+  `content_interp.rs` (`SHEAF_INTERP_ONLY` narrows them) read every
+  form, the pool sample, every scan and conformance's 540 files that
+  claim PDF/UA (`Corpus::conformance`), 54,009 pages: every page
+  interpreted within the caps, with no panic, failure or box not finite
+  (10 s); 117,464,508 glyphs matched to PDFium's characters, none past a
+  thousandth of a point (origin, within the loose box, equal to it where
+  the outline lies within), 46,656 with codes or widths guessed counted,
+  and the glyphs and characters it can't say why it matched none for
+  (91,304 and 27,994) held to each file's count in a checked-in list
+  (`content_interp_unexplained.tsv`), so text the interpreter misses
+  fails (4 minutes); and every page written again rendering as before,
+  but 2 within 16 px and 24 within what PDFium's own render of the file
+  differs by when loaded again, none left unwritten (50 minutes).
+- **Its callers.** `text_bag` keeps its own walk. On the interpreter
+  (`Forms::Report`) its bags were equal on every stream the removal
+  check reads (pages, forms, tiling patterns, Type3 glyphs) across the
+  corpus, the pool sample, the scans, the PDF/UA files and the 7k
+  fixtures, but for the hash of an empty string shown in no font, which
+  stands for no text; but it was 4% slower on the synthetic 7k's streams
+  and 37% on the scanned's (5% faster on the heavy's), laying out glyphs
+  `text_bag` doesn't need, so M11's slice 5 is the first caller outside
+  tests. The 7k gate
+  interprets every page of each fixture, with a budget proposed and
+  asserted with `SHEAF_GATE_INTERP`.
 
 ## Undo/redo: snapshots, not inverse commands
 

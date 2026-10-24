@@ -153,7 +153,8 @@ pub fn kept(
             Tok::Op(b"scn" | b"SCN") => names.insert(ResKind::Pattern, name(0)),
             Tok::Op(b"BDC" | b"DP") => names.insert(ResKind::Properties, name(0)),
             Tok::InlineImage(_) => {
-                let cs = lex::image_color_space(s, step.at.clone(), lim.content.depth);
+                let keys: &[&[u8]] = &[b"CS", b"ColorSpace"];
+                let cs = lex::image_entry(s, step.at.clone(), lim.content.depth, keys);
                 let cs = cs
                     .and_then(lex::name)
                     .filter(|n| !device(n) && !abbreviated(n));

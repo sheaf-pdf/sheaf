@@ -19,7 +19,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-# `op_json`'s document is built from sheaf-doc's form and mark fixtures.
+# `op_json`'s document is built from sheaf-doc's form and mark fixtures,
+# and `interp`'s page from its content fixtures.
 sheaf-doc = { path = "../crates/sheaf-doc", features = ["fixtures"] }
 
 # sheaf-doc's lopdf is the workspace's patched one (vendor/lopdf/SHEAF.md);
@@ -72,6 +73,13 @@ bench = false
 [[bin]]
 name = "sheaf_generators"
 path = "fuzz_targets/sheaf_generators.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interp"
+path = "fuzz_targets/interp.rs"
 test = false
 doc = false
 bench = false
