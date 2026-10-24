@@ -36,7 +36,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Ubuntu 24.04, not ubuntu-latest: GitHub's 26.04 image installs
+        # Ubuntu's amd64v3 packages (x86-64-v3, so AVX2), and there even
+        # /bin/true fails under `qemu -cpu Nehalem`, which leaves the AVX2
+        # check below unable to tell anything about sheaf.
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
