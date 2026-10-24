@@ -26,7 +26,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pdfium
 
-SKIP = "skipped: no corpus (set SHEAF_CORPUS, or check out ../pdf-corpus)"
+SKIP = ("skipped: no corpus (fetch-pdf-corpus fetch --out ../pdf-corpus pool, or set "
+        "SHEAF_CORPUS; README.md's Building says how)")
 
 
 def corpus():
@@ -35,7 +36,8 @@ def corpus():
     for root in (os.environ.get("SHEAF_CORPUS"), beside):
         if root and os.path.isdir(root):
             if not os.path.isfile(os.path.join(root, "forms", "manifest.tsv")):
-                sys.exit(f"{root} has no forms/manifest.tsv: update ../pdf-corpus, or fix SHEAF_CORPUS")
+                sys.exit(f"{root} has no forms/manifest.tsv: fetch it again with fetch-pdf-corpus, "
+                         "or fix SHEAF_CORPUS")
             return root
     return None
 
