@@ -156,7 +156,7 @@ doctor:
 # Everything .github/workflows/ci.yml checks, but the Linux binary checks.
 [doc("Everything CI checks but the Linux binary checks")]
 [group('ci')]
-ci: fmt-check boundaries clippy test ocr-smoke plugins no-defaults
+ci: fmt-check locks boundaries clippy test ocr-smoke plugins no-defaults
 
 # Format the code.
 [group('ci')]
@@ -167,6 +167,15 @@ fmt:
 [group('ci')]
 fmt-check:
     cargo fmt --all -- --check
+
+# Both lockfiles match their manifests: the workspace's, and the fuzz
+# workspace's (fuzz/Cargo.lock), which the nightly fuzz job regenerates
+# without saying so when a dependency changes.
+[doc("Both lockfiles (the workspace's and fuzz/'s) are current")]
+[group('ci')]
+locks:
+    cargo metadata --locked --format-version 1 > /dev/null
+    cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
 
 # The crate boundaries CI holds: sheaf-image pixels only, sheaf-util byte
 # helpers, sheaf-edit types only (and building for WASI).
@@ -256,7 +265,7 @@ check-windows:
 # quiet machine (`just gates`). Logs and a summary in target/just/.
 [doc("Before a commit: the checks CI can't run (logs in target/just/); gates apart")]
 [group('local')]
-precommit: (_steps "precommit" "markers fmt-check corpus interop properties seeds clippy-nonlinux check-windows")
+precommit: (_steps "precommit" "markers fmt-check locks corpus interop properties seeds clippy-nonlinux check-windows")
 
 # Before a PR merges: the ignored corpus tiers, in full (append_corpus's,
 # the export tier, realize_corpus's pixels and predicate, PDFium's resave
