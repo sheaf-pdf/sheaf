@@ -24,7 +24,7 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 
 | # | Milestone | Proves | Status | Depends on |
 |---|---|---|---|---|
-| M5 | **Scan & OCR**: searchable text layer, scan cleanup, scanner intake, separator sheets | Scanned binders become searchable | Done except scanner intake and separator sheets | Nothing unbuilt. Best after M10.5 slice 19, which rebuilds the scan and insert paths they use |
+| M5 | **Scan & OCR**: searchable text layer, scan cleanup, scanner intake, separator sheets | Scanned binders become searchable | Done except scanner intake and separator sheets. The intake pipeline, untitled scan documents (#41) and reading codes (slice 3) land; the rest is deferred (Greg, 2026-10-23) until there are scanners to test against | Nothing unbuilt |
 | M6 | **Plugins**: WASM components, declarative UI, command registry | Extensibility without forking | Done | — |
 | M7 | **Viewing & output**: page modes, split view, panels, print, image/TIFF/text export | Viewing and printing never need Acrobat | Done | — |
 | M8 | **Page tools**: split, insert/replace, crop, labels, headers/footers, Bates, watermarks | Binder assembly is complete | Done | — |
@@ -54,7 +54,7 @@ work it unblocks: solid arrows are needed, dotted ones are soft, open or
 ```mermaid
 graph LR
   fin["Done: M5 except two slices, M6–M9, M10 slices 1–5, M10.5"]
-  M5r["M5: scanner intake, separator sheets"]
+  M5r["M5: separator sheets, scanners (deferred)"]
   M10a["M10 slices 6–17: appearances, filling, flatten, form data"]
   M10b["M10 slices 18–29: calculation, Prepare Form, detection, plugin API"]
   M11["M11 Security and redaction"]
@@ -95,6 +95,7 @@ graph LR
   classDef pending stroke-dasharray:5 5
   class fin done
   class Panel pending
+  class M5r pending
 ```
 
 Each milestone is broken into slices when it starts, as M1–M4 were. Slices
@@ -132,6 +133,17 @@ below are a first cut.
 
 Slices: OCR engine + text layer ✅ → batch OCR over binder ✅ → image import ✅
 → cleanup filters ✅ (with camera capture) → scanner intake → separator sheets.
+
+**Deferred after slice 3 (Greg, 2026-10-23):** the plan is
+[`todos/m5-intake.md`](todos/m5-intake.md). Its slices 1–2 (the intake
+pipeline, and untitled documents that scans stream into; #41) and 3
+(reading barcodes and patch codes) land. Slices 4–10 (separator sheets,
+separating, the scan worker and SANE, scanning in the app, TWAIN, WIA, and
+the docs) wait until there are physical scanners to test against, such as
+the office's Fujitsu fi-6130s. Without them they aren't worth the time
+now. Run-time loading of the LGPL TWAIN DSM and of libsane, which slices 6
+and 8 need, is ruled fine ([build-or-adopt.md](todos/build-or-adopt.md),
+D17).
 
 **Decided at kickoff (2026-10-11):** OCR is a core feature, not a plugin
 (Tesseract and ONNX Runtime are native code and can't run in wasmtime), with

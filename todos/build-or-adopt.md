@@ -463,6 +463,10 @@ with the SANE exception), loaded through libsane. Entries 5, 6.
 2. Not allowed: users install TWAIN DSM and sane-backends themselves,
    and the Flatpak has no scanning.
 
+**Ruled 2026-10-23 (Greg): 1, allowed.** "The linking rule for dynamic libs
+is fine." The scanner slices that use it (M5 slices 6 and 8) are deferred
+until there are scanners to test against.
+
 ## Already acted on (2026-10-23)
 
 - **wasmtime:** PR #33 updates wasmtime, wasmtime-wasi and
