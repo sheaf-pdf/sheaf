@@ -15,7 +15,7 @@ pdfjs_version := "6.4.299"
 verapdf_version := "1.30.3"
 verapdf_key := "13DD102B4DD69354D12DE5A83184863278B17FE7"
 
-# The bundled-plugin and fuzz targets CI runs.
+# The fuzz targets the nightly CI job runs (.github/workflows/fuzz.yml).
 fuzz_targets := "lazy_reader page_tree sheaf_annot lexer splice op_json sheaf_generators"
 
 # List the recipes.
@@ -57,7 +57,7 @@ setup-system:
 setup-rust:
     rustup show active-toolchain || rustup toolchain install
     rustup target add x86_64-pc-windows-msvc
-    rustup toolchain install nightly --profile minimal
+    rustup toolchain list | grep '^nightly' >/dev/null || rustup toolchain install nightly --profile minimal
     cargo fuzz --version >/dev/null 2>&1 || cargo install cargo-fuzz --locked
 
 # PDFium and the OCR data (Tesseract's language data, PaddleOCR's models)
@@ -96,7 +96,7 @@ setup-pdfjs:
 setup-verapdf:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -x "{{verapdf}}" ] && "{{verapdf}}" --version 2>/dev/null | grep -q "{{verapdf_version}}"; then
+    if [ -x "{{verapdf}}" ] && [[ "$("{{verapdf}}" --version 2>/dev/null)" == *"veraPDF {{verapdf_version}}"* ]]; then
       echo "veraPDF {{verapdf_version}} is installed"; exit 0
     fi
     command -v java >/dev/null || { echo "java missing: just setup-system"; exit 1; }
@@ -107,7 +107,8 @@ setup-verapdf:
     curl -sSfL -o "$work/$name.asc" "$base/$name.asc"
     export GNUPGHOME="$work/gnupg"; mkdir -m 700 "$GNUPGHOME"
     curl -sSf "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x{{verapdf_key}}" | gpg -q --import
-    gpg --status-fd 1 --verify "$work/$name.asc" "$work/$name" 2>/dev/null | grep -q "VALIDSIG {{verapdf_key}}" \
+    status=$(gpg --status-fd 1 --verify "$work/$name.asc" "$work/$name" 2>/dev/null || true)
+    [[ "$status" == *"VALIDSIG {{verapdf_key}}"* ]] \
       || { echo "veraPDF's signature doesn't verify with key {{verapdf_key}}"; exit 1; }
     (cd "$work" && unzip -q "$name")
     jar=$(find "$work" -name 'verapdf-izpack-installer-*.jar' | head -1)
@@ -191,10 +192,10 @@ clippy:
 
 # The workspace's tests, each binary under the memory cap; arguments go to
 # cargo test (`just test -p sheaf-doc forms::`).
-[doc("The workspace tests under the memory cap (`just test -p sheaf-doc forms::`)")]
+[doc("The tests under the memory cap: the workspace, or what the arguments name (`just test -p sheaf-doc forms::`)")]
 [group('ci')]
 test *args:
-    scripts/test-capped.sh cargo test --workspace {{args}}
+    scripts/test-capped.sh cargo test {{ if args == "" { "--workspace" } else { args } }}
 
 # The OCR engines' smoke tests.
 [group('ci')]
@@ -244,6 +245,7 @@ clippy-nonlinux:
 [doc("Windows clippy for the crates without C build dependencies")]
 [group('platforms')]
 check-windows:
+    rustup target list --installed | grep -x x86_64-pc-windows-msvc >/dev/null || rustup target add x86_64-pc-windows-msvc
     cargo clippy --target x86_64-pc-windows-msvc -p sheaf-util -p sheaf-doc -p sheaf-ops --all-targets -- -D warnings
 
 # ----- What CI can't run --------------------------------------------------
@@ -261,12 +263,12 @@ precommit: (_steps "precommit" "markers fmt-check corpus interop properties seed
 # of a watermark, the content lexer against PDFium). An hour or more.
 [doc("Before a PR merges: every ignored corpus tier (an hour or more)")]
 [group('local')]
-premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer")
+premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer _corpus-ran")
 
-# No merge-conflict markers anywhere but target/.
+[doc("No merge-conflict markers in tracked or untracked files (git grep; binaries and ignored files skipped)")]
 [group('local')]
 markers:
-    ! grep -rnE --exclude-dir=target --exclude-dir=.git '^(<<<<<<<|=======$|>>>>>>>)' .
+    ! git grep -nIE --untracked '^(<<<<<<<|=======$|>>>>>>>)'
 
 # The workspace's tests with ../pdf-corpus (or $SHEAF_CORPUS): fails if a
 # corpus test skipped.
@@ -406,6 +408,11 @@ package *args:
 [group('release')]
 target-size:
     du -sh target target/* 2>/dev/null | sort -h | tail -8
+
+# Fails if a corpus tier's log in target/just/ says it skipped for want of
+# a corpus.
+_corpus-ran:
+    ! grep -l 'skipped: no corpus' {{logs}}/tier-*.log
 
 # Runs recipes in order, keeping on past a failure, each one's output in
 # target/just/<recipe>.log, and a summary at the end.
