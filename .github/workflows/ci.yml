@@ -16,6 +16,12 @@ on:
   pull_request:
     paths: *code
 
+# A new push to a PR cancels that PR's run in progress. Each push to main
+# runs to the end: its run id makes its group its own.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -33,6 +39,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A PR's merge commit and its base, for the dependency check below.
+          fetch-depth: 2
 
       - name: Linux system deps (GPUI)
         if: runner.os == 'Linux'
@@ -55,9 +64,26 @@ jobs:
       # Only main saves the build cache; PRs restore main's. The repo's
       # caches share 10 GB, and a PR's own copies evicted main's, so most
       # runs compiled from scratch.
+      # The build cache holds dependencies only, keyed on every Cargo.toml and
+      # Cargo.lock, the toolchain and CI's cargo settings. A PR that changes
+      # none of them restores main's cache whole, so only main and the PRs
+      # that do change them save one: the repo's caches share 10 GB, and a
+      # copy per PR evicted main's.
+      - name: Does this PR change the build cache's inputs?
+        id: deps
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          if git diff --quiet HEAD^1 HEAD -- ':(glob)**/Cargo.toml' ':(glob)**/Cargo.lock' \
+              rust-toolchain.toml .cargo/config.toml .github/workflows/ci.yml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || steps.deps.outputs.changed == 'true' }}
 
       # tesseract-rs builds Tesseract and Leptonica from source into this
       # directory; keep it between runs.
