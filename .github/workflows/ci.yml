@@ -19,6 +19,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Full debug info is most of target/, and the cache below stores target/.
+  # Line tables keep file and line in a failing test's backtrace.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   check:
@@ -49,7 +52,12 @@ jobs:
       - name: WASI target
         run: rustup target add wasm32-wasip2
 
+      # Only main saves the build cache; PRs restore main's. The repo's
+      # caches share 10 GB, and a PR's own copies evicted main's, so most
+      # runs compiled from scratch.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # tesseract-rs builds Tesseract and Leptonica from source into this
       # directory; keep it between runs.
