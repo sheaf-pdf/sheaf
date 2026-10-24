@@ -39,9 +39,6 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-        with:
-          # A PR's merge commit and its base, for the dependency check below.
-          fetch-depth: 2
 
       - name: Linux system deps (GPUI)
         if: runner.os == 'Linux'
@@ -61,29 +58,14 @@ jobs:
       - name: WASI target
         run: rustup target add wasm32-wasip2
 
-      # Only main saves the build cache; PRs restore main's. The repo's
-      # caches share 10 GB, and a PR's own copies evicted main's, so most
-      # runs compiled from scratch.
-      # The build cache holds dependencies only, keyed on every Cargo.toml and
-      # Cargo.lock, the toolchain and CI's cargo settings. A PR that changes
-      # none of them restores main's cache whole, so only main and the PRs
-      # that do change them save one: the repo's caches share 10 GB, and a
-      # copy per PR evicted main's.
-      - name: Does this PR change the build cache's inputs?
-        id: deps
-        if: github.event_name == 'pull_request'
-        shell: bash
-        run: |
-          if git diff --quiet HEAD^1 HEAD -- ':(glob)**/Cargo.toml' ':(glob)**/Cargo.lock' \
-              rust-toolchain.toml .cargo/config.toml .github/workflows/ci.yml; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
+      # The build cache holds dependencies only. Only main saves it; a PR
+      # restores main's, whole, or all but the dependencies it changes. The
+      # repo's caches share 10 GB and main's three take most of it, so a
+      # PR's own copy evicted one of main's and later runs compiled from
+      # scratch.
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || steps.deps.outputs.changed == 'true' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # tesseract-rs builds Tesseract and Leptonica from source into this
       # directory; keep it between runs.
