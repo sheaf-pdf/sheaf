@@ -21,7 +21,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Ubuntu 24.04, not ubuntu-latest: a Linux build links against the
+        # glibc it's built on, and 24.04's (2.39) runs on more systems than
+        # 26.04's (2.43); 26.04's image is also built for x86-64-v3.
+        os: [ubuntu-24.04, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
