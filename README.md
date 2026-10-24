@@ -387,6 +387,23 @@ cargo run -p sheaf-app           # the GPUI window
                                  #   sheaf unless SHEAF_SINGLE_INSTANCE=1)
 ```
 
+**Standard operations** are in the `justfile` (`cargo install just`; `just`
+lists them):
+- `just setup` makes a dev environment from a fresh checkout: the system
+  packages (with sudo, on Debian and Ubuntu), the toolchain and targets,
+  PDFium and the OCR data, the plugins, and the oracle tools
+  ([docs/oracles.md](docs/oracles.md)). `just doctor` says what's there.
+- `just ci` runs what CI runs.
+- `just precommit` runs what CI can't: the tests with the corpus,
+  interop, the release properties, and clippy as macOS and Windows see
+  sheaf-app.
+- `just premerge` runs every ignored corpus tier, before a PR merges.
+- `just gates` runs the 7k gates, waiting for a quiet machine first.
+
+Tests run under a memory cap where Linux has a user systemd
+(`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off). The corpus
+tests read `../pdf-corpus`, or `$SHEAF_CORPUS`.
+
 **Plugins.** sheaf runs WebAssembly plugins (the `plugins` feature, on by
 default; `--no-default-features` leaves out wasmtime too). The bundled
 plugins build for `wasm32-wasip2`, which `rust-toolchain.toml` installs;
