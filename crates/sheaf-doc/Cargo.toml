@@ -61,6 +61,18 @@ bitflags.workspace = true
 # The date and time a mark's identity tokens are filled in with, as the
 # user's settings write them (M10.5 §6.8).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# The predefined CMaps a Type0 font's /Encoding names (ISO 32000-1 Table
+# 118, and Adobe-*-UCS2 for a CID's text), bundled: each code's CID, and
+# its text where the font has no /ToUnicode (M11 slice 3). Only its own
+# bundle is parsed, never a file's bytes. Adobe's CMap data is under
+# BSD-3, its notice in packaging/licenses (LICENSE-cmap-resources); the
+# bundle is brotli, so the full brotli crate comes with it (LICENSE-brotli).
+hayro-cmap = "0.1"
+# The font programs files embed (TrueType, CFF and Type 1), read for each
+# glyph's outline box and a font's heights as PDFium's FreeType reads them
+# (M11 slice 3); read-fonts comes with it, as skrifa::raw. 0.44 is the
+# version the Linux app's GPUI already builds, so the two share one.
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # Every op as Op JSON, which seeds the fuzzing of transactions.

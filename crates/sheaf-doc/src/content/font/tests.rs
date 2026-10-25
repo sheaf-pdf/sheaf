@@ -258,6 +258,15 @@ fn codes(font: &Foreign, s: &[u8]) -> Vec<(std::ops::Range<usize>, u32)> {
     font.codes(s).collect()
 }
 
+/// What's guessed of a font that embeds no program, and is no Type3
+/// font, but whose metrics are all given: its glyphs' outlines.
+const OUTLINES: FontApprox = FontApprox {
+    codes: false,
+    widths: false,
+    heights: false,
+    boxes: true,
+};
+
 fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
     Rect { x0, y0, x1, y1 }
 }
@@ -285,7 +294,8 @@ fn simple_widths_from_first_char_and_missing_width() {
     assert_eq!(widths, [500.0, 600.0, 700.0, 500.0, 500.0]);
     assert_eq!(codes(&font, b"AB"), [(0..1, 65), (1..2, 66)]);
     assert_eq!(font.cid(65), None);
-    assert!(!font.approx().any(), "{:?}", font.approx());
+    // Its glyphs' outlines only a program it doesn't embed would say.
+    assert_eq!(font.approx(), OUTLINES);
     // `/LastChar` before `/Widths` ends; 0, or past it, reads to its end.
     let short = foreign(&pdf, truetype(65, 65));
     assert_eq!([65, 66].map(|c| short.width(c)), [600.0, 500.0]);
@@ -336,13 +346,27 @@ fn standard_14_without_widths() {
     };
     assert!((0..256).all(|c| helvetica.width_guessed(c) == guessed(c)));
     assert!(guessed(0x01) && guessed(0xAB) && !guessed(b'A'.into()));
+    // A string has a code whose width is guessed where a byte of it is.
+    for s in [
+        &b""[..],
+        b"A",
+        b"\x01",
+        b"\x01AB",
+        b"AB\x01",
+        b"A\xABB",
+        b"ABC",
+    ] {
+        let any = s.iter().any(|&b| guessed(b.into()));
+        assert_eq!(helvetica.width_guessed_in(s), any, "{s:?}");
+    }
     let metrics = helvetica.metrics();
     assert_eq!((metrics.ascent, metrics.descent), (718.0, -207.0));
     assert_eq!(metrics.bbox, Some(rect(-166.0, -225.0, 1000.0, 931.0)));
-    // PDFium takes its heights from the face it substitutes.
+    // PDFium takes its heights, and its glyphs' outlines, from the face it
+    // substitutes.
     let heights = FontApprox {
         heights: true,
-        ..FontApprox::default()
+        ..OUTLINES
     };
     assert_eq!(helvetica.approx(), heights);
 
@@ -368,6 +392,7 @@ fn standard_14_without_widths() {
     let given = foreign(&pdf, given);
     assert_eq!(given.width(0x80), 600.0);
     assert!((0..256).all(|c| !given.width_guessed(c)));
+    assert!(!given.width_guessed_in(b"\x80\x01"));
     assert!(Std14::Courier.glyph_width("A") == Some(600.0));
     let courier = foreign(&pdf, type1("Courier"));
     assert!((0..=255).all(|c| courier.width(c) == 600.0));
@@ -492,7 +517,7 @@ fn identity_h_widths_from_w_and_dw() {
     assert_eq!(font.vertical(1), None);
     let metrics = font.metrics();
     assert_eq!((metrics.ascent, metrics.descent), (900.0, -200.0));
-    assert!(!font.approx().any(), "{:?}", font.approx());
+    assert_eq!(font.approx(), OUTLINES);
     // No `/DW`: 1000.
     let bare = type0(
         &mut pdf,
@@ -502,18 +527,137 @@ fn identity_h_widths_from_w_and_dw() {
     let bare = foreign(&pdf, bare);
     assert_eq!(bare.kind(), FontKind::Type0(Descendant::CidFontType0));
     assert_eq!(bare.width(5), 1000.0);
-    // A predefined CMap sheaf hasn't splits by the `/ToUnicode`
-    // codespace, its CIDs unknown.
-    let predefined = type0(
+    // A predefined CMap sheaf hasn't, or PDFium doesn't know, splits by
+    // the `/ToUnicode` codespace, its CIDs unknown: a name outside Table
+    // 118; CNS-EUC-V, which PDFium's table hasn't; KSCpc-EUC-V, which
+    // Adobe's hasn't.
+    for name in ["Adobe-Korea1-V", "CNS-EUC-V", "KSCpc-EUC-V"] {
+        let predefined = type0(&mut pdf, name.into(), dictionary! { "DW" => 800 });
+        let predefined = foreign(&pdf, predefined);
+        assert!(predefined.approx().codes, "{name}");
+        assert_eq!(predefined.cid(0x41), None);
+        assert_eq!(predefined.width(0x41), 800.0);
+        assert!(predefined.vertical(0x41).is_some());
+    }
+}
+
+/// A predefined CMap sheaf has (hayro-cmap's bundle of Adobe's) and
+/// PDFium knows: its codes split by PDFium's scheme for it, a byte, or
+/// two where the first leads two (90ms-RKSJ-H), or two each
+/// (UniJIS-UCS2-H), a code cut off at the end 0 for its second byte; each
+/// code's CID Adobe's, by the code's length, 0 for a code it maps none
+/// of; widths by those CIDs; `Tw` after a space of a byte; vertical where
+/// its name ends in V. With no `/ToUnicode`, its text is as PDFium reads
+/// it: a UCS2 CMap's codes, another's CIDs in Adobe-Japan1-UCS2, none for
+/// the code 0.
+#[test]
+fn predefined_cmaps_are_adobe_s() {
+    let mut pdf = Pdf::with_version("1.7");
+    let w = |pairs: &[(i64, i64)]| -> Object {
+        let w = (pairs.iter()).flat_map(|&(cid, w)| [cid.into(), vec![w.into()].into()]);
+        Object::Array(w.collect())
+    };
+    let rksj = type0(
         &mut pdf,
-        "UniJIS-UCS2-V".into(),
-        dictionary! { "DW" => 800 },
+        "90ms-RKSJ-H".into(),
+        dictionary! { "W" => w(&[(264, 500), (843, 1000)]), "DW" => 700 },
     );
-    let predefined = foreign(&pdf, predefined);
-    assert!(predefined.approx().codes);
-    assert_eq!(predefined.cid(0x41), None);
-    assert_eq!(predefined.width(0x41), 800.0);
-    assert!(predefined.vertical(0x41).is_some());
+    let rksj = foreign(&pdf, rksj);
+    assert!(!rksj.approx().codes);
+    let split = codes(&rksj, b"A\x82\xa0\xb1\x88\x9f\x82");
+    #[rustfmt::skip]
+    assert_eq!(split, [(0..1, 0x41), (1..3, 0x82a0), (3..4, 0xb1), (4..6, 0x889f), (6..7, 0x8200)]);
+    let cids = [0x41, 0x82a0, 0xb1, 0x889f, 0x8200, 0x20, 0x80].map(|c| rksj.cid(c));
+    assert_eq!(cids, [264, 843, 343, 1125, 0, 231, 0].map(Some));
+    let widths = [0x41, 0x82a0, 0xb1].map(|c| rksj.width(c));
+    assert_eq!(widths, [500.0, 1000.0, 700.0]);
+    assert!(rksj.word_spaced(32, 1));
+    let text = rksj.text(b"A\x82\xa0\x88\x9f\xb1");
+    assert_eq!(text.as_deref(), Some("Aあ亜ｱ"));
+    assert_eq!(rksj.code_text(0x82a0).as_deref(), Some("あ"));
+    assert!(!rksj.is_vertical());
+
+    let ucs2 = type0(
+        &mut pdf,
+        "UniJIS-UCS2-H".into(),
+        dictionary! { "W" => w(&[(34, 550)]) },
+    );
+    let ucs2 = foreign(&pdf, ucs2);
+    assert!(!ucs2.approx().codes);
+    let split = codes(&ucs2, b"\0A\x30\x42\x65");
+    assert_eq!(split, [(0..2, 0x41), (2..4, 0x3042), (4..5, 0x6500)]);
+    let cids = [0x41, 0x3042, 0x65e5, 0x20].map(|c| ucs2.cid(c));
+    assert_eq!(cids, [34, 843, 3284, 1].map(Some));
+    assert_eq!((ucs2.width(0x41), ucs2.width(0x3042)), (550.0, 1000.0));
+    assert!(!ucs2.word_spaced(32, 2));
+    let text = ucs2.text(b"\0A\x30\x42\x65\xe5");
+    assert_eq!(text.as_deref(), Some("Aあ日"));
+    assert_eq!(ucs2.text(b"\0\0"), None);
+
+    let vertical = type0(&mut pdf, "90ms-RKSJ-V".into(), dictionary! {});
+    let vertical = foreign(&pdf, vertical);
+    assert!(vertical.is_vertical());
+    let cids = (vertical.cid(0x8141), vertical.cid(0x41));
+    assert_eq!(cids, (Some(7887), Some(264)));
+}
+
+/// A Type0 font's text: its `/ToUnicode`'s where it has one, its codes
+/// split by that's codespace; without one, as PDFium reads it, Identity's
+/// CIDs in the UCS2 CMap of the collection its CIDFont's
+/// `/CIDSystemInfo` orders, by name or string, its registry unread; none
+/// for an Identity font of another ordering, nor for an embedded CMap's
+/// CIDs.
+#[test]
+fn type0_text_as_pdfium_reads_it() {
+    let mut pdf = Pdf::with_version("1.7");
+    let info = |ordering: Object| {
+        dictionary! {
+            "CIDSystemInfo" => dictionary! {
+                "Registry" => Object::string_literal("Other"), "Ordering" => ordering,
+            },
+        }
+    };
+    let text = |pdf: &mut Pdf, encoding: Object, descendant: Dictionary| {
+        let font = type0(pdf, encoding, descendant);
+        foreign(pdf, font).text(b"\x01\x08\x03\x4b")
+    };
+    let japan1 = info(Object::string_literal("Japan1"));
+    let named = info("Japan1".into());
+    let identity = info(Object::string_literal("Identity"));
+    let ordered = text(&mut pdf, "Identity-H".into(), japan1.clone());
+    assert_eq!(ordered.as_deref(), Some("Aあ"));
+    let ordered = text(&mut pdf, "Identity-V".into(), named);
+    assert_eq!(ordered.as_deref(), Some("Aあ"));
+    assert_eq!(text(&mut pdf, "Identity-H".into(), identity), None);
+    let cmap = pdf.add_object(Stream::new(
+        dictionary! {},
+        b"1 begincidrange <0000> <FFFF> 0 endcidrange".to_vec(),
+    ));
+    assert_eq!(text(&mut pdf, cmap.into(), japan1.clone()), None);
+    // CID 0, `.notdef`, is Adobe's U+FFFD, as PDFium reads it, but a
+    // string showing it isn't text: it's told from another by its bytes.
+    let font = type0(&mut pdf, "Identity-H".into(), japan1.clone());
+    let font = foreign(&pdf, font);
+    assert_eq!(font.code_text(0).as_deref(), Some("\u{FFFD}"));
+    assert_eq!(font.text(b"\x01\x08\x00\x00"), None);
+    let font = type0(&mut pdf, "90ms-RKSJ-H".into(), japan1.clone());
+    let font = foreign(&pdf, font);
+    assert_eq!(font.cid(0x80), Some(0));
+    assert_eq!(font.text(b"A"), Some("A".into()));
+    assert_eq!(font.text(b"A\x80"), None);
+
+    let to_unicode = pdf.add_object(Stream::new(
+        dictionary! {},
+        b"1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+          2 beginbfchar <0108> <005A> <034B> <0059> endbfchar"
+            .to_vec(),
+    ));
+    let mut font = type0(&mut pdf, "UniJIS-UCS2-H".into(), japan1);
+    font.set("ToUnicode", to_unicode);
+    let font = foreign(&pdf, font);
+    assert_eq!(font.text(b"\x01\x08\x03\x4b").as_deref(), Some("ZY"));
+    assert_eq!(font.text(b"\x30\x42"), None);
+    assert_eq!(font.code_text(0x3042), None);
 }
 
 /// Identity-V: the vertical metrics `/W2` gives in both its forms, and
@@ -551,8 +695,10 @@ fn identity_v_metrics_from_w2_and_dw2() {
 /// An embedded CMap: codes by its codespace, as PDFium splits them, a code
 /// cut off at the end 0; CIDs by its `cidrange`s and `cidchar`s over
 /// those of the CMap its `/UseCMap` names, `/WMode` from its program; a
-/// CMap that uses itself read once; Identity used by `usecmap` known,
-/// another predefined CMap not.
+/// CMap that uses itself read once; Identity used by `usecmap` known;
+/// another predefined CMap, by `usecmap` or `/UseCMap`, read for the codes
+/// nothing else maps, by their length, and guessed, as PDFium reads none,
+/// as is one sheaf hasn't.
 #[test]
 fn embedded_cmap_over_the_one_it_uses() {
     let mut pdf = Pdf::with_version("1.7");
@@ -617,10 +763,29 @@ fn embedded_cmap_over_the_one_it_uses() {
     assert!(!identity.approx().codes);
     let other = pdf.add_object(Stream::new(
         dictionary! {},
-        b"/UniGB-UCS2-H usecmap".to_vec(),
+        b"1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+          /UniJIS-UCS2-H usecmap 1 begincidchar <0041> 7 endcidchar"
+            .to_vec(),
     ));
     let other = type0(&mut pdf, other.into(), dictionary! {});
-    assert!(foreign(&pdf, other).approx().codes);
+    let other = foreign(&pdf, other);
+    let cids = [0x41, 0x3042, 0xd800].map(|c| other.cid(c));
+    assert_eq!(cids, [7, 843, 0].map(Some));
+    assert!(other.approx().codes);
+    let named = pdf.add_object(Stream::new(
+        dictionary! { "UseCMap" => "90ms-RKSJ-H" },
+        b"1 begincodespacerange <00> <FF> endcodespacerange".to_vec(),
+    ));
+    let named = type0(&mut pdf, named.into(), dictionary! {});
+    let named = foreign(&pdf, named);
+    assert_eq!((named.cid(0x41), named.cid(0xb1)), (Some(264), Some(343)));
+    assert!(named.approx().codes);
+    let unknown = pdf.add_object(Stream::new(
+        dictionary! {},
+        b"/Adobe-Korea1-2 usecmap".to_vec(),
+    ));
+    let unknown = type0(&mut pdf, unknown.into(), dictionary! {});
+    assert!(foreign(&pdf, unknown).approx().codes);
 }
 
 /// An embedded CMap's codes as PDFium splits them
@@ -943,19 +1108,386 @@ fn fonts_are_read_once() {
         &get(&helvetica.into(), budget).unwrap()
     ));
     let (page, other) = ((1, 0), (2, 0));
-    let mut scope = fonts.scope();
-    let mut pick = |owner, name: &[u8]| {
+    let mut pick = |scope: &mut FontScope<'_>, owner, name: &[u8]| {
         let picked = scope.font(&pdf, owner, Some(&resources), name, lim, budget);
         picked.unwrap()
     };
-    let f1 = pick(page, b"F1").unwrap();
-    assert_eq!(f1.width(b'A'.into()), 600.0);
-    assert!(Arc::ptr_eq(&f1, &pick(page, b"F1").unwrap()));
-    assert!(!Arc::ptr_eq(&f1, &pick(other, b"F1").unwrap()));
-    assert!(Arc::ptr_eq(&by_ref, &pick(page, b"F2").unwrap()));
-    assert!(pick(page, b"F3").is_none());
+    let mut scope = fonts.scope();
+    let f1 = pick(&mut scope, page, b"F1").unwrap();
+    assert_eq!(scope.get(f1).width(b'A'.into()), 600.0);
+    assert_eq!(pick(&mut scope, page, b"F1"), Some(f1));
+    let other_f1 = pick(&mut scope, other, b"F1").unwrap();
+    assert!(!std::ptr::eq(scope.get(f1), scope.get(other_f1)));
+    let f2 = pick(&mut scope, page, b"F2").unwrap();
+    assert!(std::ptr::eq(&*by_ref, scope.get(f2)));
+    assert!(pick(&mut scope, page, b"F3").is_none());
     let mut again = fonts.scope();
-    let f2 = again.font(&pdf, other, Some(&resources), b"F2", lim, budget);
-    assert!(Arc::ptr_eq(&by_ref, &f2.unwrap().unwrap()));
+    let f2 = pick(&mut again, other, b"F2").unwrap();
+    assert!(std::ptr::eq(&*by_ref, again.get(f2)));
     assert!(get(&Object::Integer(1), budget).is_none());
+}
+
+/// Font `name` of [`fixture::programs`]' page, read within `budget`, its
+/// program read where `programs` says.
+fn program_font(f: &crate::content::fixture::Fixture, name: &[u8], programs: bool) -> Arc<Foreign> {
+    let fonts = f
+        .resources()
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"Font")
+        .unwrap();
+    let font = fonts.as_dict().unwrap().get(name).unwrap();
+    let read = match programs {
+        true => Fonts::default(),
+        false => Fonts::for_text(),
+    };
+    let mut budget = Limits::DEFAULT.content.decompressed;
+    read.get(&f.pdf, font, &Limits::DEFAULT, &mut budget)
+        .unwrap()
+        .unwrap()
+}
+
+/// Each glyph's box is its program's, as FreeType loads it unscaled and
+/// PDFium normalizes it to thousandths, a side below 0 a unit up
+/// (`NormalizeFontMetric`); a code PDFium maps to no glyph has `-1` all
+/// round in a simple font; a CIDFont's top is raised by a 64th of itself,
+/// and a CID past its glyphs is all 0. TrueType, CFF and Type 1 alike.
+#[test]
+fn outline_boxes_are_the_program_s() {
+    let f = crate::content::fixture::programs();
+    let char_box = |font: &Foreign, code: u8| font.char_box(code.into());
+    let truetype = program_font(&f, b"PT", true);
+    assert_eq!(truetype.program(), FontProgram::Read);
+    assert!(!truetype.approx().boxes);
+    assert_eq!(
+        char_box(&truetype, b'A'),
+        Some(rect(0.0, 0.0, 600.0, 750.0))
+    );
+    // Its off-curve point is a control point the box holds.
+    assert_eq!(
+        char_box(&truetype, b'g'),
+        Some(rect(20.0, -199.0, 480.0, 560.0))
+    );
+    assert_eq!(char_box(&truetype, b' '), Some(Rect::default()));
+    // Drawn from its side bearing, not its outline's left.
+    assert_eq!(
+        char_box(&truetype, b'B'),
+        Some(rect(50.0, 0.0, 350.0, 300.0))
+    );
+    assert_eq!(
+        char_box(&truetype, b'C'),
+        Some(rect(100.0, 50.0, 700.0, 800.0))
+    );
+    // `D` has no glyph, and draws `.notdef`; so does a code of no name.
+    let notdef = Some(rect(50.0, 0.0, 450.0, 700.0));
+    assert_eq!(
+        (char_box(&truetype, b'D'), char_box(&truetype, 1)),
+        (notdef, notdef)
+    );
+    for name in [&b"PC"[..], b"P1"] {
+        let font = program_font(&f, name, true);
+        assert_eq!(font.program(), FontProgram::Read, "{name:?}");
+        assert_eq!(char_box(&font, b'A'), Some(rect(0.0, 0.0, 600.0, 750.0)));
+        // The curve's control points.
+        assert_eq!(
+            char_box(&font, b'g'),
+            Some(rect(20.0, -199.0, 480.0, 560.0))
+        );
+        assert_eq!(char_box(&font, b' '), Some(Rect::default()));
+        assert_eq!(char_box(&font, b'D'), Some(Rect::default()), "{name:?}");
+        assert_eq!(char_box(&font, 1), Some(rect(-1.0, -1.0, -1.0, -1.0)));
+    }
+    let cid = program_font(&f, b"PI", true);
+    assert_eq!(cid.char_box(1), Some(rect(0.0, 0.0, 600.0, 761.0)));
+    assert_eq!(cid.char_box(2), Some(rect(20.0, -199.0, 480.0, 568.0)));
+    assert_eq!(cid.char_box(3), Some(Rect::default()));
+    assert_eq!(cid.char_box(4), Some(rect(50.0, 0.0, 350.0, 304.0)));
+    assert_eq!(cid.char_box(5), Some(rect(100.0, 50.0, 700.0, 812.0)));
+    assert_eq!(cid.char_box(9), Some(Rect::default()));
+    // Read for text, it has none.
+    let text = program_font(&f, b"PT", false);
+    assert_eq!(
+        (text.program(), char_box(&text, b'A')),
+        (FontProgram::None, None)
+    );
+}
+
+/// Where the descriptor has no `/FontBBox`, the heights are the program's
+/// face's, within its box, as PDFium takes them (`CheckFontMetrics`); where
+/// it has one but gives `Ascent` and `Descent` 0, `A`'s top and `g`'s
+/// bottom. Read for text, both are guessed, as without a program.
+#[test]
+fn heights_from_the_program_where_the_descriptor_lacks_them() {
+    let f = crate::content::fixture::programs();
+    let heights = |name: &[u8], programs: bool| {
+        let font = program_font(&f, name, programs);
+        let m = font.metrics();
+        (m.ascent, m.descent, m.bbox, font.approx().heights)
+    };
+    let given = Some(rect(0.0, -200.0, 700.0, 800.0));
+    assert_eq!(heights(b"PT", true), (800.0, -200.0, given, false));
+    let face = Some(rect(0.0, -199.0, 700.0, 800.0));
+    assert_eq!(heights(b"PN", true), (800.0, -199.0, face, false));
+    let own = Some(rect(0.0, -300.0, 1000.0, 1000.0));
+    assert_eq!(heights(b"PZ", true), (750.0, -199.0, own, false));
+    assert!(heights(b"PN", false).3 && heights(b"PZ", false).3);
+}
+
+/// [`fixture::type1_program`](crate::content::fixture::type1_program)
+/// with a procedure `levels` deep in its clear text.
+fn type1_nested(levels: usize) -> Vec<u8> {
+    let program = crate::content::fixture::type1_program();
+    let at = program.windows(4).position(|w| w == b"/Pai").unwrap();
+    let nested = format!(
+        "/Nested {}{}def\n",
+        "{ ".repeat(levels),
+        "} ".repeat(levels)
+    );
+    [&program[..at], nested.as_bytes(), &program[at..]].concat()
+}
+
+/// A Type 1 program whose procedures nest as deep as the scan allows is
+/// read; one a level deeper isn't handed to read-fonts.
+#[test]
+fn type1_procedures_nest_within_the_scan_s_depth() {
+    let depth = super::type1::PROC_DEPTH;
+    assert!(super::type1::scan(&type1_nested(depth)).is_some());
+    assert!(super::type1::scan(&type1_nested(depth + 1)).is_none());
+}
+
+/// A Type 1 program whose integers run as long as the scan reads ahead of
+/// is read; one an integer longer isn't handed to read-fonts, nor a run
+/// of a hundred thousand, which the scan refuses within its stack.
+#[test]
+fn type1_integers_run_within_the_scan_s_lookahead() {
+    use crate::content::fixture::type1_integers_program as type1_integers;
+    let ahead = super::type1::INTS_AHEAD;
+    assert!(super::type1::scan(&type1_integers(ahead)).is_some());
+    assert!(super::type1::scan(&type1_integers(ahead + 1)).is_none());
+    assert!(super::type1::scan(&type1_integers(100_000)).is_none());
+}
+
+/// A program that doesn't read, cut short, garbage, of no format, or a
+/// Type 1 program whose procedures nest, or whose integers run, past what
+/// read-fonts is handed, is malformed: the font's boxes guessed, its heights as without one;
+/// never a panic.
+#[test]
+fn malformed_programs_fall_back() {
+    use crate::content::fixture::{
+        cff_program, truetype_program, type1_integers_program, type1_program,
+    };
+    let half = |p: Vec<u8>| p[..p.len() / 2].to_vec();
+    let programs = [
+        ("TrueType", "FontFile2", half(truetype_program())),
+        ("TrueType", "FontFile2", b"\0\x01\0\0garbage".to_vec()),
+        ("Type1", "FontFile3", half(cff_program())),
+        ("Type1", "FontFile", half(type1_program())),
+        ("Type1", "FontFile", type1_nested(17)),
+        ("Type1", "FontFile", type1_integers_program(100_000)),
+        ("Type1", "FontFile3", b"\xff\xd8\xff\xe0 a JPEG".to_vec()),
+    ];
+    for (subtype, key, program) in programs {
+        let mut pdf = Pdf::with_version("1.7");
+        let program = pdf.add_object(Stream::new(dictionary! {}, program));
+        let descriptor = pdf.add_object(dictionary! {
+            "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 700, "Descent" => -200,
+            key => program,
+        });
+        let font = foreign(
+            &pdf,
+            dictionary! {
+                "Type" => "Font", "Subtype" => subtype, "BaseFont" => "Bad",
+                "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![600.into()],
+                "FontDescriptor" => descriptor,
+            },
+        );
+        assert_eq!(font.program(), FontProgram::Malformed, "{subtype} {key}");
+        assert!(font.approx().boxes && font.approx().heights);
+        assert_eq!(font.char_box(65), None);
+        assert_eq!(
+            (font.metrics().ascent, font.metrics().descent),
+            (700.0, -200.0)
+        );
+    }
+}
+
+/// A CIDFont's program is read once, however many of its glyphs are
+/// drawn: two thousand CIDs over a Type 1 program of a MiB, each drawn as
+/// it's asked for, are drawn quickly.
+#[test]
+fn a_cid_font_s_program_is_read_once() {
+    let program = crate::content::fixture::type1_program();
+    let at = program.windows(4).position(|w| w == b"/Pai").unwrap();
+    let comment = [&b"%"[..], &vec![b'x'; 1 << 20], b"\n"].concat();
+    let program = [&program[..at], &comment, &program[at..]].concat();
+    let mut pdf = Pdf::with_version("1.7");
+    let program = pdf.add_object(Stream::new(dictionary! {}, program));
+    let descriptor = pdf.add_object(dictionary! {
+        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => -200,
+        "FontFile" => program,
+    });
+    let font = type0(
+        &mut pdf,
+        "Identity-H".into(),
+        dictionary! { "Subtype" => "CIDFontType0", "FontDescriptor" => descriptor },
+    );
+    let font = foreign(&pdf, font);
+    assert_eq!(font.program(), FontProgram::Read);
+    let started = std::time::Instant::now();
+    assert_eq!(font.char_box(2), Some(rect(0.0, 0.0, 600.0, 761.0)));
+    for cid in 0..2000 {
+        font.char_box(cid);
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+/// An SFNT whose `loca` record is past its end, which FreeType reads
+/// past, and so sheaf: its glyphs taken for none, it reads, over its CFF.
+#[test]
+fn a_loca_record_past_the_end_is_read_past() {
+    let mut pdf = Pdf::with_version("1.7");
+    let program = crate::content::fixture::loca_past_end_program();
+    let program = pdf.add_object(Stream::new(
+        dictionary! { "Subtype" => "OpenType" },
+        program,
+    ));
+    let descriptor = pdf.add_object(dictionary! {
+        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => -200,
+        "FontFile3" => program,
+    });
+    let font = foreign(
+        &pdf,
+        dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Fix",
+            "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![600.into()],
+            "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+        },
+    );
+    assert_eq!(font.program(), FontProgram::Read);
+}
+
+/// A program's work is bounded: a CFF glyph whose subroutines call each
+/// other past its fuel, and a TrueType composite of composites past the
+/// glyphs one may draw, are unknown, and found so quickly; one within its
+/// fuel is drawn.
+#[test]
+fn programs_past_their_work_are_unknown() {
+    use crate::content::fixture::{composite_bomb_program, heavy_cff_program};
+    let font = |subtype: &str, key: &str, program: Vec<u8>| {
+        let mut pdf = Pdf::with_version("1.7");
+        let program = pdf.add_object(Stream::new(dictionary! {}, program));
+        let descriptor = pdf.add_object(dictionary! {
+            "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => 0,
+            "FontBBox" => vec![0.into(), 0.into(), 600.into(), 750.into()], key => program,
+        });
+        foreign(
+            &pdf,
+            dictionary! {
+                "Type" => "Font", "Subtype" => subtype, "BaseFont" => "Heavy",
+                "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![600.into()],
+                "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+            },
+        )
+    };
+    let started = std::time::Instant::now();
+    let light = font("Type1", "FontFile3", heavy_cff_program(3));
+    assert_eq!(light.char_box(65), Some(rect(0.0, 0.0, 640.0, 640.0)));
+    let heavy = font("Type1", "FontFile3", heavy_cff_program(10));
+    assert_eq!(
+        (heavy.program(), heavy.char_box(65)),
+        (FontProgram::Read, None)
+    );
+    let mut pdf = Pdf::with_version("1.7");
+    let bomb = pdf.add_object(Stream::new(dictionary! {}, composite_bomb_program()));
+    let descriptor = pdf.add_object(dictionary! {
+        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => 0,
+        "FontBBox" => vec![0.into(), 0.into(), 600.into(), 750.into()], "FontFile2" => bomb,
+    });
+    let bomb = type0(
+        &mut pdf,
+        "Identity-H".into(),
+        dictionary! { "Subtype" => "CIDFontType2", "FontDescriptor" => descriptor },
+    );
+    let bomb = foreign(&pdf, bomb);
+    assert_eq!(bomb.char_box(0), None);
+    assert_eq!(bomb.char_box(6), Some(rect(0.0, 0.0, 600.0, 761.0)));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+/// What a program decompresses to is charged to the budget its font is
+/// read within, a `/CIDToGIDMap` stream's too, and a simple font's what
+/// drawing its glyphs costs: past it, the font is too large; read for
+/// text, none of it is charged.
+#[test]
+fn a_program_is_charged_to_the_budget() {
+    let f = crate::content::fixture::programs();
+    let font = |name: &[u8]| {
+        let fonts = f
+            .resources()
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"Font")
+            .unwrap();
+        let font = fonts
+            .as_dict()
+            .unwrap()
+            .get(name)
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        f.pdf.get_dictionary(font).unwrap().clone()
+    };
+    let lim = &Limits::DEFAULT;
+    let program = crate::content::fixture::truetype_program().len();
+    let mut budget = usize::MAX;
+    Foreign::read(&f.pdf, &font(b"PT"), lim, &mut budget).unwrap();
+    let charged = usize::MAX - budget;
+    assert!(
+        charged > program,
+        "{charged} charged, the program {program}"
+    );
+    let mut budget = charged;
+    Foreign::read(&f.pdf, &font(b"PT"), lim, &mut budget).unwrap();
+    assert_eq!(budget, 0);
+    let mut budget = charged - 1;
+    assert_eq!(
+        Foreign::read(&f.pdf, &font(b"PT"), lim, &mut budget).err(),
+        Some(TooLarge)
+    );
+    assert_eq!(budget, charged - 1);
+    let mut budget = 0;
+    let text = Fonts::for_text();
+    let by_ref = f
+        .resources()
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"Font")
+        .unwrap();
+    let pt = by_ref.as_dict().unwrap().get(b"PT").unwrap();
+    assert!(text.get(&f.pdf, pt, lim, &mut budget).unwrap().is_some());
+
+    let mut pdf = f.pdf.clone();
+    let map = pdf.add_object(Stream::new(dictionary! {}, vec![0, 0, 0, 2, 0, 1]));
+    let cid = font(b"PI");
+    let descendant = cid.get(b"DescendantFonts").unwrap().as_array().unwrap()[0]
+        .as_reference()
+        .unwrap();
+    pdf.get_dictionary_mut(descendant)
+        .unwrap()
+        .set("CIDToGIDMap", map);
+    let mut budget = program + 6;
+    let mapped = Foreign::read(&pdf, &cid, lim, &mut budget).unwrap();
+    assert_eq!(budget, 0);
+    // CID 1 draws glyph 2, CID 2 glyph 1, and CID 3 is past the map.
+    assert_eq!(mapped.char_box(1), Some(rect(20.0, -199.0, 480.0, 568.0)));
+    assert_eq!(mapped.char_box(2), Some(rect(0.0, 0.0, 600.0, 761.0)));
+    assert_eq!(mapped.char_box(3), Some(Rect::default()));
+    let mut budget = program + 5;
+    assert_eq!(
+        Foreign::read(&pdf, &cid, lim, &mut budget).err(),
+        Some(TooLarge)
+    );
 }

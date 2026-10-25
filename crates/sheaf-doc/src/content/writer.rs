@@ -162,22 +162,6 @@ impl Paint {
         }
     }
 
-    /// The painting operator `op` is, `F` read as `f`; None for another.
-    pub fn of(op: &[u8]) -> Option<Paint> {
-        Some(match op {
-            b"f" | b"F" => Paint::Fill,
-            b"f*" => Paint::FillEvenOdd,
-            b"S" => Paint::Stroke,
-            b"s" => Paint::CloseStroke,
-            b"B" => Paint::FillStroke,
-            b"B*" => Paint::FillStrokeEvenOdd,
-            b"b" => Paint::CloseFillStroke,
-            b"b*" => Paint::CloseFillStrokeEvenOdd,
-            b"n" => Paint::None,
-            _ => return None,
-        })
-    }
-
     /// The rule it fills by, where it fills.
     pub fn fills(self) -> Option<FillRule> {
         match self {

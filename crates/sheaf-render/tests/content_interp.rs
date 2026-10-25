@@ -7,29 +7,33 @@
 //! `GetLooseBounds`) by its metric box, the glyph's width from the font's
 //! descent to its ascent through the character's matrix, united with its
 //! outline's box (its tight box, `FPDFText_GetCharBox`), which only the
-//! font's program says. The interpreter's box is the metric box, so for
-//! each glyph:
-//! - its origin is its character's (`FPDFText_GetCharOrigin`), within
-//!   [`EPSILON`];
-//! - its box lies within the character's loose box, give or take
-//!   [`EPSILON`];
-//! - where the character's tight box lies within its box, give or take
-//!   [`EPSILON`], the two are equal within it, the outline having added
-//!   nothing.
+//! font's program says. The interpreter unites them where it reads the
+//! program, so each glyph's origin is its character's
+//! (`FPDFText_GetCharOrigin`), within [`EPSILON`], and:
+//! - a glyph whose outline its font's program says, nothing it's placed
+//!   by guessed ([`exact`]), has its box its character's loose box, each
+//!   side within [`EPSILON`];
+//! - any other's box is the metric box (a Type3 glyph's `d1` box isn't
+//!   united), which lies within the character's loose box, give or take
+//!   [`EPSILON`]; and where the character's tight box lies within it,
+//!   give or take [`EPSILON`], the two are equal within it, the outline
+//!   having added nothing.
 //!
 //! A font whose heights PDFium takes from the face it draws in, as for
 //! the standard 14 without a descriptor, has them guessed
 //! ([`FontApprox::heights`]): PDFium's face is its own where the system
 //! hasn't the font, else the system's (Arial on Windows, Helvetica on
 //! macOS), each taller than Adobe's metrics, the guess. Its glyphs are
-//! held to the first two, and to the third along the line only.
+//! held as others whose outline isn't known, but to equality along the
+//! line only.
 //!
 //! In vertical writing PDFium bounds a character by the em-wide column its
 //! advance spans, centred on the pen, an em of the font's size in
-//! PageSpace whatever the text space's scale; the interpreter's quad is
-//! that column through the text space, so where that isn't scaled, as
-//! here, the same three hold. Each glyph has its character, and each
-//! character its glyph: none is left over on either side.
+//! PageSpace whatever the text space's scale, united with its outline's
+//! box; the interpreter's quad is that column, so united, through the
+//! text space, so where that isn't scaled, as here, the same hold. Each
+//! glyph has its character, and each character its glyph: none is left
+//! over on either side.
 //!
 //! A `TJ` is laid out as PDFium lays one out, a text object, its glyphs
 //! where PDFium puts them however far along the line; and each standard 14
@@ -79,8 +83,17 @@
 //!   [`Class`], within the class's tolerance ([`Class::tolerance`], a
 //!   thousandth of a point for each): the distances' 50th and 99th
 //!   percentiles and most are printed by class, and a glyph past them
-//!   fails. In vertical writing the column is the one the font's metrics
-//!   give PDFium's way. A glyph PDFium bounds by a box with no area, or
+//!   fails. In text turned but by quarter turns, the interpreter unites
+//!   the two boxes in text space and PDFium their bounds in PageSpace, so
+//!   a glyph held on every side has its box hold its character's loose
+//!   box and lie within the bounds, through the text space, of that box's
+//!   bounds in it. In vertical writing the column is the one the font's
+//!   metrics give PDFium's way, and where the text space is scaled, which
+//!   the quad's column is but PDFium's isn't, a glyph is held as one
+//!   whose outline isn't known. One file's glyphs, whose program PDFium
+//!   can't load and sheaf reads ([`PROGRAM_DECODED_OTHERWISE`]), may be
+//!   past their tolerance, as many as it says. A glyph PDFium bounds by a
+//!   box with no area, or
 //!   by its outline alone, its font's ascent being its descent, is held
 //!   to its origin; one past its tolerance where another glyph at its
 //!   origin could be its character as well, drawn over it in another font
@@ -108,18 +121,23 @@
 //!   sheaf doesn't open, or that no update can go after, is counted and
 //!   printed, never left out unsaid.
 //!
-//! Ignored by default: the first takes ten seconds; the second about four
-//! minutes, a text page a page through one lock; the third about fifty
-//! minutes, every page rendered twice through it. The orchestrator runs
-//! them in full before a merge:
+//! Ignored by default: in release, the first takes ten seconds; the second
+//! about four minutes, a text page a page through one lock; the third
+//! about fifty minutes, every page rendered twice through it. The
+//! orchestrator runs them in full before a merge (`just premerge`), or
+//! alone:
 //!
 //! ```sh
-//! cargo test -p sheaf-render --test content_interp -- --ignored --nocapture
+//! just tier-interp
 //! ```
 //!
 //! They skip when there's no corpus (see `sheaf_doc::forms::corpus`). To
 //! look at a few files by hand, name them in [`ONLY`]; the tiers' own runs
-//! leave it unset.
+//! leave it unset. The standard 14 widths test, ignored too, isn't a tier:
+//! it holds only where PDFium draws in its own faces, on a system with no
+//! font named Helvetica, Arial or Times New Roman, so it's run by hand
+//! there (`cargo test -p sheaf-render --test content_interp -- --ignored
+//! --exact standard_14_widths_are_pdfium_s_faces_but_where_guessed`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map};
 use std::ops::ControlFlow;
@@ -134,7 +152,7 @@ use sheaf_doc::content::fixture::{self, Fixture};
 use sheaf_doc::content::interp::{
     EncodeError, Glyph, InterpError, Kind, Opts, Refused, encode, interpret,
 };
-use sheaf_doc::content::{FontApprox, FontKind, Fonts, Foreign, PageContent, Std14};
+use sheaf_doc::content::{FontApprox, FontKind, FontProgram, Fonts, Foreign, PageContent, Std14};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::{Affine, Rect};
 use sheaf_doc::materialize::ObjKey;
@@ -178,6 +196,8 @@ struct Placed {
     /// It's in PDFium's stock Helvetica, as wide as the face PDFium draws
     /// it in.
     stock: bool,
+    /// Its box is held to PDFium's loose box on every side ([`exact`]).
+    exact: bool,
 }
 
 /// A character PDFium's text page made.
@@ -212,6 +232,7 @@ fn placed(f: &Fixture) -> Vec<Placed> {
                     bounds: g.quad.bounds(),
                     approx,
                     stock: show.stock,
+                    exact: show.font.is_some_and(|f| exact(f, g.approx)),
                 }));
             }
             ControlFlow::Continue(())
@@ -285,6 +306,14 @@ fn near(a: (f32, f32), b: (f32, f32)) -> bool {
     (a.0 - b.0).abs() <= EPSILON && (a.1 - b.1).abs() <= EPSILON
 }
 
+/// Whether a glyph of `font`'s, what's guessed of it `approx`, has its box
+/// held to PDFium's loose box on every side: its outline's box is its
+/// program's, united with its metrics' as PDFium unites them, and nothing
+/// it's placed by is guessed. A Type3 glyph's `d1` box isn't united.
+fn exact(font: &Foreign, approx: FontApprox) -> bool {
+    font.kind() != FontKind::Type3 && !approx.any()
+}
+
 /// What's wrong with `fixture`'s glyphs, against PDFium's characters.
 fn compare(name: &str, mut fixture: Fixture) -> Vec<String> {
     let glyphs = placed(&fixture);
@@ -321,7 +350,12 @@ fn compare(name: &str, mut fixture: Fixture) -> Vec<String> {
             false => &[across, up].concat(),
         };
         let equal = sides.iter().all(|(a, b)| (a - b).abs() <= EPSILON);
-        if c.tight.is_some_and(|t| within(t, glyph.bounds)) && !equal {
+        if glyph.exact && !equal {
+            wrong.push(format!(
+                "{at}: box {:?}, PDFium's {:?}, its outline {:?}",
+                glyph.bounds, c.loose, c.tight
+            ));
+        } else if c.tight.is_some_and(|t| within(t, glyph.bounds)) && !equal {
             wrong.push(format!(
                 "{at}: box {:?}, PDFium's {:?}, its outline {:?} within",
                 glyph.bounds, c.loose, c.tight
@@ -339,17 +373,24 @@ fn compare(name: &str, mut fixture: Fixture) -> Vec<String> {
 }
 
 /// Each fixture's glyphs are PDFium's characters: the operators of the
-/// text state, each kind of font, forms in forms, text in clipping modes,
+/// text state, each kind of font, fonts over predefined CMaps, whose CIDs
+/// are Adobe's as PDFium's own CMaps have them, fonts embedding a program
+/// of each format, their heights the program's where the descriptor lacks
+/// them, forms in forms, text in clipping modes,
 /// a form that finds its font in the page's resources, and forms nested
 /// as deep as PDFium draws them and one deeper, which neither draws. (Not marked content's: PDFium's text page makes a
 /// range's `/ActualText` its characters, in place of its glyphs.) A glyph
-/// in the stock Helvetica is held to its origin alone.
+/// in the stock Helvetica is held to its origin alone; one whose font's
+/// program says its outline, to PDFium's loose box on every side
+/// ([`exact`]).
 #[test]
 fn glyphs_are_where_pdfium_puts_characters() {
     let depth = Limits::DEFAULT.content.form_depth;
     let fixtures = [
         ("operators", fixture::operators()),
         ("fonts", fixture::fonts()),
+        ("predefined CMaps", fixture::predefined()),
+        ("font programs", fixture::programs()),
         ("forms", fixture::forms()),
         ("clips", fixture::clips()),
         ("inherited", fixture::inherited()),
@@ -358,8 +399,11 @@ fn glyphs_are_where_pdfium_puts_characters() {
     ];
     let mut wrong = Vec::new();
     let mut glyphs = 0;
+    let mut exact = Vec::new();
     for (name, f) in fixtures {
-        glyphs += placed(&f).len();
+        let placed = placed(&f);
+        glyphs += placed.len();
+        exact.push(placed.iter().filter(|g| g.exact).count());
         wrong.extend(compare(name, f));
     }
     for line in &wrong {
@@ -370,7 +414,10 @@ fn glyphs_are_where_pdfium_puts_characters() {
         "{} of {glyphs} glyphs aren't PDFium's",
         wrong.len()
     );
-    assert_eq!(glyphs, 37 + 24 + 3 + 4 + 1 + 1);
+    assert_eq!(glyphs, 37 + 24 + 13 + 26 + 3 + 4 + 1 + 1);
+    // Those over a program, the fonts' TrueType and CIDFonts among them,
+    // held to PDFium's box on every side.
+    assert_eq!(exact, [0, 15, 13, 26, 0, 0, 0, 0, 0]);
 }
 
 /// A quad's corners: bottom-left, bottom-right, top-right, top-left.
@@ -532,7 +579,7 @@ fn a_long_tj_is_laid_out_as_pdfium_lays_it_out() {
 /// Arial, Helvetica or Times New Roman, PDFium draws in those, which may
 /// be otherwise wide, as the guessed glyphs say.
 #[test]
-#[ignore = "PDFium's own faces: cargo test -p sheaf-render --test content_interp -- --ignored --nocapture"]
+#[ignore = "PDFium's own faces: cargo test -p sheaf-render --test content_interp -- --ignored --exact standard_14_widths_are_pdfium_s_faces_but_where_guessed"]
 fn standard_14_widths_are_pdfium_s_faces_but_where_guessed() {
     let afms = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sheaf-doc/assets/afm");
     let (mut checked, mut guessed, mut wrong) = (0, 0, Vec::new());
@@ -774,6 +821,19 @@ const UNEXPLAINED: &str = "tests/content_interp_unexplained.tsv";
 /// Set, the glyph boxes tier writes [`UNEXPLAINED`] from what it found.
 const WRITE_UNEXPLAINED: &str = "SHEAF_INTERP_WRITE_UNEXPLAINED";
 
+/// The file whose glyphs held to PDFium's box on every side can't all be,
+/// the program theirs are drawn from, and how many are past their
+/// tolerance, exactly: its TrueType program `482 0 R`'s stream is corrupt,
+/// and lopdf's inflate reads it to its end where zlib's stops ("invalid
+/// distance too far back"), so sheaf reads the program, with what the bad
+/// stretch decodes to, while PDFium, short of it, can't load it and draws
+/// in a substitute face (`NWODGU+TimesNewRoman`). The file's other glyphs
+/// are held as every file's. Greg accepted the allowance by this exact
+/// count (2026-10-24); which reading is right is backlog F27's research,
+/// decided on merit, not by PDFium's recovery.
+const PROGRAM_DECODED_OTHERWISE: (&str, ObjectId, usize) =
+    ("forms/safedocs/5208359.pdf", (482, 0), 38);
+
 /// How far from the page, in points, a glyph is compared: frames.rs's
 /// `FAR`, 2^17, where an `f32` still holds 1/64 pt. Farther, a
 /// comparison would measure `f32`, not where the interpreter puts it.
@@ -899,11 +959,14 @@ fn tier<T: Send>(
 /// its name in [`ContentLimits`](sheaf_doc::source::ContentLimits), and
 /// its value. A form's use is a `Do`, an operator.
 type Cap = (&'static str, &'static str, fn(&Limits) -> usize);
-const MEASURES: [Cap; 8] = [
+const MEASURES: [Cap; 9] = [
     ("operators", "operators", |l| l.content.operators),
     ("glyphs", "glyphs", |l| l.content.glyphs),
     ("bytes interpreted", "interpreted", |l| {
         l.content.interpreted
+    }),
+    ("bytes decompressed", "decompressed", |l| {
+        l.content.decompressed
     }),
     ("path segments", "segments", |l| l.content.segments),
     ("form uses", "operators", |l| l.content.operators),
@@ -932,14 +995,24 @@ struct Interpreted {
     /// Form uses refused: within themselves, and too deep.
     cycles: usize,
     deep: usize,
+    /// The fonts its text is shown in, by what sheaf read of their
+    /// programs: none, read, malformed ([`FontProgram`]); and those
+    /// malformed, a line each. A font by number counts once a file, one
+    /// written as a dictionary, which each page reads anew, once a page.
+    programs: [usize; 3],
+    malformed: Vec<String>,
+    /// Glyphs whose outline the font's program says, and whose it doesn't
+    /// ([`FontApprox::boxes`]).
+    outlines: [usize; 2],
     /// The most of each of [`MEASURES`] a page came to, and which.
-    most: [(usize, String); 8],
+    most: [(usize, String); 9],
 }
 
 fn interpreted(src: &Src) -> Interpreted {
     let mut out = Interpreted::default();
     let lim = &Limits::DEFAULT;
     let fonts = Fonts::default();
+    let mut seen = HashSet::new();
     for (i, page) in src.pages().iter().enumerate() {
         out.pages += 1;
         let at = format!("page {}", i + 1);
@@ -962,8 +1035,26 @@ fn interpreted(src: &Src) -> Interpreted {
             |event| {
                 match event.kind {
                     Kind::Text(show) => {
+                        // A dictionary font lives as long as its page's
+                        // interpretation, so its address is told apart
+                        // only within it.
+                        let key = |font: &Foreign| match font.id() {
+                            Some(id) => (Some(id), 0, 0),
+                            None => (None, i, std::ptr::from_ref(font) as usize),
+                        };
+                        if let Some(font) = show.font
+                            && seen.insert(key(font))
+                        {
+                            let program = font.program();
+                            out.programs[program as usize] += 1;
+                            if program == FontProgram::Malformed {
+                                out.malformed
+                                    .push(format!("{at}: {}", font_name(src, font)));
+                            }
+                        }
                         for g in show.glyphs() {
                             laid += 1;
+                            out.outlines[usize::from(g.approx.boxes)] += 1;
                             let b = g.quad.bounds();
                             let finite = [b.x0, b.y0, b.x1, b.y1].iter().all(|v| v.is_finite());
                             unbounded += usize::from(!finite);
@@ -1002,6 +1093,7 @@ fn interpreted(src: &Src) -> Interpreted {
             summary.operators,
             summary.glyphs,
             summary.interpreted,
+            summary.decompressed,
             summary.segments,
             summary.uses,
             summary.deepest_form,
@@ -1022,20 +1114,30 @@ fn interpreted(src: &Src) -> Interpreted {
 /// the most a page comes to of each measure a cap bounds printed beside
 /// it.
 #[test]
-#[ignore = "corpus tier: cargo test -p sheaf-render --test content_interp -- --ignored --nocapture"]
+#[ignore = "corpus tier: just tier-interp"]
 fn every_page_is_interpreted_within_the_caps() {
     let name = "content_interp interpreted";
     let Some(files) = tier(name, |_, src| interpreted(src)) else {
         return;
     };
     let lim = &Limits::DEFAULT;
-    let mut most: [(usize, String); 8] = Default::default();
+    let mut most: [(usize, String); 9] = Default::default();
     let mut pages: BTreeMap<&str, usize> = BTreeMap::new();
     let (mut unread, mut unbounded) = (0, 0);
     let (mut cycles, mut deep) = (0, 0);
+    let (mut programs, mut outlines) = ([0; 3], [0; 2]);
     let (mut limited, mut miscounted, mut failed) = (Vec::new(), Vec::new(), Vec::new());
     for (set, path, o) in &files {
         *pages.entry(set).or_default() += o.pages;
+        for (n, of_file) in programs.iter_mut().zip(o.programs) {
+            *n += of_file;
+        }
+        for (n, of_file) in outlines.iter_mut().zip(o.outlines) {
+            *n += of_file;
+        }
+        for line in &o.malformed {
+            eprintln!("{name}: a program that doesn't read: {path} {line}");
+        }
         unread += o.unread.len();
         (unbounded, cycles, deep) = (unbounded + o.unbounded, cycles + o.cycles, deep + o.deep);
         limited.extend(o.limited.iter().map(|l| format!("{path} {l}")));
@@ -1057,6 +1159,12 @@ fn every_page_is_interpreted_within_the_caps() {
          {unbounded} glyphs whose box isn't finite",
         failed.len(),
         limited.len()
+    );
+    eprintln!(
+        "{name}: fonts shown in, by number once a file and as a dictionary once a page: {} \
+         embedding no program, {} whose program is read, {} whose program doesn't read; glyphs: {} whose outline the program says, {} \
+         whose it doesn't",
+        programs[0], programs[1], programs[2], outlines[0], outlines[1]
     );
     for ((measure, cap, value), (n, at)) in MEASURES.iter().zip(&most) {
         eprintln!(
@@ -1221,8 +1329,13 @@ impl std::fmt::Display for Spread {
 struct Compared {
     glyphs: usize,
     /// Of them, in a font whose heights are guessed, which are held only
-    /// along their line.
+    /// along their line; and those whose outline no program says
+    /// ([`FontApprox::boxes`]).
     heights: usize,
+    boxes: usize,
+    /// Of those held on every side, those turned but by quarter turns
+    /// ([`Shown::turned`]).
+    turned: usize,
     /// How far each origin is from its character's.
     origin: Spread,
     /// How far each box reaches past its character's loose box.
@@ -1230,6 +1343,10 @@ struct Compared {
     /// Where the character's outline lies within the box, how far a side
     /// is from its loose box's.
     unequal: Spread,
+    /// Of them, held to the loose box on every side ([`Shown::exact`]):
+    /// how far a side is from it, or turned, how far each box reaches
+    /// past the other's bound.
+    exact: Spread,
     /// Of them, matched to a character PDFium bounds by a box with no
     /// area, its outline's where it has none and no width (`\u{200B}`),
     /// or a matrix flattens it, or by its outline alone, where its font's
@@ -1250,11 +1367,14 @@ impl Compared {
     fn merge(&mut self, other: &Compared) {
         self.glyphs += other.glyphs;
         self.heights += other.heights;
+        self.boxes += other.boxes;
+        self.turned += other.turned;
         self.flat += other.flat;
         self.ambiguous += other.ambiguous;
         self.origin.merge(&other.origin);
         self.outside.merge(&other.outside);
         self.unequal.merge(&other.unequal);
+        self.exact.merge(&other.exact);
         self.wrong += other.wrong;
         for (a, b) in self.wrong_by.iter_mut().zip(other.wrong_by) {
             *a += b;
@@ -1273,8 +1393,10 @@ struct Shown {
     /// column is the quad's, how far the quad's bounds are from it.
     off_cell: f32,
     class: Class,
-    /// Its heights are guessed ([`FontApprox::heights`]).
+    /// Its heights are guessed ([`FontApprox::heights`]), and its outline
+    /// ([`FontApprox::boxes`]).
     heights: bool,
+    boxes: bool,
     /// Its font's ascent is its descent, so PDFium bounds it by its
     /// outline alone (`GetLooseBounds`), and it's held to its origin.
     outline: bool,
@@ -1282,7 +1404,19 @@ struct Shown {
     /// x1 and y1. Along its line only, where its heights are guessed;
     /// none where it's turned.
     sides: [bool; 4],
+    /// Its box is held to its character's loose box on every side, its
+    /// outline's box its font's program's and nothing of it guessed
+    /// ([`exact`]); in vertical writing, where its text space isn't
+    /// scaled, the quad then PDFium's column.
+    exact: bool,
+    /// Where it's held so and its text space is turned but by quarter
+    /// turns, that space: its box, united with its outline's there, holds
+    /// PDFium's, which unites the two boxes' bounds in PageSpace, and lies
+    /// within the bounds through it of the bounds of PDFium's in it.
+    turned: Option<Affine>,
     text: Option<String>,
+    /// The stream of its font's program, where it's a reference.
+    program: Option<ObjectId>,
     /// Its font, as the interpretation holds it, its size and its code:
     /// how PDFium tells a duplicate.
     font: usize,
@@ -1321,15 +1455,49 @@ struct Showing {
     approx: BTreeMap<String, usize>,
 }
 
-/// `font`'s name and what's guessed of a glyph of its, `approx`, for a
-/// list: its codes or widths, or only where the glyph is, a width before
-/// it on its line guessed ([`Foreign::width_guessed`]).
-fn font_label(src: &Src, font: &Foreign, approx: FontApprox) -> String {
+/// `font`'s `/BaseFont` and kind, for a line.
+/// The stream `font`'s program is in, where the font is an object: its
+/// descriptor's, or its descendant's, first of `/FontFile`, `/FontFile2`
+/// and `/FontFile3` that's a reference.
+fn program_of(src: &Src, font: &Foreign) -> Option<ObjectId> {
+    fn dict<'a>(pdf: &'a lopdf::LazyPdf, o: &'a Object) -> Option<&'a Dictionary> {
+        pdf.dereference(o).ok()?.1.as_dict().ok()
+    }
+    let pdf = src.pdf();
+    let mut font = pdf.get_object(font.id()?).ok()?.as_dict().ok()?;
+    if let Ok(descendants) = font.get(b"DescendantFonts") {
+        let first = pdf
+            .dereference(descendants)
+            .ok()?
+            .1
+            .as_array()
+            .ok()?
+            .first()?;
+        font = dict(pdf, first)?;
+    }
+    let descriptor = dict(pdf, font.get(b"FontDescriptor").ok()?)?;
+    [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
+        .into_iter()
+        .find_map(|key| descriptor.get(key).ok()?.as_reference().ok())
+}
+
+fn font_name(src: &Src, font: &Foreign) -> String {
     let named = font.id().and_then(|id| {
         let dict = src.pdf().get_object(id).and_then(Object::as_dict).ok()?;
         let name = dict.get(b"BaseFont").and_then(Object::as_name).ok()?;
         Some(String::from_utf8_lossy(name).into_owned())
     });
+    format!(
+        "{} ({:?})",
+        named.as_deref().unwrap_or("no name"),
+        font.kind()
+    )
+}
+
+/// `font`'s name and what's guessed of a glyph of its, `approx`, for a
+/// list: its codes or widths, or only where the glyph is, a width before
+/// it on its line guessed ([`Foreign::width_guessed`]).
+fn font_label(src: &Src, font: &Foreign, approx: FontApprox) -> String {
     let of_font = font.approx();
     let guessed = match (approx.codes, of_font.widths) {
         (true, true) => "codes and widths",
@@ -1337,11 +1505,7 @@ fn font_label(src: &Src, font: &Foreign, approx: FontApprox) -> String {
         (false, true) => "widths",
         (false, false) => "a width on the line",
     };
-    format!(
-        "{} ({:?}, {guessed} guessed)",
-        named.as_deref().unwrap_or("no name"),
-        font.kind()
-    )
+    format!("{}, {guessed} guessed", font_name(src, font))
 }
 
 /// Where `g`, a glyph of `font`'s at `size`, writes vertically, the
@@ -1366,6 +1530,14 @@ fn distance(a: Rect, b: Rect) -> f32 {
     [a.x0 - b.x0, a.y0 - b.y0, a.x1 - b.x1, a.y1 - b.y1]
         .iter()
         .fold(0.0, |far, d| far.max(d.abs()))
+}
+
+/// How far `a` reaches past `b`, on the side it reaches farthest; 0 where
+/// it lies within.
+fn reach_past(a: Rect, b: Rect) -> f32 {
+    [b.x0 - a.x0, b.y0 - a.y0, a.x1 - b.x1, a.y1 - b.y1]
+        .iter()
+        .fold(0.0, |far, d| far.max(*d))
 }
 
 /// How unlike `a` is `b`: how far apart their sides are, all told.
@@ -1403,7 +1575,7 @@ fn showing(src: &Src, page: &PageFacts, fonts: &Fonts) -> Result<Showing, String
                     };
                     let trm = show.trm();
                     let metrics = font.metrics();
-                    let id = Arc::as_ptr(font) as usize;
+                    let id = std::ptr::from_ref(font) as usize;
                     let actual = (event.marks.iter())
                         .filter(|m| m.stream.as_ref() == event.at.stream)
                         .find_map(|m| m.actual_text.as_deref());
@@ -1424,6 +1596,7 @@ fn showing(src: &Src, page: &PageFacts, fonts: &Fonts) -> Result<Showing, String
                     let along = trm.a.hypot(trm.b);
                     let s = show.start;
                     let unscaled = (s.a, s.b, s.c, s.d) == (1.0, 0.0, 0.0, 1.0);
+                    let program = program_of(src, font);
                     for g in show.glyphs() {
                         let class = Class::of(g.approx, font, trm);
                         let heights = g.approx.heights && class != Class::CidVertical;
@@ -1439,11 +1612,14 @@ fn showing(src: &Src, page: &PageFacts, fonts: &Fonts) -> Result<Showing, String
                             *out.approx.entry(label.clone()).or_default() += 1;
                         }
                         let quad = g.quad.bounds();
-                        let (bounds, off_cell) = match vertical_cell(font, &g, show.size) {
-                            Some(cell) if unscaled => (cell, distance(quad, cell)),
-                            Some(cell) => (cell, 0.0),
-                            None => (quad, 0.0),
+                        let exact = class != Class::Approx && exact(font, g.approx);
+                        let (bounds, off_cell, exact) = match vertical_cell(font, &g, show.size) {
+                            Some(_) if unscaled && exact => (quad, 0.0, true),
+                            Some(cell) if unscaled => (cell, distance(quad, cell), false),
+                            Some(cell) => (cell, 0.0, false),
+                            None => (quad, 0.0, exact),
                         };
+                        let quarter = (s.b == 0.0 && s.c == 0.0) || (s.a == 0.0 && s.d == 0.0);
                         let em = along.max(trm.c.hypot(trm.d));
                         if actual {
                             let half = em / 2.0;
@@ -1460,9 +1636,13 @@ fn showing(src: &Src, page: &PageFacts, fonts: &Fonts) -> Result<Showing, String
                             off_cell,
                             class,
                             heights,
+                            boxes: g.approx.boxes,
                             outline: !font.is_vertical() && metrics.ascent == metrics.descent,
                             sides,
+                            exact,
+                            turned: (exact && !quarter).then_some(s),
                             text: g.text().map(|t| t.into_owned()),
+                            program,
                             font: id,
                             size: show.size,
                             code: g.code,
@@ -1650,6 +1830,9 @@ struct Boxes {
     /// Glyphs matched to a character whose code point their text hasn't.
     recoded: usize,
     approx: BTreeMap<String, usize>,
+    /// Of the glyphs past their class's tolerance, those drawn from
+    /// [`PROGRAM_DECODED_OTHERWISE`]'s program.
+    otherwise: usize,
     /// Glyphs past their class's tolerance, those so matched ambiguously
     /// ([`Compared::ambiguous`]), and those unmatched, and characters left
     /// over, it can't say why for: a line each.
@@ -1675,6 +1858,7 @@ impl Boxes {
         let compared = self.classes.entry(g.class).or_default();
         compared.glyphs += 1;
         compared.heights += usize::from(g.heights);
+        compared.boxes += usize::from(g.boxes);
         let (b, l) = (g.bounds, c.loose);
         let origin = (g.origin.0 - c.origin.0)
             .abs()
@@ -1693,17 +1877,37 @@ impl Boxes {
                 .map(|(d, _)| *d)
                 .fold(0.0, f32::max)
         };
-        let outside = held(past).max(g.off_cell);
-        compared.origin.add(origin);
-        compared.outside.add(outside);
         let tolerance = g.class.tolerance();
-        let outline = c
-            .tight
-            .filter(|t| within_by(*t, b, tolerance.unwrap_or(EPSILON)));
-        let unequal = outline.map(|_| held(diff.map(f32::abs)));
-        if let Some(unequal) = unequal {
-            compared.unequal.add(unequal);
-        }
+        compared.origin.add(origin);
+        // Held on every side: equal, or turned, each within the other's
+        // bound; else within the loose box, and equal to it where the
+        // outline lies within.
+        let (outside, unequal) = match (g.exact && !flat, g.turned) {
+            (true, None) => {
+                let off = distance(b, l);
+                compared.exact.add(off);
+                (0.0, Some(off))
+            }
+            (true, Some(start)) => {
+                compared.turned += 1;
+                let bound = start.bounds(start.inverse().bounds(l));
+                let off = reach_past(l, b).max(reach_past(b, bound));
+                compared.exact.add(off);
+                (0.0, Some(off))
+            }
+            (false, _) => {
+                let outside = held(past).max(g.off_cell);
+                compared.outside.add(outside);
+                let outline = c
+                    .tight
+                    .filter(|t| within_by(*t, b, tolerance.unwrap_or(EPSILON)));
+                let unequal = outline.map(|_| held(diff.map(f32::abs)));
+                if let Some(unequal) = unequal {
+                    compared.unequal.add(unequal);
+                }
+                (outside, unequal)
+            }
+        };
         if g.text
             .as_deref()
             .is_some_and(|t| !t.chars().any(|ch| u32::from(ch) == c.unicode))
@@ -1719,12 +1923,13 @@ impl Boxes {
         }
         let line = || {
             format!(
-                "{at}: {} glyph {:#x} {:?} at {:?}, box {b:?}: PDFium's {:?} at {:?}, loose \
+                "{at}: {} glyph {:#x} {:?} at {:?}, box {b:?}{}: PDFium's {:?} at {:?}, loose \
                  {l:?}, tight {:?}: origin {origin:.1e} off, {outside:.1e} past, unequal by {}",
                 g.class.name(),
                 g.code,
                 g.text,
                 g.origin,
+                if g.exact { " held on every side" } else { "" },
                 char::from_u32(c.unicode),
                 c.origin,
                 c.tight,
@@ -1736,6 +1941,7 @@ impl Boxes {
             Boxes::note(&mut self.ambiguous, line);
         } else {
             compared.wrong += 1;
+            self.otherwise += usize::from(g.program == Some(PROGRAM_DECODED_OTHERWISE.1));
             let decade = (worst.log10() + 2.0).ceil().clamp(0.0, 5.0) as usize;
             compared.wrong_by[decade] += 1;
             Boxes::note(&mut self.wrong, line);
@@ -2009,7 +2215,7 @@ fn write_unexplained(found: &BTreeMap<String, [usize; 2]>) {
 /// by why, and what it can't say why for no more than [`UNEXPLAINED`]
 /// says for each file.
 #[test]
-#[ignore = "corpus tier: cargo test -p sheaf-render --test content_interp -- --ignored --nocapture"]
+#[ignore = "corpus tier: just tier-interp"]
 fn glyph_boxes_are_pdfium_characters_on_every_page() {
     let name = "content_interp glyph boxes";
     let Some(files) = tier(name, boxes) else {
@@ -2020,6 +2226,7 @@ fn glyph_boxes_are_pdfium_characters_on_every_page() {
     let mut leftover: BTreeMap<&str, usize> = BTreeMap::new();
     let mut approx: BTreeMap<String, usize> = BTreeMap::new();
     let (mut pages, mut uncompared, mut far, mut far_chars, mut recoded) = (0, 0, 0, 0, 0);
+    let (mut past, mut decoded_otherwise, mut unheld) = (0, 0, None);
     let mut wrong = Vec::new();
     let mut found: BTreeMap<String, [usize; 2]> = BTreeMap::new();
     for (_, path, o) in &files {
@@ -2051,13 +2258,28 @@ fn glyph_boxes_are_pdfium_characters_on_every_page() {
         for line in o.unexplained.iter().chain(&o.ambiguous) {
             eprintln!("{name}: {path} {line}");
         }
-        wrong.extend(o.wrong.iter().map(|l| format!("{path} {l}")));
-        let past: Vec<String> = (o.classes.iter())
+        let of_file: usize = o.classes.values().map(|c| c.wrong).sum();
+        let (otherwise, _, allowed) = PROGRAM_DECODED_OTHERWISE;
+        let lines = o.wrong.iter().map(|l| format!("{path} {l}"));
+        if *path == otherwise && o.otherwise != allowed {
+            unheld = Some(o.otherwise);
+        }
+        if *path == otherwise && o.otherwise == allowed && of_file == allowed {
+            decoded_otherwise += of_file;
+            lines.for_each(|l| eprintln!("{name}: its program decoded otherwise: {l}"));
+        } else {
+            past += of_file;
+            wrong.extend(lines);
+        }
+        let by_class: Vec<String> = (o.classes.iter())
             .filter(|(_, c)| c.wrong > 0)
             .map(|(class, c)| format!("{} {}", c.wrong, class.name()))
             .collect();
-        if !past.is_empty() {
-            eprintln!("{name}: {path}: past the tolerance: {}", past.join(", "));
+        if !by_class.is_empty() {
+            eprintln!(
+                "{name}: {path}: past the tolerance: {}",
+                by_class.join(", ")
+            );
         }
     }
     for (font, n) in &approx {
@@ -2076,19 +2298,24 @@ fn glyph_boxes_are_pdfium_characters_on_every_page() {
             .tolerance()
             .map_or("none".into(), |t| format!("{t:e} pt"));
         eprintln!(
-            "{name}: {}: {} glyphs ({} of them with heights guessed, {} boxed by PDFium in a box \
-             with no area), tolerance {tolerance}, {} past it matched ambiguously at an origin \
-             another glyph shares, \
-             {} past it (by decade from 1e-2 pt: {:?}); origin {}; past the loose box {}; \
+            "{name}: {}: {} glyphs ({} of them with heights guessed, {} with outlines guessed, {} \
+             boxed by PDFium in a box with no area), tolerance {tolerance}, {} past it matched \
+             ambiguously at an origin another glyph shares, \
+             {} past it (by decade from 1e-2 pt: {:?}); origin {}; held to the loose box on \
+             every side ({} glyphs, {} of them turned) {}; of the rest, past the loose box {}; \
              unequal where the outline is within ({} glyphs) {}",
             class.name(),
             c.glyphs,
             c.heights,
+            c.boxes,
             c.flat,
             c.ambiguous,
             c.wrong,
             c.wrong_by,
             c.origin,
+            c.exact.n,
+            c.turned,
+            c.exact,
             c.outside,
             c.unequal.n,
             c.unequal
@@ -2097,7 +2324,11 @@ fn glyph_boxes_are_pdfium_characters_on_every_page() {
     for line in &wrong {
         eprintln!("{name}: {line}");
     }
-    let past: usize = classes.values().map(|c| c.wrong).sum();
+    eprintln!(
+        "{name}: {past} glyphs past their class's tolerance, and {decoded_otherwise} in {}, \
+         whose program PDFium can't load and sheaf reads",
+        PROGRAM_DECODED_OTHERWISE.0
+    );
     if std::env::var_os(WRITE_UNEXPLAINED).is_some() {
         assert!(
             std::env::var_os(ONLY).is_none(),
@@ -2119,6 +2350,13 @@ fn glyph_boxes_are_pdfium_characters_on_every_page() {
         eprintln!("{name}: {line}");
     }
     assert!(past == 0, "{past} glyphs past their class's tolerance");
+    let (otherwise, program, allowed) = PROGRAM_DECODED_OTHERWISE;
+    assert!(
+        unheld.is_none(),
+        "{otherwise}: {unheld:?} glyphs of {} {} R's past their tolerance, not {allowed}",
+        program.0,
+        program.1
+    );
     assert_eq!(uncompared, 0, "pages not compared");
     assert!(
         more.is_empty(),
@@ -2235,15 +2473,15 @@ fn redrawn(bytes: &[u8], src: &Src) -> Redrawn {
 /// again from what the interpreter reads of them, renders as it did,
 /// each page within [`ANTI_ALIASING_PX`] pixels.
 #[test]
-#[ignore = "corpus tier: cargo test -p sheaf-render --test content_interp -- --ignored --nocapture"]
+#[ignore = "corpus tier: just tier-interp"]
 fn pages_written_again_render_the_same() {
     let name = "content_interp written again";
     let Some(files) = tier(name, redrawn) else {
         return;
     };
     // Per set: files compared, pages compared, differing past the
-    // allowance, within it, and no more than PDFium's own, pages not
-    // written, not rendered.
+    // allowance, within it, and drawn as PDFium draws the file loaded
+    // again, pages not written, not rendered.
     let mut sets: BTreeMap<&str, [usize; 7]> = BTreeMap::new();
     let mut unwritten: BTreeMap<&str, usize> = BTreeMap::new();
     let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();

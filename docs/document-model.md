@@ -791,16 +791,23 @@ lint ledger) keeps them out of everything but tests.
   as “?” in the file; the text itself is kept". A tape's minus and subtotal sign, which
   Helvetica lacks, draw in Symbol. M10 slice 7's Noto fallback ends it.
 - **The words a page draws** (`text_bag`) are decoded through its fonts
-  (`FontDecoders`: a `/ToUnicode` CMap, else a simple font's encoding
-  and `/Differences`, else Symbol's or ZapfDingbats' own, else the code
-  as it is) and counted as NFC words, so the same text in two subsets
-  with different codes gives equal bags. Slice 10's removal check
-  compares them. From M11's slice 3 the decoder is the one a file's
-  fonts read text through (`Foreign::code_text`, below), and `text_bag`
-  keeps its own walk of the content rather than the interpreter's: the
-  two give equal bags on every stream the removal check reads, but the
-  interpreter, which lays out every glyph, was slower (The content
-  interpreter, below).
+  (a `/ToUnicode` CMap, else a simple font's encoding and
+  `/Differences`, else Symbol's or ZapfDingbats' own, else the code as it
+  is; in a Type0 font without a `/ToUnicode`, its predefined CMap's
+  codes or CIDs as PDFium reads them) and counted as NFC words, so the
+  same text in two subsets with different codes gives equal bags. Slice
+  10's removal check compares them. From M11's slice 3 `text_bag` reads
+  content as the content interpreter does (The content interpreter,
+  below), each form judged on its own (`Forms::Report`), its fonts a
+  source's `Fonts` made for text (`Fonts::for_text`: no program read),
+  each read once within the page's budget. The bags are the old walk's
+  on every stream the removal check reads, but for the hash of an empty
+  string shown in no font, which stands for no text, and CJK text where
+  the old walk hashed: a Type0 font with no `/ToUnicode` over a
+  predefined CMap, or Identity with an Adobe ordering. A string with a
+  CID 0 in it (`.notdef`, which an unmapped code takes) is still hashed,
+  though PDFium reads U+FFFD for it, so unmapped codes match only the
+  same bytes.
 - **Marks hold their stamps and attachments** (M10.5 slice 8). A mark
   names its stamp's page and its attachment's file by a stem, a blob's
   name (`BlobId::stem`), and holds them: `Mark.stamp` is a `FormRef`,
@@ -883,12 +890,23 @@ never lopdf's `Content`.
     with its tag, properties, `/MCID`, `/ActualText` decoded, its `/OC`
     list, the form use it's in and where its operator is).
 
-  `Summary` counts operators, glyphs, bytes of content lexed, path
-  segments, form uses and refusals, and the deepest forms, `q` and
-  marked content went. With `Forms::Report` no form is drawn and no
-  XObject read, a `Do` being an operator like another, as where each is
-  judged on its own (the removal check's, should `text_bag` move onto
-  it).
+  `Summary` counts operators, glyphs, bytes of content lexed, bytes
+  taken from the page's budget (`decompressed`: its content, each form's
+  data once, what the fonts it picks decompress to, and what drawing
+  their programs' glyphs costs), path segments,
+  form uses and refusals, and the deepest forms, `q` and marked content
+  went. With `Forms::Report` no form is drawn and no XObject read, a `Do`
+  being an operator like another, as where each is judged on its own
+  (the removal check's `text_bag`). `Opts.wants` (`Wants { ops, text,
+  paths }`, everything by default) says what the visitor reads: only the
+  operators `ops` holds (`Ops`, a set over those the interpreter knows,
+  one bit for the rest) are handed as `Op`, and strings and paths only
+  where it wants them, so what nobody reads isn't built. What
+  interpreting works out is the same whatever the interest: the layout,
+  each cap and its count, geometry an `f32` can't hold, the clip and the
+  `Summary`; forms, images, shadings and marked content are always
+  handed. Each operator's name is decoded once (`Op`) and dispatched by
+  one match.
 - **State as PDFium keeps it.** `State` holds the CTM, the line's width,
   cap, join and miter limit, the clip, and `TextState` (font and size,
   `Tc`, `Tw`, `Tz`, `TL`, `Ts`, `Tr`, the text matrix, where the line
@@ -916,16 +934,40 @@ never lopdf's `Content`.
   `CPDF_CMap::GetNextChar` splits them: by an embedded CMap's codespace,
   a byte each by one range but two where it's of two bytes, by more each
   code by PDFium's mixed rule, 0 for bytes no range begins; Identity-H
-  and -V by name; a code of two bytes cut off at a string's end padded
-  with a 0; a `/UseCMap` chain followed through streams, guessed where
-  it can't be read whole) and CIDs; its widths (`/Widths` from
+  and -V by name; the other predefined CMaps (PDF 32000-1 Table 118's,
+  and Adobe's UCS2 maps) from hayro-cmap's bundle of Adobe's, each parsed
+  once, split as PDFium's table of them says (`kPredefinedCMaps`, since
+  hayro-cmap keeps their codespaces to itself); a code of two bytes cut
+  off at a string's end padded with a 0; a `/UseCMap` chain followed
+  through streams, a predefined base read for the codes it maps none of,
+  guessed where it can't be read whole) and CIDs; its widths (`/Widths` from
   `/FirstChar`, `/MissingWidth`, CID `/W`, `/DW`, `/W2` and `/DW2`, kept
   as the ranges they're given in, the first for a CID winning, so no
   array expands past its own length; cut to whole numbers as PDFium cuts
   them); its heights and `/FontBBox` (`metrics`); a Type3 font's
   `/FontMatrix` and each CharProc's `d1` box (`glyph_box`), rounded as
-  PDFium rounds them; and each code's text (`code_text`, through the
-  decoder `text_bag` uses). The standard 14 have Adobe's AFM widths, glyph boxes and
+  PDFium rounds them; and each code's text (`code_text`: its
+  `/ToUnicode`'s, else its encoding's; in a Type0 font without a
+  `/ToUnicode` as PDFium's `GetUnicodeFromCharCode` reads it, a UCS2 or
+  UTF16 map's code its own text, another predefined map's CID, or
+  Identity's where `/CIDSystemInfo` orders GB1, CNS1, Japan1 or Korea1,
+  through Adobe-<collection>-UCS2). Its embedded program (`/FontFile`,
+  `/FontFile2` or `/FontFile3`: TrueType, bare CFF, OpenType over CFF,
+  Type 1) is read through skrifa and read-fonts as PDFium's FreeType
+  reads it (`Foreign::program`, `FontProgram::{None, Read, Malformed}`),
+  each code mapped to its glyph PDFium's way, for each glyph's outline
+  box (`CPDF_Font::GetCharBBox`) and the heights a descriptor lacks
+  (`CheckFontMetrics`); programs are untrusted, so a TrueType glyph's
+  composites are counted first (glyphs and points), charstrings run
+  within fuel, each glyph its share of its font's, a Type 1 program is
+  scanned ahead of read-fonts (its nesting, its integers in a row and
+  its work bounded) and read once, and one that can't be read is
+  `Malformed`, its boxes and heights guessed as without one; what
+  drawing costs (charstring evaluated, glyph data read) is charged to
+  the page's budget, a simple font's as it's read, a CIDFont's glyph
+  the first time an interpretation shows it, whichever page drew it
+  (`Foreign::charge_outlines`). The
+  standard 14 have Adobe's AFM widths, glyph boxes and
   heights, and the names PDFium takes for them (`Std14::named`); a glyph
   PDFium's own faces draw that Adobe's metrics lack, or draw at another
   width (`Std14::drawn_otherwise`), has its width guessed
@@ -935,24 +977,33 @@ never lopdf's `Content`.
   heights from the face it draws in wherever a descriptor has no
   `/FontBBox` that isn't all 0, and that face varies by OS (its own,
   Arial, Helvetica), so only a descriptor with a box and its `Ascent`
-  and `Descent` is exact; and predefined CJK CMaps (`UniJIS-UCS2-H`)
-  aren't bundled, so their CIDs are unknown. A standard 14 font without
+  and `Descent`, or a program that gives them, is exact; and a
+  predefined CMap neither hayro-cmap bundles nor PDFium knows has its
+  codes guessed. A standard 14 font without
   `/Widths` or a program has PDFium's own faces' widths, and so does
   PDFium only where it draws in them: on a system that has Arial or
   Helvetica, it takes widths from those, as it does heights (the default
-  PDFium tests give their standard 14 fonts `/Widths`). A glyph's quad is PDFium's
-  loose character box without the outline (`GetLooseBounds`' metric
-  box: the advance from descent to ascent through the character's
-  matrix), and in vertical writing the em-wide column its advance spans.
-  Simple fonts whose codes are bytes are laid out by a fast path that
-  makes the same sums in the same order (`Foreign::byte_widths`). `Fonts`
-  keeps a source's fonts by object, each read once (`Fonts::get`), and
-  `FontScope` one interpretation's picks by owner and name. What a font's
-  streams decompress to (its `/ToUnicode`, its CMap's chain and its
-  CharProcs, each stream once) is charged to the page's budget, with its
-  content and forms: once an interpretation for a font by object, cached
-  or not, so a page costs the same whichever page read it first, and
-  each time for one written in the resources as a dictionary.
+  PDFium tests give their standard 14 fonts `/Widths`). A glyph's quad is
+  PDFium's loose character box (`GetLooseBounds`): the metric box (the
+  advance from descent to ascent through the character's matrix), and in
+  vertical writing the em-wide column its advance spans, united with its
+  outline's box where its program says it, a side shorter than 0.01
+  taken out as PDFium takes it out; `FontApprox::boxes` says where the
+  outline isn't known (no program read, as for the standard 14 that
+  aren't embedded, a malformed or tricky one, a code whose glyph sheaf
+  can't say, a Type3 glyph with no box). Simple fonts whose codes are
+  bytes are laid out by a fast path that makes the same sums in the same
+  order (`Foreign::byte_widths`). `Fonts` keeps a source's fonts by
+  object, each read once (`Fonts::get`), and `FontScope` one
+  interpretation's picks by owner and name, a `FontId` each, so a `q`
+  copies no reference count; `Fonts::for_text` reads no program, for
+  text alone (the removal check's). What a font's streams decompress to
+  (its `/ToUnicode`, its CMap's chain, its CharProcs and its program,
+  each stream once), and drawing a simple font's glyphs, is charged to
+  the page's budget, with its content and forms: once an interpretation
+  for a font by object, cached or not, so a page costs the same
+  whichever page read it first, and each time for one written in the
+  resources as a dictionary.
 - **Forms per use, refused as PDFium skips them.** Each `Do` of a form is
   interpreted where it's drawn, in a state of its own: its matrix, its
   `/BBox` clipping, its resources its own, else those of what draws it;
@@ -991,12 +1042,14 @@ never lopdf's `Content`.
   is `InterpError::Limit(Cap)`, never a partial answer; a form that
   can't be read is `InterpError::XObject`; and geometry an `f32` can't
   hold (a CTM, a form's matrix, the line, a glyph's box by a bound
-  worked from its font's extent, a path, an image's corners, a shading)
-  is `InterpError::NotFinite`. It never panics or recurses past
-  `form_depth`. The most any page of the corpus comes to: 1,217,210
-  operators (13.8× under the cap), 41,050 glyphs, 17,864,912 bytes
-  lexed, 995,739 path segments, 745 form uses, forms 10 deep, 67 states
-  saved, marked content 9 deep.
+  worked from its font's extent, its outlines' reach included, a path,
+  an image's corners, a shading) is `InterpError::NotFinite`. It never
+  panics or recurses past `form_depth`. The most any page of the corpus
+  comes to: 1,217,210 operators (13.8× under the cap), 41,050 glyphs,
+  17,864,912 bytes lexed, 17,945,356 bytes decompressed with its fonts'
+  programs (6.7% of `decompressed`), 995,739 path segments (`segments`
+  stays 2²³, 8.4× that), 745 form uses, forms 10 deep, 67 states saved,
+  marked content 9 deep.
 - **Written again** (`interp::encode`, giving `Encoded { content, forms
   }`): the page's operators as one stream, and once each the content of
   every form it draws, as written (`ContentWriter::operation`), but
@@ -1019,35 +1072,47 @@ never lopdf's `Content`.
   with its boxes worked by hand (`every()`); PDFium places every glyph
   and image of them where the interpreter does, and renders each page
   written again pixel for pixel as before; their standard 14 fonts have
-  `/Widths`, so PDFium lays them out the same on every OS. The `interp`
-  fuzz target draws two streams on `fixture::fuzz_page`, with the fonts'
-  CMap, a CharProc, `/W` and `/FontMatrix` from the input where it gives
-  them, and checks that what it writes draws the same, every glyph,
-  path, image and form where it was to the bit. Three ignored tiers in sheaf-render's
-  `content_interp.rs` (`SHEAF_INTERP_ONLY` narrows them) read every
-  form, the pool sample, every scan and conformance's 540 files that
-  claim PDF/UA (`Corpus::conformance`), 54,009 pages: every page
-  interpreted within the caps, with no panic, failure or box not finite
-  (10 s); 117,464,508 glyphs matched to PDFium's characters, none past a
-  thousandth of a point (origin, within the loose box, equal to it where
-  the outline lies within), 46,656 with codes or widths guessed counted,
-  and the glyphs and characters it can't say why it matched none for
-  (91,304 and 27,994) held to each file's count in a checked-in list
+  `/Widths`, so PDFium lays them out the same on every OS; fonts over
+  predefined CMaps (`fixture::predefined`) and over hand-built TrueType,
+  CFF, Type 1 and CIDFont programs (`fixture::programs`) among them. The
+  `interp` fuzz target draws two streams on `fixture::fuzz_page`, with
+  the fonts' CMap, a CharProc, `/W`, `/W2`, `/FontMatrix` and a font
+  program from the input where it gives them, and fonts over predefined
+  CMaps beside them, and checks that what it writes draws the same, every
+  glyph, path, image and form where it was to the bit. Three ignored
+  tiers in sheaf-render's `content_interp.rs` (`just tier-interp`;
+  `SHEAF_INTERP_ONLY` narrows them) read every form, the pool sample,
+  every scan and conformance's 540 files that claim PDF/UA
+  (`Corpus::conformance`), 54,009 pages: every page interpreted within
+  the caps, with no panic, failure or box not finite (10 s); 117,492,213
+  glyphs matched to PDFium's characters, none past a thousandth of a
+  point: at the origin, and equal to the loose box on every side where
+  the outline is known and nothing guessed (90,677,142), else within it
+  and equal where the outline lies within; 3,637 with codes or widths
+  guessed counted; one file's 38 glyphs, whose corrupt program PDFium
+  can't load and sheaf reads, allowed by count; and the glyphs and
+  characters it can't say why it matched none for (73,296 and 279) held
+  to each file's count in a checked-in list
   (`content_interp_unexplained.tsv`), so text the interpreter misses
   fails (4 minutes); and every page written again rendering as before,
-  but 2 within 16 px and 24 within what PDFium's own render of the file
-  differs by when loaded again, none left unwritten (50 minutes).
-- **Its callers.** `text_bag` keeps its own walk. On the interpreter
-  (`Forms::Report`) its bags were equal on every stream the removal
-  check reads (pages, forms, tiling patterns, Type3 glyphs) across the
-  corpus, the pool sample, the scans, the PDF/UA files and the 7k
-  fixtures, but for the hash of an empty string shown in no font, which
-  stands for no text; but it was 4% slower on the synthetic 7k's streams
-  and 37% on the scanned's (5% faster on the heavy's), laying out glyphs
-  `text_bag` doesn't need, so M11's slice 5 is the first caller outside
-  tests. The 7k gate
-  interprets every page of each fixture, with a budget proposed and
-  asserted with `SHEAF_GATE_INTERP`.
+  but 2 within 16 px and 24 drawn, pixel for pixel, as PDFium draws the
+  file loaded again (its caches warm for both), none left unwritten (50
+  minutes).
+- **Its callers.** `text_bag` reads content through it (`Forms::Report`;
+  an interest of the strings shown and the operators that end a word;
+  fonts made for text). Its bags were proven equal to the old walk's on
+  every stream the removal check reads (pages, forms, tiling patterns,
+  Type3 glyphs) across the corpus, the pool sample, the scans, the PDF/UA
+  files and the 7k fixtures, but for the hash of an empty string shown
+  in no font, which stands for no text; the predefined CMaps then turned
+  69 files' hashes into CJK text, no asserted corpus count moving (a
+  string with a CID 0 in it stays hashed). With the
+  wrap-up's speed step it's 5% faster than the old walk was on the heavy
+  7k's streams, 2% slower on the synthetic's, and 31% on the scanned's
+  (about a millisecond over its 7,000 pages). M11's slice 5 is the first caller
+  to lay out glyphs. The 7k gate interprets every page of each fixture,
+  with budgets asserted with `SHEAF_GATE_INTERP`, and measures every
+  page's text bag beside it.
 
 ## Undo/redo: snapshots, not inverse commands
 
@@ -2681,8 +2746,9 @@ about 21 ms, its fsyncs included.
   XFA and XMP as words, images and embedded files by hash; their bag must
   be within the bag of everything the section writes. A string in codes
   its font doesn't map is its raw bytes' hash, so only the same bytes
-  match it (`FontDecoders` says when it falls back), and what can't be
-  read counts as removed. A veto on a derived object is a
+  match it (`text_bag` says when it falls back), and what can't be read
+  counts as removed: content past a cap of the content interpreter,
+  which `text_bag` reads through, among it. A veto on a derived object is a
   misclassification, logged as `RemovalMisclassified { key }`; vetoes are
   counted by kind (`removal::vetoes`). Modes: `Veto` stops the Append,
   `Anyway` too (an Append anyway the signatures alone asked), `Report`

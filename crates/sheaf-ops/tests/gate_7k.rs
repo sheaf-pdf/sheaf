@@ -165,9 +165,10 @@
 //! at every change. M11's slice 3, pulled forward, adds the content
 //! interpreter's, in a process of its own: every page of the fixture
 //! interpreted, its forms drawn and each glyph laid out with its box, a
-//! font cache afresh each run, with the process's peak RSS, against a
-//! budget the row proposes ([`InterpBudget`]), asserted only when
-//! [`INTERP`] is set.
+//! font cache afresh each run, with the process's peak RSS and what it
+//! added, against budgets of its own ([`InterpBudget`]), asserted only
+//! when [`INTERP`] is set; and beside it every page's text bag, as the
+//! removal check reads text, measured with no gate.
 //!
 //! From M5 slice 1, alone in `scan_of_500_black_and_white_pages`, the
 //! intake's memory: 500 synthetic black and white Letter pages at 300 dpi
@@ -213,7 +214,7 @@ use image::{GrayImage, Rgb, RgbImage};
 use in_progress::{Level, Progress, Unit};
 use lopdf::{Dictionary, Object, ObjectId};
 use sheaf_doc::content::interp::{self, Opts, interpret};
-use sheaf_doc::content::{Fonts, Marker, PageContent};
+use sheaf_doc::content::{Fonts, Marker, PageContent, text_bag};
 use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
@@ -318,32 +319,46 @@ const FLATTEN: &str = "SHEAF_GATE_FLATTEN";
 const UNATTAINABLE: &str = "unattainable by construction (the open alone peaks near it)";
 /// Set to assert the content interpreter's budgets (M11 slice 3), every
 /// page of a fixture interpreted ([`interp_part`]): the plan set none, so
-/// the row proposes one, about twice what it measured on a quiet machine
-/// ([`InterpBudget`]), asserted only when this is set until Greg rules.
+/// the row sets its own ([`InterpBudget`]), asserted only when this is
+/// set, as the other opt-in gates are, until Greg rules on them.
 const INTERP: &str = "SHEAF_GATE_INTERP";
 
-/// What interpreting every page of a fixture may take, proposed (M11
-/// slice 3): the median time, and the process's peak RSS, the source
-/// read included (on the scanned, mostly its 474 MB of bytes). Each is
-/// about twice the median of five processes at load 4 to 7 (2026-10-23):
-/// 1,052 ms and 31 MB on the synthetic, 739 ms and 88 MB on the heavy,
-/// 73.7 ms and 516 MB on the scanned.
+/// What interpreting every page of a fixture may take (M11 slice 3): the
+/// median time, and of the RSS either the process's peak, the source read
+/// included, or on the scanned, whose source holds 474 MB of bytes, what
+/// interpreting adds to it. Set from the median of five processes'
+/// medians on a quiet machine (2026-10-24, after the wrap-up's speed
+/// step, hayro-cmap and skrifa): 1,018 ms and 31.2 MB on the synthetic,
+/// 1,072 ms and 89.3 MB on the heavy (its 70 embedded TrueType programs
+/// read each run, each glyph's box united with its outline's), 71.5 ms and
+/// 0.52 MB added on the scanned. Times and peaks have about 1.6 times
+/// that; the scanned's RSS added, too small for a ratio to mean much, 4
+/// MB, under the 7 MB a kilobyte kept a page would add. Before the speed
+/// step the scanned added 1.5–2.0 MB, however many of its pages were
+/// interpreted, one or all: every interpretation picked the stock
+/// Helvetica first, and reading it takes 1.3 MB once a process; now it's
+/// picked only where a font is missing, and the scanned shows no text. A
+/// page that did would add that again, within the 4.
 struct InterpBudget {
     ms: f64,
-    peak_mb: f64,
+    peak_mb: Option<f64>,
+    added_mb: Option<f64>,
 }
 
 const INTERP_SYNTHETIC: InterpBudget = InterpBudget {
-    ms: 2000.0,
-    peak_mb: 64.0,
+    ms: 1600.0,
+    peak_mb: Some(48.0),
+    added_mb: None,
 };
 const INTERP_HEAVY: InterpBudget = InterpBudget {
-    ms: 1500.0,
-    peak_mb: 180.0,
+    ms: 1700.0,
+    peak_mb: Some(140.0),
+    added_mb: None,
 };
 const INTERP_SCANNED: InterpBudget = InterpBudget {
-    ms: 150.0,
-    peak_mb: 1024.0,
+    ms: 115.0,
+    peak_mb: None,
+    added_mb: Some(4.0),
 };
 
 /// Proposal 8's rows and the everyday triggers of a live redraw (slice
@@ -2131,8 +2146,10 @@ fn clean_part(kind: Kind) {
 /// its own (M11 slice 3): every page's content read and interpreted, its
 /// forms drawn and each glyph laid out with its box, as redaction will
 /// read a page, on the source as read, each run with a font cache of its
-/// own, so each reads its fonts afresh. Its budgets ([`InterpBudget`])
-/// are proposed, and asserted only when [`INTERP`] is set.
+/// own, so each reads its fonts (and their programs) afresh; its budgets
+/// ([`InterpBudget`]) asserted when [`INTERP`] is set. Then every page's
+/// text bag, as the removal check reads a page's streams
+/// ([`text_bag`], fonts read for text), measured with no gate.
 fn interp_part(kind: Kind) {
     let path = fixture(kind);
     let store = Store::new();
@@ -2171,8 +2188,32 @@ fn interp_part(kind: Kind) {
         })
         .0
     });
+    let mut words = 0;
+    let (bags, _) = measure(QUICK_RUNS, || {
+        let fonts = Fonts::for_text();
+        timed(|| {
+            words = 0;
+            for page in src.pages() {
+                let content = PageContent::read(pdf, &page.contents, lim).unwrap();
+                let resources = page.resources.as_deref();
+                let bag = text_bag(pdf, content.concat(), resources, lim, &fonts).unwrap();
+                words += bag.len();
+            }
+        })
+        .0
+    });
     let budget = kind.interp_budget();
-    let proposed = |what: String| format!("{what}, proposed, asserted with {INTERP}");
+    let gate = |mb: Option<f64>| match mb {
+        Some(mb) => format!("≤ {mb} MB, asserted with {INTERP}"),
+        None => String::new(),
+    };
+    let count = |what: &str, n: usize| Row {
+        what: what.into(),
+        now: Some(n as f64),
+        unit: "",
+        baseline: f64::NAN,
+        gate: String::new(),
+    };
     print_table(
         &format!(
             "{} 7k, every page interpreted in a process of its own",
@@ -2184,43 +2225,44 @@ fn interp_part(kind: Kind) {
                 "every page interpreted",
                 time,
                 f64::NAN,
-                proposed(format!("≤ {} ms", budget.ms)),
+                format!("≤ {} ms, asserted with {INTERP}", budget.ms),
             ),
             Row::peak(
                 "every page interpreted",
                 mem,
                 f64::NAN,
-                proposed(format!("≤ {} MB", budget.peak_mb)),
+                gate(budget.peak_mb),
             ),
-            Row::added("every page interpreted", mem, f64::NAN, ""),
-            Row {
-                what: "operators interpreted".into(),
-                now: Some(operators as f64),
-                unit: "",
-                baseline: f64::NAN,
-                gate: String::new(),
-            },
-            Row {
-                what: "glyphs laid out".into(),
-                now: Some(glyphs as f64),
-                unit: "",
-                baseline: f64::NAN,
-                gate: String::new(),
-            },
+            Row::added(
+                "every page interpreted",
+                mem,
+                f64::NAN,
+                gate(budget.added_mb),
+            ),
+            count("operators interpreted", operators),
+            count("glyphs laid out", glyphs),
+            Row::time("every page's text bag", bags, f64::NAN, ""),
+            count("words and hashes in the bags", words),
         ],
     );
     if std::env::var_os(INTERP).is_some() {
         assert!(
             ms(time) <= budget.ms,
-            "interpreting every page took {time:?}, over the {} ms proposed",
+            "interpreting every page took {time:?}, over the {} ms budget",
             budget.ms
         );
-        if let Some(mem) = mem {
+        if let (Some(mem), Some(most)) = (mem, budget.peak_mb) {
             let peak = mb(mem.peak);
             assert!(
-                peak <= budget.peak_mb,
-                "interpreting every page peaked at {peak:.1} MB, over the {} MB proposed",
-                budget.peak_mb
+                peak <= most,
+                "interpreting every page peaked at {peak:.1} MB, over the {most} MB budget"
+            );
+        }
+        if let (Some(mem), Some(most)) = (mem, budget.added_mb) {
+            let added = mb(mem.peak.saturating_sub(mem.start));
+            assert!(
+                added <= most,
+                "interpreting every page added {added:.1} MB, over the {most} MB budget"
             );
         }
     }

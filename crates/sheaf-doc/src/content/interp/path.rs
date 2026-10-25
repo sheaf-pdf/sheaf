@@ -11,9 +11,10 @@
 
 use std::f32::consts::SQRT_2;
 
+use super::op::Op;
 use super::state::{State, number, nums};
 use crate::annot::Pt;
-use crate::content::lex::{Step, Tok, is_number};
+use crate::content::lex::{Step, is_number};
 use crate::content::{FillRule, LineCap, LineJoin, Paint};
 use crate::geom::Rect;
 
@@ -60,11 +61,19 @@ pub struct PathDrawn<'e> {
     pub bounds: Rect,
 }
 
+/// How many segments a path's buffer keeps for the next path: a large path's
+/// isn't held after it.
+const KEPT_SEGMENTS: usize = 1 << 16;
+
 /// A path being built, in user space: PDFium's, and where its subpath
 /// started and the pen is, both at the origin before any.
 #[derive(Debug)]
 pub(super) struct Builder {
     segs: Vec<Seg>,
+    /// The last path ended, in PageSpace: its buffer and `segs`' swap
+    /// places as each path ends, so a path is built and placed without
+    /// allocating.
+    placed: Vec<Seg>,
     start: Pt,
     current: Pt,
     /// `W` or `W*`, for the operator that ends the path.
@@ -75,9 +84,9 @@ pub(super) struct Builder {
 }
 
 /// A path ended: what PDFium paints and clips by.
-pub(super) struct Ended {
+pub(super) struct Ended<'a> {
     /// Its segments in PageSpace.
-    pub segs: Vec<Seg>,
+    pub segs: &'a [Seg],
     pub paint: Paint,
     pub clip: Option<FillRule>,
     /// Its points' box, and what it paints'.
@@ -90,6 +99,7 @@ impl Default for Builder {
         let origin = Pt { x: 0.0, y: 0.0 };
         Builder {
             segs: Vec::new(),
+            placed: Vec::new(),
             start: origin,
             current: origin,
             clip: None,
@@ -107,72 +117,79 @@ impl Builder {
     /// Whether `op`, with `step`'s operands, is read PDFium's own way, as
     /// a path operator after an `m`: once one isn't, none after it is till
     /// the next `m`.
-    fn keeps(&mut self, op: &[u8], step: &Step<'_, '_>) -> bool {
-        let path_op = matches!(op, b"m" | b"l" | b"c" | b"v" | b"y" | b"h" | b"re");
+    fn keeps(&mut self, op: Op, step: &Step<'_, '_>) -> bool {
+        let path_op = matches!(
+            op,
+            Op::Move
+                | Op::Line
+                | Op::Curve
+                | Op::CurveFromPen
+                | Op::CurveToEnd
+                | Op::ClosePath
+                | Op::Rect
+        );
         if self.fast.is_some() && !(path_op && step.args().all(is_number)) {
             self.fast = None;
         }
         self.fast.is_some()
     }
 
-    /// What `step`, an operator that builds the path, does to it; false
-    /// for any other step. Every step is handed to it, as each but a path
-    /// operator ends PDFium's own reading of them.
-    pub(super) fn build(&mut self, step: &Step<'_, '_>) -> bool {
-        let Tok::Op(op) = step.tok else {
-            self.fast = None;
-            return false;
-        };
+    /// What `op`, an operator that builds the path
+    /// ([`Op::builds_path`]), does to it, its operands `step`'s.
+    pub(super) fn build(&mut self, op: Op, step: &Step<'_, '_>) {
         if self.keeps(op, step) {
             self.fast_op(op, step);
-            return true;
+            return;
         }
         let point = |x: f32, y: f32| Pt { x, y };
         match op {
-            b"m" if step.operands.len() == 2 => {
+            Op::Move if step.operands.len() == 2 => {
                 if let Some([x, y]) = nums(step) {
                     self.move_to(point(x, y));
                 }
                 self.fast = Some([0.0; 6]);
             }
-            b"l" if step.operands.len() == 2 => {
+            Op::Line if step.operands.len() == 2 => {
                 if let Some([x, y]) = nums(step) {
                     self.line_to(point(x, y));
                 }
             }
-            b"m" | b"l" => {}
-            b"c" => {
+            Op::Curve => {
                 if let Some([x1, y1, x2, y2, x3, y3]) = nums(step) {
                     self.curve(point(x1, y1), point(x2, y2), point(x3, y3));
                 }
             }
-            b"v" => {
+            Op::CurveFromPen => {
                 if let Some([x2, y2, x3, y3]) = nums(step) {
                     self.curve(self.current, point(x2, y2), point(x3, y3));
                 }
             }
-            b"y" => {
+            Op::CurveToEnd => {
                 if let Some([x1, y1, x3, y3]) = nums(step) {
                     self.curve(point(x1, y1), point(x3, y3), point(x3, y3));
                 }
             }
-            b"h" => self.close(),
-            b"re" => {
+            Op::ClosePath => self.close(),
+            Op::Rect => {
                 if let Some([x, y, w, h]) = nums(step) {
                     self.rect(x, y, w, h);
                 }
             }
-            b"W" => self.clip = Some(FillRule::NonZero),
-            b"W*" => self.clip = Some(FillRule::EvenOdd),
-            _ => return false,
+            Op::Clip(rule) => self.clip = Some(rule),
+            _ => {}
         }
-        true
+    }
+
+    /// What any other step does to it: it ends PDFium's own reading of
+    /// path operators.
+    pub(super) fn interrupt(&mut self) {
+        self.fast = None;
     }
 
     /// A path operator read PDFium's own way: its numbers, up to six, put
     /// in the buffer from its start, and each point it takes read from
     /// there. One that isn't finite builds nothing.
-    fn fast_op(&mut self, op: &[u8], step: &Step<'_, '_>) {
+    fn fast_op(&mut self, op: Op, step: &Step<'_, '_>) {
         let Some(n) = self.fast.as_mut() else {
             return;
         };
@@ -181,9 +198,9 @@ impl Builder {
         }
         let n = *n;
         let used = match op {
-            b"m" | b"l" => 2,
-            b"c" => 6,
-            b"v" | b"y" | b"re" => 4,
+            Op::Move | Op::Line => 2,
+            Op::Curve => 6,
+            Op::CurveFromPen | Op::CurveToEnd | Op::Rect => 4,
             _ => 0,
         };
         if !n[..used].iter().all(|v| v.is_finite()) {
@@ -194,12 +211,12 @@ impl Builder {
             y: n[i + 1],
         };
         match op {
-            b"m" => self.move_to(at(0)),
-            b"l" => self.line_to(at(0)),
-            b"c" => self.curve(at(0), at(2), at(4)),
-            b"v" => self.curve(self.current, at(0), at(2)),
-            b"y" => self.curve(at(0), at(2), at(2)),
-            b"h" => self.close(),
+            Op::Move => self.move_to(at(0)),
+            Op::Line => self.line_to(at(0)),
+            Op::Curve => self.curve(at(0), at(2), at(4)),
+            Op::CurveFromPen => self.curve(self.current, at(0), at(2)),
+            Op::CurveToEnd => self.curve(at(0), at(2), at(2)),
+            Op::ClosePath => self.close(),
             _ => self.rect(n[0], n[1], n[2], n[3]),
         }
     }
@@ -265,7 +282,7 @@ impl Builder {
     /// ends it: None where it draws and clips nothing. A path of one point
     /// clips everything away; it's painted only where it's closed and
     /// stroked with round caps, a dot. A move it ends with is dropped.
-    pub(super) fn end(&mut self, paint: Paint, state: &State) -> Option<Ended> {
+    pub(super) fn end(&mut self, paint: Paint, state: &State) -> Option<Ended<'_>> {
         match paint {
             Paint::CloseStroke | Paint::CloseFillStroke => self.close(),
             // PDFium closes `b*` with a line back even where the pen's
@@ -273,7 +290,12 @@ impl Builder {
             Paint::CloseFillStrokeEvenOdd => self.close_to(self.start),
             _ => {}
         }
-        let mut segs = std::mem::take(&mut self.segs);
+        // The path built becomes the one placed, and the last placed's
+        // buffer the next built's, kept but where it's grown large.
+        std::mem::swap(&mut self.segs, &mut self.placed);
+        self.segs.clear();
+        self.segs.shrink_to(KEPT_SEGMENTS);
+        let segs = &mut self.placed;
         let clip = self.clip.take();
         if segs.is_empty() {
             return None;
@@ -281,7 +303,8 @@ impl Builder {
         if segs.iter().map(|s| s.points().count()).sum::<usize>() == 1 {
             if clip.is_some() {
                 let origin = Pt { x: 0.0, y: 0.0 };
-                let mut segs = vec![Seg::Move(origin)];
+                segs.clear();
+                segs.push(Seg::Move(origin));
                 segs.extend([Seg::Line(origin); 4]);
                 segs.push(Seg::Close);
                 return Some(Ended {
@@ -298,7 +321,8 @@ impl Builder {
             if state.line_cap != LineCap::Round {
                 return None;
             }
-            segs = vec![Seg::Move(p), Seg::Line(p), Seg::Close];
+            segs.clear();
+            segs.extend([Seg::Move(p), Seg::Line(p), Seg::Close]);
         }
         if let Some(Seg::Move(_)) = segs.last() {
             segs.pop();
@@ -307,7 +331,7 @@ impl Builder {
             return None;
         }
         let m = state.ctm;
-        for seg in &mut segs {
+        for seg in segs.iter_mut() {
             *seg = match *seg {
                 Seg::Move(p) => Seg::Move(m.apply(p)),
                 Seg::Line(p) => Seg::Line(m.apply(p)),
@@ -315,9 +339,9 @@ impl Builder {
                 Seg::Close => Seg::Close,
             };
         }
-        let points = bounds(&segs);
+        let points = bounds(segs);
         let bounds = match paint.strokes() {
-            true => stroked(points, &segs, state),
+            true => stroked(points, segs, state),
             false => points,
         };
         Some(Ended {

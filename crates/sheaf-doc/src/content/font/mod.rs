@@ -17,19 +17,22 @@ mod afm;
 mod encoding;
 mod foreign;
 mod glyphless;
+mod predefined;
+mod program;
 mod std14;
 #[cfg(test)]
 mod tests;
+mod type1;
 
 use std::sync::Arc;
 
 use lopdf::Object;
 
-pub(crate) use foreign::Decoder;
 pub use foreign::{
-    Descendant, FontApprox, FontKind, FontScope, Fonts, Foreign, TooLarge, VerticalMetrics,
+    Descendant, FontApprox, FontId, FontKind, FontScope, Fonts, Foreign, TooLarge, VerticalMetrics,
 };
 pub use glyphless::Glyphless;
+pub use program::FontProgram;
 pub use std14::Std14;
 
 use super::ResId;

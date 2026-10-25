@@ -399,10 +399,12 @@ in M9 (deleting means deleted) rather than here.
 
 **Shared infrastructure:** M10.5 slice 6 built the content lexer and
 writer. The content interpreter on them, this plan's slice 3, landed
-early, in a PR of its own between milestones (2026-10-23): it's the
-base for M11's redaction, M13 content editing, M14 optimize and M17's
-tagged documents, none of which waits on the rest of M11 for it. Each
-may change it as real use finds what it needs.
+early, in a PR of its own between milestones (2026-10-23), with a
+wrap-up that put the removal check's `text_bag` on it and read fonts'
+embedded programs (skrifa) and the predefined CMaps (hayro-cmap): it's
+the base for M11's redaction, M13 content editing, M14 optimize and
+M17's tagged documents, none of which waits on the rest of M11 for it.
+Each may change it as real use finds what it needs.
 
 ### M12: Signatures
 
@@ -440,7 +442,10 @@ encryption.
 
 - Edit text in place: reflow within a text block, font matching with
   substitution when the embedded font is subset, and a clear warning when
-  a glyph is missing.
+  a glyph is missing. The font work leans on skrifa (coverage, metrics
+  and outlines; the content interpreter already reads embedded programs
+  with it) and subsetter for the subsets written (Greg, 2026-10-24; M10
+  slice 7 settles whether subsetter's renumbering is taken).
 - Add text and image objects.
 - Edit, replace, move, resize, crop images.
 - Link editing: create, edit destination/action, delete; create links from
@@ -458,7 +463,11 @@ on M11's image redaction for image editing.
 - Compare documents: text diff and visual (pixel) diff, with a side-by-side
   report.
 - Optimize / reduce file size: image downsampling and recompression, font
-  subsetting, object streams, removing unused objects.
+  subsetting (skrifa to read the programs, subsetter for TrueType and
+  OpenType ones where renumbering their glyphs is acceptable; bare CFF
+  and Type 1, which no crate subsets, built on read-fonts:
+  `todos/build-or-adopt.md` entry 62), object streams, removing unused
+  objects.
 - Fast Web View (linearization): page 1's objects first, a linearization
   dictionary and hint tables, so a viewer reading byte ranges over a
   network shows page 1 before the rest arrives.

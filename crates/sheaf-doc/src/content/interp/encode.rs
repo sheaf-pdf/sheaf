@@ -30,7 +30,7 @@ use std::ops::ControlFlow;
 
 use lopdf::{Object, ObjectId};
 
-use super::{Event, Forms, InterpError, Kind, Opts, interpret};
+use super::{Event, Forms, InterpError, Kind, Ops, Opts, Wants, interpret};
 use crate::annot::Pt;
 use crate::content::lex;
 use crate::content::page::{Concat, ReadObjects};
@@ -100,6 +100,10 @@ pub fn encode<R: ReadObjects>(
     let mut unwritable = None;
     let opts = Opts {
         forms: Forms::Descend,
+        wants: Wants {
+            ops: Ops::ALL,
+            ..Wants::NONE
+        },
     };
     interpret(objects, content, resources, lim, fonts, opts, |event| {
         match event.kind {

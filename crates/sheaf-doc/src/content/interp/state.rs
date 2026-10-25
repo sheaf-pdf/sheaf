@@ -4,13 +4,12 @@
 //! or isn't there, is 0, and a number that isn't finite leaves the state
 //! as it was.
 
-use std::sync::Arc;
-
 use super::clip::Clip;
+use super::op::Op;
 use super::path::Seg;
 use crate::annot::Pt;
 use crate::content::lex::Step;
-use crate::content::{FillRule, Foreign, LineCap, LineJoin, TextMode};
+use crate::content::{FillRule, FontId, LineCap, LineJoin, TextMode};
 use crate::geom::{Affine, Rect};
 
 /// The graphics state where an operator is: what `q` saves and `Q`
@@ -39,11 +38,12 @@ pub struct State {
 /// The text state, and where text goes next.
 #[derive(Debug, Clone)]
 pub struct TextState {
-    /// The font `Tf`, or an ExtGState's `/Font`, picked: PDFium's stock
-    /// Helvetica ([`Fonts::stock`](crate::content::Fonts::stock)) where
-    /// the resources have none by the name it gave, and `stock` is set;
-    /// None before either, where PDFium draws no text.
-    pub font: Option<Arc<Foreign>>,
+    /// The font `Tf`, or an ExtGState's `/Font`, picked, among the
+    /// interpretation's ([`FontScope`](crate::content::FontScope)); a
+    /// string shown has it ([`TextShow::font`](super::TextShow::font)).
+    pub(crate) font: Option<FontId>,
+    /// Whether that's PDFium's stock Helvetica, the resources having none
+    /// by the name it gave.
     pub stock: bool,
     /// `Tf`'s size: 1 before one.
     pub size: f32,
@@ -148,7 +148,7 @@ impl State {
                 );
                 segs.push(Seg::Close);
                 let bounds = super::path::bounds(&segs);
-                self.clip.with_path(segs, FillRule::NonZero, bounds)
+                self.clip.with_path(&segs, FillRule::NonZero, bounds)
             }
             None => self.clip.clone(),
         };
@@ -160,7 +160,7 @@ impl State {
             miter_limit: self.miter_limit,
             clip,
             text: TextState {
-                font: text.font.clone(),
+                font: text.font,
                 stock: text.stock,
                 size: text.size,
                 char_space: text.char_space,
@@ -172,26 +172,26 @@ impl State {
     }
 
     /// What `op`, an operator that only sets the state, does to it, its
-    /// operands `step`'s; false for any other operator.
-    pub(super) fn set(&mut self, op: &[u8], step: &Step<'_, '_>) -> bool {
+    /// operands `step`'s; any other does nothing.
+    pub(super) fn set(&mut self, op: Op, step: &Step<'_, '_>) {
         let text = &mut self.text;
         match op {
-            b"cm" => {
+            Op::Transform => {
                 if let Some(m) = matrix(step) {
                     self.ctm = m.then(self.ctm);
                 }
             }
-            b"w" => set(&mut self.line_width, step),
-            b"J" => self.line_cap = cap(integer(step)),
-            b"j" => self.line_join = join(integer(step)),
-            b"M" => set(&mut self.miter_limit, step),
-            b"BT" => {
+            Op::LineWidth => set(&mut self.line_width, step),
+            Op::LineCap => self.line_cap = cap(integer(step)),
+            Op::LineJoin => self.line_join = join(integer(step)),
+            Op::MiterLimit => set(&mut self.miter_limit, step),
+            Op::BeginText => {
                 text.matrix = Affine::IDENTITY;
                 text.line = ORIGIN;
                 text.pen = ORIGIN;
                 text.guessed = false;
             }
-            b"Tm" => {
+            Op::TextMatrix => {
                 if let Some(m) = matrix(step) {
                     text.matrix = m;
                     text.line = ORIGIN;
@@ -199,46 +199,45 @@ impl State {
                     text.guessed = false;
                 }
             }
-            b"Td" | b"TD" => {
+            Op::MoveLine | Op::MoveLineLeading => {
                 if let Some([x, y]) = nums(step) {
                     text.line.x += x;
                     text.line.y += y;
                     text.pen = text.line;
                     text.guessed = false;
-                    if op == b"TD" {
+                    if op == Op::MoveLineLeading {
                         text.leading = -y;
                     }
                 }
             }
-            b"T*" => text.next_line(),
-            b"Tc" => set(&mut text.char_space, step),
-            b"Tw" => set(&mut text.word_space, step),
+            Op::NextLine => text.next_line(),
+            Op::CharSpace => set(&mut text.char_space, step),
+            Op::WordSpace => set(&mut text.word_space, step),
             // PDFium takes `Tz` with one operand only.
-            b"Tz" if step.operands.len() == 1 => {
+            Op::Scale if step.operands.len() == 1 => {
                 if let Some([percent]) = nums(step) {
                     text.scale = percent / 100.0;
                 }
             }
-            b"Tz" => {}
-            b"TL" => set(&mut text.leading, step),
-            b"Ts" => set(&mut text.rise, step),
-            b"Tr" => {
+            Op::Scale => {}
+            Op::Leading => set(&mut text.leading, step),
+            Op::Rise => set(&mut text.rise, step),
+            Op::RenderMode => {
                 // A number past an `int` is 0, as PDFium reads it, and one
                 // that's no mode sets none.
                 if let Some(mode) = nums(step).and_then(|[n]| TextMode::of(int(n))) {
                     text.mode = mode;
                 }
             }
-            _ => return false,
+            _ => {}
         }
-        true
     }
 
     /// What `'` and `"` do before the string they show, their operands
     /// `step`'s: `"` sets `Tw` and `Tc` to its first two, and both move to
     /// the next line.
-    pub(super) fn next_line_of(&mut self, op: &[u8], step: &Step<'_, '_>) {
-        if op == b"\""
+    pub(super) fn next_line_of(&mut self, op: Op, step: &Step<'_, '_>) {
+        if op == Op::NextLineShowSpaced
             && let Some([tw, tc, _]) = nums(step)
         {
             self.text.word_space = tw;
@@ -252,11 +251,9 @@ impl State {
     /// the string they show.
     pub(super) fn moved(&self, op: &[u8], step: &Step<'_, '_>) -> State {
         let mut moved = self.clone();
-        match op {
-            b"'" | b"\"" => moved.next_line_of(op, step),
-            _ => {
-                moved.set(op, step);
-            }
+        match Op::of(op) {
+            op @ (Op::NextLineShow | Op::NextLineShowSpaced) => moved.next_line_of(op, step),
+            op => moved.set(op, step),
         }
         moved
     }

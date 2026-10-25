@@ -1310,9 +1310,16 @@ The images section's detail; core agrees ("keep flate2 (zlib-rs)").
   boxes within a tolerance" (`:471`). `m10.md:632-634` names
   "`ttf-parser`". Greg leans to skrifa. The interpreter in-house on
   `content/`, with hayro-interpret an oracle only (M10.5's D55,
-  `m10.5-decisions.md:1472-1491`). **Taken since:** the content
-  interpreter PR's wrap-up adopts skrifa/read-fonts for tight glyph
-  boxes ([Already acted on](#already-acted-on-2026-10-23)).
+  `m10.5-decisions.md:1472-1491`). **Taken since:** done in the content
+  interpreter PR (M11 slice 3, its wrap-up): skrifa 0.44.0 / read-fonts
+  0.41.0, default features off (`std` only), the versions GPUI's Linux
+  build already compiles through swash, so no third version; they read
+  `glyf`, bare CFF (CID-keyed included), OpenType CFF and Type 1. Glyph
+  boxes are PDFium's loose boxes, heights follow `CheckFontMetrics`,
+  behind sheaf's own `content/font/program.rs` with its work caps
+  ([Already acted on](#already-acted-on-2026-10-23)). m10.md decision
+  11 and slice 7, and ROADMAP's M13 and M14, name skrifa and subsetter
+  (Greg, 2026-10-24).
 - **Why the program matters, even for slice 3:**
   - PDFium's `CPDF_Font::CheckFontMetrics` fills an all-zero `FontBBox`,
     and `Ascent`/`Descent`, from the font file. If Ascent and Descent are
@@ -1412,8 +1419,15 @@ The images section's detail; core agrees ("keep flate2 (zlib-rs)").
 - **Today's plan:** none. sheaf parses `/ToUnicode` itself
   (`text_bag.rs:322-`: bfchar, bfrange, codespace ranges). A Type0 font
   with no ToUnicode decodes 2 bytes at a time (`:223-229`): its strings
-  become hashes, consistent but not text. **Taken since:** the content
-  interpreter PR adopts hayro-cmap.
+  become hashes, consistent but not text. **Taken since:** done in the
+  content interpreter PR (M11 slice 3, its wrap-up): hayro-cmap 0.1.0
+  (with hayro-postscript 0.1.0 and brotli 8.0.4) for the 65 bundled
+  maps, CIDs for `/W` and CID → Unicode where there's no ToUnicode;
+  sheaf's ToUnicode parser kept, PDFium's code splitting kept in
+  sheaf's own table while the codespace stays private (an upstream PR
+  to expose it is for later: backlog F25). Adobe's notice ships as
+  `packaging/licenses/LICENSE-cmap-resources`, brotli's as
+  `LICENSE-brotli`.
 - **Candidates:**
   - **[hayro-cmap](https://crates.io/crates/hayro-cmap) 0.1.0**
     (2026-04-12; [docs](https://docs.rs/hayro-cmap/0.1.0)):

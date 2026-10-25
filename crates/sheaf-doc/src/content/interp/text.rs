@@ -1,11 +1,11 @@
 //! Text shown: each string's glyphs, where PDFium places them
 //! (`CPDF_TextObject::CalcPositionDataInternal`) and the box each spans,
-//! as PDFium bounds a character (`cpdf_textpage.cpp`'s `GetLooseBounds`)
-//! but for the outline only a font program says.
+//! as PDFium bounds a character (`cpdf_textpage.cpp`'s `GetLooseBounds`):
+//! its metrics' box united with its outline's, where the font's program
+//! says it.
 
 use std::borrow::Cow;
 use std::ops::Range;
-use std::sync::Arc;
 
 use super::state::{State, TextState};
 use crate::annot::Pt;
@@ -52,9 +52,12 @@ impl Quad {
 pub struct TextShow<'e> {
     /// The string, its escapes read.
     pub string: &'e [u8],
-    /// The font it's shown in ([`TextState::font`]): None before any `Tf`,
-    /// where PDFium draws nothing, and it has no glyphs.
-    pub font: Option<&'e Arc<Foreign>>,
+    /// The font it's shown in: the one `Tf`, or an ExtGState's `/Font`,
+    /// picked, PDFium's stock Helvetica where the resources have none by
+    /// the name it gave ([`Fonts::stock`](crate::content::Fonts::stock));
+    /// None before either, where PDFium draws nothing, and it has no
+    /// glyphs.
+    pub font: Option<&'e Foreign>,
     /// Whether the font is PDFium's stock Helvetica, the resources having
     /// none by the name `Tf` gave.
     pub stock: bool,
@@ -77,11 +80,15 @@ pub struct TextShow<'e> {
 }
 
 impl<'e> TextShow<'e> {
-    /// `string`, shown `offset` from where its operator's text starts, the
-    /// pen of `state`.
-    pub(super) fn new(string: &'e [u8], state: &'e State, offset: f32) -> TextShow<'e> {
+    /// `string`, shown in `font` `offset` from where its operator's text
+    /// starts, the pen of `state`.
+    pub(super) fn new(
+        string: &'e [u8],
+        state: &'e State,
+        font: Option<&'e Foreign>,
+        offset: f32,
+    ) -> TextShow<'e> {
         let text = &state.text;
-        let font = text.font.as_ref();
         let type3 = font.is_some_and(|f| f.kind() == FontKind::Type3);
         let at = Affine {
             a: text.scale,
@@ -153,6 +160,7 @@ impl<'e> TextShow<'e> {
         let invisible = matches!(mode, TextMode::Invisible | TextMode::Clip);
         font.into_iter().flat_map(move |font| {
             let of_font = font.approx();
+            let outlined = font.outlined();
             let vertical = font.is_vertical();
             let size = text.size / 1000.0;
             let metrics = font.metrics();
@@ -160,8 +168,10 @@ impl<'e> TextShow<'e> {
             let mut moved = text.guessed;
             laid(font, text, string, offset).map(move |laid| {
                 let guessed = font.width_guessed(laid.code);
+                let outline = outlined.then(|| font.char_box(laid.code)).flatten();
                 let approx = FontApprox {
                     widths: of_font.widths || moved || guessed,
+                    boxes: of_font.boxes || (outlined && outline.is_none()),
                     ..of_font
                 };
                 moved |= guessed;
@@ -190,6 +200,19 @@ impl<'e> TextShow<'e> {
                         y: 0.0,
                     };
                     (origin, cell, pen)
+                };
+                // United with its outline's box, as PDFium unites them.
+                let cell = match outline {
+                    Some(r) => {
+                        let o = outline_box(r, origin, size, laid.units * size);
+                        Rect {
+                            x0: cell.x0.min(o.x0),
+                            y0: cell.y0.min(o.y0),
+                            x1: cell.x1.max(o.x1),
+                            y1: cell.y1.max(o.y1),
+                        }
+                    }
+                    None => cell,
                 };
                 Glyph {
                     cid: font.cid(laid.code),
@@ -221,6 +244,29 @@ impl<'e> TextShow<'e> {
 /// each step rounded, stays within it.
 const PLACED: f64 = 3e37;
 
+/// How short a side of a glyph's outline box may be before PDFium takes
+/// it out (`kSizeEpsilon`), in text space at the font size.
+const SIZE_EPSILON: f32 = 0.01;
+
+/// The box PDFium gives a glyph's outline, its tight box (`CPDF_TextPage::
+/// ProcessTextObject`), in the text space it's laid out in: `r`, its
+/// font's box for its code in glyph units ([`Foreign::char_box`]), at
+/// `size`, a thousandth of the font size, from its origin `origin`; a side
+/// shorter than [`SIZE_EPSILON`] taken out, its top to `size` above its
+/// bottom, its right to `width` past its left, its advance at the font
+/// size, each worked in PDFium's order.
+fn outline_box(r: Rect, origin: Pt, size: f32, width: f32) -> Rect {
+    let (x0, y0) = (r.x0 * size + origin.x, r.y0 * size + origin.y);
+    let (mut x1, mut y1) = (r.x1 * size + origin.x, r.y1 * size + origin.y);
+    if (y1 - y0).abs() < SIZE_EPSILON {
+        y1 = y0 + size;
+    }
+    if (x1 - x0).abs() < SIZE_EPSILON {
+        x1 = x0 + width;
+    }
+    Rect::new(x0, y0, x1, y1)
+}
+
 /// A glyph shown: a code of a string.
 #[derive(Debug, Clone)]
 pub struct Glyph<'e> {
@@ -237,17 +283,26 @@ pub struct Glyph<'e> {
     /// where it's a space, through `Tz` along a line; `TJ`'s adjustments
     /// aren't its.
     pub advance: f32,
-    /// The box it spans, as PDFium bounds a character but for its
-    /// outline: across its width, from the font's descent to its ascent,
-    /// or in vertical writing the em-wide column its advance spans. It
-    /// holds what of the glyph the font's metrics say; an outline only
-    /// the font's program says may reach past it.
+    /// The box it spans, as PDFium bounds a character (its loose box):
+    /// across its width, from the font's descent to its ascent, or in
+    /// vertical writing the em-wide column its advance spans; united with
+    /// its outline's box where the font's program says it
+    /// ([`Foreign::char_box`]), as PDFium takes that box out where it has
+    /// no width or height. United in text space, so in text turned or
+    /// skewed its bounds hold PDFium's box, which unites the two boxes'
+    /// bounds in PageSpace; and where the font's ascent is its descent,
+    /// which PDFium bounds by the outline's box alone, its heights are
+    /// guessed ([`FontApprox::heights`]). Where no program says its outline
+    /// ([`FontApprox::boxes`]), and in a Type3 font, whose glyphs' `d1`
+    /// boxes ([`Foreign::glyph_box`]) aren't united, it holds what the
+    /// metrics say, and the outline may reach past it.
     pub quad: Quad,
     /// What of the metrics it's placed by is guessed, so its box may be
-    /// elsewhere: its font's ([`Foreign::approx`]); and its width, where
-    /// the font guesses its code's ([`Foreign::width_guessed`]), or one
-    /// shown before it on its line, its string's or since the line was
-    /// set ([`TextState::guessed`]), which moves it.
+    /// elsewhere: its font's ([`Foreign::approx`]); its width, where the
+    /// font guesses its code's ([`Foreign::width_guessed`]), or one shown
+    /// before it on its line, its string's or since the line was set
+    /// ([`TextState::guessed`]), which moves it; and its outline, where
+    /// the font's program doesn't say its code's.
     pub approx: FontApprox,
     /// Whether it draws nothing: shown in `3 Tr` or `7 Tr`.
     pub invisible: bool,
@@ -285,7 +340,10 @@ struct Laid {
     code: u32,
     /// Where it starts.
     at: f32,
-    /// Its width (`w0`), or its vertical advance (`w1`, negative).
+    /// Its width (`w0`), or its vertical advance (`w1`, negative), in
+    /// glyph units.
+    units: f32,
+    /// That at the font size.
     width: f32,
     /// Where the pen goes past it: on by the width, then `Tw` where it's a
     /// space, then `Tc`, added in PDFium's order.
@@ -316,6 +374,7 @@ fn laid<'a>(
             bytes,
             code,
             at,
+            units,
             width,
             end: next,
         };

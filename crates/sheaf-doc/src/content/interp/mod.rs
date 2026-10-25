@@ -2,9 +2,9 @@
 //! at a time, in the graphics and text state it's drawn in, as PDFium
 //! interprets it (`CPDF_StreamContentParser`), so that where it says a
 //! glyph is, PDFium draws it. It reads the toolkit's tokens
-//! ([`lex`](super::lex)) and the fonts files draw in ([`Foreign`]), and
-//! hands each operator, each string shown and each form drawn to a
-//! visitor, as an [`Event`]:
+//! ([`lex`](super::lex)) and the fonts files draw in
+//! ([`Foreign`](super::Foreign)), and hands each operator, each string
+//! shown and each form drawn to a visitor, as an [`Event`]:
 //!
 //! - every operator, inline images among them, with where it is and its
 //!   operands as written ([`At`]), in the state before it ([`State`]):
@@ -28,6 +28,9 @@
 //! - marked content: each range opened and ended, each point, and the
 //!   ranges every event is in ([`Mark`], [`Marks`]), with their `/MCID`,
 //!   `/ActualText` and optional content, and an XObject's own `/OC`.
+//!
+//! A visitor that reads less says what it reads ([`Wants`]), and isn't
+//! handed the rest.
 //!
 //! Where PDFium reads content its own way, so does this: an operand that
 //! isn't a number is 0, a `Q` with nothing saved is passed over, text in
@@ -56,6 +59,7 @@ mod encode;
 #[cfg(test)]
 mod encode_tests;
 mod marked;
+mod op;
 mod path;
 mod state;
 #[cfg(test)]
@@ -63,16 +67,16 @@ mod tests;
 mod text;
 mod xobject;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use lopdf::{Object, ObjectId};
 
 pub use clip::{Clip, ClipPart};
 pub use encode::{EncodeError, Encoded, Unwritable, encode};
 pub use marked::{Mark, Marks};
+pub use op::Ops;
 pub use path::{PathDrawn, Seg};
 pub use state::{State, TextState};
 pub use text::{Glyph, Quad, TextShow};
@@ -80,9 +84,10 @@ pub use xobject::{FormUse, ImageDrawn, ImageOf, Refused, UseId};
 
 use super::lex::{self, LexError, ResCx, Step, Tok};
 use super::page::{Concat, ReadObjects, direct};
-use super::{FontKind, FontScope, Fonts, Foreign, Paint, Props, TooLarge};
+use super::{FontId, FontKind, FontScope, Fonts, Paint, Props, TooLarge};
 use crate::geom::Rect;
 use crate::source::Limits;
+use op::Op;
 use path::Builder;
 use state::{number, nums};
 use xobject::{Form, ImageFacts, XObject};
@@ -102,6 +107,45 @@ pub enum Forms {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Opts {
     pub forms: Forms,
+    /// What the visitor reads: everything, unless it says.
+    pub wants: Wants,
+}
+
+/// What of an interpretation its visitor reads ([`Opts::wants`]): what it
+/// doesn't isn't handed it, nor built for it. What it does is as where it
+/// wants everything, and so is what interpreting returns, its [`Summary`]
+/// and its errors, the caps and the geometry an `f32` can't hold among
+/// them: what isn't wanted is still worked out where those depend on it.
+/// The events of forms, images, shadings and marked content are always
+/// handed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wants {
+    /// The operators handed it as a [`Kind::Op`]; the others are
+    /// interpreted unseen.
+    pub ops: Ops,
+    /// Each string shown, [`Kind::Text`].
+    pub text: bool,
+    /// Each path painted or made the clip, [`Kind::Path`].
+    pub paths: bool,
+}
+
+impl Wants {
+    pub const ALL: Wants = Wants {
+        ops: Ops::ALL,
+        text: true,
+        paths: true,
+    };
+    pub const NONE: Wants = Wants {
+        ops: Ops::NONE,
+        text: false,
+        paths: false,
+    };
+}
+
+impl Default for Wants {
+    fn default() -> Wants {
+        Wants::ALL
+    }
 }
 
 /// What content does at one place, in the state it's done in.
@@ -224,6 +268,14 @@ pub struct Summary {
     pub glyphs: usize,
     /// Bytes of content lexed: the content's, and each form use's.
     pub interpreted: usize,
+    /// Bytes taken from the page's budget
+    /// ([`decompressed`](crate::source::ContentLimits::decompressed)): the
+    /// content's, each form's data once, what each font picked
+    /// decompresses to ([`FontScope::font`]), and what drawing its
+    /// program's glyphs cost: a simple font's as it's read, a CIDFont's
+    /// for each glyph shown, once
+    /// ([`Foreign::charge_outlines`](super::Foreign::charge_outlines)).
+    pub decompressed: usize,
     /// Path segments painted or made the clip.
     pub segments: usize,
     /// Form uses interpreted.
@@ -291,8 +343,8 @@ pub enum Cap {
     /// [`depth`](crate::source::ContentLimits::depth).
     #[error("marked content nested")]
     Marked,
-    /// What forms and fonts decompress to, with the content: what's left
-    /// of the page's
+    /// What forms and fonts decompress to, and drawing their programs'
+    /// glyphs costs, with the content: what's left of the page's
     /// [`decompressed`](crate::source::ContentLimits::decompressed).
     #[error("what the forms and fonts drawn decompress to")]
     Decompressed,
@@ -311,14 +363,13 @@ pub fn interpret<R: ReadObjects>(
     opts: Opts,
     mut visit: impl FnMut(Event<'_>) -> ControlFlow<()>,
 ) -> Result<Summary, InterpError> {
-    let res = Rc::new(ResCx::read(objects, resources));
+    let res = ResCx::read(objects, resources);
     let mut run = Run {
         objects,
         lim,
         page: resources,
-        page_res: res.clone(),
+        page_res: &res,
         fonts: fonts.scope(),
-        stock: fonts.stock(),
         opts,
         visit: &mut visit,
         summary: Summary::default(),
@@ -326,6 +377,7 @@ pub fn interpret<R: ReadObjects>(
         path: Vec::new(),
         chain: Vec::new(),
         xobjects: HashMap::new(),
+        outlines: HashSet::new(),
         budget: (lim.content.decompressed).saturating_sub(content.bytes().len()),
     };
     let top = Frame {
@@ -333,7 +385,7 @@ pub fn interpret<R: ReadObjects>(
         stream: None,
         resources,
         owner: PAGE,
-        res,
+        res: &res,
     };
     match run
         .stream(&top, State::default(), Marks::default())
@@ -343,6 +395,7 @@ pub fn interpret<R: ReadObjects>(
         Err(Halt::Break) => run.summary.stopped = true,
         Err(Halt::Fail(e)) => return Err(e),
     }
+    run.summary.decompressed = lim.content.decompressed - run.budget;
     Ok(run.summary)
 }
 
@@ -356,9 +409,8 @@ struct Run<'a, R: ReadObjects> {
     lim: &'a Limits,
     /// The resources of the content interpreted.
     page: Option<&'a Object>,
-    page_res: Rc<ResCx>,
+    page_res: &'a ResCx,
     fonts: FontScope<'a>,
-    stock: Arc<Foreign>,
     opts: Opts,
     visit: &'a mut dyn FnMut(Event<'_>) -> ControlFlow<()>,
     summary: Summary,
@@ -370,7 +422,12 @@ struct Run<'a, R: ReadObjects> {
     chain: Vec<ObjectId>,
     /// XObjects read, each once.
     xobjects: HashMap<ObjectId, Rc<Drawn>>,
-    /// What the forms and fonts may yet decompress to.
+    /// The CIDFont glyphs whose outlines' drawing is charged
+    /// ([`Foreign::charge_outlines`](super::Foreign::charge_outlines)),
+    /// each once.
+    outlines: HashSet<(FontId, u32)>,
+    /// What the forms and fonts may yet decompress to, and drawing the
+    /// glyphs of their programs cost.
     budget: usize,
 }
 
@@ -380,7 +437,7 @@ enum Drawn {
         form: Form,
         /// Where its own resources have color spaces, what lexing it
         /// needs of them.
-        res: Option<Rc<ResCx>>,
+        res: Option<Box<ResCx>>,
     },
     Image(ImageFacts),
     Other,
@@ -396,7 +453,7 @@ struct Frame<'f> {
     resources: Option<&'f Object>,
     /// Whose they are: [`PAGE`], or a form's.
     owner: ObjectId,
-    res: Rc<ResCx>,
+    res: &'f ResCx,
 }
 
 /// What interpreting content keeps that's its own, and goes with it: the
@@ -470,7 +527,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
             clip_glyphs: Vec::new(),
             clip_texts: 0,
         };
-        let done = lex::steps(frame.content, &frame.res, self.lim, |step| {
+        let done = lex::steps(frame.content, frame.res, self.lim, |step| {
             self.step(frame, &mut local, &step)
         });
         self.saved -= local.saved.len();
@@ -514,31 +571,45 @@ impl<'a, R: ReadObjects> Run<'a, R> {
             content: frame.content,
             operands: step.operands,
         };
-        self.emit(&at, &local.state, &local.marks, Kind::Op)?;
-        if local.path.build(step) {
+        let op = match step.tok {
+            Tok::Op(name) => Op::of(name),
+            Tok::InlineImage(_) | Tok::Operand(_) => Op::Other,
+        };
+        if self.opts.wants.ops.has(op) {
+            self.emit(&at, &local.state, &local.marks, Kind::Op)?;
+        }
+        if op.builds_path() {
+            local.path.build(op, step);
             return match local.path.len() > self.lim.content.segments {
                 true => Err(past(Cap::Segments)),
                 false => Ok(()),
             };
         }
-        let op = match step.tok {
-            Tok::Op(op) => op,
-            Tok::InlineImage(ref data) => return self.inline_image(local, &at, data.clone()),
-            Tok::Operand(_) => return Ok(()),
-        };
-        if local.state.set(op, step) {
-            let moves = matches!(op, b"cm" | b"Td" | b"TD" | b"T*");
-            return match moves && !local.state.is_finite() {
-                true => Err(not_finite()),
-                false => Ok(()),
-            };
-        }
-        if let Some(paint) = Paint::of(op) {
-            return self.paint(local, &at, paint);
-        }
+        // Each step but a path operator ends PDFium's own reading of them.
+        local.path.interrupt();
         let depth = self.lim.content.depth;
         match op {
-            b"q" => {
+            // What moves the CTM or the line may move it past an `f32`.
+            Op::Transform | Op::MoveLine | Op::MoveLineLeading | Op::NextLine => {
+                local.state.set(op, step);
+                if !local.state.is_finite() {
+                    return Err(not_finite());
+                }
+            }
+            Op::LineWidth
+            | Op::LineCap
+            | Op::LineJoin
+            | Op::MiterLimit
+            | Op::BeginText
+            | Op::TextMatrix
+            | Op::CharSpace
+            | Op::WordSpace
+            | Op::Scale
+            | Op::Leading
+            | Op::Rise
+            | Op::RenderMode => local.state.set(op, step),
+            Op::Paint(paint) => return self.paint(local, &at, paint),
+            Op::Save => {
                 if self.saved >= self.lim.content.states {
                     return Err(past(Cap::States));
                 }
@@ -547,36 +618,51 @@ impl<'a, R: ReadObjects> Run<'a, R> {
                 self.summary.deepest_q = self.summary.deepest_q.max(self.saved);
             }
             // A `Q` with nothing saved is passed over, as in PDFium.
-            b"Q" => {
+            Op::Restore => {
                 if let Some(restored) = local.saved.pop() {
                     local.state = restored;
                     self.saved -= 1;
                 }
             }
-            b"Tf" => {
+            Op::Font => {
                 let name = step.arg(1).and_then(|o| string(o, depth));
                 self.pick(frame, &mut local.state, name.as_deref().unwrap_or_default())?;
                 if let Some([size]) = nums(step) {
                     local.state.text.size = size;
                 }
             }
-            b"gs" => self.ext_gstate(frame, &mut local.state, step)?,
-            b"Tj" => self.show(local, &at, step.arg(0))?,
-            b"'" | b"\"" => {
+            Op::ExtGState => self.ext_gstate(frame, &mut local.state, step)?,
+            Op::Show => self.show(local, &at, step.arg(0))?,
+            Op::NextLineShow | Op::NextLineShowSpaced => {
                 local.state.next_line_of(op, step);
                 if !local.state.is_finite() {
                     return Err(not_finite());
                 }
                 self.show(local, &at, step.arg(0))?;
             }
-            b"TJ" => self.show_array(local, &at, step.arg(0))?,
-            b"ET" => end_text(local),
-            b"Do" => self.draw(frame, local, &at, step)?,
-            b"sh" => self.shade(frame, local, &at, step)?,
-            b"BMC" | b"BDC" => self.begin_marked(frame, local, &at, step, op)?,
-            b"EMC" => self.end_marked(local, &at)?,
-            b"MP" | b"DP" => self.point(frame, local, &at, step, op)?,
-            _ => {}
+            Op::ShowArray => self.show_array(local, &at, step.arg(0))?,
+            Op::EndText => end_text(local),
+            Op::Draw => self.draw(frame, local, &at, step)?,
+            Op::Shade => self.shade(frame, local, &at, step)?,
+            Op::BeginMarked | Op::BeginMarkedProps => {
+                self.begin_marked(frame, local, &at, step, op)?
+            }
+            Op::EndMarked => self.end_marked(local, &at)?,
+            Op::Point | Op::PointProps => self.point(frame, local, &at, step, op)?,
+            Op::Other => {
+                if let Tok::InlineImage(ref data) = step.tok {
+                    return self.inline_image(local, &at, data.clone());
+                }
+            }
+            // Built above.
+            Op::Move
+            | Op::Line
+            | Op::Curve
+            | Op::CurveFromPen
+            | Op::CurveToEnd
+            | Op::ClosePath
+            | Op::Rect
+            | Op::Clip(_) => {}
         }
         Ok(())
     }
@@ -588,16 +674,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         marks: &Marks,
         kind: Kind<'_>,
     ) -> Result<(), Stop> {
-        let event = Event {
-            at: at.clone(),
-            state,
-            marks,
-            kind,
-        };
-        match (self.visit)(event) {
-            ControlFlow::Continue(()) => Ok(()),
-            ControlFlow::Break(()) => Err(Stop::Halt(Halt::Break)),
-        }
+        hand(self.visit, at, state, marks, kind)
     }
 
     /// Font `name` picked, as PDFium's `FindFont` picks one: the
@@ -621,7 +698,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         };
         let text = &mut state.text;
         text.stock = font.is_none();
-        text.font = Some(font.unwrap_or_else(|| self.stock.clone()));
+        text.font = Some(font.unwrap_or_else(|| self.fonts.stock()));
         Ok(())
     }
 
@@ -759,10 +836,14 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         strings: &[(Vec<u8>, f32)],
         first: f32,
     ) -> Result<(), Stop> {
-        let Some(font) = local.state.text.font.clone() else {
-            for (string, _) in strings {
-                let show = TextShow::new(string, &local.state, 0.0);
-                self.emit(at, &local.state, &local.marks, Kind::Text(show))?;
+        let wanted = self.opts.wants.text;
+        let id = local.state.text.font;
+        let Some(font) = id.map(|id| self.fonts.get(id)) else {
+            if wanted {
+                for (string, _) in strings {
+                    let show = TextShow::new(string, &local.state, None, 0.0);
+                    hand(self.visit, at, &local.state, &local.marks, Kind::Text(show))?;
+                }
             }
             return Ok(());
         };
@@ -784,23 +865,27 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         adjust(&mut local.state, first);
         let mut run = 0.0;
         for (i, (string, after)) in strings.iter().enumerate() {
-            let (end, glyphs) = text::advance(&font, &local.state.text, string, run);
+            let (end, glyphs) = text::advance(font, &local.state.text, string, run);
             self.summary.glyphs += glyphs;
             if self.summary.glyphs > self.lim.content.glyphs {
                 return Err(past(Cap::Glyphs));
             }
-            let show = TextShow::new(string, &local.state, run);
-            if !show.bounded(&font, glyphs, end) {
+            let outlines = &mut self.outlines;
+            let first = |glyph| id.is_some_and(|id| outlines.insert((id, glyph)));
+            font.charge_outlines(string, first, &mut self.budget)
+                .map_err(|_: TooLarge| past(Cap::Decompressed))?;
+            let show = TextShow::new(string, &local.state, Some(font), run);
+            if !show.bounded(font, glyphs, end) {
                 return Err(not_finite());
             }
             if clips && local.clip_texts <= clip::TEXTS {
                 local.clip_glyphs.extend(show.glyphs().map(|g| g.quad));
             }
-            self.emit(at, &local.state, &local.marks, Kind::Text(show))?;
+            if wanted {
+                hand(self.visit, at, &local.state, &local.marks, Kind::Text(show))?;
+            }
             let text = &mut local.state.text;
-            text.guessed |= guessed
-                || (font.guesses_widths()
-                    && font.codes(string).any(|(_, code)| font.width_guessed(code)));
+            text.guessed = text.guessed || guessed || font.width_guessed_in(string);
             run = end;
             if i + 1 < strings.len() {
                 run -= after * text.size / 1000.0;
@@ -830,16 +915,18 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         if self.summary.segments > self.lim.content.segments {
             return Err(past(Cap::Segments));
         }
-        if !(path::finite(&ended.segs) && finite_rect(ended.bounds)) {
+        if !(path::finite(ended.segs) && finite_rect(ended.bounds)) {
             return Err(not_finite());
         }
-        let drawn = PathDrawn {
-            segments: &ended.segs,
-            paint: ended.paint,
-            clip: ended.clip,
-            bounds: ended.bounds,
-        };
-        self.emit(at, &local.state, &local.marks, Kind::Path(drawn))?;
+        if self.opts.wants.paths {
+            let drawn = PathDrawn {
+                segments: ended.segs,
+                paint: ended.paint,
+                clip: ended.clip,
+                bounds: ended.bounds,
+            };
+            self.emit(at, &local.state, &local.marks, Kind::Path(drawn))?;
+        }
         if let Some(rule) = ended.clip {
             local.state.clip = local.state.clip.with_path(ended.segs, rule, ended.points);
         }
@@ -931,10 +1018,10 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         // own haven't got are the page's.
         let (resources, owner, res) = match &form.resources {
             Some(own) => {
-                let res = res.clone().unwrap_or_else(|| self.page_res.clone());
+                let res = res.as_deref().unwrap_or(self.page_res);
                 (Some(own), id, res)
             }
-            None => (frame.resources, frame.owner, frame.res.clone()),
+            None => (frame.resources, frame.owner, frame.res),
         };
         let inner = Frame {
             content: &form.data,
@@ -970,7 +1057,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
                     .resources
                     .as_ref()
                     .filter(|r| category(self.objects, r, b"ColorSpace").is_some())
-                    .map(|r| Rc::new(ResCx::read(self.objects, Some(r))));
+                    .map(|r| Box::new(ResCx::read(self.objects, Some(r))));
                 Drawn::Form { form, res }
             }
             XObject::Image(facts) => Drawn::Image(facts),
@@ -1035,7 +1122,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         local: &mut Local,
         at: &At<'_>,
         step: &Step<'_, '_>,
-        op: &[u8],
+        op: Op,
     ) -> Result<(), Stop> {
         let depth = self.lim.content.depth;
         let tag = |i: usize| {
@@ -1044,7 +1131,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
                 .unwrap_or_default()
         };
         let mark = match op {
-            b"BDC" => match step.arg(0).and_then(|list| self.props(frame, list)) {
+            Op::BeginMarkedProps => match step.arg(0).and_then(|list| self.props(frame, list)) {
                 Some((Props::Named(_, None), _)) | None => return Ok(()),
                 Some((props, named)) => {
                     Mark::new(tag(1), Some(props), named, frame.stream, at.range())
@@ -1087,7 +1174,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
         local: &Local,
         at: &At<'_>,
         step: &Step<'_, '_>,
-        op: &[u8],
+        op: Op,
     ) -> Result<(), Stop> {
         let depth = self.lim.content.depth;
         let tag = |i: usize| {
@@ -1096,7 +1183,7 @@ impl<'a, R: ReadObjects> Run<'a, R> {
                 .unwrap_or_default()
         };
         let mark = match op {
-            b"DP" => match step.arg(0).and_then(|list| self.props(frame, list)) {
+            Op::PointProps => match step.arg(0).and_then(|list| self.props(frame, list)) {
                 Some((props, named)) => {
                     Mark::new(tag(1), Some(props), named, frame.stream, at.range())
                 }
@@ -1143,6 +1230,27 @@ impl<'a, R: ReadObjects> Run<'a, R> {
             None if frame.owner != PAGE => self.page.filter(has).map(|page| (PAGE, page)),
             None => None,
         }
+    }
+}
+
+/// `kind`, at `at` in `state` and `marks`, handed to `visit`: what
+/// [`Run::emit`] does, for where a font of the run's is borrowed.
+fn hand(
+    visit: &mut dyn FnMut(Event<'_>) -> ControlFlow<()>,
+    at: &At<'_>,
+    state: &State,
+    marks: &Marks,
+    kind: Kind<'_>,
+) -> Result<(), Stop> {
+    let event = Event {
+        at: at.clone(),
+        state,
+        marks,
+        kind,
+    };
+    match visit(event) {
+        ControlFlow::Continue(()) => Ok(()),
+        ControlFlow::Break(()) => Err(Stop::Halt(Halt::Break)),
     }
 }
 

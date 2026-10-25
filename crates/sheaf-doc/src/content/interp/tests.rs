@@ -14,7 +14,7 @@ use super::state::number;
 use super::*;
 use crate::annot::Pt;
 use crate::content::fixture::{self, Fixture};
-use crate::content::{FillRule, Paint};
+use crate::content::{FillRule, Foreign, Paint};
 use crate::geom::{Affine, Rect};
 use crate::source::{ContentLimits, Limits};
 
@@ -263,7 +263,8 @@ fn a_width_guessed_moves_what_follows_it() {
 /// the standard 14 by Adobe's metrics, `/Widths`, CID `/W` through
 /// Identity and an embedded CMap (`Tw` on its one-byte space), a Type3
 /// `/FontMatrix`, Identity-V's column by `/W2` and `/DW2`, and a code of
-/// Identity-H cut off at a string's end, as PDFium reads it.
+/// Identity-H cut off at a string's end, as PDFium reads it; each box
+/// over the program united with its glyph's outline box.
 #[test]
 fn each_font_kind_places_its_glyphs() {
     let f = fixture::fonts();
@@ -285,16 +286,16 @@ fn each_font_kind_places_its_glyphs() {
         (b'b', [106.0, 660.0], [106.0, co0, 112.0, co1]),
         (b'A', [100.0, 640.0], [100.0, 639.0, 105.0, 649.0]),
         (b'B', [105.0, 640.0], [105.0, 639.0, 111.0, 649.0]),
-        (1, [100.0, 620.0], [100.0, 618.0, 104.0, 628.0]),
+        (1, [100.0, 620.0], [100.0, 618.0, 105.0, 630.15]),
         (2, [104.0, 620.0], [104.0, 618.0, 109.0, 628.0]),
         (10, [109.0, 620.0], [109.0, 618.0, 116.0, 628.0]),
-        (1, [100.0, 600.0], [100.0, 598.0, 104.5, 608.0]),
+        (1, [100.0, 600.0], [100.0, 598.0, 105.0, 610.15]),
         (b'A', [100.0, 580.0], [100.0, 578.0, 108.0, 588.0]),
-        (b' ', [108.0, 580.0], [108.0, 578.0, 111.0, 588.0]),
+        (b' ', [108.0, 580.0], [108.0, 578.0, 113.0, 590.15]),
         (b'A', [117.0, 580.0], [117.0, 578.0, 125.0, 588.0]),
         (b'a', [100.0, 560.0], [100.0, 558.01, 110.0, 567.99]),
-        (1, [297.5, 591.2], [295.0, 590.0, 305.0, 600.0]),
-        (2, [297.0, 581.2], [295.0, 580.0, 305.0, 590.0]),
+        (1, [297.5, 591.2], [295.0, 590.0, 305.0, 601.35]),
+        (2, [297.0, 581.2], [287.0, 580.0, 305.0, 590.0]),
     ];
     assert_glyphs(&seen.glyphs[..18], expected);
     let cut: Vec<(u32, [f32; 3])> = (seen.glyphs[18..].iter())
@@ -305,13 +306,175 @@ fn each_font_kind_places_its_glyphs() {
         .collect();
     #[rustfmt::skip]
     assert_eq!(cut, [
-        (1, [100.0, 104.0, 538.0]), (0x0A00, [104.0, 114.0, 538.0]), (97, [114.0, 124.0, 538.01]),
-        (1, [100.0, 104.0, 518.0]), (0x2000, [104.0, 114.0, 518.0]), (97, [114.0, 124.0, 518.01]),
+        (1, [100.0, 105.0, 538.0]), (0x0A00, [104.0, 114.0, 538.0]), (97, [114.0, 124.0, 538.01]),
+        (1, [100.0, 105.0, 518.0]), (0x2000, [104.0, 114.0, 518.0]), (97, [114.0, 124.0, 518.01]),
     ]);
     let invisible: Vec<usize> = (seen.glyphs.iter().enumerate())
         .filter_map(|(i, g)| g.invisible.then_some(i))
         .collect();
     assert_eq!(invisible, [2, 3]);
+}
+
+/// Text in fonts over predefined CMaps places its glyphs where
+/// [`fixture::predefined`] says, each code's CID Adobe's and its text,
+/// with no `/ToUnicode`, its code point or its CID's, and none guessed:
+/// 90ms-RKSJ-H's codes of one byte and two, `Tw` after its space of a
+/// byte; UniJIS-UCS2-H's of two, none after its space.
+#[test]
+fn predefined_cmaps_place_their_glyphs() {
+    let f = fixture::predefined();
+    let mut glyphs = Vec::new();
+    each(&f, Opts::default(), |event| {
+        if let Kind::Text(show) = event.kind {
+            glyphs.extend(show.glyphs().map(|g| {
+                assert!(!g.approx.any(), "{:?}", g.approx);
+                let text = g.text().map(String::from).unwrap_or_default();
+                let b = g.quad.bounds();
+                (
+                    g.code,
+                    g.cid,
+                    text,
+                    [g.origin.x, g.origin.y, b.x0, b.y0, b.x1, b.y1],
+                )
+            }));
+        }
+    });
+    let at = |code: u32, cid: u32, text: &'static str, x: f32, x1: f32, y: f32| {
+        (code, Some(cid), text, [x, y, x, y - 2.0, x1, y + 8.0])
+    };
+    #[rustfmt::skip]
+    let mut expected = [
+        at(0x41, 264, "A", 100.0, 105.0, 700.0), at(0x82a0, 843, "あ", 105.0, 115.0, 700.0),
+        at(0x889f, 1125, "亜", 115.0, 124.0, 700.0), at(0xb1, 343, "ｱ", 124.0, 127.0, 700.0),
+        at(0x41, 264, "A", 100.0, 105.0, 680.0), at(0x20, 231, "\u{2002}", 105.0, 107.5, 680.0),
+        at(0x41, 264, "A", 113.5, 118.5, 680.0),
+        at(0x41, 34, "A", 100.0, 105.5, 660.0), at(0x3042, 843, "あ", 105.5, 115.0, 660.0),
+        at(0x65e5, 3284, "日", 115.0, 123.5, 660.0),
+        at(0x41, 34, "A", 100.0, 105.5, 640.0), at(0x20, 1, " ", 105.5, 111.5, 640.0),
+        at(0x41, 34, "A", 111.5, 117.0, 640.0),
+    ];
+    // CID 1 draws the program's glyph, so its box reaches its outline's.
+    expected[11].3[5] = 650.15;
+    assert_eq!(glyphs.len(), expected.len(), "{glyphs:#?}");
+    for (i, (glyph, (code, cid, text, place))) in glyphs.iter().zip(expected).enumerate() {
+        assert_eq!(
+            (glyph.0, glyph.1, glyph.2.as_str()),
+            (code, cid, text),
+            "glyph {i}"
+        );
+        let worked = glyph.3;
+        assert!(
+            worked.iter().zip(place).all(|(&a, b)| close(a, b)),
+            "glyph {i}: {worked:?}, not {place:?}"
+        );
+    }
+}
+
+/// A glyph's box is its metrics' united with its outline's box, as PDFium
+/// bounds a character ([`fixture::programs`]): within its metrics but for
+/// `/PI`'s `C`, whose top is raised a 64th past the ascent, and `/PS`'s,
+/// whose metrics fall short: code 1, which names no glyph, its outline's
+/// box taken out from a hundredth left of its origin to its advance; `A`
+/// past its width and the ascent; `g` past the descent and the ascent.
+/// Read for text, no program says an outline: each box is its metrics',
+/// and its outline guessed.
+#[test]
+fn glyph_boxes_take_in_their_outlines() {
+    let f = fixture::programs();
+    let content = f.content();
+    let boxes = |fonts: &Fonts| {
+        let mut glyphs = Vec::new();
+        interpret(
+            &f.pdf,
+            content.concat(),
+            f.resources(),
+            &Limits::DEFAULT,
+            fonts,
+            Opts::default(),
+            |event| {
+                if let Kind::Text(show) = event.kind {
+                    glyphs.extend(show.glyphs().map(|g| (g.quad.bounds(), g.approx.boxes)));
+                }
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        glyphs
+    };
+    let expect = |glyphs: &[(Rect, bool)], places: &[[f32; 4]], guessed: bool| {
+        // `/PI`'s CIDs 1 to 5, then `/PS`'s three.
+        let shown = glyphs[14..19].iter().chain(&glyphs[23..]);
+        for (i, (&(bounds, boxes), &place)) in shown.zip(places).enumerate() {
+            assert_rect(bounds, place, &format!("glyph {i}"));
+            assert_eq!(boxes, guessed, "glyph {i}");
+        }
+    };
+    let read = boxes(&Fonts::default());
+    assert_eq!(read.len(), 26);
+    #[rustfmt::skip]
+    expect(&read, &[
+        [100.0, 638.0, 106.0, 648.0], [106.0, 638.0, 111.0, 648.0], [111.0, 638.0, 113.5, 648.0],
+        [113.5, 638.0, 118.0, 648.0], [118.0, 638.0, 125.0, 648.12],
+        [99.99, 579.0, 104.0, 585.0], [104.0, 579.0, 110.0, 587.5], [107.0, 578.01, 112.0, 585.6],
+    ], false);
+    #[rustfmt::skip]
+    expect(&boxes(&Fonts::for_text()), &[
+        [100.0, 638.0, 106.0, 648.0], [106.0, 638.0, 111.0, 648.0], [111.0, 638.0, 113.5, 648.0],
+        [113.5, 638.0, 118.0, 648.0], [118.0, 638.0, 125.0, 648.0],
+        [100.0, 579.0, 104.0, 585.0], [104.0, 579.0, 107.0, 585.0], [107.0, 579.0, 112.0, 585.0],
+    ], true);
+}
+
+/// Text placed past what an `f32` holds is refused alike whether fonts'
+/// programs are read or not ([`Fonts::for_text`]): every fixture drawn up
+/// to 10²⁵ times its size, far past any page, and 10³⁶ times, which each
+/// is refused. Drawn 10³⁰ times, an em past 10³⁰ points, a CIDFont's
+/// outlines, taken to reach as far as any can, would reach past it where
+/// their metrics don't: [`fixture::programs`]' page is refused only where
+/// its programs are read.
+#[test]
+fn text_past_an_f32_is_refused_alike_with_programs_or_without() {
+    let refused = |f: &Fixture, scale: &str, fonts: &Fonts| {
+        let content = f.content();
+        let concat = content.concat();
+        let cm = format!("{scale} 0 0 {scale} 0 0 cm");
+        let scaled = Concat::new(&[cm.as_bytes(), concat.bytes()]);
+        let read = interpret(
+            &f.pdf,
+            &scaled,
+            f.resources(),
+            &Limits::DEFAULT,
+            fonts,
+            Opts::default(),
+            |_| ControlFlow::Continue(()),
+        );
+        matches!(read, Err(InterpError::NotFinite))
+    };
+    let scales = [
+        "1.0",
+        "10000000000.0",
+        "100000000000000000000.0",
+        "10000000000000000000000000.0",
+        "1000000000000000000000000000000000000.0",
+    ];
+    let mut refusals = 0;
+    for (name, f) in fixture::every() {
+        for scale in scales {
+            let with = refused(&f, scale, &Fonts::default());
+            assert_eq!(
+                with,
+                refused(&f, scale, &Fonts::for_text()),
+                "{name} at {scale}"
+            );
+            refusals += usize::from(with);
+        }
+    }
+    // Each fixture drawn 10³⁶ times, and none drawn less.
+    assert_eq!(refusals, fixture::every().len());
+    let far = "1000000000000000000000000000000.0";
+    let f = fixture::programs();
+    assert!(refused(&f, far, &Fonts::default()));
+    assert!(!refused(&f, far, &Fonts::for_text()));
 }
 
 /// A form whose own resources lack a category finds it in the page's, as
@@ -548,7 +711,8 @@ fn each_cap_is_held_to() {
     let content = f.content().concat().bytes().len();
     let all = content + form(b"(a)") + form(b"(b)") + char_procs;
     let decompressed = |n: usize| with(|c| c.decompressed = n);
-    assert_eq!(limit(run_fixture(&f, &decompressed(all))), None);
+    let (_, summary) = run_fixture(&f, &decompressed(all)).unwrap();
+    assert_eq!(summary.decompressed, all);
     let past = run_fixture(&f, &decompressed(all - 1));
     assert_eq!(limit(past), Some(Cap::Decompressed));
 
@@ -578,6 +742,110 @@ fn each_cap_is_held_to() {
     );
     let past = run(&pdf, building, None, &segments(11), Opts::default());
     assert_eq!(limit(past), Some(Cap::Segments));
+}
+
+/// What each font's program decompresses to, and what drawing its glyphs
+/// costs, is counted in what the page takes from its budget, with its
+/// content: one TrueType program read for each of four fonts, a CFF for
+/// each of two and a Type 1, a simple font's glyphs drawn as it's read and
+/// the CIDFont's as they're shown, each once; read for text, only the
+/// content.
+#[test]
+fn decompressed_counts_each_font_s_program() {
+    let f = fixture::programs();
+    let parts = f.content();
+    let content = parts.concat().bytes().len();
+    let programs = 4 * fixture::truetype_program().len()
+        + 2 * fixture::cff_program().len()
+        + fixture::type1_program().len();
+    let fonts = f.resources().unwrap().as_dict().unwrap();
+    let fonts = fonts.get(b"Font").unwrap().as_dict().unwrap();
+    let mut charged = 0;
+    for (name, font) in fonts.iter() {
+        let font = f.pdf.get_dictionary(font.as_reference().unwrap()).unwrap();
+        let mut budget = usize::MAX;
+        let read = Foreign::read(&f.pdf, font, &Limits::DEFAULT, &mut budget).unwrap();
+        if name == b"PI" {
+            let mut first = HashSet::new();
+            let shown = b"\0\x01\0\x02\0\x03\0\x04\0\x05";
+            let insert = |glyph| first.insert(glyph);
+            read.charge_outlines(shown, insert, &mut budget).unwrap();
+        }
+        charged += usize::MAX - budget;
+    }
+    assert!(
+        charged > programs,
+        "{charged} charged, the programs {programs}"
+    );
+    let read = |fonts: &Fonts| {
+        let concat = parts.concat();
+        let glyphs = &mut 0;
+        let summary = interpret(
+            &f.pdf,
+            &Concat::new(&[concat.bytes()]),
+            f.resources(),
+            &Limits::DEFAULT,
+            fonts,
+            Opts::default(),
+            |event| {
+                if let Kind::Text(show) = event.kind {
+                    *glyphs += show.glyphs().count();
+                }
+                ControlFlow::Continue(())
+            },
+        );
+        (*glyphs, summary.unwrap().decompressed)
+    };
+    assert_eq!(read(&Fonts::default()), (26, content + charged));
+    assert_eq!(read(&Fonts::for_text()), (26, content));
+}
+
+/// Drawing a program's glyphs is charged to the page's budget however
+/// many fonts share the program: a thousand simple fonts, and a thousand
+/// CIDFonts, over one small CFF whose `A` evaluates all its fuel, each
+/// showing `A`, end the page past a budget of 32 MiB, quickly; the
+/// content shown in one of each is within it.
+#[test]
+fn fonts_sharing_a_heavy_program_end_within_the_budget() {
+    let mut pdf = Pdf::with_version("1.7");
+    let program = pdf.add_object(Stream::new(
+        dictionary! { "Subtype" => "Type1C" },
+        fixture::heavy_cff_program(10),
+    ));
+    let descriptor = pdf.add_object(dictionary! {
+        "Type" => "FontDescriptor", "Flags" => 32, "Ascent" => 750, "Descent" => 0,
+        "FontBBox" => vec![0.into(), 0.into(), 600.into(), 750.into()], "FontFile3" => program,
+    });
+    let simple = dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Heavy",
+        "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![600.into()],
+        "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+    };
+    let cid_font = pdf.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "CIDFontType0", "BaseFont" => "Heavy",
+        "FontDescriptor" => descriptor,
+    });
+    let composite = dictionary! {
+        "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Heavy",
+        "Encoding" => "Identity-H", "DescendantFonts" => vec![cid_font.into()],
+    };
+    for (font, shown) in [(simple, "(A)"), (composite, "<0002>")] {
+        let mut fonts = lopdf::Dictionary::new();
+        let mut content = Vec::new();
+        for n in 0..1000 {
+            fonts.set(format!("F{n}"), pdf.add_object(font.clone()));
+            content.extend(format!("BT /F{n} 10 Tf {shown} Tj ET\n").bytes());
+        }
+        let resources: Object = dictionary! { "Font" => fonts }.into();
+        let lim = with(|c| c.decompressed = 32 << 20);
+        let started = std::time::Instant::now();
+        let ran = run(&pdf, &content, Some(&resources), &lim, Opts::default());
+        assert_eq!(limit(ran), Some(Cap::Decompressed), "{shown}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let one = content.split(|&b| b == b'\n').next().unwrap();
+        let ran = run(&pdf, one, Some(&resources), &lim, Opts::default());
+        assert_eq!(limit(ran), None, "{shown}");
+    }
 }
 
 /// A form of whitespace, which has one operator, costs its length each
@@ -783,6 +1051,7 @@ fn reported_forms_are_not_drawn() {
     let content = f.content();
     let opts = Opts {
         forms: Forms::Report,
+        ..Opts::default()
     };
     let (seen, summary) = run(
         &f.pdf,
@@ -830,7 +1099,10 @@ fn a_form_that_cant_be_read_stops_only_what_draws_it() {
     };
     let content = f.content();
     let drawn = |forms| {
-        let opts = Opts { forms };
+        let opts = Opts {
+            forms,
+            ..Opts::default()
+        };
         let (lim, fonts) = (Limits::DEFAULT, Fonts::default());
         interpret(
             &broken,
@@ -910,6 +1182,234 @@ fn faults_say_where() {
         Err(InterpError::XObject { xobject, .. }) => assert_eq!(xobject, unreadable),
         other => panic!("{other:?}"),
     }
+}
+
+/// Each operator the interpreter reads is told by its name, and no two
+/// by one but `f` and `F`; any other name, one an operator's name starts
+/// or one that starts with an operator's, and the empty one, are none.
+/// In a set of operators, each is its own, and the others are one.
+#[test]
+fn each_operator_decodes_to_its_op() {
+    let ops = [
+        (&b"m"[..], Op::Move),
+        (b"l", Op::Line),
+        (b"c", Op::Curve),
+        (b"v", Op::CurveFromPen),
+        (b"y", Op::CurveToEnd),
+        (b"h", Op::ClosePath),
+        (b"re", Op::Rect),
+        (b"W", Op::Clip(FillRule::NonZero)),
+        (b"W*", Op::Clip(FillRule::EvenOdd)),
+        (b"f", Op::Paint(Paint::Fill)),
+        (b"F", Op::Paint(Paint::Fill)),
+        (b"f*", Op::Paint(Paint::FillEvenOdd)),
+        (b"S", Op::Paint(Paint::Stroke)),
+        (b"s", Op::Paint(Paint::CloseStroke)),
+        (b"B", Op::Paint(Paint::FillStroke)),
+        (b"B*", Op::Paint(Paint::FillStrokeEvenOdd)),
+        (b"b", Op::Paint(Paint::CloseFillStroke)),
+        (b"b*", Op::Paint(Paint::CloseFillStrokeEvenOdd)),
+        (b"n", Op::Paint(Paint::None)),
+        (b"cm", Op::Transform),
+        (b"w", Op::LineWidth),
+        (b"J", Op::LineCap),
+        (b"j", Op::LineJoin),
+        (b"M", Op::MiterLimit),
+        (b"q", Op::Save),
+        (b"Q", Op::Restore),
+        (b"gs", Op::ExtGState),
+        (b"BT", Op::BeginText),
+        (b"ET", Op::EndText),
+        (b"Tm", Op::TextMatrix),
+        (b"Td", Op::MoveLine),
+        (b"TD", Op::MoveLineLeading),
+        (b"T*", Op::NextLine),
+        (b"Tc", Op::CharSpace),
+        (b"Tw", Op::WordSpace),
+        (b"Tz", Op::Scale),
+        (b"TL", Op::Leading),
+        (b"Ts", Op::Rise),
+        (b"Tr", Op::RenderMode),
+        (b"Tf", Op::Font),
+        (b"Tj", Op::Show),
+        (b"TJ", Op::ShowArray),
+        (b"'", Op::NextLineShow),
+        (b"\"", Op::NextLineShowSpaced),
+        (b"Do", Op::Draw),
+        (b"sh", Op::Shade),
+        (b"BMC", Op::BeginMarked),
+        (b"BDC", Op::BeginMarkedProps),
+        (b"EMC", Op::EndMarked),
+        (b"MP", Op::Point),
+        (b"DP", Op::PointProps),
+    ];
+    let shown = |name: &[u8]| String::from_utf8_lossy(name).into_owned();
+    for (name, op) in ops {
+        assert_eq!(Op::of(name), op, "{}", shown(name));
+        let named: Vec<&[u8]> = (ops.iter())
+            .filter(|(_, other)| *other == op)
+            .map(|(n, _)| *n)
+            .collect();
+        match op {
+            Op::Paint(Paint::Fill) => assert_eq!(named, [b"f", b"F"]),
+            _ => assert_eq!(named, [name], "{}", shown(name)),
+        }
+    }
+    for name in [
+        &b""[..],
+        b"T",
+        b"Tjx",
+        b"BTx",
+        b"W**",
+        b"E",
+        b"EM",
+        b"BI",
+        b"EI",
+        b"d",
+        b"g",
+        b"rg",
+        b"cs",
+        b"d0",
+        b"BX",
+        b"tj",
+        b"bt",
+        b"Do ",
+    ] {
+        assert_eq!(Op::of(name), Op::Other, "{}", shown(name));
+        assert_eq!(Ops::of(&[name]), Ops::of(&[b"g"]), "{}", shown(name));
+    }
+    for (name, op) in ops {
+        let set = Ops::of(&[name]);
+        for (_, other) in ops {
+            assert_eq!(set.has(other), other == op, "{} {other:?}", shown(name));
+        }
+        assert!(!set.has(Op::Other) && Ops::of(&[b"g"]).has(Op::Other));
+    }
+}
+
+/// What a visitor that wants less is handed, a form drawn or reported,
+/// is what it'd be handed wanting everything, but what it doesn't want:
+/// each event, its state and its numbers the same to the bit; and what
+/// interpreting returns is the same, its summary or its error. Content:
+/// each fixture's, on its page and on the fuzz page, and on [`fixture::clips`]'
+/// page content past an `f32` (a path's points, a stroke's reach, a
+/// glyph's place, what a shading paints but where the clip cuts it) and
+/// past the caps on segments and glyphs, wanted or not.
+#[test]
+fn a_smaller_interest_only_filters() {
+    let wants = [
+        crate::content::text_bag::WANTS,
+        Wants {
+            text: true,
+            ..Wants::NONE
+        },
+        Wants {
+            paths: true,
+            ..Wants::NONE
+        },
+        Wants {
+            ops: Ops::ALL,
+            ..Wants::NONE
+        },
+        Wants {
+            ops: Ops::of(&[b"q", b"Q", b"Do", b"rg"]),
+            ..Wants::NONE
+        },
+        Wants::NONE,
+    ];
+    // Each event, and whether `wants` wants it.
+    let handed = |f: &Fixture, content: &[u8], lim: &Limits, opts: Opts, wants: Wants| {
+        let mut events = Vec::new();
+        let done = interpret(
+            &f.pdf,
+            &Concat::new(&[content]),
+            f.resources(),
+            lim,
+            &Fonts::default(),
+            opts,
+            |event| {
+                let wanted = match (&event.kind, &event.at.tok) {
+                    (Kind::Op, Tok::Op(name)) => wants.ops.has(Op::of(name)),
+                    (Kind::Op, _) => wants.ops.has(Op::Other),
+                    (Kind::Text(_), _) => wants.text,
+                    (Kind::Path(_), _) => wants.paths,
+                    _ => true,
+                };
+                events.push((wanted, encode_tests::described(&event)));
+                ControlFlow::Continue(())
+            },
+        );
+        (events, format!("{done:?}"))
+    };
+    let far = |digits: usize| format!("3{}.0", "0".repeat(digits));
+    let (f38, f33, f36) = (far(38), far(33), far(36));
+    let clips = fixture::clips();
+    let tight = Limits {
+        content: ContentLimits {
+            segments: 8,
+            glyphs: 2,
+            ..Limits::DEFAULT.content
+        },
+        ..Limits::DEFAULT
+    };
+    let past = [
+        format!("{f38} 0 -{f38} {f38} 0 0 cm 2 2 m 3 3 l S"),
+        format!("{f33} 0 0 {f33} 0 0 cm 1000000 w 0 0 m 1 0 l S"),
+        format!("BT /T3 10 Tf {f38} 0 Td (a) Tj (a) Tj ET"),
+        format!("0 0 10 10 re W n {f36} 0 0 {f36} 0 0 cm /Sh sh"),
+        format!("{f36} 0 0 {f36} 0 0 cm /Sh sh"),
+        "0 0 m 1 1 l 2 2 l 3 3 l 4 4 l 5 5 l 6 6 l 7 7 l 8 8 l S".into(),
+        "0 0 m 1 1 l 2 2 l 3 3 l 4 4 l 5 5 l 6 6 l 7 7 l 8 8 l 9 9 l".into(),
+        "BT /T3 10 Tf (aaa) Tj ET".into(),
+    ];
+    let fuzz_page = fixture::fuzz_page();
+    let mut cases: Vec<(&Fixture, Vec<u8>, &Limits)> = Vec::new();
+    let every = fixture::every();
+    for (_, f) in &every {
+        let content = f.content().into_bytes();
+        cases.push((f, content.clone(), &Limits::DEFAULT));
+        cases.push((&fuzz_page, content, &Limits::DEFAULT));
+    }
+    for content in &past {
+        cases.push((&clips, content.clone().into_bytes(), &Limits::DEFAULT));
+        cases.push((&clips, content.clone().into_bytes(), &tight));
+    }
+    let mut failed = std::collections::BTreeMap::new();
+    for (f, content, lim) in cases {
+        let what = String::from_utf8_lossy(&content);
+        for forms in [Forms::Descend, Forms::Report] {
+            let all = Opts {
+                forms,
+                ..Opts::default()
+            };
+            for wants in wants {
+                let (events, done) = handed(f, &content, lim, all, wants);
+                let fewer = handed(f, &content, lim, Opts { forms, wants }, wants);
+                let (fewer, less_done) = fewer;
+                let what = format!("{what}, {forms:?}, {wants:?}");
+                assert_eq!(done, less_done, "{what}");
+                let filtered: Vec<_> = (events.into_iter().filter(|(w, _)| *w))
+                    .map(|(_, e)| e)
+                    .collect();
+                assert!(fewer.iter().all(|(w, _)| *w), "{what}");
+                let fewer: Vec<_> = fewer.into_iter().map(|(_, e)| e).collect();
+                encode_tests::assert_alike(&filtered, &fewer, &what);
+            }
+            let (_, done) = handed(f, &content, lim, all, Wants::ALL);
+            if done.starts_with("Err") {
+                *failed.entry(done).or_insert(0) += 1;
+            }
+        }
+    }
+    // Each content past an `f32` fails it, a form drawn or reported,
+    // within the caps or not, but the shading the clip cuts; and each
+    // cap, within the tight ones.
+    let expected = [
+        ("Err(NotFinite)", 4 * 2 * 2),
+        ("Err(Limit(Segments))", 2 * 2),
+        ("Err(Limit(Glyphs))", 2),
+    ];
+    assert_eq!(failed, expected.map(|(e, n)| (e.to_string(), n)).into());
 }
 
 /// Operands are read as PDFium reads them: what isn't a number, or
@@ -1129,6 +1629,7 @@ fn each_image_is_its_unit_square_through_the_ctm() {
 
     let opts = Opts {
         forms: Forms::Report,
+        ..Opts::default()
     };
     let mut reported = Vec::new();
     each(&f, opts, |event| match event.kind {

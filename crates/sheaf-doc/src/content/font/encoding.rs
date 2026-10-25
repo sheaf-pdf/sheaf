@@ -87,6 +87,43 @@ pub(crate) fn glyph_text(name: &str, dingbats: bool) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// The code point glyph `name` stands for as FreeType's glyph name list
+/// reads it, which PDFium copies (`FXFT_unicode_from_adobe_name`): `uni`
+/// and exactly four upper-case hex digits, or `u` and four to six, each
+/// at the end or before a period; else the Adobe Glyph List's code point
+/// for what's before a period that isn't the first character, where it
+/// gives exactly one. With whether a period followed, as a variant's name
+/// has one. None where it's none of those.
+pub(crate) fn name_code_point(name: &[u8]) -> Option<(u32, bool)> {
+    // Up to `most` upper-case hex digits after `prefix`, at least `least`
+    // of them, and what follows them.
+    let hex = |prefix: &[u8], least: usize, most: usize| {
+        let rest = name.strip_prefix(prefix)?;
+        let digits = rest
+            .iter()
+            .take(most)
+            .take_while(|c| matches!(c, b'0'..=b'9' | b'A'..=b'F'));
+        let n = digits.count();
+        let value =
+            (rest[..n].iter()).fold(0, |v, &c| v << 4 | (c as char).to_digit(16).unwrap_or(0));
+        match rest.get(n) {
+            _ if n < least => None,
+            None => Some((value, false)),
+            Some(b'.') => Some((value, true)),
+            Some(_) => None,
+        }
+    };
+    if let Some(read) = hex(b"uni", 4, 4).or_else(|| hex(b"u", 4, 6)) {
+        return Some(read);
+    }
+    let dot = name.iter().skip(1).position(|&c| c == b'.').map(|i| i + 1);
+    let base = std::str::from_utf8(&name[..dot.unwrap_or(name.len())]).ok()?;
+    // The list FreeType keeps has only the names of one code point.
+    let mut text = tables().agl.get(base)?.chars();
+    let one = text.next().filter(|_| text.next().is_none())?;
+    Some((u32::from(one), dot.is_some()))
+}
+
 /// `uniXXXX…`: groups of four upper-case hex digits, none a surrogate.
 fn uni(part: &str) -> Option<Vec<char>> {
     let hex = part.strip_prefix("uni")?;

@@ -18,7 +18,8 @@
 //!   others.
 //! - [`PageBlocks`]: its pagination artifacts and who drew them, and
 //!   sheaf's own blocks.
-//! - [`text_bag`]: the words it draws, decoded through its fonts.
+//! - [`text_bag`]: the words it draws, as [`interp`] reads it, decoded
+//!   through its fonts.
 //! - [`Font`]: what sheaf draws text in, [`Std14`] and [`Glyphless`], and
 //!   [`FontRes`], a font as a page resource named by its [`ResId`];
 //!   [`Foreign`], a font a file draws in, as read, and [`Fonts`], a
@@ -67,8 +68,8 @@ pub use blocks::{
     PageBlocks, Pagination, PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{
-    Descendant, Font, FontApprox, FontKind, FontMetrics, FontRes, FontScope, Fonts, Foreign,
-    Glyphless, Std14, TooLarge, Unencoded, VerticalMetrics, wrap_with,
+    Descendant, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram, FontRes, FontScope,
+    Fonts, Foreign, Glyphless, Std14, TooLarge, Unencoded, VerticalMetrics, wrap_with,
 };
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};
 pub use marked::{Marked, PropertiesDict, Props, marked};
@@ -76,7 +77,7 @@ pub use names::{Kept, NameSet, ResKind, kept, names_used};
 pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, contents};
 pub use res::{Res, ResBody, ResId};
 pub use splice::{Rewrite, SpliceError, Spliced, renames, splice, splice_each, without_keys};
-pub use text_bag::{FontDecoders, TextBag, text_bag};
+pub use text_bag::{TextBag, text_bag};
 pub use writer::{
     Blend, Color, ContentWriter, FillRule, GState, LineCap, LineJoin, Need, Paint, Reserved,
     ResourceNeeds, TextMode, write_string,

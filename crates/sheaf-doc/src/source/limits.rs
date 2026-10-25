@@ -70,7 +70,9 @@ pub struct FormLimits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContentLimits {
     /// What a page's streams decompress to, together; where content is
-    /// interpreted, with the forms and fonts it draws.
+    /// interpreted, with the forms and fonts it draws, and the work of
+    /// drawing their programs' glyphs, in bytes of charstring and glyph
+    /// data.
     pub decompressed: usize,
     /// Operands before an operator. PDFium keeps the last 16; a real
     /// operator takes at most 33 (`scn` with DeviceN's 32 components and

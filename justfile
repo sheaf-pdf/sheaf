@@ -16,7 +16,7 @@ verapdf_version := "1.30.3"
 verapdf_key := "13DD102B4DD69354D12DE5A83184863278B17FE7"
 
 # The fuzz targets the nightly CI job runs (.github/workflows/fuzz.yml).
-fuzz_targets := "lazy_reader page_tree sheaf_annot lexer splice op_json sheaf_generators"
+fuzz_targets := "lazy_reader page_tree sheaf_annot lexer splice interp op_json sheaf_generators"
 
 # List the recipes.
 default:
@@ -269,11 +269,12 @@ precommit: (_steps "precommit" "markers fmt-check locks corpus interop propertie
 
 # Before a PR merges: the ignored corpus tiers, in full (append_corpus's,
 # the export tier, realize_corpus's pixels and predicate, PDFium's resave
-# of a watermark, the content lexer against PDFium, codes over scans/,
-# Arlington over what sheaf writes). An hour or more.
-[doc("Before a PR merges: every ignored corpus tier (an hour or more)")]
+# of a watermark, the content lexer and the content interpreter against
+# PDFium, codes over scans/, Arlington over what sheaf writes). Two hours
+# or more, the interpreter's tiers about one of them.
+[doc("Before a PR merges: every ignored corpus tier (two hours or more)")]
 [group('local')]
-premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-codes tier-arlington _corpus-ran")
+premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington _corpus-ran")
 
 [doc("No merge-conflict markers in tracked or untracked files (git grep; binaries and ignored files skipped)")]
 [group('local')]
@@ -369,6 +370,22 @@ tier-codes:
 tier-arlington:
     scripts/test-capped.sh cargo test -p sheaf-ops --test arlington -- --ignored --nocapture
 
+# The content interpreter against PDFium over every form, the pool sample,
+# scans/ and the PDF/UA files: every page interpreted within the caps,
+# each glyph's box against PDFium's character, and every page written
+# again rendering the same. In release, about 55 minutes;
+# SHEAF_INTERP_ONLY=<paths, comma-separated> narrows it to a few files.
+# Not here: the standard 14 widths test, ignored too, holds only where
+# PDFium draws in its own standard 14 faces, as it does where the system
+# has no font named Helvetica, Arial or Times New Roman (a bare Linux
+# box). Run it by hand there: `cargo test -p sheaf-render --test
+# content_interp -- --ignored --exact
+# standard_14_widths_are_pdfium_s_faces_but_where_guessed`.
+[doc("The content interpreter's tiers against PDFium, in release (about 55 min)")]
+[group('corpus')]
+tier-interp:
+    scripts/test-capped.sh cargo test -p sheaf-render --release --test content_interp -- --ignored --nocapture --exact every_page_is_interpreted_within_the_caps glyph_boxes_are_pdfium_characters_on_every_page pages_written_again_render_the_same
+
 # ----- Gates ---------------------------------------------------------------
 
 # Wait until the machine is quiet: the 1-minute load under
@@ -410,7 +427,8 @@ gates *names:
 
 # A fuzz target for `secs` seconds, as the nightly CI job runs it: seeded
 # from the stable test's fixtures, its corpus kept in fuzz/corpus/. Targets:
-# lazy_reader page_tree sheaf_annot lexer splice op_json sheaf_generators.
+# lazy_reader page_tree sheaf_annot lexer splice interp op_json
+# sheaf_generators.
 [doc("A fuzz target for `secs` seconds, as nightly CI runs it")]
 [group('fuzz')]
 fuzz target secs="300":

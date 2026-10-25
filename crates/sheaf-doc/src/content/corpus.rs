@@ -187,6 +187,7 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
     out.office = office(&src);
     let mut forms_seen = HashSet::new();
     let known = DrawnForms::default();
+    let fonts = Fonts::for_text();
     for (i, page) in src.pages().iter().enumerate() {
         out.pages += 1;
         let at = format!("{} page {}", entry.path, i + 1);
@@ -238,8 +239,9 @@ fn read_file(corpus: &Corpus, entry: &Entry) -> Outcome {
                     .push(format!("{at}: {ours:?}, lopdf {reference:?}"));
             }
         }
-        let fonts = FontDecoders::read(src.pdf(), resources, LIM);
-        out.words += text_bag(concat, &res, LIM, &fonts).unwrap().len();
+        out.words += text_bag(src.pdf(), concat, resources, LIM, &fonts)
+            .unwrap()
+            .len();
         // The forms it draws, each once a file.
         let names = names_used(concat, &res, LIM, &[]).unwrap();
         for name in names.of(ResKind::XObject) {

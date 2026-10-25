@@ -4,17 +4,18 @@
 //! in the graphics state, so it's a list each part is added to the front
 //! of, which `q` saves as a clone.
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use super::path::Seg;
 use super::text::Quad;
+use crate::annot::Pt;
 use crate::content::FillRule;
 use crate::geom::Rect;
 
 /// The parts that cut what's drawn, the last added first; none where
 /// nothing does.
 #[derive(Debug, Clone, Default)]
-pub struct Clip(Option<Arc<Node>>);
+pub struct Clip(Option<Rc<Node>>);
 
 #[derive(Debug)]
 struct Node {
@@ -36,7 +37,7 @@ pub enum ClipPart {
     /// A path in PageSpace: what its rule says is inside it, and the box
     /// its points span.
     Path {
-        segments: Arc<[Seg]>,
+        segments: Rc<[Seg]>,
         rule: FillRule,
         bounds: Rect,
     },
@@ -44,7 +45,7 @@ pub enum ClipPart {
     /// and its `ET` drew: its glyphs' boxes, and the box they span. A
     /// glyph's outline, which only its font's program says, may reach past
     /// its box ([`Glyph::quad`](super::Glyph::quad)).
-    Text { glyphs: Arc<[Quad]>, bounds: Rect },
+    Text { glyphs: Rc<[Quad]>, bounds: Rect },
 }
 
 impl ClipPart {
@@ -78,7 +79,7 @@ impl Clip {
     /// points span. A rectangle on the axes added last that holds them
     /// cuts nothing they don't, so they take its place, as in PDFium
     /// (`AppendPathWithAutoMerge`).
-    pub(super) fn with_path(&self, segments: Vec<Seg>, rule: FillRule, bounds: Rect) -> Clip {
+    pub(super) fn with_path(&self, segments: &[Seg], rule: FillRule, bounds: Rect) -> Clip {
         let outer = match self.0.as_deref() {
             Some(Node {
                 rect: Some(r),
@@ -87,7 +88,7 @@ impl Clip {
             }) if contains(*r, bounds) => outer,
             _ => self,
         };
-        let rect = rectangle(&segments);
+        let rect = rectangle(segments);
         let part = ClipPart::Path {
             segments: segments.into(),
             rule,
@@ -122,7 +123,7 @@ impl Clip {
     fn with(&self, part: ClipPart, rect: Option<Rect>, texts: usize) -> Clip {
         let outer = self.0.as_ref();
         let bounds = outer.map_or(part.bounds(), |node| node.bounds.intersect(part.bounds()));
-        Clip(Some(Arc::new(Node {
+        Clip(Some(Rc::new(Node {
             part,
             bounds,
             rect,
@@ -138,7 +139,7 @@ impl Drop for Clip {
     fn drop(&mut self) {
         let mut next = self.0.take();
         while let Some(node) = next {
-            next = Arc::try_unwrap(node)
+            next = Rc::try_unwrap(node)
                 .ok()
                 .and_then(|mut node| node.outer.0.take());
         }
@@ -152,19 +153,21 @@ fn contains(outer: Rect, inner: Rect) -> bool {
 /// The rectangle `segs` are, where they're one on the axes: four corners
 /// joined by lines, back to the first, each side along an axis.
 fn rectangle(segs: &[Seg]) -> Option<Rect> {
-    let mut corners = Vec::with_capacity(5);
+    let mut corners = [Pt { x: 0.0, y: 0.0 }; 5];
+    let mut n = 0;
     for seg in segs {
         match *seg {
-            Seg::Move(p) if corners.is_empty() => corners.push(p),
-            Seg::Line(p) if !corners.is_empty() => corners.push(p),
-            Seg::Close => {}
+            Seg::Move(p) if n == 0 => corners[0] = p,
+            Seg::Line(p) if n > 0 && n < 5 => corners[n] = p,
+            Seg::Close => continue,
             _ => return None,
         }
+        n += 1;
     }
-    if corners.len() == 5 && corners[4] == corners[0] {
-        corners.pop();
+    if n == 5 && corners[4] == corners[0] {
+        n = 4;
     }
-    let [a, b, c, d] = corners[..] else {
+    let [a, b, c, d] = corners[..n] else {
         return None;
     };
     let across = a.x == b.x && b.y == c.y && c.x == d.x && d.y == a.y;

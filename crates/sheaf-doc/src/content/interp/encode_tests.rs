@@ -20,7 +20,7 @@ use crate::source::Limits;
 /// An event as the round trip compares it: what it is, but for its
 /// numbers, and its numbers.
 #[derive(Debug)]
-struct Seen {
+pub(super) struct Seen {
     what: String,
     numbers: Vec<f32>,
 }
@@ -44,10 +44,23 @@ fn drawn(f: &Fixture, content: &[u8]) -> Result<Vec<Seen>, InterpError> {
     Ok(seen)
 }
 
+/// `event` as the round trip compares it: None for an operator, which it
+/// writes.
 fn seen(event: &Event<'_>) -> Option<Seen> {
+    (!matches!(event.kind, Kind::Op)).then(|| described(event))
+}
+
+/// `event` as [`seen`] compares it, and an operator as what it is, where,
+/// and in what text state.
+pub(super) fn described(event: &Event<'_>) -> Seen {
     let mut n = Vec::new();
     let what = match &event.kind {
-        Kind::Op => return None,
+        Kind::Op => {
+            let text = &event.state.text;
+            affine(&mut n, text.matrix);
+            n.extend([text.line.x, text.line.y, text.pen.x, text.pen.y]);
+            format!("op {:?} at {:?}", event.at.tok, event.at.op)
+        }
         Kind::Text(show) => {
             let text = &event.state.text;
             n.extend([show.size, text.char_space, text.word_space, text.scale]);
@@ -125,10 +138,10 @@ fn seen(event: &Event<'_>) -> Option<Seen> {
         })
         .collect();
     let marks: Vec<String> = event.marks.iter().map(mark).collect();
-    Some(Seen {
+    Seen {
         what: format!("{what}; in {marks:?}; clipped by {clip:?}"),
         numbers: n,
-    })
+    }
 }
 
 /// What's said of a mark, but where it's written.
@@ -175,7 +188,7 @@ fn same(a: f32, b: f32) -> bool {
 }
 
 /// `after` is `before`, event for event.
-fn assert_alike(before: &[Seen], after: &[Seen], what: &str) {
+pub(super) fn assert_alike(before: &[Seen], after: &[Seen], what: &str) {
     assert_eq!(before.len(), after.len(), "{what}: events");
     for (i, (b, a)) in before.iter().zip(after).enumerate() {
         assert_eq!(b.what, a.what, "{what}: event {i}");

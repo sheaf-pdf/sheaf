@@ -207,8 +207,9 @@ pub fn splice(data: &[u8]) -> usize {
 /// each glyph laid out with its box. Where `data` has [`FONT_PART`]s,
 /// the content is what's before the first, and what's after each is,
 /// in turn, `/CM`'s embedded CMap, `/T3`'s `a` CharProc, `/I2`'s `/W`
-/// and `/V`'s `/W2`, and `/T3`'s `/FontMatrix` ([`with_fonts`]), so the
-/// fonts' readers read what the fuzzer makes too. Where that reads, it's
+/// and `/V`'s `/W2`, `/T3`'s `/FontMatrix`, and `/TT`'s program, which
+/// the CIDFonts share ([`with_fonts`]), so the fonts' readers read what
+/// the fuzzer makes too, a program's reader among them. Where that reads, it's
 /// written again ([`encode`](content::interp::encode)) and the encoding
 /// drawn, which draws the same, but operators: as many events and
 /// glyphs, each where it was, to the bit. Returns how many events it
@@ -230,12 +231,12 @@ pub fn interp(data: &[u8]) -> usize {
 #[cfg(any(test, feature = "fixtures"))]
 pub const FONT_PART: &[u8] = b"\n%%font\n";
 
-/// `data` split at each [`FONT_PART`], into five parts at most.
+/// `data` split at each [`FONT_PART`], into six parts at most.
 #[cfg(any(test, feature = "fixtures"))]
 fn font_parts(data: &[u8]) -> Vec<&[u8]> {
     let mut parts = Vec::new();
     let mut rest = data;
-    while parts.len() < 4
+    while parts.len() < 5
         && let Some(at) = rest.windows(FONT_PART.len()).position(|w| w == FONT_PART)
     {
         parts.push(&rest[..at]);
@@ -247,8 +248,9 @@ fn font_parts(data: &[u8]) -> Vec<&[u8]> {
 
 /// `page`, the fuzz page, with what `parts` give its fonts, each where
 /// it's there: the bytes of `/CM`'s embedded CMap and of `/T3`'s `a`
-/// CharProc, and objects, where they read as arrays, for `/I2`'s `/W` and
-/// `/V`'s `/W2`, and `/T3`'s `/FontMatrix`.
+/// CharProc, objects, where they read as arrays, for `/I2`'s `/W` and
+/// `/V`'s `/W2`, and `/T3`'s `/FontMatrix`, and the bytes of `/TT`'s
+/// `/FontFile2`, the program the CIDFonts embed too.
 #[cfg(any(test, feature = "fixtures"))]
 fn with_fonts(page: &content::fixture::Fixture, parts: &[&[u8]]) -> content::fixture::Fixture {
     let mut pdf = page.pdf.clone();
@@ -278,8 +280,14 @@ fn with_fonts(page: &content::fixture::Fixture, parts: &[&[u8]]) -> content::fix
     let cmap = get(&page.pdf, font(b"CM"), b"Encoding").and_then(|e| e.as_reference().ok());
     let procs = get(&page.pdf, font(content::fixture::SQUARES), b"CharProcs");
     let proc = procs.and_then(|p| p.as_dict().ok()?.get(b"a").ok()?.as_reference().ok());
+    let descriptor = get(&page.pdf, font(b"TT"), b"FontDescriptor");
+    let descriptor = descriptor.and_then(|d| d.as_reference().ok());
+    let program = descriptor.and_then(|d| get(&page.pdf, d, b"FontFile2")?.as_reference().ok());
     for (id, data) in [cmap, proc].into_iter().zip(parts) {
         set_stream(id, data);
+    }
+    if let Some(data) = parts.get(4) {
+        set_stream(program, data);
     }
     if let Some(widths) = parts.get(2).copied().and_then(array) {
         let cids = [
@@ -1202,9 +1210,33 @@ mod tests {
 
     /// [`interp`]'s fixtures with the fonts' parts ([`FONT_PART`]): the
     /// content of each operator of the text state and of each kind of
-    /// font, then the fuzz page's own CMap and `a` CharProc, a `/W`, and
-    /// a `/FontMatrix`, so mutations reach the fonts' readers.
+    /// font, then the fuzz page's own CMap and `a` CharProc, a `/W`, a
+    /// `/FontMatrix`, and a program of each format (`content::fixture`'s
+    /// TrueType, CFF and Type 1), so mutations reach the fonts' readers.
     fn font_part_fixtures() -> Vec<Vec<u8>> {
+        let programs = [
+            crate::content::fixture::truetype_program(),
+            crate::content::fixture::cff_program(),
+            crate::content::fixture::type1_program(),
+        ];
+        with_font_parts(&programs)
+    }
+
+    /// [`font_part_fixtures`] with programs that once stopped the fuzzer:
+    /// a Type 1 program whose integers run past what sheaf hands
+    /// read-fonts, and an SFNT whose `loca` record is past its end.
+    fn hostile_program_fixtures() -> Vec<Vec<u8>> {
+        let programs = [
+            crate::content::fixture::type1_integers_program(300),
+            crate::content::fixture::loca_past_end_program(),
+        ];
+        with_font_parts(&programs)
+    }
+
+    /// The content of each operator of the text state and of each kind of
+    /// font, then the fuzz page's fonts' parts, `programs` each in turn
+    /// the last ([`font_part_fixtures`]).
+    fn with_font_parts(programs: &[Vec<u8>]) -> Vec<Vec<u8>> {
         let parts: [&[u8]; 4] = [
             b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
               /CMapName /OneByte def\n\
@@ -1220,9 +1252,10 @@ mod tests {
             crate::content::fixture::fonts(),
         ];
         (pages.iter())
-            .map(|f| {
+            .flat_map(|f| programs.iter().map(move |program| (f, program)))
+            .map(|(f, program)| {
                 let mut data = f.content().into_bytes();
-                for part in parts {
+                for part in parts.into_iter().chain([&program[..]]) {
                     data.extend(FONT_PART);
                     data.extend(part);
                 }
@@ -1531,6 +1564,7 @@ mod tests {
             Ok("interp") => {
                 let content = splice_fixtures().into_iter().chain(interp_fixtures());
                 let content = content.chain(font_part_fixtures());
+                let content = content.chain(hostile_program_fixtures());
                 named(content.collect(), |n| format!("content-{n}")).collect()
             }
             Ok("op_json") => named(op_json_fixtures(), |n| format!("ops-{n}.json")).collect(),
@@ -1541,6 +1575,35 @@ mod tests {
         };
         for (name, seed) in seeds {
             std::fs::write(dir.join(name), seed).unwrap();
+        }
+    }
+
+    /// Unmutated, each font-part fixture's last part is `/TT`'s program,
+    /// which reads: the fuzzer starts from a program of each format.
+    #[test]
+    fn the_font_part_fixtures_give_a_program_that_reads() {
+        let page = content::fixture::fuzz_page();
+        for fixture in font_part_fixtures() {
+            let parts = font_parts(&fixture);
+            assert_eq!(parts.len(), 6);
+            let page = with_fonts(&page, &parts[1..]);
+            let fonts = page
+                .resources()
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get(b"Font")
+                .unwrap();
+            let tt = fonts.as_dict().unwrap().get(b"TT").unwrap();
+            let read = content::Fonts::default();
+            let mut budget = Limits::DEFAULT.content.decompressed;
+            let tt = read
+                .get(&page.pdf, tt, &Limits::DEFAULT, &mut budget)
+                .unwrap()
+                .unwrap();
+            assert_eq!(tt.program(), content::FontProgram::Read);
+            // Its bytes, and what drawing its glyphs costs.
+            assert!(Limits::DEFAULT.content.decompressed - budget > parts[5].len());
         }
     }
 
@@ -1647,9 +1710,10 @@ mod tests {
                 }
             }
         }
-        for (n, fixture) in (interp_fixtures().iter().chain(&font_part_fixtures())).enumerate() {
+        let pages = interp_fixtures().into_iter().chain(font_part_fixtures());
+        for (n, fixture) in pages.chain(hostile_program_fixtures()).enumerate() {
             // Unmutated, each draws on the fuzz page.
-            assert!(interp(fixture) > 0, "page {n}");
+            assert!(interp(&fixture) > 0, "page {n}");
             for case in 0..INTERP_CASES {
                 let mut data = fixture.clone();
                 for _ in 0..rng.usize(1..=4) {

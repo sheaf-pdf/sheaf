@@ -8,7 +8,6 @@
 # pieces). The tier fails where a file has more than its line says, and
 # a file with no line has none; SHEAF_INTERP_WRITE_UNEXPLAINED=1 over
 # every file writes the lines again, after these.
-conformance/safedocs/0001978.pdf	4	0
 conformance/safedocs/0004923.pdf	9	0
 conformance/safedocs/0008910.pdf	20	0
 conformance/safedocs/0009399.pdf	11	0
@@ -16,19 +15,16 @@ conformance/safedocs/0009469.pdf	22	0
 conformance/safedocs/0009988.pdf	16	0
 conformance/safedocs/0161162.pdf	2	0
 conformance/verapdf/PDF_UA-1/7.21 Fonts/7.21.3 Composite fonts/7.21.3.3 CMaps/7.21.3.3-t01-fail-a.pdf	5	5
-conformance/verapdf/PDF_UA-1/7.21 Fonts/7.21.7 Unicode character maps/7.21.7-t01-pass-a.pdf	1	0
 conformance/verapdf/PDF_UA-1/7.7 Mathematical expressions/7.7-t01-fail-a.pdf	0	6
 conformance/verapdf/PDF_UA-1/7.7 Mathematical expressions/7.7-t01-fail-b.pdf	0	6
 conformance/verapdf/PDF_UA-1/7.7 Mathematical expressions/7.7-t01-pass-a.pdf	0	6
 conformance/verapdf/PDF_UA-1/7.7 Mathematical expressions/7.7-t01-pass-b.pdf	0	6
 conformance/verapdf/PDF_UA-1/7.7 Mathematical expressions/7.7-t01-pass-c.pdf	0	6
 conformance/verapdf/PDF_UA-2/8.4 Text representation for content/8.4.5 Fonts/8.4.5.4 CMaps/8.4.5.4-t01-fail-a.pdf	5	5
-conformance/verapdf/PDF_UA-2/8.4 Text representation for content/8.4.5 Fonts/8.4.5.8 Unicode character maps/8.4.5.8-t01-pass-a.pdf	1	0
 forms/ny-tax/it201_2025_fill_in.pdf	2	0
 forms/safedocs/0002886.pdf	6	0
 forms/safedocs/0003246.pdf	1	0
 forms/safedocs/0004596.pdf	9	0
-forms/safedocs/0004934.pdf	2	0
 forms/safedocs/0007964.pdf	127	0
 forms/safedocs/0011300.pdf	1	0
 forms/safedocs/0012512.pdf	4	0
@@ -39,16 +35,14 @@ forms/safedocs/0013503.pdf	216	0
 forms/safedocs/0015620.pdf	1	0
 forms/safedocs/0018806.pdf	12	0
 forms/safedocs/0019248.pdf	2	0
-forms/safedocs/0020174.pdf	1	0
 forms/safedocs/0021193.pdf	1	0
 forms/safedocs/0023076.pdf	11	0
 forms/safedocs/0023200.pdf	1	0
 forms/safedocs/0024642.pdf	1	0
 forms/safedocs/0025121.pdf	795	0
-forms/safedocs/0026602.pdf	40	7
 forms/safedocs/0027127.pdf	447	0
 forms/safedocs/0027451.pdf	5	0
-forms/safedocs/0027502.pdf	456	0
+forms/safedocs/0027502.pdf	455	0
 forms/safedocs/0029640.pdf	16	0
 forms/safedocs/0032886.pdf	18	0
 forms/safedocs/0034007.pdf	5	0
@@ -90,15 +84,12 @@ forms/safedocs/0115056.pdf	1	0
 forms/safedocs/0118604.pdf	435	0
 forms/safedocs/0119457.pdf	4	0
 forms/safedocs/0120331.pdf	6	0
-forms/safedocs/0124377.pdf	4	0
 forms/safedocs/0125021.pdf	1	0
 forms/safedocs/0125184.pdf	3	0
 forms/safedocs/0129993.pdf	300	0
 forms/safedocs/0130099.pdf	14	0
 forms/safedocs/0135085.pdf	1	0
-forms/safedocs/0136401.pdf	13	0
 forms/safedocs/0136832.pdf	44	0
-forms/safedocs/0137778.pdf	0	3
 forms/safedocs/0143435.pdf	5	0
 forms/safedocs/0149399.pdf	3	0
 forms/safedocs/0170241.pdf	6	0
@@ -107,11 +98,9 @@ forms/safedocs/0181101.pdf	2	0
 forms/safedocs/0187977.pdf	2	0
 forms/safedocs/0195082.pdf	35	0
 forms/safedocs/0201773.pdf	4	0
-forms/safedocs/0208686.pdf	297	359
 forms/safedocs/0215475.pdf	38	0
 forms/safedocs/0230429.pdf	1	0
 forms/safedocs/0231351.pdf	1	0
-forms/safedocs/0238027.pdf	54	0
 forms/safedocs/0245058.pdf	2	0
 forms/safedocs/0246258.pdf	5	0
 forms/safedocs/0255771.pdf	17	0
@@ -122,16 +111,12 @@ forms/safedocs/0271967.pdf	7	0
 forms/safedocs/0277481.pdf	1	0
 forms/safedocs/0291684.pdf	1	0
 forms/safedocs/0296110.pdf	10	0
-forms/safedocs/0306586.pdf	6	0
 forms/safedocs/0328496.pdf	362	0
 forms/safedocs/0356360.pdf	7	7
 forms/safedocs/0392041.pdf	0	24
 forms/safedocs/0402991.pdf	60	0
 forms/safedocs/0440854.pdf	9	0
-forms/safedocs/0446302.pdf	1	0
 forms/safedocs/0477226.pdf	2	0
-forms/safedocs/0488353.pdf	40	472
-forms/safedocs/0499654.pdf	8	8
 forms/safedocs/0550382.pdf	6	0
 forms/safedocs/0557423.pdf	28	0
 forms/safedocs/0559181.pdf	3	0
@@ -139,22 +124,19 @@ forms/safedocs/0571757.pdf	1	0
 forms/safedocs/0588528.pdf	26	2
 forms/safedocs/0595581.pdf	0	22
 forms/safedocs/0600033.pdf	3	0
-forms/safedocs/0614186.pdf	14	8
+forms/safedocs/0614186.pdf	6	0
 forms/safedocs/0626002.pdf	0	6
 forms/safedocs/0651841.pdf	61	0
 forms/safedocs/0674521.pdf	0	56
-forms/safedocs/0724744.pdf	22	0
 forms/safedocs/0725543.pdf	10	12
-forms/safedocs/0754802.pdf	120	0
 forms/safedocs/0760674.pdf	0	8
 forms/safedocs/0773301.pdf	33	0
 forms/safedocs/0790306.pdf	0	25
-forms/safedocs/0824122.pdf	8	0
+forms/safedocs/0824122.pdf	4	0
 forms/safedocs/0838592.pdf	3	0
 forms/safedocs/0845477.pdf	117	0
 forms/safedocs/0853606.pdf	1	0
 forms/safedocs/0861734.pdf	26	0
-forms/safedocs/0883199.pdf	22	0
 forms/safedocs/0899113.pdf	0	8
 forms/safedocs/1024832.pdf	2	0
 forms/safedocs/1098070.pdf	2	0
@@ -165,7 +147,6 @@ forms/safedocs/1204971.pdf	56	0
 forms/safedocs/1213146.pdf	1	0
 forms/safedocs/1263925.pdf	2985	0
 forms/safedocs/1269149.pdf	22	0
-forms/safedocs/1314652.pdf	1	0
 forms/safedocs/1331385.pdf	1	0
 forms/safedocs/1333976.pdf	1	0
 forms/safedocs/1341505.pdf	821	0
@@ -216,7 +197,6 @@ pool/safedocs/3024/3024578.pdf	1	12
 pool/safedocs/3025/3025031.pdf	42	0
 pool/safedocs/3030/3030896.pdf	1	12
 pool/safedocs/3234/3234460.pdf	38	0
-pool/safedocs/3239/3239385.pdf	24	0
 pool/safedocs/3256/3256191.pdf	66	0
 pool/safedocs/3310/3310434.pdf	1	0
 pool/safedocs/3786/3786994.pdf	1	1
@@ -253,29 +233,23 @@ pool/safedocs/7344/7344536.pdf	18	0
 scans/safedocs/0000509.pdf	41	0
 scans/safedocs/0000574.pdf	3	0
 scans/safedocs/0000736.pdf	1201	0
-scans/safedocs/0000908.pdf	16120	16100
 scans/safedocs/0001047.pdf	2	0
 scans/safedocs/0001093.pdf	2	0
 scans/safedocs/0001488.pdf	19	0
 scans/safedocs/0002203.pdf	1	0
 scans/safedocs/0002291.pdf	8	0
-scans/safedocs/0002381.pdf	16	1790
+scans/safedocs/0002381.pdf	1	0
 scans/safedocs/0002702.pdf	3	0
 scans/safedocs/0002865.pdf	2	0
 scans/safedocs/0003440.pdf	1	0
-scans/safedocs/0003459.pdf	34	797
 scans/safedocs/0003611.pdf	5	0
 scans/safedocs/0003625.pdf	101	0
 scans/safedocs/0003853.pdf	26	0
-scans/safedocs/0003865.pdf	11	24
 scans/safedocs/0004228.pdf	1	0
-scans/safedocs/0004325.pdf	144	198
 scans/safedocs/0005080.pdf	0	3
 scans/safedocs/0005217.pdf	18	0
 scans/safedocs/0005418.pdf	2	0
-scans/safedocs/0005462.pdf	33	2277
 scans/safedocs/0005475.pdf	21	0
-scans/safedocs/0005707.pdf	32	77
 scans/safedocs/0006047.pdf	8	0
 scans/safedocs/0006769.pdf	4	0
 scans/safedocs/0006950.pdf	21	0
@@ -285,27 +259,21 @@ scans/safedocs/0008019.pdf	18	1
 scans/safedocs/0008617.pdf	1	0
 scans/safedocs/0008817.pdf	20	0
 scans/safedocs/0009119.pdf	26	0
-scans/safedocs/0009937.pdf	83	418
 scans/safedocs/0010660.pdf	31	0
 scans/safedocs/0011151.pdf	1	0
 scans/safedocs/0011472.pdf	5	0
 scans/safedocs/0011568.pdf	1	0
 scans/safedocs/0012161.pdf	11	0
-scans/safedocs/0012932.pdf	37	117
 scans/safedocs/0013291.pdf	5	0
 scans/safedocs/0013332.pdf	1	0
-scans/safedocs/0013825.pdf	377	1688
 scans/safedocs/0013983.pdf	0	1
 scans/safedocs/0014163.pdf	2	0
-scans/safedocs/0014935.pdf	1	2
-scans/safedocs/0015239.pdf	199	874
 scans/safedocs/0015259.pdf	2	0
 scans/safedocs/0016035.pdf	24	0
 scans/safedocs/0016205.pdf	15	0
 scans/safedocs/0016368.pdf	2	0
 scans/safedocs/0017454.pdf	67	0
 scans/safedocs/0017608.pdf	1	0
-scans/safedocs/0017615.pdf	9	1591
 scans/safedocs/0018614.pdf	3	0
 scans/safedocs/0019081.pdf	1	0
 scans/safedocs/0019222.pdf	3	0
@@ -313,18 +281,15 @@ scans/safedocs/0019656.pdf	1	0
 scans/safedocs/0019889.pdf	12	0
 scans/safedocs/0020556.pdf	4	0
 scans/safedocs/0020700.pdf	5	0
-scans/safedocs/0020703.pdf	212	270
 scans/safedocs/0020822.pdf	1	0
 scans/safedocs/0021278.pdf	38	0
 scans/safedocs/0021846.pdf	2	0
 scans/safedocs/0023592.pdf	3	0
 scans/safedocs/0023854.pdf	6	0
-scans/safedocs/0027802.pdf	16	563
 scans/safedocs/0028114.pdf	2	0
 scans/safedocs/0029558.pdf	6	0
 scans/safedocs/0031643.pdf	87	0
 scans/safedocs/0039965.pdf	55	0
-scans/safedocs/0045795.pdf	11	72
 scans/safedocs/0056610.pdf	81	0
 scans/safedocs/0072920.pdf	16	0
 scans/safedocs/0079336.pdf	2	0

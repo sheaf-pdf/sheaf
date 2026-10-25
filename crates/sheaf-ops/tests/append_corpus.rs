@@ -66,9 +66,7 @@ use std::sync::Arc;
 
 use in_progress::NoProgress;
 use lopdf::{Document as Pdf, Object, ObjectId};
-use sheaf_doc::content::{
-    FontDecoders, PagOrigin, PageContent, PaginationKind, ResCx, TextBag, text_bag,
-};
+use sheaf_doc::content::{Fonts, PagOrigin, PageContent, PaginationKind, TextBag, text_bag};
 use sheaf_doc::effects::{Flags, judge};
 use sheaf_doc::forms::Report;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
@@ -484,15 +482,13 @@ fn artifacts(doc: &Document, kind: PaginationKind, origin: PagOrigin) -> usize {
 fn drawn_words(doc: &Document) -> TextBag {
     let src = doc.primary();
     let (pdf, lim) = (src.pdf(), src.limits());
-    let mut bag = TextBag::default();
+    let (mut bag, fonts) = (TextBag::default(), Fonts::for_text());
     for page in (0..src.page_count()).filter_map(|i| src.page(i)) {
         let Ok(content) = PageContent::read(pdf, &page.contents, lim) else {
             continue;
         };
         let resources = page.resources.as_deref();
-        let fonts = FontDecoders::read(pdf, resources, lim);
-        let res = ResCx::read(pdf, resources);
-        if let Ok(words) = text_bag(content.concat(), &res, lim, &fonts) {
+        if let Ok(words) = text_bag(pdf, content.concat(), resources, lim, &fonts) {
             bag.extend(&words);
         }
     }
