@@ -940,7 +940,7 @@ fn closed_bookmark_stays_closed(how: How) {
     assert_eq!(open_flags(&back), open_flags(&items), "{how:?}");
 }
 
-/// Bug 13 (todos/m9.md): after a save in place, a version from before
+/// Bug 13 (plan/complete/m09-markup.md): after a save in place, a version from before
 /// it still means the file it was made from, whatever the path holds
 /// now: undone past the save and saved again, its pages are written,
 /// whether the first save was a Rewrite or an Append, and whether the

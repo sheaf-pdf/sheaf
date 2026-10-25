@@ -5,7 +5,7 @@ scanned and photographed pages, beyond the OCR engines already in
 `sheaf-ocr`. Researched 2026-10-14. Claims we could not confirm are marked
 "(unverified)".
 
-What sheaf already runs (see [`todos/cleanup-cli.md`](../../todos/cleanup-cli.md)):
+What sheaf already runs (see [`plan/complete/cleanup-cli.md`](../../plan/complete/cleanup-cli.md)):
 
 - PaddleOCR PP-OCRv5 text detection and recognition, through `oar-ocr` on
   ONNX Runtime;
@@ -110,7 +110,7 @@ There are no wall-clock timings.
   sandboxed export step.
 - **Runtime fit:** it would run on the ONNX Runtime that `oar-ocr` already
   ships. Under the `sheaf-image` boundary
-  ([`todos/m8-sheaf-image.md`](../../todos/m8-sheaf-image.md)) a model can't
+  ([`plan/complete/m08-sheaf-image.md`](../../plan/complete/m08-sheaf-image.md)) a model can't
   live in `sheaf-image`. It would sit beside UVDoc, behind
   `sheaf_ocr`/`sheaf_ops` model lookup, and stay opt-in.
 
@@ -142,7 +142,7 @@ Open questions before this becomes a roadmap item:
 ## 2. Page parsing (layout, tables, Markdown)
 
 These matter for the pending **Export to Markdown** item in
-[ROADMAP.md](../../ROADMAP.md#pending). The `oar-ocr` 0.10 crate that
+[ROADMAP.md](../../plan/pending.md). The `oar-ocr` 0.10 crate that
 `sheaf-ocr` already depends on includes more than OCR (from its README):
 
 - **`OARStructureBuilder`:** layout detection (PP-DocLayout S/M/L,

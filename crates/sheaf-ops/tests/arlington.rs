@@ -794,24 +794,19 @@ fn every_allowance_for_any_file_is_needed() {
     );
 }
 
-/// Every allowance names a backlog entry that's open: a `### B12:`
-/// heading of `todos/backlog.md`'s before its `## Closed`.
+/// Every allowance names a backlog entry that's open: a file
+/// `plan/backlog/B12.md` (a closed entry's moves to
+/// `plan/complete/backlog-closed.md`).
 #[test]
 fn every_allowance_names_an_open_backlog_entry() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../todos/backlog.md");
-    let backlog = std::fs::read_to_string(path).unwrap();
-    let open = backlog.split("\n## Closed").next().unwrap();
-    let entries: Vec<&str> = (open.lines())
-        .filter_map(|line| line.strip_prefix("### "))
-        .filter_map(|heading| heading.split_once(':').map(|(entry, _)| entry))
-        .collect();
+    let backlog = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plan/backlog");
     let unknown: Vec<String> = (allowances().rows())
-        .filter(|a| !entries.contains(&a.entry.as_str()))
+        .filter(|a| !backlog.join(format!("{}.md", a.entry)).is_file())
         .map(named)
         .collect();
     assert!(
         unknown.is_empty(),
-        "rows whose entry isn't open in todos/backlog.md:\n{}",
+        "rows whose entry isn't open in plan/backlog/:\n{}",
         unknown.join("\n")
     );
 }

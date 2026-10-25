@@ -104,7 +104,7 @@ impl Corpus {
         Corpus::find().or_else(|| {
             eprintln!(
                 "skipped: no corpus (fetch-pdf-corpus fetch --out ../pdf-corpus, or set \
-                 SHEAF_CORPUS; README.md's Building says how)"
+                 SHEAF_CORPUS; docs/building.md says how)"
             );
             None
         })

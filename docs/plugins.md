@@ -1,7 +1,7 @@
 # Writing sheaf plugins
 
 Status: API `sheaf:plugin@0.4.0`, 2026-10-23. Design notes live in
-[`todos/plugins.md`](../todos/plugins.md).
+[`plan/complete/m06-plugins.md`](../plan/complete/m06-plugins.md).
 
 A sheaf plugin is a WebAssembly component plus a manifest. It can add
 commands to the menus, the command palette and the keymap; read the open

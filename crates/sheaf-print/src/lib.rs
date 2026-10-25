@@ -1,6 +1,6 @@
 //! Printing: the system's printers and their paper, where a page lands on
 //! the sheet, and handing a print-ready PDF to the spooler. See
-//! `todos/m7.md` for why sheaf draws its own dialog.
+//! `plan/complete/m07-viewing.md` for why sheaf draws its own dialog.
 //!
 //! - Linux and macOS: CUPS, through `lpstat`, `lpoptions` and `lp`, which
 //!   reads the job on its stdin.

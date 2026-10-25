@@ -117,7 +117,7 @@ pub struct Step {
 }
 
 /// A node of the history tree: a version of the document, and the edits
-/// that made it from its parent (the edge into it). See `todos/m9.md`,
+/// that made it from its parent (the edge into it). See `plan/complete/m09-markup.md`,
 /// decision 16.
 struct Version {
     parent: Option<VersionId>,
@@ -1274,7 +1274,7 @@ impl Document {
     }
 
     /// The steps that made version `id` from its parent: the edge into it,
-    /// which is what a merge would replay (`todos/file-contention.md`).
+    /// which is what a merge would replay (`plan/topics/file-contention.md`).
     pub fn edge(&self, id: VersionId) -> Option<&[Step]> {
         Some(&self.versions.get(&id)?.steps)
     }
