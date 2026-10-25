@@ -11,8 +11,8 @@
 //! - the form check finds nothing in what it wrote that it didn't find in
 //!   the file (`nothing_found`);
 //! - none replaces the open file, which every export refuses;
-//! - a clean copy holds none of sheaf's private data, the settings an
-//!   older sheaf's watermark kept among them;
+//! - a clean copy holds none of sheaf's private data, what marks another
+//!   file's generator's watermark among it;
 //! - an extract keeps the Bates numbers the document was given, unsaved;
 //! - a flatten draws what's shown, and print's what prints, never a
 //!   hidden annotation, and a widget's look only by its `/AS`;
@@ -42,7 +42,6 @@ use sheaf_doc::export::{
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::fixture::{Form, append_revision, note, row};
 use sheaf_doc::forms::{Report, check};
-use sheaf_doc::generate::fixture as older;
 use sheaf_doc::materialize::{AskAnswers, SaveRecord};
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{Actor, Document, PageId};
@@ -82,8 +81,9 @@ fn base() -> (Vec<u8>, &'static str) {
 }
 
 /// `bytes` with `field` filled in, as Reader saves a fill (`filled`), and
-/// then, in a revision of its own, an older sheaf's watermark on the first
-/// page, with the settings it kept; and on that page the three other
+/// then, in a revision of its own, another file's generator's watermark
+/// merged into the first page's content, its list marked as the
+/// generator's ([`MERGED_WATERMARK`]); and on that page the three other
 /// tools' squares and the check box [`HIDDEN`] and the rest name.
 fn prepared(bytes: &[u8], field: &str) -> Vec<u8> {
     let bytes = common::filled(bytes, field, "Filled In");
@@ -101,12 +101,15 @@ fn prepared(bytes: &[u8], field: &str) -> Vec<u8> {
     append_revision(&bytes, &ids, |pdf| {
         // What the watermark draws with: its own names alone (the page has
         // an `/F1` of its own).
-        let helv = pdf.add_object(dictionary! {
-            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        let bold = pdf.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica-Bold",
         });
-        let drawn_with = older::resources(pdf, helv);
-        let [q, watermark] = [older::Q, older::WATERMARK]
-            .map(|c| Object::Reference(pdf.add_object(Stream::new(dictionary! {}, c.to_vec()))));
+        let gs = pdf.add_object(dictionary! { "Type" => "ExtGState", "ca" => 0.3, "CA" => 0.3 });
+        let drawn_with = dictionary! {
+            "Font" => dictionary! { "WmF" => bold },
+            "ExtGState" => dictionary! { "WmGs" => gs },
+        };
+        let watermark = pdf.add_object(Stream::new(dictionary! {}, MERGED_WATERMARK.to_vec()));
         let appearance = |pdf: &mut Pdf, fill: &[u8]| {
             let mut content = fill.to_vec();
             content.extend_from_slice(b" 0 0 20 20 re f");
@@ -147,12 +150,12 @@ fn prepared(bytes: &[u8], field: &str) -> Vec<u8> {
         });
         added.push(check.into());
         let d = pdf.get_dictionary_mut(page).unwrap();
-        let mut contents = vec![q];
+        let mut contents = Vec::new();
         match d.get(b"Contents").unwrap() {
             Object::Array(a) => contents.extend(a.iter().cloned()),
             c => contents.push(c.clone()),
         }
-        contents.push(watermark);
+        contents.push(watermark.into());
         d.set("Contents", contents);
         let resources = d.get_mut(b"Resources").unwrap().as_dict_mut().unwrap();
         for (kind, names) in drawn_with.iter() {
@@ -160,9 +163,7 @@ fn prepared(bytes: &[u8], field: &str) -> Vec<u8> {
                 .cloned()
                 .unwrap_or_default();
             for (name, object) in names.as_dict().unwrap().iter() {
-                if name.starts_with(b"Sheaf") {
-                    have.set(name.clone(), object.clone());
-                }
+                have.set(name.clone(), object.clone());
             }
             resources.set(kind.clone(), have);
         }
@@ -186,6 +187,12 @@ fn prepared(bytes: &[u8], field: &str) -> Vec<u8> {
             .push(check.into());
     })
 }
+
+/// A watermark another file's generator drew, merged into a page's
+/// content: "DRAFT" in red, its list marked as generator `g1a`'s.
+const MERGED_WATERMARK: &[u8] = b"/Artifact <</Type/Pagination/Subtype/Watermark/SHEF_Gen (g1a)>> \
+    BDC\nq\n/WmGs gs 0.7071 0.7071 -0.7071 0.7071 200.000 300.000 cm BT 0.784 0.118 0.118 rg \
+    /WmF 72.00 Tf 0 0 Td (DRAFT) Tj ET\nQ\nEMC\n";
 
 /// The Bates numbers every page is given, `SHEAF000001` on the first.
 fn numbered() -> HeaderFooterSpec {
@@ -436,8 +443,8 @@ fn every_way_out() {
     let prepared = prepared(&base, field);
     let was = check(&prepared, None).unwrap();
     assert!(
-        holds(&prepared, b"SheafSettings"),
-        "an older sheaf's watermark"
+        holds(&prepared, b"/SHEF_Gen (g1a)"),
+        "another file's generator's watermark"
     );
     let mut failed: BTreeMap<String, String> = BTreeMap::new();
     let mut outs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -450,12 +457,12 @@ fn every_way_out() {
     }
     let out = |way: Way| &outs[&format!("{way:?}")];
 
-    // A clean copy holds none of sheaf's private data, an older sheaf's
-    // watermark's settings among them, which a save keeps.
+    // A clean copy holds none of sheaf's private data, what marks another
+    // file's generator's watermark among it, which a save keeps.
     let clean = Pdf::load_mem(out(Way::CleanCopy)).unwrap();
     assert_eq!(sheaf_doc::private::found(&clean), []);
-    assert!(!holds(out(Way::CleanCopy), b"SheafSettings"));
-    assert!(holds(out(Way::Save(How::Rewritten)), b"SheafSettings"));
+    assert!(!holds(out(Way::CleanCopy), b"SHEF_Gen"));
+    assert!(holds(out(Way::Save(How::Rewritten)), b"/SHEF_Gen (g1a)"));
 
     // The extract of the second page keeps its Bates number, set and not
     // saved, drawn and as the file says it: not renumbered from 1.

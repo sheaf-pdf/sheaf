@@ -238,9 +238,7 @@ pub enum RemovedKind {
     /// (§3.4, §11.4).
     Filtered,
     /// Pages a filter takes sheaf's private data out of, what they draw
-    /// kept (§15's `StripLegacy`): what an older sheaf kept in what it
-    /// drew, an image's path among it, the names it gave what it drew
-    /// with, and what marks sheaf's blocks.
+    /// kept (§15's `StripPrivate`): what marks sheaf's blocks.
     PrivateData,
     /// The form's XFA part, which a save drops (§11.8): one.
     XfaDatasets,
@@ -615,8 +613,8 @@ fn page(
     if was != now {
         flags |= Flags::CONTENT;
     }
-    // A filter added takes out what the page drew, or what an older sheaf
-    // kept in it; one gone puts it back.
+    // A filter added takes out what the page drew, or sheaf's private data
+    // in it; one gone puts it back.
     let unfiltered = Vector::new();
     let had = (a.filter(|a| b.is_some_and(|b| a.base == b.base)))
         .map_or(&unfiltered, |def| &def.content.filters);
@@ -625,11 +623,11 @@ fn page(
         flags |= Flags::CONTENT;
     }
     let added = || has.iter().filter(|f| !had.contains(f));
-    if added().any(|f| !f.drops_ocr() && !matches!(f, Filter::StripLegacy(_))) {
+    if added().any(|f| !f.drops_ocr() && !matches!(f, Filter::StripPrivate(_))) {
         flags |= Flags::REMOVES;
         found.removed(RemovedKind::Filtered, 1);
     }
-    if added().any(|f| matches!(f, Filter::StripLegacy(_))) {
+    if added().any(|f| matches!(f, Filter::StripPrivate(_))) {
         flags |= Flags::REMOVES;
         found.removed(RemovedKind::PrivateData, 1);
     }

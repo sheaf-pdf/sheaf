@@ -11,10 +11,8 @@
 //! Reader's usage rights when the save drops them (`DropUr3`).
 //! `/SHEF_Generators` names a string of its own
 //! ([`ObjKey::Generators`]) saying what the generators are, when there
-//! are any and the output keeps sheaf's private data (§15);
-//! `/SheafHeaderFooter`, where an older sheaf kept its header's settings,
-//! is owned and never written. The header gives the version
-//! (§11.7), so a Rewrite writes no `/Version`.
+//! are any and the output keeps sheaf's private data (§15). The header
+//! gives the version (§11.7), so a Rewrite writes no `/Version`.
 //!
 //! An Append's catalog ([`appended`]) holds the keys the state doesn't own
 //! as the saved file holds them ([`RootValues`]), so a key a save dropped

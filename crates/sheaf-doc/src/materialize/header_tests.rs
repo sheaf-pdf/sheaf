@@ -678,69 +678,6 @@ fn what_sheaf_wouldn_t_write_as_a_header_isn_t_found() {
     assert_eq!(found(&second), (1, 0));
 }
 
-/// A file of three pages, each saying its number, with a header an older
-/// sheaf drew on the third, "Draft", its settings in the catalog.
-pub(crate) fn older_header_file() -> Vec<u8> {
-    use crate::generate::fixture::{HEADER_SETTINGS, legacy_header};
-    let mut pdf = Pdf::load_mem(&text_file(3)).unwrap();
-    let third = pages(&pdf)[2];
-    let root = (pdf.catalog().unwrap().get(b"Pages"))
-        .and_then(Object::as_reference)
-        .unwrap();
-    let inherited = pdf
-        .get_dictionary(root)
-        .unwrap()
-        .get(b"Resources")
-        .unwrap()
-        .clone();
-    let mut page = pdf.get_dictionary(third).unwrap().clone();
-    page.set("Resources", inherited);
-    legacy_header(&mut pdf, &mut page);
-    pdf.objects.insert(third, Object::Dictionary(page));
-    let catalog = pdf
-        .trailer
-        .get(b"Root")
-        .and_then(Object::as_reference)
-        .unwrap();
-    (pdf.get_dictionary_mut(catalog).unwrap())
-        .set("SheafHeaderFooter", Object::string_literal(HEADER_SETTINGS));
-    bytes(&pdf)
-}
-
-/// A header an older sheaf drew on the third page, its settings in the
-/// catalog: the settings aren't read, so no header opens; a header set
-/// over its page replaces it, and the save, a Rewrite for what that takes
-/// off, writes neither the settings nor the old text.
-#[test]
-fn an_older_sheaf_s_header_is_replaced_and_its_settings_dropped() {
-    let dir = scratch();
-    let (path, mut doc) = opened(&dir, "older.pdf", &older_header_file());
-    assert!(doc.state().generators().is_empty());
-    let found = doc.primary().blocks(2).unwrap();
-    let older: Vec<(PaginationKind, PagOrigin)> = found
-        .pagination
-        .iter()
-        .map(|p| (p.kind, p.origin))
-        .collect();
-    assert_eq!(older, [(PaginationKind::Header, PagOrigin::SheafLegacy)]);
-    let set = fx::set_header(fx::header("Final"), None);
-    doc.commit_ops(vec![set], "header").unwrap();
-    let report = super::save_with(
-        &mut doc,
-        &path,
-        SaveHow::Planned,
-        &AskAnswers::default(),
-        &in_progress::NoProgress,
-    )
-    .unwrap();
-    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
-    let pdf = Pdf::load(&path).unwrap();
-    assert!(!pdf.catalog().unwrap().has(b"SheafHeaderFooter"));
-    let all = everything(&pdf);
-    assert!(!all.contains("Draft") && !all.contains("SheafHF"), "{all}");
-    assert!(drawn(&pdf, pages(&pdf)[2]).contains("(Final) Tj"));
-}
-
 /// The objects `section`, an Append's, writes, each as its first bytes
 /// say it.
 fn objects_of(section: &[u8]) -> Vec<String> {

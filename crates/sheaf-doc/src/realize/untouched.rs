@@ -30,7 +30,7 @@ use lopdf::{Object, ObjectId};
 
 use super::{MarkDraw, ViewInputs};
 use crate::annot::AnnotId;
-use crate::file::{PageAnnots, is_ours};
+use crate::file::is_ours;
 use crate::forms::FieldId;
 use crate::geom::Geom;
 use crate::materialize::emit::Shown;
@@ -222,7 +222,6 @@ fn annots_kept(
     }
     // Every entry of the base page the render draws is drawn as it is.
     let pdf = src.pdf();
-    let entries = PageAnnots::new(base);
     let modeled_slots: HashSet<usize> = (src.annots().on(def.base.index).iter())
         .map(|a| a.slot)
         .chain(
@@ -261,7 +260,7 @@ fn annots_kept(
         };
         // A record's that the overlay doesn't draw as it is, one deleted,
         // or sheaf's own, written with its mark alone.
-        if of_record || modeled_slots.contains(&slot) || is_ours(pdf, entry, &entries) {
+        if of_record || modeled_slots.contains(&slot) || is_ours(pdf, entry) {
             return false;
         }
         // One the records don't hold, kept as the page has it: a widget,

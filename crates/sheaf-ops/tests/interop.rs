@@ -1290,17 +1290,16 @@ fn the_exports_read_in_pdfjs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A page an older sheaf wrote recognized text on (`/SheafOcrLayer`, in
-/// the font `/SheafOcr`) and drew a header on (in the font `/SheafHF`, its
-/// settings in the catalog), given a watermark of the document's: its
-/// clean copy, which holds none of sheaf's private data, the names it gave
-/// what it drew with given new ones, passes `qpdf --check`, and pdf.js
-/// reads the page as it read the file, then the watermark, inside an
-/// `/Artifact` of its own.
+/// A page sheaf wrote recognized text on, a block of its own
+/// (`text_layer::fixture::block_page`), with a header another file's
+/// generator drew merged into the page's own content, its list marked as
+/// the generator's, given a watermark of the document's: its clean copy,
+/// which holds none of sheaf's private data, passes `qpdf --check`, and
+/// pdf.js reads the page as it read the file, then the watermark, inside
+/// an `/Artifact` of its own.
 #[test]
 #[ignore = "needs qpdf, or node and pdf.js"]
 fn a_clean_copy_reads_in_pdfjs() {
-    use sheaf_doc::generate::fixture as older;
     let (qpdf, pdfjs) = (qpdf(), pdfjs());
     if qpdf.is_none() && pdfjs.is_none() {
         return;
@@ -1308,15 +1307,17 @@ fn a_clean_copy_reads_in_pdfjs() {
     let dir = scratch("interop-clean");
     let script = dir.join("marked.mjs");
     std::fs::write(&script, PDFJS_MARKED).unwrap();
-    let mut pdf = sheaf_doc::text_layer::fixture::legacy_page();
+    let mut pdf = sheaf_doc::text_layer::fixture::block_page();
     let page = *pdf.get_pages().get(&1).unwrap();
-    let mut dict = pdf.get_dictionary(page).unwrap().clone();
-    older::legacy_header(&mut pdf, &mut dict);
-    pdf.objects.insert(page, Object::Dictionary(dict));
-    let catalog = pdf.trailer.get(b"Root").and_then(Object::as_reference);
-    let settings = Object::string_literal(older::HEADER_SETTINGS);
-    (pdf.get_dictionary_mut(catalog.unwrap()).unwrap()).set("SheafHeaderFooter", settings);
-    let base = dir.join("older.pdf");
+    let header: &[u8] = b"/Artifact <</Type/Pagination/Subtype/Header/SHEF_Gen (g1)>> BDC\n\
+        q\nBT\n0 0 0 rg\n/F1 10 Tf\n1 0 0 1 72 748.8 Tm\n(Draft) Tj\nET\nQ\nEMC\n";
+    let header = pdf.add_object(lopdf::Stream::new(dictionary! {}, header.to_vec()));
+    let dict = pdf.get_dictionary_mut(page).unwrap();
+    let mut contents = dict.get(b"Contents").unwrap().as_array().unwrap().clone();
+    // After the page's own content, inside the streams that isolate it.
+    contents.insert(2, header.into());
+    dict.set("Contents", contents);
+    let base = dir.join("merged.pdf");
     pdf.save(&base).unwrap();
     let mut doc = common::open(&base);
     doc.commit_ops(
@@ -1328,7 +1329,7 @@ fn a_clean_copy_reads_in_pdfjs() {
     let clean = common::exported_to(&doc, Export::clean_copy, &path);
     let clean = lopdf::Document::load_mem(&clean).unwrap();
     assert_eq!(sheaf_doc::private::found(&clean), []);
-    for (what, path) in [("older", &base), ("clean", &path)] {
+    for (what, path) in [("merged", &base), ("clean", &path)] {
         if let Some(qpdf) = &qpdf {
             run(Command::new(qpdf).arg("--check").arg(path))
                 .unwrap_or_else(|e| panic!("qpdf --check, {what}: {e}"));
@@ -1336,13 +1337,13 @@ fn a_clean_copy_reads_in_pdfjs() {
         }
     }
     if let Some(pdfjs) = &pdfjs {
-        let older = marked_read(pdfjs, &script, &base, 1, "older");
+        let merged = marked_read(pdfjs, &script, &base, 1, "merged");
         assert!(
-            older.contains("Saved") && older.contains("Draft"),
-            "{older}"
+            merged.contains("Saved") && merged.contains("Draft"),
+            "{merged}"
         );
         let read = marked_read(pdfjs, &script, &path, 1, "clean");
-        let want = format!("{older}\nbegin Artifact\ntext \"MINE\"\nend");
+        let want = format!("{merged}\nbegin Artifact\ntext \"MINE\"\nend");
         assert_eq!(read, want, "pdf.js, clean");
     }
     let _ = std::fs::remove_dir_all(&dir);

@@ -303,18 +303,22 @@ fn a_file_without_private_data_holds_none() {
 }
 
 /// A file to be written without sheaf's private data that still holds
-/// some isn't written (§11.9, failing closed): here an older sheaf's
-/// watermark settings, its names and its header's, nothing having taken
-/// them out of its pages' content.
+/// some isn't written (§11.9, failing closed): here the recognized text
+/// sheaf wrote in it, its block's stream marked and its list named in the
+/// page's resources, nothing having taken them out of its page's content.
 #[test]
 fn a_file_holding_private_data_is_not_written_without_it() {
     let dir = scratch();
-    let (_, doc) = opened(&dir, "older.pdf", &super::header_tests::older_header_file());
+    let mut bytes = Vec::new();
+    crate::text_layer::fixture::block_page()
+        .save_to(&mut bytes)
+        .unwrap();
+    let (_, doc) = opened(&dir, "ocr.pdf", &bytes);
     let Err(ExportError::Failed(why)) = stripped(&doc, false) else {
         panic!("written")
     };
     assert!(
-        why.contains("it would hold sheaf's private data: Sheaf"),
+        why.contains("it would hold sheaf's private data: SHEF_"),
         "{why}"
     );
     let pdf = Pdf::load_mem(&stripped(&doc, true).unwrap()).unwrap();
@@ -322,18 +326,19 @@ fn a_file_holding_private_data_is_not_written_without_it() {
 }
 
 /// A page whose content can't be read whole (one of its streams can't be
-/// decoded), another of its streams holding an older sheaf's watermark
-/// settings: `RemovePrivateData`'s filters can't reach the page, so a
+/// decoded), another of its streams holding a generator's watermark,
+/// merged into it, its list marked: `RemovePrivateData`'s filters can't
+/// reach the page, so a
 /// clean copy isn't written (failing closed), and print without markup
 /// is, a note saying what's left (§16 row 27, `Private::Scrub`).
 #[test]
 fn private_data_a_page_s_content_hides_fails_a_clean_copy_alone() {
     let dir = scratch();
-    let legacy: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Watermark /SheafSettings \
-        (settings) >> BDC q 0.5 g 100 100 50 50 re f Q EMC";
+    let merged: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Watermark /SHEF_Gen \
+        (g1) >> BDC q 0.5 g 100 100 50 50 re f Q EMC";
     let undecoded: &[u8] = b"% undecoded";
     let file =
-        super::others_tests::acrobat_file(&[&[super::others_tests::BODY, legacy, undecoded]]);
+        super::others_tests::acrobat_file(&[&[super::others_tests::BODY, merged, undecoded]]);
     let mut pdf = Pdf::load_mem(&file).unwrap();
     for obj in pdf.objects.values_mut() {
         if let Ok(stream) = obj.as_stream_mut()
@@ -348,25 +353,25 @@ fn private_data_a_page_s_content_hides_fails_a_clean_copy_alone() {
     let Err(ExportError::Failed(why)) = stripped(&doc, true) else {
         panic!("written")
     };
-    assert!(why.contains("SheafSettings"), "{why}");
+    assert!(why.contains("SHEF_Gen"), "{why}");
     let page = doc.page(0).unwrap();
     let print = Export::print(doc.export_from(Actor::User), &[page], false);
     let printed = crate::export::run(print, &PRINT_ANSWERS, &NoProgress).unwrap();
-    let left = "some of sheaf's private data couldn't be taken out: SheafSettings";
+    let left = "some of sheaf's private data couldn't be taken out: SHEF_Gen";
     let notes: Vec<&str> = printed.notes.iter().map(|n| n.0.as_str()).collect();
     assert!(notes.iter().any(|n| n.starts_with(left)), "{notes:?}");
 }
 
 /// A page flattened, whose block is made only as it's written, is read
-/// all the same: an older sheaf's settings in its own content fail the
+/// all the same: a generator's list marked in its own content fails the
 /// file, and taken out, it's written, its flattened mark drawn. Written
 /// again, it's the same bytes.
 #[test]
 fn a_flattened_page_s_own_content_is_read() {
     let dir = scratch();
-    let legacy: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Watermark /SheafSettings \
-        (settings) >> BDC q 0.5 g 100 100 50 50 re f Q EMC";
-    let file = super::others_tests::acrobat_file(&[&[super::others_tests::BODY, legacy]]);
+    let merged: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Watermark /SHEF_Gen \
+        (g1) >> BDC q 0.5 g 100 100 50 50 re f Q EMC";
+    let file = super::others_tests::acrobat_file(&[&[super::others_tests::BODY, merged]]);
     let (_, mut doc) = opened(&dir, "a.pdf", &file);
     let page = doc.page(0).unwrap();
     let square = thread_mark(
@@ -383,7 +388,7 @@ fn a_flattened_page_s_own_content_is_read() {
     let Err(ExportError::Failed(why)) = stripped(&doc, false) else {
         panic!("written")
     };
-    assert!(why.contains("SheafSettings"), "{why}");
+    assert!(why.contains("SHEF_Gen"), "{why}");
     let bytes = stripped(&doc, true).unwrap();
     let pdf = Pdf::load_mem(&bytes).unwrap();
     assert_eq!(found(&pdf), []);

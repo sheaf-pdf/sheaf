@@ -2,9 +2,8 @@
 //! a block of its own, `/SHEF_Block << /K /Ocr /B (b…) >>`, drawn after
 //! the page's isolated content and before the generators over it, in one
 //! glyphless font a file; and the text a file holds taken out by a re-OCR
-//! or a Clear, whatever shape it was written in: sheaf's blocks, one
-//! another tool merged into a stream, and the layer an older sheaf wrote
-//! (`text_layer::fixture`). A file's blocks are found again where they're
+//! or a Clear, whatever shape it was written in: sheaf's blocks, and one
+//! another tool merged into a stream (`text_layer::fixture`). A file's blocks are found again where they're
 //! drawn, after the page's isolated content, and kept there as it's
 //! edited and saved again, so nesting never grows. Slice 9's ports of the
 //! old writers' layer tests are here too.
@@ -429,9 +428,9 @@ fn stream_of(pdf: &Pdf, id: ObjectId) -> Option<(Dictionary, Vec<u8>)> {
 }
 
 /// The files whose page holds recognized text sheaf wrote, each with its
-/// name: an older sheaf's layer, a block of sheaf's in a stream of its
-/// own, and a block of [`saved::layer`] this writer drew and saved (on
-/// a page saying "page 0").
+/// name: a block of sheaf's in a stream of its own, and a block of
+/// [`saved::layer`] this writer drew and saved (on a page saying "page
+/// 0").
 fn saved_text() -> Vec<(&'static str, Vec<u8>)> {
     let bytes = |mut pdf: Pdf| {
         let mut bytes = Vec::new();
@@ -444,11 +443,7 @@ fn saved_text() -> Vec<(&'static str, Vec<u8>)> {
     doc.commit_ops(fx::ocr([(page, Arc::new(saved::layer()))]), "ocr")
         .unwrap();
     let ours = rewrite(&doc).unwrap();
-    vec![
-        ("legacy", bytes(saved::legacy_page())),
-        ("block", bytes(saved::block_page())),
-        ("ours", ours),
-    ]
+    vec![("block", bytes(saved::block_page())), ("ours", ours)]
 }
 
 /// What a save that took one page's recognized text out says why it
@@ -471,8 +466,8 @@ fn says_old_words(pdf: &Pdf) -> bool {
 /// A layer a file holds, recognized over and saved as planned: a Rewrite,
 /// for the text it replaces, after which the old words are nowhere in the
 /// file and the page draws its own content and one block, the new one's.
-/// Over an older sheaf's layer, a block of sheaf's, and a block this
-/// writer saved, which saved again with nothing changed stays as it is.
+/// Over a block of sheaf's, and a block this writer saved, which saved
+/// again with nothing changed stays as it is.
 #[test]
 fn replacing_a_saved_layer_rewrites_without_the_old_words() {
     for (name, bytes) in saved_text() {
@@ -514,8 +509,8 @@ fn replacing_a_saved_layer_rewrites_without_the_old_words() {
 /// A layer a file holds, cleared and saved as planned: a Rewrite, for the
 /// text it takes out, after which its words are nowhere in the file and
 /// the page draws its own content as it was, sheaf's isolation set aside.
-/// Over an older sheaf's layer, a block of sheaf's, one this writer saved,
-/// and a block another tool merged into the page's one stream, cut out of
+/// Over a block of sheaf's, one this writer saved, and a block another
+/// tool merged into the page's one stream, cut out of
 /// it, the rest of the stream as it was and the names only the block drew
 /// with gone from the page's resources.
 #[test]
@@ -560,52 +555,6 @@ fn clear_removes_a_saved_layer() {
         let lists = res.get(b"Properties").ok();
         let lists = lists.map(|l| pdf.dereference(l).unwrap().1.as_dict().unwrap());
         assert!(lists.is_none_or(|l| !l.has(saved::OCR_LIST)), "{name}");
-    }
-}
-
-crate::both_ways!(
-    removing_a_legacy_layer_keeps_q_and_q_balanced,
-    removing_a_legacy_layer_keeps_q_and_q_balanced_appended: legacy_balance
-);
-
-/// An older sheaf's layer, whose page's own content leaves a `q` open,
-/// taken out with the `q` before the content that its first `Q` ends:
-/// cleared, the page balances as its own content does; recognized again,
-/// or cleared under a header, the page's own content is isolated as its
-/// balance asks, by one `q` and two `Q`s, and the page balances.
-fn legacy_balance(how: How) {
-    let base = Balance {
-        net: 1,
-        min_prefix: 0,
-    };
-    for what in ["cleared", "recognized", "cleared under a header"] {
-        let dir = scratch();
-        let mut bytes = Vec::new();
-        saved::legacy_page().save_to(&mut bytes).unwrap();
-        let (_, mut doc) = opened(&dir, "a.pdf", &bytes);
-        let p0 = doc.page(0).unwrap();
-        let ops = match what {
-            "cleared" => vec![fx::clear_ocr(&[p0])],
-            "recognized" => fx::ocr([(p0, ocr_layer("Fresh"))]),
-            _ => vec![
-                fx::clear_ocr(&[p0]),
-                fx::set_header(fx::header("Draft"), None),
-            ],
-        };
-        doc.commit_ops(ops, what).unwrap();
-        let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
-        let page = pages(&pdf)[0];
-        let streams = contents(&pdf, page);
-        let data = |at: usize| stream(&pdf, streams[at]).1;
-        if what == "cleared" {
-            assert_eq!(streams.len(), 1, "{what} {how:?}");
-            assert_eq!(depth(&pdf, page).1, base, "{what} {how:?}");
-            continue;
-        }
-        assert_eq!(streams.len(), 4, "{what} {how:?}");
-        assert_eq!((data(0), data(2)), (b"q\n".to_vec(), b"Q\nQ\n".to_vec()));
-        assert_eq!(data(1), saved::BASE, "{what} {how:?}");
-        assert_eq!(depth(&pdf, page).1, Balance::default(), "{what} {how:?}");
     }
 }
 
@@ -673,95 +622,6 @@ fn a_page_that_cant_be_read_is_saved_without_its_text() {
     let page = pages(&pdf)[0];
     assert_eq!(contents(&pdf, page).len(), 1);
     assert_eq!(glyphless_fonts(&pdf), 0);
-}
-
-/// An older sheaf's layer with a second layer stream after it, as no
-/// sheaf wrote: the `q` and the last layer go, as a pair; the other
-/// layer's stream, its `Q` then the page's own, stays, and a note says
-/// so.
-#[test]
-fn a_legacy_layer_without_its_q_stays() {
-    let mut pdf = saved::legacy_page();
-    let id = pdf.get_pages()[&1];
-    let [q, base, layer] = crate::content::contents(pdf.get_dictionary(id).unwrap())[..] else {
-        panic!("the legacy page draws three streams")
-    };
-    let copy = pdf.get_object(layer).unwrap().clone();
-    let second = pdf.add_object(copy);
-    let entries: Vec<Object> = [q, base, layer, second].map(Object::Reference).into();
-    pdf.get_dictionary_mut(id).unwrap().set("Contents", entries);
-    let mut bytes = Vec::new();
-    pdf.save_to(&mut bytes).unwrap();
-    let dir = scratch();
-    let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
-    let p0 = doc.page(0).unwrap();
-    let commit = doc.commit_ops(vec![fx::clear_ocr(&[p0])], "clear").unwrap();
-    // The save says it, not the commit as well.
-    assert_eq!(commit.notices, []);
-    let report = save_with(
-        &mut doc,
-        &path,
-        SaveHow::Planned,
-        &AskAnswers::default(),
-        &NoProgress,
-    )
-    .unwrap();
-    let notes: Vec<String> = report.notes.iter().map(|n| n.to_string()).collect();
-    let note = "Recognized text sheaf wrote earlier stays on page 1: taking it out would change \
-                what else the page draws.";
-    assert!(notes.iter().any(|n| n == note), "{notes:?}");
-    let pdf = Pdf::load(&path).unwrap();
-    let page = pages(&pdf)[0];
-    let streams = contents(&pdf, page);
-    assert_eq!(streams.len(), 2);
-    assert_eq!(stream(&pdf, streams[0]).1, saved::BASE);
-    assert_eq!(stream(&pdf, streams[1]).1, saved::LEGACY_LAYER);
-    assert_eq!(depth(&pdf, page).1, Balance::default());
-}
-
-/// An older sheaf's layer whose `q` another tool lost, the only text of
-/// its kind on the page: a Clear can't take it out, so it changes nothing,
-/// and says the layer stays, as a save says of one beside text it takes
-/// out. Recognizing the page again says so too. A save writes it as it
-/// was.
-#[test]
-fn a_lone_legacy_layer_without_its_q_stays_and_says_so() {
-    let mut pdf = saved::legacy_page();
-    let id = pdf.get_pages()[&1];
-    let [_, base, layer] = crate::content::contents(pdf.get_dictionary(id).unwrap())[..] else {
-        panic!("the legacy page draws three streams")
-    };
-    let entries: Vec<Object> = [base, layer].map(Object::Reference).into();
-    pdf.get_dictionary_mut(id).unwrap().set("Contents", entries);
-    let mut bytes = Vec::new();
-    pdf.save_to(&mut bytes).unwrap();
-    let dir = scratch();
-    let (path, mut doc) = opened(&dir, "a.pdf", &bytes);
-    let p0 = doc.page(0).unwrap();
-    let stays = "Recognized text sheaf wrote earlier stays on page 1: taking it out would change \
-                 what else the page draws";
-    let commit = doc.commit_ops(vec![fx::clear_ocr(&[p0])], "clear").unwrap();
-    assert_eq!(commit.version, None, "nothing changed");
-    assert_eq!(crate::notice_text(&commit.notices).as_deref(), Some(stays));
-    let set = fx::ocr([(p0, ocr_layer("again"))]);
-    let commit = doc.commit_ops(set, "ocr").unwrap();
-    assert!(commit.version.is_some());
-    assert_eq!(crate::notice_text(&commit.notices).as_deref(), Some(stays));
-    doc.undo().unwrap();
-    save_with(
-        &mut doc,
-        &path,
-        SaveHow::Planned,
-        &AskAnswers::default(),
-        &NoProgress,
-    )
-    .unwrap();
-    let pdf = Pdf::load(&path).unwrap();
-    let page = pages(&pdf)[0];
-    let streams = contents(&pdf, page);
-    assert_eq!(streams.len(), 2);
-    assert_eq!(stream(&pdf, streams[0]).1, saved::BASE);
-    assert_eq!(stream(&pdf, streams[1]).1, saved::LEGACY_LAYER);
 }
 
 /// What each of page `page`'s streams of `pdf` is, by its marker:

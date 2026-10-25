@@ -311,24 +311,6 @@ impl Reserved {
         (self.names.keys()).map(|(kind, name)| (*kind, name.as_slice()))
     }
 
-    /// `name` in `kind` given a new one, kept in its place: what it binds
-    /// named as [`ContentWriter::finish`] names a resource, clear of every
-    /// other name kept (one bound to the same resource is used again).
-    /// What binds something it can't tell is named by a digest of its old
-    /// name. None when it keeps no `name`.
-    pub fn rename(&mut self, kind: ResKind, name: &[u8]) -> Option<Vec<u8>> {
-        let ids = self.names.remove(&(kind, name.to_vec()))?;
-        let id = (ids.first().copied()).unwrap_or_else(|| ResId(sheaf_util::checksum(name)));
-        let new = fresh(kind, id, self, &BTreeSet::new());
-        let bound = self.names.entry((kind, new.clone())).or_default();
-        for id in ids {
-            if !bound.contains(&id) {
-                bound.push(id);
-            }
-        }
-        Some(new)
-    }
-
     /// Whether `name` may name `id` in `kind`.
     fn allows(&self, kind: ResKind, name: &[u8], id: ResId) -> bool {
         self.names

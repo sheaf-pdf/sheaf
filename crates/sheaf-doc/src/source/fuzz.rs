@@ -47,8 +47,7 @@ pub fn page_tree(data: &[u8]) {
 
 /// `data` as the objects of a page's annotations, `n 0 obj … endobj` from
 /// 4 up, read as the open reads sheaf's marks: each entry's `/SHEF_Annot`
-/// and digest, or its geometry from the standard keys, and whether it's
-/// ours to rewrite. The page, turned 90°, lists an annotation for each
+/// and digest, and whether it's ours to rewrite. The page, turned 90°, lists an annotation for each
 /// `endobj`, in a file with no cross-reference table, which the reader
 /// rebuilds by scanning.
 pub fn sheaf_annot(data: &[u8]) {
@@ -58,10 +57,9 @@ pub fn sheaf_annot(data: &[u8]) {
     let (pdf, Some(page)) = (src.pdf(), src.page(0)) else {
         return;
     };
-    let annots = crate::file::PageAnnots::new(&page.annots);
     for entry in page.annots.iter() {
-        let _ = crate::file::sheaf_mark(pdf, entry, page.geom.rotate, &annots);
-        let _ = crate::file::is_ours(pdf, entry, &annots);
+        let _ = crate::file::sheaf_mark(pdf, entry);
+        let _ = crate::file::is_ours(pdf, entry);
         if let Ok((_, lopdf::Object::Dictionary(d))) = pdf.dereference(entry) {
             let _ = crate::annot::staleness(pdf, d, false);
         }
@@ -123,8 +121,8 @@ pub fn lexer(data: &[u8]) {
 /// Acrobat's and one with an artifact in it: its marked ranges, names and
 /// blocks, and a splice of each range at the top, of all of them at once
 /// widened to touch ([`touching`]), and of its pagination artifacts as a
-/// strip cuts them; and each range at the top with what an older sheaf
-/// kept in its list taken out of it. Where a splice is made, what it
+/// strip cuts them; and each range at the top with sheaf's private data
+/// taken out of its list. Where a splice is made, what it
 /// keeps lexes as the tokens it kept; where a list is written again, the
 /// content lexes as it did but for the list, which reads as it did without
 /// those keys. Returns how many were made.
@@ -456,7 +454,7 @@ thread_local! {
 /// [`op_json`]'s document: four pages, a form with every kind of field on
 /// the first two, sheaf's marks of every kind on the third, and on the
 /// fourth another tool's comment with a reply; bookmarks, roman labels on
-/// the first two pages and a header an older sheaf drew on the last two.
+/// the first two pages and a header Acrobat drew on the last two.
 /// The names the Op JSON fixture's references use are there
 /// (`Part I › Ch. 2`, `Appendix`, `a1b2-c3`, `acro-1`, `sheaf:12`). Read
 /// once, opened afresh each time, with the files its ops are granted: a
@@ -518,7 +516,7 @@ impl OpJson {
             .set("PageLabels", dictionary! { "Nums" => labels });
         for &page in &pages[2..] {
             let mut dict = f.dict(page).clone();
-            crate::generate::fixture::legacy_header(&mut f.pdf, &mut dict);
+            crate::generate::fixture::acrobat_header(&mut f.pdf, &mut dict);
             *f.dict(page) = dict;
         }
         let store = Store::new();
@@ -1070,8 +1068,7 @@ mod tests {
     }
 
     /// [`sheaf_annot`]'s fixtures: every kind of mark as a save writes it,
-    /// and the same with version 1's payloads, which have no version or
-    /// digest. Each is the annotations' objects as lopdf writes them,
+    /// the annotations' objects as lopdf writes them,
     /// numbered from 4 in `/Annots` order, without the appearances and
     /// files they refer to, but for what makes a page stamp and an
     /// attachment marks: the stamp's appearance, after them, which names
@@ -1104,42 +1101,29 @@ mod tests {
             let resources = s.dict.get(b"Resources").and_then(Object::as_dict).ok()?;
             resources.has(b"XObject").then(|| s.clone())
         };
-        [false, true]
-            .map(|v1| {
-                let mut out = Pdf::with_version("1.7");
-                out.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
-                let mut next = 4 + entries.len() as u32;
-                for id in &entries {
-                    let mut d = f.pdf.get_dictionary(*id).unwrap().clone();
-                    let ap = draws_a_form(&d);
-                    for key in [b"AP".as_slice(), b"P"] {
-                        d.remove(key);
-                    }
-                    if let Some(stream) = ap {
-                        out.objects.insert((next, 0), stream.into());
-                        d.set("AP", dictionary! { "N" => (next, 0) });
-                        next += 1;
-                    }
-                    if let Ok(irt) = d.get(b"IRT").and_then(Object::as_reference) {
-                        d.set("IRT", number[&irt]);
-                    }
-                    if v1 && let Ok(json) = d.get(b"SHEF_Annot").and_then(Object::as_str) {
-                        let mut json: serde_json::Value =
-                            serde_json::from_str(&crate::file::text_string(json)).unwrap();
-                        let fields = json.as_object_mut().unwrap();
-                        fields.remove("v");
-                        fields.remove("std");
-                        d.set("SHEF_Annot", crate::save::text_string(&json.to_string()));
-                    }
-                    out.objects.insert(number[id], d.into());
-                }
-                let mut bytes = Vec::new();
-                out.save_to(&mut bytes).unwrap();
-                let at =
-                    |token: &[u8]| bytes.windows(token.len()).position(|w| w == token).unwrap();
-                bytes[at(b"4 0 obj")..at(b"xref")].to_vec()
-            })
-            .to_vec()
+        let mut out = Pdf::with_version("1.7");
+        out.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+        let mut next = 4 + entries.len() as u32;
+        for id in &entries {
+            let mut d = f.pdf.get_dictionary(*id).unwrap().clone();
+            let ap = draws_a_form(&d);
+            for key in [b"AP".as_slice(), b"P"] {
+                d.remove(key);
+            }
+            if let Some(stream) = ap {
+                out.objects.insert((next, 0), stream.into());
+                d.set("AP", dictionary! { "N" => (next, 0) });
+                next += 1;
+            }
+            if let Ok(irt) = d.get(b"IRT").and_then(Object::as_reference) {
+                d.set("IRT", number[&irt]);
+            }
+            out.objects.insert(number[id], d.into());
+        }
+        let mut bytes = Vec::new();
+        out.save_to(&mut bytes).unwrap();
+        let at = |token: &[u8]| bytes.windows(token.len()).position(|w| w == token).unwrap();
+        vec![bytes[at(b"4 0 obj")..at(b"xref")].to_vec()]
     }
 
     /// [`lexer`]'s fixtures: page content with an inline image found by
@@ -1181,12 +1165,12 @@ mod tests {
             b"/Artifact <</Type /Pagination /Subtype /Header>> BDC q /X0 Do Q EMC /X1 Do",
             b"BT /F1 12 Tf 72 700 Td /Artifact <</Subtype /Footer>> BDC (f) Tj EMC \
               0 -14 Td (Body) Tj ET",
-            b"/Artifact <</Subtype /Watermark /SheafStamp true>> BDC q 0.5 g \
-              BT /SheafHF 9 Tf (wm) Tj ET Q EMC /Span <</MCID 0>> BDC (x) Tj EMC",
+            b"/Artifact <</Subtype /Watermark /SHEF_Gen (g1)>> BDC q 0.5 g \
+              BT /F1 9 Tf (wm) Tj ET Q EMC /Span <</MCID 0>> BDC (x) Tj EMC",
             b"1 g /Artifact <</Subtype /Background>> BDC 0 0 m 9 9 l S \
               BI /W 2 /H 1 /BPC 8 /CS /CS3 ID ab EIxyz EI EMC Q",
-            b"/Artifact <</Type/Pagination/Subtype/Background/SheafStamp true\
-              /SheafSettings({\"path\":\"/a (b)\"}) % kept\n/D <</SheafStamp 1>>>> BDC\n\
+            b"/Artifact <</Type/Pagination/Subtype/Background/SHEF_Gen (g1)\
+              /SHEF_OcrBlock({\"path\":\"/a (b)\"}) % kept\n/D <</SHEF_Gen 1>>>> BDC\n\
               q\n0.5 g 0 0 9 9 re f\nQ\nEMC\n",
         ]
         .map(<[u8]>::to_vec)
@@ -1607,19 +1591,14 @@ mod tests {
         }
     }
 
-    /// Unmutated, the marks' fixtures read as marks, every one: version 2's
-    /// by their digests, version 1's from the standard keys, a
-    /// replacement's struck text from its StrikeOut.
+    /// Unmutated, the marks' fixtures read as marks, every one, by their
+    /// digests.
     #[test]
     fn the_mark_fixtures_read_as_marks() {
         for fixture in mark_fixtures() {
             let src = annotated_page(&fixture).unwrap();
             let page = src.page(0).unwrap();
-            let annots = crate::file::PageAnnots::new(&page.annots);
-            let read = page
-                .annots
-                .iter()
-                .filter_map(|e| crate::file::sheaf_mark(src.pdf(), e, page.geom.rotate, &annots));
+            let read = (page.annots.iter()).filter_map(|e| crate::file::sheaf_mark(src.pdf(), e));
             assert_eq!(read.count(), every_mark_kind().len());
         }
     }

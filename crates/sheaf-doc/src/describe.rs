@@ -219,7 +219,6 @@ fn others_found(o: &OthersFound) -> String {
     let OthersFound {
         acrobat,
         other_files,
-        older_sheaf,
         authored,
         authored_left,
         refused,
@@ -231,7 +230,6 @@ fn others_found(o: &OthersFound) -> String {
     let said = [
         (acrobat, format!("{acrobat} made in Acrobat")),
         (other_files, format!("{other_files} from other files")),
-        (older_sheaf, format!("{older_sheaf} made by an older sheaf")),
         (authored, format!("{authored} the author's")),
         (
             authored_left,

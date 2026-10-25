@@ -85,13 +85,12 @@ use crate::model::DocState;
 use crate::source::Source;
 
 /// A Rewrite's `graph`, to be written without sheaf's private data
-/// ([`Private::Strip`]), holds none (§15): no name of
-/// [`private::KEYS`], legacy ones among them, as a key or a name in an
-/// object or in the content of a page, a form or a pattern, and no mark
-/// named as sheaf names one ([`private::found`]). The data of a stream
-/// made as it's written isn't in the graph, which holds it empty: it's a
-/// block or a form the emitter draws, unmarked under Strip. The rest of
-/// its page is read.
+/// ([`Private::Strip`]), holds none (§15): no name of [`private::KEYS`] as
+/// a key or a name in an object or in the content of a page, a form or a
+/// pattern, and no mark named as sheaf names one ([`private::found`]). The
+/// data of a stream made as it's written isn't in the graph, which holds
+/// it empty: it's a block or a form the emitter draws, unmarked under
+/// Strip. The rest of its page is read.
 ///
 /// [`Private::Strip`]: super::Private::Strip
 /// [`private::KEYS`]: crate::private::KEYS

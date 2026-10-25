@@ -12,11 +12,11 @@ use sheaf_edit::{GridPos, HeaderFooterSpec, Z};
 use super::{EditError, Lower, Notice, OthersFound};
 use crate::content::{
     self, BlockAt, ContentError, Font, GenId, PagOrigin, PageContent, Pagination, PaginationKind,
-    PropertiesDict, ResCx, Reserved, SheafBlock, SpanAcross, Std14,
+    PropertiesDict, ResCx, SheafBlock, SpanAcross, Std14,
 };
 use crate::generate::{self, header};
 use crate::model::{
-    DocState, Filter, Frozen, GenSpec, Generator, Layer, LegacySel, MarkedSel, PageDef, PageId,
+    DocState, Filter, Frozen, GenSpec, Generator, Layer, MarkedSel, PageDef, PageId, PrivateSel,
     Scope, Static, StreamSel, WatermarkContent, WatermarkGen,
 };
 use crate::prim::{Key, Val};
@@ -31,50 +31,27 @@ pub(crate) fn set_ocr(
     page: PageId,
     layer: &Arc<TextLayer>,
 ) -> Result<(), EditError> {
-    let stays = put_ocr(lw, page, (!layer.is_empty()).then(|| layer.clone()))?;
-    told_stays(lw, stays.as_slice());
-    Ok(())
+    put_ocr(lw, page, (!layer.is_empty()).then(|| layer.clone()))
 }
 
 /// The recognized text of `pages` taken off, each page's stack's and its
 /// file's ([`put_ocr`]), a page at a time, with progress.
 pub(crate) fn clear_ocr(lw: &mut Lower, pages: &[PageId]) -> Result<(), EditError> {
-    let mut stays = Vec::new();
     for (i, &page) in pages.iter().enumerate() {
         lw.pages_done(i, pages.len())?;
-        stays.extend(put_ocr(lw, page, None)?);
+        put_ocr(lw, page, None)?;
     }
-    told_stays(lw, &stays);
     Ok(())
-}
-
-/// The reader told that the layer an older sheaf wrote stays on `pages`,
-/// where nothing else of their text is taken out of their files, so no
-/// save says so ([`Notice::OcrStays`]).
-fn told_stays(lw: &mut Lower, pages: &[PageId]) {
-    if !pages.is_empty() {
-        let pages = crate::describe::pages_text(pages, &lw.rec);
-        lw.notices.push(Notice::OcrStays { pages });
-    }
 }
 
 /// Page `page`'s recognized text: `text` in place of what it has, or none.
 /// A layer it replaces on the page's stack, saved or not, keeps its
 /// block's id, and a new one draws one; what its file holds is filtered
 /// out ([`saved_ocr`]). Nothing is put when that leaves the page as it is.
-/// `page` when a layer an older sheaf wrote stays in its file and nothing
-/// else there is filtered out: a save, which notes what such a filter
-/// leaves, has nothing to say of it.
-fn put_ocr(
-    lw: &mut Lower,
-    page: PageId,
-    text: Option<Arc<TextLayer>>,
-) -> Result<Option<PageId>, EditError> {
+fn put_ocr(lw: &mut Lower, page: PageId, text: Option<Arc<TextLayer>>) -> Result<(), EditError> {
     lw.read(Key::Page(page));
     let def = lw.rec.def(page).expect("resolved").clone();
-    let (filters, legacy_stays) = saved_ocr(lw, page, &def)?;
-    let drops = Filter::DropStreams(StreamSel::SheafOcr);
-    let stays = (legacy_stays && !filters.contains(&drops)).then_some(page);
+    let filters = saved_ocr(lw, page, &def)?;
     let kept = def.content.ocr_layer().map(|l| l.id);
     let layer = text.map(|text| Layer {
         id: kept.unwrap_or_else(|| lw.block_id()),
@@ -85,26 +62,22 @@ fn put_ocr(
         content = content.with_filters(filters);
     }
     if content == def.content {
-        return Ok(stays);
+        return Ok(());
     }
     let def = PageDef::new(def.base.clone(), def.copy, content);
     lw.rec.put(Key::Page(page), Some(Val::Page(Arc::new(def))));
-    Ok(stays)
+    Ok(())
 }
 
 /// The filters that take the recognized text sheaf wrote in the file of
 /// page `page`, shown as `def`, out of it (§3.4): its OCR blocks, each a
-/// stream of its own, and the layer an older sheaf wrote, with its `q`
-/// ([`StreamSel::SheafOcr`]); and the blocks another tool merged into a
-/// stream ([`MarkedSel::SheafOcr`]), once a splice is shown to take them
-/// out as a save cuts them. None when it holds none. Beside them, whether
-/// a layer an older sheaf wrote stays, without a `q` to take out with it
-/// ([`PageBlocks::legacy_ocr_stays`]). Read from the page's blocks, a fact
-/// of its source read once; a page whose content can't be read, or whose
-/// merged blocks a splice refuses, is [`EditError::Content`].
-///
-/// [`PageBlocks::legacy_ocr_stays`]: crate::content::PageBlocks::legacy_ocr_stays
-fn saved_ocr(lw: &Lower, page: PageId, def: &PageDef) -> Result<(Vec<Filter>, bool), EditError> {
+/// stream of its own ([`StreamSel::SheafOcr`]); and the blocks another
+/// tool merged into a stream ([`MarkedSel::SheafOcr`]), once a splice is
+/// shown to take them out as a save cuts them. None when it holds none.
+/// Read from the page's blocks, a fact of its source read once; a page
+/// whose content can't be read, or whose merged blocks a splice refuses,
+/// is [`EditError::Content`].
+fn saved_ocr(lw: &Lower, page: PageId, def: &PageDef) -> Result<Vec<Filter>, EditError> {
     let (src, index) = (&def.base.src, def.base.index);
     let blocks = src.blocks(index).map_err(|e| lw.content(e, page))?;
     let ocr = (blocks.sheaf.iter()).filter(|b| matches!(b.block, SheafBlock::Ocr(_)));
@@ -116,24 +89,23 @@ fn saved_ocr(lw: &Lower, page: PageId, def: &PageDef) -> Result<(Vec<Filter>, bo
         })
         .collect();
     let mut filters = Vec::new();
-    if streams || blocks.legacy_ocr.is_some() {
+    if streams {
         filters.push(Filter::DropStreams(StreamSel::SheafOcr));
     }
     if !merged.is_empty() {
         cut_together(src, index, &merged).map_err(|e| lw.content(e, page))?;
         filters.push(Filter::DropMarked(MarkedSel::SheafOcr));
     }
-    Ok((filters, blocks.legacy_ocr_stays))
+    Ok(filters)
 }
 
 /// The filters that take sheaf's private data out of the content of page
 /// `def` (§15): `RemovePrivateData`'s, which a Strip output writes
-/// ([`Private::Strip`]). What an older sheaf kept in the lists written in
-/// its pagination artifacts, and in those of sheaf's blocks another tool
-/// merged into a stream ([`LegacySel::Marked`]); what marks its streams as
-/// sheaf's ([`LegacySel::Streams`]); and the lists named in its resources,
-/// and the names an older sheaf gave them ([`LegacySel::Resources`]). Read
-/// from the page's blocks and resources, facts of its source read once.
+/// ([`Private::Strip`]). What marks the lists written in sheaf's blocks
+/// another tool merged into a stream ([`PrivateSel::Marked`]); what marks
+/// its streams as sheaf's ([`PrivateSel::Streams`]); and what marks the
+/// lists named in its resources ([`PrivateSel::NamedLists`]). Read from the
+/// page's blocks and resources, facts of its source read once.
 /// None for a page that holds none, or whose content can't be read, which
 /// is written as it is, and fails a Strip output's check if it holds any
 /// (a Scrub output's says so in a note).
@@ -145,43 +117,34 @@ pub(crate) fn private_filters(def: &PageDef) -> Vec<Filter> {
         return Vec::new();
     };
     let mut sels = Vec::new();
-    let kinds = BTreeSet::from(PaginationKind::ALL);
-    let origins = BTreeSet::from([PagOrigin::SheafLegacy]);
-    if blocks.selected(&kinds, &origins).next().is_some() {
-        sels.push(LegacySel::Marked(MarkedSel::Pagination { kinds, origins }));
-    }
     for b in blocks.sheaf.iter() {
         let sel = match (b.block, b.at) {
             (SheafBlock::Gen(g), BlockAt::Marked(_)) => MarkedSel::SheafGen(g),
             (SheafBlock::Ocr(_), BlockAt::Marked(_)) => MarkedSel::SheafOcr,
             _ => continue,
         };
-        let sel = LegacySel::Marked(sel);
+        let sel = PrivateSel::Marked(sel);
         if !sels.contains(&sel) {
             sels.push(sel);
         }
     }
     if blocks.sheaf_marked {
-        sels.push(LegacySel::Streams);
+        sels.push(PrivateSel::Streams);
     }
-    if private_resources(src, index) {
-        sels.push(LegacySel::Resources);
+    if private_lists(src, index) {
+        sels.push(PrivateSel::NamedLists);
     }
-    sels.into_iter().map(Filter::StripLegacy).collect()
+    sels.into_iter().map(Filter::StripPrivate).collect()
 }
 
-/// Whether page `index` of `src`'s resources hold sheaf's private data: a
-/// name an older sheaf gave one, or a property list named there with a
-/// key of [`private::LIST_KEYS`].
-fn private_resources(src: &Src, index: u32) -> bool {
+/// Whether a property list named in page `index` of `src`'s resources
+/// holds sheaf's private data: a key of [`private::LIST_KEYS`].
+fn private_lists(src: &Src, index: u32) -> bool {
     let Some(facts) = src.page(index) else {
         return false;
     };
-    let resources = facts.resources.as_deref();
-    let reserved = Reserved::read(src.pdf(), resources);
-    let lists = PropertiesDict::read(src.pdf(), resources);
-    (reserved.names()).any(|(_, name)| private::is_resource_name(name))
-        || (lists.lists()).any(|l| (l.iter()).any(|(k, _)| private::LIST_KEYS.contains(&&k[..])))
+    let lists = PropertiesDict::read(src.pdf(), facts.resources.as_deref());
+    (lists.lists()).any(|l| (l.iter()).any(|(k, _)| private::LIST_KEYS.contains(&&k[..])))
 }
 
 /// Nothing when a save can cut `spans`, ranges of page `index` of `src`,
@@ -338,8 +301,8 @@ pub fn others_on(
 /// generators drawing them are off it now, finds (§6.5): the filters that
 /// take out those others drew, and what it found of others', counted
 /// ([`OthersFound`]). Taken: another file's blocks, those another tool
-/// merged into a stream of its own, and the artifacts Acrobat and sheaf
-/// before M10.5 drew, and with `include_authored` the author's own, each
+/// merged into a stream of its own, and the artifacts Acrobat drew, and
+/// with `include_authored` the author's own, each
 /// where a splice takes it out. One a splice refuses, an author's it isn't
 /// asked to take, one inside a form and a page that can't be read are left
 /// as they are; one the page's filters take out already isn't counted.
@@ -418,7 +381,6 @@ fn found_on(
         let count = match (origin, taken) {
             (PagOrigin::Acrobat, true) => &mut found.acrobat,
             (PagOrigin::Sheaf, true) => &mut found.other_files,
-            (PagOrigin::SheafLegacy, true) => &mut found.older_sheaf,
             (PagOrigin::Authored, true) => &mut found.authored,
             (PagOrigin::Authored, false) => &mut found.authored_left,
             (_, false) => &mut found.refused,

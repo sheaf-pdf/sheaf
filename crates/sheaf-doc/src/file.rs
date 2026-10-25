@@ -33,101 +33,32 @@ impl PdfFile {
     }
 }
 
-use std::cell::OnceCell;
 use std::collections::HashMap;
 
 use lopdf::{Dictionary, Object, ObjectId};
 use sheaf_edit::Rotation;
 
-use crate::annot::{Annot, AnnotKind, Box2, PART, Pt, from_json};
+use crate::annot::{Annot, AnnotKind, Box2, Pt, from_json};
 use crate::attachments::Objects;
-use crate::import::{inset, numbers, points, quads, user_box};
-
-/// A page's `/Annots`, as [`sheaf_mark`] and [`is_ours`] read its
-/// entries. A version 1 replacement's struck text is the StrikeOut grouped
-/// under it (`/RT /Group`, its `/IRT` the replacement's entry), found in
-/// an index of the page's StrikeOuts made the first time one is asked
-/// for, so a page of replacements reads in linear time.
-pub(crate) struct PageAnnots<'a> {
-    list: &'a [Object],
-    strikes: OnceCell<HashMap<ObjectId, &'a Dictionary>>,
-}
-
-impl<'a> PageAnnots<'a> {
-    pub(crate) fn new(list: &'a [Object]) -> Self {
-        Self {
-            list,
-            strikes: OnceCell::new(),
-        }
-    }
-
-    /// The first StrikeOut grouped under entry `id`.
-    fn strike<P: Objects + ?Sized>(&self, pdf: &'a P, id: ObjectId) -> Option<&'a Dictionary> {
-        let strikes = self.strikes.get_or_init(|| {
-            let mut by_parent = HashMap::new();
-            for e in self.list {
-                let Some(d) = pdf.dereference(e).ok().and_then(|(_, o)| o.as_dict().ok()) else {
-                    continue;
-                };
-                let name = |key: &[u8], is: &[u8]| {
-                    d.get(key).and_then(Object::as_name).is_ok_and(|n| n == is)
-                };
-                if let Ok(irt) = d.get(b"IRT").and_then(Object::as_reference)
-                    && name(b"RT", b"Group")
-                    && name(b"Subtype", b"StrikeOut")
-                {
-                    by_parent.entry(irt).or_insert(d);
-                }
-            }
-            by_parent
-        });
-        strikes.get(&id).copied()
-    }
-}
 
 /// The mark an `/Annots` entry carries, when this build can read it and
-/// no other tool has changed it since sheaf wrote it (M10.5 §3.6). A
-/// version 2 payload is fresh while its digest is the dictionary's
-/// ([`staleness`](crate::annot::staleness)). A version 1 payload is fresh
-/// while its `modified` is `/M`. Its geometry was in the page's displayed
-/// space, which on a page sheaf had turned wasn't the `/Rotate` the save
-/// wrote, so the geometry is read from the standard keys, which are
-/// PageSpace, and the mark reads upright turned `turn`, the page's
-/// `/Rotate`; a replacement's struck text is its StrikeOut's, among
-/// `annots`, the page's. A page stamp must hold its page and an
-/// attachment its file ([`holds`]). None for anything else, which is
-/// another tool's.
-pub(crate) fn sheaf_mark<'a, P: Objects + ?Sized>(
-    pdf: &'a P,
-    entry: &Object,
-    turn: Rotation,
-    annots: &PageAnnots<'a>,
-) -> Option<Annot> {
-    let (id, dict) = pdf.dereference(entry).ok()?;
+/// no other tool has changed it since sheaf wrote it (M10.5 §3.6): its
+/// payload is this build's version ([`VERSION`](crate::annot::VERSION)),
+/// and fresh while its digest is the dictionary's
+/// ([`staleness`](crate::annot::staleness)). A page stamp must hold its
+/// page and an attachment its file ([`holds`]). None for anything else,
+/// which is another tool's.
+pub(crate) fn sheaf_mark<P: Objects + ?Sized>(pdf: &P, entry: &Object) -> Option<Annot> {
+    let (_, dict) = pdf.dereference(entry).ok()?;
     let dict = dict.as_dict().ok()?;
     let (_, json) = pdf.dereference(dict.get(b"SHEF_Annot").ok()?).ok()?;
     let payload = from_json(text_string(json.as_str().ok()?).as_bytes())?;
+    if payload.v != crate::annot::VERSION {
+        return None;
+    }
     let a = payload.mark;
-    let a = match payload.v {
-        Some(crate::annot::VERSION) => {
-            let digest = crate::annot::staleness(pdf, dict, a.thread_parent().is_some());
-            (payload.std == digest).then_some(a)?
-        }
-        None => {
-            let modified = dict.get(b"M").map(|m| text(pdf, m)).unwrap_or_default();
-            if a.modified != modified {
-                return None;
-            }
-            let strike = || annots.strike(pdf, id?);
-            Annot {
-                kind: from_standard_keys(pdf, dict, &a, strike)?,
-                turn,
-                ..a
-            }
-        }
-        Some(_) => return None,
-    };
-    holds(pdf, dict, &a).then_some(a)
+    let digest = crate::annot::staleness(pdf, dict, a.thread_parent().is_some());
+    (payload.std == digest && holds(pdf, dict, &a)).then_some(a)
 }
 
 /// Whether `dict`, mark `a`'s, holds what the mark names: a page stamp
@@ -154,18 +85,15 @@ pub(crate) fn held<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, a: &Annot) -
 }
 
 /// The page a page stamp's appearance draws, `dict` its dictionary: the
-/// one form its normal appearance's resources name, `/SheafStamp` as
-/// sheaf wrote it before M10.5 slice 6 and a name of its own since.
-/// The form itself isn't read.
+/// one form its normal appearance's resources name. The form itself isn't
+/// read.
 pub(crate) fn stamp_page<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<ObjectId> {
     let normal = dict_at(pdf, dict_at(pdf, dict, b"AP")?, b"N")?;
     let forms = dict_at(pdf, dict_at(pdf, normal, b"Resources")?, b"XObject")?;
-    let form = match forms.get(b"SheafStamp") {
-        Ok(form) => form,
-        Err(_) if forms.len() == 1 => forms.iter().next()?.1,
-        Err(_) => return None,
-    };
-    form.as_reference().ok()
+    if forms.len() != 1 {
+        return None;
+    }
+    forms.iter().next()?.1.as_reference().ok()
 }
 
 /// The embedded file an attachment's file specification holds, `dict` its
@@ -192,165 +120,15 @@ fn dict_at<'a, P: Objects + ?Sized>(
     }
 }
 
-/// A version 1 mark's geometry, as the standard keys sheaf wrote have it:
-/// a box is `/Rect` less `/RD`, or less the writer's pad where it wrote
-/// none; text markup is its `/QuadPoints`, lines and paths their `/L`,
-/// `/Vertices`, `/InkList` and `/CL`; a note's or an attachment's corner
-/// is its icon box's. Everything else is `a`'s.
-fn from_standard_keys<'s, P: Objects + ?Sized>(
-    pdf: &P,
-    dict: &Dictionary,
-    a: &Annot,
-    strike: impl FnOnce() -> Option<&'s Dictionary>,
-) -> Option<AnnotKind> {
-    let rect = numbers(pdf, dict, b"Rect").filter(|r| r.len() == 4)?;
-    let padded = user_box([rect[0], rect[1], rect[2], rect[3]]);
-    let less_pad = || inset(padded, a.stroke.max(1.0) + 1.0);
-    let less_rd = || {
-        let d = numbers(pdf, dict, b"RD").filter(|d| d.len() == 4)?;
-        let (x0, y0) = (padded.x + d[0], padded.y + d[1]);
-        let (x1, y1) = (padded.right() - d[2], padded.bottom() - d[3]);
-        Some(user_box([x0, y0, x1, y1]))
-    };
-    let corner = |b: Box2| Pt { x: b.x, y: b.y };
-    let line = || {
-        let l = numbers(pdf, dict, b"L").filter(|l| l.len() == 4)?;
-        Some(points(&l))
-    };
-    let vertices = || numbers(pdf, dict, b"Vertices").map(|v| points(&v));
-    Some(match a.kind.clone() {
-        AnnotKind::Highlight { .. } => AnnotKind::Highlight {
-            rects: quads(pdf, dict)?,
-        },
-        AnnotKind::Underline { .. } => AnnotKind::Underline {
-            rects: quads(pdf, dict)?,
-        },
-        AnnotKind::StrikeOut { .. } => AnnotKind::StrikeOut {
-            rects: quads(pdf, dict)?,
-        },
-        AnnotKind::Squiggly { .. } => AnnotKind::Squiggly {
-            rects: quads(pdf, dict)?,
-        },
-        AnnotKind::Replace { struck, .. } => AnnotKind::Replace {
-            rects: quads(pdf, strike()?)?,
-            struck,
-            at: less_rd()?,
-        },
-        AnnotKind::Insert { .. } => AnnotKind::Insert { at: less_rd()? },
-        kind @ (AnnotKind::Reply { .. } | AnnotKind::Status { .. }) => kind,
-        AnnotKind::Note { .. } => AnnotKind::Note {
-            pos: corner(less_pad()),
-        },
-        AnnotKind::FileAttachment {
-            icon,
-            file,
-            name,
-            size,
-            ..
-        } => AnnotKind::FileAttachment {
-            pos: corner(less_pad()),
-            icon,
-            file,
-            name,
-            size,
-        },
-        AnnotKind::FreeText { size, .. } => AnnotKind::FreeText {
-            rect: less_rd()?,
-            size,
-        },
-        AnnotKind::Square { .. } => AnnotKind::Square { rect: less_rd()? },
-        AnnotKind::Ellipse { .. } => AnnotKind::Ellipse { rect: less_rd()? },
-        AnnotKind::Tape {
-            size, tape, look, ..
-        } => AnnotKind::Tape {
-            rect: less_pad(),
-            size,
-            tape,
-            look,
-        },
-        AnnotKind::Line {
-            arrow, arrow_start, ..
-        } => {
-            let [a, b] = line()?.try_into().ok()?;
-            AnnotKind::Line {
-                a,
-                b,
-                arrow,
-                arrow_start,
-            }
-        }
-        AnnotKind::Ink { .. } => AnnotKind::Ink {
-            paths: crate::import::ink(pdf, dict)?,
-        },
-        AnnotKind::Stamp { glyph, .. } => AnnotKind::Stamp {
-            rect: less_pad(),
-            glyph,
-        },
-        AnnotKind::Connector { label, partner, .. } => AnnotKind::Connector {
-            rect: less_pad(),
-            label,
-            partner,
-        },
-        AnnotKind::PageStamp {
-            stamp, name, text, ..
-        } => AnnotKind::PageStamp {
-            rect: less_pad(),
-            stamp,
-            name,
-            text,
-        },
-        AnnotKind::TextStamp { text, status, .. } => AnnotKind::TextStamp {
-            rect: less_pad(),
-            text,
-            status,
-        },
-        AnnotKind::PageBorder { status, .. } => AnnotKind::PageBorder {
-            rect: less_pad(),
-            status,
-        },
-        AnnotKind::Polygon { .. } => AnnotKind::Polygon {
-            points: vertices()?,
-        },
-        AnnotKind::Polyline { .. } => AnnotKind::Polyline {
-            points: vertices()?,
-        },
-        AnnotKind::Callout { size, .. } => {
-            // [point, knee, where it meets the box].
-            let cl = numbers(pdf, dict, b"CL").filter(|cl| cl.len() >= 4)?;
-            let cl = points(&cl);
-            AnnotKind::Callout {
-                rect: less_rd()?,
-                knee: cl[1],
-                point: cl[0],
-                size,
-            }
-        }
-        AnnotKind::Measure { what, scale, .. } => AnnotKind::Measure {
-            points: match what {
-                crate::measure::Measured::Distance => line()?,
-                _ => vertices()?,
-            },
-            what,
-            scale,
-        },
-    })
-}
-
 /// Is this `/Annots` entry one of ours to rewrite: a mark this build can
-/// read, fresh, or a companion of one? `annots` is the page's. A
-/// companion is a replacement's StrikeOut: grouped (`/RT /Group`) under
-/// a sheaf Caret by its `/IRT`, or, in a file sheaf wrote before M10.5
-/// slice 9, marked [`PART`] with its `/IRT` a mark. A stale mark isn't
-/// ours, nor is a `/SHEF_Annot` this build can't read, from a newer
-/// sheaf: each is kept like any other tool's annotation, so a save here
-/// never loses it or reverts its edit. It answers as [`sheaf_mark`] does,
-/// so what the open lists as another tool's comment is what a save
-/// keeps.
-pub(crate) fn is_ours<'a, P: Objects + ?Sized>(
-    pdf: &'a P,
-    entry: &Object,
-    annots: &PageAnnots<'a>,
-) -> bool {
+/// read, fresh, or a companion of one? A companion is a replacement's
+/// StrikeOut, grouped (`/RT /Group`) under a sheaf Caret by its `/IRT`. A
+/// stale mark isn't ours, nor is a `/SHEF_Annot` this build can't read,
+/// from another sheaf: each is kept like any other tool's annotation, so a
+/// save here never loses it or reverts its edit. It answers as
+/// [`sheaf_mark`] does, so what the open lists as another tool's comment
+/// is what a save keeps.
+pub(crate) fn is_ours<P: Objects + ?Sized>(pdf: &P, entry: &Object) -> bool {
     let Some(dict) = pdf
         .dereference(entry)
         .ok()
@@ -358,8 +136,7 @@ pub(crate) fn is_ours<'a, P: Objects + ?Sized>(
     else {
         return false;
     };
-    // The turn doesn't decide it.
-    let mark = |entry: &Object| sheaf_mark(pdf, entry, Rotation::R0, annots);
+    let mark = |entry: &Object| sheaf_mark(pdf, entry);
     if dict.has(b"SHEF_Annot") {
         return mark(entry).is_some();
     }
@@ -367,9 +144,6 @@ pub(crate) fn is_ours<'a, P: Objects + ?Sized>(
     let Ok(irt) = dict.get(b"IRT") else {
         return false;
     };
-    if dict.has(PART.as_bytes()) {
-        return mark(irt).is_some();
-    }
     let name = |key: &[u8], is: &[u8]| {
         dict.get(key)
             .and_then(Object::as_name)
@@ -378,16 +152,6 @@ pub(crate) fn is_ours<'a, P: Objects + ?Sized>(
     name(b"RT", b"Group")
         && name(b"Subtype", b"StrikeOut")
         && mark(irt).is_some_and(|a| matches!(a.kind, AnnotKind::Replace { .. }))
-}
-
-/// A text string's text, decoded as [`text_string`] decodes it, after its
-/// references.
-fn text<P: Objects + ?Sized>(pdf: &P, o: &Object) -> String {
-    pdf.dereference(o)
-        .ok()
-        .and_then(|(_, o)| o.as_str().ok())
-        .map(text_string)
-        .unwrap_or_default()
 }
 
 /// An annotation some other tool left on a page of the file, a comment or
@@ -666,8 +430,9 @@ fn is_listed_subtype(s: &str) -> bool {
 
 /// Every mark, comment and link on `pages`, the file's page objects by
 /// index, each with its `/Rotate` as the page table reads it
-/// ([`Source::geom`](crate::Source::geom)), each mark with what it holds:
-/// its page stamp's page or its attachment's file.
+/// ([`Source::geom`](crate::Source::geom)), which another tool's comment
+/// is converted with, each mark with what it holds: its page stamp's page
+/// or its attachment's file.
 pub fn annots_in<P: Objects + ?Sized>(
     pdf: &P,
     pages: impl IntoIterator<Item = (lopdf::ObjectId, Rotation)>,
@@ -689,7 +454,6 @@ pub fn annots_in<P: Objects + ?Sized>(
         if list.is_empty() {
             continue;
         }
-        let entries = PageAnnots::new(list);
         let mut found = Vec::new();
         // Other tools', each by its place in `found`, and their
         // dictionaries, to convert together.
@@ -699,7 +463,7 @@ pub fn annots_in<P: Objects + ?Sized>(
                 continue;
             };
             let Ok(dict) = obj.as_dict() else { continue };
-            if let Some(annot) = sheaf_mark(pdf, entry, turn, &entries) {
+            if let Some(annot) = sheaf_mark(pdf, entry) {
                 let held = held(pdf, dict, &annot);
                 found.push(InFile {
                     object,
@@ -712,7 +476,7 @@ pub fn annots_in<P: Objects + ?Sized>(
             // including a mark another tool has edited since sheaf wrote it
             // and one this build can't read, is listed as another tool's,
             // with what it is as one of our marks.
-            if is_ours(pdf, entry, &entries) {
+            if is_ours(pdf, entry) {
                 continue;
             }
             let subtype = dict
@@ -827,7 +591,6 @@ pub fn annots_in<P: Objects + ?Sized>(
 mod tests {
     use super::*;
     use lopdf::{Object, Stream, dictionary};
-    use sheaf_edit::Rotation;
 
     /// `pdf`'s pages, none of them turned, as [`annots_in`] takes them.
     fn upright(pdf: &lopdf::Document) -> impl Iterator<Item = (lopdf::ObjectId, Rotation)> + '_ {
@@ -949,8 +712,11 @@ mod tests {
         assert!(found[3].grouped && !found[1].grouped);
     }
 
+    /// A mark this build can't read, a kind from a newer sheaf or a
+    /// payload of another version, is another tool's, listed as one and
+    /// kept.
     #[test]
-    fn a_companion_follows_its_mark() {
+    fn a_mark_this_build_cant_read_is_another_tool_s() {
         use lopdf::{Object, Stream, dictionary};
         let mut pdf = lopdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
@@ -975,21 +741,21 @@ mod tests {
             name: String::new(),
         };
         let main = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
+        let mut other_version = main.clone();
+        let json = text_string(main.get(b"SHEF_Annot").unwrap().as_str().unwrap());
+        let version = format!("\"v\":{}", crate::annot::VERSION);
+        assert!(json.contains(&version), "{json}");
+        let json = json.replace(&version, "\"v\":999");
+        other_version.set("SHEF_Annot", Object::string_literal(json));
         let main = pdf.add_object(main);
-        let part = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
-            "IRT" => main, PART => true,
-        });
-        // A mark from a newer sheaf, and its companion.
+        let other_version = pdf.add_object(other_version);
         let unknown = pdf.add_object(dictionary! {
             "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(),
-            "SHEF_Annot" => Object::string_literal(r#"{"id":6,"kind":{"Future":{}}}"#),
+            "SHEF_Annot" => Object::string_literal(
+                format!(r#"{{"v":{},"id":6,"kind":{{"Future":{{}}}}}}"#, crate::annot::VERSION),
+            ),
         });
-        let unknown_part = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
-            "IRT" => unknown, PART => true,
-        });
-        let list: Vec<Object> = [main, part, unknown, unknown_part]
+        let list: Vec<Object> = [main, other_version, unknown]
             .into_iter()
             .map(Object::Reference)
             .collect();
@@ -1007,22 +773,18 @@ mod tests {
         let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
 
-        let page = PageAnnots::new(&list);
-        let mine: Vec<bool> = list.iter().map(|e| is_ours(&pdf, e, &page)).collect();
-        assert_eq!(mine, vec![true, true, false, false]);
+        let mine: Vec<bool> = list.iter().map(|e| is_ours(&pdf, e)).collect();
+        assert_eq!(mine, vec![true, false, false]);
         let found = annots_in(&pdf, upright(&pdf));
         assert_eq!(found.sheaf()[&0], vec![ours]);
-        // The newer sheaf's mark and its companion are listed like another
-        // tool's, and kept.
         let subtypes: Vec<&str> = (found.foreign().into_iter())
             .map(|(_, f)| f.subtype.as_str())
             .collect();
-        assert_eq!(subtypes, vec!["StrikeOut", "Caret"]);
+        assert_eq!(subtypes, vec!["Text", "StrikeOut"]);
     }
 
     /// A replacement's StrikeOut is its Caret's companion by its group
-    /// alone, as sheaf writes it from slice 9: grouped under a sheaf
-    /// Caret. Grouped under another of sheaf's marks, or under another
+    /// alone, as sheaf writes it: grouped under a sheaf Caret. Grouped under another of sheaf's marks, or under another
     /// tool's Caret, a StrikeOut is another tool's.
     #[test]
     fn a_strike_grouped_under_a_sheaf_caret_is_its_companion() {
@@ -1066,7 +828,6 @@ mod tests {
         let [mut strike] = <[_; 1]>::try_from(written.companions).ok().unwrap();
         strike.set("IRT", caret);
         strike.set("RT", Object::Name(b"Group".to_vec()));
-        assert!(!strike.has(PART.as_bytes()));
         let strike = pdf.add_object(strike);
         let note = mark(
             6,
@@ -1105,8 +866,7 @@ mod tests {
         let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
 
-        let page = PageAnnots::new(&list);
-        let mine: Vec<bool> = list.iter().map(|e| is_ours(&pdf, e, &page)).collect();
+        let mine: Vec<bool> = list.iter().map(|e| is_ours(&pdf, e)).collect();
         assert_eq!(mine, vec![true, true, true, false, false, false]);
         let found = annots_in(&pdf, upright(&pdf));
         assert_eq!(found.sheaf()[&0].len(), 2);
@@ -1208,10 +968,18 @@ mod tests {
         let pages_id = pdf.new_object_id();
         let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
         let text = |s: &str| Object::string_literal(s);
+        let at = Box2 {
+            x: 10.0,
+            y: 10.0,
+            w: 30.0,
+            h: 10.0,
+        };
         let ours = Annot {
             id: crate::annot::AnnotId(9),
-            kind: crate::annot::AnnotKind::Note {
-                pos: Pt { x: 1.0, y: 2.0 },
+            kind: crate::annot::AnnotKind::Replace {
+                rects: vec![at],
+                struck: "old".into(),
+                at,
             },
             color: [1, 2, 3],
             opacity: 1.0,
@@ -1226,12 +994,12 @@ mod tests {
             turn: Rotation::R0,
             name: String::new(),
         };
-        let main = crate::serialize::built::to_pdf(&ours, &mut pdf).main;
-        let main = pdf.add_object(main);
-        let part = pdf.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
-            "IRT" => main, PART => true,
-        });
+        let written = crate::serialize::built::to_pdf(&ours, &mut pdf);
+        let main = pdf.add_object(written.main);
+        let [mut strike] = <[_; 1]>::try_from(written.companions).ok().unwrap();
+        strike.set("IRT", main);
+        strike.set("RT", Object::Name(b"Group".to_vec()));
+        let part = pdf.add_object(strike);
         let note = pdf.add_object(dictionary! {
             "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "NM" => text("n"),
             "T" => text("Reviewer"), "Contents" => text("Why?"),

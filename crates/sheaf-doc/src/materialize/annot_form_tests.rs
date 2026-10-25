@@ -107,9 +107,6 @@ fn every_kind_of_mark_reopens_as_written() {
     assert_eq!(marks(&back, 1), want);
     let page = back.page(1).unwrap();
     assert_eq!(back.state().foreign_on(page).count(), 0);
-    // No companion is marked: a replacement's StrikeOut is its Caret's by
-    // its group.
-    assert!(!holds(&out.bytes, crate::annot::PART.as_bytes()));
 }
 
 /// A mark the document holds as it was read is the file's object as it is,
@@ -156,11 +153,9 @@ fn a_mark_as_read_is_the_file_s_object_and_an_edited_one_keeps_its_number() {
 }
 
 /// A replace-text mark saves with its StrikeOut grouped under its Caret,
-/// marked no other way, and reopens as one mark; a file sheaf wrote with
-/// `/SheafPart` on the StrikeOut opens as one mark too, and saves without
-/// it.
+/// marked no other way, and reopens as one mark.
 #[test]
-fn a_replacement_saves_with_no_sheaf_part_and_reopens_as_one_mark() {
+fn a_replacement_saves_its_strike_grouped_and_reopens_as_one_mark() {
     let at = bx(100.0, 600.0, 80.0, 14.0);
     let replace = mark(
         7,
@@ -185,38 +180,11 @@ fn a_replacement_saves_with_no_sheaf_part_and_reopens_as_one_mark() {
         &Object::Reference(caret.0.unwrap())
     );
     assert_eq!(name(&strike.1, b"RT"), Some(b"Group".as_slice()));
-    assert!(!strike.1.has(crate::annot::PART.as_bytes()));
+    assert!(!(strike.1.iter()).any(|(k, _)| crate::private::is_private(k)));
     let back = open(&out.bytes, None);
     let page = back.page(0).unwrap();
     assert_eq!(back.state().annots_on(page).count(), 1);
     assert!(matches!(marks(&back, 0)[0].kind, AnnotKind::Replace { .. }));
-
-    // As sheaf wrote it before: the StrikeOut marked as the Caret's part.
-    let mut f = Form::new(1);
-    let written = crate::serialize::built::to_pdf(&replace, &mut f.pdf);
-    let caret = f.pdf.add_object(written.main);
-    let mut strike = written.companions.into_iter().next().unwrap();
-    strike.set("IRT", caret);
-    strike.set("RT", Object::Name(b"Group".to_vec()));
-    strike.set(crate::annot::PART, true);
-    let strike = f.pdf.add_object(strike);
-    f.set_annots(0, &[caret, strike]);
-    let old = f.bytes();
-    let d = open(&old, None);
-    let page = d.page(0).unwrap();
-    assert_eq!(d.state().annots_on(page).count(), 1);
-    assert_eq!(d.state().marks_on(page).count(), 1);
-    // Unedited, it isn't copied as the file has it: it's written anew.
-    let out = rewrite(&d, Profile::default());
-    assert!(!holds(&out.bytes, crate::annot::PART.as_bytes()));
-    let mut d = d;
-    let mut edited = marks(&d, 0).remove(0);
-    edited.contents = "newer words".into();
-    d.commit_ops(vec![fx::update(&edited)], "edit").unwrap();
-    let out = rewrite(&d, Profile::default());
-    assert!(!holds(&out.bytes, crate::annot::PART.as_bytes()));
-    let back = open(&out.bytes, None);
-    assert_eq!(back.state().annots_on(back.page(0).unwrap()).count(), 1);
 }
 
 /// A mark as the file has it is copied as it is only while it says what

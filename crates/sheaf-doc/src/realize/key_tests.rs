@@ -276,19 +276,19 @@ fn pages_showing_other_pages_have_other_keys() {
 }
 
 /// A page whose filters differ draws differently, a filter that takes
-/// ranges out from one that takes an older sheaf's settings out of the
-/// same ranges among them, so its key differs; the same filters again give
-/// the same key.
+/// ranges out from one that takes sheaf's private data out of the same
+/// ranges' lists among them, so its key differs; the same filters again
+/// give the same key.
 #[test]
 fn each_filter_is_its_page_s_key() {
     use crate::content::{PagOrigin, PaginationKind};
-    use crate::model::{Filter, LegacySel, MarkedSel, PageDef, StreamSel};
+    use crate::model::{Filter, MarkedSel, PageDef, PrivateSel, StreamSel};
     let d = doc_of(1, &[]);
     let p0 = d.page(0).unwrap();
     let screen = ViewInputs::screen();
     let sel = MarkedSel::Pagination {
         kinds: BTreeSet::from([PaginationKind::Watermark]),
-        origins: BTreeSet::from([PagOrigin::SheafLegacy]),
+        origins: BTreeSet::from([PagOrigin::Acrobat]),
     };
     let filtered = |filter: Option<Filter>| {
         let def = d.state().def(p0).unwrap();
@@ -306,17 +306,19 @@ fn each_filter_is_its_page_s_key() {
     let filters = [
         None,
         Some(Filter::DropMarked(sel.clone())),
-        Some(Filter::StripLegacy(LegacySel::Marked(sel.clone()))),
+        Some(Filter::StripPrivate(PrivateSel::Marked(sel.clone()))),
         Some(Filter::DropStreams(StreamSel::SheafGen(
             crate::content::GenId(1),
         ))),
         Some(Filter::DropMarked(MarkedSel::SheafGen(
             crate::content::GenId(1),
         ))),
+        Some(Filter::StripPrivate(PrivateSel::Streams)),
+        Some(Filter::StripPrivate(PrivateSel::NamedLists)),
     ];
     let keys: BTreeSet<RenderKey> = filters.iter().cloned().map(filtered).collect();
     assert_eq!(keys.len(), filters.len());
-    let again = Some(Filter::StripLegacy(LegacySel::Marked(sel)));
+    let again = Some(Filter::StripPrivate(PrivateSel::Marked(sel)));
     assert_eq!(filtered(again.clone()), filtered(again));
 }
 

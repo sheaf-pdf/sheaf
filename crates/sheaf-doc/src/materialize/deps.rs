@@ -939,16 +939,12 @@ impl<'a> Deps<'a> {
             }
             let facts = src.annots();
             let read: HashSet<usize> = facts.on(shown.index).iter().map(|a| a.slot).collect();
-            let entries = crate::file::PageAnnots::new(&base);
             for (slot, entry) in base.iter().enumerate() {
                 let by_record = match entry {
                     Object::Reference(r) => held.contains(r),
                     _ => slots.contains(&slot),
                 };
-                if by_record
-                    || read.contains(&slot)
-                    || crate::file::is_ours(src.pdf(), entry, &entries)
-                {
+                if by_record || read.contains(&slot) || crate::file::is_ours(src.pdf(), entry) {
                     continue;
                 }
                 let popup = (src.pdf().dereference(entry).ok())

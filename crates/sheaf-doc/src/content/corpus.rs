@@ -7,7 +7,7 @@
 //! classified as the tools that made the files drew them; each of them
 //! splices out, as a strip cuts it, or is refused, Acrobat's never; and
 //! each list of theirs written in the content can be written again without
-//! a key, as Clean Copy writes an older sheaf's.
+//! a key, as Clean Copy writes sheaf's without what marks it.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
@@ -51,7 +51,7 @@ struct Outcome {
     acrobat_refused: Vec<String>,
     unstrippable: Vec<String>,
     /// Pagination artifacts' lists written again without `/Type`, as a
-    /// filter writes an older sheaf's without what it kept, by whether the
+    /// filter writes sheaf's without what marks it, by whether the
     /// list is written in the content and whether it could be; and those
     /// in the content refused, each a line.
     rewrites: BTreeMap<(bool, bool), usize>,
@@ -394,12 +394,7 @@ fn corpus_content_lexes_splices_and_classifies() {
     for ((kind, origin), n) in &origins {
         eprintln!("  {kind:?} by {origin:?}: {n}");
     }
-    for origin in [
-        PagOrigin::Sheaf,
-        PagOrigin::SheafLegacy,
-        PagOrigin::Acrobat,
-        PagOrigin::Authored,
-    ] {
+    for origin in [PagOrigin::Sheaf, PagOrigin::Acrobat, PagOrigin::Authored] {
         let n = |made| splices.get(&(origin, made)).copied().unwrap_or(0);
         eprintln!(
             "  {origin:?}'s spliced out alone: {} made, {} refused",

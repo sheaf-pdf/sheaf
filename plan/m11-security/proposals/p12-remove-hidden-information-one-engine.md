@@ -17,9 +17,8 @@ Part of [M11: Security & redaction](../README.md) · [all proposals](README.md)
     `/Names /JavaScript`, Launch, URIs);
   - embedded search indexes;
   - thumbnails;
-  - sheaf's private data (`SheafSettings`, which holds a watermark
-    image's local path; `/SheafHeaderFooter`; `/SHEF_Annot`
-    payloads).
+  - sheaf's private data (`private::KEYS`: `/SHEF_Annot` payloads,
+    `/SHEF_Generators`, and the markers on its blocks and their lists).
 - Unreferenced objects always go, by a full rewrite.
 - Export Redacted Copy offers it as a checkbox, on by default, with
   the categories remembered in `state.json`.

@@ -263,13 +263,12 @@ pub fn import(snap: &Snapshot, store: &Store, comments: &Comments) -> Imported {
             files: Some(&interned),
         };
         let converted = crate::import::convert_page(pdf, &dicts, rotation, files);
-        let page_annots = crate::file::PageAnnots::new(&entries);
         let mut new = Vec::new();
         for ((dict, entry), mark) in dicts.iter().zip(&entries).zip(converted) {
             // One of sheaf's comes back exactly as it was, under the name
             // it had there, so what replies to it there does here; one
             // another tool has edited since is that tool's.
-            let own = crate::file::sheaf_mark(pdf, entry, rotation, &page_annots);
+            let own = crate::file::sheaf_mark(pdf, entry);
             let mark = match own {
                 Some(mut a) => {
                     bring_held(pdf, dict, &mut a, snap, &interned);

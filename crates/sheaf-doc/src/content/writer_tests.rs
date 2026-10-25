@@ -270,42 +270,6 @@ fn names_are_bound_at_the_end() {
     assert_eq!(needs.0[0].name, next(&next(&header.name)));
 }
 
-/// A name given a new one is named as content naming what it binds would
-/// name it, clear of the names kept, and kept in its place: the new name
-/// binds what it did, and content drawing the same resource after names it
-/// so. One that binds something other than a reference is named by its
-/// old name; one not kept isn't renamed.
-#[test]
-fn a_name_is_given_a_new_one() {
-    let mut pdf = Pdf::with_version("1.7");
-    let image = pdf.add_object(Stream::new(dictionary! { "Subtype" => "Image" }, vec![0]));
-    let form = Res::written(image);
-    let mut w = ContentWriter::new();
-    w.draw(form.clone());
-    let (_, drawn) = written(w);
-    let named = drawn.0[0].name.clone();
-    let resources: Object = dictionary! {
-        "XObject" => dictionary! { "SheafWMim" => image, named.clone() => list("Other") },
-        "Font" => dictionary! { "SheafHF" => dictionary! { "F" => Object::Reference((7, 0)) } },
-    }
-    .into();
-    let mut reserved = Reserved::read(&pdf, Some(&resources));
-    let new = reserved.rename(ResKind::XObject, b"SheafWMim").unwrap();
-    assert_eq!(new, next(&named));
-    let names: Vec<(ResKind, &[u8])> = reserved.names().collect();
-    assert!(names.contains(&(ResKind::XObject, &new[..])));
-    assert!(!names.contains(&(ResKind::XObject, &b"SheafWMim"[..])));
-    let mut w = ContentWriter::new();
-    w.draw(form);
-    let (_, needs) = w.finish(&reserved);
-    assert_eq!(needs.0[0].name, new);
-    let font = reserved.rename(ResKind::Font, b"SheafHF").unwrap();
-    let again = Reserved::read(&pdf, Some(&resources)).rename(ResKind::Font, b"SheafHF");
-    assert!(font.starts_with(b"Sh") && font.len() == 8, "{font:?}");
-    assert_eq!(again, Some(font));
-    assert_eq!(reserved.rename(ResKind::Font, b"SheafHF"), None);
-}
-
 /// A resource drawn again is one need, where it was first drawn; a form
 /// written already is named by its number.
 #[test]

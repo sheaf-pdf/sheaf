@@ -1,9 +1,10 @@
 //! sheaf's private data in the files it writes (M10.5 §15): every name it
-//! writes, or wrote before M10.5, that only sheaf reads, where each
-//! appears and how Strip takes it out ([`KEYS`]); the neutral name a
-//! sheaf mark is written with under Strip ([`neutral_nm`]); and what of
-//! them a file holds ([`found`]), which a Strip output's post-condition
-//! fails on (§11.9). Everything else sheaf writes is standard keys.
+//! writes that only sheaf reads, where each appears and how Strip takes it
+//! out ([`KEYS`]); the neutral name a sheaf mark is written with under
+//! Strip ([`neutral_nm`]); and what of them a file holds ([`found`]),
+//! which a Strip output's post-condition fails on (§11.9). Everything else
+//! sheaf writes is standard keys. sheaf is pre-release: it reads only the
+//! names this build writes, none a sheaf before the edit API wrote.
 //!
 //! A stamp library's collection files (`/SheafStampText`,
 //! [`crate::stamp_lib`]) are the user's own library, outside the edit API
@@ -31,11 +32,6 @@ pub enum Place {
     /// A marked range's property list, written in the content or named in
     /// the resources' `/Properties`: a key.
     List,
-    /// A resource's name in a page's resources, and in the content that
-    /// draws with it.
-    Resource,
-    /// A stamp's `/Name`: its value.
-    StampName,
 }
 
 /// One of sheaf's private names.
@@ -43,29 +39,25 @@ pub enum Place {
 pub struct Key {
     /// The name, or for [`Place::Nm`] the text a value starts with.
     pub name: &'static [u8],
-    /// Whether every name it starts is one (`/SheafFlat1`, `/SheafWMgs`).
+    /// Whether every text it starts is one (`sheaf:12`, `sheaf-anon:ab`).
     pub prefix: bool,
     pub places: &'static [Place],
-    /// What an older sheaf wrote, before M10.5: read, never written.
-    pub older: bool,
     /// How Strip takes it out.
     pub strip: &'static str,
 }
 
-/// sheaf's private names (§15), those written now first, then an older sheaf's.
+/// sheaf's private names (§15).
 pub const KEYS: &[Key] = &[
     Key {
         name: b"sheaf:",
         prefix: true,
         places: &[Place::Nm],
-        older: false,
         strip: "a sheaf mark's name, and its StrikeOut's, written neutral (`neutral_nm`)",
     },
     Key {
         name: b"sheaf-anon:",
         prefix: true,
         places: &[Place::Nm],
-        older: false,
         strip: "the name a comment without one is given when a reply made in sheaf names it, \
                 written neutral",
     },
@@ -73,109 +65,34 @@ pub const KEYS: &[Key] = &[
         name: b"SHEF_Annot",
         prefix: false,
         places: &[Place::Annot],
-        older: false,
         strip: "the mark's key left out",
     },
     Key {
         name: b"SHEF_Generators",
         prefix: false,
         places: &[Place::Catalog],
-        older: false,
         strip: "the catalog's key left out",
     },
     Key {
         name: b"SHEF_Block",
         prefix: false,
         places: &[Place::Stream],
-        older: false,
         strip: "a block drawn now isn't marked; a file's block is copied without it \
-                (`LegacySel::Streams`)",
+                (`PrivateSel::Streams`)",
     },
     Key {
         name: b"SHEF_Gen",
         prefix: false,
         places: &[Place::List],
-        older: false,
         strip: "a generator's list drawn now is written without it; a file's is written again \
-                without it (`LegacySel::Resources`, `LegacySel::Marked`)",
+                without it (`PrivateSel::NamedLists`, `PrivateSel::Marked`)",
     },
     Key {
         name: b"SHEF_OcrBlock",
         prefix: false,
         places: &[Place::List],
-        older: false,
         strip: "recognized text drawn now is marked with no list; a file's list is written \
                 again without it",
-    },
-    Key {
-        name: b"SheafStamp",
-        prefix: false,
-        places: &[Place::List, Place::Resource],
-        older: true,
-        strip: "left out of a list; as a stamp's form's name, the stamp is written anew",
-    },
-    Key {
-        name: b"SheafSettings",
-        prefix: false,
-        places: &[Place::List],
-        older: true,
-        strip: "left out of a list (`LegacySel::Marked`)",
-    },
-    Key {
-        name: b"SheafHF",
-        prefix: false,
-        places: &[Place::Resource],
-        older: true,
-        strip: "renamed `/Sh…` (`LegacySel::Resources`)",
-    },
-    Key {
-        name: b"SheafHeaderFooter",
-        prefix: false,
-        places: &[Place::Catalog],
-        older: true,
-        strip: "the catalog's key, owned and never written (`CATALOG_OWNED`)",
-    },
-    Key {
-        name: b"SheafPart",
-        prefix: false,
-        places: &[Place::Annot],
-        older: true,
-        strip: "a mark's companion it marks is written anew with the mark",
-    },
-    Key {
-        name: b"SheafOcrLayer",
-        prefix: false,
-        places: &[Place::Stream],
-        older: true,
-        strip: "the stream copied without it (`LegacySel::Streams`)",
-    },
-    Key {
-        name: b"SheafTick",
-        prefix: true,
-        places: &[Place::StampName],
-        older: true,
-        strip: "a tick's `/Name`, written `/Tick`",
-    },
-    Key {
-        name: b"SheafOcr",
-        prefix: false,
-        places: &[Place::Resource],
-        older: true,
-        strip: "renamed `/Sh…`",
-    },
-    Key {
-        name: b"SheafFlat",
-        prefix: true,
-        places: &[Place::Resource],
-        older: true,
-        strip: "renamed `/Sh…`",
-    },
-    Key {
-        name: b"SheafWM",
-        prefix: true,
-        places: &[Place::Resource],
-        older: true,
-        strip: "renamed `/Sh…`",
     },
 ];
 
@@ -238,12 +155,6 @@ pub fn is_private(name: &[u8]) -> bool {
     (KEYS.iter()).any(|k| k.places != [Place::Nm] && k.names(name))
 }
 
-/// Whether `name` is a name an older sheaf gave a resource, which Strip
-/// renames.
-pub fn is_resource_name(name: &[u8]) -> bool {
-    (KEYS.iter()).any(|k| in_place(k, Place::Resource) && k.names(name))
-}
-
 /// Whether `nm`, an annotation's `/NM`, is a name sheaf gave it.
 pub fn is_sheaf_nm(nm: &[u8]) -> bool {
     (KEYS.iter()).any(|k| k.places == [Place::Nm] && k.names(nm))
@@ -267,19 +178,15 @@ pub fn neutral_nm(nm: &str) -> String {
 }
 
 /// Whether annotation dictionary `dict` holds sheaf's private data: a key
-/// of [`KEYS`], a name sheaf gave it, or an older sheaf's tick's `/Name`.
+/// of [`KEYS`], or a name sheaf gave it.
 pub(crate) fn in_annot(dict: &Dictionary) -> bool {
     let nm = dict.get(b"NM").ok().and_then(|nm| nm.as_str().ok());
-    let name = dict.get(b"Name").ok().and_then(|n| n.as_name().ok());
-    (dict.iter()).any(|(key, _)| is_private(key))
-        || nm.is_some_and(is_sheaf_nm)
-        || name.is_some_and(is_private)
+    (dict.iter()).any(|(key, _)| is_private(key)) || nm.is_some_and(is_sheaf_nm)
 }
 
 /// `dict`, an annotation's dictionary as written, without sheaf's private
-/// data: its keys of [`KEYS`] left out, the name sheaf gave it neutral
-/// ([`neutral_nm`]), and an older sheaf's tick's `/Name` a tick's, as
-/// sheaf names one now.
+/// data: its keys of [`KEYS`] left out, and the name sheaf gave it neutral
+/// ([`neutral_nm`]).
 pub(crate) fn strip_annot(dict: &mut Dictionary) {
     let keys: Vec<Vec<u8>> = (dict.iter())
         .filter(|(key, _)| is_private(key))
@@ -293,13 +200,6 @@ pub(crate) fn strip_annot(dict: &mut Dictionary) {
     {
         let neutral = neutral_nm(&String::from_utf8_lossy(nm));
         dict.set("NM", Object::string_literal(neutral));
-    }
-    if dict
-        .get(b"Name")
-        .and_then(Object::as_name)
-        .is_ok_and(is_private)
-    {
-        dict.set("Name", Object::Name(b"Tick".to_vec()));
     }
 }
 
@@ -317,8 +217,7 @@ pub struct Found {
 /// tiling pattern. Content that can't be read whole is read a stream at a
 /// time, and what can't be read fails closed: content that can't be lexed,
 /// and a stream whose data can't be decoded (lopdf hands back what of a
-/// broken deflated stream inflates) are searched for `/SHEF_` and `/Sheaf`
-/// as bytes,
+/// broken deflated stream inflates) are searched for `/SHEF_` as bytes,
 /// and a stream that decodes past the content limit is taken to hold
 /// some.
 pub fn found(pdf: &Pdf) -> Vec<Found> {
@@ -332,7 +231,7 @@ pub fn found(pdf: &Pdf) -> Vec<Found> {
         if hit {
             let name = match said {
                 Said::Name(n) | Said::Nm(n) => n.to_vec(),
-                Said::Unread => b"/Sheaf".to_vec(),
+                Said::Unread => b"/SHEF_".to_vec(),
             };
             found.insert(Found { at, name });
         }
@@ -340,17 +239,17 @@ pub fn found(pdf: &Pdf) -> Vec<Found> {
     found.into_iter().collect()
 }
 
-/// Every name `pdf` holds that starts `SHEF_` or `Sheaf`, wherever
-/// [`found`] looks: what §15's test holds to [`KEYS`].
+/// Every name `pdf` holds that starts `SHEF_`, wherever [`found`] looks:
+/// what §15's test holds to [`KEYS`].
 #[cfg(test)]
 pub(crate) fn sheaf_names(pdf: &Pdf) -> BTreeSet<Vec<u8>> {
     let mut names = BTreeSet::new();
     walk(pdf, &mut |_, said| match said {
-        Said::Name(name) if name.starts_with(b"SHEF_") || name.starts_with(b"Sheaf") => {
+        Said::Name(name) if name.starts_with(b"SHEF_") => {
             names.insert(name.to_vec());
         }
         Said::Unread => {
-            names.insert(b"Sheaf?".to_vec());
+            names.insert(b"SHEF_?".to_vec());
         }
         _ => {}
     });
@@ -364,7 +263,7 @@ enum Said<'a> {
     Name(&'a [u8]),
     /// An annotation's `/NM`.
     Nm(&'a [u8]),
-    /// Content that can't be read, holding `/SHEF_` or `/Sheaf`.
+    /// Content that can't be read, holding `/SHEF_`.
     Unread,
 }
 
@@ -407,7 +306,7 @@ fn walk(pdf: &Pdf, f: &mut dyn FnMut(ObjectId, Said)) {
                 Err(ContentFault::TooLarge(_)) => f(id, Said::Unread),
                 Err(_) => {
                     let raw = pdf.get_object(stream).and_then(Object::as_stream);
-                    if raw.is_ok_and(|raw| says_sheaf(&raw.content)) {
+                    if raw.is_ok_and(|raw| says_shef(&raw.content)) {
                         f(id, Said::Unread);
                     }
                 }
@@ -417,8 +316,8 @@ fn walk(pdf: &Pdf, f: &mut dyn FnMut(ObjectId, Said)) {
 }
 
 /// Each name and inline property list's key in content `bytes`, `at`'s,
-/// handed to `f`; content that can't be lexed is searched for `/SHEF_` and
-/// `/Sheaf` as bytes.
+/// handed to `f`; content that can't be lexed is searched for `/SHEF_` as
+/// bytes.
 fn lexed(
     at: ObjectId,
     bytes: &[u8],
@@ -430,7 +329,7 @@ fn lexed(
             Ok((_, Tok::Operand(operand))) => operand,
             Ok(_) => continue,
             Err(_) => {
-                if says_sheaf(bytes) {
+                if says_shef(bytes) {
                     f(at, Said::Unread);
                 }
                 break;
@@ -446,10 +345,9 @@ fn lexed(
     }
 }
 
-/// Whether `bytes` hold `/SHEF_` (a name sheaf writes) or `/Sheaf` (an older
-/// sheaf's).
-fn says_sheaf(bytes: &[u8]) -> bool {
-    bytes.windows(6).any(|w| w == b"/SHEF_" || w == b"/Sheaf")
+/// Whether `bytes` hold `/SHEF_`, the prefix of every name sheaf writes.
+fn says_shef(bytes: &[u8]) -> bool {
+    bytes.windows(6).any(|w| w == b"/SHEF_")
 }
 
 /// Each name and dictionary key in `obj`, at any depth, handed to `f`
@@ -480,37 +378,25 @@ mod tests {
     /// matches names exactly or by prefix as it says.
     #[test]
     fn the_table_says_what_is_private() {
-        assert_eq!(
-            LIST_KEYS,
-            [
-                &b"SHEF_Gen"[..],
-                b"SHEF_OcrBlock",
-                b"SheafStamp",
-                b"SheafSettings"
-            ]
-        );
-        assert_eq!(STREAM_KEYS, [&b"SHEF_Block"[..], b"SheafOcrLayer"]);
+        assert_eq!(LIST_KEYS, [&b"SHEF_Gen"[..], b"SHEF_OcrBlock"]);
+        assert_eq!(STREAM_KEYS, [&b"SHEF_Block"[..]]);
         for name in [
             &b"SHEF_Annot"[..],
-            b"SheafOcr",
-            b"SheafOcrLayer",
-            b"SheafFlat1",
-            b"SheafWMgs",
-            b"SheafTick12",
-            b"SheafHeaderFooter",
+            b"SHEF_Generators",
+            b"SHEF_Block",
+            b"SHEF_Gen",
+            b"SHEF_OcrBlock",
         ] {
             assert!(is_private(name), "{}", String::from_utf8_lossy(name));
         }
-        for name in [&b"SheafStampText"[..], b"SheafOcrX", b"Sheaf", b"ShABCDEF"] {
+        for name in [&b"SheafStampText"[..], b"SHEF_GenX", b"SHEF_", b"ShABCDEF"] {
             assert!(!is_private(name), "{}", String::from_utf8_lossy(name));
         }
-        assert!(is_resource_name(b"SheafWMim") && is_resource_name(b"SheafHF"));
-        assert!(!is_resource_name(b"SHEF_Gen"));
         assert!(is_sheaf_nm(b"sheaf:12") && is_sheaf_nm(b"sheaf-anon:ab"));
         assert!(!is_sheaf_nm(b"sheafy") && !is_sheaf_nm(b"a1b2-c3"));
         // Every name sheaf writes is a second-class name (ISO 32000-2 Annex
         // E): its prefix, `SHEF_`, then the rest.
-        for key in KEYS.iter().filter(|k| !k.older && k.places != [Place::Nm]) {
+        for key in KEYS.iter().filter(|k| k.places != [Place::Nm]) {
             let name = String::from_utf8_lossy(key.name);
             assert!(key.name.starts_with(b"SHEF_"), "{name}");
             assert_eq!(
@@ -534,19 +420,19 @@ mod tests {
     }
 
     /// What's found: keys and names anywhere, a sheaf mark's `/NM`, and in
-    /// a page's content a name and an inline list's key; a stream not
-    /// content isn't lexed.
+    /// a page's content a name and an inline list's key; a string isn't a
+    /// name, and a stream not content isn't lexed.
     #[test]
     fn found_reads_dictionaries_names_and_content() {
         let mut pdf = Pdf::with_version("1.7");
         let content = pdf.add_object(Stream::new(
-            dictionary! { "SheafOcrLayer" => true },
-            b"/Artifact <</SheafSettings (x) /Type /Pagination>> BDC /SheafHF 9 Tf (Sheaf) Tj EMC"
+            dictionary! { "SHEF_Block" => dictionary! { "K" => "Ocr", "B" => Object::string_literal("b1") } },
+            b"/Artifact <</SHEF_Gen (g1) /Type /Pagination>> BDC /SHEF_OcrBlock 9 Tf (SHEF_Annot) Tj EMC"
                 .to_vec(),
         ));
         let image = pdf.add_object(Stream::new(
             dictionary! { "Subtype" => "Image" },
-            b"/SheafWMim Do".to_vec(),
+            b"/SHEF_Image Do".to_vec(),
         ));
         let page = pdf.add_object(dictionary! { "Type" => "Page", "Contents" => content });
         let annot = pdf.add_object(dictionary! {
@@ -559,23 +445,23 @@ mod tests {
         assert_eq!(
             found(&pdf),
             [
-                at(content, b"SheafOcrLayer"),
-                at(page, b"SheafHF"),
-                at(page, b"SheafSettings"),
+                at(content, b"SHEF_Block"),
+                at(page, b"SHEF_Gen"),
+                at(page, b"SHEF_OcrBlock"),
                 at(annot, b"SHEF_Annot"),
                 at(annot, b"sheaf:7"),
             ]
         );
         let names = sheaf_names(&pdf);
-        assert!(names.contains(b"SheafHF".as_slice()));
+        assert!(names.contains(b"SHEF_OcrBlock".as_slice()));
         assert!(
-            !names.contains(b"SheafWMim".as_slice()),
+            !names.contains(b"SHEF_Image".as_slice()),
             "{image:?} isn't content"
         );
     }
 
     /// Content that can't be lexed is found to hold private data when its
-    /// bytes say `/SHEF_` or `/Sheaf`, and not otherwise.
+    /// bytes say `/SHEF_`, and not otherwise.
     #[test]
     fn content_that_cant_be_read_fails_closed() {
         let unread = |data: &[u8]| {
@@ -586,32 +472,30 @@ mod tests {
         };
         let want = |at| Found {
             at,
-            name: b"/Sheaf".to_vec(),
+            name: b"/SHEF_".to_vec(),
         };
-        let (page, said) = unread(b"BT (never ends /SheafHF 9 Tf");
-        assert_eq!(said, [want(page)]);
         let (page, said) = unread(b"BT (never ends /SHEF_Gen 9 Tf");
         assert_eq!(said, [want(page)]);
         assert_eq!(unread(b"BT (never ends /F1 9 Tf").1, []);
     }
 
     /// A page with a stream whose data can't be decoded is read a stream
-    /// at a time: an older sheaf's list in another of its streams is found,
+    /// at a time: a generator's list in another of its streams is found,
     /// and the stream that can't be is found to hold private data when its
-    /// bytes say `/Sheaf`, and not otherwise.
+    /// bytes say `/SHEF_`, and not otherwise.
     #[test]
     fn a_stream_that_cant_be_decoded_fails_closed() {
         let page_of = |undecoded: &[u8]| {
             let mut pdf = Pdf::with_version("1.7");
-            let older = pdf.add_object(Stream::new(
+            let readable = pdf.add_object(Stream::new(
                 dictionary! {},
-                b"/Artifact <</SheafSettings (x)>> BDC 0 0 9 9 re f EMC".to_vec(),
+                b"/Artifact <</SHEF_Gen (g1)>> BDC 0 0 9 9 re f EMC".to_vec(),
             ));
             let filter = dictionary! { "Filter" => "JBIG2Decode" };
             let undecoded = pdf.add_object(Stream::new(filter, undecoded.to_vec()));
-            let contents = vec![older.into(), undecoded.into()];
+            let contents = vec![readable.into(), undecoded.into()];
             let page = pdf.add_object(dictionary! { "Type" => "Page", "Contents" => contents });
-            assert!(PageContent::read(&pdf, &[older, undecoded], &Limits::DEFAULT).is_err());
+            assert!(PageContent::read(&pdf, &[readable, undecoded], &Limits::DEFAULT).is_err());
             (page, found(&pdf))
         };
         let at = |at, name: &[u8]| Found {
@@ -619,8 +503,8 @@ mod tests {
             name: name.to_vec(),
         };
         let (page, said) = page_of(b"/F1 9 Tf");
-        assert_eq!(said, [at(page, b"SheafSettings")]);
-        let (page, said) = page_of(b"/SheafHF 9 Tf");
-        assert_eq!(said, [at(page, b"/Sheaf"), at(page, b"SheafSettings")]);
+        assert_eq!(said, [at(page, b"SHEF_Gen")]);
+        let (page, said) = page_of(b"/SHEF_OcrBlock 9 Tf");
+        assert_eq!(said, [at(page, b"/SHEF_"), at(page, b"SHEF_Gen")]);
     }
 }

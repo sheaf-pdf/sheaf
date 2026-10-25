@@ -70,8 +70,8 @@ fn block(d: &Document, page: PageId) -> Option<BlockId> {
 }
 
 /// The recognized text a file holds, in each shape sheaf wrote it, is
-/// filtered out by a re-OCR and by Clear: streams of their own (an older
-/// sheaf's layer with its `q`, a block) dropped whole, a block merged into
+/// filtered out by a re-OCR and by Clear: a block in a stream of its own
+/// dropped whole, a block merged into
 /// another stream cut out. Either is replaced text, once a page; set again
 /// or cleared again, the page keeps the one filter.
 #[test]
@@ -79,8 +79,7 @@ fn set_and_clear_filter_out_the_text_a_file_holds() {
     let streams = Filter::DropStreams(StreamSel::SheafOcr);
     let merged = Filter::DropMarked(MarkedSel::SheafOcr);
     let shapes = [
-        (saved::legacy_page as fn() -> Pdf, &streams),
-        (saved::block_page, &streams),
+        (saved::block_page as fn() -> Pdf, &streams),
         (saved::merged_page, &merged),
     ];
     let replaced = Flags::CONTENT | Flags::REMOVES | Flags::REPLACES_TEXT;

@@ -392,8 +392,7 @@ Session and `sheaf edit`):
   terminal's widgets by page, and those no page lists, a page template's),
   the page labels, the generators sheaf drew (`/SHEF_Generators`, read
   as written, the pages each is on from its blocks' stream markers; from
-  slice 17 the header and footer too, and an older sheaf's
-  `/SheafHeaderFooter` is read no more), attachments, the portfolio
+  slice 17 the header and footer too), attachments, the portfolio
   schema, layers, and the outline with its colors, styles and closed
   state (`/C`, `/F`, a negative `/Count`), each
   item with its object and whether it holds an action or destination sheaf
@@ -542,20 +541,14 @@ not what's stored.
   `/Rect`, its parent's, set later too; and `/AP`, which other tools
   regenerate. A tick is a stamp named `/Tick`; it is known by the mark's
   `id`, as every mark is.
-- **Reading a mark** (`file::sheaf_mark`): version 2 is a mark while its
-  digest matches. Version 1, from before slice 5, held its geometry in
-  the page's displayed space, which on a page sheaf had turned wasn't the
-  `/Rotate` the save wrote, so its geometry comes from the standard keys,
-  already PageSpace (a box is `/Rect` less `/RD` or the old writer's pad;
-  text markup is `/QuadPoints`; lines and paths are `/L`, `/Vertices`,
-  `/InkList` and `/CL`; a replacement's struck text is its grouped
-  StrikeOut's, found through an index of the page's StrikeOuts made
-  once), its `turn` is the page's `/Rotate`, and it's a mark while
-  the JSON's `modified` is `/M`. A mark that fails either check was
-  edited by another tool, and opens as that tool's comment, a record as
-  other tools' comments are: shown, deletable and adoptable, never
-  reverted. `file::is_ours` asks the same reader, so a save keeps its
-  dictionary as the other tool wrote it.
+- **Reading a mark** (`file::sheaf_mark`): a payload is a mark when it
+  says this build's version (`v`, which every payload holds) and while its
+  digest matches. sheaf is pre-release: a payload of another version, one
+  without a version among them (version 1, before slice 5), isn't read. A
+  mark whose digest doesn't match was edited by another tool, and opens as
+  that tool's comment, a record as other tools' comments are: shown,
+  deletable and adoptable, never reverted. `file::is_ours` asks the same
+  reader, so a save keeps its dictionary as the other tool wrote it.
 - **Copied marks get new ids.** `/NM` need only be unique on its page,
   and Acrobat's Insert Pages copies `sheaf:<id>` with the page. At the
   open the first mark, in page and then `/Annots` order, keeps an id, and
@@ -695,8 +688,7 @@ lint ledger) keeps them out of everything but tests.
   `/Watermark` or `/Background`, the outermost one) with who drew each,
   sheaf's blocks by stream marker (`/SHEF_Block`) and by marked-content
   marker (`/SHEF_Gen`, `/SHEF_OcrBlock`), the isolating streams
-  (`/SHEF_Block << /K /Isolate >>`), the OCR layer sheaf wrote before
-  (its `q` and its layer, marked `/SheafOcrLayer`), the balance, and
+  (`/SHEF_Block << /K /Isolate >>`), the balance, and
   whether a form the page draws outside its pagination artifacts has one
   inside, which removing the page's would leave in place. A source reads
   each XObject its pages draw once, whatever names and pages draw it
@@ -709,9 +701,6 @@ lint ledger) keeps them out of everything but tests.
     `/SHEF_Gen` (watermarks and backgrounds from slice 16, the header and
     footer from slice 17; from slice 18 the recognized text's blocks are
     `/SHEF_Block` streams too, but no artifacts);
-  - **`SheafLegacy`:** sheaf before M10.5: `/SheafStamp` or
-    `/SheafSettings` in its list, drawn in the `/SheafHF` font, or in a
-    `/SheafOcrLayer` stream;
   - **`Acrobat`:** it paints nothing but forms, at least one, and each
     has `/PieceInfo /ADBE_CompoundType /Private` a pagination kind;
   - **`Authored`:** any other, the author's own running heads, as Word,
@@ -752,10 +741,10 @@ lint ledger) keeps them out of everything but tests.
   finished: `/Sh` and six base32 characters of the digest, the next name
   up where the resources already bind it to something else, and the
   same name again where they bind it to the same thing, so a header
-  written again keeps its list's name. No name is given: `/SheafHF`
-  went with the legacy header in slice 17, and is read only to tell an
-  older sheaf's artifacts, and `/SheafOcr` with the legacy OCR layer in
-  slice 18, whose stream `/SheafOcrLayer` tells it. The emitter writes a
+  written again keeps its list's name. No name is given: the names the
+  header and the OCR layer were drawn in went with them in slices 17 and
+  18, and what a sheaf before the edit API wrote isn't read (sheaf is
+  pre-release). The emitter writes a
   content's resources by digest,
   one object a resource a file; `ResObjects` (`serialize::built` from
   slice 20, `content::to_lopdf` before) writes them into a PDF sheaf
@@ -1894,8 +1883,8 @@ and the text itself is kept. The resources they draw with are named
 `/Sh` and six characters of their digest, and are one object a file
 whichever marks and pages use them (bug 19): one mark of every kind
 draws with three fonts and two graphics states between them. A page
-stamp's page is written once a file, as a form drawn under such a name
-(`/SheafStamp` is only read), and an attachment's file once. Both come
+stamp's page is written once a file, as a form drawn under such a name,
+and an attachment's file once. Both come
 from what the marks hold (a form a source's mark draws, a library
 stamp's page and an attached file from their blobs), not this machine's
 cache. A generator's marked content names its property list in the
@@ -2168,10 +2157,9 @@ below).
   slice 16, the header and footer from 17) and, from slice 18, its
   recognized text are drawn as blocks around its isolated content
   (Watermarks and backgrounds as generators; OCR as content). Until slice
-  18 the OCR layer went through the legacy installer, with the emitter as
-  its `content::sink::Sink`: `text_layer::install` (`[q, base…, layer]`,
-  `/SheafOcrLayer`, `/SheafOcr`), which first took out a layer the page
-  held already; until slice 17 the header and footer went through
+  18 the OCR layer went through the old installer, with the emitter as
+  its `content::sink::Sink`: `text_layer::install` (`[q, base…, layer]`),
+  which first took out a layer the page held already; until slice 17 the header and footer went through
   `stamps::install` too, its Bates numbers counted at each Rewrite. The
   page's own
   streams are referenced, never re-encoded; a resource is one object a
@@ -2193,8 +2181,7 @@ below).
   form, its resources by digest through the emitter's sink) and a
   replacement's StrikeOut (`AnnotPart(id, Companion)`), which carries
   `/IRT` to its Caret and `/RT /Group` and nothing else: `file::is_ours`
-  knows a companion by that group under a sheaf Caret, and still reads
-  `/SheafPart` in older files. A page stamp draws the form its
+  knows a companion by that group under a sheaf Caret. A page stamp draws the form its
   `FormRef` names (the source's object, or a `Blob`'s page made a form,
   once a file), an attachment embeds its `BlobRef`'s bytes, once a file.
   A mark read from the primary keeps its number; one the state holds as
@@ -2331,7 +2318,7 @@ below).
   pruned, told to stop and waited for when the save stops first. An
   annotation, widget or field nothing changed is the file's object as it
   is without being built, only while it's what the built one would be (a
-  mark's `/P` its page's and no pop-up or `/SheafPart` companion; another
+  mark's `/P` its page's and no pop-up; another
   tool's annotation no `/RT` without a parent; an outline root typed; a
   field no empty `/Kids`), and the form check runs only when the save
   wrote any of the form anew. The graph is lopdf's eager load, which
@@ -3819,7 +3806,7 @@ changes the key only where a generator is laid out in the turned page;
 characters are in PageSpace). On a page with recognized text and a
 header, the text reads in draw order: the page's own, then the
 recognized words, then the header (§11.4). In slice 17, whose header was
-a generator block while the OCR layer was still the legacy installer's,
+a generator block while the OCR layer was still the old installer's,
 the header read before the recognized words; slice 18 made the layer a
 block of its own, drawn before the generators over the page.
 
@@ -4115,8 +4102,8 @@ other programs drew of its kind goes from the pages it draws on (§3.5,
 §6.5, §11.4, proposals 30, 31 and 39 and bugs 16–18 and 28 of
 `plan/complete/m10.5-edit-api/README.md`). The derived copy that drew a watermark into
 a copy of each page is gone, and with it `watermark::install` and
-`read`, the per-page ExtGState, font and image, the `/SheafWM*` names
-and `SheafSettings`, which nothing writes now.
+`read`, the per-page ExtGState, font and image, and the names and
+settings it wrote into the page, which nothing writes or reads now.
 
 ```rust
 pub enum Z { Under, Over }                                    // sheaf_edit, kebab-case
@@ -4137,11 +4124,11 @@ pub enum Scope { All, Pages(im::OrdSet<PageId>) }
 pub enum ImageRef { Blob(BlobRef), Placed(Placed) }
 pub enum PageForm { Blob { pdf: BlobRef, index: u32 }, Placed(Placed) }
 pub struct Placed { pub at: ObjRef, pub res: ResId, pub turns: u8 }
-pub enum Filter { DropMarked(MarkedSel), DropStreams(StreamSel), StripLegacy(LegacySel) }
+pub enum Filter { DropMarked(MarkedSel), DropStreams(StreamSel), StripPrivate(PrivateSel) }
 pub enum MarkedSel { SheafGen(GenId),
                      Pagination { kinds: BTreeSet<PaginationKind>, origins: BTreeSet<PagOrigin> } }
 pub enum StreamSel { SheafGen(GenId) }
-pub enum LegacySel { Marked(MarkedSel) }
+pub enum PrivateSel { Marked(MarkedSel) }
 impl Generator { pub fn covers(&self, page: PageId) -> bool; pub fn z(&self) -> Z;
                  pub fn scope(&self) -> Cow<'_, Scope>; pub fn replaces(&self) -> &BTreeSet<PaginationKind>; }
 ```
@@ -4183,8 +4170,8 @@ moved them onto `Generator` as fields, with `frozen`, for both kinds;
   for what others drew of its kind and adds filters: `DropStreams` for
   another file's blocks in streams of their own, `DropMarked(SheafGen)`
   for blocks another tool merged into a stream, and a `Pagination`
-  filter for Acrobat's and an older sheaf's ranges, the author's own
-  too with `include_authored`, each origin only where a splice takes at
+  filter for Acrobat's ranges, the author's own too with
+  `include_authored`, each origin only where a splice takes at
   least one of its ranges. What it found, by who drew it, and what it
   left in place is counted at lowering, in its resolved op's `others`
   (`tx::OthersFound`), and said in its line: "Remove the
@@ -4346,7 +4333,7 @@ whether a page is intact, and counts such a page as changed.
 ### Others' watermarks (proposal 31)
 
 What a generator draws on a page replaces what others drew there of its
-`replaces` kinds: Acrobat's, an older sheaf's and another file's blocks
+`replaces` kinds: Acrobat's and another file's blocks
 (`PagOrigin::REPLACED`), never the author's own, which only Remove with
 `include_authored` takes. The cut is made at emit (`replacing`), only on
 a page whose blocks hold such a range, through `content::splice_each`
@@ -4366,31 +4353,29 @@ counted. The cut goes with drawing the generators: under `content_only`
 a replaced artifact stays as the file has it, so OCR may read a
 replaced Acrobat watermark's text.
 
-### An older sheaf's settings, and Clean Copy
+### What marks sheaf's merged blocks, and Clean Copy
 
-`Filter::StripLegacy(LegacySel::Marked(sel))` writes the property lists
-of the ranges selected again without `LEGACY_KEYS` (from slice 19
-`private::LIST_KEYS`: `/SheafSettings`, with its image's local path, and
-`/SheafStamp`), keeping what they draw: `lex::without_entries` removes
-the entries and the spaces before them and keeps every other byte, and
-the result must read back (`lex::object`) as the list less those keys,
-or the rewrite is refused (`SpliceError::List`: a named list, one across
-streams, a key that isn't a name or a value that isn't an object, a
-range that doesn't open with `BDC`). Rewrites go in the same `Filtered`
-copies as cuts (`Spliced::streams(content, rewrites)`; one inside a
-taken cut goes with it); a refused one keeps the settings, with a Note.
-Clean Copy, and print and page images without markup, read each page's
-blocks and add the filter where an older sheaf drew a watermark or
-background (`save::without_markup`; from slice 19 `private_filters`, the
+`Filter::StripPrivate(PrivateSel::Marked(sel))` writes the property lists
+of the ranges selected again without `private::LIST_KEYS` (`/SHEF_Gen`
+and `/SHEF_OcrBlock`, which mark a generator's block or an OCR block
+another tool merged into a stream), keeping what they draw:
+`lex::without_entries` removes the entries and the spaces before them and
+keeps every other byte, and the result must read back (`lex::object`) as
+the list less those keys, or the rewrite is refused (`SpliceError::List`:
+a named list, one across streams, a key that isn't a name or a value
+that isn't an object, a range that doesn't open with `BDC`). Rewrites go
+in the same `Filtered` copies as cuts (`Spliced::streams(content,
+rewrites)`; one inside a taken cut goes with it); a refused one keeps
+what marks it, with a Note. Clean Copy, and print and page images
+without markup, read each page's blocks and add the filter where such a
+block is merged into a stream (`private_filters`, the
 `RemovePrivateData` transform's); adding it is `CONTENT | REMOVES`
-(`RemovedKind::OlderSettings`, from slice 19 `PrivateData`), so an
-Append can't leave the path in an earlier revision. Every older sheaf's
-list rewrites (lopdf wrote them, one operation a stream); in the corpus
-one Word list split across two streams is refused. Once cleaned, such a
-range reads as the author's (`Authored`), and its `/SheafWM*` names,
-like named lists' settings, are slice 19's RemovePrivateData's
-(`LegacySel::Resources`; see Private data, under Exports, memory
-sources, Session and `sheaf edit`).
+(`RemovedKind::PrivateData`), so an Append can't leave the path in an
+earlier revision. A list named in the page's resources is
+RemovePrivateData's too (`PrivateSel::NamedLists`; see Private data,
+under Exports, memory sources, Session and `sheaf edit`). sheaf is
+pre-release: what a sheaf before the edit API kept in what it drew isn't
+read, recognized or taken out.
 
 ### The app
 
@@ -4415,7 +4400,7 @@ watermark to remove". Choosing the menu item again closes the dialog.
 **Deleted:** `derive::watermark`, `current_watermark` and `has_kinds`;
 all of `watermark.rs` (`Watermark`, `Mark`, `Anchor`, `FONT`,
 `install`, `read`, the per-page ExtGState, font and image and the
-`/SheafWM*` names); `Derive::Watermark` and `RemoveWatermark` with
+names it drew with); `Derive::Watermark` and `RemoveWatermark` with
 `set_base`'s Unencodable arm; `save::HeaderKept` and `derived_copy`'s
 `header` and geometry parameters; `stamps::WATERMARK` and `BACKGROUND`
 (`stamps::strip` stayed the header and footer's alone until slice 17); the
@@ -4444,10 +4429,10 @@ writes the page or a view draws it, found again from `/SHEF_Generators`
 when the file opens. Its page tokens are live, read from the document as
 it's written, and its Bates numbers, date and file are fixed when it's
 set (§3.5, §6.5, §7.1–7.2, §9.1, §11.3–11.4, §11.9, proposals 8 and 31
-and bugs 16, 24, 28 and 29 of `plan/complete/m10.5-edit-api/README.md`). The legacy
-header went with it: `stamps::install`, its catalog record
-`/SheafHeaderFooter`, Bates numbers counted at each Rewrite, the
-`LegacyHeaderFooter` Rewrite and the Full sidecar; and so did derived
+and bugs 16, 24, 28 and 29 of `plan/complete/m10.5-edit-api/README.md`). The old
+header went with it: `stamps::install`, its catalog record, Bates
+numbers counted at each Rewrite, the `LegacyHeaderFooter` Rewrite and
+the Full sidecar; and so did derived
 sources, whose last maker was Remove Header/Footer's strip.
 
 ```rust
@@ -4536,8 +4521,7 @@ its page tokens count the pages written.
   a page at a time, with progress and a way to cancel (`pages_done`,
   §6.3), and adds the filters `found_on` gives: `DropStreams` or
   `DropMarked(SheafGen)` for another file's blocks, and a `Pagination`
-  filter for Acrobat's and an older sheaf's ranges, the author's too
-  with `include_authored`, each only where a splice takes it out.
+  filter for Acrobat's ranges, the author's too with `include_authored`, each only where a splice takes it out.
   `OthersFound` counts them by who drew them, and what's left (the
   author's, refused, inside forms, unreadable); what the page's filters
   take out already isn't counted again. Its line: "Remove the header and
@@ -4575,16 +4559,15 @@ its page tokens count the pages written.
   tests intact; from slice 18 the recognized text's block goes between
   the page's content and the watermark (OCR as content).
 - **Replacing others' headers** is the watermark's rule (Others'
-  watermarks): Acrobat's, an older sheaf's and another file's headers
-  and footers go from the pages the header covers, the author's stay.
+  watermarks): Acrobat's and another file's headers and footers go from
+  the pages the header covers, the author's stay.
   A page whose content can't be read gets no header, said once in a
   Note, as watermarks do.
 - **`/SHEF_Generators`** has a `header-footer` kind: the spec with its
   font, and `frozen` `{date, file}`; the Bates numbers are the blocks'
-  `/N`. A watermark's entry is what slice 16 wrote, byte for byte.
-  `/SheafHeaderFooter` is written no more and stays catalog-owned
-  (`CATALOG_OWNED`), so a save drops an older sheaf's; `/SheafHF` and
-  `/SheafStamp` are only read, to tell an older sheaf's artifacts. A
+  `/N`. A watermark's entry is what slice 16 wrote, byte for byte. What
+  a sheaf before the edit API wrote of its header (a catalog record, a
+  font and a list of its own names) isn't read: sheaf is pre-release. A
   header needs PDF 1.4, as a watermark does (`needs_after`).
 - **On screen** a view draws the header through the same emission
   (`ViewInputs.generators`). A page's render key holds each generator's
@@ -4606,10 +4589,7 @@ survive a save, a reopen and a reorder after. A page whose block another
 tool merged into its content has no `/N` to read (`Saved::unnumbered`):
 its number is lost, recognition logs it, and a save says so ("The Bates
 numbers on pages 2, 3 can't be read: another program merged the header
-into the page. …"). An older sheaf's catalog header isn't read: its
-artifacts are `SheafLegacy` by their `/SheafHF` font or `/SheafStamp`
-list, which Set replaces and Remove counts and takes, but nothing
-prefills from its settings.
+into the page. …").
 
 ### Live redraws (proposal 8)
 
@@ -4748,11 +4728,13 @@ the page's stack, with a block id, written as a `/SHEF_Block` stream
 after the page's isolated content and before the generators drawn over
 it, and found again in a reopened file by that stream's marker. A layer
 a file holds is like any other, saved or not: a re-OCR or Clear takes it
-out, an older sheaf's too, and the save says so (§3.4, §6.1, §6.4, §7.1,
-§11.4, §11.9, §13, proposal 26 and bug 14 of `plan/complete/m10.5-edit-api/README.md`).
-The legacy installer went with it: `text_layer::install`, `strip` and
-`has_layer`, `[q, base…, layer]` with `/SheafOcrLayer` and `/SheafOcr`,
-and the emitter's special cases for it.
+out, and the save says so (§3.4, §6.1, §6.4, §7.1, §11.4, §11.9, §13,
+proposal 26 and bug 14 of `plan/complete/m10.5-edit-api/README.md`). The
+old installer went with it: `text_layer::install`, `strip` and
+`has_layer`, `[q, base…, layer]` with names of its own, and the
+emitter's special cases for it; and later the reading of the layer it
+wrote (sheaf is pre-release: what a sheaf before the edit API wrote
+isn't read).
 
 ```rust
 pub struct Layer { pub id: BlockId, pub body: Static }            // sheaf_doc::model
@@ -4789,18 +4771,11 @@ Flattened}`).
 - **What the file holds.** Both read the page's blocks (`Source::blocks`,
   a fact of its source read once; `saved_ocr`) and add the filters that
   take the recognized text sheaf wrote in its file out: `DropStreams(
-  StreamSel::SheafOcr)` for an OCR block that's a stream of its own or an
-  older sheaf's layer with its `q` (`PageBlocks::legacy_ocr`, both or
-  neither, so what's left balances as it did), and `DropMarked(
-  MarkedSel::SheafOcr)` for blocks another tool merged into a stream,
-  once a splice is shown to take them together. Both record a read of
-  the page's `Page(p)`, so a flush that changes nothing still conflicts
-  with a change to the page under `Validate`. An older sheaf's layer
-  stream that lost its `q`, or a second one, can't be taken out (its `Q`
-  ends the page's own; `PageBlocks::legacy_ocr_stays`): beside text a
-  filter takes out, a save says it stays; on a page with nothing else to
-  take out, no filter is added and the commit says it instead
-  (`Notice::OcrStays`, since the backlog-fixes PR, B7).
+  StreamSel::SheafOcr)` for an OCR block that's a stream of its own, and
+  `DropMarked(MarkedSel::SheafOcr)` for blocks another tool merged into a
+  stream, once a splice is shown to take them together. Both record a
+  read of the page's `Page(p)`, so a flush that changes nothing still
+  conflicts with a change to the page under `Validate`.
 - **In the app** (since the backlog-fixes PR, F8): Document > Remove
   Recognized Text… asks whether the selected pages or every page, then
   runs `ClearOcrText` as a planner (`ocr_clear.rs`), one undo step. On
@@ -4808,7 +4783,7 @@ Flattened}`).
 - **`EditError::Content { op, page, why }`** (§6.4): a page whose content
   can't be read, or whose merged block a splice refuses, fails the op,
   naming it, the page's position and why (`ContentError::on_page`). Where
-  the legacy installer drew without lexing, Set on such a page now
+  the old installer drew without lexing, Set on such a page now
   fails; the app's OCR run counts the page as failed and goes on.
 - **Effects** (§7.1). A layer set where the saved state had none is
   `CONTENT`, so it appends; one the saved state had, replaced or gone
@@ -4841,14 +4816,12 @@ Flattened}`).
   background, header or footer is drawn on page 3, whose content can't be
   read.").
 - **Taken out.** `rebuilt` acts on the filters: OCR blocks that are
-  streams of their own and an older sheaf's `q` and layer are left out of
-  `/Contents`; merged OCR ranges are cut out of their streams
-  (`splice_each`, a copy of each stream, `ObjKey::Filtered`), and the
-  names only they used are dropped from the page's resources. A legacy
-  layer whose `q` is gone stays (its `Q` would unbalance the page), as
-  does a cut a splice refuses, said in a Note ("Recognized text sheaf
-  wrote earlier stays on page 3: taking it out would change what else
-  the page draws."). What's left is counted again, so the isolation
+  streams of their own are left out of `/Contents`; merged OCR ranges
+  are cut out of their streams (`splice_each`, a copy of each stream,
+  `ObjKey::Filtered`), and the names only they used are dropped from the
+  page's resources. A cut a splice refuses stays, said in a Note
+  ("Recognized text sheaf wrote earlier stays on page 3: taking it out
+  would change what else the page draws."). What's left is counted again, so the isolation
   matches.
 - **On screen** a view draws the stack's layer when its inputs ask for
   it (`ocr_over`: every consumer's but `content_only`'s, which blank
@@ -4859,8 +4832,8 @@ Flattened}`).
 ### Found again after reopen
 
 - **`Marker::Ocr(BlockId)`.** `Source::markers` reads a page's OCR blocks
-  by their stream's dictionary, as it reads a generator's. An older
-  sheaf's layer and a flattened block are none: the page's content.
+  by their stream's dictionary, as it reads a generator's. A flattened
+  block is none: the page's content.
 - **The static-over slot.** A saved OCR block no filter drops stays where
   sheaf wrote it: `[gen-under… QOpen inner… QClose ocr… gen-over…]`.
   `intact` peels the OCR blocks off before it checks the isolation, so a
@@ -4987,7 +4960,7 @@ pub enum Static { OcrText(Arc<TextLayer>), Placements(Arc<[Placement]>) }    // 
 pub struct Placement { pub form: FormRef, pub matrix: Affine, pub tag: PlaceTag }
 pub enum FormRef { Base(ObjRef), Blob(BlobRef), Pinned(Arc<PinnedAp>) }
 pub enum BlockKind { Ocr, Flattened }                  // Layer::kind(), from the body
-pub enum LegacySel { Marked(MarkedSel), Streams, Resources }
+pub enum PrivateSel { Marked(MarkedSel), Streams, Resources }
 pub struct Session { pub doc: Document, pub view: ViewFacts, .. }     // sheaf_ops::session
 pub enum SaveTo { InPlace, File { path: PathBuf, append: bool } }
 pub struct NeedsDecision(pub Ask);
@@ -5172,38 +5145,33 @@ reference to its form.
 
 ### Private data
 
-`private::KEYS` (§15) is every name sheaf writes, or wrote before
-M10.5, that only sheaf reads: where it appears and how Strip takes it
-out. `found(pdf)` lists what of them a file holds (dictionary keys and
+`private::KEYS` (§15) is every name sheaf writes that only sheaf reads:
+where it appears and how Strip takes it out. sheaf is pre-release: it
+reads only the names this build writes, and what a sheaf before the edit
+API wrote (its own names, before they were second-class `SHEF_` ones)
+is neither read nor recognized nor stripped. `found(pdf)` lists what of them a file holds (dictionary keys and
 names anywhere, sheaf `/NM`s, and the names and inline lists' keys in
 the content of pages, forms and tiling patterns; content that can't be
 read whole is read a stream at a time, and content that can't be lexed
-or a stream that can't be decoded but says `/Sheaf` counts, as does a
+or a stream that can't be decoded but says `/SHEF_` counts, as does a
 stream past the content limit), and a Strip output whose graph holds
 any fails (`verify::private`, §11.9 item 4), so a clean copy can't hold
 them. A Scrub output (print, with markup or without) is written as Strip
 writes it, and what's left is a note (`verify::private_left`): a
 printer's or a page image's file, or text read from it, mustn't fail for
-what an older sheaf left on a page sheaf can't read. Print with markup
+what sheaf left on a page sheaf can't read. Print with markup
 kept sheaf's private data until the backlog-fixes PR (B13): its header
 stayed live in `/SHEF_Generators`, so the file opened in sheaf again
 numbered it against its own pages ("Page 1 of 2" for pages 5 and 6 of
 10). Everything else sheaf writes is standard keys.
 
-| Name | Where | Written | Under Strip |
-|---|---|---|---|
-| `sheaf:…`, `sheaf-anon:…` | `/NM` | now | written neutral (`neutral_nm`: a UUID-shaped xxh3-128 digest of the name) |
-| `SHEF_Annot` | annotation | now | left out; marks are written anew, never as read |
-| `SHEF_Generators` | catalog | now | left out |
-| `SHEF_Block` | stream | now | not marked; a file's block copied without it (`LegacySel::Streams`) |
-| `SHEF_Gen`, `SHEF_OcrBlock` | property list | now | lists written without them; recognized text `/ShOCR BMC` with no list |
-| `SheafStamp` | list, resource | older | left out of a list; a stamp drawn by it written anew |
-| `SheafSettings` | list | older | left out (`LegacySel::Marked`) |
-| `SheafHF`, `SheafOcr`, `SheafFlat*`, `SheafWM*` | resource | older | renamed `/Sh…` (`LegacySel::Resources`) |
-| `SheafHeaderFooter` | catalog | older | owned, never written |
-| `SheafPart` | annotation | older | its companion written anew with its mark |
-| `SheafOcrLayer` | stream | older | copied without it (`LegacySel::Streams`) |
-| `SheafTick*` | a stamp's `/Name` | older | written `/Tick` |
+| Name | Where | Under Strip |
+|---|---|---|
+| `sheaf:…`, `sheaf-anon:…` | `/NM` | written neutral (`neutral_nm`: a UUID-shaped xxh3-128 digest of the name) |
+| `SHEF_Annot` | annotation | left out; marks are written anew, never as read |
+| `SHEF_Generators` | catalog | left out |
+| `SHEF_Block` | stream | not marked; a file's block copied without it (`PrivateSel::Streams`) |
+| `SHEF_Gen`, `SHEF_OcrBlock` | property list | lists written without them (`PrivateSel::Marked`, `PrivateSel::NamedLists`); recognized text `/ShOCR BMC` with no list |
 
 `LIST_KEYS` and `STREAM_KEYS` are derived from it at compile time
 (`model::LEGACY_KEYS` went). A stamp library's collection files
@@ -5219,25 +5187,22 @@ resources.
   isolation unmarked, generator lists `<< /Type /Pagination /Subtype …
   >>` (`generate::layout` and `text_layer::block` take a `Private`). A
   Strip target planned as an Append is refused.
-- **The filters** (`Filter::StripLegacy`, `private_filters(def)` from
+- **The filters** (`Filter::StripPrivate`, `private_filters(def)` from
   the page's blocks and resources) cover what the file holds:
-  `Marked(Pagination { every kind, SheafLegacy })`, `Marked(SheafGen(g))`
-  and `Marked(SheafOcr)` for merged blocks; `Streams`, when the page has
-  a stream sheaf marked (`PageBlocks::sheaf_marked`), copying each with
-  its dictionary stripped; `Resources`, when its resources hold a private
-  name or list key: named `/Properties` lists lose `LIST_KEYS`, and each
-  legacy resource name is renamed `/Sh…` (`Reserved::rename`) in the
-  resources and in the content (`content::renames`: `Tf`, `Do`, `gs`,
-  `sh`, `cs`, `scn`, `BDC`, `DP`), every other byte as it was. A named
-  list under `Marked` alone is still refused with a note. On the Keep
+  `Marked(SheafGen(g))` and `Marked(SheafOcr)` for merged blocks;
+  `Streams`, when the page has a stream sheaf marked
+  (`PageBlocks::sheaf_marked`), copying each with its dictionary
+  stripped; `NamedLists`, when a list its resources' `/Properties` name
+  holds a key of `LIST_KEYS`, which it loses there, every byte of the
+  content as it was. A named list under `Marked` alone is still refused
+  with a note. On the Keep
   path nothing changes order, so a save's bytes are as before. Adding
   the filters is `RemovedKind::PrivateData` ("page's private data from
   sheaf"; `OlderSettings` went).
 
 Clean Copy and print without markup are the presets that strip. Content
 sheaf can't read keeps what it holds, and a clean copy of a page whose
-content can't be read but holds sheaf's names, or of another tool's
-appearance drawing an old `/SheafStamp` form, fails: it says so rather
+content can't be read but holds sheaf's names fails: it says so rather
 than write them. Print without markup writes such a page with a note.
 
 ### Pages made in memory
@@ -5605,7 +5570,8 @@ into the pages:
 - **Every way out** (sheaf-ops' `tests/exports.rs`, in a child process
   whose `TMPDIR`, `TMP`, `TEMP`, `XDG_CACHE_HOME` and `HOME` are empty
   directories that must stay so, `common::own_dirs`): a filled hybrid
-  1040 (a fixture without the corpus) with an older sheaf's watermark,
+  1040 (a fixture without the corpus) with another file's generator's
+  watermark merged into a page,
   three other tools' squares (hidden, not printed, printed) and a check
   box with no `/AS`, given a note and an unsaved Bates header, then
   written 16 ways: Save and Save As by both strategies, the recovery
@@ -5644,7 +5610,7 @@ is_link_or_field, without_markup, EXPORT, CLEAN, written, is_the_file}`
 `model::held_stamp` and `find_stamp`'s cache arm, combine's
 `page_source`, the app's blank and image cache writes and the stamps
 panel's; `model::LEGACY_KEYS` and `RemovedKind::OlderSettings` (now
-`private::LIST_KEYS` and `PrivateData`); `/SheafFlat1`'s writer;
+`private::LIST_KEYS` and `PrivateData`); the old flatten's writer;
 `scan::add_text` and its throwaway document, blank.rs's and comments
 import's hand-rolled open and save, Combine's `open::start` and its
 write and reopen, `comments::summary_pdf`; the app's
@@ -6167,14 +6133,12 @@ the page's `PageDef`.
   the page still showing the file it opened, and the next save writes it
   again in place of what the file holds. A file opened again holds the
   block as the page's own content, kept in its place by its marker; a
-  re-OCR or a Clear takes it out (the stack's `SheafOcr` filters), and an
-  older sheaf's `/SheafOcrLayer` with its `q`, so a layer in a file is
-  like any other, saved or not. The model reads no layer back from a
+  re-OCR or a Clear takes it out (the stack's `SheafOcr` filters), so a
+  layer in a file is like any other, saved or not. The model reads no layer back from a
   file: its words are the page's text, as PDFium reads it. Without
   sheaf's private data (a clean copy, print without markup; M10.5 slice
-  19) the range is `/ShOCR BMC` with no list, a file's lists lose
-  `/SHEF_OcrBlock`, and an older sheaf's layer stream its
-  `/SheafOcrLayer` and `/SheafOcr` names.
+  19) the range is `/ShOCR BMC` with no list, and a file's lists lose
+  `/SHEF_OcrBlock`.
 - **Ops**: `SetOcrText` (one page's layer) and `ClearOcrText`, which put
   the pages' `PageDef`s and nothing else, each reading the page's blocks
   for the text its file holds (a page whose content can't be read is

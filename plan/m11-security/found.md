@@ -59,14 +59,14 @@ references are as of `f61e7eb`. The slice in brackets fixes each one.
    - a Replace mark's `struck` text and mark contents in `/SHEF_Annot`
      (`annot.rs`);
    - bookmark titles from "Bookmark matches" (`pattern_panel.rs`);
-   - OCR layer streams (`/SheafOcrLayer`);
+   - OCR blocks (streams marked `/SHEF_Block << /K /Ocr >>`);
    - `/ActualText` and `/Alt` in the structure tree.
 
    A content rewriter alone wouldn't reach them. [Slices 5 and 7, by
    proposals 7 and 8.]
 9. **Hidden data in saved files:**
    - watermark settings with the image's local path in content property
-     lists (`watermark.rs`, `SheafSettings`);
+     lists (`watermark.rs`);
    - header/footer settings in the catalog;
    - `/Info`, XMP and `/PieceInfo` kept as they were, with `ModDate` and
      `Producer` never updated.
@@ -74,7 +74,8 @@ references are as of `f61e7eb`. The slice in brackets fixes each one.
    All are fine in a binder, but sanitizing must remove them. [Slice 9.
    M10.5 no longer writes the watermark settings or the image's local
    path (slice 16), and Clean Copy strips sheaf's private data,
-   `private::KEYS` (slice 19).]
+   `private::KEYS` (slice 19). What a sheaf before the edit API wrote is
+   unsupported, pre-release: it isn't read or stripped.]
 10. **Gaps in lopdf 0.45:**
     - strings inside stream dictionaries are neither decrypted nor
       encrypted (issue #603), for example an Indexed palette;

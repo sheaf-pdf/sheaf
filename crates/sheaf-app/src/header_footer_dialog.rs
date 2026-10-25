@@ -13,7 +13,7 @@
 //! again at each change of the settings and each change the document goes
 //! through ([`HeaderFooterDialog::follow`]), and the page realized from the
 //! state that leaves, as the screen draws it; the header set again replaces
-//! the one drawn there, and those Acrobat or an older sheaf drew. It says
+//! the one drawn there, and those Acrobat drew. It says
 //! what others drew of headers and footers on the selected pages, or all
 //! of them, which applying replaces and Remove takes off, counted once off
 //! the UI thread as it opens (`generator_dialog::Count`; proposal 31,

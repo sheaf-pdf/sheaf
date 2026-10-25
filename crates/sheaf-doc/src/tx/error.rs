@@ -157,11 +157,6 @@ pub enum Notice {
     ///
     /// [`Document::commit`]: crate::model::Document::commit
     Unencodable,
-    /// The recognized text an older sheaf wrote stays on `pages`, which
-    /// name them as the reader does: its layer lost the `q` it was written
-    /// with, so its `Q` ends the page's own. What a save says of such a
-    /// layer beside text it takes out, for a page it takes nothing out of.
-    OcrStays { pages: String },
 }
 
 impl fmt::Display for Notice {
@@ -198,11 +193,6 @@ impl fmt::Display for Notice {
             Notice::Unencodable => f.write_str(
                 "some characters can't be drawn in the built-in fonts and show as “?” in the \
                  file; the text itself is kept",
-            ),
-            Notice::OcrStays { pages } => write!(
-                f,
-                "recognized text sheaf wrote earlier stays on {pages}: taking it out would \
-                 change what else the page draws"
             ),
         }
     }

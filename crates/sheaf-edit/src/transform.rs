@@ -39,7 +39,7 @@ pub enum Transform {
     /// links and the form's widgets stay as `keep` says.
     RemoveMarkup { keep: MarkupKeep },
     /// None of sheaf's private data (`private::KEYS`): what sheaf marks
-    /// what it writes with, and what an older sheaf kept in what it drew.
+    /// what it writes with.
     RemovePrivateData,
 }
 

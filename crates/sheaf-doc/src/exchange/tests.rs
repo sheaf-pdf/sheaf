@@ -223,9 +223,7 @@ fn another_pdf_s_comments_are_read_from_it() {
         assert_eq!(names, want.map(|(page, nm)| (page, nm.to_string())));
         assert_eq!(c.parent_of(c.dict(1).unwrap()).as_deref(), Some("ann-1"));
         let entry = Object::Reference(c.annots[2].1);
-        let entries = [entry.clone()];
-        let annots = crate::file::PageAnnots::new(&entries);
-        let back = crate::file::sheaf_mark(c.src.pdf(), &entry, Rotation::R0, &annots).unwrap();
+        let back = crate::file::sheaf_mark(c.src.pdf(), &entry).unwrap();
         assert_eq!(
             (back.id, back.kind, back.contents),
             (ours.id, ours.kind.clone(), ours.contents.clone())

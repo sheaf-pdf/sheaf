@@ -198,14 +198,14 @@ pub enum Op {
         include_authored: bool,
     },
     /// The header and footer, on the pages `scope` says, in place of any
-    /// there is, and of those Acrobat or an earlier sheaf drew there. The
+    /// there is, and of those Acrobat or another file drew there. The
     /// author's own stay.
     SetHeaderFooter {
         spec: HeaderFooterSpec,
         scope: ScopeSel,
     },
-    /// Take the header and footer off `pages`, and those Acrobat, an older
-    /// sheaf or another file drew there. `include_authored` takes the
+    /// Take the header and footer off `pages`, and those Acrobat or another
+    /// file drew there. `include_authored` takes the
     /// author's own off too: those the program that made the file drew.
     RemoveHeaderFooter {
         pages: PageSel,

@@ -1298,13 +1298,13 @@ fn a_key_the_model_doesnt_list_is_counted_by_its_kind_of_name() {
     );
 
     // Any other key the model doesn't list in an object sheaf built whole
-    // is a finding: misspelled, or an older sheaf's private key. Merged
+    // is a finding: misspelled, or a name no one defines. Merged
     // over a source's, it may be the source's, and is counted only.
     // A page's content, the plain stream table, is said to be a stream
     // of its own: a key it doesn't list is one too.
     let mut misspelled = changed(keys, 4, |annot| {
         annot.set("Contnets", text("A note"));
-        annot.set("SheafPart", 1);
+        annot.set("MadeUp", 1);
     });
     misspelled = changed(misspelled, 3, |page| page.set("Contents", r(6)));
     let content = Stream::new(dictionary! { "Subtype" => "Form" }, b"q Q".to_vec());
@@ -1316,7 +1316,7 @@ fn a_key_the_model_doesnt_list_is_counted_by_its_kind_of_name() {
         [
             (Some(6), "Stream", "Subtype", Rule::Unlisted, "/Form"),
             (Some(4), "AnnotText", "Contnets", Rule::Unlisted, "(A note)"),
-            (Some(4), "AnnotText", "SheafPart", Rule::Unlisted, "1"),
+            (Some(4), "AnnotText", "MadeUp", Rule::Unlisted, "1"),
         ],
         "{report}"
     );
