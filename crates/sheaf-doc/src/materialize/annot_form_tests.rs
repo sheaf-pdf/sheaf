@@ -298,7 +298,7 @@ fn a_reply_follows_its_mark_given_a_fresh_id() {
         assert_eq!(list.len(), 2, "page {index}");
         // An insert's marks come after the file's other annotations.
         let (reply, mark) = (&list[0], &list[1]);
-        assert!(mark.1.has(b"SheafAnnot"));
+        assert!(mark.1.has(b"SHEF_Annot"));
         assert_eq!(
             reply.1.get(b"IRT").unwrap(),
             &Object::Reference(mark.0.unwrap()),

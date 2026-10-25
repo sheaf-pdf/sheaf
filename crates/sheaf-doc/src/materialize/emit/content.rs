@@ -8,7 +8,7 @@
 //!   ([`generators_on`]'s order), then what a flatten drew there, last, as
 //!   the annotations showed over everything, so the page's own text reads
 //!   first, then the recognized words, then the header. Each block is a
-//!   stream of its own marked `/SheafBlock`. A generator's says `<< /K /Gen
+//!   stream of its own marked `/SHEF_Block`. A generator's says `<< /K /Gen
 //!   /G (g…) /L <…> /R <…> /N (…) >>`, its generator, its layout's digest,
 //!   its recipe's and, on a page the header numbers, its Bates number;
 //!   identical blocks are one object ([`ObjKey::Block`]), so a watermark on
@@ -90,8 +90,8 @@
 //!   (one level down), so the form an Acrobat watermark draws is no longer
 //!   the page's, but those a block drawn anew binds to the same resource.
 //! - **Without sheaf's private data** (`Private::Strip`), what's drawn
-//!   anew is unmarked: a block's stream says no `/SheafBlock`, a
-//!   generator's list no `/SheafGen`, recognized text is marked `/ShOCR`
+//!   anew is unmarked: a block's stream says no `/SHEF_Block`, a
+//!   generator's list no `/SHEF_Gen`, recognized text is marked `/ShOCR`
 //!   with no list, and the streams that isolate the page's content say
 //!   nothing either.
 //!
@@ -1361,16 +1361,16 @@ fn names_digest(bytes: &[u8]) -> u64 {
     sheaf_util::checksum(bytes) as u64
 }
 
-/// What a block's stream dictionary says: `/SheafBlock` and `marker`, or
+/// What a block's stream dictionary says: `/SHEF_Block` and `marker`, or
 /// nothing when the emission strips sheaf's private data (§15).
 fn marked(cx: &Cx, marker: Dictionary) -> Dictionary {
     match cx.strips() {
         true => Dictionary::new(),
-        false => dictionary! { "SheafBlock" => marker },
+        false => dictionary! { "SHEF_Block" => marker },
     }
 }
 
-/// A block of sheaf's drawing `ops`, marked `/SheafBlock` with `marker`
+/// A block of sheaf's drawing `ops`, marked `/SHEF_Block` with `marker`
 /// ([`marked`]), as a stream of its own, once a file: where it is, and its
 /// key.
 fn block(cx: &mut Cx, marker: Dictionary, ops: Vec<u8>) -> (Object, ObjKey) {
@@ -1395,7 +1395,7 @@ fn layer(cx: &mut Cx, l: &Layer, reserved: &mut Reserved, needs: &mut ResourceNe
     }
 }
 
-/// A block of sheaf's drawing `ops`, marked `/SheafBlock` with `marker`
+/// A block of sheaf's drawing `ops`, marked `/SHEF_Block` with `marker`
 /// ([`marked`]), as a stream of its own, once a file, its data deflated as
 /// it's written ([`Deferred`]): where it is. Keyed as [`block`] keys it.
 fn deferred_block(cx: &mut Cx, marker: Dictionary, ops: Vec<u8>) -> Object {
@@ -1555,7 +1555,7 @@ fn art(cx: &mut Cx, content: &WatermarkContent) -> Option<Art> {
 }
 
 /// What watermark `content`'s image or page is drawn as, as
-/// `/SheafGenerators` says it: the digest of its resource, and the quarter
+/// `/SHEF_Generators` says it: the digest of its resource, and the quarter
 /// turns an image shows upright at. Nothing, for one that can't be had,
 /// which draws nothing and isn't found again.
 pub(crate) fn drawn_as(cx: &mut Cx, content: &WatermarkContent) -> (ResId, u8) {

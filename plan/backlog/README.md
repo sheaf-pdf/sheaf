@@ -139,10 +139,10 @@ Status: open
 | [F20](F20.md) | Upstream: cms `CertificateChoices` alternatives for attribute certificates | upstream | 2026-10-23, the build-or-adopt audit |
 | [F21](F21.md) | Try PP-OCRv6 in the PaddleOCR engine | feature | 2026-10-23, the build-or-adopt audit |
 | [F23](F23.md) | hayro-syntax as a second reader in the lazy-reader corpus test | feature | 2026-10-23, the build-or-adopt audit |
-| [F24](F24.md) | sheaf's private names as second- or third-class names | feature | 2026-10-24, the Arlington checks |
 | [F25](F25.md) | Upstream: hayro-cmap's codespace ranges, public | upstream | 2026-10-24, the content interpreter's wrap-up |
 | [F26](F26.md) | skrifa past 0.46, for read-fonts' Type 1 parser of 0.43 and later | feature | 2026-10-24, the content interpreter's wrap-up |
 | [F27](F27.md) | Research: what sheaf should read from a corrupt Flate stream (corpus 5208359) | research | 2026-10-24, the content interpreter's wrap-up |
+| [F28](F28.md) | Register the `SHEF` prefix before the first release | feature | 2026-10-25, F24 |
 
 Outside material already compared against sheaf: [sources
 checked](../complete/backlog-sources-checked.md).

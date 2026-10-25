@@ -5,7 +5,7 @@
 //! spec's face, one font a file; its page tokens read as the document
 //! being written has them, its Bates numbers as they were fixed, which an
 //! open reads back from the blocks; the headers others drew on its pages
-//! replaced, the author's own left; found again from `/SheafGenerators`.
+//! replaced, the author's own left; found again from `/SHEF_Generators`.
 //! And its live tokens drawn again after a save: a reorder appends the
 //! pages whose numbers moved, their old blocks let go (§11.9), while a
 //! change to its text rewrites.
@@ -65,10 +65,10 @@ fn numbers(doc: &Document) -> Vec<Option<u64>> {
     ids(doc).iter().map(|&p| g.frozen.bates_number(p)).collect()
 }
 
-/// The `/SheafBlock` dictionary of stream `id` of `pdf`, if it has one.
+/// The `/SHEF_Block` dictionary of stream `id` of `pdf`, if it has one.
 fn marker(pdf: &Pdf, id: ObjectId) -> Option<Dictionary> {
     let (dict, _) = stream(pdf, id);
-    dict.get(b"SheafBlock").ok()?.as_dict().ok().cloned()
+    dict.get(b"SHEF_Block").ok()?.as_dict().ok().cloned()
 }
 
 /// The blocks of generators on each page of `pdf`, in order.
@@ -205,7 +205,7 @@ fn inserted(how: How) {
     assert!(data.is_empty(), "{data:?}");
     assert!(
         !dict
-            .get(b"SheafBlock")
+            .get(b"SHEF_Block")
             .unwrap()
             .as_dict()
             .unwrap()
@@ -592,7 +592,7 @@ fn a_found_header_removed_leaves_no_trace() {
         assert!(!streams.iter().any(|&s| isolates(&pdf, s)));
     }
     let all = everything(&pdf);
-    for gone in ["CONFIDENTIAL", "SheafBlock", "SheafGen", "Isolate"] {
+    for gone in ["CONFIDENTIAL", "SHEF_Block", "SHEF_Gen", "Isolate"] {
         assert!(!all.contains(gone), "{gone}");
     }
     let (_, third) = opened(&dir, "c.pdf", &std::fs::read(&path).unwrap());
@@ -620,7 +620,7 @@ fn what_sheaf_wouldn_t_write_as_a_header_isn_t_found() {
     let found = |edit: &dyn Fn(&mut serde_json::Value)| {
         let mut pdf = Pdf::load_mem(&bytes).unwrap();
         let catalog = pdf.catalog().unwrap();
-        let at = (catalog.get(b"SheafGenerators"))
+        let at = (catalog.get(b"SHEF_Generators"))
             .and_then(Object::as_reference)
             .unwrap();
         let mut json: serde_json::Value =
@@ -808,7 +808,7 @@ fn traded(doc: &mut Document, path: &Path, said_now: [&str; 5]) {
     let objects = objects_of(&file[before..]);
     let count = |what: &str| objects.iter().filter(|o| o.contains(what)).count();
     let (dicts, nodes) = (count("/Type/Page/"), count("/Type/Pages"));
-    let (blocks, xref) = (count("/SheafBlock"), count("/Type/XRef"));
+    let (blocks, xref) = (count("/SHEF_Block"), count("/Type/XRef"));
     assert_eq!((dicts, nodes), (2, 1), "{objects:#?}");
     assert!(blocks <= 2 && dicts + nodes + blocks + xref == objects.len());
     assert_eq!(said(path), said_now);

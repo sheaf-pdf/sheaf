@@ -108,7 +108,7 @@ Generator            { id: GenId, spec: GenSpec, z: Z, scope: Scope,
                      read where each page is, its date, file and Bates
                      numbers fixed when it was set, in Frozen), laid out on
                      each page it covers when a save or a view draws the
-                     page, found again at open from /SheafGenerators
+                     page, found again at open from /SHEF_Generators
                      (Watermarks and backgrounds as generators; Headers,
                      footers and Bates as generators).
 
@@ -383,14 +383,14 @@ Session and `sheaf edit`):
   reads too), each with its object and an id (a page stamp's page and an
   attachment's file are found in the file, not in this machine's cache, and
   a mark whose file doesn't hold them is another tool's comment; a mark
-  another tool has edited since sheaf wrote it, whose `/SheafAnnot` digest
+  another tool has edited since sheaf wrote it, whose `/SHEF_Annot` digest
   no longer matches, is that tool's comment; copies of marks another program
   made, which say ids earlier marks have, get new ones; other tools' get ids
   no mark has, drawn from an rng the file's hash seeds, so the same bytes
   open with the same ids), the form (`Source::form`, also read once a
   source: every node of the field tree with the object it was read as, each
   terminal's widgets by page, and those no page lists, a page template's),
-  the page labels, the generators sheaf drew (`/SheafGenerators`, read
+  the page labels, the generators sheaf drew (`/SHEF_Generators`, read
   as written, the pages each is on from its blocks' stream markers; from
   slice 17 the header and footer too, and an older sheaf's
   `/SheafHeaderFooter` is read no more), attachments, the portfolio
@@ -520,7 +520,7 @@ not what's stored.
   M10.5 slice 15; see Crop as geometry): it sets the page's crop box, the
   kept area as shown mapped through `from_view`, in the page's own user
   space, so no mark, OCR word or bookmark moves.
-- **`/SheafAnnot` version 2** (`annot::Payload`) is the mark's JSON in
+- **`/SHEF_Annot` version 2** (`annot::Payload`) is the mark's JSON in
   PageSpace with its `turn` (none when upright), `"v":2` and `"std"`, a
   staleness digest of the dictionary it was written into
   (`annot::staleness`). The digest covers what the writer sets from the
@@ -693,9 +693,9 @@ lint ledger) keeps them out of everything but tests.
   and sheaf's marked blocks, the **pagination artifacts** (an
   `/Artifact` range whose `/Subtype` is `/Header`, `/Footer`,
   `/Watermark` or `/Background`, the outermost one) with who drew each,
-  sheaf's blocks by stream marker (`/SheafBlock`) and by marked-content
-  marker (`/SheafGen`, `/SheafOcrBlock`), the isolating streams
-  (`/SheafBlock << /K /Isolate >>`), the OCR layer sheaf wrote before
+  sheaf's blocks by stream marker (`/SHEF_Block`) and by marked-content
+  marker (`/SHEF_Gen`, `/SHEF_OcrBlock`), the isolating streams
+  (`/SHEF_Block << /K /Isolate >>`), the OCR layer sheaf wrote before
   (its `q` and its layer, marked `/SheafOcrLayer`), the balance, and
   whether a form the page draws outside its pagination artifacts has one
   inside, which removing the page's would leave in place. A source reads
@@ -705,10 +705,10 @@ lint ledger) keeps them out of everything but tests.
   page's streams leave of `Limits.content.decompressed`: one past the
   cap, or met once that's spent, counts as having an artifact inside.
   Who drew an artifact (`PagOrigin`):
-  - **`Sheaf`:** it's in a `/SheafBlock` stream or its list has
-    `/SheafGen` (watermarks and backgrounds from slice 16, the header and
+  - **`Sheaf`:** it's in a `/SHEF_Block` stream or its list has
+    `/SHEF_Gen` (watermarks and backgrounds from slice 16, the header and
     footer from slice 17; from slice 18 the recognized text's blocks are
-    `/SheafBlock` streams too, but no artifacts);
+    `/SHEF_Block` streams too, but no artifacts);
   - **`SheafLegacy`:** sheaf before M10.5: `/SheafStamp` or
     `/SheafSettings` in its list, drawn in the `/SheafHF` font, or in a
     `/SheafOcrLayer` stream;
@@ -1357,7 +1357,7 @@ targets to sit after the preceding bookmark's pages.
 - **Op JSON.** `{"op": "delete-pages", "pages": {"positions": "3-5"}}`:
   each op kebab-case under `"op"`, every op-layer type
   `deny_unknown_fields`, so a misspelled field is an error rather than a
-  default. The exceptions are the record types `/SheafAnnot` stores
+  default. The exceptions are the record types `/SHEF_Annot` stores
   inside its lenient `Annot` (`Pt`, `Box2`, `Scale`, `Tape` with its
   `Line`, `Row` and `TapeLook`): strict, a mark another sheaf wrote with
   a field more would read as another tool's comment. Their fields but
@@ -1862,7 +1862,7 @@ Two strategies, and a third that writes nothing (Unchanged):
 **Rewrite** (M2 slice 3, first; from M10.5 slice 9 the new writer's,
 `materialize`, below): the state's objects emitted by key over the
 primary's (every page in a new balanced tree, sheaf's marks each with its
-appearance and, in `/SheafAnnot`, its PageSpace JSON and staleness
+appearance and, in `/SHEF_Annot`, its PageSpace JSON and staleness
 digest: version 2, see Coordinates), then whatever still points at a page
 that isn't kept cut (`kept::keep_only`: links, named destinations, the
 open action, form widgets, the structure tree) so pruning takes it out,
@@ -1900,7 +1900,7 @@ from what the marks hold (a form a source's mark draws, a library
 stamp's page and an attached file from their blobs), not this machine's
 cache. A generator's marked content names its property list in the
 page's `/Properties` (the header and footer's from slice 17, as a
-`/SheafBlock`).
+`/SHEF_Block`).
 
 A save is an output (M10.5 slice 9, below): the document doesn't change,
 nothing is reopened or read back, and what the screen shows stays.
@@ -2136,7 +2136,7 @@ below).
   on copy 0 of a primary page, with a note when a copied page's file was
   tagged, and `/Thumb` goes when sheaf draws over the page. The catalog is
   written by its ownership table: owned keys from the state (`/Pages`,
-  `/PageLabels` from the `LabelSpec`s, `/SheafGenerators` from the
+  `/PageLabels` from the `LabelSpec`s, `/SHEF_Generators` from the
   generators; no `/Version`, which the header gives), every other key
   the primary's,
   which `keep_only` prunes. Copies go by key (`copy::Closure`): each
@@ -2189,7 +2189,7 @@ below).
   bookmark's `/Count` is negative.
 - **Annotations** (`emit::annots`): a page's `/Annots` is its records',
   in their order. A mark is written through `annot::emission`, pure: its
-  dictionary with `/SheafAnnot`, its appearance (an `AnnotPart(id, Ap)`
+  dictionary with `/SHEF_Annot`, its appearance (an `AnnotPart(id, Ap)`
   form, its resources by digest through the emitter's sink) and a
   replacement's StrikeOut (`AnnotPart(id, Companion)`), which carries
   `/IRT` to its Caret and `/RT /Group` and nothing else: `file::is_ours`
@@ -2629,7 +2629,7 @@ about 21 ms, its fsyncs included.
   the form's dictionary when the node came, went, moved or shows other
   widgets; the pages of a widget that stops or starts being its field's
   object; the outline by place; labels; the catalog for
-  `/SheafGenerators` and labels that came or went, a transform the file
+  `/SHEF_Generators` and labels that came or went, a transform the file
   hasn't had
   (`DropUr3`'s `/Perms`; the form's dictionary and every field for
   `DropXfa`'s tooltips) or an XFA copy policy keeps again; and the
@@ -4217,19 +4217,19 @@ moved them onto `Generator` as fields, with `frozen`, for both kinds;
   honoured. Text is in the `FontChoice`'s standard 14 face, a character
   it can't draw `?`. The content is `/Artifact /Sh… BDC q /Sh… gs cm …
   Q EMC`, its property list `<< /Type /Pagination /Subtype /Watermark
-  (or /Background) /SheafGen (g…) >>` named in `/Properties` like every
+  (or /Background) /SHEF_Gen (g…) >>` named in `/Properties` like every
   resource it adds, its graphics state `/ca` and `/CA`. The layout's
   digest (`/L`) is of its operators and its resources' ids, never their
   names; the recipe's (`/R`) is the render key's digest of the
   watermark (`generate::recipe_digest`).
 - **Blocks and isolation** (`emit::content`). A covered page's
   `/Contents` is `[under…, QOpen, base′…, QClose, over…]`. Each block is
-  a stream of its own marked `/SheafBlock << /K /Gen /G (g…) /L <…> /R
+  a stream of its own marked `/SHEF_Block << /K /Gen /G (g…) /L <…> /R
   <…> >>`, keyed by its bytes (`ObjKey::Block`), so a watermark laid out
   alike on 7,000 pages is one object; a page whose image or page can't
   be had gets an empty block, so its scope can still be read back. The
   page's own content is isolated by shared marked streams
-  (`Shared::QOpen(n)`, `Shared::QClose(n)`, `/SheafBlock << /K /Isolate
+  (`Shared::QOpen(n)`, `Shared::QClose(n)`, `/SHEF_Block << /K /Isolate
   >>`) counted by its balance (§3.4): `open = 1 + d`, `close = 1 + d +
   net`, `d` the deepest its `Q`s go below where it starts, so no `Q` of
   its undoes theirs and nothing it leaves set reaches the watermark. Its
@@ -4245,7 +4245,7 @@ moved them onto `Generator` as fields, with `frozen`, for both kinds;
   share base Resources share one; the font, graphics state and image are
   one object a file. `/Thumb` goes whenever `/Contents` changes. Images
   are decoded once a blob and pages made forms once a page (`Cx.arts`).
-- **`/SheafGenerators`** in the catalog (`ObjKey::Generators`, a root)
+- **`/SHEF_Generators`** in the catalog (`ObjKey::Generators`, a root)
   is an indirect literal string of versioned JSON (`v: 1`), ASCII with
   every other character `\uXXXX`: each watermark's id, kind, z, scope
   (`all` or `pages`, the pages read back from the blocks), `replaces` and
@@ -4256,7 +4256,7 @@ moved them onto `Generator` as fields, with `frozen`, for both kinds;
   its Append writes the catalog's `/Version /1.4` (`needs_after`; the
   planner classes it `OTHER`). ISO 32000-1 marks `/Subtype` in an
   artifact's list as 1.7; sheaf follows the slice's 1.4, for Greg.
-- **Append.** A change of `Generator(g)` writes `/SheafGenerators`, the
+- **Append.** A change of `Generator(g)` writes `/SHEF_Generators`, the
   catalog when the first watermark comes or the last goes, and the pages
   covered before or after; a change of scope alone writes only the pages
   that came or went. Adding a watermark to a saved file appends its
@@ -4266,7 +4266,7 @@ moved them onto `Generator` as fields, with `frozen`, for both kinds;
   `PageRes`, like `Res` and `Shared`, says nothing of its own; a block
   is judged by what the page draws (`Drawn::on`, which adds each
   covering watermark's text, or a hash of its image or page); and the
-  old `/SheafGenerators` by every watermark's text, image or page, saved
+  old `/SHEF_Generators` by every watermark's text, image or page, saved
   against now. So a layout change appends with no veto, and a text
   change plans a Rewrite.
 - **A PDF/A or PDF/UA claim** (`Source::conformance`, slice 3's fact)
@@ -4293,7 +4293,7 @@ whether a page is intact, and counts such a page as changed.
 
 ### Found again after reopen
 
-- **Markers.** A source whose catalog has `/SheafGenerators` (and,
+- **Markers.** A source whose catalog has `/SHEF_Generators` (and,
   until slice 17, a derived copy) is `marked()`, and only then are each
   page's stream markers read (`Source::markers(i)`): each `/Contents`
   stream's dictionary, never decompressed, once a stream. The corpus has
@@ -4302,13 +4302,13 @@ whether a page is intact, and counts such a page as changed.
   saved with recognized text alone isn't `marked()`, and a page of it
   that something is drawn on is told by its blocks (OCR as content).
 - **Recognition** (`Source::generators()`, `generate::read`): each
-  `/SheafGenerators` entry alone, one that can't be read whole passed
+  `/SHEF_Generators` entry alone, one that can't be read whole passed
   over with a log line (a version it doesn't know, a bad id, values the
   op would refuse, `replaces` other than its own z's kind, a `pages`
   scope with no block, an image or page it can't bind, a second of one
   id or z). A page holds a generator's block by its streams' markers, or,
   on a page with no block in a stream of its own whose resources name a
-  list with `/SheafGen` in `/Properties`, by the ranges its content marks
+  list with `/SHEF_Gen` in `/Properties`, by the ranges its content marks
   (a block another tool merged into a stream, `qpdf --coalesce-contents`,
   say).
   `pages` is the pages holding one of its blocks, empty ones too; `all`
@@ -4439,8 +4439,8 @@ resources bind that the file's didn't, page by page.
 ## Headers, footers and Bates as generators (M10.5 slice 17)
 
 The header and footer is a generator too (`GenSpec::HeaderFooter`): one
-record, drawn as `/SheafBlock` blocks on each page it covers when a save
-writes the page or a view draws it, found again from `/SheafGenerators`
+record, drawn as `/SHEF_Block` blocks on each page it covers when a save
+writes the page or a view draws it, found again from `/SHEF_Generators`
 when the file opens. Its page tokens are live, read from the document as
 it's written, and its Bates numbers, date and file are fixed when it's
 set (§3.5, §6.5, §7.1–7.2, §9.1, §11.3–11.4, §11.9, proposals 8 and 31
@@ -4562,10 +4562,10 @@ its page tokens count the pages written.
 
 - **Blocks.** Each slot that isn't blank is its own `/Artifact /Sh… BDC
   q BT … ET Q EMC`, its list `<< /Type /Pagination /Subtype /Header (or
-  /Footer) /SheafGen (g…) >>`, set in `Std14::from(spec.font)` from the
+  /Footer) /SHEF_Gen (g…) >>`, set in `Std14::from(spec.font)` from the
   page's shown frame, so it's upright at every turn and on the page's
   crop. A page with nothing to draw gets an empty block, so its scope
-  reads back. The block's `/SheafBlock` says `/N (n)`, decimal, when the
+  reads back. The block's `/SHEF_Block` says `/N (n)`, decimal, when the
   page has a Bates number. `/L` is the layout's digest; `/R` the recipe's
   (`recipe_digest(g, page)`: the spec, z, `replaces`, and the page's own
   fixed values, never the whole map).
@@ -4579,7 +4579,7 @@ its page tokens count the pages written.
   and footers go from the pages the header covers, the author's stay.
   A page whose content can't be read gets no header, said once in a
   Note, as watermarks do.
-- **`/SheafGenerators`** has a `header-footer` kind: the spec with its
+- **`/SHEF_Generators`** has a `header-footer` kind: the spec with its
   font, and `frozen` `{date, file}`; the Bates numbers are the blocks'
   `/N`. A watermark's entry is what slice 16 wrote, byte for byte.
   `/SheafHeaderFooter` is written no more and stays catalog-owned
@@ -4744,7 +4744,7 @@ pages first (option A) is to revisit.
 ## OCR as content (M10.5 slice 18)
 
 Recognized text is page content drawn as a block of its own: a layer on
-the page's stack, with a block id, written as a `/SheafBlock` stream
+the page's stack, with a block id, written as a `/SHEF_Block` stream
 after the page's isolated content and before the generators drawn over
 it, and found again in a reopened file by that stream's marker. A layer
 a file holds is like any other, saved or not: a re-OCR or Clear takes it
@@ -4825,9 +4825,9 @@ Flattened}`).
   ET Q EMC`: invisible text in the glyphless font, each word fitted to
   its box in the layer's upright frame, in a `q` of its own so its text
   mode reaches nothing drawn after it, marked with a property list `<<
-  /SheafOcrBlock (b…) >>` that names its block. The font and the list
+  /SHEF_OcrBlock (b…) >>` that names its block. The font and the list
   take `/Sh…` names clear of the page's (`Reserved`). The emitter
-  (`recognized`) writes it as a stream marked `/SheafBlock << /K /Ocr /B
+  (`recognized`) writes it as a stream marked `/SHEF_Block << /K /Ocr /B
   (b…) >>`, keyed by its digest (`ObjKey::Block`), its resources in the
   page's own (`ObjKey::PageRes`); the glyphless font is one object a
   file (`ObjKey::Res`). Each block names its own list, so pages don't
@@ -4877,7 +4877,7 @@ Flattened}`).
   block on an unbalanced base keep `q`, the base, `Q Q`, the block, then
   the header.
 - **Files saved with OCR alone.** `Source::markers` stays gated on the
-  catalog's `/SheafGenerators`, so a file sheaf saved with recognized
+  catalog's `/SHEF_Generators`, so a file sheaf saved with recognized
   text and no generator shows no markers to `intact`, `untouched` and
   the render key: the base engine draws such a page, which is right, as
   nothing is drawn over it. A page something is drawn on reads its
@@ -5142,7 +5142,7 @@ kind isn't stored).
 (`[gen-under… QOpen base′… QClose ocr… gen-over… flat…]`), since an
 annotation shows over everything on its page, a watermark over the
 content included; the OCR block stays before the generators. A stream
-marked `/SheafBlock << /K /Flat /B (b…)
+marked `/SHEF_Block << /K /Flat /B (b…)
 >>` (`ObjKey::Block`), each placement `q <matrix> cm /Sh… Do Q`, its
 name from the form's digest. A Base form is referenced copy-on-write; a
 pinned one is drawn again through `annot::appearance`, as emission draws
@@ -5186,17 +5186,17 @@ writes it, and what's left is a note (`verify::private_left`): a
 printer's or a page image's file, or text read from it, mustn't fail for
 what an older sheaf left on a page sheaf can't read. Print with markup
 kept sheaf's private data until the backlog-fixes PR (B13): its header
-stayed live in `/SheafGenerators`, so the file opened in sheaf again
+stayed live in `/SHEF_Generators`, so the file opened in sheaf again
 numbered it against its own pages ("Page 1 of 2" for pages 5 and 6 of
 10). Everything else sheaf writes is standard keys.
 
 | Name | Where | Written | Under Strip |
 |---|---|---|---|
 | `sheaf:…`, `sheaf-anon:…` | `/NM` | now | written neutral (`neutral_nm`: a UUID-shaped xxh3-128 digest of the name) |
-| `SheafAnnot` | annotation | now | left out; marks are written anew, never as read |
-| `SheafGenerators` | catalog | now | left out |
-| `SheafBlock` | stream | now | not marked; a file's block copied without it (`LegacySel::Streams`) |
-| `SheafGen`, `SheafOcrBlock` | property list | now | lists written without them; recognized text `/ShOCR BMC` with no list |
+| `SHEF_Annot` | annotation | now | left out; marks are written anew, never as read |
+| `SHEF_Generators` | catalog | now | left out |
+| `SHEF_Block` | stream | now | not marked; a file's block copied without it (`LegacySel::Streams`) |
+| `SHEF_Gen`, `SHEF_OcrBlock` | property list | now | lists written without them; recognized text `/ShOCR BMC` with no list |
 | `SheafStamp` | list, resource | older | left out of a list; a stamp drawn by it written anew |
 | `SheafSettings` | list | older | left out (`LegacySel::Marked`) |
 | `SheafHF`, `SheafOcr`, `SheafFlat*`, `SheafWM*` | resource | older | renamed `/Sh…` (`LegacySel::Resources`) |
@@ -5212,10 +5212,10 @@ and the table: a stamp placed from one is its page's content and
 resources.
 
 - **The profile** (`Profile.private`, `EmitBase::Rewrite { private }`)
-  covers what the emitter writes anew: no `/SheafAnnot` and a neutral
+  covers what the emitter writes anew: no `/SHEF_Annot` and a neutral
   `/NM` on marks and their StrikeOut companions (`/IRT`, `/RT` and
   `/Dest` are references, so threads and connectors hold), others'
-  comments without sheaf's keys, no `/SheafGenerators`, blocks and
+  comments without sheaf's keys, no `/SHEF_Generators`, blocks and
   isolation unmarked, generator lists `<< /Type /Pagination /Subtype …
   >>` (`generate::layout` and `text_layer::block` take a `Private`). A
   Strip target planned as an Append is refused.
@@ -6160,7 +6160,7 @@ the page's `PageDef`.
   content): invisible text (text render mode 3 in `content::Glyphless`,
   Tesseract's glyphless font embedded once a file, each UTF-16 code unit
   of a word a CID and the text read back through its ToUnicode), a
-  stream marked `/SheafBlock << /K /Ocr /B (b…) >>` after the page's
+  stream marked `/SHEF_Block << /K /Ocr /B (b…) >>` after the page's
   isolated content and before the generators drawn over it, its range
   `/ShOCR` with a list naming the block, its font and list under `/Sh…`
   names. A save is an output (slice 9), so the layer stays on the stack,
@@ -6173,7 +6173,7 @@ the page's `PageDef`.
   file: its words are the page's text, as PDFium reads it. Without
   sheaf's private data (a clean copy, print without markup; M10.5 slice
   19) the range is `/ShOCR BMC` with no list, a file's lists lose
-  `/SheafOcrBlock`, and an older sheaf's layer stream its
+  `/SHEF_OcrBlock`, and an older sheaf's layer stream its
   `/SheafOcrLayer` and `/SheafOcr` names.
 - **Ops**: `SetOcrText` (one page's layer) and `ClearOcrText`, which put
   the pages' `PageDef`s and nothing else, each reading the page's blocks

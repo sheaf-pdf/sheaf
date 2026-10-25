@@ -231,11 +231,11 @@ fn no_sheaf_name_but_the_private_keys_is_written() {
             .collect();
         assert_eq!(other, Vec::<String>::new(), "{how:?}");
         for written in [
-            "SheafAnnot",
-            "SheafGenerators",
-            "SheafBlock",
-            "SheafGen",
-            "SheafOcrBlock",
+            "SHEF_Annot",
+            "SHEF_Generators",
+            "SHEF_Block",
+            "SHEF_Gen",
+            "SHEF_OcrBlock",
         ] {
             assert!(names.contains(written.as_bytes()), "{how:?}: {written}");
         }

@@ -46,7 +46,7 @@ without warning, which layer 1 below addresses.
 A preparer and a reviewer both open a binder and add marks. The reviewer
 saves first. When the preparer saves:
 - The reviewer's sheaf marks are deleted. On pages where the preparer has
-  marks, `write_page_annots` replaces every `/SheafAnnot`; on the rest,
+  marks, `write_page_annots` replaces every `/SHEF_Annot`; on the rest,
   `strip_sheaf_annots` removes them.
 - If the reviewer added or removed pages, the preparer's marks and page
   edits land on the wrong pages.

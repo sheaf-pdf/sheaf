@@ -600,21 +600,21 @@ fn origins(blocks: &PageBlocks) -> Vec<(PaginationKind, PagOrigin)> {
 fn sheafs_blocks_are_found_by_their_markers() {
     let mut pdf = Pdf::with_version("1.7");
     let gen_list = dictionary! {
-        "Type" => "Pagination", "Subtype" => "Header", "SheafGen" => Object::string_literal("g1f"),
+        "Type" => "Pagination", "Subtype" => "Header", "SHEF_Gen" => Object::string_literal("g1f"),
     };
     let resources = dictionary! { "Properties" => dictionary! {
         "ShP0" => gen_list,
-        "ShP1" => dictionary! { "SheafOcrBlock" => Object::string_literal("b2a") },
+        "ShP1" => dictionary! { "SHEF_OcrBlock" => Object::string_literal("b2a") },
     } };
     let block = |k: &str, key: &str, id: &str| {
-        dictionary! { "SheafBlock" => dictionary! { "K" => k, key => Object::string_literal(id) } }
+        dictionary! { "SHEF_Block" => dictionary! { "K" => k, key => Object::string_literal(id) } }
     };
     let gen_stream: &[u8] = b"/Artifact /ShP0 BDC (Head) Tj EMC";
     let (blocks, ids) = blocks_of(
         &mut pdf,
         &[
             (
-                dictionary! { "SheafBlock" => dictionary! { "K" => "Isolate" } },
+                dictionary! { "SHEF_Block" => dictionary! { "K" => "Isolate" } },
                 b"q q",
             ),
             (
@@ -622,7 +622,7 @@ fn sheafs_blocks_are_found_by_their_markers() {
                 b"0 g /Artifact /ShP0 BDC (merged) Tj EMC /ShOCR /ShP1 BDC EMC",
             ),
             (
-                dictionary! { "SheafBlock" => dictionary! { "K" => "Isolate" } },
+                dictionary! { "SHEF_Block" => dictionary! { "K" => "Isolate" } },
                 b"Q Q",
             ),
             (block("Gen", "G", "g1f"), gen_stream),

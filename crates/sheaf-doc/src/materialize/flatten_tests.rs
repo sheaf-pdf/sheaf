@@ -1,5 +1,5 @@
 //! Annotations flattened (M10.5 slice 19): what each shows drawn into its
-//! page as a layer of placed forms, `/SheafBlock << /K /Flat /B (b…) >>`,
+//! page as a layer of placed forms, `/SHEF_Block << /K /Flat /B (b…) >>`,
 //! after the page's isolated content, and the annotation gone. Print,
 //! Hidden and NoView are honored, links stay, a widget draws the state its
 //! `/AS` names and nothing without one, while another tool's comment draws
@@ -442,7 +442,7 @@ fn placements_in(st: &crate::DocState, page: PageId) -> usize {
 /// The block stream `id` of `pdf` is a flattened layer's, by its id.
 fn flat_block(pdf: &Pdf, id: ObjectId) -> Option<BlockId> {
     let (dict, _) = stream(pdf, id);
-    let marker = dict.get(b"SheafBlock").ok()?.as_dict().ok()?;
+    let marker = dict.get(b"SHEF_Block").ok()?.as_dict().ok()?;
     if marker.get(b"K").and_then(Object::as_name).ok()? != b"Flat" {
         return None;
     }
@@ -738,12 +738,12 @@ fn over_the_watermark(how: How) {
         .unwrap();
     let out = Pdf::load_mem(&how.write(&doc)).unwrap();
     let page = pages(&out)[0];
-    // Each stream's `/SheafBlock` kind, or `-`, the page's own.
+    // Each stream's `/SHEF_Block` kind, or `-`, the page's own.
     let kinds = |pdf: &Pdf, page: ObjectId| -> Vec<String> {
         (contents(pdf, page).into_iter())
             .map(|c| {
                 let (dict, _) = stream(pdf, c);
-                let kind = (dict.get(b"SheafBlock").and_then(Object::as_dict))
+                let kind = (dict.get(b"SHEF_Block").and_then(Object::as_dict))
                     .and_then(|m| m.get(b"K").and_then(Object::as_name));
                 kind.map_or("-".into(), |k| String::from_utf8_lossy(k).into_owned())
             })

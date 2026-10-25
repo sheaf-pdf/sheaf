@@ -198,7 +198,7 @@ fn clean_copy_strips_markup_only() {
             );
         }
         if let Ok(d) = obj.as_dict() {
-            assert!(!d.has(b"SheafAnnot"));
+            assert!(!d.has(b"SHEF_Annot"));
         }
     }
     let bytes = std::fs::read(&out).unwrap();

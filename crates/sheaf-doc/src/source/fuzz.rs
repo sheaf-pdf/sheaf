@@ -46,7 +46,7 @@ pub fn page_tree(data: &[u8]) {
 }
 
 /// `data` as the objects of a page's annotations, `n 0 obj … endobj` from
-/// 4 up, read as the open reads sheaf's marks: each entry's `/SheafAnnot`
+/// 4 up, read as the open reads sheaf's marks: each entry's `/SHEF_Annot`
 /// and digest, or its geometry from the standard keys, and whether it's
 /// ours to rewrite. The page, turned 90°, lists an annotation for each
 /// `endobj`, in a file with no cross-reference table, which the reader
@@ -69,7 +69,7 @@ pub fn sheaf_annot(data: &[u8]) {
 }
 
 /// `data` opened as a source, and the generators sheaf drew on it found as
-/// an open finds them: from its catalog's `/SheafGenerators` and the
+/// an open finds them: from its catalog's `/SHEF_Generators` and the
 /// markers of its pages' streams, its images and pages bound to the
 /// XObjects their blocks draw, a header's Bates numbers its blocks'. Each
 /// is made a generator of the pages it's on, and laid out as the realizer
@@ -144,7 +144,7 @@ pub fn splice(data: &[u8]) -> usize {
     ));
     let resources = Object::Dictionary(dictionary! {
         "Properties" => dictionary! { "P0" => dictionary! {
-            "Type" => "Pagination", "Subtype" => "Header", "SheafGen" => Object::string_literal("g1"),
+            "Type" => "Pagination", "Subtype" => "Header", "SHEF_Gen" => Object::string_literal("g1"),
         } },
         "XObject" => dictionary! { "X0" => acrobat, "X1" => nested },
         "ColorSpace" => dictionary! { "CS3" => "DeviceRGB" },
@@ -1123,13 +1123,13 @@ mod tests {
                     if let Ok(irt) = d.get(b"IRT").and_then(Object::as_reference) {
                         d.set("IRT", number[&irt]);
                     }
-                    if v1 && let Ok(json) = d.get(b"SheafAnnot").and_then(Object::as_str) {
+                    if v1 && let Ok(json) = d.get(b"SHEF_Annot").and_then(Object::as_str) {
                         let mut json: serde_json::Value =
                             serde_json::from_str(&crate::file::text_string(json)).unwrap();
                         let fields = json.as_object_mut().unwrap();
                         fields.remove("v");
                         fields.remove("std");
-                        d.set("SheafAnnot", crate::save::text_string(&json.to_string()));
+                        d.set("SHEF_Annot", crate::save::text_string(&json.to_string()));
                     }
                     out.objects.insert(number[id], d.into());
                 }

@@ -66,7 +66,6 @@ use super::grammar::{ArlType, At, Row, Table, WrapFn, Wrapped, grammar, version}
 use super::predicate::{self, Cx, Gate, Reference, Since, TOLERANCE, Truth};
 use crate::file::text_string;
 use crate::materialize::emit::PdfVersion;
-use crate::private;
 use crate::serialize::full::left_out;
 use crate::source::Limits;
 
@@ -144,8 +143,8 @@ pub enum Rule {
     Tree,
     /// A key or element of a [`Made::Built`] object that the model
     /// doesn't list ([`Unlisted`]), and isn't a second- or third-class
-    /// name nor one of the private keys sheaf writes
-    /// ([`private::KEYS`](crate::private::KEYS)), in a table that says
+    /// name (the private keys sheaf writes are second-class, `SHEF_`:
+    /// [`private::KEYS`](crate::private::KEYS)), in a table that says
     /// what the object is (not a `_Universal` one, nor the plain `Stream`
     /// one such a table links a stream to): sheaf builds the object whole,
     /// so it's a key PDF doesn't define, misspelled or misplaced.
@@ -713,10 +712,8 @@ impl<'a> Walk<'a> {
                             (None, At::Key(key)) => Class::of(key),
                             (None, At::Index(_)) => Class::Other,
                         };
-                        let own = matches!(at, At::Key(key) if sheaf_s_own(key));
                         if made == Made::Built
                             && matches!(class, Class::Other | Class::Extension(_))
-                            && !own
                             && !v.loose
                         {
                             let value = render(value);
@@ -1823,27 +1820,6 @@ impl<'a> Trail<'a> {
             path
         }
     }
-}
-
-/// Whether `key` is one of the private keys sheaf writes (M10.5 §15,
-/// [`private::KEYS`]), in a dictionary or a property list: neither a
-/// second- nor a third-class name (backlog F24), but sheaf's on purpose.
-/// An older sheaf's, which sheaf no longer writes, isn't.
-fn sheaf_s_own(key: &[u8]) -> bool {
-    use private::Place;
-    (private::KEYS.iter()).any(|own| {
-        let keyed = (own.places.iter()).any(|p| {
-            matches!(
-                p,
-                Place::Annot | Place::Catalog | Place::Stream | Place::List
-            )
-        });
-        let named = match own.prefix {
-            true => key.starts_with(own.name),
-            false => key == own.name,
-        };
-        keyed && named && !own.older
-    })
 }
 
 /// Whether `table` is one of the model's `_Universal` tables, which fit

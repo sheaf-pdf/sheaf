@@ -6,7 +6,7 @@
 //!
 //! - [`layout`]: a generator's content on one page, a [`Drawn`]: an
 //!   `/Artifact` whose property list (`/Type /Pagination`, its kind's
-//!   `/Subtype`, and `/SheafGen` naming the generator) is named in the
+//!   `/Subtype`, and `/SHEF_Gen` naming the generator) is named in the
 //!   page's `/Properties`, its graphics state isolated in `q`…`Q`. A
 //!   watermark's text is in its [`FontChoice`]'s standard 14 face (a
 //!   character the face can't draw is `?`); an image or a PDF's page is
@@ -19,14 +19,14 @@
 //!   digest alone (`/L`), what a block laid out alike again is told by.
 //! - [`recipe_digest`]: what a generator draws on each page it's on, which
 //!   its blocks say they were drawn from (`/R`).
-//! - [`catalog_json`]: what the catalog's `/SheafGenerators` says of the
+//! - [`catalog_json`]: what the catalog's `/SHEF_Generators` says of the
 //!   document's generators, from which an open finds them again: versioned
 //!   JSON, its specs without paths or object numbers (an image or a page is
 //!   `"placed"`, the XObject its blocks draw, with the digest of the
 //!   resource it was drawn as and an image's turns), a header's date and
 //!   file; its Bates numbers are its blocks' (`/N`).
 //! - [`read`]: what an open finds ([`Saved`]): the generators
-//!   `/SheafGenerators` says there are, on the pages whose streams'
+//!   `/SHEF_Generators` says there are, on the pages whose streams'
 //!   markers name them (empty blocks too), an image or a page bound to the
 //!   XObject a block of it draws, a header's Bates numbers its blocks'.
 //!   [`unfit`] and [`header::unfit`] say what a generator can't draw, for
@@ -95,7 +95,7 @@ const CAP_HEIGHT: f32 = 0.72;
 /// Generator `g` on the page `ctx` says, a watermark's image or page `art`
 /// (None for text, or one that can't be had, which draws nothing); the
 /// names it draws with kept clear of `reserved`, those the page's
-/// resources bind already; its lists without `/SheafGen` when `private`
+/// resources bind already; its lists without `/SHEF_Gen` when `private`
 /// strips it (§15). Empty where it draws nothing.
 pub fn layout(
     g: &Generator,
@@ -155,7 +155,7 @@ fn list(g: &Generator, kind: PaginationKind, private: Private) -> Dictionary {
     };
     if private == Private::Keep {
         let id = Object::String(g.id.to_string().into_bytes(), StringFormat::Literal);
-        list.set("SheafGen", id);
+        list.set("SHEF_Gen", id);
     }
     list
 }
@@ -477,7 +477,7 @@ pub(crate) fn page_ctx(
     }
 }
 
-/// The catalog's `/SheafGenerators`, the document's generators as JSON in
+/// The catalog's `/SHEF_Generators`, the document's generators as JSON in
 /// ASCII: None when it has none. `drawn_as` says what each image or page
 /// is drawn as: its resource's digest, and the quarter turns an image
 /// shows upright at.
@@ -499,17 +499,17 @@ pub fn catalog_json(
     Some(ascii(&json))
 }
 
-/// The version of `/SheafGenerators`' JSON.
+/// The version of `/SHEF_Generators`' JSON.
 const STORED_VERSION: u32 = 1;
 
-/// `/SheafGenerators`, as JSON.
+/// `/SHEF_Generators`, as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Stored {
     v: u32,
     generators: Vec<StoredGen>,
 }
 
-/// A generator as `/SheafGenerators` holds it: its id as its blocks name it.
+/// A generator as `/SHEF_Generators` holds it: its id as its blocks name it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 struct StoredGen {

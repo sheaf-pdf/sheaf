@@ -1098,7 +1098,7 @@ fn each_once(doc: &Document, took: &Took) -> Result<(), String> {
 
 /// An error unless each of `doc`'s pages is isolated once: one stream of
 /// `q`s before its own content and one of `Q`s after, sheaf's
-/// `/SheafBlock << /K /Isolate >>`. A page whose content can't be read
+/// `/SHEF_Block << /K /Isolate >>`. A page whose content can't be read
 /// isn't, and took no text (`took`).
 fn isolated_once(doc: &Document, took: &Took) -> Result<(), String> {
     let src = doc.primary();

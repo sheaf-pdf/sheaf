@@ -335,7 +335,7 @@ impl Source {
 
     /// Whether its pages may hold sheaf's blocks and the streams that
     /// isolate them (§11.4): its catalog says what sheaf's generators are
-    /// (`/SheafGenerators`). The markers of a file without them aren't
+    /// (`/SHEF_Generators`). The markers of a file without them aren't
     /// read, so the pages of every other file are written as they were. A
     /// file sheaf saved with recognized text alone has none: a page of it
     /// that something is drawn on finds its blocks by reading them

@@ -9,7 +9,7 @@
 //! the mark in a frame that reads upright: [`Annot::upright`], or a view's.
 //! The writer lays a mark out upright and maps that into PageSpace.
 //!
-//! Every annotation we write carries `/NM sheaf:<id>` and a `/SheafAnnot`
+//! Every annotation we write carries `/NM sheaf:<id>` and a `/SHEF_Annot`
 //! JSON copy of the model ([`Payload`]), so a file we saved can be reopened
 //! with the marks editable and PDFium told to hide its rendering of them.
 //! Beside the mark, the copy holds a digest of the dictionary's standard
@@ -1170,7 +1170,7 @@ pub const PART: &str = "SheafPart";
 /// A mark as the writer makes it, before anything of it is in a file
 /// ([`emission`]).
 pub struct Emitted {
-    /// Its annotation dictionary, `/SheafAnnot` set: with no `/AP`, `/P`
+    /// Its annotation dictionary, `/SHEF_Annot` set: with no `/AP`, `/P`
     /// or `/IRT`, which the writer gives it.
     pub main: Dictionary,
     pub appearance: Appearance,
@@ -1181,7 +1181,7 @@ pub struct Emitted {
 }
 
 /// Mark `a` as the writer makes it, drawing and embedding what `held`
-/// says the file holds for it: its dictionary with `/SheafAnnot`, its
+/// says the file holds for it: its dictionary with `/SHEF_Annot`, its
 /// appearance, and its companions. Pure: the same mark and `held` give
 /// the same objects, whichever file they go into.
 pub fn emission(a: &Annot, held: Held) -> Emitted {
@@ -1206,7 +1206,7 @@ pub fn emission(a: &Annot, held: Held) -> Emitted {
         mark: a,
     };
     main.set(
-        "SheafAnnot",
+        "SHEF_Annot",
         pdf_text_string(&serde_json::to_string(&payload).unwrap_or_default()),
     );
     let mut companions = Vec::new();
@@ -1338,7 +1338,7 @@ impl Annot {
 
     /// Whether some of the text it draws can't be drawn in the built-in
     /// fonts: its appearance shows those characters as `?`, while its
-    /// `/Contents` and its `/SheafAnnot` keep them (M10.5 proposal 22,
+    /// `/Contents` and its `/SHEF_Annot` keep them (M10.5 proposal 22,
     /// until M10 slice 7's fallback font). Read from the text the writer
     /// draws, laid out, without drawing it.
     pub fn unencodable(&self) -> bool {
@@ -1451,7 +1451,7 @@ fn ellipse_path(w: &mut ContentWriter<'_>, [x0, y0, x1, y1]: [f32; 4]) {
 
 /// A text string: as is when PDFDocEncoding reads it back so
 /// ([`crate::file::is_pdf_doc_ascii`]), else UTF-16BE with its BOM. The
-/// `/SheafAnnot` JSON is one too: a DEL in a mark's text, written as is,
+/// `/SHEF_Annot` JSON is one too: a DEL in a mark's text, written as is,
 /// would read back as a NUL, which no JSON string holds.
 fn pdf_text_string(s: &str) -> Object {
     if crate::file::is_pdf_doc_ascii(s) {
@@ -1731,7 +1731,7 @@ impl Appearance {
     }
 }
 
-/// The main annotation dictionary (without `/AP`, `/P` or `/SheafAnnot`)
+/// The main annotation dictionary (without `/AP`, `/P` or `/SHEF_Annot`)
 /// and its appearance. A page stamp's draws `stamp`, its page as a form,
 /// when it has one.
 fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
@@ -2232,7 +2232,7 @@ fn annotation(a: &Annot, stamp: Option<StampForm>) -> (Dictionary, Appearance) {
         }
         AnnotKind::Stamp { .. } => {
             dict.set("Subtype", Object::Name(b"Stamp".to_vec()));
-            // Which tick it is is the mark's id, in /SheafAnnot.
+            // Which tick it is is the mark's id, in /SHEF_Annot.
             dict.set("Name", Object::Name(b"Tick".to_vec()));
         }
     }
@@ -2605,10 +2605,10 @@ pub fn tape_pdf(a: &Annot) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// The `/SheafAnnot` version this build writes.
+/// The `/SHEF_Annot` version this build writes.
 pub const VERSION: u32 = 2;
 
-/// A `/SheafAnnot` payload: the mark's JSON, and beside its fields the
+/// A `/SHEF_Annot` payload: the mark's JSON, and beside its fields the
 /// version and the [`staleness`] digest of the dictionary it was written
 /// into. Version 1 had neither, and its geometry was in the page's
 /// displayed space. A field of [`Annot`] is never called `v` or `std`.
@@ -2623,7 +2623,7 @@ pub struct Payload<M> {
     pub mark: M,
 }
 
-/// Parse a `/SheafAnnot` payload.
+/// Parse a `/SHEF_Annot` payload.
 pub fn from_json(s: &[u8]) -> Option<Payload<Annot>> {
     serde_json::from_slice(s).ok()
 }
@@ -2966,7 +2966,7 @@ mod tests {
             dict.get(b"Subtype").unwrap().as_name().unwrap(),
             b"FreeText"
         );
-        let json = dict.get(b"SheafAnnot").unwrap().as_str().unwrap();
+        let json = dict.get(b"SHEF_Annot").unwrap().as_str().unwrap();
         // Non-ASCII contents force UTF-16 for the JSON string too; decode it.
         let json = if json.starts_with(&[0xFE, 0xFF]) {
             let units: Vec<u16> = json[2..]
@@ -3195,7 +3195,7 @@ mod tests {
     }
 
     /// A tick is a Stamp named `/Tick`: which one it is is its mark's id,
-    /// which its `/SheafAnnot` holds.
+    /// which its `/SHEF_Annot` holds.
     #[test]
     fn a_tick_is_named_tick() {
         let tick = mark(AnnotKind::Stamp {
@@ -3206,7 +3206,7 @@ mod tests {
         let main = to_pdf(&tick, &mut pdf).main;
         assert_eq!(main.get(b"Subtype").unwrap().as_name().unwrap(), b"Stamp");
         assert_eq!(main.get(b"Name").unwrap().as_name().unwrap(), b"Tick");
-        let json = main.get(b"SheafAnnot").unwrap().as_str().unwrap();
+        let json = main.get(b"SHEF_Annot").unwrap().as_str().unwrap();
         let json = crate::file::text_string(json);
         assert_eq!(from_json(json.as_bytes()).unwrap().mark.id, tick.id);
     }

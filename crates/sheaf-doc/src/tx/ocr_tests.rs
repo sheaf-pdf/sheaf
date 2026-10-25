@@ -152,7 +152,7 @@ fn clear_takes_an_unsaved_layer_off_and_nothing_is_no_change() {
 fn a_page_whose_content_can_t_be_cut_fails_the_op() {
     // Its text state set outside a `q`: cut, it would stay set for what's
     // drawn after.
-    let unsafe_block: &[u8] = b"/ShOCR << /SheafOcrBlock (b2a) >> BDC BT 3 Tr ET EMC 0 0 9 9 re f";
+    let unsafe_block: &[u8] = b"/ShOCR << /SHEF_OcrBlock (b2a) >> BDC BT 3 Tr ET EMC 0 0 9 9 re f";
     let contents: [&[u8]; 3] = [b"0 0 9 9 re f", b"BT (never ends Tj ET", unsafe_block];
     let mut d = open(saved::pages_drawing(&contents), "pages.pdf");
     let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap());

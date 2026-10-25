@@ -91,7 +91,7 @@ pub fn read(bytes: &[u8], password: Option<&str>) -> Result<Comments> {
 
 /// Another PDF's comments: every annotation but links, form fields and
 /// popups, sheaf's own included (they come back exactly, from
-/// `/SheafAnnot`). The PDF is read as a source, decrypted with `password`.
+/// `/SHEF_Annot`). The PDF is read as a source, decrypted with `password`.
 pub fn from_pdf(bytes: &[u8], password: Option<&str>) -> Result<Comments> {
     let src = Store::new()
         .open(bytes.into(), BlobKind::comments(password))

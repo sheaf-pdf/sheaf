@@ -1,5 +1,5 @@
 //! Recognized text as a save writes it (M10.5 slice 18): each page's layer
-//! a block of its own, `/SheafBlock << /K /Ocr /B (b…) >>`, drawn after
+//! a block of its own, `/SHEF_Block << /K /Ocr /B (b…) >>`, drawn after
 //! the page's isolated content and before the generators over it, in one
 //! glyphless font a file; and the text a file holds taken out by a re-OCR
 //! or a Clear, whatever shape it was written in: sheaf's blocks, one
@@ -117,9 +117,9 @@ fn glyphless_fonts(pdf: &Pdf) -> usize {
 }
 
 /// The block `dict`, a stream's dictionary, marks it as recognized text's,
-/// by its layer's id: `/SheafBlock << /K /Ocr /B (b…) >>`.
+/// by its layer's id: `/SHEF_Block << /K /Ocr /B (b…) >>`.
 pub(crate) fn ocr_block(dict: &Dictionary) -> Option<BlockId> {
-    let marker = dict.get(b"SheafBlock").ok()?.as_dict().ok()?;
+    let marker = dict.get(b"SHEF_Block").ok()?.as_dict().ok()?;
     (marker.get(b"K").and_then(Object::as_name).ok() == Some(b"Ocr"))
         .then(|| BlockId::parse(marker.get(b"B").ok()?.as_str().ok()?))
         .flatten()
@@ -203,7 +203,7 @@ fn rewrite_writes_invisible_text_layer() {
     let lists = pdf.dereference(lists).unwrap().1.as_dict().unwrap();
     let said = (lists.iter()).map(|(_, l)| pdf.dereference(l).unwrap().1.as_dict().unwrap());
     let said: Vec<&[u8]> = said
-        .map(|l| l.get(b"SheafOcrBlock").unwrap().as_str().unwrap())
+        .map(|l| l.get(b"SHEF_OcrBlock").unwrap().as_str().unwrap())
         .collect();
     assert_eq!(said, [id.to_string().as_bytes()]);
     // Other pages are untouched.
@@ -406,7 +406,7 @@ fn ocr_appends_one_block_a_page_and_one_font() {
     let isolating: Vec<Vec<u8>> = (new.iter())
         .filter(|&&id| {
             let (dict, _) = stream_of(&pdf, id).unwrap_or_default();
-            let marker = dict.get(b"SheafBlock").and_then(Object::as_dict);
+            let marker = dict.get(b"SHEF_Block").and_then(Object::as_dict);
             marker.is_ok_and(|m| m.get(b"K").and_then(Object::as_name).ok() == Some(b"Isolate"))
         })
         .map(|&id| stream(&pdf, id).1)

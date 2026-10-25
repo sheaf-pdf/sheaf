@@ -19,4 +19,4 @@ roots), with content and appearance strings decoded, plus the text
 service over the written bytes. It covers Info and XMP, embedded-file
 names, named destinations, link URIs and Launch targets, structure
 `/Alt` and `/ActualText`, `/TU`, JavaScript, `/PieceInfo` and
-`/SheafAnnot`. A pass over `DocState` is only a fast pre-check.
+`/SHEF_Annot`. A pass over `DocState` is only a fast pre-check.
