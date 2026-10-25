@@ -59,7 +59,7 @@ fn round_trip(a: &Annot, turn: Rotation) {
     let a = &Annot { turn, ..a.clone() };
     let mut pdf = Pdf::with_version("1.7");
     let mut main = crate::serialize::built::to_pdf(a, &mut pdf).main;
-    main.remove(b"SheafAnnot");
+    main.remove(b"SHEF_Annot");
     let back = convert(&pdf, &main, turn, Options::default())
         .unwrap_or_else(|e| panic!("{:?}: {e:?}", a.kind));
     let rotate = turn.degrees();

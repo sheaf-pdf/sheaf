@@ -6,7 +6,7 @@
 //! `/SheafWMf`, `/SheafWMim`). A header an older sheaf drew, in a font
 //! named `/SheafHF`, its settings in the catalog (`/SheafHeaderFooter`);
 //! and a header sheaf draws as a generator's block, which
-//! `/SheafGenerators` says is a header. For tests here and in other crates
+//! `/SHEF_Generators` says is a header. For tests here and in other crates
 //! (the `fixtures` feature).
 
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
@@ -96,7 +96,7 @@ pub const SHEAF_HEADER_ID: u64 = 0x1f;
 pub const SHEAF_HEADER: &[u8] = b"/Artifact /ShHead BDC\nq\nBT\n0 0 0 rg\n/ShHelv 10 Tf\n\
     1 0 0 1 72 748.8 Tm\n(Draft) Tj\nET\nQ\nEMC\n";
 
-/// `/SheafGenerators` saying [`SHEAF_HEADER`]'s generator is a header and
+/// `/SHEF_Generators` saying [`SHEAF_HEADER`]'s generator is a header and
 /// footer on the pages its blocks are on.
 pub const SHEAF_HEADER_JSON: &str = concat!(
     r#"{"v":1,"generators":[{"id":"g1f","kind":"header-footer","z":"over","scope":"pages","#,
@@ -107,7 +107,7 @@ pub const SHEAF_HEADER_JSON: &str = concat!(
 
 /// `page` of `pdf` with [`SHEAF_HEADER`] drawn on it, after its content,
 /// its list and font named in its resources (a dictionary of its own, or
-/// the object they are); the catalog's `/SheafGenerators` must say what it
+/// the object they are); the catalog's `/SHEF_Generators` must say what it
 /// is ([`SHEAF_HEADER_JSON`]).
 pub fn sheaf_header(pdf: &mut Pdf, page: &mut Dictionary) {
     let font = pdf.add_object(dictionary! {
@@ -116,10 +116,10 @@ pub fn sheaf_header(pdf: &mut Pdf, page: &mut Dictionary) {
     });
     let list = dictionary! {
         "Type" => "Pagination", "Subtype" => "Header",
-        "SheafGen" => Object::string_literal("g1f"),
+        "SHEF_Gen" => Object::string_literal("g1f"),
     };
     let marker = dictionary! {
-        "SheafBlock" => dictionary! { "K" => "Gen", "G" => Object::string_literal("g1f") },
+        "SHEF_Block" => dictionary! { "K" => "Gen", "G" => Object::string_literal("g1f") },
     };
     let block = pdf.add_object(Stream::new(marker, SHEAF_HEADER.to_vec()));
     bind(pdf, page, b"Font", b"ShHelv", font.into());

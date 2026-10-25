@@ -43,7 +43,7 @@
 //!   copy or of another file isn't written (proposal 24).
 //!
 //! **Without sheaf's private data** (`Private::Strip`, §15), a mark is
-//! always written anew, without `/SheafAnnot`, and the name sheaf gave it,
+//! always written anew, without `/SHEF_Annot`, and the name sheaf gave it,
 //! its StrikeOut's and a comment's a reply made here named, is a neutral
 //! one ([`private::neutral_nm`]); `/IRT`, `/RT /Group` and a connector's
 //! `/Dest` refer to objects, and follow. Another tool's comment loses any
@@ -670,7 +670,7 @@ pub(crate) fn mark_kept<'b>(
     for entry in base {
         let read = (entry.as_reference().ok()).and_then(|at| pdf.get_dictionary(at).ok());
         let under = read.is_some_and(|d| {
-            d.get(b"IRT").ok() == Some(&Object::Reference(r.id)) && !d.has(b"SheafAnnot")
+            d.get(b"IRT").ok() == Some(&Object::Reference(r.id)) && !d.has(b"SHEF_Annot")
         });
         if under && crate::file::is_ours(pdf, entry, &entries) {
             if read.is_some_and(|d| d.has(crate::annot::PART.as_bytes())) {

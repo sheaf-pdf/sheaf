@@ -27,7 +27,7 @@ should-haves.**
 - **Tab-delimited text** out, and in through a row picker.
 - **JSON** for the CLI and plugins is a file format with a version:
   `{"sheaf_form_data": 1, "fields": [{name, type, value, export?}]}`,
-  changed only by adding, as M9 decision 1 treats `/SheafAnnot`, and
+  changed only by adding, as M9 decision 1 treats `/SHEF_Annot`, and
   documented in `docs/forms.md`.
 - IRS field names are opaque (`topmostSubform[0].Page1[0].f1_01[0]`),
   so a CSV can carry each field's tooltip as a second header row,

@@ -764,8 +764,8 @@ const RETIRED: &[(&str, u8)] = &[
     // The header and footer as a legacy installer with a catalog record of
     // its own: it is a generator (`GenSpec::HeaderFooter`), set and taken
     // off by ops, its Bates numbers fixed at apply (`Frozen`) and kept in
-    // its blocks' `/N`, drawn at emit as `/SheafBlock` blocks and found
-    // again from `/SheafGenerators`, so nothing writes or reads
+    // its blocks' `/N`, drawn at emit as `/SHEF_Block` blocks and found
+    // again from `/SHEF_Generators`, so nothing writes or reads
     // `/SheafHeaderFooter`, counts Bates numbers at each save, or strips a
     // header by hand. Its tokens and lines moved to `generate::header`
     // (`TOKENS`, `Line` for `Placed`), and `Generator`'s `z`, `scope` and
@@ -862,7 +862,7 @@ const RETIRED: &[(&str, u8)] = &[
     ("page_insert::DocView::show_copies", 17),
     ("page_insert::DocView::keep_copies", 17),
     // OCR as content: recognized text is a layer with a block id, drawn as
-    // a `/SheafBlock` block of its own after the page's isolated content
+    // a `/SHEF_Block` block of its own after the page's isolated content
     // (`text_layer::block`), its font and list under `/Sh…` names, and a
     // saved one is taken out by the stack's filters. The legacy installer
     // (`/SheafOcrLayer`, `/SheafOcr`), the emitter's balance around it, and
@@ -1311,7 +1311,7 @@ const QUALIFIED_ONLY: &[&str] = &[
     // a placed image or page (`ImageRef::Placed`, `PageForm::Placed`), a
     // source's page facts (`source::PageFacts`), and every other strip,
     // stripped page, stored entry and base that draws a page (a test's
-    // `strip`, `/SheafGenerators`' `stored`, a render key's
+    // `strip`, `/SHEF_Generators`' `stored`, a render key's
     // `base_draws`). Nothing else is named `to_content`, so the header's
     // and the OCR layer's are matched bare.
     "Shared",

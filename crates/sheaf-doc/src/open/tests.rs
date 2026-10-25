@@ -153,7 +153,7 @@ fn finish_never_lexes_content() {
         // sheaf's blocks stay: an open reads their dictionaries alone.
         let blocks = (crate::content::contents(f.dict(page)).into_iter()).filter(|&id| {
             let stream = f.pdf.get_object(id).and_then(Object::as_stream);
-            stream.is_ok_and(|s| s.dict.has(b"SheafBlock"))
+            stream.is_ok_and(|s| s.dict.has(b"SHEF_Block"))
         });
         let mut entries = vec![garbage.into(), Object::Reference(garbage)];
         entries.extend(blocks.map(Object::Reference).collect::<Vec<_>>());
@@ -310,7 +310,7 @@ fn every_mark_kind_round_trips_on_every_rotate() {
 }
 
 /// A mark an older sheaf wrote reads as the same mark written now. Its
-/// `/SheafAnnot` is version 1's: the JSON in the page's displayed space,
+/// `/SHEF_Annot` is version 1's: the JSON in the page's displayed space,
 /// with no version or digest, and a tick named `/SheafTick<id>`. Its
 /// geometry comes from the standard keys, within 0.01 pt, and it reads
 /// upright as the page shows. So does one written on a page sheaf had
@@ -327,7 +327,7 @@ fn a_v1_mark_reads_as_its_v2_self() {
         let shown = crate::geom::Geom::read(Some(rect(MEDIA)), Some(rect(CROP)), frame).to_view();
         for id in f.annots(0) {
             let d = f.dict(id);
-            let Ok(json) = d.get(b"SheafAnnot").and_then(Object::as_str) else {
+            let Ok(json) = d.get(b"SHEF_Annot").and_then(Object::as_str) else {
                 continue;
             };
             let a = crate::annot::from_json(crate::file::text_string(json).as_bytes())
@@ -338,7 +338,7 @@ fn a_v1_mark_reads_as_its_v2_self() {
                 ..a.mapped(&shown)
             };
             let json = serde_json::to_string(&old).unwrap();
-            d.set("SheafAnnot", crate::save::text_string(&json));
+            d.set("SHEF_Annot", crate::save::text_string(&json));
             if matches!(a.kind, AnnotKind::Stamp { .. }) {
                 let tick = format!("SheafTick{}", a.id.0);
                 d.set("Name", Object::Name(tick.into_bytes()));
@@ -360,7 +360,7 @@ crate::both_ways!(
 /// A mark another tool has edited since sheaf wrote it is that tool's
 /// comment: Acrobat's edit of its text (a new `/Contents` and `/M`) opens
 /// among the other tools' comments, as a mark that can be made editable,
-/// and not among the marks, whether its `/SheafAnnot` is version 2, whose
+/// and not among the marks, whether its `/SHEF_Annot` is version 2, whose
 /// digest no longer matches, or version 1, whose `modified` isn't `/M`. A
 /// Rewrite and an Append of an edit of the page's other marks
 /// keep it as that tool left it: not put back as sheaf wrote it, and not
@@ -374,7 +374,7 @@ fn stale_mark_is_theirs(how: How) {
         let case = if v1 { "version 1" } else { "version 2" };
         if v1 {
             // Its JSON as an older sheaf wrote it: no version or digest.
-            let json = f.dict(square).get(b"SheafAnnot").and_then(Object::as_str);
+            let json = f.dict(square).get(b"SHEF_Annot").and_then(Object::as_str);
             let json = crate::file::text_string(json.unwrap());
             let mut payload: serde_json::Value = serde_json::from_str(&json).unwrap();
             let payload = payload.as_object_mut().unwrap();
@@ -382,7 +382,7 @@ fn stale_mark_is_theirs(how: How) {
             payload.remove("std");
             let json = serde_json::to_string(payload).unwrap();
             f.dict(square)
-                .set("SheafAnnot", crate::save::text_string(&json));
+                .set("SHEF_Annot", crate::save::text_string(&json));
         }
         let edited = crate::save::text_string("Edited in Acrobat");
         f.dict(square).set("Contents", edited.clone());
@@ -595,7 +595,7 @@ fn a_page_of_v1_replacements_reads_in_linear_time() {
                 "Type" => "Annot", "Subtype" => "Caret",
                 "Rect" => vec![0.into(), 0.into(), 4.into(), 4.into()],
                 "M" => Object::string_literal("D:1"),
-                "SheafAnnot" => Object::string_literal(json),
+                "SHEF_Annot" => Object::string_literal(json),
             })
         })
         .collect();

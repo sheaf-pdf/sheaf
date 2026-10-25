@@ -21,7 +21,7 @@
 //!   watermarks and backgrounds) on its OCR words, what its flattened
 //!   annotations draw, its header's text there and what its watermarks
 //!   draw, a block the file held when it opened too, when the saved state
-//!   backs its generator; `/SheafGenerators` on what every generator's
+//!   backs its generator; `/SHEF_Generators` on what every generator's
 //!   recipe says. A resource sheaf drew with, a mark's appearance a
 //!   flatten pinned, a page's resources it made and the streams that
 //!   isolate a page's content are their user's, and say nothing of their
@@ -309,7 +309,7 @@ struct Walk<'a> {
     /// The old blocks judged on their pages, by number: a block pages laid
     /// out alike share is judged on each page that held it.
     blocks: HashMap<u32, ObjKey>,
-    /// Whether the old `/SheafGenerators` was examined.
+    /// Whether the old `/SHEF_Generators` was examined.
     generators: bool,
     /// The other old objects' text, in the order they were examined.
     bags: Vec<(ObjKey, TextBag)>,

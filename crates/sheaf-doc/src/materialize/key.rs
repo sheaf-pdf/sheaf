@@ -72,7 +72,7 @@ pub enum ObjKey {
     /// A name tree of the catalog's `/Names` a save builds: the document
     /// scripts of forms that came in from other files beside the primary's.
     Names(NameTree),
-    /// The catalog's `/SheafGenerators`: what the document's generators
+    /// The catalog's `/SHEF_Generators`: what the document's generators
     /// are, which an open reads them back from.
     Generators,
     /// A page's resources when sheaf draws on it with its own (§11.5): its
@@ -139,7 +139,7 @@ pub enum NameTree {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Shared {
     /// The `n` `q`s that isolate a page's own content from what sheaf
-    /// draws with it (§3.4), marked `/SheafBlock << /K /Isolate >>`.
+    /// draws with it (§3.4), marked `/SHEF_Block << /K /Isolate >>`.
     QOpen(u32),
     /// The `n` `Q`s that end them.
     QClose(u32),

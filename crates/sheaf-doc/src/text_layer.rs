@@ -110,7 +110,7 @@ pub(crate) fn overlaps_line(line: Box2, r: Box2) -> bool {
 /// Layer `layer`, block `id`'s, as its block draws it (§11.4): invisible
 /// text, one `Tj` per word, fitted to the word's box by horizontal scaling,
 /// in [`Glyphless`]; marked `/ShOCR` with a property list that names its
-/// block (`<< /SheafOcrBlock (b…) >>`), so a stream another tool merges it
+/// block (`<< /SHEF_OcrBlock (b…) >>`), so a stream another tool merges it
 /// into still says what it is, or with none when `private` strips that
 /// (§15); and in a `q` of its own, so the text mode it sets reaches
 /// nothing drawn after it. Text runs along the upright frame's x, so it's
@@ -139,7 +139,7 @@ pub(crate) fn block(
     let mut w = ContentWriter::new();
     match private {
         Private::Keep => {
-            let list = dictionary! { "SheafOcrBlock" => Object::string_literal(id.to_string()) };
+            let list = dictionary! { "SHEF_OcrBlock" => Object::string_literal(id.to_string()) };
             w.begin_marked("ShOCR", list);
         }
         Private::Strip | Private::Scrub => w.begin_tagged("ShOCR"),
@@ -325,7 +325,7 @@ mod tests {
         assert!(c.starts_with(&start), "{c}");
         assert!(c.ends_with("ET\nQ\nEMC\n"), "{c}");
         assert_eq!(list.kind, ResKind::Properties);
-        let said = dictionary! { "SheafOcrBlock" => Object::string_literal("b2a") };
+        let said = dictionary! { "SHEF_OcrBlock" => Object::string_literal("b2a") };
         assert_eq!(list.res, Res::dict(said));
         assert!(c.contains(&format!("/{} 10 Tf\n", name(font))), "{c}");
         assert!(font.name.starts_with(b"Sh"));

@@ -15,7 +15,7 @@
 //! | `Form` | the form's dictionary; when the files the forms come from changed, every field and widget of the other files (their fonts' renames in `/DR`), their document scripts and the catalog; when `/DA` or `/Q` changed, the other files' roots (theirs are pushed down) |
 //! | `Bookmark(b)`, `OutlineRoots` | each bookmark whose item or place in the tree (`/Parent`, `/Prev`, `/Next`, `/First`, `/Last`, `/Count`) changed, and the outline's root when its own did |
 //! | `Labels` | the page labels; the catalog when they came or went; each page a generator whose tokens read a page's label lays out otherwise than its block in the saved file |
-//! | `Generator(g)` | what the generators are (`/SheafGenerators`), the catalog when the first came or the last went, and the pages it's on then or now (only those it came onto or went from, or whose Bates number it changed, when nothing else of it changed) |
+//! | `Generator(g)` | what the generators are (`/SHEF_Generators`), the catalog when the first came or the last went, and the pages it's on then or now (only those it came onto or went from, or whose Bates number it changed, when nothing else of it changed) |
 //!
 //! And beside the path: the form's dictionary for a save transform the file
 //! hasn't had (every field, for `DropXfa`'s tooltips), and the catalog for

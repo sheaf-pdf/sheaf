@@ -105,7 +105,7 @@ pub(crate) fn sheaf_mark<'a, P: Objects + ?Sized>(
 ) -> Option<Annot> {
     let (id, dict) = pdf.dereference(entry).ok()?;
     let dict = dict.as_dict().ok()?;
-    let (_, json) = pdf.dereference(dict.get(b"SheafAnnot").ok()?).ok()?;
+    let (_, json) = pdf.dereference(dict.get(b"SHEF_Annot").ok()?).ok()?;
     let payload = from_json(text_string(json.as_str().ok()?).as_bytes())?;
     let a = payload.mark;
     let a = match payload.v {
@@ -341,7 +341,7 @@ fn from_standard_keys<'s, P: Objects + ?Sized>(
 /// companion is a replacement's StrikeOut: grouped (`/RT /Group`) under
 /// a sheaf Caret by its `/IRT`, or, in a file sheaf wrote before M10.5
 /// slice 9, marked [`PART`] with its `/IRT` a mark. A stale mark isn't
-/// ours, nor is a `/SheafAnnot` this build can't read, from a newer
+/// ours, nor is a `/SHEF_Annot` this build can't read, from a newer
 /// sheaf: each is kept like any other tool's annotation, so a save here
 /// never loses it or reverts its edit. It answers as [`sheaf_mark`] does,
 /// so what the open lists as another tool's comment is what a save
@@ -360,7 +360,7 @@ pub(crate) fn is_ours<'a, P: Objects + ?Sized>(
     };
     // The turn doesn't decide it.
     let mark = |entry: &Object| sheaf_mark(pdf, entry, Rotation::R0, annots);
-    if dict.has(b"SheafAnnot") {
+    if dict.has(b"SHEF_Annot") {
         return mark(entry).is_some();
     }
     // One step only: a companion's /IRT is its mark, never another companion.
@@ -983,7 +983,7 @@ mod tests {
         // A mark from a newer sheaf, and its companion.
         let unknown = pdf.add_object(dictionary! {
             "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(),
-            "SheafAnnot" => Object::string_literal(r#"{"id":6,"kind":{"Future":{}}}"#),
+            "SHEF_Annot" => Object::string_literal(r#"{"id":6,"kind":{"Future":{}}}"#),
         });
         let unknown_part = pdf.add_object(dictionary! {
             "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),

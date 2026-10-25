@@ -4841,7 +4841,7 @@ mod tests {
     }
 
     /// The header/footer sheaf drew opens as the generator that draws it,
-    /// on the pages it's on (`/SheafGenerators`, and its blocks). Set
+    /// on the pages it's on (`/SHEF_Generators`, and its blocks). Set
     /// again, it's the same generator, its id kept; a Rewrite draws it as
     /// its blocks, which an open of the file finds again, as they are.
     #[test]

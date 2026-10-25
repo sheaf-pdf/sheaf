@@ -8,5 +8,5 @@ Part of [M11: Security & redaction](../README.md) · [all proposals](README.md)
   and apply sheaf's marks, and the reverse.
 - A third-party `/Redact` opens as an editable sheaf redaction mark,
   not as a comment (bug 7).
-- Marks also keep the `/SheafAnnot` JSON, as every sheaf mark does
+- Marks also keep the `/SHEF_Annot` JSON, as every sheaf mark does
   (M9 decision 1).

@@ -68,8 +68,8 @@ pub const BLOCK_ID: u64 = 0x2a;
 /// An OCR block of [`layer`], block [`BLOCK_ID`]'s, as `text_layer::block`
 /// writes it, frozen: its invisible text in a `q` of its own, in the
 /// glyphless font named [`OCR_FONT`], marked `/ShOCR` with the list named
-/// [`OCR_LIST`], which says its block (`/SheafOcrBlock (b2a)`).
-pub const OCR_BLOCK: &[u8] = b"/ShOCR /Sh6OZT5N BDC\nq\nBT\n3 Tr\n/ShOANHIY 12 Tf\n\
+/// [`OCR_LIST`], which says its block (`/SHEF_OcrBlock (b2a)`).
+pub const OCR_BLOCK: &[u8] = b"/ShOCR /ShX256IW BDC\nq\nBT\n3 Tr\n/ShOANHIY 12 Tf\n\
     1 0 0 1 72 680 Tm\n133.3333 Tz\n<00530061007600650064> Tj\n1 0 0 1 112 680 Tm\n133.3333 Tz\n\
     <0020> Tj\n1 0 0 1 120 680 Tm\n133.3333 Tz\n<0077006F007200640073> Tj\nET\nQ\nEMC\n";
 
@@ -77,7 +77,7 @@ pub const OCR_BLOCK: &[u8] = b"/ShOCR /Sh6OZT5N BDC\nq\nBT\n3 Tr\n/ShOANHIY 12 T
 pub const OCR_FONT: &[u8] = b"ShOANHIY";
 
 /// The name [`OCR_BLOCK`] names its property list by.
-pub const OCR_LIST: &[u8] = b"Sh6OZT5N";
+pub const OCR_LIST: &[u8] = b"ShX256IW";
 
 /// A one-page document whose page draws [`BASE`] and then the layer an
 /// older sheaf wrote of [`layer`], as it wrote it: `/Contents [q, base,
@@ -98,16 +98,16 @@ pub fn legacy_page() -> Pdf {
 
 /// A one-page document whose page draws [`BASE`], isolated by the `q`
 /// and the two `Q`s its balance asks for, each a stream marked
-/// `/SheafBlock << /K /Isolate >>`, and then [`OCR_BLOCK`], a stream
-/// marked `/SheafBlock << /K /Ocr /B (b2a) >>`.
+/// `/SHEF_Block << /K /Isolate >>`, and then [`OCR_BLOCK`], a stream
+/// marked `/SHEF_Block << /K /Ocr /B (b2a) >>`.
 pub fn block_page() -> Pdf {
     let mut pdf = Pdf::with_version("1.7");
-    let isolate = || dictionary! { "SheafBlock" => dictionary! { "K" => "Isolate" } };
+    let isolate = || dictionary! { "SHEF_Block" => dictionary! { "K" => "Isolate" } };
     let open = pdf.add_object(Stream::new(isolate(), b"q\n".to_vec()));
     let base = pdf.add_object(Stream::new(dictionary! {}, BASE.to_vec()));
     let close = pdf.add_object(Stream::new(isolate(), b"Q\nQ\n".to_vec()));
     let block = dictionary! {
-        "SheafBlock" => dictionary! { "K" => "Ocr", "B" => block_id() },
+        "SHEF_Block" => dictionary! { "K" => "Ocr", "B" => block_id() },
     };
     let ocr = pdf.add_object(Stream::new(block, OCR_BLOCK.to_vec()));
     let contents = vec![open.into(), base.into(), close.into(), ocr.into()];
@@ -135,7 +135,7 @@ fn block_id() -> Object {
 /// [`OCR_LIST`].
 fn block_resources(pdf: &mut Pdf) -> Dictionary {
     let fonts = dictionary! { "F1" => helvetica(pdf), OCR_FONT => glyphless(pdf) };
-    let list = dictionary! { "SheafOcrBlock" => block_id() };
+    let list = dictionary! { "SHEF_OcrBlock" => block_id() };
     dictionary! { "Font" => fonts, "Properties" => dictionary! { OCR_LIST => list } }
 }
 

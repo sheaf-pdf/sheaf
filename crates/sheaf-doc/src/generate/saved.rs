@@ -1,6 +1,6 @@
 //! The generators a file says sheaf drew on it (M10.5 §3.5), as an open
 //! finds them ([`read`]): a fact of its source
-//! ([`Source::generators`]), read from the catalog's `/SheafGenerators`
+//! ([`Source::generators`]), read from the catalog's `/SHEF_Generators`
 //! and the pages' blocks. It names what it read as the file numbers it:
 //! the stream each block is in, and the XObject an image's or a page's
 //! block draws, which a generator made of it binds to its source.
@@ -25,7 +25,7 @@ use crate::model::{
 use crate::source::{ObjRef, Source};
 use crate::store::Src;
 
-/// A generator a file's `/SheafGenerators` and its pages' blocks say sheaf
+/// A generator a file's `/SHEF_Generators` and its pages' blocks say sheaf
 /// drew on it (§3.5), as [`read`] finds it: what an open makes a generator
 /// of ([`Saved::generator`]).
 #[derive(Debug, Clone, PartialEq)]
@@ -170,7 +170,7 @@ impl Saved {
 }
 
 /// The generators sheaf drew on `src` (§3.5): what its catalog's
-/// `/SheafGenerators` says each is, on the pages whose blocks name it: by
+/// `/SHEF_Generators` says each is, on the pages whose blocks name it: by
 /// their streams' markers ([`Source::markers`]), and on a page holding no
 /// block in a stream of its own whose resources name a list of sheaf's,
 /// by the ranges its content marks, where another tool merged a block into
@@ -203,13 +203,13 @@ pub fn read(src: &Source) -> Vec<Saved> {
         Ok(stored) if stored.v == STORED_VERSION => stored,
         Ok(stored) => {
             log::warn!(
-                "/SheafGenerators is version {}, not one sheaf reads",
+                "/SHEF_Generators is version {}, not one sheaf reads",
                 stored.v
             );
             return Vec::new();
         }
         Err(e) => {
-            log::warn!("/SheafGenerators can't be read: {e}");
+            log::warn!("/SHEF_Generators can't be read: {e}");
             return Vec::new();
         }
     };
@@ -252,12 +252,12 @@ pub fn read(src: &Source) -> Vec<Saved> {
         let g: StoredGen = match serde_json::from_value(g) {
             Ok(g) => g,
             Err(e) => {
-                log::warn!("a generator /SheafGenerators says can't be read: {e}");
+                log::warn!("a generator /SHEF_Generators says can't be read: {e}");
                 continue;
             }
         };
         let Some(id) = GenId::parse(g.id.as_bytes()) else {
-            log::warn!("/SheafGenerators names a generator {:?}", g.id);
+            log::warn!("/SHEF_Generators names a generator {:?}", g.id);
             continue;
         };
         // A header and footer is over the page's content, and says what it
@@ -405,7 +405,7 @@ fn names_a_list(src: &Source, index: u32) -> bool {
     };
     let lists = dict(resources).and_then(|res| dict(res.get(b"Properties").ok()?));
     lists.is_some_and(|lists| {
-        (lists.iter()).any(|(_, list)| dict(list).is_some_and(|l| l.has(b"SheafGen")))
+        (lists.iter()).any(|(_, list)| dict(list).is_some_and(|l| l.has(b"SHEF_Gen")))
     })
 }
 
@@ -424,7 +424,7 @@ fn merged(src: &Source, index: u32) -> Vec<GenId> {
         .collect()
 }
 
-/// The catalog's `/SheafGenerators` string, when it has one.
+/// The catalog's `/SHEF_Generators` string, when it has one.
 fn stored_json(pdf: &LazyPdf) -> Option<Vec<u8>> {
     let catalog = pdf.catalog().ok()?;
     let (_, json) = pdf

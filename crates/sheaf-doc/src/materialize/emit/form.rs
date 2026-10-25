@@ -792,7 +792,7 @@ impl Fields {
         // Any other such kid isn't the field's to write: a page, or the
         // catalog, as 0092321's `Page2[0]` lists it, copied as a kid would
         // carry what the save wrote anew, a removed generator's text in
-        // the catalog's `/SheafGenerators` among it (Greg, 2026-10-22).
+        // the catalog's `/SHEF_Generators` among it (Greg, 2026-10-22).
         let primary = cx.primary.id();
         if copy == 0 && r.src.id() == primary && !split && self.scoped.is_none() {
             let pdf = r.src.pdf();

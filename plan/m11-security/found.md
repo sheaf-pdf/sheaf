@@ -56,7 +56,7 @@ references are as of `f61e7eb`. The slice in brackets fixes each one.
 
    [Slice 4.]
 8. **Copies of page text live outside the content stream:**
-   - a Replace mark's `struck` text and mark contents in `/SheafAnnot`
+   - a Replace mark's `struck` text and mark contents in `/SHEF_Annot`
      (`annot.rs`);
    - bookmark titles from "Bookmark matches" (`pattern_panel.rs`);
    - OCR layer streams (`/SheafOcrLayer`);

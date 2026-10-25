@@ -1,4 +1,4 @@
-//! A watermark and a header laid out on a page, and `/SheafGenerators`' JSON.
+//! A watermark and a header laid out on a page, and `/SHEF_Generators`' JSON.
 
 use std::collections::BTreeSet;
 
@@ -169,7 +169,7 @@ fn a_block_is_a_pagination_artifact_in_its_own_state() {
     let want = dictionary! {
         "Type" => "Pagination",
         "Subtype" => "Watermark",
-        "SheafGen" => Object::string_literal("gab"),
+        "SHEF_Gen" => Object::string_literal("gab"),
     };
     assert_eq!(list, &want);
     let Object::Dictionary(gs) = object(&drawn.res.0[1]) else {
@@ -355,7 +355,7 @@ fn num(x: f32) -> String {
     if s == "-0" { "0".into() } else { s.into() }
 }
 
-/// `/SheafGenerators` holds each watermark, in ASCII, with its id as its
+/// `/SHEF_Generators` holds each watermark, in ASCII, with its id as its
 /// blocks name it, its kind, z, scope and what it replaces; an image's or
 /// a page's file is "placed", never a path or an object number. Nothing
 /// when there are none.
@@ -444,7 +444,7 @@ fn a_header_goes_out_in_win_ansi_with_a_named_list() {
         let want = dictionary! {
             "Type" => "Pagination",
             "Subtype" => kind,
-            "SheafGen" => Object::string_literal("g2a"),
+            "SHEF_Gen" => Object::string_literal("g2a"),
         };
         assert_eq!(object(need), &Object::Dictionary(want));
         let name = format!("/{} BDC", String::from_utf8_lossy(&need.name));

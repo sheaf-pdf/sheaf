@@ -1,7 +1,7 @@
 //! Watermarks and backgrounds as a save draws them (M10.5 slice 16): a
 //! block of its own for each distinct layout, marked with its generator,
 //! the page's own content isolated by its balance, the page's resources
-//! one dictionary for each base page's, the catalog's `/SheafGenerators`,
+//! one dictionary for each base page's, the catalog's `/SHEF_Generators`,
 //! the PDF version raised, and an Append of what changed.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -104,13 +104,13 @@ fn stream(pdf: &Pdf, id: ObjectId) -> (Dictionary, Vec<u8>) {
     (s.dict.clone(), data)
 }
 
-/// A `/SheafBlock` marker's strings, by key.
+/// A `/SHEF_Block` marker's strings, by key.
 type Strings = BTreeMap<Vec<u8>, Vec<u8>>;
 
-/// What `/SheafBlock` marks stream `id` as: its `/K`, and the rest by key.
+/// What `/SHEF_Block` marks stream `id` as: its `/K`, and the rest by key.
 fn marker(pdf: &Pdf, id: ObjectId) -> Option<(Vec<u8>, Strings)> {
     let (dict, _) = stream(pdf, id);
-    let marker = dict.get(b"SheafBlock").ok()?.as_dict().ok()?;
+    let marker = dict.get(b"SHEF_Block").ok()?.as_dict().ok()?;
     let kind = marker.get(b"K").unwrap().as_name().unwrap().to_vec();
     let strings = (marker.iter())
         .filter(|(k, _)| k.as_slice() != b"K")
@@ -150,7 +150,7 @@ fn balance(pdf: &Pdf, page: ObjectId) -> Balance {
 /// before it and a marked `Q` after it, its marker's values strings
 /// naming its generator, its layout and its recipe, its property list
 /// named in the page's `/Properties`, and the catalog's
-/// `/SheafGenerators` saying what it is. Both ways.
+/// `/SHEF_Generators` saying what it is. Both ways.
 fn markers(how: How) {
     let dir = scratch();
     let (_, mut doc) = opened(&dir, "a.pdf", &text_file(3));
@@ -193,14 +193,14 @@ fn markers(how: How) {
             list.get(b"Subtype").unwrap().as_name().unwrap(),
             b"Watermark"
         );
-        let gen_id = list.get(b"SheafGen").unwrap().as_str().unwrap();
+        let gen_id = list.get(b"SHEF_Gen").unwrap().as_str().unwrap();
         assert_eq!(GenId::parse(gen_id), Some(id));
         assert!(res.get(b"Font").unwrap().as_dict().unwrap().has(b"F1"));
     }
     assert_eq!(blocks.len(), 1, "{how:?}: one block");
     let catalog = pdf.catalog().unwrap();
     let json = catalog
-        .get(b"SheafGenerators")
+        .get(b"SHEF_Generators")
         .unwrap()
         .as_reference()
         .unwrap();
@@ -252,7 +252,7 @@ fn census(how: How) {
         assert_eq!(count(&bold), 1, "{how:?}: {split}");
         assert_eq!(count(&|d| d.has(b"ca")), 1, "{how:?}: {split}");
         let block = |d: &Dictionary| {
-            (d.get(b"SheafBlock").and_then(Object::as_dict))
+            (d.get(b"SHEF_Block").and_then(Object::as_dict))
                 .is_ok_and(|m| m.get(b"K").and_then(Object::as_name).ok() == Some(b"Gen"))
         };
         assert_eq!(count(&block), 1, "{how:?}: {split}");
@@ -604,7 +604,7 @@ fn a_changed_text_rewrites_and_a_moved_watermark_appends() {
     assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
 }
 
-/// An Append that writes neither the catalog nor `/SheafGenerators`, a
+/// An Append that writes neither the catalog nor `/SHEF_Generators`, a
 /// comment's on a page the background isn't on, makes nothing of the
 /// image the background draws: what the generators are, which needs its
 /// digest, is made only when it's written. The background moved, it is.
@@ -659,7 +659,7 @@ fn encrypted(how: How) {
     assert!(!holds(&out, id.to_string().as_bytes()), "{how:?}");
     let lim = &Limits::DEFAULT.reader;
     let pdf = lopdf::LazyPdf::open(std::sync::Arc::<[u8]>::from(out), Some(USER), lim).unwrap();
-    let json = pdf.catalog().unwrap().get(b"SheafGenerators").unwrap();
+    let json = pdf.catalog().unwrap().get(b"SHEF_Generators").unwrap();
     let json = pdf.dereference(json).unwrap().1.as_str().unwrap().to_vec();
     assert!(
         String::from_utf8(json).unwrap().contains("MARKSECRET"),
@@ -687,7 +687,7 @@ fn encrypted(how: How) {
         .unwrap()
         .as_stream()
         .unwrap();
-    let marker = block.dict.get(b"SheafBlock").unwrap().as_dict().unwrap();
+    let marker = block.dict.get(b"SHEF_Block").unwrap().as_dict().unwrap();
     assert_eq!(
         GenId::parse(marker.get(b"G").unwrap().as_str().unwrap()),
         Some(id)
@@ -717,7 +717,7 @@ fn the_last_watermark_removed_leaves_no_generators() {
     let keys = keys_at(&doc, &written(base.len(), &section, &path));
     assert_eq!(kinds(&keys), BTreeMap::from([("page", 2), ("catalog", 1)]));
     let pdf = Pdf::load(&path).unwrap();
-    assert!(!pdf.catalog().unwrap().has(b"SheafGenerators"));
+    assert!(!pdf.catalog().unwrap().has(b"SHEF_Generators"));
     for page in self::pages(&pdf) {
         assert_eq!(contents(&pdf, page).len(), 1);
         assert!(marker(&pdf, contents(&pdf, page)[0]).is_none());
@@ -736,7 +736,7 @@ fn a_saved_file_s_generators_are_numbered_when_it_opens() {
     save_rewritten(&mut doc, &path).unwrap();
     let doc = crate::open::file(&path, None).unwrap().doc;
     let pdf = Pdf::load(&path).unwrap();
-    let at = pdf.catalog().unwrap().get(b"SheafGenerators").unwrap();
+    let at = pdf.catalog().unwrap().get(b"SHEF_Generators").unwrap();
     let map = &doc.saved_record().unwrap().map;
     assert_eq!(
         map.keys.get(&ObjKey::Generators),
@@ -812,7 +812,7 @@ fn reads(pdf: &Pdf, text: &[u8]) -> bool {
 /// `Page2[0]` does (a `WrongParent` the file has): a watermark appended,
 /// the file opened again and the watermark taken off, the Rewrite leaves
 /// none of its text, though the catalog the Append wrote, the file's now,
-/// held it in `/SheafGenerators`. No field's kid is a catalog, and the
+/// held it in `/SHEF_Generators`. No field's kid is a catalog, and the
 /// form check finds nothing the file didn't have.
 #[test]
 fn a_watermark_taken_off_isn_t_kept_by_a_field_s_stray_kid() {

@@ -709,7 +709,7 @@ fn plant_unknown_mark(path: &Path) {
         "Rect" => vec![100.into(), 600.into(), 160.into(), 660.into()],
         "NM" => Object::string_literal("sheaf:77"),
         "Contents" => Object::string_literal("from a newer sheaf"),
-        "SheafAnnot" => Object::string_literal(json),
+        "SHEF_Annot" => Object::string_literal(json),
         "AP" => dictionary! { "N" => ap },
     });
     pdf.get_dictionary_mut(page0)
@@ -1180,7 +1180,7 @@ fn replies_follow_our_marks(how: How) {
     let list = page_annots(&out);
     let note_obj = list
         .iter()
-        .find(|(_, d)| d.has(b"SheafAnnot"))
+        .find(|(_, d)| d.has(b"SHEF_Annot"))
         .map(|(id, _)| *id)
         .unwrap();
     let (_, reply) = list
@@ -1342,7 +1342,7 @@ fn made_ours_takes_its_place(how: How) {
         .iter()
         .find(|(_, d)| crate::import::subtype(d) == "Square")
         .unwrap();
-    assert!(sq.has(b"SheafAnnot"));
+    assert!(sq.has(b"SHEF_Annot"));
     assert_eq!(crate::file::thread_name(sq), "sq");
     let (_, reply) = list
         .iter()
@@ -2308,7 +2308,7 @@ fn caret_and_strikeout(how: How) {
     // A companion is known by its group and its Caret: it's marked no
     // other way.
     assert!(!strike.has(crate::annot::PART.as_bytes()));
-    assert!(!strike.has(b"SheafAnnot"));
+    assert!(!strike.has(b"SHEF_Annot"));
     assert!(strike.has(b"QuadPoints"));
     // The names the renderer hides are exactly what was written.
     let names: Vec<String> = list
@@ -2768,7 +2768,7 @@ fn encrypted_source_saves(how: How) {
 
 /// A header/footer is drawn into page content as its generator's blocks
 /// on save, pagination artifacts of sheaf's own, what it is said in the
-/// catalog's `/SheafGenerators` and nothing in `/SheafHeaderFooter`; an
+/// catalog's `/SHEF_Generators` and nothing in `/SheafHeaderFooter`; an
 /// open finds it again (taking it off is `header_tests`' and
 /// `others_tests`').
 #[test]

@@ -636,7 +636,7 @@ fn only_held_objects_are_found_in_but_all_are_walked() {
 
 #[test]
 fn a_held_object_nothing_reaches_is_found() {
-    let mut objects = changed(clean(), 1, |catalog| catalog.set("SheafGenerators", r(7)));
+    let mut objects = changed(clean(), 1, |catalog| catalog.set("SHEF_Generators", r(7)));
     objects.extend([
         (
             6,
@@ -662,7 +662,7 @@ fn a_held_object_nothing_reaches_is_found() {
     );
     assert_eq!(
         report.unlisted,
-        BTreeMap::from([(unlisted("Catalog", "SheafGenerators", Class::Other), 1)])
+        BTreeMap::from([(unlisted("Catalog", "SHEF_Generators", Class::Second), 1)])
     );
 
     // A reference to no object is found where it's written.
@@ -1270,7 +1270,7 @@ fn a_value_direct_where_it_must_be_indirect_or_the_reverse_is_found() {
 #[test]
 fn a_key_the_model_doesnt_list_is_counted_by_its_kind_of_name() {
     let keys = changed(clean(), 4, |annot| {
-        annot.set("SheafAnnot", 1);
+        annot.set("SHEF_Annot", 1);
         annot.set("ABCD_x", 1);
         annot.set("XXMine", 1);
     });
@@ -1283,7 +1283,7 @@ fn a_key_the_model_doesnt_list_is_counted_by_its_kind_of_name() {
         report.unlisted,
         BTreeMap::from([
             (unlisted("AnnotText", "ABCD_x", Class::Second), 1),
-            (unlisted("AnnotText", "SheafAnnot", Class::Other), 1),
+            (unlisted("AnnotText", "SHEF_Annot", Class::Second), 1),
             (unlisted("AnnotText", "XXMine", Class::Third), 1),
             (
                 unlisted(

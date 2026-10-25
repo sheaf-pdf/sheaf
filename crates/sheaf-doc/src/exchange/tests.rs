@@ -432,7 +432,7 @@ fn imports_match_by_name_and_report_the_rest() {
         .map(|i| (back.annots[i].0, thread_name(back.dict(i).unwrap())))
         .collect();
     assert_eq!(names, [(0, ours.name()), (0, "sq".to_string())]);
-    // Ours come back exactly, from /SheafAnnot.
+    // Ours come back exactly, from /SHEF_Annot.
     let again = import(&snap, doc.store(), &back);
     assert_eq!((again.added, again.updated), (0, 2));
 

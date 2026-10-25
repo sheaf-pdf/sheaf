@@ -198,7 +198,7 @@ pub enum LegacySel {
     /// [`private::LIST_KEYS`]: crate::private::LIST_KEYS
     Marked(MarkedSel),
     /// Every stream of the page's content sheaf marked: its dictionary
-    /// without [`private::STREAM_KEYS`] (a block's `/SheafBlock`, an older
+    /// without [`private::STREAM_KEYS`] (a block's `/SHEF_Block`, an older
     /// sheaf's `/SheafOcrLayer`), its data as it was.
     ///
     /// [`private::STREAM_KEYS`]: crate::private::STREAM_KEYS
@@ -220,7 +220,7 @@ pub enum LegacySel {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MarkedSel {
     /// A generator's blocks merged into another stream: the ranges whose
-    /// property list has `/SheafGen` naming it.
+    /// property list has `/SHEF_Gen` naming it.
     SheafGen(GenId),
     /// The pagination artifacts of `kinds` that `origins` drew
     /// ([`PageBlocks::selected`]), each cut as [`Pagination::cuts`] says;
@@ -235,7 +235,7 @@ pub enum MarkedSel {
         origins: BTreeSet<PagOrigin>,
     },
     /// sheaf's OCR blocks merged into another stream: the ranges whose
-    /// property list has `/SheafOcrBlock`, whatever block it names. An op
+    /// property list has `/SHEF_OcrBlock`, whatever block it names. An op
     /// puts it only once a splice is shown to take them out, and fails
     /// where one refuses ([`EditError::Content`]).
     ///
@@ -246,10 +246,10 @@ pub enum MarkedSel {
 /// The streams a [`Filter::DropStreams`] leaves out.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StreamSel {
-    /// A generator's blocks: the streams whose `/SheafBlock` names it.
+    /// A generator's blocks: the streams whose `/SHEF_Block` names it.
     SheafGen(GenId),
     /// sheaf's recognized text in the file: its OCR blocks, each a stream
-    /// marked `/SheafBlock << /K /Ocr >>`, whatever block it names; and
+    /// marked `/SHEF_Block << /K /Ocr >>`, whatever block it names; and
     /// the layer an older sheaf wrote, the `/SheafOcrLayer` stream after
     /// the page's content with the `q` stream before it that its leading
     /// `Q` ends, both or neither, as [`PageBlocks::legacy_ocr`] pairs
@@ -262,7 +262,7 @@ pub enum StreamSel {
 /// One thing drawn over a page: a block of its own in the file (§11.4).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layer {
-    /// Its block's (`/SheafBlock << /B (b…) >>`): drawn when it's made,
+    /// Its block's (`/SHEF_Block << /B (b…) >>`): drawn when it's made,
     /// kept by one that replaces it on the stack, saved or not, and shared
     /// by a duplicate.
     pub id: BlockId,
@@ -1181,7 +1181,7 @@ pub enum PageForm {
 /// XObject, the resource it was drawn as (its digest, which named it and
 /// which the blocks' layouts were digested with, so a block laid out alike
 /// again is the one the file has), and the quarter turns clockwise an
-/// image shows upright at (0 for a page). The file's `/SheafGenerators`
+/// image shows upright at (0 for a page). The file's `/SHEF_Generators`
 /// says the last two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placed {

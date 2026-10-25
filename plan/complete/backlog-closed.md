@@ -434,3 +434,29 @@ Entries move here when they close, saying where they went. IDs are never reused.
   copy under the test fixtures with its license, or read them from
   `../pdf-corpus/tools`. Start with the objects sheaf creates, not every
   object it copies. [build-or-adopt.md](../research/build-or-adopt/README.md), entry 94.
+
+### F24: sheaf's private names as second- or third-class names
+
+- **Closed:** 2026-10-25, done: the five private names sheaf writes are
+  second-class names with the prefix `SHEF_` (Greg chose `SHEF`):
+  `/SHEF_Annot`, `/SHEF_Block`, `/SHEF_Generators`, `/SHEF_Gen` and
+  `/SHEF_OcrBlock`. The Arlington checker's exemption for them is gone,
+  and a test holds every name sheaf writes to the prefix. Registering it
+  waits for the first release ([F28](../backlog/F28.md)).
+- **Found:** 2026-10-24, the Arlington checks (F22)
+- **What:** rename the keys `/SheafAnnot` (a mark), `/SheafBlock` (a
+  block's stream) and `/SheafGenerators` (the catalog), and the
+  marked-content names `/SheafGen` and `/SheafOcrBlock`
+  (`private::KEYS`), to a registered second-class prefix (e.g.
+  `SHEF_Annot`) or third-class `XX` names, or move the page and form data
+  under `/PieceInfo`, the spec's place for an application's private data.
+  Or keep them.
+- **Why:** ISO 32000-2 Annex E keeps first-class names for the spec. A
+  validator could flag them, or a future spec key could collide.
+  Arlington counts them as unlisted "other"; the checker exempts them by
+  name from the `unlisted` rule, and a renamed set would need no
+  exemption.
+- **Overlap:** M10.5's private data (`private.rs`); the sidecar format
+- **Notes:** pre-alpha, so a rename has no compatibility cost (clean over
+  compat). A decision for Greg. Registering a prefix is with the PDF
+  Association's registry.

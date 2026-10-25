@@ -70,21 +70,21 @@ pub const KEYS: &[Key] = &[
                 written neutral",
     },
     Key {
-        name: b"SheafAnnot",
+        name: b"SHEF_Annot",
         prefix: false,
         places: &[Place::Annot],
         older: false,
         strip: "the mark's key left out",
     },
     Key {
-        name: b"SheafGenerators",
+        name: b"SHEF_Generators",
         prefix: false,
         places: &[Place::Catalog],
         older: false,
         strip: "the catalog's key left out",
     },
     Key {
-        name: b"SheafBlock",
+        name: b"SHEF_Block",
         prefix: false,
         places: &[Place::Stream],
         older: false,
@@ -92,7 +92,7 @@ pub const KEYS: &[Key] = &[
                 (`LegacySel::Streams`)",
     },
     Key {
-        name: b"SheafGen",
+        name: b"SHEF_Gen",
         prefix: false,
         places: &[Place::List],
         older: false,
@@ -100,7 +100,7 @@ pub const KEYS: &[Key] = &[
                 without it (`LegacySel::Resources`, `LegacySel::Marked`)",
     },
     Key {
-        name: b"SheafOcrBlock",
+        name: b"SHEF_OcrBlock",
         prefix: false,
         places: &[Place::List],
         older: false,
@@ -317,7 +317,8 @@ pub struct Found {
 /// tiling pattern. Content that can't be read whole is read a stream at a
 /// time, and what can't be read fails closed: content that can't be lexed,
 /// and a stream whose data can't be decoded (lopdf hands back what of a
-/// broken deflated stream inflates) are searched for `/Sheaf` as bytes,
+/// broken deflated stream inflates) are searched for `/SHEF_` and `/Sheaf`
+/// as bytes,
 /// and a stream that decodes past the content limit is taken to hold
 /// some.
 pub fn found(pdf: &Pdf) -> Vec<Found> {
@@ -339,13 +340,13 @@ pub fn found(pdf: &Pdf) -> Vec<Found> {
     found.into_iter().collect()
 }
 
-/// Every name `pdf` holds that starts `Sheaf`, wherever [`found`] looks:
-/// what §15's test holds to [`KEYS`].
+/// Every name `pdf` holds that starts `SHEF_` or `Sheaf`, wherever
+/// [`found`] looks: what §15's test holds to [`KEYS`].
 #[cfg(test)]
 pub(crate) fn sheaf_names(pdf: &Pdf) -> BTreeSet<Vec<u8>> {
     let mut names = BTreeSet::new();
     walk(pdf, &mut |_, said| match said {
-        Said::Name(name) if name.starts_with(b"Sheaf") => {
+        Said::Name(name) if name.starts_with(b"SHEF_") || name.starts_with(b"Sheaf") => {
             names.insert(name.to_vec());
         }
         Said::Unread => {
@@ -363,7 +364,7 @@ enum Said<'a> {
     Name(&'a [u8]),
     /// An annotation's `/NM`.
     Nm(&'a [u8]),
-    /// Content that can't be read, holding `/Sheaf`.
+    /// Content that can't be read, holding `/SHEF_` or `/Sheaf`.
     Unread,
 }
 
@@ -416,8 +417,8 @@ fn walk(pdf: &Pdf, f: &mut dyn FnMut(ObjectId, Said)) {
 }
 
 /// Each name and inline property list's key in content `bytes`, `at`'s,
-/// handed to `f`; content that can't be lexed is searched for `/Sheaf` as
-/// bytes.
+/// handed to `f`; content that can't be lexed is searched for `/SHEF_` and
+/// `/Sheaf` as bytes.
 fn lexed(
     at: ObjectId,
     bytes: &[u8],
@@ -445,9 +446,10 @@ fn lexed(
     }
 }
 
-/// Whether `bytes` hold `/Sheaf`.
+/// Whether `bytes` hold `/SHEF_` (a name sheaf writes) or `/Sheaf` (an older
+/// sheaf's).
 fn says_sheaf(bytes: &[u8]) -> bool {
-    bytes.windows(6).any(|w| w == b"/Sheaf")
+    bytes.windows(6).any(|w| w == b"/SHEF_" || w == b"/Sheaf")
 }
 
 /// Each name and dictionary key in `obj`, at any depth, handed to `f`
@@ -481,15 +483,15 @@ mod tests {
         assert_eq!(
             LIST_KEYS,
             [
-                &b"SheafGen"[..],
-                b"SheafOcrBlock",
+                &b"SHEF_Gen"[..],
+                b"SHEF_OcrBlock",
                 b"SheafStamp",
                 b"SheafSettings"
             ]
         );
-        assert_eq!(STREAM_KEYS, [&b"SheafBlock"[..], b"SheafOcrLayer"]);
+        assert_eq!(STREAM_KEYS, [&b"SHEF_Block"[..], b"SheafOcrLayer"]);
         for name in [
-            &b"SheafAnnot"[..],
+            &b"SHEF_Annot"[..],
             b"SheafOcr",
             b"SheafOcrLayer",
             b"SheafFlat1",
@@ -503,9 +505,20 @@ mod tests {
             assert!(!is_private(name), "{}", String::from_utf8_lossy(name));
         }
         assert!(is_resource_name(b"SheafWMim") && is_resource_name(b"SheafHF"));
-        assert!(!is_resource_name(b"SheafGen"));
+        assert!(!is_resource_name(b"SHEF_Gen"));
         assert!(is_sheaf_nm(b"sheaf:12") && is_sheaf_nm(b"sheaf-anon:ab"));
         assert!(!is_sheaf_nm(b"sheafy") && !is_sheaf_nm(b"a1b2-c3"));
+        // Every name sheaf writes is a second-class name (ISO 32000-2 Annex
+        // E): its prefix, `SHEF_`, then the rest.
+        for key in KEYS.iter().filter(|k| !k.older && k.places != [Place::Nm]) {
+            let name = String::from_utf8_lossy(key.name);
+            assert!(key.name.starts_with(b"SHEF_"), "{name}");
+            assert_eq!(
+                crate::arlington::Class::of(key.name),
+                crate::arlington::Class::Second,
+                "{name}"
+            );
+        }
     }
 
     /// A neutral name is a UUID's form, the same for the same name, and
@@ -537,7 +550,7 @@ mod tests {
         ));
         let page = pdf.add_object(dictionary! { "Type" => "Page", "Contents" => content });
         let annot = pdf.add_object(dictionary! {
-            "NM" => Object::string_literal("sheaf:7"), "SheafAnnot" => Object::string_literal("{}"),
+            "NM" => Object::string_literal("sheaf:7"), "SHEF_Annot" => Object::string_literal("{}"),
         });
         let at = |at, name: &[u8]| Found {
             at,
@@ -549,7 +562,7 @@ mod tests {
                 at(content, b"SheafOcrLayer"),
                 at(page, b"SheafHF"),
                 at(page, b"SheafSettings"),
-                at(annot, b"SheafAnnot"),
+                at(annot, b"SHEF_Annot"),
                 at(annot, b"sheaf:7"),
             ]
         );
@@ -562,7 +575,7 @@ mod tests {
     }
 
     /// Content that can't be lexed is found to hold private data when its
-    /// bytes say `/Sheaf`, and not otherwise.
+    /// bytes say `/SHEF_` or `/Sheaf`, and not otherwise.
     #[test]
     fn content_that_cant_be_read_fails_closed() {
         let unread = |data: &[u8]| {
@@ -571,12 +584,14 @@ mod tests {
             let page = pdf.add_object(dictionary! { "Type" => "Page", "Contents" => content });
             (page, found(&pdf))
         };
-        let (page, said) = unread(b"BT (never ends /SheafHF 9 Tf");
-        let want = Found {
-            at: page,
+        let want = |at| Found {
+            at,
             name: b"/Sheaf".to_vec(),
         };
-        assert_eq!(said, [want]);
+        let (page, said) = unread(b"BT (never ends /SheafHF 9 Tf");
+        assert_eq!(said, [want(page)]);
+        let (page, said) = unread(b"BT (never ends /SHEF_Gen 9 Tf");
+        assert_eq!(said, [want(page)]);
         assert_eq!(unread(b"BT (never ends /F1 9 Tf").1, []);
     }
 

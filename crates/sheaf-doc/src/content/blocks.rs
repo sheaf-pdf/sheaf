@@ -57,8 +57,8 @@ impl PaginationKind {
 /// Who drew a pagination artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PagOrigin {
-    /// sheaf, as a generator's block: in a `/SheafBlock` stream, or with
-    /// `/SheafGen` in its list.
+    /// sheaf, as a generator's block: in a `/SHEF_Block` stream, or with
+    /// `/SHEF_Gen` in its list.
     Sheaf,
     /// sheaf before M10.5: `/SheafStamp` or `/SheafSettings` in its list,
     /// drawn in the `/SheafHF` font, or in a `/SheafOcrLayer` stream.
@@ -160,7 +160,7 @@ pub enum SheafBlock {
 /// Where a block of sheaf's is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockAt {
-    /// A stream of its own, marked `/SheafBlock`.
+    /// A stream of its own, marked `/SHEF_Block`.
     Stream(ObjectId),
     /// A marked range in a stream another tool merged it into.
     Marked(SpanAcross),
@@ -194,7 +194,7 @@ pub struct Pagination {
     pub kind: PaginationKind,
     pub origin: PagOrigin,
     /// The generator whose block it is, by its stream's marker or its
-    /// list's `/SheafGen`: sheaf's own.
+    /// list's `/SHEF_Gen`: sheaf's own.
     pub generator: Option<GenId>,
     pub span: SpanAcross,
 }
@@ -258,11 +258,11 @@ pub struct PageBlocks {
     /// page has one of for every run of text.
     pub marked: Arc<[Marked]>,
     pub pagination: Arc<[Pagination]>,
-    /// sheaf's blocks: each stream marked `/SheafBlock`, and each range
-    /// whose list has `/SheafGen` or `/SheafOcrBlock` in a stream that
+    /// sheaf's blocks: each stream marked `/SHEF_Block`, and each range
+    /// whose list has `/SHEF_Gen` or `/SHEF_OcrBlock` in a stream that
     /// isn't.
     pub sheaf: Arc<[SheafBlockRef]>,
-    /// The streams marked `/SheafBlock << /K /Isolate >>`.
+    /// The streams marked `/SHEF_Block << /K /Isolate >>`.
     pub isolation: Arc<[ObjectId]>,
     pub legacy_ocr: Option<LegacyOcr>,
     /// Whether a layer stream an older sheaf wrote, marked
@@ -273,7 +273,7 @@ pub struct PageBlocks {
     /// [`legacy_ocr`]: Self::legacy_ocr
     pub legacy_ocr_stays: bool,
     /// Whether a stream of its content is marked as sheaf's
-    /// ([`STREAM_KEYS`](crate::private::STREAM_KEYS)): `/SheafBlock`, or an
+    /// ([`STREAM_KEYS`](crate::private::STREAM_KEYS)): `/SHEF_Block`, or an
     /// older sheaf's `/SheafOcrLayer`, whatever else it says.
     pub sheaf_marked: bool,
     pub balance: Balance,
@@ -489,7 +489,7 @@ impl StreamMark {
         if dict.has(LEGACY_OCR) {
             return StreamMark::OcrLayer;
         }
-        let Ok(Object::Dictionary(block)) = dict.get(b"SheafBlock") else {
+        let Ok(Object::Dictionary(block)) = dict.get(b"SHEF_Block") else {
             return StreamMark::Plain;
         };
         let string = |key: &[u8]| block.get(key).ok()?.as_str().ok();
@@ -539,7 +539,7 @@ impl Marker {
     pub fn of(dict: &Dictionary) -> Option<Marker> {
         match StreamMark::of(dict) {
             StreamMark::Block(SheafBlock::Gen(id)) => {
-                let block = dict.get(b"SheafBlock").and_then(Object::as_dict).ok();
+                let block = dict.get(b"SHEF_Block").and_then(Object::as_dict).ok();
                 let string = |key: &[u8]| block?.get(key).ok()?.as_str().ok();
                 let digest = |key: &[u8]| Some(u128::from_be_bytes(string(key)?.try_into().ok()?));
                 let number = string(b"N")
@@ -582,16 +582,16 @@ pub fn isolates(stream: &[u8]) -> Option<(u8, u32)> {
     Some((op, n))
 }
 
-/// The block of sheaf's a range's list marks: `/SheafGen` on a
-/// generator's, `/SheafOcrBlock` on an OCR layer's.
+/// The block of sheaf's a range's list marks: `/SHEF_Gen` on a
+/// generator's, `/SHEF_OcrBlock` on an OCR layer's.
 fn marked_block(m: &Marked) -> Option<SheafBlock> {
     let list = m.props.as_ref()?.dict()?;
     let string = |key: &[u8]| list.get(key).ok()?.as_str().ok();
-    string(b"SheafGen")
+    string(b"SHEF_Gen")
         .and_then(GenId::parse)
         .map(SheafBlock::Gen)
         .or_else(|| {
-            string(b"SheafOcrBlock")
+            string(b"SHEF_OcrBlock")
                 .and_then(BlockId::parse)
                 .map(SheafBlock::Ocr)
         })
@@ -657,7 +657,7 @@ impl Drawn {
         let has = |key: &[u8]| list.is_some_and(|l| l.has(key));
         match mark {
             StreamMark::Block(_) => PagOrigin::Sheaf,
-            _ if has(b"SheafGen") => PagOrigin::Sheaf,
+            _ if has(b"SHEF_Gen") => PagOrigin::Sheaf,
             StreamMark::OcrLayer => PagOrigin::SheafLegacy,
             _ if has(b"SheafStamp") || has(b"SheafSettings") || self.sheaf_hf => {
                 PagOrigin::SheafLegacy

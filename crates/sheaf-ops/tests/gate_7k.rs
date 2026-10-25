@@ -2491,7 +2491,7 @@ fn image_background(image: &Blob) -> Op {
 /// file's pages' resources don't have, by kind, and the resources
 /// dictionaries the pages have, beside how many the file's had (by the
 /// object, or the dictionary written inline); and the blocks of
-/// recognized text they draw (`/SheafBlock << /K /Ocr … >>`), with how
+/// recognized text they draw (`/SHEF_Block << /K /Ocr … >>`), with how
 /// many pages draw other than one.
 struct Census {
     images: HashSet<ObjectId>,

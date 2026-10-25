@@ -77,7 +77,6 @@ are [build or adopt](research/build-or-adopt/decisions.md)'s decisions.
 - cargo-sheaf-plugin.md: proposals 1–5 [→](topics/plugins/cargo-sheaf-plugin.md#proposed-to-confirm); a host component check (leaning yes) [→](topics/plugins/cargo-sheaf-plugin.md#open); `new --ci github` (leaning yes) [→](topics/plugins/cargo-sheaf-plugin.md#open).
 - document-transforms.md: proposals 1–2 [→](topics/plugins/document-transforms.md#proposed-to-confirm); eleven open items, with recs (per-transform destinations, Rewrite input, refuse unreadable output, pause edits) [→](topics/plugins/document-transforms.md#open).
 - plugin-image-writes.md: per-capability permissions [→](topics/plugins/image-writes.md#where-we-landed); the live handle's details [→](topics/plugins/image-writes.md#where-we-landed).
-- [F24](backlog/F24.md): rename the `/Sheaf*` private names, or keep them.
 
 ## Pending features and the backlog
 

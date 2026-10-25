@@ -9,7 +9,7 @@
 //! from its ([`super::form`]), which also gives `/Names /JavaScript` when
 //! forms from other files bring document scripts, and `/Perms` without
 //! Reader's usage rights when the save drops them (`DropUr3`).
-//! `/SheafGenerators` names a string of its own
+//! `/SHEF_Generators` names a string of its own
 //! ([`ObjKey::Generators`]) saying what the generators are, when there
 //! are any and the output keeps sheaf's private data (§15);
 //! `/SheafHeaderFooter`, where an older sheaf kept its header's settings,
@@ -101,9 +101,9 @@ pub(crate) fn catalog(cx: &mut Cx) {
 }
 
 /// The catalog's key for what the document's generators are.
-pub(crate) const GENERATORS: &str = "SheafGenerators";
+pub(crate) const GENERATORS: &str = "SHEF_Generators";
 
-/// `/SheafGenerators`' object: its JSON, a string of its own
+/// `/SHEF_Generators`' object: its JSON, a string of its own
 /// ([`crate::generate::catalog_json`]).
 pub(crate) fn generators(json: Vec<u8>) -> Object {
     Object::String(json, lopdf::StringFormat::Literal)

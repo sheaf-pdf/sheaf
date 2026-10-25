@@ -252,9 +252,9 @@ cached ids survive:
   `ObjMap`, then by position only when the page counts agree, otherwise
   fresh. No `PageId` may be bound twice, enforced in release builds
   (`check_invariants` is only a `debug_assert`);
-- **marks:** free, from `/SheafAnnot` and `/NM`, as open already does;
-- **generators:** free after slices 16–17, from `/SheafGenerators` and
-  `/SheafBlock`;
+- **marks:** free, from `/SHEF_Annot` and `/NM`, as open already does;
+- **generators:** free after slices 16–17, from `/SHEF_Generators` and
+  `/SHEF_Block`;
 - **fields:** by full name; **bookmarks:** by pre-order when the title
   matches;
 - **other tools' comments:** by `/NM`, then number, then subtype and

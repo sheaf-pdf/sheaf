@@ -211,7 +211,7 @@ impl SaveRecord {
 }
 
 /// A generator's block on a page of a file (§3.5): the digests its
-/// `/SheafBlock` says, of its layout (`/L`) and of the recipe it was drawn
+/// `/SHEF_Block` says, of its layout (`/L`) and of the recipe it was drawn
 /// from (`/R`), and its object, by the key the removal check finds it by in
 /// that file: the record's map's, or the opened file's own object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,7 +342,7 @@ impl ObjMap {
             (ObjKey::AcroForm, b"AcroForm".as_slice()),
             (ObjKey::OutlinesRoot, b"Outlines"),
             (ObjKey::Labels, b"PageLabels"),
-            (ObjKey::Generators, b"SheafGenerators"),
+            (ObjKey::Generators, b"SHEF_Generators"),
         ]
         .map(|(key, name)| (key, reference(catalog.and_then(|c| c.get(name).ok()))));
         for (key, id) in roots.into_iter().chain(in_catalog) {
@@ -437,10 +437,10 @@ pub const CATALOG_OWNED: &[&[u8]] = &[
     b"PageLabels",
     b"AcroForm",
     b"Version",
-    b"SheafGenerators",
+    b"SHEF_Generators",
     // Where an older sheaf kept its header and footer's settings: owned,
     // and never written, so a save leaves its text out of the file (a
-    // header sheaf drew is in `/SheafGenerators` now).
+    // header sheaf drew is in `/SHEF_Generators` now).
     b"SheafHeaderFooter",
 ];
 pub const ACROFORM_OWNED: &[&[u8]] = &[

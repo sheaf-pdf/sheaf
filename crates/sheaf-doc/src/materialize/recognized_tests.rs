@@ -1,5 +1,5 @@
 //! Watermarks and backgrounds a file holds, once it opens again (M10.5
-//! slice 16): found from the catalog's `/SheafGenerators` and the pages'
+//! slice 16): found from the catalog's `/SHEF_Generators` and the pages'
 //! blocks, laid out alike again where nothing changed, set aside where
 //! something did or they're gone; another file's kept, isolated, until a
 //! filter takes them out.
@@ -63,14 +63,14 @@ pub(super) fn stream(pdf: &Pdf, id: ObjectId) -> (Dictionary, Vec<u8>) {
 /// The generator stream `id` of `pdf` is a block of, if it's one.
 pub(super) fn block_of(pdf: &Pdf, id: ObjectId) -> Option<GenId> {
     let (dict, _) = stream(pdf, id);
-    let marker = dict.get(b"SheafBlock").ok()?.as_dict().ok()?;
+    let marker = dict.get(b"SHEF_Block").ok()?.as_dict().ok()?;
     GenId::parse(marker.get(b"G").ok()?.as_str().ok()?)
 }
 
 /// Whether stream `id` of `pdf` isolates a page's content.
 pub(super) fn isolates(pdf: &Pdf, id: ObjectId) -> bool {
     let (dict, _) = stream(pdf, id);
-    (dict.get(b"SheafBlock").and_then(Object::as_dict))
+    (dict.get(b"SHEF_Block").and_then(Object::as_dict))
         .is_ok_and(|m| m.get(b"K").and_then(Object::as_name).ok() == Some(b"Isolate"))
 }
 
@@ -248,7 +248,7 @@ crate::both_ways!(
 
 /// A watermark and a background found again and removed leave nothing of
 /// theirs: the save rewrites, and the file it writes has no block, no
-/// stream isolating content, no `/SheafGenerators`, no property list
+/// stream isolating content, no `/SHEF_Generators`, no property list
 /// naming a generator, and nowhere the watermark's text.
 #[test]
 fn a_found_watermark_removed_leaves_no_trace() {
@@ -278,7 +278,7 @@ fn a_found_watermark_removed_leaves_no_trace() {
         assert!(drawn(&pdf, page).contains("(page "));
     }
     let all = everything(&pdf);
-    for gone in ["DRAFT", "UNDERNEATH", "SheafBlock", "SheafGen", "Isolate"] {
+    for gone in ["DRAFT", "UNDERNEATH", "SHEF_Block", "SHEF_Gen", "Isolate"] {
         assert!(!all.contains(gone), "{gone}");
     }
     let (_, third) = opened(&dir, "c.pdf", &std::fs::read(&path).unwrap());
@@ -503,7 +503,7 @@ fn an_empty_block_keeps_its_page_in_scope() {
     let ids = contents(&pdf, third);
     let (mut dict, _) = stream(&pdf, ids[3]);
     let empty = sheaf_util::checksum(&[]).to_be_bytes().to_vec();
-    let marker = dict.get_mut(b"SheafBlock").unwrap().as_dict_mut().unwrap();
+    let marker = dict.get_mut(b"SHEF_Block").unwrap().as_dict_mut().unwrap();
     marker.set("L", Object::String(empty, lopdf::StringFormat::Hexadecimal));
     dict.remove(b"Filter");
     let block = pdf.add_object(Stream::new(dict, Vec::new()));
@@ -678,7 +678,7 @@ fn shared(how: How) {
     });
     let list = dictionary! {
         "Type" => "Pagination", "Subtype" => "Watermark",
-        "SheafGen" => Object::string_literal("g1f"),
+        "SHEF_Gen" => Object::string_literal("g1f"),
     };
     let content = b"/Artifact /P0 BDC q BT /F1 30 Tf 100 100 Td (THEIRS) Tj ET Q EMC\n\
                     BT /F1 24 Tf 72 72 Td (shared) Tj ET";
@@ -769,7 +769,7 @@ fn a_found_watermark_appends_only_what_changes() {
     assert_eq!(super::removal::vetoes_here().derived, 0);
 }
 
-/// What `/SheafGenerators` says that sheaf wouldn't write is passed over:
+/// What `/SHEF_Generators` says that sheaf wouldn't write is passed over:
 /// another version of it, a second generator at a z, one on some pages
 /// none of which holds a block of it, one that can't be read, the others
 /// still found, one that replaces more than its own kind, and one that
@@ -787,7 +787,7 @@ fn what_sheaf_wouldn_t_write_isn_t_found() {
         let mut pdf = Pdf::load_mem(&bytes).unwrap();
         let catalog = pdf.catalog().unwrap();
         let at = catalog
-            .get(b"SheafGenerators")
+            .get(b"SHEF_Generators")
             .unwrap()
             .as_reference()
             .unwrap();
@@ -1021,7 +1021,7 @@ fn a_found_watermark_removed_is_gone_from_copies() {
         let pdf = Pdf::load_mem(&bytes).unwrap();
         assert_eq!(blocks(&pdf), vec![Vec::<GenId>::new(); 2], "{what}");
         let all = everything(&pdf);
-        for gone in ["DRAFT", "SheafBlock"] {
+        for gone in ["DRAFT", "SHEF_Block"] {
             assert!(!all.contains(gone), "{what}: {gone}");
         }
         if what != "extracted" {
@@ -1031,7 +1031,7 @@ fn a_found_watermark_removed_is_gone_from_copies() {
 }
 
 /// A file sheaf saved with a watermark whose catalog another tool wrote
-/// without `/SheafGenerators` holds sheaf's blocks all the same: watermarked
+/// without `/SHEF_Generators` holds sheaf's blocks all the same: watermarked
 /// again, each page's old block and the streams that isolated its content
 /// are left out whole, so it holds one block, the new one, isolated once,
 /// and no copy of a stream. Both ways.
@@ -1043,7 +1043,7 @@ fn uncataloged(how: How) {
     let mut pdf = Pdf::load_mem(&How::Rewritten.write(&doc)).unwrap();
     let catalog = pdf.trailer.get(b"Root").and_then(Object::as_reference);
     let catalog = pdf.get_object_mut(catalog.unwrap()).unwrap();
-    catalog.as_dict_mut().unwrap().remove(b"SheafGenerators");
+    catalog.as_dict_mut().unwrap().remove(b"SHEF_Generators");
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     let (_, mut again) = opened(&dir, "b.pdf", &bytes);

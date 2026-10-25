@@ -1,5 +1,5 @@
 # libFuzzer's dictionary for the targets: the tokens PDF files are made of,
-# an annotation's keys and its /SheafAnnot JSON, and content's operators,
+# an annotation's keys and its /SHEF_Annot JSON, and content's operators,
 # inline images and marked content, and what the content interpreter reads
 # of them: text moved to a line, paths, clips, forms and property lists;
 # and the font programs its fonts embed: their keys, a TrueType's tables,
@@ -66,7 +66,7 @@
 "/M"
 "/IC"
 "/CA"
-"/SheafAnnot"
+"/SHEF_Annot"
 "/SheafPart"
 "\xfe\xff"
 "\"v\":2"
@@ -165,9 +165,9 @@
 "NP"
 "/SheafStamp"
 "/SheafHF"
-"/SheafGenerators"
-"/SheafBlock"
-"/SheafGen"
+"/SHEF_Generators"
+"/SHEF_Block"
+"/SHEF_Gen"
 "/K /Gen"
 "/K /Isolate"
 "\"header-footer\""

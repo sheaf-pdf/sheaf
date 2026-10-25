@@ -1056,7 +1056,7 @@ pub fn every_fact() -> Form {
     *f.dict(pages[2]) = third;
     let json = crate::generate::fixture::SHEAF_HEADER_JSON;
     f.dict(catalog)
-        .set("SheafGenerators", Object::string_literal(json));
+        .set("SHEF_Generators", Object::string_literal(json));
     let item = |title: &str, page: ObjectId| {
         dictionary! {
             "Title" => Object::string_literal(title),
