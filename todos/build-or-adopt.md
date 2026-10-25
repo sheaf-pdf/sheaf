@@ -53,8 +53,10 @@ by itself: the plan lines it would change are listed under
 - **PDFium can't be M11's image decoder.** Its bitmaps lose the color
   space, bit depth and palette, and its decoded data stops at the image
   filters (entry 33, decision D5).
-- **subsetter always renumbers glyphs,** so the plan's glyph-ID rule
-  for the Noto fallback rules it out (entry 17, D1).
+- **subsetter always renumbers glyphs.** With `/Identity`, that breaks
+  the plan's glyph-ID rule for the Noto fallback. A `/CIDToGIDMap`
+  stream, from each glyph's number in the whole font to subsetter's,
+  keeps the rule (added 2026-10-25; entry 17, D1).
 - **23% of the corpus's real-world signatures are BER.** The stable
   cms 0.2.3 reads none of them; 0.3.0-rc.0 reads all of them, but the
   rest of RustCrypto's 0.3 round isn't published (entry 44, D2).
@@ -97,7 +99,7 @@ backlog id. "D" points to a decision for Greg.
 | 14 | Scan cleanup | M5 (done) | build in-house (keep) | imageproc 0.27.0 | MIT | high |
 | 15 | Image import and export | M5, M7, M8 (done); B24, B25 | adopt (keep) | image 0.25.10, png 0.18, tiff 0.11.3, fax 0.2.7 | permissive | n/a |
 | 16 | TIFF | M5 import; B25 | adopt (keep), G3 through hayro-ccitt | tiff 0.11.3; hayro-ccitt 0.4.0 | MIT; MIT OR Apache-2.0 | high |
-| 17 | Noto fallback subset | M10 slice 7; D1 | build in-house on read-fonts | read-fonts 0.46.0; skera 0.9.0 alternative | MIT OR Apache-2.0 | medium |
+| 17 | Noto fallback subset | M10 slice 7; D1 | adopt subsetter behind a `/CIDToGIDMap` stream (2026-10-25); else build in-house on read-fonts | subsetter 0.2.6; read-fonts 0.46.0 or skera 0.9.0 otherwise | MIT OR Apache-2.0 | medium |
 | 18 | Field appearance layout | M10 slices 6, 11 | build in-house | none needed | n/a | high |
 | 19 | NFC, graphemes, RTL notice | M10 slice 7 | adopt | unicode-normalization 0.1.26, unicode-segmentation 1.13.3, unicode-bidi 0.3.18 | (MIT OR Apache-2.0) AND Unicode-3.0; MIT OR Apache-2.0 | high |
 | 20 | Field editor painting | M10 slice 11; D9 | build on GPUI's `paint_glyph` | gpui-pre 0.3.9 | Apache-2.0 | medium |
@@ -195,13 +197,43 @@ The plan says any font sheaf embeds keeps each glyph's number from the
 whole font (`content/font/mod.rs:35-38`; m10.md:1455-1460), and
 m10.md:633 names subsetter. subsetter always renumbers. Entry 17.
 
-1. **Keep the rule. Build a glyph-ID-preserving `glyf` subset in-house
-   on read-fonts,** a port of M10.5's `gen.py` algorithm. Use skera with
-   `SUBSET_FLAGS_RETAIN_GIDS` if it grows. It keeps codes writable before
-   the subset is known, appearance digests independent of the save, and
-   an Append's earlier subset valid. The cost: `loca` and `hmtx` at about
-   15.5 KB each before Flate. Medium.
-2. Drop the rule and adopt subsetter 0.2.6, the mature choice. The
+Greg named subsetter for the subsets sheaf writes (2026-10-24), after
+this memo. Option 1 was added on 2026-10-25: it takes subsetter and keeps
+what the rule is for, so it now comes first.
+
+1. **Take subsetter, and map the old numbers to its new ones with a
+   `/CIDToGIDMap` stream** instead of `/Identity`. Content still draws
+   each glyph by its number in the whole font (CID = the whole font's
+   GID). Only the font's map changes per subset, so codes stay writable
+   before the subset is known, appearance digests stay independent of
+   the save, and an Append's earlier subset stays valid.
+   - **Cost:** the map is 2 bytes per CID up to the highest one drawn,
+     at most 7,768 bytes for Noto's 3,884 glyphs before Flate. It's
+     mostly zeros. subsetter's dense subset has no padded `loca` and
+     `hmtx`. The `Font` docs keep the rule and change only its wording
+     ("CID = the whole font's GID", not `/Identity`). A `/CIDToGIDMap`
+     belongs to a Type 2 (TrueType) CIDFont, which Noto Sans is.
+   - **Checked:**
+     - subsetter 0.2.6's `GlyphRemapper::get(old) -> Option<u16>` gives
+       the map, and `new_from_glyphs_sorted` makes it ascending
+       whatever order the glyphs are met in.
+     - PDFium's `CPDF_CIDFont::GlyphFromCharCode` reads an embedded
+       font's stream map as 2 big-endian bytes per CID. A CID past the
+       end draws no glyph.
+   - **Unchecked:** the rendering itself, and the size after Flate.
+     Both are for slice 7's checks, in PDFium, pdftoppm and pdf.js.
+   - **Kept from entry 17:** subsetter's output may change across its
+     releases, and that changes new subsets' `FontRes` digests.
+
+   Smaller than option 2.
+2. **Keep the rule with `/Identity`. Build a glyph-ID-preserving `glyf`
+   subset in-house on read-fonts,** a port of M10.5's `gen.py`
+   algorithm. Use skera with `SUBSET_FLAGS_RETAIN_GIDS` if it grows. It
+   keeps codes writable before the subset is known, appearance digests
+   independent of the save, and an Append's earlier subset valid. The
+   cost: `loca` and `hmtx` at about 15.5 KB each before Flate. Medium.
+   This was the memo's first recommendation.
+3. Drop the rule and adopt subsetter 0.2.6 with `/Identity`. The
    emitter then picks codes per output (two passes), and M10.5's `Font`
    docs change.
 
@@ -1090,9 +1122,21 @@ The images section's detail; core agrees ("keep flate2 (zlib-rs)").
   - The keep-glyph-IDs rule is worth keeping: the emitter writes codes
     before it knows the subset, appearance digests stay independent of
     the save, and an Append's earlier subset stays valid.
-  - subsetter breaks it: adopting it means codes chosen per output (two
-    passes in the emitter), and dropping the rule from M10.5's `Font`
-    docs.
+  - subsetter breaks it with `/CIDToGIDMap /Identity`: adopting it that
+    way means codes chosen per output (two passes in the emitter), and
+    dropping the rule from M10.5's `Font` docs.
+  - **With a `/CIDToGIDMap` stream it doesn't** (added 2026-10-25).
+    Content keeps each CID as the glyph's number in the whole font, and
+    the stream maps it to subsetter's number. `GlyphRemapper::get(old)`
+    gives each entry, and `new_from_glyphs_sorted` makes the numbering
+    ascending, whatever order the glyphs are met in. PDFium reads an
+    embedded font's stream map in `CPDF_CIDFont::GlyphFromCharCode`, 2
+    big-endian bytes per CID; a CID past the end draws no glyph. The map
+    is at most 7,768 bytes before Flate for Noto, against about 31 KB of
+    padded `loca` and `hmtx` under `/Identity`. Not yet drawn or
+    measured after Flate. Without its default `variable-fonts` feature,
+    subsetter adds only `rustc-hash`, not a second skrifa, and Noto Sans
+    Regular is a static font.
   - skera fits Noto (a `glyf` font) with RETAIN_GIDS, but it's
     general-purpose: its output includes cmap and layout tables unless
     they're dropped.
@@ -1106,10 +1150,13 @@ The images section's detail; core agrees ("keep flate2 (zlib-rs)").
     glyphs. Keeping every glyph ID costs `loca` and `hmtx` about 15.5 KB
     each before Flate, mostly repeated entries (the compressed size is
     unverified).
-- **Recommendation:** **build in-house on read-fonts** (a port of
-  gen.py's algorithm), with **skera + `RETAIN_GIDS`** as the alternative
-  if it grows. Not subsetter while the rule stands. Medium. If Greg would
-  rather drop the rule, subsetter is the mature choice.
+- **Recommendation** (2026-10-25, after Greg named subsetter):
+  **subsetter 0.2.6, without default features, behind a `/CIDToGIDMap`
+  stream** (D1 option 1). If slice 7's checks find the map stream drawn
+  wrong anywhere, fall back to the first recommendation: **build in-house
+  on read-fonts** (a port of gen.py's algorithm), with **skera +
+  `RETAIN_GIDS`** as the alternative if it grows. Not subsetter with
+  `/Identity` while the rule stands. Medium.
 
 #### 18. Appearance layout: comb cells, auto size, wrapping
 
