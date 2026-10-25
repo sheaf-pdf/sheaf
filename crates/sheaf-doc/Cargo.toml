@@ -6,9 +6,9 @@ license.workspace = true
 publish = false
 
 [features]
-# Forms and encrypted files built in code and the lookup for Greg's corpus
-# of real ones (`forms::fixture`, `serialize::fixture`, `forms::corpus`),
-# for other crates' tests.
+# Forms and encrypted files built in code, the lookup for Greg's corpus
+# of real ones (`forms::fixture`, `serialize::fixture`, `forms::corpus`)
+# and the Arlington checker (`arlington`), for other crates' tests.
 fixtures = []
 
 [dependencies]

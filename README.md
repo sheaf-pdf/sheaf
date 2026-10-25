@@ -718,6 +718,8 @@ PDFium (BSD-3), hayro (Apache-2.0/MIT), Tesseract and its glyphless `pdf.ttf`
 (Apache-2.0), Leptonica (BSD-2), ONNX Runtime (MIT), PaddleOCR models and
 `oar-ocr` (Apache-2.0); see `packaging/licenses/`. Barcodes are read and QR
 codes made with rxing (Apache-2.0). MuPDF is deliberately not used (AGPL).
-lopdf (MIT) is vendored with a patch in `vendor/lopdf`. Text in
-the standard 14 fonts is laid out with Adobe's Core 14 AFM metrics (Adobe's
-notice) and the Adobe Glyph List (BSD-3), in `crates/sheaf-doc/assets`.
+lopdf (MIT) is vendored with a patch in `vendor/lopdf`. The Arlington PDF
+Model's TSVs (PDF Association, Apache-2.0) are vendored in
+`vendor/arlington-pdf-model` for tests only. Text in the standard 14 fonts
+is laid out with Adobe's Core 14 AFM metrics (Adobe's notice) and the Adobe
+Glyph List (BSD-3), in `crates/sheaf-doc/assets`.

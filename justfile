@@ -269,11 +269,11 @@ precommit: (_steps "precommit" "markers fmt-check locks corpus interop propertie
 
 # Before a PR merges: the ignored corpus tiers, in full (append_corpus's,
 # the export tier, realize_corpus's pixels and predicate, PDFium's resave
-# of a watermark, the content lexer against PDFium, codes over scans/).
-# An hour or more.
+# of a watermark, the content lexer against PDFium, codes over scans/,
+# Arlington over what sheaf writes). An hour or more.
 [doc("Before a PR merges: every ignored corpus tier (an hour or more)")]
 [group('local')]
-premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-codes _corpus-ran")
+premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-codes tier-arlington _corpus-ran")
 
 [doc("No merge-conflict markers in tracked or untracked files (git grep; binaries and ignored files skipped)")]
 [group('local')]
@@ -360,6 +360,14 @@ tier-lexer:
 [group('corpus')]
 tier-codes:
     scripts/test-capped.sh cargo test -p sheaf-ops --test codes -- --ignored --nocapture
+
+# What sheaf writes on every form held to the Arlington PDF Model (backlog
+# F22): a mark, a header and footer and recognized text, saved as planned,
+# then a Rewrite, each save's objects checked; the form's own aren't.
+[doc("Arlington over what sheaf writes on every form: a mark, a header and footer, recognized text, then a Rewrite (SHEAF_ARLINGTON_ONLY narrows it)")]
+[group('corpus')]
+tier-arlington:
+    scripts/test-capped.sh cargo test -p sheaf-ops --test arlington -- --ignored --nocapture
 
 # ----- Gates ---------------------------------------------------------------
 

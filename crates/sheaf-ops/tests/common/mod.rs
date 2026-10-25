@@ -5,6 +5,8 @@
 //! file of pages saying "page i", opened as the app opens it, views over a
 //! pool of their own, and an OCR engine that reads nothing. And a page
 //! drawn as M5's separators are found, for the codes tests and the gate.
+//! And what the corpus tiers give a file: a note, a header and footer with
+//! Bates numbers, and a recognized word.
 
 #![allow(dead_code)]
 // The tests' scratch files go in the temp directory, which clippy.toml
@@ -24,11 +26,15 @@ use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{Form, Rect, source};
 use sheaf_doc::forms::{FileForm, Finding, Report, Value, check};
+use sheaf_doc::geom::Geom;
 pub use sheaf_doc::materialize::{How, StrategyKind};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture as fx;
-use sheaf_doc::{Actor, CommitOpts, Document, FixedCount, PageId, Src, Stale, Store};
-use sheaf_edit::{Margins, Rotation};
+use sheaf_doc::{
+    Actor, Annot, AnnotId, AnnotKind, Box2, CommitOpts, Document, FixedCount, PageId, Pt, Src,
+    Stale, Store,
+};
+use sheaf_edit::{BatesSpec, HeaderFooterSpec, Margins, Rotation};
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_ocr::{EngineInfo, EngineKind, InputKind, OcrEngine, OcrImage, OcrWord};
 use sheaf_ops::views::Views;
@@ -264,6 +270,12 @@ pub fn saved(doc: &mut Document, path: &Path, how: How) -> (StrategyKind, Vec<u8
 /// runs), a signature or an XFA part's values given up when it asks. What
 /// it was saved as, and the file.
 pub fn planned(doc: &mut Document, path: &Path) -> (StrategyKind, Vec<u8>) {
+    planned_or_why(doc, path).unwrap()
+}
+
+/// [`planned`]'s save, or why it wrote nothing: for a corpus tier, which
+/// counts a file's failure rather than stop at it.
+pub fn planned_or_why(doc: &mut Document, path: &Path) -> Result<(StrategyKind, Vec<u8>), String> {
     let answers = sheaf_doc::materialize::AskAnswers {
         break_signatures: true,
         drop_xfa_values: true,
@@ -271,9 +283,11 @@ pub fn planned(doc: &mut Document, path: &Path) -> (StrategyKind, Vec<u8>) {
     };
     let how = sheaf_doc::materialize::SaveHow::Planned;
     let report =
-        sheaf_doc::materialize::save_with(doc, path, how, &answers, &sheaf_ops::NoProgress);
-    let strategy = report.unwrap().strategy.expect("the file was written");
-    (strategy, std::fs::read(path).unwrap())
+        sheaf_doc::materialize::save_with(doc, path, how, &answers, &sheaf_ops::NoProgress)
+            .map_err(|stop| format!("the save stopped: {stop}"))?;
+    let strategy = report.strategy.ok_or("the save wrote no file")?;
+    let bytes = std::fs::read(path).map_err(|e| format!("reading the saved file: {e}"))?;
+    Ok((strategy, bytes))
 }
 
 /// `doc` written by a Rewrite, then saved to `path`, its file, as the
@@ -430,6 +444,66 @@ pub fn narrowed<T>(var: &str, items: Vec<T>, path: impl Fn(&T) -> &str) -> Vec<T
     );
     eprintln!("narrowed by {var} to {} files", items.len());
     items
+}
+
+/// The text at the left of the header every corpus file takes, and its
+/// Bates numbers' prefix.
+pub const HEADER: &str = "SHEAF-CORPUS-HEADER";
+pub const BATES: &str = "SHEAFBATES";
+
+/// A note saying `text`.
+pub fn note(text: &str) -> Annot {
+    Annot {
+        id: AnnotId(0),
+        kind: AnnotKind::Note {
+            pos: Pt { x: 72.0, y: 72.0 },
+        },
+        color: [255, 230, 0],
+        opacity: 1.0,
+        stroke: 1.0,
+        author: "sheaf".into(),
+        contents: text.into(),
+        modified: String::new(),
+        created: String::new(),
+        fill: None,
+        dashed: false,
+        cloudy: false,
+        turn: Rotation::R0,
+        name: String::new(),
+    }
+}
+
+/// The header and footer every corpus file takes: [`HEADER`] at the
+/// header's left, "Page <<1>> of <<N>>" at the footer's center, and its
+/// Bates number, six digits after [`BATES`] from 1, at its right.
+pub fn corpus_header() -> HeaderFooterSpec {
+    let mut spec = fx::header(HEADER);
+    spec.texts[4] = "Page <<1>> of <<N>>".into();
+    spec.texts[5] = "<<bates>>".into();
+    spec.bates = Some(BatesSpec {
+        prefix: BATES.into(),
+        suffix: String::new(),
+        digits: 6,
+        start: 1,
+    });
+    spec
+}
+
+/// `text` as an engine reads it on a page shown as `geom` shows it: one
+/// word, in the view frame's points, across the page a quarter of the way
+/// down.
+pub fn word_on(geom: &Geom, text: &str) -> sheaf_doc::OcrWord {
+    let shown = geom.shown();
+    sheaf_doc::OcrWord {
+        text: text.into(),
+        rect: Box2 {
+            x: shown.width * 0.1,
+            y: shown.height * 0.25,
+            w: shown.width * 0.6,
+            h: shown.height * 0.02,
+        },
+        confidence: 1.0,
+    }
 }
 
 /// `bytes` with field `name`'s `/V` set to `value` (its appearance as it

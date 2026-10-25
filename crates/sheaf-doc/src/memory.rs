@@ -24,23 +24,28 @@ pub fn blank_pages(width: f32, height: f32, count: u32) -> Result<Vec<u8>> {
 }
 
 /// `count` blank pages, none at all when it's 0, with `info` as the
-/// trailer's `/Info` when there is one.
+/// trailer's `/Info` when there is one. No pages, no content stream:
+/// nothing would use it.
 fn pages_pdf(width: f32, height: f32, count: u32, info: Option<Dictionary>) -> Result<Vec<u8>> {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
-    let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
-    let kids: Vec<Object> = (0..count)
-        .map(|_| {
-            pdf.add_object(dictionary! {
-                "Type" => "Page",
-                "Parent" => pages_id,
-                "MediaBox" => vec![0.into(), 0.into(), Object::from(width), Object::from(height)],
-                "Contents" => content,
-                "Resources" => dictionary! {},
+    let kids: Vec<Object> = if count == 0 {
+        Vec::new()
+    } else {
+        let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
+        (0..count)
+            .map(|_| {
+                pdf.add_object(dictionary! {
+                    "Type" => "Page",
+                    "Parent" => pages_id,
+                    "MediaBox" => vec![0.into(), 0.into(), Object::from(width), Object::from(height)],
+                    "Contents" => content,
+                    "Resources" => dictionary! {},
+                })
+                .into()
             })
-            .into()
-        })
-        .collect();
+            .collect()
+    };
     pdf.objects.insert(
         pages_id,
         dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => i64::from(count) }.into(),
@@ -127,12 +132,19 @@ mod tests {
 
     /// A file of no pages opens as what a document made in memory starts
     /// from, and as nothing else: the same bytes read from a file don't.
+    /// It holds its catalog and its page tree, and no content stream for
+    /// no page.
     #[test]
     fn a_file_of_no_pages_is_sheaf_s_own() {
         let store = Store::new();
         let empty = empty(&store).unwrap();
         assert_eq!(empty.page_count(), 0);
         let bytes = empty.blob().bytes().clone();
+        let objects = Pdf::load_mem(&bytes).unwrap().objects;
+        let types: Vec<&[u8]> = (objects.values())
+            .filter_map(|o| o.as_dict().ok()?.get(b"Type").ok()?.as_name().ok())
+            .collect();
+        assert_eq!((objects.len(), types), (2, vec![&b"Pages"[..], b"Catalog"]));
         drop(empty);
         let file = BlobKind::file(std::path::Path::new("empty.pdf"), None);
         let refused = Store::new().open(bytes, file).unwrap_err();

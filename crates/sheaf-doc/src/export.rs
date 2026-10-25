@@ -523,6 +523,28 @@ fn exported_asks(plan: &mut SavePlan, exported: &DocState) {
     });
 }
 
+/// For tests: what [`run`] writes of `e`, before it's written: the
+/// version its transforms leave, and the file of it the plan makes, its
+/// record saying where each object sits, which the Arlington checks hold
+/// ([`Hold::written`]). Its gates and asks are [`run`]'s.
+///
+/// [`Hold::written`]: crate::arlington::Hold::written
+#[cfg(any(test, feature = "fixtures"))]
+pub fn materialized(
+    e: Export,
+    answers: &AskAnswers,
+    p: &dyn Progress,
+) -> Result<(DocState, materialize::Output), ExportError> {
+    let Planned {
+        input,
+        plan,
+        target,
+        ..
+    } = planned(e, answers, p)?;
+    let written = materialize::materialize(&input, &plan, target, p)?;
+    Ok((input.target, written))
+}
+
 #[cfg(any(test, feature = "fixtures"))]
 impl Document {
     /// For tests: the bytes of the export `make` makes of the current
