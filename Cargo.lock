@@ -3751,9 +3751,9 @@ dependencies = [
 
 [[package]]
 name = "instance-handoff"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5d5d8b8eea8cc503be6b816bbbcab7150d374d10a7a1046abf32ce1fb4d363f"
+checksum = "d7b798f9d4db6f765e87960d57931720f9609c03190f47632456cf8bb3d488e0"
 dependencies = [
  "libc",
  "log",
