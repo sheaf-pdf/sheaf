@@ -798,6 +798,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "brotli"
+version = "8.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
+]
+
+[[package]]
 name = "brotli-decompressor"
 version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3267,6 +3278,22 @@ dependencies = [
  "serde",
  "serde_core",
 ]
+
+[[package]]
+name = "hayro-cmap"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24d285dc30731c8485de5fa732fbdf2b3affdf01e4da7c2135022ca6fa664bf6"
+dependencies = [
+ "brotli",
+ "hayro-postscript",
+]
+
+[[package]]
+name = "hayro-postscript"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 
 [[package]]
 name = "heapless"
@@ -6754,6 +6781,7 @@ dependencies = [
  "env_logger",
  "fastrand",
  "flate2",
+ "hayro-cmap",
  "hmac 0.13.0",
  "im",
  "image",
@@ -6773,6 +6801,7 @@ dependencies = [
  "sheaf-edit",
  "sheaf-image",
  "sheaf-util",
+ "skrifa 0.44.0",
  "syn 2.0.119",
  "thiserror 2.0.21",
  "unicode-normalization",

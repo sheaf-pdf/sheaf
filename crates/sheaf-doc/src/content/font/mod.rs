@@ -1,8 +1,12 @@
 //! Fonts sheaf draws text in: what codes a string is in a font, how far
-//! they advance, and the font's resource for a page.
+//! they advance, and the font's resource for a page; and the fonts files
+//! draw in, as read.
 //!
-//! - [`Std14`]: the standard 14, with Adobe's widths and exact encoders.
+//! - [`Std14`]: the standard 14, with Adobe's widths, boxes and exact
+//!   encoders.
 //! - [`Glyphless`]: OCR's invisible text.
+//! - [`Foreign`]: a file's font, its codes, widths and heights as PDFium
+//!   reads them; [`Fonts`], a source's, each read once.
 //!
 //! Text a font can't encode draws `?` and is counted ([`Unencoded`]), so
 //! the writer can say so once; the text itself (`/Contents`, a recipe) is
@@ -11,20 +15,41 @@
 
 mod afm;
 mod encoding;
+mod foreign;
 mod glyphless;
+mod predefined;
+mod program;
 mod std14;
 #[cfg(test)]
 mod tests;
+mod type1;
 
 use std::sync::Arc;
 
 use lopdf::Object;
 
-pub(crate) use encoding::{Encoding, glyph_text};
+pub use foreign::{
+    Descendant, FontApprox, FontId, FontKind, FontScope, Fonts, Foreign, TooLarge, VerticalMetrics,
+};
 pub use glyphless::Glyphless;
+pub use program::FontProgram;
 pub use std14::Std14;
 
 use super::ResId;
+use crate::geom::Rect;
+
+/// How far a font's glyphs reach above and below the baseline, and the
+/// box all of them fit in, in glyph units: thousandths of text space at a
+/// font size of 1. A Type3 font whose matrix turns glyph space over may
+/// have its ascent below its descent, as PDFium keeps them; a glyph's box
+/// spans the two either way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FontMetrics {
+    pub ascent: f32,
+    /// Below the baseline: negative.
+    pub descent: f32,
+    pub bbox: Option<Rect>,
+}
 
 /// Characters a font couldn't encode: each drew `?`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

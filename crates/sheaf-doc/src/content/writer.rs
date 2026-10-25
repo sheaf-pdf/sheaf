@@ -161,9 +161,33 @@ impl Paint {
             Paint::None => "n",
         }
     }
+
+    /// The rule it fills by, where it fills.
+    pub fn fills(self) -> Option<FillRule> {
+        match self {
+            Paint::Fill | Paint::FillStroke | Paint::CloseFillStroke => Some(FillRule::NonZero),
+            Paint::FillEvenOdd | Paint::FillStrokeEvenOdd | Paint::CloseFillStrokeEvenOdd => {
+                Some(FillRule::EvenOdd)
+            }
+            Paint::Stroke | Paint::CloseStroke | Paint::None => None,
+        }
+    }
+
+    /// Whether it strokes.
+    pub fn strokes(self) -> bool {
+        matches!(
+            self,
+            Paint::Stroke
+                | Paint::CloseStroke
+                | Paint::FillStroke
+                | Paint::FillStrokeEvenOdd
+                | Paint::CloseFillStroke
+                | Paint::CloseFillStrokeEvenOdd
+        )
+    }
 }
 
-/// Which rule says what's inside a path, for a clip.
+/// Which rule says what's inside a path, filled or a clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillRule {
     NonZero,
@@ -182,6 +206,31 @@ pub enum TextMode {
     StrokeClip,
     FillStrokeClip,
     Clip,
+}
+
+impl TextMode {
+    /// The mode `n Tr` sets; None for a number that's none.
+    pub fn of(n: i32) -> Option<TextMode> {
+        Some(match n {
+            0 => TextMode::Fill,
+            1 => TextMode::Stroke,
+            2 => TextMode::FillStroke,
+            3 => TextMode::Invisible,
+            4 => TextMode::FillClip,
+            5 => TextMode::StrokeClip,
+            6 => TextMode::FillStrokeClip,
+            7 => TextMode::Clip,
+            _ => return None,
+        })
+    }
+
+    /// Whether text shown in it is added to the clip (4 to 7).
+    pub fn clips(self) -> bool {
+        matches!(
+            self,
+            TextMode::FillClip | TextMode::StrokeClip | TextMode::FillStrokeClip | TextMode::Clip
+        )
+    }
 }
 
 /// The resources content draws with, each named: what the resources it
@@ -542,6 +591,22 @@ impl<'f> ContentWriter<'f> {
     /// `EMC`.
     pub fn end_marked(&mut self) {
         self.op(&[], "EMC");
+    }
+
+    /// Operator `op` as content read gives it, `operands` before it, each
+    /// as written, a line of its own: content written again
+    /// ([`interp::encode`](super::interp::encode)). An inline image is
+    /// `op`, its token whole, `BI` to `EI`. What it does isn't followed: a
+    /// `Tf` so written changes nothing [`text`](Self::text) draws in, nor
+    /// does a `q` or `Q` save or restore it, and the names it gives are
+    /// the resources' already, none of [`ResourceNeeds`].
+    pub fn operation<'o>(&mut self, operands: impl IntoIterator<Item = &'o [u8]>, op: &[u8]) {
+        for operand in operands {
+            self.out.extend_from_slice(operand);
+            self.out.push(b' ');
+        }
+        self.out.extend_from_slice(op);
+        self.out.push(b'\n');
     }
 
     /// The content, and the resources it draws with, named: each `/Sh`

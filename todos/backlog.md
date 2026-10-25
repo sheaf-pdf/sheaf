@@ -286,7 +286,12 @@ phase; they're triaged between phases.
   steps or bytes per mutated body (what it really guards against is
   unbounded work), or CPU time rather than elapsed time.
 - **Notes:** the 7k gates measure time on a quiet machine on purpose;
-  a unit test in the default suite shouldn't depend on load.
+  a unit test in the default suite shouldn't depend on load. The content
+  interpreter's `interp` body added about 1.5 s alone (M11 slice 3,
+  before its review cut the cases to 200 a page: 7.0 s alone at load
+  7), and failed it in full parallel sheaf-doc runs at load 34–67; its
+  wrap-up added about 1 s more (four more font-part seeds and the
+  programs page).
 
 ### B24: G4 encoding truncates images wider than 65,535 pixels
 
@@ -772,6 +777,216 @@ phase; they're triaged between phases.
   from its findings, and triage what the tier then finds. `PageRes`,
   `Filtered` and `PagesNode` keys need their source worked out from their
   page.
+
+### B47: A form that draws itself is refused at once; PDFium draws it 40 deep
+
+- **Found:** 2026-10-23, M11 slice 3 (the content interpreter)
+- **Where:** `content::interp` (`Refused::Cycle`), against PDFium's
+  `CPDF_Form` cycle check
+- **Severity:** wrong output (minor): the interpreter reports less than
+  PDFium draws
+- **What happens:** PDFium's cycle check compares the buffers it reads
+  each form use into, which it makes afresh for every use of a stream
+  read from a file, filtered or not (`CPDF_StreamAcc` copies it). So it
+  draws a self-drawing form 40 deep (`kMaxFormLevel`), where the
+  interpreter refuses the use at once.
+- **Expected:** a decision: keep refusing (redaction fails closed on any
+  refusal, slice 5), or draw such a form to PDFium's depth so what's
+  reported is what PDFium draws.
+- **Repro:** `fixture::cycles()`; `Refused::Cycle`'s doc.
+- **Notes:** M11 slice 3's notes (Deviations, "A refused form use is
+  skipped"). No corpus page has one.
+
+### B48: An inline image's end depends on what follows it when `/L` runs past the content
+
+- **Found:** 2026-10-23, M11 slice 3 (the fuzz target)
+- **Where:** the content lexer's PDF 2.0 `/L` rule (`content::lex`,
+  M10.5 slice 6)
+- **Severity:** wrong output (minor)
+- **What happens:** where an inline image's `/L` runs past the content's
+  end the lexer ends the image at `EI`, but within the content it trusts
+  `/L`, so the same image lexes differently with other bytes after it.
+  PDFium (8fdce8e1) ignores `/L` for inline images. `interp::encode`
+  refuses such images (`Unwritable::InlineLength`).
+- **Expected:** read inline images as PDFium does, or say why `/L` is
+  kept; `encode`'s refusal could then go.
+- **Repro:** `an_inline_image_is_written_where_it_ends_whatever_follows`
+  (interp/encode_tests.rs).
+- **Notes:** M11 slice 3's notes (Found).
+
+### B49: Text and inline images in a form may draw otherwise once written again
+
+- **Found:** 2026-10-23, M11 slice 3
+- **Where:** `content::interp::encode`
+- **Severity:** wrong output (unseen in the corpus)
+- **What happens:** PDFium refreshes a text object's orientation at `BT`,
+  `Tm`, `cm` and `Tz`, not at a form's start, so text a form shows
+  before any of those may draw otherwise once a `Td` is lowered to a
+  `Tm`. And a form with no resources of its own, drawn from parents with
+  different color spaces, lexes its unfiltered inline images differently
+  per parent, while `encode` writes it once, from its first use.
+- **Expected:** what's written draws as before in each use.
+- **Repro:** none yet; tier 3 (`pages_written_again_render_the_same`)
+  shows neither.
+- **Notes:** M11 slice 3's notes (Found); slice 5 writes forms per use
+  where it removes from them, which may settle the second.
+
+### B50: An XObject lopdf can't read stops the pages that draw it (0221018's `14 0 R`)
+
+- **Found:** 2026-10-23, M11 slice 3
+- **Where:** lopdf's object reader, through `content::interp`
+  (`InterpError::XObject`) and the removal check
+- **Severity:** annoyance (fails closed)
+- **What happens:** forms/safedocs/0221018.pdf's form `10 0 R` draws
+  `14 0 R`, whose dictionary holds a broken reference in its `/Font`
+  ("invalid indirect object at byte offset 377590"). lopdf refuses the
+  object; qpdf and MuPDF read it, the bad entry dropped. `Descend` fails
+  closed on it, and the removal check counts it as unreadable.
+- **Expected:** the object read as other readers recover it, the bad
+  entry dropped.
+- **Repro:** `qpdf --show-object=14 ../pdf-corpus/forms/safedocs/0221018.pdf`;
+  `a_form_that_cant_be_read_stops_only_what_draws_it`.
+- **Notes:** a lopdf change, so F13 (in-housing) rather than
+  mid-milestone.
+
+### B51: An embedded CMap with no mappings may give PDFium each code as its CID
+
+- **Found:** 2026-10-23, M11 slice 3
+- **Where:** `content::font` (embedded CMaps)
+- **Severity:** wrong output (unverified)
+- **What happens:** PDFium's `CIDFromCharCode` may take each code for its
+  own CID where an embedded CMap's table is empty; sheaf gives CID 0.
+- **Expected:** PDFium's reading, once checked against PDFium.
+- **Repro:** none in the corpus; a fixture with an empty `begincmap`
+  would show it.
+- **Notes:** M11 slice 3's notes (Found).
+
+### B52: Codes a `/ToUnicode` lacks don't fall back to their CID's text
+
+- **Found:** 2026-10-24, the content interpreter's wrap-up (M11 slice 3)
+- **Where:** `Foreign::code_text` and `Foreign::text`
+  (`content/font/foreign.rs`)
+- **Severity:** wrong output (minor): text PDFium extracts is a hash in
+  sheaf's bags
+- **What happens:** in a Type0 font with a `/ToUnicode` stream, a code
+  it doesn't map has no text, so `text_bag` hashes the string. PDFium
+  falls back per code to the CID's text through its collection
+  (`GetUnicodeFromCharCode`).
+- **Expected:** PDFium's per-code fallback, through the predefined maps
+  hayro-cmap supplies.
+- **Repro:** none counted; a fixture with a partial `/ToUnicode` over an
+  Adobe ordering.
+- **Notes:** the removal check is conservative with a hash (only the
+  same bytes match it).
+
+### B53: A font without `/Widths` takes no widths from its embedded program
+
+- **Found:** 2026-10-24, the content interpreter's wrap-up (M11 slice 3)
+- **Where:** `Foreign::read` (`content/font/foreign.rs`)
+- **Severity:** wrong output (flagged): widths guessed, `approx.widths`
+- **What happens:** a simple font that isn't one of the standard 14 and
+  has no `/Widths` has its widths guessed, even where its program, which
+  sheaf now reads, gives each glyph's advance, as PDFium takes them.
+- **Expected:** the program's advances, as PDFium's FreeType gives them.
+- **Repro:** the tiers' "codes or widths guessed" class.
+- **Notes:** redaction fails closed near such glyphs (slice 5).
+
+### B54: Tricky TrueType fonts are known by name only
+
+- **Found:** 2026-10-24, the content interpreter's wrap-up (M11 slice 3)
+- **Where:** `content/font/program.rs`
+- **Severity:** wrong output (flagged)
+- **What happens:** FreeType draws "tricky" fonts (CJK fonts whose
+  outlines need their hinting) hinted, and knows them by family name or
+  by checksums of their hinting tables. sheaf knows them by name only, so
+  a renamed one has its boxes taken unhinted where PDFium's differ.
+- **Expected:** FreeType's checksum list too.
+- **Repro:** the PDFium comparison's 495 TrueType and 1,833 CIDFontType2
+  glyphs in tricky fonts (mostly forms/safedocs/0571757.pdf), unknown
+  by name.
+- **Notes:** a tricky font's boxes are unknown (`approx.boxes`), so
+  nothing is held to them.
+
+### B55: An embedded CMap over a predefined base guesses every code
+
+- **Found:** 2026-10-24, the content interpreter's wrap-up (M11 slice 3)
+- **Where:** `CidMap` (`content/font/foreign.rs`), `approx.codes`
+- **Severity:** annoyance: slice 5 fails closed on more than it must
+- **What happens:** where an embedded CMap uses a predefined base that
+  isn't Identity, sheaf reads the base for the codes the CMap maps none
+  of, which PDFium doesn't (it gives them CID 0), and flags the whole
+  font `approx.codes`, not just those codes.
+- **Expected:** per-glyph flags for the codes the base maps.
+- **Repro:** veraPDF's UseCMap `/H` test in the PDF/UA files.
+- **Notes:** per-glyph code flags cost the hot path a test; one corpus
+  font gains.
+
+### B56: retired.rs misses a retired type named through a re-export or as `Type::method`
+
+- **Found:** 2026-10-24, the content interpreter's wrap-up (M11 slice 3),
+  fault-checking `RETIRED_M11`
+- **Where:** `crates/sheaf-doc/tests/retired.rs` (`scan_file`)
+- **Severity:** annoyance (tests)
+- **What happens:** with `content::text_bag::FontDecoders` retired, a
+  file with `use sheaf_doc::content::{FontDecoders, …}` and
+  `FontDecoders::read(…)` passes the ledger: the `use` path through the
+  re-export doesn't hold `text_bag::FontDecoders`, and a call's path
+  counts only its function. A file naming the type as a type fails it.
+- **Expected:** a `use` of the last segment through a re-export, and a
+  type as a call path's qualifier, counted.
+- **Repro:** put the A/B harness's `use` and call into a test file;
+  `nothing_retired_is_back` passes.
+- **Notes:** it caught the old walk's own file (four hits).
+
+### B57: `content::marked` and the interpreter disagree on a `BDC` naming a list `/Properties` lacks
+
+- **Found:** 2026-10-23, the content interpreter (M11 slice 3); logged at
+  its wrap-up's review
+- **Where:** `content::marked` (strict) against `content::interp`'s
+  marked content
+- **Severity:** correctness for M11 slice 5, which reads both
+- **What happens:** a `BDC` whose properties are a name the resources'
+  `/Properties` lacks opens nothing in PDFium, so its `EMC` closes the
+  range around it; the interpreter reads it so, while `content::marked`
+  keeps the range, so sheaf's two readings of the same content differ.
+- **Expected:** one rule for both, PDFium's, or slice 5 told which one
+  it reads and why.
+- **Repro:** `/Span /Missing BDC (a) Tj EMC` inside `/P <</MCID 0>> BDC
+  … EMC`, with no `/Missing` in `/Properties`.
+- **Notes:** before slice 5.
+
+### B58: Predefined CMaps PDFium knows but no Adobe bundle has stay guessed
+
+- **Found:** 2026-10-24, the content interpreter's wrap-up (M11 slice 3)
+- **Where:** `content/font/predefined.rs`, `Codes::Unknown`
+- **Severity:** annoyance: slice 5 fails closed on such fonts
+- **What happens:** KSCpc-EUC-V, 83pv-RKSJ-V and 90pv-RKSJ-V are in
+  PDFium's table (`kPredefinedCMaps`) and ISO 32000-1 Table 118, but
+  hayro-cmap bundles Adobe's maps, which have no such files, so a font
+  over one keeps `approx.codes`; so do GBK2K-EUC-H/V (no Adobe file) and
+  CNS-EUC-H/V (bundled, not in PDFium's table).
+- **Expected:** their codes read as PDFium reads them, from its own
+  data (BSD-3, with its notice), or a reason to leave them guessed.
+- **Repro:** a Type0 font with `/Encoding /KSCpc-EUC-V`.
+- **Notes:** no corpus file uses one; the `-H` forms of the first three
+  are read.
+
+### B59: A Type3 glyph whose `d1` box has no area takes the font's `/FontBBox`
+
+- **Found:** 2026-10-23, the content interpreter (M11 slice 3); logged at
+  its wrap-up's review
+- **Where:** `type3()` (`content/font/foreign.rs`), `Foreign::glyph_box`
+- **Severity:** annoyance: a glyph's box may be larger, or smaller, than
+  PDFium's, unflagged
+- **What happens:** PDFium takes a `d1` box with no area for none and
+  bounds the glyph by what its CharProc draws; sheaf falls back to the
+  font's `/FontBBox`, and flags the box only where there's no
+  `/FontBBox`.
+- **Expected:** the box of what the CharProc draws (it's interpreted
+  already where it's shown), or `approx.boxes` set for such glyphs.
+- **Repro:** a Type3 font whose CharProc starts `500 0 0 0 0 0 d1`.
+- **Notes:** a `/FontBBox` usually holds every glyph, so the box is
+  mostly wider, which slice 5 survives.
 
 ## Features
 
@@ -1344,7 +1559,52 @@ phase; they're triaged between phases.
   - **Size:** the plugin is small; the link op is the real work.
   - **When:** revisit after M13 lands (Greg, 2026-10-23).
 
-(F17 is on the content interpreter PR.)
+### F17: hayro-interpret as a second corpus oracle beside PDFium
+
+- **Found:** 2026-10-24, the content interpreter's wrap-up (M11 slice 3)
+- **What:** a dev-dependency on hayro-interpret 0.8 (pure Rust, MIT OR
+  Apache-2.0), and corpus tiers beside `content_interp.rs`'s that
+  compare sheaf's interpreter with it: glyph places and boxes, paths and
+  images, and renders of pages written again (`interp::encode`). Where
+  sheaf and PDFium disagree, a third reading says which one is off.
+- **Why:** PDFium is the only oracle today, so its quirks become the
+  tiers' rule or their allowances. The content interpreter's wrap-up
+  found several:
+  - PDFium renders some files otherwise the second time a process
+    loads them (forms/safedocs/0171994: 30–349 px), so tier 3 compares
+    such pages with the file loaded again;
+  - it reads codes renamed by `/Differences` through the base encoding,
+    not the glyph names (120,024 glyphs matched a character of another
+    code point);
+  - its own standard 14 faces differ from Adobe's AFM (86 glyphs
+    missing, a few wider), so their widths are guessed;
+  - it makes no character for a text object whose outlines give it no
+    width, and draws in a substitute face where it can't decode a
+    program that sheaf reads (forms/safedocs/5208359, tier 2's
+    `PROGRAM_DECODED_OTHERWISE`);
+  - its text page drops lone-space strings, consecutive spaces,
+    duplicates and a string in the glyphless OCR font shown just after
+    another; in right-to-left text its generated characters become
+    pieces `FPDFText_IsGenerated` doesn't report; and its vertical loose
+    box is an em of the font size in PageSpace whatever the text
+    matrix's scale (tier 2's unexplained counts, 73,296 glyphs and 279
+    characters);
+  - its CID-to-Unicode tables are older than Adobe's 2023 data that
+    hayro-cmap bundles (2,433 more glyphs matched a character of another
+    code point, CID 231 being U+2002); and through FreeType it misreads
+    a negative CFF `FontBBox` integer written with operator 29.
+  Each was sorted out by hand; a second interpreter would sort the next
+  ones.
+- **Overlap:** M10.5 D55 (`todos/m10.5-decisions.md`: hayro stays a
+  test oracle, never the interpreter); `docs/prior-art/rust-ecosystem.md`'s
+  hayro row; `docs/oracles.md`'s hayro-interpret row; F23 (hayro-syntax
+  as a second reader); hayro-cmap, already sheaf-doc's for the
+  predefined CMaps.
+- **Notes:** test-only, never in a shipped build. hayro reads fonts
+  through skrifa, as sheaf now does, so font-program bugs they share
+  won't show; its README still calls it experimental, so expect a triage
+  list of its own. hayro-interpret 0.8 wants skrifa ^0.46, a version
+  past sheaf's 0.44 (a dev-dependency's build only).
 
 ### F18: Notices for the data and code sheaf ships
 
@@ -1353,15 +1613,20 @@ phase; they're triaged between phases.
   arrives:
   - Unicode-3.0, for unicode-normalization from 0.1.26 (which declares
     it) and ICU4X data;
-  - Adobe's BSD-3 notice for hayro-cmap's CMap bundle (the content
-    interpreter PR brings it);
+  - Adobe's BSD-3 notice for hayro-cmap's CMap bundle: done in the
+    content interpreter PR (`LICENSE-cmap-resources`, and
+    `LICENSE-brotli` for the brotli crates that decompress it, which
+    also covers lopdf's brotli-decompressor);
+  - FreeType's FTL credit, for program.rs' readers that follow its
+    routines and for libpdfium, which builds it in: done in the same PR
+    (`LICENSE-freetype`);
   - the OFL for Noto Sans and Liberation (M10 slices 7 and 11);
   - BSD-3 for Foxit's Symbol and Dingbats, if M14 takes them;
   - the IJG notice ("based in part on the work of the Independent JPEG
     Group") for jpeg-encoder, if M11 takes it;
   - SCOWL's notice, if spell check ships en_US.
 - **Why:** each license requires its notice in binary distributions;
-  today `packaging/licenses` has none of these.
+  `packaging/licenses` has none of the others yet.
 - **Overlap:** M10 slices 7 and 11 (`m10.md:1469`, `:1597`); M11's
   content interpreter (CMaps) and slice 6 (JPEG); M14's embed-all
   profile; Spell check (Pending); B27, whose license check covers crates,
@@ -1453,6 +1718,59 @@ phase; they're triaged between phases.
 - **Notes:** pre-alpha, so a rename has no compatibility cost (clean over
   compat). A decision for Greg. Registering a prefix is with the PDF
   Association's registry.
+
+### F25: Upstream: hayro-cmap's codespace ranges, public
+
+- **Found:** 2026-10-24, the content interpreter's wrap-up (M11 slice 3)
+- **What:** a PR to hayro-cmap exposing a CMap's codespace ranges (they
+  are crate-private in 0.1.0), so a code's length comes from the map.
+- **Why:** sheaf splits a predefined map's codes by its own copy of
+  PDFium's `kPredefinedCMaps` schemes (`content/font/predefined.rs`);
+  with the ranges public that table could go, but PDFium's collection
+  and UCS2 facts.
+- **Overlap:** build-or-adopt entry 26; F18 (the CMaps' notice).
+- **Notes:** small; an issue first.
+
+### F26: skrifa past 0.46, for read-fonts' Type 1 parser of 0.43 and later
+
+- **Found:** 2026-10-24, the content interpreter's wrap-up (M11 slice 3)
+- **What:** move sheaf-doc's skrifa to one whose read-fonts is 0.43 or
+  later (skrifa 0.46 and up), whose Type 1 parser bounds its own work.
+- **Why:** read-fonts 0.41 (skrifa 0.44, the copy GPUI builds) reads a
+  Type 1 program in work and depth that grow faster than the program
+  does; sheaf scans each program ahead of it (`content/font/type1.rs`)
+  and hands it only one within bounds. The review checked it apart from
+  sheaf: 0.43.0 and later read the same inputs in milliseconds, so it's
+  fixed upstream and public, and no report is needed.
+- **Overlap:** build-or-adopt entry 25; F17 (hayro-interpret wants
+  skrifa ^0.46); the skrifa bump in M11's slice 3 notes (For Greg).
+- **Notes:** keep the scan after the bump: it also finds the
+  charstrings by name, which read-fonts keeps to itself.
+
+### F27: Research: what sheaf should read from a corrupt Flate stream (corpus 5208359)
+
+- **Found:** 2026-10-24, the content interpreter's wrap-up (M11 slice 3)
+- **What:** work out what a reader should do with a Flate stream that's
+  corrupt partway, and decide sheaf's rule. forms/safedocs/5208359.pdf's
+  TrueType program `482 0 R` is one (zlib: "invalid distance too far
+  back"): lopdf's inflate (miniz) decodes all 26,872 bytes and skrifa
+  reads the program; PDFium (zlib) reads part, can't load it, and draws
+  in a substitute CFF face (19,469 bytes), so 38 glyphs' boxes differ.
+  Find where the stream breaks, what zlib and miniz each output, and
+  what pdf.js, MuPDF, poppler and qpdf do with it (all installed), then
+  choose on merit, not PDFium parity.
+- **Why:** sheaf decodes streams for drawing, text, OCR and the removal
+  check; a corrupt stream read two ways gives different text and boxes,
+  and a "best effort" decode is also a hostile-input surface.
+- **Overlap:** F13 (in-housing the parser and filters); F17
+  (hayro-interpret as a second oracle); exports.rs's 0070616 allowance,
+  the precedent.
+- **Notes:** tier 2 holds the 38 glyphs by exact count
+  (`PROGRAM_DECODED_OTHERWISE` in crates/sheaf-render/tests/content_interp.rs).
+  Greg accepted the allowance and kept 5208359 in the corpus for now
+  (2026-10-24): "the problem may be as much that pdfium tries in the
+  first place", and a broken file made an unreliable target for the
+  slice. The file's 5 fonts tier 1 counts malformed are there too.
 
 ## Closed
 

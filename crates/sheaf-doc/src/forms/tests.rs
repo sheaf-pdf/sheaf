@@ -777,7 +777,8 @@ fn the_manifest_by_its_header() {
 /// one there without `forms/manifest.tsv`, or with only the old
 /// top-level `manifest.tsv`, is an error, not a skip. Its scans are
 /// `scans/manifest.tsv`'s rows, its signed files `signatures/
-/// manifest.tsv`'s, and a corpus without them says so.
+/// manifest.tsv`'s, its conformance files `conformance/manifest.tsv`'s,
+/// and a corpus without them says so.
 #[test]
 fn the_corpus_is_where_its_manifest_is() {
     let dir = std::env::temp_dir().join(format!("sheaf-corpus-{}", std::process::id()));
@@ -829,6 +830,32 @@ fn the_corpus_is_where_its_manifest_is() {
         (signed[0].column("valid"), signed[0].column("certified")),
         ("2", "")
     );
+    let err = found.conformance().err().unwrap();
+    assert!(
+        format!("{err:#}").contains("conformance/manifest.tsv"),
+        "{err:#}"
+    );
+    std::fs::create_dir_all(some.join("conformance")).unwrap();
+    std::fs::write(
+        some.join("conformance/manifest.tsv"),
+        "path\tlicense\tpages\texpect\tclaims\tmarked\tstruct_tree\n\
+         conformance/ua/d.pdf\tCC-BY-4.0\t2\tfail\tPDF/A-2a, PDF/UA-1\t1\t1\n\
+         conformance/a/e.pdf\tCC-BY-3.0\t1\t\tPDF/A-1b\t0\t0\n",
+    )
+    .unwrap();
+    let suites = found.conformance().unwrap();
+    assert_eq!(suites.len(), 2);
+    assert_eq!(found.path(&suites[0]), some.join("conformance/ua/d.pdf"));
+    assert_eq!(suites[0].pages, 2);
+    assert!(suites[0].column("claims").contains("PDF/UA"));
+    assert!(!suites[1].column("claims").contains("PDF/UA"));
+    assert_eq!(
+        (suites[0].column("expect"), suites[1].column("expect")),
+        ("fail", "")
+    );
+    assert_eq!(suites[0].column("struct_tree"), "1");
+    // No form or kind column: they're empty.
+    assert_eq!((suites[1].form.as_str(), suites[1].kind.as_str()), ("", ""));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

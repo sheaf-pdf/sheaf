@@ -380,7 +380,8 @@ fn hex(string: &[u8]) -> Vec<u8> {
 /// What content does, an operator at a time: an operator or an inline
 /// image, and the operands before it.
 pub(crate) struct Step<'a, 'o> {
-    s: &'a [u8],
+    /// The content it's in.
+    pub s: &'a [u8],
     /// The operator, or the inline image.
     pub tok: Tok<'a>,
     /// Where `tok` is.
@@ -703,17 +704,29 @@ fn image_dict(
     }
 }
 
-/// The color space of the inline image `image` (its token, `BI` to `EI`,
-/// in `s`), as written.
-pub(crate) fn image_color_space(s: &[u8], image: Range<usize>, depth: usize) -> Option<&[u8]> {
-    let mut cs = None;
+/// The value of the inline image `image` (its token, `BI` to `EI`, in
+/// `s`) under one of `keys`, as written: the last such entry's, as
+/// PDFium's dictionary keeps the last.
+pub(crate) fn image_entry<'s>(
+    s: &'s [u8],
+    image: Range<usize>,
+    depth: usize,
+    keys: &[&[u8]],
+) -> Option<&'s [u8]> {
+    let mut found = None;
     image_dict(&s[..image.end], image.start, depth, |key, value| {
-        if matches!(name(key).as_deref(), Some(b"CS" | b"ColorSpace")) {
-            cs = Some(value);
+        if name(key).is_some_and(|k| keys.contains(&&*k)) {
+            found = Some(value);
         }
     })
     .ok()?;
-    cs.map(|r| &s[r])
+    found.map(|r| &s[r])
+}
+
+/// The length the inline image `image` (its token in `s`) gives its data,
+/// its `/L` or `/Length`, where that's a length, as the lexer reads it.
+pub(crate) fn image_length(s: &[u8], image: Range<usize>, depth: usize) -> Option<u64> {
+    image_entry(s, image, depth, &[b"L", b"Length"]).and_then(int)
 }
 
 enum Filter {
@@ -844,7 +857,7 @@ fn hex_string(s: &[u8], start: usize) -> Result<usize, LexError> {
 }
 
 /// The elements of an array token, as written.
-fn elements(array: &[u8], depth: usize) -> Vec<&[u8]> {
+pub(crate) fn elements(array: &[u8], depth: usize) -> Vec<&[u8]> {
     let inner = array.strip_prefix(b"[").unwrap_or(array);
     items(inner.strip_suffix(b"]").unwrap_or(inner), depth)
 }
@@ -937,7 +950,7 @@ fn int(number: &[u8]) -> Option<u64> {
 
 /// Whether a word is a number, as PDFium tells one: digits, signs and
 /// points only.
-fn is_number(word: &[u8]) -> bool {
+pub(crate) fn is_number(word: &[u8]) -> bool {
     word.iter()
         .all(|c| matches!(c, b'0'..=b'9' | b'+' | b'-' | b'.'))
 }

@@ -9,8 +9,8 @@ use crate::source::Limits;
 /// The bag `content` draws with the fonts of `resources`.
 fn bag(pdf: &Pdf, resources: &Object, content: &[u8]) -> TextBag {
     let lim = Limits::DEFAULT;
-    let fonts = FontDecoders::read(pdf, Some(resources), &lim);
-    text_bag(&Concat::new(&[content]), &ResCx::none(), &lim, &fonts).unwrap()
+    let content = Concat::new(&[content]);
+    text_bag(pdf, &content, Some(resources), &lim, &Fonts::for_text()).unwrap()
 }
 
 /// A bag of `text`'s words.
@@ -211,6 +211,17 @@ fn codes_no_font_reads_are_their_bytes_hash() {
     assert_eq!(other.missing_from(&want), 0);
     assert_eq!(words("one one two three").missing_from(&want), 2);
     assert_eq!(want.len(), 3);
+    // An empty string shows nothing, in no font or one: no hash, and no
+    // end to the word around it.
+    assert!(bag(&pdf, &resources, b"BT () Tj [()] TJ ET").is_empty());
+    assert_eq!(
+        bag(
+            &pdf,
+            &resources,
+            b"BT /T 9 Tf (a) Tj () Tj [()] TJ (b) Tj ET"
+        ),
+        words("ab")
+    );
 }
 
 /// A composite font whose encoding isn't Identity: its CMap's codespace
@@ -242,8 +253,44 @@ fn codespace_ranges_split_mixed_codes() {
 #[test]
 fn content_that_doesnt_lex_is_an_error() {
     let lim = Limits::DEFAULT;
-    let fonts = FontDecoders::default();
     let content = Concat::new(&[b"BT (Hello) Tj (open"]);
-    let e = text_bag(&content, &ResCx::none(), &lim, &fonts).unwrap_err();
-    assert_eq!(e.at, 14);
+    let e = text_bag(&Pdf::new(), &content, None, &lim, &Fonts::for_text()).unwrap_err();
+    assert!(matches!(e, interp::InterpError::Lex { form: None, error } if error.at == 14));
+}
+
+/// A form the content draws is judged on its own, and isn't read: its
+/// words aren't the content's. An ExtGState's `/Font` picks the font, as
+/// in PDFium, which takes one given by reference for a name it hasn't
+/// got: its text is drawn in the stock Helvetica, and is its bytes' hash.
+#[test]
+fn forms_are_their_own_and_gs_picks_the_font() {
+    let mut pdf = Pdf::with_version("1.7");
+    let standard = pdf.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Times-Roman",
+    });
+    let fonts = dictionary! { "T" => standard };
+    let form = Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 9.into(), 9.into()],
+            "Resources" => dictionary! { "Font" => fonts.clone() },
+        },
+        b"BT /T 9 Tf (inside) Tj ET".to_vec(),
+    );
+    let form = pdf.add_object(form);
+    let resources: Object = dictionary! {
+        "Font" => fonts,
+        "XObject" => dictionary! { "X" => form },
+        "ExtGState" => dictionary! { "G" => dictionary! { "Font" => vec![standard.into(), 9.into()] } },
+    }
+    .into();
+    assert_eq!(
+        bag(&pdf, &resources, b"BT /T 9 Tf (outside) Tj ET /X Do"),
+        words("outside")
+    );
+    let mut want = words("one");
+    want.add_hash(sheaf_util::checksum(b"two"));
+    assert_eq!(
+        bag(&pdf, &resources, b"BT /T 9 Tf (one) Tj /G gs (two) Tj ET"),
+        want
+    );
 }

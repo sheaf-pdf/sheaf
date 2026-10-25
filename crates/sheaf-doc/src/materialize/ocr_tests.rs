@@ -24,7 +24,7 @@ use super::removal;
 use super::removal_tests::{opened, scratch, text_file};
 use super::rewrite_tests::{make_pdf, open, read_pages, tempdir};
 use super::{AskAnswers, How, SaveHow, StrategyKind, Why, save_with};
-use crate::content::{Balance, BlockId, Concat, FontDecoders, Marker, ResCx, text_bag};
+use crate::content::{Balance, BlockId, Concat, Fonts, Marker, text_bag};
 use crate::effects::{Removed, RemovedKind};
 use crate::history::FixedCount;
 use crate::model::{Document, PageId};
@@ -141,11 +141,11 @@ pub(crate) const HELLO_HEX: &str = "<00480065006C006C006F>";
 fn words(pdf: &Pdf, page: ObjectId) -> Vec<String> {
     let lim = Limits::DEFAULT;
     let resources = pdf.get_dictionary(page).unwrap().get(b"Resources").ok();
-    let fonts = FontDecoders::read(pdf, resources, &lim);
+    let fonts = Fonts::for_text();
     (contents(pdf, page).into_iter())
         .flat_map(|c| {
             let data = stream(pdf, c).1;
-            let bag = text_bag(&Concat::new(&[&data]), &ResCx::default(), &lim, &fonts).unwrap();
+            let bag = text_bag(pdf, &Concat::new(&[&data]), resources, &lim, &fonts).unwrap();
             let words: Vec<String> = bag.words().map(|(w, _)| w.to_string()).collect();
             words
         })

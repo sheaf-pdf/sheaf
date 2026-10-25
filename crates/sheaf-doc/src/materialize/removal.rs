@@ -59,7 +59,7 @@ use super::emit::AllowedDrops;
 use super::key::ObjKey;
 use super::record::SavedSide;
 use crate::annot::{AnnotId, AnnotKind};
-use crate::content::{Concat, FontDecoders, GenId, Marker, ReadObjects, ResCx, TextBag, text_bag};
+use crate::content::{Concat, Fonts, GenId, Marker, ReadObjects, TextBag, text_bag};
 use crate::file::text_string;
 use crate::model::{
     AnnotBody, AnnotRec, DocState, FormRef, GenSpec, ImageRef, Mark, PageForm, PageId, Static,
@@ -313,6 +313,8 @@ struct Walk<'a> {
     generators: bool,
     /// The other old objects' text, in the order they were examined.
     bags: Vec<(ObjKey, TextBag)>,
+    /// The saved file's fonts their content draws in, each read once.
+    fonts: Fonts,
     /// The first old object that couldn't be read.
     unread: Option<ObjKey>,
 }
@@ -337,6 +339,7 @@ impl<'a> Walk<'a> {
             blocks: HashMap::new(),
             generators: false,
             bags: Vec::new(),
+            fonts: Fonts::for_text(),
             unread: None,
         }
     }
@@ -441,7 +444,7 @@ impl<'a> Walk<'a> {
             _ => {}
         }
         let resources = |d: &Dictionary| inherited(s.old, d);
-        match bag(s.old, &obj, &item.how, s.lim, &resources) {
+        match bag(s.old, &obj, &item.how, s.lim, &resources, &self.fonts) {
             Some(bag) if bag.is_empty() => {}
             Some(bag) => self.bags.push((key, bag)),
             None => {
@@ -608,28 +611,30 @@ fn written(s: &Section) -> Result<TextBag, ObjKey> {
             }
         }
     }
+    let fonts = Fonts::for_text();
     let mut out = TextBag::default();
     for (id, (key, obj)) in s.objects {
         let how = uses.get(id).unwrap_or(&Use::Object);
-        out.extend(&bag(&joined, obj, how, s.lim, &resources).ok_or(*key)?);
+        out.extend(&bag(&joined, obj, how, s.lim, &resources, &fonts).ok_or(*key)?);
     }
     Ok(out)
 }
 
 /// The text of `obj`, reached as `how`, whose objects `objects` reads, a
-/// page's resources by `resources`: its strings, and a stream's text by
-/// what it is. None when it can't be read.
+/// page's resources by `resources`, their fonts by `fonts`: its strings,
+/// and a stream's text by what it is. None when it can't be read.
 fn bag(
     objects: &impl ReadObjects,
     obj: &Object,
     how: &Use,
     lim: &Limits,
     resources: &dyn Fn(&Dictionary) -> Option<Object>,
+    fonts: &Fonts,
 ) -> Option<TextBag> {
     let mut bag = TextBag::default();
     strings(obj, &mut bag);
     if let Object::Stream(stream) = obj {
-        bag.extend(&stream_text(objects, stream, how, lim, resources)?);
+        bag.extend(&stream_text(objects, stream, how, lim, resources, fonts)?);
     }
     Some(bag)
 }
@@ -644,6 +649,7 @@ fn stream_text(
     how: &Use,
     lim: &Limits,
     resources: &dyn Fn(&Dictionary) -> Option<Object>,
+    fonts: &Fonts,
 ) -> Option<TextBag> {
     let dict = &stream.dict;
     let (kind, subtype) = (
@@ -670,10 +676,7 @@ fn stream_text(
         .ok()?;
     match content {
         Some(res) => {
-            let res = res.as_ref();
-            let fonts = FontDecoders::read(objects, res, lim);
-            let cx = ResCx::read(objects, res);
-            bag = text_bag(&Concat::new(&[&data]), &cx, lim, &fonts).ok()?;
+            bag = text_bag(objects, &Concat::new(&[&data]), res.as_ref(), lim, fonts).ok()?;
         }
         None => bag.add(&text_string(&data)),
     }

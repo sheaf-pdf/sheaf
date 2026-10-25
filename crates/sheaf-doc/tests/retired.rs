@@ -1,8 +1,9 @@
 //! The retired-symbols ledger (M10.5 §17): every name the edit API took
 //! out, with the slice that took it out ([`RETIRED`]), and every name a
 //! later milestone's slice took out, in a table of the milestone's own
-//! ([`RETIRED_M5`]). Nothing under `crates/` may define one again or refer
-//! to it. Each slice adds its rows in the commit that deletes the names.
+//! ([`RETIRED_M5`], [`RETIRED_M11`]). Nothing under `crates/` may define
+//! one again or refer to it. Each slice adds its rows in the commit that
+//! deletes the names.
 //!
 //! A row is a path from its crate's root, such as
 //! `model::Document::marginal`. Every `.rs` file under `crates/` (but not
@@ -1054,8 +1055,21 @@ const RETIRED_M5: &[(&str, u8)] = &[
     ("scan_dialog::ScanEvent::Created", 2),
 ];
 
+/// Every name M11 retired, with the slice of `todos/m11.md` that retired
+/// it.
+const RETIRED_M11: &[(&str, u8)] = &[
+    // `text_bag` reads content as the interpreter does, its fonts a
+    // source's `Fonts`, each read once within the page's budget: not a
+    // `/ToUnicode` per font name read afresh for every stream.
+    ("content::text_bag::FontDecoders", 3),
+];
+
 /// The ledgers, with the words a hit names its slice by.
-const LEDGERS: &[(&[(&str, u8)], &str)] = &[(RETIRED, "slice"), (RETIRED_M5, "M5 slice")];
+const LEDGERS: &[(&[(&str, u8)], &str)] = &[
+    (RETIRED, "slice"),
+    (RETIRED_M5, "M5 slice"),
+    (RETIRED_M11, "M11 slice"),
+];
 
 /// Last segments only a path matches: names the new design uses again
 /// (§17), and words common enough to name other things.

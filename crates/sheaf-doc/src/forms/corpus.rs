@@ -1,10 +1,11 @@
 //! Greg's corpus of real files (M10 proposal 21): where it is, and the
 //! manifests of the categories the tests read, a row per file:
 //! `forms/manifest.tsv` for the forms under `forms/`,
-//! `scans/manifest.tsv` for the scanned documents under `scans/`, and
-//! `signatures/manifest.tsv` for the signed files under `signatures/`.
-//! Each of the corpus's categories has a manifest of its own, in its
-//! folder.
+//! `scans/manifest.tsv` for the scanned documents under `scans/`,
+//! `signatures/manifest.tsv` for the signed files under `signatures/`,
+//! and `conformance/manifest.tsv` for the conformance suites' files under
+//! `conformance/`. Each of the corpus's categories has a manifest of its
+//! own, in its folder.
 //!
 //! Tests look in `$SHEAF_CORPUS`, then in `../pdf-corpus` beside the
 //! workspace, and skip, passing with a message, when neither is there
@@ -38,8 +39,11 @@ const SCANS: &str = "scans/manifest.tsv";
 /// The signed files' manifest, relative to the corpus root.
 const SIGNATURES: &str = "signatures/manifest.tsv";
 
-/// One row of a manifest (`forms/`, `scans/` or `signatures/
-/// manifest.tsv`). Columns it lacks are left empty.
+/// The conformance suites' manifest, relative to the corpus root.
+const CONFORMANCE: &str = "conformance/manifest.tsv";
+
+/// One row of a manifest (`forms/`, `scans/`, `signatures/` or
+/// `conformance/manifest.tsv`). Columns it lacks are left empty.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Entry {
     /// Relative to the corpus root (`forms/irs/f1040.pdf`).
@@ -67,7 +71,11 @@ pub struct Entry {
     /// The columns the fields above don't name, by their header's name:
     /// the signatures manifest's `signatures`, `subfilters`, `certified`
     /// (DocMDP's `/P`, empty when it certifies nothing), `intact` and
-    /// `valid` (how many signatures pyHanko found so), among them.
+    /// `valid` (how many signatures pyHanko found so), and the
+    /// conformance manifest's `claims` (the standards a file says it
+    /// meets, `PDF/A-2a, PDF/UA-1`), `expect` (a suite's verdict on its
+    /// test file, `pass` or `fail`) and `struct_tree` (`1` where it has a
+    /// structure tree), among them.
     pub extra: BTreeMap<String, String>,
 }
 
@@ -135,6 +143,15 @@ impl Corpus {
     /// files came does.
     pub fn signatures(&self) -> Result<Vec<Entry>> {
         self.rows(SIGNATURES)
+    }
+
+    /// `conformance/manifest.tsv`'s rows: every file under
+    /// `conformance/`, the PDF/A, PDF/UA and other suites' test files and
+    /// the files that claim a standard. It has no form or kind columns.
+    /// An error when the corpus has none, as one from before they came
+    /// does.
+    pub fn conformance(&self) -> Result<Vec<Entry>> {
+        self.rows(CONFORMANCE)
     }
 
     /// The rows of the manifest at `manifest`, relative to the root.

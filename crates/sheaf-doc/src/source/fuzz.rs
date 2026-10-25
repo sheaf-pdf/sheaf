@@ -1,7 +1,8 @@
 //! The bodies of the fuzz targets in `fuzz/` (cargo-fuzz), here so a
 //! stable test runs them too. Each reads what it's given, and must
 //! neither panic nor hang whatever the bytes. `op_json`'s document is
-//! built from the form fixtures, so it needs the `fixtures` feature.
+//! built from the form fixtures, and `interp`'s page from the content
+//! fixtures, so they need the `fixtures` feature.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -196,6 +197,238 @@ pub fn splice(data: &[u8]) -> usize {
         }
     }
     made
+}
+
+/// `data` as a page's content, two streams split at its middle, drawn on
+/// [`fuzz_page`](content::fixture::fuzz_page)'s page, whose resources
+/// name a font of each kind, a color space of each size, a property list
+/// with `/ActualText`, optional content, and forms that draw themselves,
+/// a chain of two and a form in a form: interpreted, its forms drawn,
+/// each glyph laid out with its box. Where `data` has [`FONT_PART`]s,
+/// the content is what's before the first, and what's after each is,
+/// in turn, `/CM`'s embedded CMap, `/T3`'s `a` CharProc, `/I2`'s `/W`
+/// and `/V`'s `/W2`, `/T3`'s `/FontMatrix`, and `/TT`'s program, which
+/// the CIDFonts share ([`with_fonts`]), so the fonts' readers read what
+/// the fuzzer makes too, a program's reader among them. Where that reads, it's
+/// written again ([`encode`](content::interp::encode)) and the encoding
+/// drawn, which draws the same, but operators: as many events and
+/// glyphs, each where it was, to the bit. Returns how many events it
+/// drew.
+#[cfg(any(test, feature = "fixtures"))]
+pub fn interp(data: &[u8]) -> usize {
+    let parts = font_parts(data);
+    match parts[..] {
+        [content] => INTERP.with(|(page, fonts)| interp_on(page, fonts, content)),
+        [content, ref fonts @ ..] => INTERP.with(|(page, _)| {
+            let page = with_fonts(page, fonts);
+            interp_on(&page, &content::Fonts::default(), content)
+        }),
+        [] => 0,
+    }
+}
+
+/// What splits [`interp`]'s input into its content and the fonts' parts.
+#[cfg(any(test, feature = "fixtures"))]
+pub const FONT_PART: &[u8] = b"\n%%font\n";
+
+/// `data` split at each [`FONT_PART`], into six parts at most.
+#[cfg(any(test, feature = "fixtures"))]
+fn font_parts(data: &[u8]) -> Vec<&[u8]> {
+    let mut parts = Vec::new();
+    let mut rest = data;
+    while parts.len() < 5
+        && let Some(at) = rest.windows(FONT_PART.len()).position(|w| w == FONT_PART)
+    {
+        parts.push(&rest[..at]);
+        rest = &rest[at + FONT_PART.len()..];
+    }
+    parts.push(rest);
+    parts
+}
+
+/// `page`, the fuzz page, with what `parts` give its fonts, each where
+/// it's there: the bytes of `/CM`'s embedded CMap and of `/T3`'s `a`
+/// CharProc, objects, where they read as arrays, for `/I2`'s `/W` and
+/// `/V`'s `/W2`, and `/T3`'s `/FontMatrix`, and the bytes of `/TT`'s
+/// `/FontFile2`, the program the CIDFonts embed too.
+#[cfg(any(test, feature = "fixtures"))]
+fn with_fonts(page: &content::fixture::Fixture, parts: &[&[u8]]) -> content::fixture::Fixture {
+    let mut pdf = page.pdf.clone();
+    let font = |name: &[u8]| -> lopdf::ObjectId {
+        let fonts = page
+            .resources()
+            .and_then(|r| r.as_dict().ok()?.get(b"Font").ok());
+        let font = fonts.and_then(|f| f.as_dict().ok()?.get(name).ok()?.as_reference().ok());
+        font.expect("the fuzz page has the font")
+    };
+    let get = |pdf: &lopdf::Document, id, key: &[u8]| -> Option<Object> {
+        Some(pdf.get_dictionary(id).ok()?.get(key).ok()?.clone())
+    };
+    let descendant = |pdf: &lopdf::Document, name| match get(pdf, font(name), b"DescendantFonts") {
+        Some(Object::Array(fonts)) => fonts.first().and_then(|f| f.as_reference().ok()),
+        _ => None,
+    };
+    let array = |part: &[u8]| match content::object(part, Limits::DEFAULT.content.depth) {
+        Some(array @ Object::Array(_)) => Some(array),
+        _ => None,
+    };
+    let mut set_stream = |id: Option<lopdf::ObjectId>, data: &[u8]| {
+        if let Some(stream) = id.and_then(|id| pdf.get_object_mut(id).ok()?.as_stream_mut().ok()) {
+            stream.set_plain_content(data.to_vec());
+        }
+    };
+    let cmap = get(&page.pdf, font(b"CM"), b"Encoding").and_then(|e| e.as_reference().ok());
+    let procs = get(&page.pdf, font(content::fixture::SQUARES), b"CharProcs");
+    let proc = procs.and_then(|p| p.as_dict().ok()?.get(b"a").ok()?.as_reference().ok());
+    let descriptor = get(&page.pdf, font(b"TT"), b"FontDescriptor");
+    let descriptor = descriptor.and_then(|d| d.as_reference().ok());
+    let program = descriptor.and_then(|d| get(&page.pdf, d, b"FontFile2")?.as_reference().ok());
+    for (id, data) in [cmap, proc].into_iter().zip(parts) {
+        set_stream(id, data);
+    }
+    if let Some(data) = parts.get(4) {
+        set_stream(program, data);
+    }
+    if let Some(widths) = parts.get(2).copied().and_then(array) {
+        let cids = [
+            (descendant(&pdf, b"I2"), &b"W"[..]),
+            (descendant(&pdf, b"V"), b"W2"),
+        ];
+        for (id, key) in cids {
+            if let Some(cid_font) = id.and_then(|id| pdf.get_dictionary_mut(id).ok()) {
+                cid_font.set(key, widths.clone());
+            }
+        }
+    }
+    if let Some(matrix) = parts.get(3).copied().and_then(array)
+        && let Ok(t3) = pdf.get_dictionary_mut(font(content::fixture::SQUARES))
+    {
+        t3.set("FontMatrix", matrix);
+    }
+    content::fixture::Fixture { pdf }
+}
+
+/// [`interp`]'s body: `data` drawn on `page`, with `fonts`.
+#[cfg(any(test, feature = "fixtures"))]
+fn interp_on(page: &content::fixture::Fixture, fonts: &content::Fonts, data: &[u8]) -> usize {
+    use content::interp::{EncodeError, encode};
+    let (first, second) = data.split_at(data.len() / 2);
+    let content = Concat::new(&[first, second]);
+    let Ok(drawn) = drawn_on(page, &content, fonts) else {
+        return 0;
+    };
+    let lim = &Limits::DEFAULT;
+    let encoded = match encode(&page.pdf, &content, page.resources(), lim, fonts) {
+        Ok(encoded) => encoded,
+        // What can't be written to read back the same isn't.
+        Err(EncodeError::Unwritable { .. }) => return drawn.events,
+        Err(e) => panic!("it's drawn, but isn't written again: {e}"),
+    };
+    let again = page.encoded(&encoded);
+    let redrawn = drawn_on(&again, &Concat::new(&[&encoded.content]), fonts);
+    let redrawn = redrawn.expect("the content written again is drawn");
+    assert_eq!(drawn, redrawn, "written again, it draws otherwise");
+    drawn.events
+}
+
+#[cfg(any(test, feature = "fixtures"))]
+thread_local! {
+    static INTERP: (content::fixture::Fixture, content::Fonts) =
+        (content::fixture::fuzz_page(), content::Fonts::default());
+}
+
+/// What content drew, but its operators.
+#[cfg(any(test, feature = "fixtures"))]
+#[derive(Debug, PartialEq, Eq)]
+struct Drawn {
+    events: usize,
+    glyphs: usize,
+    /// Where each thing drawn is, to the bit but for a 0's sign: each
+    /// glyph's code, origin, box and advance, each path's segments and
+    /// bounds, each image's corners, each shading's bounds, each form's
+    /// matrix and box, and each marked range's tag and MCID, hashed in
+    /// order.
+    placed: u64,
+}
+
+/// What `content`, drawn on `page`, draws, each glyph laid out with its
+/// box ([`Drawn`]).
+#[cfg(any(test, feature = "fixtures"))]
+fn drawn_on(
+    page: &content::fixture::Fixture,
+    content: &Concat,
+    fonts: &content::Fonts,
+) -> Result<Drawn, content::interp::InterpError> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    use content::interp::{Kind, Opts, Seg, interpret};
+    let (mut events, mut glyphs) = (0, 0);
+    let mut placed = DefaultHasher::new();
+    // Each number's bits, a 0 of either sign the same.
+    let mut put = |numbers: &[f32]| {
+        for v in numbers {
+            (v + 0.0).to_bits().hash(&mut placed);
+        }
+    };
+    let rect = |r: crate::geom::Rect| [r.x0, r.y0, r.x1, r.y1];
+    let lim = &Limits::DEFAULT;
+    interpret(
+        &page.pdf,
+        content,
+        page.resources(),
+        lim,
+        fonts,
+        Opts::default(),
+        |event| {
+            if !matches!(event.kind, Kind::Op) {
+                events += 1;
+            }
+            match event.kind {
+                Kind::Op => {}
+                Kind::Text(show) => {
+                    for g in show.glyphs() {
+                        glyphs += 1;
+                        put(&[f32::from_bits(g.code), g.advance, g.origin.x, g.origin.y]);
+                        for p in g.quad.0 {
+                            put(&[p.x, p.y]);
+                        }
+                    }
+                }
+                Kind::Path(path) => {
+                    put(&rect(path.bounds));
+                    for seg in path.segments {
+                        match *seg {
+                            Seg::Move(p) | Seg::Line(p) => put(&[p.x, p.y]),
+                            Seg::Curve(a, b, p) => put(&[a.x, a.y, b.x, b.y, p.x, p.y]),
+                            Seg::Close => put(&[f32::NAN]),
+                        }
+                    }
+                }
+                Kind::Image(image) => {
+                    for p in image.quad.0 {
+                        put(&[p.x, p.y]);
+                    }
+                }
+                Kind::Shading(shading) => put(&shading.bounds.map_or([f32::NAN; 4], rect)),
+                Kind::FormBegin(form) => {
+                    let m = form.matrix;
+                    put(&[m.a, m.b, m.c, m.d, m.e, m.f]);
+                    put(&form.bbox.map_or([f32::NAN; 4], rect));
+                }
+                Kind::MarkedBegin(mark) | Kind::MarkedPoint(mark) => {
+                    let mcid = mark.mcid.unwrap_or(u32::MAX);
+                    put(&[f32::from_bits(mcid), f32::from_bits(mark.tag.len() as u32)]);
+                }
+                _ => {}
+            }
+            std::ops::ControlFlow::Continue(())
+        },
+    )?;
+    Ok(Drawn {
+        events,
+        glyphs,
+        placed: placed.finish(),
+    })
 }
 
 /// `data` as Op JSON (M10.5 §6.1): an envelope that reads is applied by
@@ -466,6 +699,10 @@ mod tests {
     /// Mutations of each fixture.
     const CASES: usize = 600;
 
+    /// Mutations of each of [`interp`]'s pages, which it draws twice and
+    /// writes once.
+    const INTERP_CASES: usize = 200;
+
     /// What a mutation may write: the tokens files are made of, and
     /// numbers that are offsets, lengths and counts.
     const TOKENS: &[&[u8]] = &[
@@ -497,8 +734,8 @@ mod tests {
         b"-1",
     ];
 
-    /// What a mutation of content may write: its tokens, and the bytes
-    /// that end an inline image's data.
+    /// What a mutation of content may write: its tokens, the bytes that
+    /// end an inline image's data, and what moves text and draws forms.
     const CONTENT_TOKENS: &[&[u8]] = &[
         b" ",
         b"(",
@@ -534,6 +771,16 @@ mod tests {
         b" /Artifact /P0 BDC ",
         b" /Artifact <</Type /Pagination /Subtype /Footer>> BDC ",
         b"4294967296",
+        b" 12 TL ",
+        b" 5 -14 TD ",
+        b" T* ",
+        b" (a) ' ",
+        b" 2 1 (a b) \" ",
+        b" 0 1 -1 0 300 500 Tm ",
+        b" /T3 10 Tf ",
+        b" /X1 Do ",
+        b" /Fm1 Do ",
+        b" /OC /OC0 BDC ",
     ];
 
     /// Mutations of each Op JSON fixture: fewer, as each opens a document
@@ -948,6 +1195,75 @@ mod tests {
         .collect()
     }
 
+    /// [`interp`]'s fixtures, beside the splice's: the content
+    /// interpreter's pages' content (`content::fixture`), each operator of
+    /// the text state, text in each kind of font, forms, images, paths,
+    /// clips and marked content; but the chains', the fan-out's and the
+    /// inherited form's, which only draw a form the fuzz page hasn't got.
+    fn interp_fixtures() -> Vec<Vec<u8>> {
+        let pages = crate::content::fixture::every().into_iter();
+        let contents = pages.map(|(_, f)| f.content().into_bytes());
+        contents
+            .filter(|c| c != b"/F Do" && c != b"/Fm Do")
+            .collect()
+    }
+
+    /// [`interp`]'s fixtures with the fonts' parts ([`FONT_PART`]): the
+    /// content of each operator of the text state and of each kind of
+    /// font, then the fuzz page's own CMap and `a` CharProc, a `/W`, a
+    /// `/FontMatrix`, and a program of each format (`content::fixture`'s
+    /// TrueType, CFF and Type 1), so mutations reach the fonts' readers.
+    fn font_part_fixtures() -> Vec<Vec<u8>> {
+        let programs = [
+            crate::content::fixture::truetype_program(),
+            crate::content::fixture::cff_program(),
+            crate::content::fixture::type1_program(),
+        ];
+        with_font_parts(&programs)
+    }
+
+    /// [`font_part_fixtures`] with programs that once stopped the fuzzer:
+    /// a Type 1 program whose integers run past what sheaf hands
+    /// read-fonts, and an SFNT whose `loca` record is past its end.
+    fn hostile_program_fixtures() -> Vec<Vec<u8>> {
+        let programs = [
+            crate::content::fixture::type1_integers_program(300),
+            crate::content::fixture::loca_past_end_program(),
+        ];
+        with_font_parts(&programs)
+    }
+
+    /// The content of each operator of the text state and of each kind of
+    /// font, then the fuzz page's fonts' parts, `programs` each in turn
+    /// the last ([`font_part_fixtures`]).
+    fn with_font_parts(programs: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let parts: [&[u8]; 4] = [
+            b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+              /CMapName /OneByte def\n\
+              1 begincodespacerange <00> <FF> endcodespacerange\n\
+              1 begincidrange <20> <7E> 1 endcidrange\n\
+              endcmap CMapName currentdict /CMap defineresource pop end end",
+            b"1000 0 0 -200 1000 800 d1 0 0 1000 800 re f",
+            b"[1 [400 500] 10 20 700]",
+            b"[0.001 0 0 0.001 0 0]",
+        ];
+        let pages = [
+            crate::content::fixture::operators(),
+            crate::content::fixture::fonts(),
+        ];
+        (pages.iter())
+            .flat_map(|f| programs.iter().map(move |program| (f, program)))
+            .map(|(f, program)| {
+                let mut data = f.content().into_bytes();
+                for part in parts.into_iter().chain([&program[..]]) {
+                    data.extend(FONT_PART);
+                    data.extend(part);
+                }
+                data
+            })
+            .collect()
+    }
+
     /// [`op_json`]'s fixtures: every op, between them every form of every
     /// reference and every kind of mark (`sheaf_edit::fixture`), as one
     /// envelope, and each op as an envelope of its own; then
@@ -1225,8 +1541,9 @@ mod tests {
     /// `SHEAF_FUZZ_SEEDS` names: `fuzz.yml` seeds each night's run with
     /// them, so the repository holds no PDF. The target
     /// `SHEAF_FUZZ_TARGET` names takes the marks' fixtures when it's
-    /// `sheaf_annot`, the content when it's `lexer` or `splice`, Op JSON
-    /// when it's `op_json`, files sheaf saved with watermarks when it's
+    /// `sheaf_annot`, the content when it's `lexer`, `splice` or
+    /// `interp` (the interpreter's pages' too), Op JSON when it's
+    /// `op_json`, files sheaf saved with watermarks when it's
     /// `sheaf_generators`, and the files otherwise.
     #[test]
     #[ignore = "fuzz.yml's seeds"]
@@ -1244,6 +1561,12 @@ mod tests {
             Ok("sheaf_annot") => named(mark_fixtures(), |n| format!("marks-{n}")).collect(),
             Ok("lexer") => named(content_fixtures(), |n| format!("content-{n}")).collect(),
             Ok("splice") => named(splice_fixtures(), |n| format!("content-{n}")).collect(),
+            Ok("interp") => {
+                let content = splice_fixtures().into_iter().chain(interp_fixtures());
+                let content = content.chain(font_part_fixtures());
+                let content = content.chain(hostile_program_fixtures());
+                named(content.collect(), |n| format!("content-{n}")).collect()
+            }
             Ok("op_json") => named(op_json_fixtures(), |n| format!("ops-{n}.json")).collect(),
             Ok("sheaf_generators") => {
                 named(generator_fixtures(), |n| format!("generators-{n}.pdf")).collect()
@@ -1252,6 +1575,35 @@ mod tests {
         };
         for (name, seed) in seeds {
             std::fs::write(dir.join(name), seed).unwrap();
+        }
+    }
+
+    /// Unmutated, each font-part fixture's last part is `/TT`'s program,
+    /// which reads: the fuzzer starts from a program of each format.
+    #[test]
+    fn the_font_part_fixtures_give_a_program_that_reads() {
+        let page = content::fixture::fuzz_page();
+        for fixture in font_part_fixtures() {
+            let parts = font_parts(&fixture);
+            assert_eq!(parts.len(), 6);
+            let page = with_fonts(&page, &parts[1..]);
+            let fonts = page
+                .resources()
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get(b"Font")
+                .unwrap();
+            let tt = fonts.as_dict().unwrap().get(b"TT").unwrap();
+            let read = content::Fonts::default();
+            let mut budget = Limits::DEFAULT.content.decompressed;
+            let tt = read
+                .get(&page.pdf, tt, &Limits::DEFAULT, &mut budget)
+                .unwrap()
+                .unwrap();
+            assert_eq!(tt.program(), content::FontProgram::Read);
+            // Its bytes, and what drawing its glyphs costs.
+            assert!(Limits::DEFAULT.content.decompressed - budget > parts[5].len());
         }
     }
 
@@ -1348,11 +1700,29 @@ mod tests {
                 let ran = std::panic::catch_unwind(|| {
                     lexer(&data);
                     splice(&data);
+                    interp(&data);
                 });
                 if let Err(panic) = ran {
                     let kept = std::env::temp_dir().join(format!("sheaf-fuzz-content-{n}-{case}"));
                     std::fs::write(&kept, &data).unwrap();
                     eprintln!("content {n}, case {case}: the input is {}", kept.display());
+                    std::panic::resume_unwind(panic);
+                }
+            }
+        }
+        let pages = interp_fixtures().into_iter().chain(font_part_fixtures());
+        for (n, fixture) in pages.chain(hostile_program_fixtures()).enumerate() {
+            // Unmutated, each draws on the fuzz page.
+            assert!(interp(&fixture) > 0, "page {n}");
+            for case in 0..INTERP_CASES {
+                let mut data = fixture.clone();
+                for _ in 0..rng.usize(1..=4) {
+                    mutate(&mut rng, &mut data, CONTENT_TOKENS);
+                }
+                if let Err(panic) = std::panic::catch_unwind(|| interp(&data)) {
+                    let kept = std::env::temp_dir().join(format!("sheaf-fuzz-page-{n}-{case}"));
+                    std::fs::write(&kept, &data).unwrap();
+                    eprintln!("page {n}, case {case}: the input is {}", kept.display());
                     std::panic::resume_unwind(panic);
                 }
             }

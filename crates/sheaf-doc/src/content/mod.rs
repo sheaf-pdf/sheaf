@@ -18,9 +18,19 @@
 //!   others.
 //! - [`PageBlocks`]: its pagination artifacts and who drew them, and
 //!   sheaf's own blocks.
-//! - [`text_bag`]: the words it draws, decoded through its fonts.
+//! - [`text_bag`]: the words it draws, as [`interp`] reads it, decoded
+//!   through its fonts.
 //! - [`Font`]: what sheaf draws text in, [`Std14`] and [`Glyphless`], and
-//!   [`FontRes`], a font as a page resource named by its [`ResId`].
+//!   [`FontRes`], a font as a page resource named by its [`ResId`];
+//!   [`Foreign`], a font a file draws in, as read, and [`Fonts`], a
+//!   source's.
+//! - [`interp`]: what it draws, an operator at a time, in the graphics
+//!   and text state it's drawn in: each glyph and where it is, each
+//!   path, image and shading, the clip and the marked content each is
+//!   in, and each form it draws, interpreted where it's drawn (M11 slice
+//!   3); content written again from what it draws ([`interp::encode`]);
+//!   and [`fixture`], pages built to test it, for other crates' tests
+//!   too.
 //! - [`ContentWriter`]: content written, its resources ([`Res`]) named at
 //!   the end.
 //! - [`sink`]: where content's resources are written: the emitter, or a
@@ -32,7 +42,10 @@ mod blocks;
 mod blocks_tests;
 #[cfg(test)]
 mod corpus;
+#[cfg(any(test, feature = "fixtures"))]
+pub mod fixture;
 mod font;
+pub mod interp;
 mod lex;
 mod marked;
 mod names;
@@ -54,14 +67,17 @@ pub use blocks::{
     BlockAt, BlockId, ContentError, DrawnForms, GenId, LEGACY_OCR, LegacyOcr, Marker, PagOrigin,
     PageBlocks, Pagination, PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
-pub use font::{Font, FontRes, Glyphless, Std14, Unencoded, wrap_with};
+pub use font::{
+    Descendant, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram, FontRes, FontScope,
+    Fonts, Foreign, Glyphless, Std14, TooLarge, Unencoded, VerticalMetrics, wrap_with,
+};
 pub use lex::{LexError, LexErrorKind, ResCx, Tok, lex, name, object};
 pub use marked::{Marked, PropertiesDict, Props, marked};
 pub use names::{Kept, NameSet, ResKind, kept, names_used};
 pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, contents};
 pub use res::{Res, ResBody, ResId};
 pub use splice::{Rewrite, SpliceError, Spliced, renames, splice, splice_each, without_keys};
-pub use text_bag::{FontDecoders, TextBag, text_bag};
+pub use text_bag::{TextBag, text_bag};
 pub use writer::{
     Blend, Color, ContentWriter, FillRule, GState, LineCap, LineJoin, Need, Paint, Reserved,
     ResourceNeeds, TextMode, write_string,
