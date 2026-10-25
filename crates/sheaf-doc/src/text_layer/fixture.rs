@@ -1,10 +1,6 @@
 //! Pages holding recognized text sheaf wrote, for tests here and in other
-//! crates (the `fixtures` feature). The OCR layer an older sheaf wrote
-//! before M10.5 slice 18 ([`legacy_page`]), its bytes frozen as its
-//! installer wrote them: a `q` stream before the page's content and the
-//! layer after it, which starts with the `Q` that ends it, both marked
-//! `/SheafOcrLayer`, its text in a glyphless font named `/SheafOcr`. An
-//! OCR block of sheaf's, frozen as `text_layer::block` writes it
+//! crates (the `fixtures` feature). An OCR block of sheaf's, frozen as
+//! `text_layer::block` writes it
 //! ([`OCR_BLOCK`]), a stream of its own after the page's isolated content
 //! ([`block_page`]), and the same block merged into the page's one stream
 //! by another tool ([`merged_page`]). Each page's own content is
@@ -52,16 +48,6 @@ pub fn layer() -> TextLayer {
     super::from_engine(words, &Geom::read(None, None, 0), "test")
 }
 
-/// The layer an older sheaf wrote of [`layer`], as its installer wrote it
-/// after the page's content: it ends the `q` before the content, and its
-/// text is invisible, in the glyphless font named `/SheafOcr`.
-pub const LEGACY_LAYER: &[u8] = b"Q\nBT\n3 Tr\n/SheafOcr 12 Tf\n1 0 0 1 72 680 Tm\n133.3333 Tz\n\
-    <00530061007600650064> Tj\n1 0 0 1 112 680 Tm\n133.3333 Tz\n<0020> Tj\n\
-    1 0 0 1 120 680 Tm\n133.3333 Tz\n<0077006F007200640073> Tj\nET\n";
-
-/// The marker on each of the legacy layer's two streams.
-pub const LEGACY_MARKER: &[u8] = b"SheafOcrLayer";
-
 /// The id of [`block_page`]'s and [`merged_page`]'s block.
 pub const BLOCK_ID: u64 = 0x2a;
 
@@ -78,23 +64,6 @@ pub const OCR_FONT: &[u8] = b"ShOANHIY";
 
 /// The name [`OCR_BLOCK`] names its property list by.
 pub const OCR_LIST: &[u8] = b"ShX256IW";
-
-/// A one-page document whose page draws [`BASE`] and then the layer an
-/// older sheaf wrote of [`layer`], as it wrote it: `/Contents [q, base,
-/// layer]`, the `q` and the layer marked [`LEGACY_MARKER`] and compressed,
-/// and its resources a dictionary of its own binding the glyphless font
-/// as `/SheafOcr` beside Helvetica as `/F1`.
-pub fn legacy_page() -> Pdf {
-    let mut pdf = Pdf::with_version("1.7");
-    let font = glyphless(&mut pdf);
-    let marked = || dictionary! { LEGACY_MARKER => true };
-    let q = compressed(&mut pdf, marked(), b"q\n");
-    let base = pdf.add_object(Stream::new(dictionary! {}, BASE.to_vec()));
-    let layer = compressed(&mut pdf, marked(), LEGACY_LAYER);
-    let fonts = dictionary! { "F1" => helvetica(&mut pdf), "SheafOcr" => font };
-    let resources = dictionary! { "Font" => fonts };
-    one_page(pdf, vec![q.into(), base.into(), layer.into()], resources)
-}
 
 /// A one-page document whose page draws [`BASE`], isolated by the `q`
 /// and the two `Q`s its balance asks for, each a stream marked
@@ -149,14 +118,6 @@ fn helvetica(pdf: &mut Pdf) -> ObjectId {
     pdf.add_object(dictionary! {
         "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
     })
-}
-
-/// A stream of `content` with `dict`, compressed as a save compressed it,
-/// made in `pdf`.
-fn compressed(pdf: &mut Pdf, dict: Dictionary, content: &[u8]) -> ObjectId {
-    let mut stream = Stream::new(dict, content.to_vec());
-    let _ = stream.compress();
-    pdf.add_object(stream)
 }
 
 /// A document of Letter pages, each drawing one of `contents`, with no

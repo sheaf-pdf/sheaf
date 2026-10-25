@@ -396,8 +396,8 @@ fn ranges_must_lie_between_steps() {
     assert_eq!(without(s, b"1 2 3 /A BMC EMC").unwrap(), b" 4 5 6 re f");
 }
 
-/// What an older sheaf kept in a list.
-const KEYS: [&[u8]; 2] = [b"SheafSettings", b"SheafStamp"];
+/// What sheaf marks a list with.
+const KEYS: [&[u8]; 2] = crate::private::LIST_KEYS;
 
 /// The list of the range that opens `streams` written again without
 /// [`KEYS`], and the streams as they're then.
@@ -420,22 +420,22 @@ fn content_with(c: &Concat, groups: &[Vec<SpanAcross>], rewrites: &[Rewrite]) ->
     }
 }
 
-/// An older sheaf's list loses its keys and keeps every other byte as it
-/// was written: comments, spacing, line ends, a key written with an
+/// A list loses the keys sheaf marks it with and keeps every other byte
+/// as it was written: comments, spacing, line ends, a key written with an
 /// escape, and a dictionary inside it, whose own keys are its own.
 #[test]
 fn a_list_is_written_again_without_its_keys() {
     // As lopdf wrote them, with no space between entries.
-    let s: &[u8] = b"/Artifact <</Type/Pagination/Subtype/Watermark/SheafStamp true\
-        /SheafSettings({\"path\":\"/home/me/logo.png\"})>> BDC\nq\n/SheafWMgs gs Q\nEMC\n";
+    let s: &[u8] = b"/Artifact <</Type/Pagination/Subtype/Watermark/SHEF_Gen true\
+        /SHEF_OcrBlock({\"path\":\"/home/me/logo.png\"})>> BDC\nq\n/GS0 gs Q\nEMC\n";
     let (rewrite, made) = rewritten(&[s]).unwrap();
     assert!(rewrite.is_some());
     assert_eq!(
         made,
-        [b"/Artifact <</Type/Pagination/Subtype/Watermark>> BDC\nq\n/SheafWMgs gs Q\nEMC\n"]
+        [b"/Artifact <</Type/Pagination/Subtype/Watermark>> BDC\nq\n/GS0 gs Q\nEMC\n"]
     );
     let s: &[u8] = b"q /Artifact << /Type /Pagination % its kind\n  /Subtype /Watermark\t\
-        /SheafStamp true /Inner <</SheafStamp 1>> % a note\n /Sheaf#53ettings (x)\n>> BDC Q EMC";
+        /SHEF_Gen true /Inner <</SHEF_Gen 1>> % a note\n /SHEF#5FOcrBlock (x)\n>> BDC Q EMC";
     let c = Concat::new(&[s]);
     let range = span_of(s, &s[2..]);
     let rewrite = without_keys(&c, &ResCx::none(), LIM, range, &KEYS).unwrap();
@@ -443,7 +443,7 @@ fn a_list_is_written_again_without_its_keys() {
         content_with(&c, &[], &[rewrite.unwrap()]),
         [
             &b"q /Artifact << /Type /Pagination % its kind\n  /Subtype /Watermark \
-            /Inner <</SheafStamp 1>> % a note\n\n>> BDC Q EMC"[..]
+            /Inner <</SHEF_Gen 1>> % a note\n\n>> BDC Q EMC"[..]
         ]
     );
     // With none of them, there's nothing to write.
@@ -461,14 +461,14 @@ fn a_list_that_cant_be_written_again_is_refused() {
     assert!(refused(&[b"/Artifact BMC EMC"]));
     // Across two streams.
     assert!(refused(&[
-        b"/Artifact <</Subtype /Watermark /SheafStamp",
+        b"/Artifact <</Subtype /Watermark /SHEF_Gen",
         b" true>> BDC EMC"
     ]));
     // An entry whose key isn't a name, or whose value isn't an object.
-    assert!(refused(&[b"/Artifact <</SheafStamp true 1 2>> BDC EMC"]));
-    assert!(refused(&[b"/Artifact <</SheafStamp true /A b>> BDC EMC"]));
+    assert!(refused(&[b"/Artifact <</SHEF_Gen true 1 2>> BDC EMC"]));
+    assert!(refused(&[b"/Artifact <</SHEF_Gen true /A b>> BDC EMC"]));
     // A range that doesn't start at its tag.
-    let s: &[u8] = b"/Artifact <</SheafStamp true>> BDC 0 0 9 9 re f EMC";
+    let s: &[u8] = b"/Artifact <</SHEF_Gen true>> BDC 0 0 9 9 re f EMC";
     let c = Concat::new(&[s]);
     let at = without_keys(&c, &ResCx::none(), LIM, span_of(s, b"0 0 9 9 re f"), &KEYS);
     assert!(matches!(at, Err(SpliceError::List(_))));
@@ -479,8 +479,8 @@ fn a_list_that_cant_be_written_again_is_refused() {
 /// range a splice refuses among it.
 #[test]
 fn a_list_written_again_goes_with_what_s_taken_out() {
-    let s: &[u8] = b"/Artifact <</Subtype /Watermark /SheafStamp true>> BDC Q EMC \
-        /Artifact <</Subtype /Background /SheafStamp true>> BDC 0 0 9 9 re f EMC";
+    let s: &[u8] = b"/Artifact <</Subtype /Watermark /SHEF_Gen true>> BDC Q EMC \
+        /Artifact <</Subtype /Background /SHEF_Gen true>> BDC 0 0 9 9 re f EMC";
     let c = Concat::new(&[s]);
     let ranges: Vec<SpanAcross> = (marked(&c, &PropertiesDict::default(), &ResCx::none(), LIM))
         .unwrap()
@@ -509,45 +509,6 @@ fn a_list_written_again_goes_with_what_s_taken_out() {
         [&b"/Artifact <</Subtype /Watermark>> BDC Q EMC \
             /Artifact <</Subtype /Background>> BDC 0 0 9 9 re f EMC"[..]]
     );
-}
-
-/// Each name an older sheaf gave a resource is written again as its new
-/// one wherever content draws with it, by its category: every other byte
-/// stays, a name of another category among them, and an inline image's
-/// is left. A name written with an escape is one too.
-#[test]
-fn renamed_resources_are_written_again() {
-    let renamed = [
-        (ResKind::Font, b"SheafHF".to_vec(), b"ShAAAAAA".to_vec()),
-        (
-            ResKind::XObject,
-            b"SheafWMim".to_vec(),
-            b"ShBBBBBB".to_vec(),
-        ),
-        (
-            ResKind::ExtGState,
-            b"SheafWMgs".to_vec(),
-            b"ShCCCCCC".to_vec(),
-        ),
-    ];
-    let rewritten = |streams: &[&[u8]]| {
-        let c = Concat::new(streams);
-        let rewrites = renames(&c, &ResCx::none(), LIM, &renamed).unwrap();
-        content_with(&c, &[], &rewrites)
-    };
-    let s: &[u8] = b"q /SheafWMgs gs /SheafWMim Do Q BT /Sheaf#48F 9 Tf (SheafHF) Tj ET \
-        /SheafHF Do % /SheafHF 9 Tf\n";
-    assert_eq!(
-        rewritten(&[s]),
-        [
-            &b"q /ShCCCCCC gs /ShBBBBBB Do Q BT /ShAAAAAA 9 Tf (SheafHF) Tj ET \
-            /SheafHF Do % /SheafHF 9 Tf\n"[..]
-        ]
-    );
-    let image: &[u8] = b"BI /W 1 /H 1 /CS /SheafWMgs /BPC 8 ID x EI";
-    assert_eq!(rewritten(&[image]), [image]);
-    let c = Concat::new(&[s]);
-    assert_eq!(renames(&c, &ResCx::none(), LIM, &[]).unwrap(), []);
 }
 
 #[test]
@@ -707,62 +668,6 @@ fn a_block_id_round_trips() {
         assert_eq!(BlockId::parse(id.to_string().as_bytes()), Some(id));
     }
     assert_eq!(BlockId(0x2a).to_string(), "b2a");
-}
-
-#[test]
-fn sheafs_own_from_before_are_legacy() {
-    // A header as an older sheaf drew it, inside an OCR layer it wrote
-    // after (`text_layer::fixture::legacy_page`'s).
-    let mut pdf = crate::text_layer::fixture::legacy_page();
-    let id = pdf.get_pages()[&1];
-    let mut page = pdf.get_dictionary(id).unwrap().clone();
-    let [q, body, layer] = contents(&page)[..] else {
-        panic!("the legacy page draws three streams")
-    };
-    page.set("Contents", body);
-    crate::generate::fixture::legacy_header(&mut pdf, &mut page);
-    let mut ids = vec![q];
-    ids.extend(contents(&page));
-    ids.push(layer);
-    let resources = page.get(b"Resources").ok();
-    let blocks = PageBlocks::read(&pdf, &ids, resources, LIM, &DrawnForms::default()).unwrap();
-    assert_eq!(
-        origins(&blocks),
-        [(PaginationKind::Header, PagOrigin::SheafLegacy)]
-    );
-    let content = PageContent::read(&pdf, &ids, LIM).unwrap();
-    let streams = content.ids();
-    // `[ocr q, header q, body, header, ocr layer]`
-    assert_eq!(
-        blocks.legacy_ocr,
-        Some(LegacyOcr {
-            q: streams[0],
-            layer: streams[4]
-        })
-    );
-    assert!(!blocks.legacy_ocr_stays, "its layer is the pair's");
-    // The body's own `q`, which it leaves open.
-    assert_eq!(
-        blocks.balance,
-        Balance {
-            net: 1,
-            min_prefix: 0
-        }
-    );
-    // `/SheafHF` alone marks it, too.
-    let mut pdf = Pdf::with_version("1.7");
-    let (blocks, _) = blocks_of(
-        &mut pdf,
-        &[(
-            dictionary! {},
-            b"/Artifact <</Subtype /Footer>> BDC BT /SheafHF 9 Tf (1) Tj ET EMC",
-        )],
-        dictionary! {},
-    );
-    assert_eq!(
-        origins(&blocks),
-        [(PaginationKind::Footer, PagOrigin::SheafLegacy)]
-    );
 }
 
 /// A form of Acrobat's, its `/PieceInfo` naming `private`, and resources

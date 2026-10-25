@@ -1,11 +1,11 @@
 //! Watermarks as PDFium draws them from a saved file (M10.5 slice 16),
 //! saved both ways: text in its face's encoding, upright on a turned page,
 //! over a page whose content leaves its graphics state changed, over an
-//! OCR layer sheaf wrote before (an older sheaf's too), and on a form's
-//! pages. Acrobat's watermark replaced by one of the document's, or taken
-//! off, leaves the rest of the page as it drew, and corpus files with
-//! others' watermarks keep the author's. A clean copy of an older sheaf's
-//! watermark draws it as it was, without the settings it kept.
+//! OCR layer sheaf wrote before, and on a form's pages. Acrobat's
+//! watermark replaced by one of the document's, or taken off, leaves the
+//! rest of the page as it drew, and corpus files with others' watermarks
+//! keep the author's. A clean copy of another file's generator's
+//! watermark draws it as it was, without what marks it as sheaf's.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
@@ -21,7 +21,6 @@ use common::{
 use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::content::{PagOrigin, PaginationKind};
 use sheaf_doc::export::Export;
-use sheaf_doc::generate::fixture as older;
 use sheaf_doc::materialize::How;
 use sheaf_doc::text_layer::fixture as saved;
 use sheaf_doc::tx::fixture as fx;
@@ -205,12 +204,12 @@ fn layer(text: &str) -> std::sync::Arc<TextLayer> {
     ))
 }
 
-/// A page with an OCR layer sheaf wrote before, in an earlier save or in
-/// an older sheaf's shape (`text_layer::fixture::legacy_page`, whose own
-/// content leaves a `q` open), given new text and a watermark, draws as
-/// the page with the watermark alone: the old layer goes, the legacy one
-/// with the `q` before the page's content, and nothing of either layer
-/// shows; PDFium reads the new words and not the old. Both ways.
+/// A page with an OCR layer sheaf wrote before, in an earlier save or as a
+/// block on a page whose own content leaves a `q` open
+/// (`text_layer::fixture::block_page`), given new text and a watermark,
+/// draws as the page with the watermark alone: the old layer goes, and
+/// nothing of it shows; PDFium reads the new words and not the old. Both
+/// ways.
 #[test]
 fn a_watermark_over_an_old_ocr_layer_draws_as_over_the_page() {
     let dir = scratch("watermark-ocr");
@@ -221,9 +220,9 @@ fn a_watermark_over_an_old_ocr_layer_draws_as_over_the_page() {
     doc.commit_ops(fx::ocr([(page, layer("before"))]), "ocr")
         .unwrap();
     How::Rewritten.save(&mut doc, &path);
-    let legacy = dir.join("legacy.pdf");
-    saved::legacy_page().save(&legacy).unwrap();
-    for (old, body, was) in [(&path, body, "before"), (&legacy, saved::BASE, "Saved")] {
+    let block = dir.join("block.pdf");
+    saved::block_page().save(&block).unwrap();
+    for (old, body, was) in [(&path, body, "before"), (&block, saved::BASE, "Saved")] {
         let plain = pages_pdf(&dir, "plain.pdf", &[body]);
         let mut plain = open(&plain);
         plain
@@ -611,22 +610,39 @@ fn corpus_files_with_others_watermarks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A page an older sheaf drew a background and a watermark on, as it wrote
-/// them ([`older`]): an image in its own graphics state and resource names,
-/// the image's path in its list's settings; then "DRAFT" in red over the
-/// page's content, which a `q` before it isolates.
-fn older_pdf(dir: &Path, name: &str) -> PathBuf {
+/// A page another file's generators drew a background and a watermark on,
+/// merged into its streams, each list marked as its generator's
+/// (`/SHEF_Gen`): an image in its own graphics state; then "DRAFT" in red
+/// over the page's content.
+fn merged_pdf(dir: &Path, name: &str) -> PathBuf {
     let mut pdf = Pdf::with_version("1.7");
     let pages = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {
         "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
     });
-    let resources = older::resources(&mut pdf, font);
-    let streams: [&[u8]; 4] = [
-        older::Q,
-        older::BACKGROUND,
+    let bold = pdf.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica-Bold",
+    });
+    let gs = pdf.add_object(dictionary! { "Type" => "ExtGState", "ca" => 0.3, "CA" => 0.3 });
+    let image = pdf.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Image", "Width" => 2, "Height" => 2,
+            "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8,
+        },
+        vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0],
+    ));
+    let resources = dictionary! {
+        "Font" => dictionary! { "F1" => font, "F2" => bold },
+        "ExtGState" => dictionary! { "GS0" => gs },
+        "XObject" => dictionary! { "Im0" => image },
+    };
+    let streams: [&[u8]; 3] = [
+        b"/Artifact <</Type/Pagination/Subtype/Background/SHEF_Gen (g1b)>> BDC\nq\n/GS0 gs \
+          306 0 0 306 153 243 cm /Im0 Do\nQ\nEMC\n",
         b"BT /F1 24 Tf 72 700 Td (body) Tj ET",
-        older::WATERMARK,
+        b"/Artifact <</Type/Pagination/Subtype/Watermark/SHEF_Gen (g1a)>> BDC\nq\n/GS0 gs \
+          0.7071 0.7071 -0.7071 0.7071 200 300 cm BT 0.784 0.118 0.118 rg /F2 72 Tf 0 0 Td \
+          (DRAFT) Tj ET\nQ\nEMC\n",
     ];
     let contents: Vec<lopdf::Object> = (streams.iter())
         .map(|s| {
@@ -649,27 +665,19 @@ fn older_pdf(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
-/// A clean copy of a page an older sheaf drew a watermark and a background
-/// on draws them as the file did, pixel for pixel, and holds neither the
-/// settings it kept in them, nor the image's path, nor the names it gave
-/// what they draw with: none of sheaf's private data (§15).
+/// A clean copy of a page another file's generators drew a watermark and
+/// a background on draws them as the file did, pixel for pixel, and holds
+/// nothing that marks them as sheaf's: none of sheaf's private data (§15).
 #[test]
-fn a_clean_copy_draws_an_older_sheaf_s_watermark_as_it_was() {
-    let dir = scratch("watermark-older-clean");
-    let path = older_pdf(&dir, "older.pdf");
+fn a_clean_copy_draws_another_file_s_watermark_as_it_was() {
+    let dir = scratch("watermark-merged-clean");
+    let path = merged_pdf(&dir, "merged.pdf");
     let original = std::fs::read(&path).unwrap();
     let doc = open(&path);
     let out = dir.join("clean.pdf");
     let clean = common::exported_to(&doc, Export::clean_copy, &out);
-    for gone in [
-        &b"SheafSettings"[..],
-        b"SheafStamp",
-        b"SheafWM",
-        b"/home/someone",
-    ] {
-        assert!(holds(&original, gone));
-        assert!(!holds(&clean, gone), "{}", String::from_utf8_lossy(gone));
-    }
+    assert!(holds(&original, b"SHEF_Gen"));
+    assert!(!holds(&clean, b"SHEF_Gen"));
     let found = sheaf_doc::private::found(&Pdf::load_mem(&clean).unwrap());
     assert_eq!(found, []);
     let (before, after) = (drawn(original), drawn(clean));

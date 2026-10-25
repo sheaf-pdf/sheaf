@@ -1,8 +1,7 @@
 //! Document > Remove Recognized Text…: the text OCR put on pages taken off
 //! them, on the selected pages or every page, once the reader says so
 //! (`ClearOcrText`, M10.5 slice 18). What sheaf recognized goes, unsaved
-//! or in the file, an older sheaf's layer too where it can be taken out;
-//! what the pages draw stays, and so does text another program
+//! or in the file; what the pages draw stays, and so does text another program
 //! recognized. It's planned as a header's removal is, each page's content
 //! read off the UI thread, and committed on the version the question was
 //! asked on: one undo step. On the command line it's `sheaf edit`'s

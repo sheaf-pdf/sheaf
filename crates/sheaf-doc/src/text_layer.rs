@@ -7,8 +7,7 @@
 //! search and select. A page's realization draws it as a save writes it,
 //! so Find and selection read it from there (§10.5). A layer in a file is
 //! one like any other, saved or not: re-recognizing the page, or clearing
-//! its text, takes it out (`StreamSel::SheafOcr`, `MarkedSel::SheafOcr`),
-//! the layer an older sheaf wrote too.
+//! its text, takes it out (`StreamSel::SheafOcr`, `MarkedSel::SheafOcr`).
 //!
 //! Word rects are in PageSpace (M10.5 §5), like marks, so cropping or
 //! turning the page moves none of them. The frame the text reads upright

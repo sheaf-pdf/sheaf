@@ -2139,7 +2139,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "The header and footer, on the pages `scope` says, in place of any\nthere is, and of those Acrobat or an earlier sheaf drew there. The\nauthor's own stay.",
+          "description": "The header and footer, on the pages `scope` says, in place of any\nthere is, and of those Acrobat or another file drew there. The\nauthor's own stay.",
           "properties": {
             "op": {
               "const": "set-header-footer",
@@ -2161,7 +2161,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Take the header and footer off `pages`, and those Acrobat, an older\nsheaf or another file drew there. `include_authored` takes the\nauthor's own off too: those the program that made the file drew.",
+          "description": "Take the header and footer off `pages`, and those Acrobat or another\nfile drew there. `include_authored` takes the\nauthor's own off too: those the program that made the file drew.",
           "properties": {
             "include_authored": {
               "type": "boolean"

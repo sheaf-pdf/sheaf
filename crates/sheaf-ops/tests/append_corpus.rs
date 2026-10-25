@@ -651,9 +651,9 @@ fn watermark_round_trips() {
 const HEADER_ONLY: &str = "SHEAF_HEADER_ONLY";
 
 /// The others whose headers and footers a header and footer of sheaf's
-/// replaces: Acrobat and an older sheaf (§11.4). A corpus file has none
-/// of sheaf's own.
-const REPLACED: [PagOrigin; 2] = [PagOrigin::Acrobat, PagOrigin::SheafLegacy];
+/// replaces in a corpus file: Acrobat (§11.4). A corpus file has none of
+/// sheaf's own.
+const REPLACED: [PagOrigin; 1] = [PagOrigin::Acrobat];
 
 /// What a header and footer's round trips through a copy of a file came
 /// to, each way's together.
@@ -913,8 +913,8 @@ fn header_round_trips() {
     println!(
         "{files} of {} files given a header and footer both ways, found again and removed; \
          {reordered} reorders appended, {anyway} of them anyway over their signatures, {asked} \
-         asked about their signatures with no Append to offer; of Acrobat's and an older \
-         sheaf's headers and footers on their pages, {theirs} each way's together, {} left \
+         asked about their signatures with no Append to offer; of Acrobat's headers and \
+         footers on their pages, {theirs} each way's together, {} left \
          ({left:?}); the author's own {authored}, all left; {} failed; removal check vetoes: {} \
          derived",
         entries.len(),

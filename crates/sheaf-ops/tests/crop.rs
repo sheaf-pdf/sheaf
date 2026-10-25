@@ -883,8 +883,8 @@ sheaf_doc::both_ways!(
 
 /// A page keeps its boxes, which are the page's, not its base's, through
 /// the generators drawn on it: cropped pages, a watermark on the first and
-/// a header over both, which replaces the one an older sheaf drew on the
-/// second, are cropped as they are and show their file's pages, saved
+/// a header over both, which replaces the one another file's header and
+/// footer drew on the second, merged into its content, are cropped as they are and show their file's pages, saved
 /// `how` with that `/CropBox`, the mark in the middle of the crop and the
 /// header in its top left corner, inside the margins. A watermark set on a
 /// version before a crop made since lands, and sits in the middle of that
@@ -893,8 +893,8 @@ sheaf_doc::both_ways!(
 /// laid out on the new crop.
 fn generators_keep_crop(how: How) {
     let dir = scratch(&format!("generators-{how:?}"));
-    let older = b"/Artifact <</Type /Pagination /Subtype /Header /SheafStamp true>> BDC (h) Tj EMC";
-    let headed = [SQUARE, b"\n", older].concat();
+    let theirs = b"/Artifact <</Type /Pagination /Subtype /Header /SHEF_Gen (g1)>> BDC (h) Tj EMC";
+    let headed = [SQUARE, b"\n", theirs].concat();
     let file = file_of(vec![(letter(), SQUARE), (letter(), &headed)]);
     let mut doc = open(&on_disk(&dir, "two.pdf", file));
     let pages: Vec<PageId> = doc.state().order().iter().copied().collect();

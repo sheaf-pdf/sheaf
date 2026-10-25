@@ -90,7 +90,7 @@ impl Counted {
     }
 
     /// What a dialog says of it, of the pages `on` ("all pages", "pages
-    /// 2-4"): "On all pages: 2 made in Acrobat and 1 by an older sheaf will
+    /// 2-4"): "On all pages: 2 made in Acrobat and 1 from other files will
     /// be replaced; 12 the author's stay (Remove can take them)", with
     /// those a splice refuses, those inside forms and the pages that can't
     /// be read when there are any; or that others drew no `what` ("header
@@ -99,7 +99,6 @@ impl Counted {
         let OthersFound {
             acrobat,
             other_files,
-            older_sheaf,
             authored_left,
             refused,
             in_forms,
@@ -111,7 +110,6 @@ impl Counted {
         let them = |n: usize| if n == 1 { "it" } else { "them" };
         let replaced: Vec<String> = [
             (acrobat, "made in Acrobat"),
-            (older_sheaf, "by an older sheaf"),
             (other_files, "from other files"),
         ]
         .into_iter()

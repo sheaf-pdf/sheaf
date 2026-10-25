@@ -35,8 +35,8 @@ mod state;
 pub use records::{
     AnnotBody, AnnotRec, BlockKind, Bookmark, ContentStack, CtxNeeds, FieldNode, FieldProps,
     Filter, Foreign, FormDoc, FormInst, FormRef, Frozen, GenId, GenSpec, Generator, ImageRef,
-    Layer, LegacySel, Mark, MarkAp, MarkedSel, PageBase, PageCtx, PageDef, PageForm, PinnedAp,
-    PlaceTag, Placed, Placement, Scope, ScriptState, Static, StreamSel, Target, Terminal,
+    Layer, Mark, MarkAp, MarkedSel, PageBase, PageCtx, PageDef, PageForm, PinnedAp, PlaceTag,
+    Placed, Placement, PrivateSel, Scope, ScriptState, Static, StreamSel, Target, Terminal,
     WatermarkContent, WatermarkGen, Widget, WidgetProps, XfaState,
 };
 pub use sheaf_edit::{OutlineId, PageId, SourceId, TextStyle};
@@ -4880,8 +4880,6 @@ mod tests {
             assert_eq!(only(&d).id, id, "{text}");
         }
         let saved = saved(&mut d);
-        let catalog = saved.pdf().catalog().unwrap();
-        assert!(!catalog.has(b"SheafHeaderFooter"));
         let drawn: Vec<Vec<(PaginationKind, PagOrigin)>> = (0..3)
             .map(|i| {
                 let blocks = saved.blocks(i).unwrap();

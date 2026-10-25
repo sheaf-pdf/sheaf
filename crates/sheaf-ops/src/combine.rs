@@ -215,7 +215,7 @@ pub fn build(
     notices.sort_by_key(|n| match n {
         Notice::FormRenamed { .. } | Notice::CopiesRenamed { .. } => 0,
         Notice::SignatureNotValidHere { .. } => 1,
-        Notice::ScriptsOff | Notice::Unencodable | Notice::OcrStays { .. } => 2,
+        Notice::ScriptsOff | Notice::Unencodable => 2,
     });
     report.notice = sheaf_doc::notice_text(&notices);
     Ok((session, report))

@@ -378,15 +378,15 @@ fn isolation_is_counted_from_the_base_s_balance() {
     }
 }
 
-/// A page with an OCR layer sheaf wrote before M10.5
-/// (`text_layer::fixture::legacy_page`), given new text and a watermark:
-/// the old layer is set aside with its `q`, so the isolation counts the
-/// page's own content alone, which leaves a `q` open, and the new layer's
-/// block goes after it, before the watermark's. Both ways.
-fn legacy_ocr(how: How) {
+/// A page with an OCR block sheaf wrote (`text_layer::fixture::block_page`),
+/// given new text and a watermark: the old block is set aside, so the
+/// isolation counts the page's own content alone, which leaves a `q` open,
+/// and the new layer's block goes after it, before the watermark's. Both
+/// ways.
+fn replaced_ocr(how: How) {
     let dir = scratch();
     let mut bytes = Vec::new();
-    crate::text_layer::fixture::legacy_page()
+    crate::text_layer::fixture::block_page()
         .save_to(&mut bytes)
         .unwrap();
     let (_, mut doc) = opened(&dir, "a.pdf", &bytes);
@@ -398,11 +398,8 @@ fn legacy_ocr(how: How) {
     let pdf = Pdf::load_mem(&bytes).unwrap();
     let page = pages(&pdf)[0];
     let ids = contents(&pdf, page);
-    let old_layer = |id: ObjectId| {
-        let marker = crate::text_layer::fixture::LEGACY_MARKER;
-        stream(&pdf, id).0.has(marker)
-    };
-    assert!(!ids.iter().any(|&id| old_layer(id)), "{how:?}");
+    let old_block = |id: ObjectId| stream(&pdf, id).1 == crate::text_layer::fixture::OCR_BLOCK;
+    assert!(!ids.iter().any(|&id| old_block(id)), "{how:?}");
     let kinds: Vec<Option<Vec<u8>>> = (ids.iter())
         .map(|&id| marker(&pdf, id).map(|(k, _)| k))
         .collect();
@@ -422,8 +419,8 @@ fn legacy_ocr(how: How) {
 }
 
 crate::both_ways!(
-    an_old_ocr_layer_replaced_is_not_isolated,
-    an_old_ocr_layer_replaced_is_not_isolated_appended: legacy_ocr
+    a_file_s_ocr_block_replaced_is_set_aside,
+    a_file_s_ocr_block_replaced_is_set_aside_appended: replaced_ocr
 );
 
 /// Text is drawn in its face's WinAnsi, "Café" one byte a character, and

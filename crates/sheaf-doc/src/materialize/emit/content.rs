@@ -69,23 +69,18 @@
 //!   into a stream, and others' pagination artifacts, as a Remove selects
 //!   them and as the generators drawn on a page replace those of their kinds
 //!   ([`replacing`]), every tool's but the author's (§11.4): an Acrobat
-//!   header, or one an older sheaf drew, under a header set now. One a
-//!   splice refuses stays, counted in a note; another file's block of a kind
-//!   replaced, a stream of its own, is left out whole. The recognized text
-//!   the file holds that a re-OCR or a Clear takes out goes the same way,
-//!   found by the page's blocks: its blocks, streams of their own, are left
-//!   out, and so is the layer an older sheaf wrote with the `q` before the
-//!   page's content that its first `Q` ends, both or neither; one merged
-//!   into another stream is cut out of it. A layer's stream without its `q`,
-//!   or a cut a splice refuses, stays, counted in a note. sheaf's private
-//!   data a filter takes out of the page ([`Filter::StripLegacy`], §15): a
-//!   range kept whose list written in the content holds some has it written
-//!   again without it, in the same copy, one that can't be keeping it,
-//!   counted in a note; a stream sheaf marked is a copy of its own without
-//!   the mark; the lists named in the page's resources lose it; and each
-//!   name an older sheaf gave a resource is given a new one, where the
-//!   resources bind it and in the content that draws with it, so what it
-//!   drew is drawn as it was. What's left is counted again, and the names
+//!   header under a header set now. One a splice refuses stays, counted in
+//!   a note; another file's block of a kind replaced, a stream of its own,
+//!   is left out whole. The recognized text the file holds that a re-OCR or
+//!   a Clear takes out goes the same way, found by the page's blocks: its
+//!   blocks, streams of their own, are left out; one merged into another
+//!   stream is cut out of it. A cut a splice refuses stays, counted in a
+//!   note. sheaf's private data a filter takes out of the page
+//!   ([`Filter::StripPrivate`], §15): a range kept whose list written in the
+//!   content holds some has it written again without it, in the same copy,
+//!   one that can't be keeping it, counted in a note; a stream sheaf marked
+//!   is a copy of its own without the mark; and the lists named in the
+//!   page's resources lose it. What's left is counted again, and the names
 //!   only what's set aside or cut used are dropped from the page's resources
 //!   (one level down), so the form an Acrobat watermark draws is no longer
 //!   the page's, but those a block drawn anew binds to the same resource.
@@ -126,9 +121,9 @@ use lopdf::{Dictionary, Object, ObjectId, Stream, StringFormat, dictionary};
 use super::{Cx, Deferred, PdfVersion};
 use crate::content::sink::{self, Sink as _};
 use crate::content::{
-    self, Balance, BlockAt, BlockId, Concat, ContentWriter, GenId, LEGACY_OCR, Marker, NameSet,
-    PagOrigin, PageBlocks, PageContent, Pagination, PaginationKind, Pos, Props, Res, ResBody,
-    ResCx, ResId, ResKind, Reserved, ResourceNeeds, SheafBlock, SpanAcross,
+    self, Balance, BlockAt, BlockId, Concat, ContentWriter, GenId, Marker, NameSet, PagOrigin,
+    PageBlocks, PageContent, Pagination, PaginationKind, Pos, Props, Res, ResBody, ResCx, ResId,
+    ResKind, Reserved, ResourceNeeds, SheafBlock, SpanAcross,
 };
 use crate::generate::{self, Art};
 use crate::geom::Geom;
@@ -136,8 +131,8 @@ use crate::materialize::copy::Scope;
 use crate::materialize::key::{ObjKey, Shared};
 use crate::materialize::record::DrawnBlock;
 use crate::model::{
-    BlockKind, DocState, Filter, FormRef, GenSpec, Generator, ImageRef, Layer, LegacySel,
-    MarkedSel, PageCtx, PageDef, PageForm, PageId, PlaceTag, Placement, Static, StreamSel,
+    BlockKind, DocState, Filter, FormRef, GenSpec, Generator, ImageRef, Layer, MarkedSel, PageCtx,
+    PageDef, PageForm, PageId, PlaceTag, Placement, PrivateSel, Static, StreamSel,
     WatermarkContent,
 };
 use crate::private;
@@ -331,8 +326,8 @@ fn stack(
     if stayed.text > 0 {
         cx.text_stayed.push(id);
     }
-    if stayed.settings > 0 {
-        cx.settings_kept.push((id, stayed.settings));
+    if stayed.lists > 0 {
+        cx.lists_kept.push((id, stayed.lists));
     }
     if !on.is_empty() {
         cx.needs(PdfVersion::ARTIFACTS);
@@ -343,15 +338,14 @@ fn stack(
 }
 
 /// What stays of what a page's filters select: others' ranges a splice
-/// refuses to take out; the recognized text sheaf wrote that can't be,
-/// a cut a splice refuses or a layer's stream without the `q` its first
-/// `Q` ends; and the property lists of an older sheaf's that can't be
-/// written again without what it kept in them.
+/// refuses to take out; the recognized text sheaf wrote that can't be, a
+/// cut a splice refuses; and the property lists of sheaf's blocks that
+/// can't be written again without what sheaf marked them with.
 #[derive(Default)]
 struct Stayed {
     ranges: usize,
     text: usize,
-    settings: usize,
+    lists: usize,
 }
 
 /// What the generators `on` page `index` of `src` replace there (§11.4):
@@ -605,14 +599,13 @@ fn wrapped(
 /// another file's blocks kept but where a filter takes them out, and the
 /// streams that isolate them with them, else set aside too; the recognized
 /// text sheaf wrote that a filter takes out set aside, found by the page's
-/// blocks, the layer an older sheaf wrote with its `q` or not at all; the
-/// layers' blocks it leaves kept as they are, in their order, the
+/// blocks; the layers' blocks it leaves kept as they are, in their order, the
 /// recognized text's after the isolated content and before `layers`,
 /// flattened annotations' after the generators over it, before those
 /// `layers` adds, and the names they draw with kept; a stream a filter's
 /// ranges come out of written as a copy ([`ObjKey::Filtered`]), each range
 /// cut where a splice takes it ([`content::splice_each`]), and each range
-/// kept whose list loses what an older sheaf kept in it written so
+/// kept whose list loses what sheaf marked it with written so
 /// ([`content::without_keys`]). What's left is counted again, and the names
 /// only what's set aside or cut used are dropped from the page's resources,
 /// which a block drawn anew may name again. A stream the file has that
@@ -661,8 +654,7 @@ fn rebuilt(
     let dicts = content.dicts();
     let concat = content.concat();
     // The streams of recognized text sheaf wrote that the filters leave
-    // out: its blocks, and the layer an older sheaf wrote with its `q`. A
-    // layer's stream without one stays, its first `Q` the page's own then.
+    // out: its blocks.
     let drops_text = filters.contains(&Filter::DropStreams(StreamSel::SheafOcr));
     let texts: Vec<ObjectId> = (blocks.as_deref().filter(|_| drops_text))
         .map(|blocks| {
@@ -671,18 +663,9 @@ fn rebuilt(
                     (SheafBlock::Ocr(_), BlockAt::Stream(stream)) => Some(stream),
                     _ => None,
                 })
-                .chain(blocks.legacy_ocr.iter().flat_map(|l| [l.q, l.layer]))
                 .collect()
         })
         .unwrap_or_default();
-    let mut text_stayed = (0..ids.len())
-        .filter(|&i| {
-            drops_text
-                && dicts[i].has(LEGACY_OCR)
-                && !texts.contains(&ids[i])
-                && concat.stream(i).trim_ascii() != b"q"
-        })
-        .count();
     let marked: Vec<Option<Marker>> = (0..ids.len())
         .map(|i| match Marker::of(&dicts[i]) {
             Some(Marker::Isolate) if content::isolates(concat.stream(i)).is_none() => None,
@@ -779,7 +762,7 @@ fn rebuilt(
     }
     let spliced = content::splice_each(concat, &res, lim, &groups);
     let refused = |taken: &[bool]| taken.iter().filter(|t| !**t).count();
-    text_stayed += refused(&spliced.taken[..texts_cut]);
+    let text_stayed = refused(&spliced.taken[..texts_cut]);
     stayed += refused(&spliced.taken[texts_cut..]);
     let cuts: Vec<SpanAcross> = (groups.iter().zip(&spliced.taken))
         .filter(|(_, taken)| **taken)
@@ -812,17 +795,16 @@ fn rebuilt(
             kept.dropped.remove(kind, name);
         }
     }
-    let strips = |sel: LegacySel| filters.contains(&Filter::StripLegacy(sel));
-    let mut strip = ResStrip {
-        renamed: Vec::new(),
-        lists: strips(LegacySel::Resources),
+    let strips = |sel: PrivateSel| filters.contains(&Filter::StripPrivate(sel));
+    let strip = ResStrip {
+        lists: strips(PrivateSel::NamedLists),
     };
     // The lists written in the content of the ranges kept that lose
     // sheaf's private data, written again without it. One that can't be
     // keeps it, counted; a named one is the resources'.
     let mut rewrites = Vec::new();
-    let mut settings = 0;
-    for span in older_ranges(filters, blocks.as_deref()) {
+    let mut lists = 0;
+    for span in marked_ranges(filters, blocks.as_deref()) {
         let named = || {
             (blocks.iter().flat_map(|b| b.marked.iter()))
                 .any(|m| m.span == span && matches!(m.props, Some(Props::Named(..))))
@@ -835,25 +817,13 @@ fn rebuilt(
         }
         match content::without_keys(concat, &res, lim, span, &private::LIST_KEYS) {
             Ok(rewrite) => rewrites.extend(rewrite),
-            Err(_) => settings += 1,
+            Err(_) => lists += 1,
         }
-    }
-    // The names an older sheaf gave the page's resources, given new ones
-    // where the content draws with them, and kept clear of by what's drawn
-    // anew. Only then are the names the resources bind read before the
-    // streams kept are written; otherwise after, as they always were, so
-    // the page is written as it was.
-    let mut renaming = None;
-    if strip.lists {
-        let mut reserved = reserved(cx, src, index, page, &kept.dropped);
-        strip.renamed = renamed(&mut reserved);
-        rewrites.extend(content::renames(concat, &res, lim, &strip.renamed).ok()?);
-        renaming = Some(reserved);
     }
     let spliced = spliced.streams(concat, &rewrites);
     // Each stream as written: a copy where it changed, or where its
     // dictionary loses what sheaf marked it with, else the file's.
-    let unmarked = strips(LegacySel::Streams);
+    let unmarked = strips(PrivateSel::Streams);
     let scope = Scope { src, copy: 0 };
     let entry = |cx: &mut Cx, i: usize| {
         let changed = spliced.as_ref().and_then(|streams| match &streams[i] {
@@ -871,10 +841,7 @@ fn rebuilt(
     for i in (0..ids.len()).filter(|&i| !aside[i] && !reused(i) && !moved(i)) {
         base.push(entry(cx, i));
     }
-    let mut reserved = match renaming {
-        Some(reserved) => reserved,
-        None => reserved(cx, src, index, page, &kept.dropped),
-    };
+    let mut reserved = reserved(cx, src, index, page, &kept.dropped);
     let mut needs = ResourceNeeds::default();
     let contents = match on.is_empty() && layers.is_empty() && saved_layers.is_empty() {
         true => base,
@@ -949,16 +916,16 @@ fn rebuilt(
     Some(Stayed {
         ranges: stayed,
         text: text_stayed,
-        settings,
+        lists,
     })
 }
 
-/// The marked ranges of a page's `blocks` that `filters` take what an
-/// older sheaf kept out of ([`Filter::StripLegacy`]), each once.
-fn older_ranges(filters: &[Filter], blocks: Option<&PageBlocks>) -> Vec<SpanAcross> {
+/// The marked ranges of a page's `blocks` that `filters` take sheaf's
+/// private data out of the lists of ([`Filter::StripPrivate`]), each once.
+fn marked_ranges(filters: &[Filter], blocks: Option<&PageBlocks>) -> Vec<SpanAcross> {
     let mut spans = Vec::new();
     for f in filters {
-        let (Filter::StripLegacy(LegacySel::Marked(sel)), Some(blocks)) = (f, blocks) else {
+        let (Filter::StripPrivate(PrivateSel::Marked(sel)), Some(blocks)) = (f, blocks) else {
             continue;
         };
         let found: Vec<SpanAcross> = match sel {
@@ -1157,19 +1124,17 @@ fn reserved(cx: &mut Cx, src: &Src, index: u32, page: &Dictionary, dropped: &Nam
     reserved
 }
 
-/// What a page's resources lose of sheaf's private data
-/// ([`LegacySel::Resources`]): the names an older sheaf gave them, each
-/// with its new one; and whether the property lists named there lose
-/// [`private::LIST_KEYS`].
+/// What a page's resources lose of sheaf's private data: whether the
+/// property lists named there lose [`private::LIST_KEYS`]
+/// ([`PrivateSel::NamedLists`]).
 #[derive(Default)]
 struct ResStrip {
-    renamed: Vec<(ResKind, Vec<u8>, Vec<u8>)>,
     lists: bool,
 }
 
 impl ResStrip {
     fn is_empty(&self) -> bool {
-        self.renamed.is_empty() && !self.lists
+        !self.lists
     }
 }
 
@@ -1198,12 +1163,9 @@ fn page_res(
     if !cx.page_res.contains_key(&key) {
         let mut resources = sink::resources(cx, page);
         for kind in ResKind::ALL {
-            let renamed: Vec<_> = (strip.renamed.iter())
-                .filter(|(k, ..)| *k == kind)
-                .collect();
             let lists = strip.lists && kind == ResKind::Properties;
             let mut names = dropped.of(kind).peekable();
-            if names.peek().is_none() && renamed.is_empty() && !lists {
+            if names.peek().is_none() && !lists {
                 continue;
             }
             let mut category = match resources.get(kind.key()) {
@@ -1213,11 +1175,6 @@ fn page_res(
             };
             for name in names {
                 category.remove(name);
-            }
-            for (_, old, new) in renamed {
-                if let Some(bound) = category.remove(old) {
-                    category.set(new.clone(), bound);
-                }
             }
             if lists {
                 strip_lists(cx, &mut category);
@@ -1314,32 +1271,8 @@ fn added(needs: &ResourceNeeds, strip: &ResStrip) -> u64 {
     if !strip.is_empty() {
         bytes.push(1);
         bytes.push(u8::from(strip.lists));
-        for (kind, old, new) in &strip.renamed {
-            bytes.extend(kind.key());
-            bytes.push(0);
-            bytes.extend(old);
-            bytes.push(0);
-            bytes.extend(new);
-            bytes.push(0);
-        }
     }
     names_digest(&bytes)
-}
-
-/// The names an older sheaf gave the resources `reserved` keeps
-/// ([`private::is_resource_name`]), each given a new one, kept there in its
-/// place.
-fn renamed(reserved: &mut Reserved) -> Vec<(ResKind, Vec<u8>, Vec<u8>)> {
-    let older: Vec<(ResKind, Vec<u8>)> = (reserved.names())
-        .filter(|(_, name)| private::is_resource_name(name))
-        .map(|(kind, name)| (kind, name.to_vec()))
-        .collect();
-    (older.into_iter())
-        .filter_map(|(kind, old)| {
-            let new = reserved.rename(kind, &old)?;
-            Some((kind, old, new))
-        })
-        .collect()
 }
 
 /// A digest of the names `dropped` takes out of a page's resources: each

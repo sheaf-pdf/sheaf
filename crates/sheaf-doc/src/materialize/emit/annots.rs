@@ -67,7 +67,6 @@ use lopdf::{Dictionary, Object, ObjectId, Stream, dictionary};
 use super::{Cx, Shown};
 use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted};
 use crate::content::{Res, ResId};
-use crate::file::PageAnnots;
 use crate::geom::{Affine, Rect};
 use crate::materialize::copy::{self, Scope};
 use crate::materialize::key::{ObjKey, Part};
@@ -243,7 +242,6 @@ impl Page<'_> {
                     .collect::<HashSet<usize>>()
             })
         };
-        let entries = PageAnnots::new(self.base);
         let mut after: HashMap<Option<AnnotId>, Vec<Object>> = HashMap::new();
         let mut last = None;
         for (slot, entry) in self.base.iter().enumerate() {
@@ -257,7 +255,7 @@ impl Page<'_> {
                 }
                 continue;
             }
-            if modeled().contains(&slot) || crate::file::is_ours(shown.src.pdf(), entry, &entries) {
+            if modeled().contains(&slot) || crate::file::is_ours(shown.src.pdf(), entry) {
                 continue;
             }
             if let Some(kept) = self.unmodeled(cx, entry) {
@@ -622,8 +620,8 @@ pub(crate) struct Kept<'b> {
 /// and isn't a mark itself. Not when its `/P` isn't `page` (the number its
 /// page is written at), its `/IRT` doesn't name `parent` (the number its
 /// thread's parent is written at, None while that isn't written; a mark
-/// that isn't a reply names none), it has a pop-up, or a companion is
-/// marked `/SheafPart`, none of which the mark is written with. What a save
+/// that isn't a reply names none), or it has a pop-up, which the mark isn't
+/// written with. What a save
 /// and an overlay keep, and the realizer's model of them
 /// ([`untouched`](crate::realize::untouched)).
 pub(crate) fn mark_kept<'b>(
@@ -665,17 +663,13 @@ pub(crate) fn mark_kept<'b>(
     if !threads || !p_kept || dict.has(b"Popup") {
         return None;
     }
-    let entries = PageAnnots::new(base);
     let mut companions = Vec::new();
     for entry in base {
         let read = (entry.as_reference().ok()).and_then(|at| pdf.get_dictionary(at).ok());
         let under = read.is_some_and(|d| {
             d.get(b"IRT").ok() == Some(&Object::Reference(r.id)) && !d.has(b"SHEF_Annot")
         });
-        if under && crate::file::is_ours(pdf, entry, &entries) {
-            if read.is_some_and(|d| d.has(crate::annot::PART.as_bytes())) {
-                return None;
-            }
+        if under && crate::file::is_ours(pdf, entry) {
             companions.push(entry);
         }
     }

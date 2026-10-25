@@ -356,19 +356,19 @@ pub enum Private {
     /// None of it ([`private::KEYS`]): what sheaf draws is written
     /// unmarked, its marks with neutral names and without their JSON, the
     /// catalog without the generators; what the file holds, a transform
-    /// takes out (`RemovePrivateData`'s [`Filter::StripLegacy`]); and the
+    /// takes out (`RemovePrivateData`'s [`Filter::StripPrivate`]); and the
     /// file is checked for any left before it's written, failing closed
     /// (§11.9). Clean Copy's. Only a Rewrite writes it.
     ///
     /// [`private::KEYS`]: crate::private::KEYS
-    /// [`Filter::StripLegacy`]: crate::model::Filter::StripLegacy
+    /// [`Filter::StripPrivate`]: crate::model::Filter::StripPrivate
     Strip,
     /// As [`Private::Strip`] writes it, but what a transform couldn't take
     /// out of what the file holds (on a page whose content can't be read,
     /// in a list that can't be written again) is said in a note, not a
     /// failure: print's without markup, whose file is for a printer or a
-    /// page image, which mustn't fail for what an older sheaf left in it
-    /// (§16 row 27).
+    /// page image, which mustn't fail for what sheaf left in it (§16 row
+    /// 27).
     Scrub,
 }
 

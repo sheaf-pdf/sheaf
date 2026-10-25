@@ -483,7 +483,7 @@ pub fn irt_name<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Strin
 }
 
 /// `/InkList`'s strokes, those with points.
-pub(crate) fn ink<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<Vec<Pt>>> {
+fn ink<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<Vec<Pt>>> {
     let (_, list) = pdf.dereference(dict.get(b"InkList").ok()?).ok()?;
     Some(
         list.as_array()
@@ -498,14 +498,14 @@ pub(crate) fn ink<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec
 }
 
 /// `/QuadPoints` as the box each quad bounds.
-pub(crate) fn quads<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<Box2>> {
+fn quads<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<Box2>> {
     let q = numbers(pdf, dict, b"QuadPoints")?;
     let quads = q.as_chunks::<8>().0;
     Some(quads.iter().map(|c| bounds(&points(c))).collect())
 }
 
 /// Coordinates `[x0 y0 x1 y1 …]` as points.
-pub(crate) fn points(v: &[f32]) -> Vec<Pt> {
+fn points(v: &[f32]) -> Vec<Pt> {
     let pairs = v.as_chunks::<2>().0;
     pairs.iter().map(|&[x, y]| Pt { x, y }).collect()
 }
@@ -521,17 +521,13 @@ fn floats<P: Objects + ?Sized>(pdf: &P, a: &[Object]) -> Vec<f32> {
         .collect()
 }
 
-pub(crate) fn numbers<P: Objects + ?Sized>(
-    pdf: &P,
-    dict: &Dictionary,
-    key: &[u8],
-) -> Option<Vec<f32>> {
+fn numbers<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, key: &[u8]) -> Option<Vec<f32>> {
     let (_, o) = pdf.dereference(dict.get(key).ok()?).ok()?;
     Some(floats(pdf, o.as_array().ok()?))
 }
 
 /// A user-space box `[x0 y0 x1 y1]`, in either order, as a mark's.
-pub(crate) fn user_box(r: [f32; 4]) -> Box2 {
+fn user_box(r: [f32; 4]) -> Box2 {
     Box2::from_corners(Pt { x: r[0], y: r[1] }, Pt { x: r[2], y: r[3] })
 }
 
@@ -557,7 +553,7 @@ fn icon_at(rect: Box2) -> Pt {
 }
 
 /// `r` with `d` off each side, but never past its middle.
-pub(crate) fn inset(r: Box2, d: f32) -> Box2 {
+fn inset(r: Box2, d: f32) -> Box2 {
     let d = d.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
     Box2 {
         x: r.x + d,

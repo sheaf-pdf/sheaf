@@ -33,8 +33,8 @@ use crate::materialize::emit::annots::{LinkTo, base_annots};
 use crate::materialize::emit::content;
 use crate::model::{
     AnnotBody, ContentStack, CtxNeeds, DocState, FieldProps, Filter, Foreign, FormDoc, FormInst,
-    FormRef, Frozen, GenSpec, Generator, ImageRef, Layer, LegacySel, Mark, MarkAp, MarkedSel,
-    PageBase, PageCtx, PageDef, PageForm, PageId, PlaceTag, Placed, Placement, RenderTables,
+    FormRef, Frozen, GenSpec, Generator, ImageRef, Layer, Mark, MarkAp, MarkedSel, PageBase,
+    PageCtx, PageDef, PageForm, PageId, PlaceTag, Placed, Placement, PrivateSel, RenderTables,
     ScriptState, Static, StreamSel, Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps,
     XfaState,
 };
@@ -1074,15 +1074,15 @@ impl Feed for Filter {
             Filter::DropMarked(sel) => sum.feed(sel),
             Filter::DropStreams(StreamSel::SheafGen(g)) => sum.feed(&1u8).feed(&g.0),
             Filter::DropStreams(StreamSel::SheafOcr) => sum.feed(&4u8),
-            Filter::StripLegacy(LegacySel::Marked(sel)) => sum.feed(&3u8).feed(sel),
-            Filter::StripLegacy(LegacySel::Streams) => sum.feed(&6u8),
-            Filter::StripLegacy(LegacySel::Resources) => sum.feed(&7u8),
+            Filter::StripPrivate(PrivateSel::Marked(sel)) => sum.feed(&3u8).feed(sel),
+            Filter::StripPrivate(PrivateSel::Streams) => sum.feed(&6u8),
+            Filter::StripPrivate(PrivateSel::NamedLists) => sum.feed(&7u8),
         };
     }
 }
 
 /// Fed as its [`Filter::DropMarked`]'s, 0, 2 and 5 the tags they share
-/// with [`Filter::DropStreams`]' 1 and 4 and [`Filter::StripLegacy`]'s 3,
+/// with [`Filter::DropStreams`]' 1 and 4 and [`Filter::StripPrivate`]'s 3,
 /// 6 and 7.
 impl Feed for MarkedSel {
     fn feed(&self, sum: &mut Sum) {

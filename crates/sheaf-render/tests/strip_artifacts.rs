@@ -73,7 +73,7 @@ fn page(streams: &[&[u8]]) -> (Pdf, ObjectId) {
     (pdf, page)
 }
 
-/// The headers and footers Acrobat or an older sheaf drew taken off page
+/// The headers and footers Acrobat or sheaf drew taken off page
 /// `page` of `pdf`, as `RemoveHeaderFooter`'s filter takes them: each
 /// stream that changes written anew, the rest as they were. Whether all
 /// of them were.

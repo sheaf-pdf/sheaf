@@ -371,7 +371,7 @@ pub fn info(id: &str) -> Option<Info> {
         ),
         "workspace::HeaderFooter" => (
             "header-footer",
-            "Add, update or remove a header and footer: text with the page number, page count, page label, date and file name. It replaces one Acrobat or an older sheaf drew, and keeps the author's own running heads unless you remove them too.",
+            "Add, update or remove a header and footer: text with the page number, page count, page label, date and file name. It replaces one Acrobat drew, and keeps the author's own running heads unless you remove them too.",
             &["page numbers", "running head", "footer", "stamp"],
         ),
         "workspace::BatesNumbering" => (

@@ -1992,8 +1992,8 @@ crate::both_ways!(
     a_page_stamp_is_written_once_under_a_name_of_its_own_appended: a_page_stamp_is_written_once
 );
 
-/// Stamps on two pages draw one page of it, a form named as a
-/// resource of the appearance's own, never `/SheafStamp`.
+/// Stamps on two pages draw one page of it, a form named as a resource
+/// of the appearance's own.
 fn a_page_stamp_is_written_once(how: How) {
     let tag = format!("{:x}", fastrand::u64(..));
     let dir = tempdir();
@@ -2018,7 +2018,7 @@ fn a_page_stamp_is_written_once(how: How) {
         let annots = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap();
         let id = annots.as_array().unwrap()[0].as_reference().unwrap();
         let (name, form, stream) = drawn_form(&pdf, pdf.get_dictionary(id).unwrap());
-        assert!(name.starts_with(b"Sh") && name != b"SheafStamp");
+        assert!(name.starts_with(b"Sh"), "{name:?}");
         forms.insert(form);
         let content = String::from_utf8_lossy(&stream.decompressed_content().unwrap()).into_owned();
         assert!(content.contains(&tag), "{content}");
@@ -2307,8 +2307,7 @@ fn caret_and_strikeout(how: How) {
     assert_eq!(strike.get(b"RT").unwrap().as_name().unwrap(), b"Group");
     // A companion is known by its group and its Caret: it's marked no
     // other way.
-    assert!(!strike.has(crate::annot::PART.as_bytes()));
-    assert!(!strike.has(b"SHEF_Annot"));
+    assert!(!(strike.iter()).any(|(k, _)| crate::private::is_private(k)));
     assert!(strike.has(b"QuadPoints"));
     // The names the renderer hides are exactly what was written.
     let names: Vec<String> = list
@@ -2768,8 +2767,7 @@ fn encrypted_source_saves(how: How) {
 
 /// A header/footer is drawn into page content as its generator's blocks
 /// on save, pagination artifacts of sheaf's own, what it is said in the
-/// catalog's `/SHEF_Generators` and nothing in `/SheafHeaderFooter`; an
-/// open finds it again (taking it off is `header_tests`' and
+/// catalog's `/SHEF_Generators`; an open finds it again (taking it off is `header_tests`' and
 /// `others_tests`').
 #[test]
 fn header_footer_is_drawn_and_found_again() {
@@ -2820,7 +2818,6 @@ fn header_footer_is_drawn_and_found_again() {
         let want = format!("(Page {} of 2)", i + 1);
         assert!(String::from_utf8_lossy(&all).contains(&want), "page {i}");
     }
-    assert!(!pdf.catalog().unwrap().has(b"SheafHeaderFooter"));
     // Read from a source, as it opens: the same.
     let [saved] = &src.generators()[..] else {
         panic!("one generator")

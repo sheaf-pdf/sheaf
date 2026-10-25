@@ -16,10 +16,10 @@
 //! a source holds, or a mark's drawn again from what it was drawn from);
 //! filters that take others' watermarks and backgrounds out of its own
 //! content (Remove Watermark's): blocks of sheaf's no generator of the
-//! document's backs, and the pagination artifacts Acrobat, an older sheaf
-//! or, asked to, the author drew; filters that take the recognized text
-//! sheaf wrote in its file out (a re-OCR's and Clear's); and one that takes
-//! the settings an older sheaf kept out of its watermarks (Clean Copy's).
+//! document's backs, and the pagination artifacts Acrobat or, asked to,
+//! the author drew; filters that take the recognized text sheaf wrote in
+//! its file out (a re-OCR's and Clear's); and ones that take sheaf's
+//! private data out of its content (Remove Private Data's).
 //! Other filters and layers under it come with the features that make them.
 //! A generator is a header and footer or a watermark or background, with
 //! its z, its scope, what it fixed when it was set (the date, the file and
@@ -163,16 +163,16 @@ pub enum Filter {
     /// Whole streams of its `/Contents`.
     DropStreams(StreamSel),
     /// sheaf's private data in the page's own content taken out, what it
-    /// drew kept (§15): what an older sheaf kept in what it drew, the names
-    /// it gave what it drew with, and what sheaf marks its blocks with, as
-    /// [`LegacySel`] selects it. Each stream it changes is a copy of its
+    /// drew kept (§15): what sheaf marks its blocks with, in their streams'
+    /// dictionaries and their property lists, as [`PrivateSel`] selects
+    /// it. Each stream it changes is a copy of its
     /// own, as [`Filter::DropMarked`]'s are. A list that can't be written
     /// again without it keeps it, said in a note. `RemovePrivateData`'s, a
     /// Strip output's ([`Private::Strip`]), whose check fails on what's
     /// left (§11.9), or says it in a note under `Private::Scrub`.
     ///
     /// [`Private::Strip`]: crate::materialize::Private::Strip
-    StripLegacy(LegacySel),
+    StripPrivate(PrivateSel),
 }
 
 impl Filter {
@@ -187,33 +187,28 @@ impl Filter {
     }
 }
 
-/// What a [`Filter::StripLegacy`] takes sheaf's private data out of.
+/// What a [`Filter::StripPrivate`] takes sheaf's private data out of.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum LegacySel {
+pub enum PrivateSel {
     /// The property lists of the ranges selected written in the content:
-    /// written again without [`private::LIST_KEYS`] (§13), an older
-    /// sheaf's settings, an image's path among them, and its mark among
-    /// them. A list named in the resources is [`LegacySel::Resources`]'.
+    /// written again without [`private::LIST_KEYS`] (§13), a generator's
+    /// `/SHEF_Gen` and an OCR block's `/SHEF_OcrBlock`. A list named in
+    /// the resources is [`PrivateSel::NamedLists`]'.
     ///
     /// [`private::LIST_KEYS`]: crate::private::LIST_KEYS
     Marked(MarkedSel),
     /// Every stream of the page's content sheaf marked: its dictionary
-    /// without [`private::STREAM_KEYS`] (a block's `/SHEF_Block`, an older
-    /// sheaf's `/SheafOcrLayer`), its data as it was.
+    /// without [`private::STREAM_KEYS`] (a block's `/SHEF_Block`), its
+    /// data as it was.
     ///
     /// [`private::STREAM_KEYS`]: crate::private::STREAM_KEYS
     Streams,
-    /// The page's resources: each property list named in its
-    /// `/Properties` without [`private::LIST_KEYS`], and each name an
-    /// older sheaf gave a resource ([`private::is_resource_name`]: its
-    /// header's font, its watermark's, its recognized text's, what its
-    /// flatten drew) given a new one, `/Sh…`, where the resources bind it
-    /// and wherever the page's content draws with it, lexically, every
-    /// other byte as it was.
+    /// Each property list named in the page's resources' `/Properties`:
+    /// written there again without [`private::LIST_KEYS`], every other
+    /// byte of the content as it was.
     ///
     /// [`private::LIST_KEYS`]: crate::private::LIST_KEYS
-    /// [`private::is_resource_name`]: crate::private::is_resource_name
-    Resources,
+    NamedLists,
 }
 
 /// The marked ranges a [`Filter::DropMarked`] takes out.
@@ -249,13 +244,7 @@ pub enum StreamSel {
     /// A generator's blocks: the streams whose `/SHEF_Block` names it.
     SheafGen(GenId),
     /// sheaf's recognized text in the file: its OCR blocks, each a stream
-    /// marked `/SHEF_Block << /K /Ocr >>`, whatever block it names; and
-    /// the layer an older sheaf wrote, the `/SheafOcrLayer` stream after
-    /// the page's content with the `q` stream before it that its leading
-    /// `Q` ends, both or neither, as [`PageBlocks::legacy_ocr`] pairs
-    /// them, so what's left balances as it did.
-    ///
-    /// [`PageBlocks::legacy_ocr`]: crate::content::PageBlocks::legacy_ocr
+    /// marked `/SHEF_Block << /K /Ocr >>`, whatever block it names.
     SheafOcr,
 }
 

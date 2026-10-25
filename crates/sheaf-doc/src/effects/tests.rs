@@ -13,8 +13,8 @@ use crate::forms::FieldKind;
 use crate::forms::field::Mk;
 use crate::labels::Style;
 use crate::model::{
-    FieldProps, Filter, FormDoc, FormInst, Frozen, GenId, GenSpec, ImageRef, LegacySel, Mark,
-    MarkedSel, OutlineId, PageBase, Placed, Scope, SourceId, Static, StreamSel, Target, TextStyle,
+    FieldProps, Filter, FormDoc, FormInst, Frozen, GenId, GenSpec, ImageRef, Mark, MarkedSel,
+    OutlineId, PageBase, Placed, PrivateSel, Scope, SourceId, Static, StreamSel, Target, TextStyle,
     WatermarkGen, WidgetProps,
 };
 use crate::source::ObjRef;
@@ -803,21 +803,18 @@ fn filters_added_and_taken_off() {
     let p = path(&st, &[(page, Some(with_filter(&st, 0, acrobat_s.clone())))]);
     assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
     assert_eq!(removed(&p), [(RemovedKind::Filtered, 1)]);
-    // What an older sheaf kept, taken out, is counted apart: what's drawn
-    // stays.
-    let older = Filter::StripLegacy(LegacySel::Marked(MarkedSel::Pagination {
-        kinds: BTreeSet::from([crate::content::PaginationKind::Watermark]),
-        origins: BTreeSet::from([crate::content::PagOrigin::SheafLegacy]),
-    }));
-    let p = path(&st, &[(page, Some(with_filter(&st, 0, older.clone())))]);
+    // What marks the lists of a generator's blocks merged into a stream,
+    // taken out, is counted apart: what's drawn stays.
+    let marks = Filter::StripPrivate(PrivateSel::Marked(MarkedSel::SheafGen(GenId(5))));
+    let p = path(&st, &[(page, Some(with_filter(&st, 0, marks.clone())))]);
     assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
     assert_eq!(removed(&p), [(RemovedKind::PrivateData, 1)]);
     let both = holding(st.clone(), &[(page, with_filter(&st, 0, acrobat_s))]);
-    let p = path(&both, &[(page, Some(with_filter(&both, 0, older)))]);
+    let p = path(&both, &[(page, Some(with_filter(&both, 0, marks)))]);
     assert_eq!(removed(&p), [(RemovedKind::PrivateData, 1)]);
-    // And what marks sheaf's streams, or what its resources hold.
-    for sel in [LegacySel::Streams, LegacySel::Resources] {
-        let strip = Filter::StripLegacy(sel);
+    // And what marks sheaf's streams, or the lists its resources name.
+    for sel in [PrivateSel::Streams, PrivateSel::NamedLists] {
+        let strip = Filter::StripPrivate(sel);
         let p = path(&st, &[(page, Some(with_filter(&st, 0, strip)))]);
         assert_eq!(p.flags, Flags::CONTENT | Flags::REMOVES);
         assert_eq!(removed(&p), [(RemovedKind::PrivateData, 1)]);
@@ -1321,10 +1318,7 @@ fn samples(st: &DocState) -> Vec<(Key, Vec<Option<Val>>)> {
                 Some(with_filter(
                     st,
                     0,
-                    Filter::StripLegacy(LegacySel::Marked(MarkedSel::Pagination {
-                        kinds: BTreeSet::from([crate::content::PaginationKind::Watermark]),
-                        origins: BTreeSet::from([crate::content::PagOrigin::SheafLegacy]),
-                    })),
+                    Filter::StripPrivate(PrivateSel::Marked(MarkedSel::SheafGen(GenId(5)))),
                 )),
             ],
         ),

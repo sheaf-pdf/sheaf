@@ -438,10 +438,6 @@ pub const CATALOG_OWNED: &[&[u8]] = &[
     b"AcroForm",
     b"Version",
     b"SHEF_Generators",
-    // Where an older sheaf kept its header and footer's settings: owned,
-    // and never written, so a save leaves its text out of the file (a
-    // header sheaf drew is in `/SHEF_Generators` now).
-    b"SheafHeaderFooter",
 ];
 pub const ACROFORM_OWNED: &[&[u8]] = &[
     b"Fields",

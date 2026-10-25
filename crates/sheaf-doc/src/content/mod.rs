@@ -12,10 +12,8 @@
 //!   `q`/`Q` balance and the resource names it uses; [`kept`], the last
 //!   two of what's left once ranges are taken out.
 //! - [`splice`]: its streams with ranges taken out, byte for byte, when
-//!   that's safe, and refused when it isn't; [`without_keys`], a marked
-//!   range's property list written again without some keys; and
-//!   [`renames`], the resource names it draws with written again as
-//!   others.
+//!   that's safe, and refused when it isn't; and [`without_keys`], a
+//!   marked range's property list written again without some keys.
 //! - [`PageBlocks`]: its pagination artifacts and who drew them, and
 //!   sheaf's own blocks.
 //! - [`text_bag`]: the words it draws, as [`interp`] reads it, decoded
@@ -64,8 +62,8 @@ mod writer_tests;
 
 pub use balance::{Balance, balance};
 pub use blocks::{
-    BlockAt, BlockId, ContentError, DrawnForms, GenId, LEGACY_OCR, LegacyOcr, Marker, PagOrigin,
-    PageBlocks, Pagination, PaginationKind, SheafBlock, SheafBlockRef, isolates,
+    BlockAt, BlockId, ContentError, DrawnForms, GenId, Marker, PagOrigin, PageBlocks, Pagination,
+    PaginationKind, SheafBlock, SheafBlockRef, isolates,
 };
 pub use font::{
     Descendant, Font, FontApprox, FontId, FontKind, FontMetrics, FontProgram, FontRes, FontScope,
@@ -76,7 +74,7 @@ pub use marked::{Marked, PropertiesDict, Props, marked};
 pub use names::{Kept, NameSet, ResKind, kept, names_used};
 pub use page::{Concat, ContentFault, PageContent, Pos, ReadObjects, SpanAcross, contents};
 pub use res::{Res, ResBody, ResId};
-pub use splice::{Rewrite, SpliceError, Spliced, renames, splice, splice_each, without_keys};
+pub use splice::{Rewrite, SpliceError, Spliced, splice, splice_each, without_keys};
 pub use text_bag::{TextBag, text_bag};
 pub use writer::{
     Blend, Color, ContentWriter, FillRule, GState, LineCap, LineJoin, Need, Paint, Reserved,

@@ -2,8 +2,7 @@
 //! running heads, watermarks and backgrounds marked as pagination
 //! artifacts, and which tool drew each; sheaf's own blocks, by the marker
 //! on their stream or in their property list; the streams that isolate
-//! the page's content; the OCR layer sheaf wrote before M10.5; and the
-//! content's `q`/`Q` balance. A source reads a page's once, when first
+//! the page's content; and the content's `q`/`Q` balance. A source reads a page's once, when first
 //! asked ([`Source::blocks`]), never at open.
 //!
 //! [`Source::blocks`]: crate::source::Source::blocks
@@ -60,9 +59,6 @@ pub enum PagOrigin {
     /// sheaf, as a generator's block: in a `/SHEF_Block` stream, or with
     /// `/SHEF_Gen` in its list.
     Sheaf,
-    /// sheaf before M10.5: `/SheafStamp` or `/SheafSettings` in its list,
-    /// drawn in the `/SheafHF` font, or in a `/SheafOcrLayer` stream.
-    SheafLegacy,
     /// Acrobat: it draws Form XObjects only, each with `/PieceInfo
     /// /ADBE_CompoundType /Private` a pagination kind.
     Acrobat,
@@ -76,8 +72,7 @@ impl PagOrigin {
     /// (§11.4), and RemoveWatermark and RemoveHeaderFooter by default:
     /// every tool's but the author's own, which only `include_authored`
     /// asks for (proposal 31).
-    pub const REPLACED: [PagOrigin; 3] =
-        [PagOrigin::Sheaf, PagOrigin::SheafLegacy, PagOrigin::Acrobat];
+    pub const REPLACED: [PagOrigin; 2] = [PagOrigin::Sheaf, PagOrigin::Acrobat];
 }
 
 /// A generator's id: random in [1, 2^53), as an id a file will hold is
@@ -172,19 +167,6 @@ pub struct SheafBlockRef {
     pub at: BlockAt,
 }
 
-/// The marker on each stream of the OCR layer sheaf wrote before M10.5
-/// ([`LegacyOcr`]), read and never written.
-pub const LEGACY_OCR: &[u8] = b"SheafOcrLayer";
-
-/// The OCR layer sheaf wrote before M10.5: a stream of `q` before the
-/// page's content, and the layer after it, which starts with `Q`. Both are
-/// marked `/SheafOcrLayer` ([`LEGACY_OCR`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LegacyOcr {
-    pub q: ObjectId,
-    pub layer: ObjectId,
-}
-
 /// A pagination artifact: an `/Artifact` range whose `/Subtype` is a
 /// pagination kind, outside any other. Acrobat, Word and sheaf write
 /// `/Type /Pagination` with it; without a `/Subtype` there's no kind to
@@ -264,17 +246,9 @@ pub struct PageBlocks {
     pub sheaf: Arc<[SheafBlockRef]>,
     /// The streams marked `/SHEF_Block << /K /Isolate >>`.
     pub isolation: Arc<[ObjectId]>,
-    pub legacy_ocr: Option<LegacyOcr>,
-    /// Whether a layer stream an older sheaf wrote, marked
-    /// `/SheafOcrLayer` and not a `q`, is outside [`legacy_ocr`]'s pair:
-    /// one another tool took the `q` from, or a second. Its first `Q` is
-    /// the page's own then, so it can't be taken out.
-    ///
-    /// [`legacy_ocr`]: Self::legacy_ocr
-    pub legacy_ocr_stays: bool,
     /// Whether a stream of its content is marked as sheaf's
-    /// ([`STREAM_KEYS`](crate::private::STREAM_KEYS)): `/SHEF_Block`, or an
-    /// older sheaf's `/SheafOcrLayer`, whatever else it says.
+    /// ([`STREAM_KEYS`](crate::private::STREAM_KEYS)): `/SHEF_Block`,
+    /// whatever else it says.
     pub sheaf_marked: bool,
     pub balance: Balance,
     /// Whether a Form XObject the page draws outside its pagination
@@ -434,7 +408,6 @@ impl PageBlocks {
         let nested_in_forms = forms
             .into_iter()
             .any(|form| known.nested(objects, form, resources, lim, &mut budget));
-        let legacy_ocr = legacy_ocr(content, &marks);
         Ok(PageBlocks {
             marked: marked
                 .into_iter()
@@ -443,8 +416,6 @@ impl PageBlocks {
             pagination,
             sheaf: sheaf.into(),
             isolation,
-            legacy_ocr,
-            legacy_ocr_stays: legacy_ocr_stays(content, &marks, legacy_ocr),
             sheaf_marked: (content.dicts().iter())
                 .any(|d| (d.iter()).any(|(k, _)| crate::private::STREAM_KEYS.contains(&&k[..]))),
             balance,
@@ -481,14 +452,10 @@ enum StreamMark {
     Plain,
     Block(SheafBlock),
     Isolate,
-    OcrLayer,
 }
 
 impl StreamMark {
     fn of(dict: &Dictionary) -> StreamMark {
-        if dict.has(LEGACY_OCR) {
-            return StreamMark::OcrLayer;
-        }
         let Ok(Object::Dictionary(block)) = dict.get(b"SHEF_Block") else {
             return StreamMark::Plain;
         };
@@ -517,8 +484,7 @@ impl StreamMark {
 /// layer's block, of recognized text or of annotations a flatten drew, by
 /// its layer's id (`/B`); or a stream that isolates the page's own
 /// content. What a source reads of a page's streams without decompressing
-/// them ([`Source::markers`]). The layer an older sheaf wrote is none: the
-/// page's own content.
+/// them ([`Source::markers`]).
 ///
 /// [`Source::markers`]: crate::source::Source::markers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -555,7 +521,7 @@ impl Marker {
             StreamMark::Block(SheafBlock::Ocr(id)) => Some(Marker::Ocr(id)),
             StreamMark::Block(SheafBlock::Flat(id)) => Some(Marker::Flat(id)),
             StreamMark::Isolate => Some(Marker::Isolate),
-            StreamMark::Plain | StreamMark::OcrLayer => None,
+            StreamMark::Plain => None,
         }
     }
 }
@@ -606,38 +572,11 @@ fn pagination(m: &Marked) -> Option<PaginationKind> {
     PaginationKind::from_name(list.get(b"Subtype").ok()?.as_name().ok()?)
 }
 
-/// The legacy OCR layer's two streams, when the page has both.
-fn legacy_ocr(content: &PageContent, marks: &[StreamMark]) -> Option<LegacyOcr> {
-    let mut ocr = marks
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| matches!(m, StreamMark::OcrLayer))
-        .map(|(i, _)| (i, content.concat().stream(i).trim_ascii() == b"q"));
-    let q = ocr.find(|&(_, q)| q)?.0;
-    let layer = ocr.rfind(|&(_, q)| !q)?.0;
-    Some(LegacyOcr {
-        q: content.ids()[q],
-        layer: content.ids()[layer],
-    })
-}
-
-/// Whether a stream `marks` says is a legacy OCR layer's, other than a
-/// `q`, isn't `pair`'s layer ([`PageBlocks::legacy_ocr_stays`]).
-fn legacy_ocr_stays(content: &PageContent, marks: &[StreamMark], pair: Option<LegacyOcr>) -> bool {
-    (marks.iter().enumerate()).any(|(i, m)| {
-        matches!(m, StreamMark::OcrLayer)
-            && content.concat().stream(i).trim_ascii() != b"q"
-            && pair.is_none_or(|p| p.layer != content.ids()[i])
-    })
-}
-
 /// A pagination artifact being lexed, outside any other: what it draws.
 struct Drawn {
     /// Where it is in the marked ranges.
     index: usize,
     kind: PaginationKind,
-    /// Whether it sets the font `/SheafHF`.
-    sheaf_hf: bool,
     /// Whether it paints anything but XObjects.
     paints: bool,
     /// The XObjects it draws.
@@ -658,10 +597,6 @@ impl Drawn {
         match mark {
             StreamMark::Block(_) => PagOrigin::Sheaf,
             _ if has(b"SHEF_Gen") => PagOrigin::Sheaf,
-            StreamMark::OcrLayer => PagOrigin::SheafLegacy,
-            _ if has(b"SheafStamp") || has(b"SheafSettings") || self.sheaf_hf => {
-                PagOrigin::SheafLegacy
-            }
             _ if !self.paints
                 && !self.forms.is_empty()
                 && self.forms.iter().all(|f| acrobat(f)) =>
@@ -691,7 +626,6 @@ impl Scan<'_> {
                     self.open = Some(Drawn {
                         index,
                         kind,
-                        sheaf_hf: false,
                         paints: false,
                         forms: BTreeSet::new(),
                     });
@@ -720,7 +654,6 @@ impl Scan<'_> {
         };
         match op {
             b"Do" => drawn.forms.extend(step.name(0).map(|f| f.into_owned())),
-            b"Tf" => drawn.sheaf_hf |= step.name(1).as_deref() == Some(b"SheafHF"),
             op => drawn.paints |= paints(op),
         }
         Ok(())

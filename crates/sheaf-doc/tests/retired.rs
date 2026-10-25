@@ -737,8 +737,8 @@ const RETIRED: &[(&str, u8)] = &[
     // The watermark and background as a derived copy with a mark drawn on
     // its pages: they are generators (`GenSpec::Watermark`), set and taken
     // off by ops (`SetWatermark`, `RemoveWatermark`) and drawn at emit
-    // (`generate::layout`), so nothing writes `SheafSettings` or the
-    // `/SheafWM*` names, nothing reads a watermark back from a page, and
+    // (`generate::layout`), so nothing writes a watermark's settings or
+    // names into a page, nothing reads a watermark back from a page, and
     // no copy keeps a header for one. Remove Header/Footer keeps
     // `stamps::strip` for its own kinds until slice 17. The dialog starts
     // from the generator at its z; `crop_dialog::why` moved to
@@ -765,8 +765,8 @@ const RETIRED: &[(&str, u8)] = &[
     // its own: it is a generator (`GenSpec::HeaderFooter`), set and taken
     // off by ops, its Bates numbers fixed at apply (`Frozen`) and kept in
     // its blocks' `/N`, drawn at emit as `/SHEF_Block` blocks and found
-    // again from `/SHEF_Generators`, so nothing writes or reads
-    // `/SheafHeaderFooter`, counts Bates numbers at each save, or strips a
+    // again from `/SHEF_Generators`, so nothing writes or reads a catalog
+    // record of the header's, counts Bates numbers at each save, or strips a
     // header by hand. Its tokens and lines moved to `generate::header`
     // (`TOKENS`, `Line` for `Placed`), and `Generator`'s `z`, `scope` and
     // `replaces` are its fields now, so they have no row; nor has
@@ -864,9 +864,9 @@ const RETIRED: &[(&str, u8)] = &[
     // OCR as content: recognized text is a layer with a block id, drawn as
     // a `/SHEF_Block` block of its own after the page's isolated content
     // (`text_layer::block`), its font and list under `/Sh…` names, and a
-    // saved one is taken out by the stack's filters. The legacy installer
-    // (`/SheafOcrLayer`, `/SheafOcr`), the emitter's balance around it, and
-    // the sink's methods only it used are gone.
+    // saved one is taken out by the stack's filters. The old installer,
+    // the emitter's balance around it, and the sink's methods only it used
+    // are gone.
     ("model::ContentStack::with_ocr_text", 18),
     ("model::records::ContentStack::with_ocr_text", 18),
     ("text_layer::install", 18),
@@ -906,18 +906,17 @@ const RETIRED: &[(&str, u8)] = &[
     ("combine::page_source", 19),
     ("page_insert::DocView::insert_made", 19),
     // Private data: under `Private::Strip` a file holds none of
-    // `private::KEYS`, legacy names included (an inline list loses
-    // `private::LIST_KEYS`, derived from them); a page's markers, lists
-    // and names of sheaf's go through its filters,
-    // `RemovedKind::PrivateData`.
+    // `private::KEYS` (an inline list loses `private::LIST_KEYS`, derived
+    // from them); a page's markers and lists of sheaf's go through its
+    // filters, `RemovedKind::PrivateData`.
     ("model::LEGACY_KEYS", 19),
     ("effects::RemovedKind::OlderSettings", 19),
     // The old exports: every way out is `export::run`, an `ExportTx` of
     // transforms (`KeepPages`, `RemoveMarkup`, `RemovePrivateData`,
     // `FlattenAnnotations`) written by `materialize` with the save's
     // checks, and the presets name them. `subset`'s fake snapshot, the
-    // post-pass on a Rewrite's graph (`flatten_annots`, `/SheafFlat1`,
-    // the widget first-state fallback) and the markup strip are gone,
+    // post-pass on a Rewrite's graph (`flatten_annots`, the widget
+    // first-state fallback) and the markup strip are gone,
     // with the app's methods named after them.
     ("save::subset", 19),
     ("save::paired", 19),

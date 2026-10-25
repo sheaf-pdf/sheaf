@@ -16,14 +16,12 @@
 //! keys ([`staleness`]): a mark another tool has edited since no longer
 //! matches it, and opens as that tool's comment (M10.5 §3.6).
 //!
-//! The JSON is a file format. Changes to it are additive: a new kind is a
-//! new variant and a new field has `#[serde(default)]`, so older files keep
-//! reading. Version 1, from before M10.5, held the mark in its page's
-//! displayed space; it's read from the standard keys (`file::sheaf_mark`).
-//! A mark this build can't read (a kind from a newer sheaf) isn't ours to
-//! rewrite: it's kept and shown like another tool's (see `file::is_ours`).
-//! Every mark also writes a full appearance, so other viewers, and older
-//! sheaf builds, draw it. Appearances are drawn with the content toolkit's
+//! sheaf is pre-release: it reads only the payloads this build writes
+//! ([`VERSION`]), none an earlier sheaf wrote. A mark this build can't read
+//! (another version, or a kind from a newer sheaf) isn't ours to rewrite:
+//! it's kept and shown like another tool's (see `file::is_ours`). Every
+//! mark also writes a full appearance, so other viewers, and other sheaf
+//! builds, draw it. Appearances are drawn with the content toolkit's
 //! writer, their text in the standard 14 fonts; a character those lack
 //! draws `?`, which [`Annot::unencodable`] tells without drawing anything.
 //! A save writes marks as [`emission`] makes them, through the emitter.
@@ -1160,13 +1158,6 @@ impl Annot {
     }
 }
 
-/// Marked a companion annotation in files sheaf wrote before M10.5 slice
-/// 9: one sheaf writes beside a mark's own, pointing at it with `/IRT`
-/// (the StrikeOut of a replace-text edit). Only read now: a companion is
-/// a StrikeOut grouped (`/RT /Group`) under a sheaf Caret
-/// (`file::is_ours`), and none is written with it.
-pub const PART: &str = "SheafPart";
-
 /// A mark as the writer makes it, before anything of it is in a file
 /// ([`emission`]).
 pub struct Emitted {
@@ -1201,7 +1192,7 @@ pub fn emission(a: &Annot, held: Held) -> Emitted {
     // the digest reads is direct, so it needs no file to read them in.
     on_grid(&mut main);
     let payload = Payload {
-        v: Some(VERSION),
+        v: VERSION,
         std: written_staleness(&main, a.thread_parent().is_some()),
         mark: a,
     };
@@ -2610,13 +2601,12 @@ pub const VERSION: u32 = 2;
 
 /// A `/SHEF_Annot` payload: the mark's JSON, and beside its fields the
 /// version and the [`staleness`] digest of the dictionary it was written
-/// into. Version 1 had neither, and its geometry was in the page's
-/// displayed space. A field of [`Annot`] is never called `v` or `std`.
+/// into. A field of [`Annot`] is never called `v` or `std`.
 #[derive(Serialize, Deserialize)]
 pub struct Payload<M> {
-    /// [`VERSION`]; none in version 1.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub v: Option<u32>,
+    /// [`VERSION`], as this build writes it: a payload without one isn't
+    /// sheaf's, and one of another version isn't this build's to read.
+    pub v: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub std: String,
     #[serde(flatten)]
@@ -2914,13 +2904,37 @@ mod tests {
         assert_eq!(symbol("+"), Some(&Std14::Helvetica));
     }
 
+    /// A payload as the writer makes it, its digest left out.
+    fn payload_json(a: &Annot) -> Vec<u8> {
+        let payload = Payload {
+            v: VERSION,
+            std: String::new(),
+            mark: a,
+        };
+        serde_json::to_vec(&payload).unwrap()
+    }
+
+    /// An empty creation date isn't written, and reads back empty.
     #[test]
-    fn marks_saved_before_creation_dates_still_read() {
-        let old = br#"{"id":3,"kind":{"Note":{"pos":{"x":1.0,"y":2.0}}},"color":[1,2,3],"opacity":1.0,"stroke":1.0,"author":"me","contents":"hi","modified":"D:20261011000000"}"#;
-        let a = from_json(old).unwrap().mark;
+    fn an_empty_creation_date_is_not_written() {
+        let a = mark(AnnotKind::Note {
+            pos: Pt { x: 1.0, y: 2.0 },
+        });
         assert_eq!(a.created, "");
-        // And an empty one isn't written.
-        assert!(!serde_json::to_string(&a).unwrap().contains("created"));
+        let json = payload_json(&a);
+        assert!(!String::from_utf8_lossy(&json).contains("created"));
+        assert_eq!(from_json(&json).unwrap().mark.created, "");
+    }
+
+    /// A payload without a version isn't read: the mark's JSON alone isn't
+    /// sheaf's.
+    #[test]
+    fn a_payload_without_a_version_is_not_read() {
+        let a = mark(AnnotKind::Note {
+            pos: Pt { x: 1.0, y: 2.0 },
+        });
+        assert!(from_json(&serde_json::to_vec(&a).unwrap()).is_none());
+        assert_eq!(from_json(&payload_json(&a)).unwrap().mark, a);
     }
 
     #[test]
@@ -2979,7 +2993,7 @@ mod tests {
         };
         let payload = from_json(&json).unwrap();
         assert_eq!(payload.mark, a);
-        assert_eq!(payload.v, Some(VERSION));
+        assert_eq!(payload.v, VERSION);
         assert_eq!(payload.std, staleness(&pdf, &dict, false));
         // On one line, turned with the mark, in WinAnsi.
         let content = String::from_utf8_lossy(&stream.content);
@@ -3178,8 +3192,7 @@ mod tests {
             at: caret_box(50.0, 22.0, 12.0),
         });
         a.contents = "the".into();
-        let json = serde_json::to_vec(&a).unwrap();
-        assert_eq!(from_json(&json).unwrap().mark, a);
+        assert_eq!(from_json(&payload_json(&a)).unwrap().mark, a);
         assert_eq!(
             a.pdf_names(),
             vec!["sheaf:1".to_string(), "sheaf:1:strike".to_string()]
@@ -3187,10 +3200,7 @@ mod tests {
         let ins = mark(AnnotKind::Insert {
             at: caret_box(50.0, 22.0, 12.0),
         });
-        assert_eq!(
-            from_json(&serde_json::to_vec(&ins).unwrap()).unwrap().mark,
-            ins
-        );
+        assert_eq!(from_json(&payload_json(&ins)).unwrap().mark, ins);
         assert_eq!(ins.kind.bounds().w, ins.kind.bounds().h);
     }
 

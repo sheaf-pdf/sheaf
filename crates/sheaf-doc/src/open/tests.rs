@@ -309,49 +309,6 @@ fn every_mark_kind_round_trips_on_every_rotate() {
     }
 }
 
-/// A mark an older sheaf wrote reads as the same mark written now. Its
-/// `/SHEF_Annot` is version 1's: the JSON in the page's displayed space,
-/// with no version or digest, and a tick named `/SheafTick<id>`. Its
-/// geometry comes from the standard keys, within 0.01 pt, and it reads
-/// upright as the page shows. So does one written on a page sheaf had
-/// turned, whose JSON is in the displayed space of the `/Rotate` the page
-/// had before the save.
-#[test]
-fn a_v1_mark_reads_as_its_v2_self() {
-    use crate::annot::AnnotKind;
-    let rect = |b: [f32; 4]| crate::geom::Rect::new(b[0], b[1], b[2], b[3]);
-    // The page's /Rotate, and the one the JSON's frame has.
-    for (degrees, frame) in [(0, 0), (90, 90), (180, 180), (270, 270), (90, 0), (0, 270)] {
-        let marks = every_mark_turned(Rotation::from_degrees(degrees));
-        let mut f = marked(degrees, &marks);
-        let shown = crate::geom::Geom::read(Some(rect(MEDIA)), Some(rect(CROP)), frame).to_view();
-        for id in f.annots(0) {
-            let d = f.dict(id);
-            let Ok(json) = d.get(b"SHEF_Annot").and_then(Object::as_str) else {
-                continue;
-            };
-            let a = crate::annot::from_json(crate::file::text_string(json).as_bytes())
-                .unwrap()
-                .mark;
-            let old = Annot {
-                turn: Rotation::R0,
-                ..a.mapped(&shown)
-            };
-            let json = serde_json::to_string(&old).unwrap();
-            d.set("SHEF_Annot", crate::save::text_string(&json));
-            if matches!(a.kind, AnnotKind::Stamp { .. }) {
-                let tick = format!("SheafTick{}", a.id.0);
-                d.set("Name", Object::Name(tick.into_bytes()));
-            }
-        }
-        let facts = finish(&f.source(), &NoProgress);
-        let case = format!("{degrees}°, its JSON in {frame}°'s frame");
-        let foreign = theirs(&facts.annots);
-        assert!(foreign.is_empty(), "{case}: {foreign:?}");
-        assert_marks(&facts.annots.marks()[&0], &marks, 0.01, &case);
-    }
-}
-
 crate::both_ways!(
     a_stale_mark_is_another_tools_comment,
     a_stale_mark_is_another_tools_comment_appended: stale_mark_is_theirs
@@ -360,93 +317,77 @@ crate::both_ways!(
 /// A mark another tool has edited since sheaf wrote it is that tool's
 /// comment: Acrobat's edit of its text (a new `/Contents` and `/M`) opens
 /// among the other tools' comments, as a mark that can be made editable,
-/// and not among the marks, whether its `/SHEF_Annot` is version 2, whose
-/// digest no longer matches, or version 1, whose `modified` isn't `/M`. A
-/// Rewrite and an Append of an edit of the page's other marks
-/// keep it as that tool left it: not put back as sheaf wrote it, and not
-/// dropped.
+/// and not among the marks, its `/SHEF_Annot`'s digest no longer matching.
+/// A Rewrite and an Append of an edit of the page's other marks keep it as
+/// that tool left it: not put back as sheaf wrote it, and not dropped.
 fn stale_mark_is_theirs(how: How) {
     use crate::annot::AnnotKind;
-    for v1 in [false, true] {
-        let marks = every_mark_turned(Rotation::R90)[1..4].to_vec();
-        let mut f = marked(90, &marks);
-        let square = f.annots(0)[2];
-        let case = if v1 { "version 1" } else { "version 2" };
-        if v1 {
-            // Its JSON as an older sheaf wrote it: no version or digest.
-            let json = f.dict(square).get(b"SHEF_Annot").and_then(Object::as_str);
-            let json = crate::file::text_string(json.unwrap());
-            let mut payload: serde_json::Value = serde_json::from_str(&json).unwrap();
-            let payload = payload.as_object_mut().unwrap();
-            payload.remove("v");
-            payload.remove("std");
-            let json = serde_json::to_string(payload).unwrap();
-            f.dict(square)
-                .set("SHEF_Annot", crate::save::text_string(&json));
-        }
-        let edited = crate::save::text_string("Edited in Acrobat");
-        f.dict(square).set("Contents", edited.clone());
-        f.dict(square)
-            .set("M", Object::string_literal("D:20261017090000Z"));
-        let bytes = f.bytes();
-        let as_left = Pdf::load_mem(&bytes)
-            .unwrap()
-            .get_dictionary(square)
-            .unwrap()
-            .clone();
-        let Opened { mut doc, .. } = opened(bytes);
-        let page = doc.page(0).unwrap();
-        let ids: Vec<AnnotId> = doc.state().marks_on(page).map(|a| a.id).collect();
-        assert_eq!(ids, [AnnotId(2), AnnotId(3)], "{case}");
-        let foreign = theirs_in(doc.state());
-        let [theirs] = foreign.as_slice() else {
-            panic!("{case}: {foreign:?}");
-        };
-        assert_eq!(
-            (theirs.name.as_str(), theirs.contents.as_str()),
-            ("sheaf:4", "Edited in Acrobat"),
-            "{case}"
-        );
-        assert!(
-            matches!(
-                theirs.mark.as_deref(),
-                Some(Annot {
-                    kind: AnnotKind::Square { .. },
-                    ..
-                })
-            ),
-            "{case}"
-        );
-        let mut note = doc.state().marks_on(page).next().unwrap().clone();
-        note.contents = "Edited in sheaf".into();
-        doc.commit_ops(vec![fx::update(&note)], "Edit").unwrap();
-        let saved = how.write(&doc);
-        let case = format!("{case}, {how:?}");
-        let pdf = Pdf::load_mem(&saved).unwrap();
-        let page = pdf.page_iter().next().unwrap();
-        let found = annots_read(&saved);
-        let contents: Vec<String> = (found.sheaf()[&0].iter())
-            .map(|a| a.contents.clone())
-            .collect();
-        assert_eq!(contents, ["Edited in sheaf", "About this"], "{case}");
-        let foreign = found.foreign();
-        let [(_, theirs)] = foreign.as_slice() else {
-            panic!("{case}: {foreign:?}");
-        };
-        assert_eq!(theirs.name, "sheaf:4", "{case}");
-        let list = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap();
-        let kept = list.as_array().unwrap().iter().find_map(|e| {
-            let d = pdf.get_dictionary(e.as_reference().ok()?).ok()?;
-            (crate::file::thread_name(d) == "sheaf:4").then_some(d)
-        });
-        let keys = |d: &Dictionary| -> Vec<(Vec<u8>, Object)> {
-            d.iter()
-                .filter(|(k, _)| k.as_slice() != b"AP")
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
-        assert_eq!(kept.map(keys), Some(keys(&as_left)), "{case}");
-    }
+    let marks = every_mark_turned(Rotation::R90)[1..4].to_vec();
+    let mut f = marked(90, &marks);
+    let square = f.annots(0)[2];
+    let case = "edited";
+    let edited = crate::save::text_string("Edited in Acrobat");
+    f.dict(square).set("Contents", edited.clone());
+    f.dict(square)
+        .set("M", Object::string_literal("D:20261017090000Z"));
+    let bytes = f.bytes();
+    let as_left = Pdf::load_mem(&bytes)
+        .unwrap()
+        .get_dictionary(square)
+        .unwrap()
+        .clone();
+    let Opened { mut doc, .. } = opened(bytes);
+    let page = doc.page(0).unwrap();
+    let ids: Vec<AnnotId> = doc.state().marks_on(page).map(|a| a.id).collect();
+    assert_eq!(ids, [AnnotId(2), AnnotId(3)], "{case}");
+    let foreign = theirs_in(doc.state());
+    let [theirs] = foreign.as_slice() else {
+        panic!("{case}: {foreign:?}");
+    };
+    assert_eq!(
+        (theirs.name.as_str(), theirs.contents.as_str()),
+        ("sheaf:4", "Edited in Acrobat"),
+        "{case}"
+    );
+    assert!(
+        matches!(
+            theirs.mark.as_deref(),
+            Some(Annot {
+                kind: AnnotKind::Square { .. },
+                ..
+            })
+        ),
+        "{case}"
+    );
+    let mut note = doc.state().marks_on(page).next().unwrap().clone();
+    note.contents = "Edited in sheaf".into();
+    doc.commit_ops(vec![fx::update(&note)], "Edit").unwrap();
+    let saved = how.write(&doc);
+    let case = format!("{case}, {how:?}");
+    let pdf = Pdf::load_mem(&saved).unwrap();
+    let page = pdf.page_iter().next().unwrap();
+    let found = annots_read(&saved);
+    let contents: Vec<String> = (found.sheaf()[&0].iter())
+        .map(|a| a.contents.clone())
+        .collect();
+    assert_eq!(contents, ["Edited in sheaf", "About this"], "{case}");
+    let foreign = found.foreign();
+    let [(_, theirs)] = foreign.as_slice() else {
+        panic!("{case}: {foreign:?}");
+    };
+    assert_eq!(theirs.name, "sheaf:4", "{case}");
+    let list = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap();
+    let kept = list.as_array().unwrap().iter().find_map(|e| {
+        let d = pdf.get_dictionary(e.as_reference().ok()?).ok()?;
+        (crate::file::thread_name(d) == "sheaf:4").then_some(d)
+    });
+    let keys = |d: &Dictionary| -> Vec<(Vec<u8>, Object)> {
+        d.iter()
+            .filter(|(k, _)| k.as_slice() != b"AP")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+    assert_eq!(kept.map(keys), Some(keys(&as_left)), "{case}");
 }
 
 crate::both_ways!(
@@ -576,44 +517,6 @@ fn a_mark_s_text_reads_back_as_written() {
     let foreign = theirs(&facts.annots);
     assert!(foreign.is_empty(), "{foreign:?}");
     assert_eq!(facts.annots.marks()[&0], [n]);
-}
-
-/// A page of version 1 replacements whose StrikeOuts are gone, each of
-/// which looks for its own, opens and saves in linear time: the page's
-/// StrikeOuts are indexed once, where a search of the page for each took
-/// 22 s at 12,000.
-#[test]
-fn a_page_of_v1_replacements_reads_in_linear_time() {
-    const N: usize = 10_000;
-    let mut f = Form::new(1);
-    let ids: Vec<ObjectId> = (1..=N)
-        .map(|i| {
-            let json = format!(
-                r#"{{"id":{i},"kind":{{"Replace":{{"rects":[],"struck":"x","at":{{"x":1.0,"y":1.0,"w":2.0,"h":2.0}}}}}},"color":[1,2,3],"opacity":1.0,"stroke":1.0,"author":"me","contents":"","modified":"D:1"}}"#
-            );
-            f.pdf.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Caret",
-                "Rect" => vec![0.into(), 0.into(), 4.into(), 4.into()],
-                "M" => Object::string_literal("D:1"),
-                "SHEF_Annot" => Object::string_literal(json),
-            })
-        })
-        .collect();
-    f.set_annots(0, &ids);
-    let started = std::time::Instant::now();
-    let facts = finish(&f.source(), &NoProgress);
-    let page = f.dict(f.pages[0]).clone();
-    let list = page.get(b"Annots").unwrap().as_array().unwrap();
-    let annots = crate::file::PageAnnots::new(list);
-    let kept: Vec<&Object> = (list.iter())
-        .filter(|e| !crate::file::is_ours(&f.pdf, e, &annots))
-        .collect();
-    let took = started.elapsed();
-    // None has its StrikeOut, so each is another tool's, and kept.
-    assert!(facts.annots.marks().is_empty());
-    assert_eq!(theirs(&facts.annots).len(), N);
-    assert_eq!(kept.len(), N);
-    assert!(took < std::time::Duration::from_secs(5), "{took:?}");
 }
 
 crate::both_ways!(

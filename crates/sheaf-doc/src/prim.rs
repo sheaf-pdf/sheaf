@@ -35,9 +35,9 @@ use crate::labels::LabelSpec;
 use crate::measure::Scale;
 use crate::model::{
     AnnotBody, AnnotRec, Bookmark, ContentStack, DocState, FieldNode, FieldProps, Filter, Foreign,
-    FormDoc, FormInst, FormRef, Frozen, GenId, GenSpec, Generator, Layer, LegacySel, Mark,
-    MarkedSel, OutlineId, PageDef, PageId, PinnedAp, Placement, Scope, ScriptState, Static, Target,
-    Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps,
+    FormDoc, FormInst, FormRef, Frozen, GenId, GenSpec, Generator, Layer, Mark, MarkedSel,
+    OutlineId, PageDef, PageId, PinnedAp, Placement, PrivateSel, Scope, ScriptState, Static,
+    Target, Terminal, WatermarkContent, WatermarkGen, Widget, WidgetProps,
 };
 use crate::tape::{Row, Tape};
 use crate::text_layer::TextLayer;
@@ -658,11 +658,11 @@ impl HeapSize for Layer {
 impl HeapSize for Filter {
     fn heap_size(&self) -> usize {
         match self {
-            Filter::DropMarked(sel) | Filter::StripLegacy(LegacySel::Marked(sel)) => {
+            Filter::DropMarked(sel) | Filter::StripPrivate(PrivateSel::Marked(sel)) => {
                 sel.heap_size()
             }
             Filter::DropStreams(_)
-            | Filter::StripLegacy(LegacySel::Streams | LegacySel::Resources) => 0,
+            | Filter::StripPrivate(PrivateSel::Streams | PrivateSel::NamedLists) => 0,
         }
     }
 }

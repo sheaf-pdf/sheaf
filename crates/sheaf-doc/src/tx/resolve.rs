@@ -198,11 +198,10 @@ pub enum ResolvedOp {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OthersFound {
     /// Taken out: Acrobat's; sheaf's in another file, which no generator
-    /// of the document's backs; sheaf's from before M10.5; and the author's
-    /// own, with `include_authored`.
+    /// of the document's backs; and the author's own, with
+    /// `include_authored`.
     pub acrobat: usize,
     pub other_files: usize,
-    pub older_sheaf: usize,
     pub authored: usize,
     /// Left in place: the author's, without `include_authored` or where a
     /// splice refuses them; and others' a splice refuses, which taking out
@@ -221,7 +220,6 @@ impl OthersFound {
         OthersFound {
             acrobat: self.acrobat + other.acrobat,
             other_files: self.other_files + other.other_files,
-            older_sheaf: self.older_sheaf + other.older_sheaf,
             authored: self.authored + other.authored,
             authored_left: self.authored_left + other.authored_left,
             refused: self.refused + other.refused,

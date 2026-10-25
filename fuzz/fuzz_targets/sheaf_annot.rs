@@ -1,6 +1,6 @@
 //! A page's annotations on any bytes, read as sheaf's marks: each
-//! `/SHEF_Annot`, its staleness digest, or its geometry from the standard
-//! keys, and whether it's sheaf's to rewrite.
+//! `/SHEF_Annot` and its staleness digest, and whether it's sheaf's to
+//! rewrite.
 
 #![no_main]
 

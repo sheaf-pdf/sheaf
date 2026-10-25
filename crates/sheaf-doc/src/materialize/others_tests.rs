@@ -1,15 +1,15 @@
 //! Others' watermarks, backgrounds, headers and footers (M10.5 slices 16
 //! and 17, proposal 31): a watermark or a header and footer of the
-//! document's replaces those of its kind Acrobat, an older sheaf or another
-//! file drew on the pages it covers, never the author's own;
-//! RemoveWatermark and RemoveHeaderFooter take them off, and the author's
-//! only when asked to, saying what they found, as a dialog counts it
-//! before ([`others_on`]). What's taken out is spliced from the streams
-//! it's in, each a copy of its own; the names only it used leave the
-//! page's resources, and what they named the file. One a splice refuses
-//! stays, counted. What an older sheaf kept in the watermarks it drew, its
-//! settings with an image's path, Clean Copy takes out of them, what they
-//! draw kept; a list it can't be taken out of keeps it, counted.
+//! document's replaces those of its kind Acrobat or another file drew on
+//! the pages it covers, never the author's own; RemoveWatermark and
+//! RemoveHeaderFooter take them off, and the author's only when asked to,
+//! saying what they found, as a dialog counts it before ([`others_on`]).
+//! What's taken out is spliced from the streams it's in, each a copy of
+//! its own; the names only it used leave the page's resources, and what
+//! they named the file. One a splice refuses stays, counted. What marks
+//! the lists of another file's generators' blocks merged into a page's
+//! streams, Clean Copy takes out of them, what they draw kept; a list it
+//! can't be taken out of keeps it, counted.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -19,15 +19,16 @@ use in_progress::NoProgress;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{Op, Z};
 
-use super::header_tests::{ACROBAT_HEADER, AUTHORED, older_header_file};
+use super::header_tests::{ACROBAT_HEADER, AUTHORED};
 use super::recognized_tests::{contents, depth, drawn, everything, pages, stream};
 use super::removal_tests::{opened, scratch, text_file};
 use super::{How, Onto, Profile, SaveHow, SaveInput, SaveTarget, StrategyKind, Why};
+use crate::content::GenId;
 use crate::content::{Balance, PagOrigin, PaginationKind};
 use crate::effects::{Flags, Removed, RemovedKind};
 use crate::export::Export;
-use crate::generate::{fixture as older, header};
-use crate::model::{Document, Filter, LegacySel, MarkedSel, PageDef, PageId, StreamSel};
+use crate::generate::header;
+use crate::model::{Document, Filter, MarkedSel, PageDef, PageId, PrivateSel, StreamSel};
 use crate::prim::{Key, Val};
 use crate::tx::{OthersFound, fixture as fx, others_on};
 
@@ -370,35 +371,6 @@ fn the_author_s_are_left_unless_asked() {
     }
 }
 
-/// A watermark an older sheaf drew, its list marked `/SheafStamp`, is
-/// replaced by the document's, drawn once.
-#[test]
-fn an_older_sheaf_s_watermark_is_replaced() {
-    let dir = scratch();
-    let legacy: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Watermark /SheafStamp true \
-        /SheafSettings (settings) >> BDC q /GS0 gs 0.7 0.7 -0.7 0.7 200 300 cm BT 0.5 0.5 0.5 rg \
-        /F1 60 Tf 0 0 Td (OLD SHEAF) Tj ET\nQ\nEMC\n";
-    let (_, mut doc) = opened(&dir, "a.pdf", &acrobat_file(&[&[BODY, legacy]]));
-    doc.commit_ops(vec![watermark("MINE")], "watermark")
-        .unwrap();
-    for how in [How::Rewritten, How::Appended] {
-        let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
-        let text = drawn(&pdf, pages(&pdf)[0]);
-        assert!(
-            !text.contains("OLD SHEAF") && text.matches("(MINE)").count() == 1,
-            "{how:?}: {text}"
-        );
-        assert!(!text.contains("SheafSettings"), "{how:?}");
-    }
-    let (_, mut doc) = opened(&dir, "b.pdf", &acrobat_file(&[&[BODY, legacy]]));
-    let page = doc.page(0).unwrap();
-    let c = (doc.commit_ops(vec![fx::remove_watermark(None, &[page])], "remove")).unwrap();
-    assert_eq!(
-        c.lines[0].text,
-        "Remove the watermark and background from page 1 (1 made by an older sheaf)"
-    );
-}
-
 /// Acrobat's watermark that no splice takes out stays where the
 /// document's is drawn, and the save is made, a note counting it;
 /// RemoveWatermark says it stays, and a page whose content can't be read.
@@ -466,26 +438,38 @@ crate::both_ways!(
     a_stream_blank_pages_share_stays_where_uncovered_appended: shared
 );
 
-/// A file as [`acrobat_file`] makes one, whose resources are Helvetica as
-/// `/F1` and what an older sheaf drew its watermarks with: its font,
-/// graphics state and image.
-fn older_file(streams: &[&[&[u8]]]) -> Vec<u8> {
-    file_of(streams, older::resources)
-}
+/// The generator another file's watermarks are [`MERGED_WATERMARK`]'s.
+const WATERMARK_GEN: GenId = GenId(0x1a);
 
-/// `doc`'s current version written `how`, its state with what an older
-/// sheaf kept in its watermarks and backgrounds taken out of `pages`, as
-/// Clean Copy takes it out of the pages that hold one: the file, and its
-/// notes.
+/// The generator another file's backgrounds are [`MERGED_BACKGROUND`]'s.
+const BACKGROUND_GEN: GenId = GenId(0x1b);
+
+/// A background another file's generator drew, merged into the page's
+/// streams by another tool: its list marked as the generator's
+/// (`/SHEF_Gen`), drawn in [`acrobat_file`]'s graphics state.
+const MERGED_BACKGROUND: &[u8] =
+    b"/Artifact <</Type/Pagination/Subtype/Background/SHEF_Gen (g1b)>> \
+    BDC\nq\n/GS0 gs 0.9 g 0 0 612 792 re f\nQ\nEMC\n";
+
+/// A watermark another file's generator drew after the page's content,
+/// merged as [`MERGED_BACKGROUND`] is: "DRAFT" in red.
+const MERGED_WATERMARK: &[u8] = b"/Artifact <</Type/Pagination/Subtype/Watermark/SHEF_Gen (g1a)>> \
+    BDC\nq\n/GS0 gs 0.7071 0.7071 -0.7071 0.7071 200.000 300.000 cm BT 0.784 0.118 0.118 rg \
+    /F1 72.00 Tf 0 0 Td (DRAFT) Tj ET\nQ\nEMC\n";
+
+/// `doc`'s current version written `how`, its state with what marks the
+/// lists of [`WATERMARK_GEN`]'s and [`BACKGROUND_GEN`]'s blocks taken out
+/// of `pages`, as Clean Copy takes it out of the pages that hold one: the
+/// file, and its notes.
 fn stripped(doc: &Document, pages: &[PageId], how: How) -> (Vec<u8>, Vec<String>) {
     let mut target = doc.state().clone();
     for &p in pages {
         let def = target.def(p).unwrap();
-        let older = MarkedSel::Pagination {
-            kinds: BTreeSet::from([PaginationKind::Watermark, PaginationKind::Background]),
-            origins: BTreeSet::from([PagOrigin::SheafLegacy]),
-        };
-        let content = (def.content).with_filter(Filter::StripLegacy(LegacySel::Marked(older)));
+        let mut content = def.content.clone();
+        for g in [WATERMARK_GEN, BACKGROUND_GEN] {
+            let sel = MarkedSel::SheafGen(g);
+            content = content.with_filter(Filter::StripPrivate(PrivateSel::Marked(sel)));
+        }
         let def = PageDef::new(def.base.clone(), def.copy, content);
         target
             .set(&Key::Page(p), Some(Val::Page(Arc::new(def))))
@@ -523,19 +507,18 @@ fn stripped(doc: &Document, pages: &[PageId], how: How) -> (Vec<u8>, Vec<String>
     (out.bytes, out.notes.iter().map(|n| n.to_string()).collect())
 }
 
-/// Pages an older sheaf drew a watermark and a background on, as it wrote
-/// them, the image's path in the background's settings: a clean copy, and
-/// a print without markup (§16 row 27), keep what they draw and take out
-/// what it kept in them, and what it drew with is named anew, so no object
-/// of the copy holds the settings, the path or a name of sheaf's. The two
-/// pages that shared their streams share the copies, and a page with none
-/// draws its own as it was.
+/// Pages another file's generators drew a watermark and a background on,
+/// merged into their streams, each list marked as its generator's: a clean
+/// copy, and a print without markup (§16 row 27), keep what they draw and
+/// take out what marks them, so no object of the copy holds a name of
+/// sheaf's. The two pages that shared their streams share the copies, and
+/// a page with none draws its own as it was.
 #[test]
-fn a_clean_copy_takes_out_what_an_older_sheaf_kept() {
+fn a_clean_copy_takes_out_what_marks_another_file_s_blocks() {
     let dir = scratch();
-    let marked: &[&[u8]] = &[older::Q, older::BACKGROUND, BODY, older::WATERMARK];
+    let marked: &[&[u8]] = &[MERGED_BACKGROUND, BODY, MERGED_WATERMARK];
     let other: &[u8] = b"BT /F1 12 Tf 72 700 Td (other) Tj ET";
-    let (_, doc) = opened(&dir, "a.pdf", &older_file(&[marked, marked, &[other]]));
+    let (_, doc) = opened(&dir, "a.pdf", &acrobat_file(&[marked, marked, &[other]]));
     let every = all(&doc);
     let made = [
         ("clean copy", doc.export_bytes(Export::clean_copy)),
@@ -546,10 +529,7 @@ fn a_clean_copy_takes_out_what_an_older_sheaf_kept() {
     ];
     for (what, bytes) in made {
         let pdf = Pdf::load_mem(&bytes).unwrap();
-        let all = everything(&pdf);
-        for gone in ["SheafSettings", "SheafStamp", "SheafWM", "/home/someone"] {
-            assert!(!all.contains(gone), "{what}: {gone}");
-        }
+        assert!(!everything(&pdf).contains("SHEF_"), "{what}");
         assert_eq!(crate::private::found(&pdf), [], "{what}");
         let [first, second, third] = pages(&pdf)[..] else {
             panic!("{what}: three pages")
@@ -557,24 +537,12 @@ fn a_clean_copy_takes_out_what_an_older_sheaf_kept() {
         let text = drawn(&pdf, first);
         for kept in [
             "/Subtype/Background>> BDC",
+            "0 0 612 792 re f",
             "(body) Tj",
             "/Subtype/Watermark>> BDC",
             "(DRAFT) Tj",
         ] {
             assert!(text.contains(kept), "{what}: {kept}: {text}");
-        }
-        // Each name it drew with, given a new one the page binds.
-        for (kind, op) in [
-            ("XObject", " Do"),
-            ("ExtGState", " gs"),
-            ("Font", " 72.00 Tf"),
-        ] {
-            let names = bound(&pdf, first, kind);
-            let used = (names.iter()).find(|n| text.contains(&format!("/{n}{op}")));
-            assert!(
-                used.is_some_and(|n| n.starts_with("Sh")),
-                "{what}: {kind}: {names:?}: {text}"
-            );
         }
         assert_eq!(depth(&pdf, first).1, Balance::default(), "{what}");
         assert_eq!(contents(&pdf, first), contents(&pdf, second), "{what}");
@@ -582,14 +550,14 @@ fn a_clean_copy_takes_out_what_an_older_sheaf_kept() {
     }
 }
 
-/// Three blank pages share one stream, which holds a background an older
-/// sheaf drew: what it kept taken out of the first's alone, that page
-/// draws a copy of the stream without it, and the others the stream as it
-/// was. Both ways.
-fn older_shared(how: How) {
+/// Three blank pages share one stream, which holds a background another
+/// file's generator drew: what marks it taken out of the first's alone,
+/// that page draws a copy of the stream without it, and the others the
+/// stream as it was. Both ways.
+fn merged_shared(how: How) {
     let dir = scratch();
-    let blank: &[&[u8]] = &[older::BACKGROUND];
-    let (_, doc) = opened(&dir, "blank.pdf", &older_file(&[blank, blank, blank]));
+    let blank: &[&[u8]] = &[MERGED_BACKGROUND];
+    let (_, doc) = opened(&dir, "blank.pdf", &acrobat_file(&[blank, blank, blank]));
     let original = Pdf::load_mem(doc.snapshot().primary.bytes()).unwrap();
     let shared = contents(&original, pages(&original)[0])[0];
     let (bytes, notes) = stripped(&doc, &[doc.page(0).unwrap()], how);
@@ -600,7 +568,7 @@ fn older_shared(how: How) {
     assert_ne!(firsts[0], shared, "{how:?}: a copy");
     let text = drawn(&pdf, pages(&pdf)[0]);
     assert!(
-        !text.contains("SheafSettings") && text.contains("/SheafWMim Do"),
+        !text.contains("SHEF_Gen") && text.contains("/GS0 gs"),
         "{how:?}: {text}"
     );
     for page in &pages(&pdf)[1..] {
@@ -608,39 +576,39 @@ fn older_shared(how: How) {
     }
     assert_eq!(
         stream(&pdf, shared).1,
-        older::BACKGROUND.to_vec(),
+        MERGED_BACKGROUND.to_vec(),
         "{how:?}"
     );
 }
 
 crate::both_ways!(
-    a_stream_blank_pages_share_keeps_what_an_older_sheaf_kept_elsewhere,
-    a_stream_blank_pages_share_keeps_what_an_older_sheaf_kept_elsewhere_appended: older_shared
+    a_stream_blank_pages_share_keeps_what_marks_a_block_elsewhere,
+    a_stream_blank_pages_share_keeps_what_marks_a_block_elsewhere_appended: merged_shared
 );
 
-/// An older sheaf's watermark whose settings are in a list the resources
-/// name, `/P0`, which no rewrite of the content reaches, keeps them, and
-/// the save is made, a note counting it. A clean copy, which takes them
-/// out of the lists the resources name too, holds none.
+/// Another file's watermark whose list, marked as its generator's, the
+/// resources name, `/P0`, which no rewrite of the content reaches, keeps
+/// what marks it, and the save is made, a note counting it. A clean copy,
+/// which takes it out of the lists the resources name too, holds none.
 #[test]
-fn settings_a_list_cant_lose_stay_and_are_counted() {
+fn what_a_named_list_cant_lose_stays_and_is_counted() {
     let dir = scratch();
     let named: &[u8] = b"/Artifact /P0 BDC q BT /F1 60 Tf 100 300 Td (NAMED) Tj ET Q EMC";
-    let file = file_of(&[&[BODY, named]], |pdf, font| {
-        let mut resources = older::resources(pdf, font);
+    let file = file_of(&[&[BODY, named]], |_, font| {
         let list = dictionary! {
             "Type" => "Pagination", "Subtype" => "Watermark",
-            "SheafSettings" => Object::string_literal("{}"),
+            "SHEF_Gen" => Object::string_literal("g1a"),
         };
-        resources.set("Properties", dictionary! { "P0" => list });
-        resources
+        dictionary! {
+            "Font" => dictionary! { "F1" => font },
+            "Properties" => dictionary! { "P0" => list },
+        }
     });
     let (_, doc) = opened(&dir, "a.pdf", &file);
     for how in [How::Rewritten, How::Appended] {
         let (bytes, notes) = stripped(&doc, &[doc.page(0).unwrap()], how);
-        let note = "1 watermark, background, header or footer an older sheaf drew on page 1 \
-                    keeps the settings it kept in it, which can't be taken out of it as it's \
-                    written.";
+        let note = "sheaf's private data stays in 1 property list on page 1, which can't be \
+                    written again without it.";
         assert_eq!(notes, [note], "{how:?}");
         let pdf = Pdf::load_mem(&bytes).unwrap();
         assert!(
@@ -787,89 +755,64 @@ crate::both_ways!(
     the_author_s_running_heads_are_left_unless_asked_appended: running_heads
 );
 
-/// A header an older sheaf drew, its list marked `/SheafStamp`, is taken
-/// off by RemoveHeaderFooter, which says so, and isn't drawn after. Both
-/// ways.
-fn older_header_removed(how: How) {
-    let dir = scratch();
-    let (_, mut doc) = opened(&dir, "older.pdf", &older_header_file());
-    let all = all(&doc);
-    let older = OthersFound {
-        older_sheaf: 1,
-        ..OthersFound::default()
-    };
-    assert_eq!(headers_on(&doc, &all, false), older);
-    let c = doc
-        .commit_ops(vec![fx::remove_header(&all)], "remove")
-        .unwrap();
-    assert_eq!(
-        c.lines[0].text,
-        "Remove the header and footer from pages 1–3 (1 made by an older sheaf)"
-    );
-    let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();
-    let text = drawn(&pdf, pages(&pdf)[2]);
-    assert!(
-        !text.contains("Draft") && text.contains("(page 2)"),
-        "{how:?}: {text}"
-    );
-    assert_eq!(depth(&pdf, pages(&pdf)[2]).1, Balance::default(), "{how:?}");
-}
-
-crate::both_ways!(
-    an_older_sheaf_s_header_is_removed,
-    an_older_sheaf_s_header_is_removed_appended: older_header_removed
-);
-
-/// A header and footer an older sheaf drew, marked `/SheafStamp`, on one
-/// stream beside an artifact of another type, an author's running head
-/// and a watermark of an older sheaf's.
+/// A header and footer another file's header and footer drew, merged
+/// into one stream (`/SHEF_Gen (g1)`), beside an artifact of another type,
+/// an author's running head and a watermark another file's generator drew
+/// (`/SHEF_Gen (g2)`).
 const MIXED: &[u8] = b"q 1 0 0 rg 0 0 10 10 re f Q\n\
-    /Artifact <</Type /Pagination /Subtype /Header /SheafStamp true>> BDC \
+    /Artifact <</Type /Pagination /Subtype /Header /SHEF_Gen (g1)>> BDC \
     q BT /F1 9 Tf (Head) Tj ET Q EMC\n\
     /Artifact <</Type /Layout>> BDC 0 0 m 9 9 l S EMC\n\
-    /Artifact <</Type /Pagination /Subtype /Footer /SheafStamp true>> BDC \
+    /Artifact <</Type /Pagination /Subtype /Footer /SHEF_Gen (g1)>> BDC \
     /Span <</ActualText (x)>> BDC (nested) Tj EMC EMC\n\
     /Artifact <</Type /Pagination /Subtype /Header>> BDC (author) Tj EMC\n\
-    /Artifact <</Type /Pagination /Subtype /Watermark /SheafStamp true>> BDC (wm) Tj EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Watermark /SHEF_Gen (g2)>> BDC (wm) Tj EMC\n\
     0 0 1 rg";
 
 /// What [`MIXED`] is with the header and footer taken out.
 const MIXED_LEFT: &[u8] = b"q 1 0 0 rg 0 0 10 10 re f Q\n\n\
     /Artifact <</Type /Layout>> BDC 0 0 m 9 9 l S EMC\n\n\
     /Artifact <</Type /Pagination /Subtype /Header>> BDC (author) Tj EMC\n\
-    /Artifact <</Type /Pagination /Subtype /Watermark /SheafStamp true>> BDC (wm) Tj EMC\n\
+    /Artifact <</Type /Pagination /Subtype /Watermark /SHEF_Gen (g2)>> BDC (wm) Tj EMC\n\
     0 0 1 rg";
 
-/// A header an older sheaf drew in the page's stream.
-const OLDER_HEAD: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Header /SheafStamp true>> BDC \
+/// A header another file's generator drew, merged into the page's stream.
+const MERGED_HEAD: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Header /SHEF_Gen (g1)>> BDC \
     q BT /F1 9 Tf (Head) Tj ET Q EMC";
+
+/// A header another file's generator drew after the page's content, in a
+/// stream another tool merged it into: the `Q` before it ends the `q`
+/// before the page's content.
+const MERGED_HEAD_AFTER: &[u8] = b"Q\n\
+    /Artifact <</Type/Pagination/Subtype/Header/SHEF_Gen (g1)>> BDC\n\
+    q\nBT\n0 0 0 rg\n/F1 10 Tf\n1 0 0 1 72 748.8 Tm\n(Draft) Tj\nET\nQ\nEMC\n";
 
 /// Inline image data holding ` EI `.
 const IMAGE: &[u8] = b"BI /W 6 /H 1 /BPC 8 /CS /G ID  EI EI\nEI";
 
-/// A header an older sheaf drew that opens in one stream and ends in the
-/// next, and a third stream.
+/// A header another file's generator drew that opens in one stream and
+/// ends in the next, and a third stream.
 const ACROSS: [&[u8]; 3] = [
-    b"q 0 0 1 rg /Artifact <</Subtype /Header /SheafStamp true>> BDC q BT /F1 9 Tf",
+    b"q 0 0 1 rg /Artifact <</Subtype /Header /SHEF_Gen (g1)>> BDC q BT /F1 9 Tf",
     b"(Head) Tj ET Q EMC 0 0 9 9 re f Q",
     b"0 g",
 ];
 
 /// RemoveHeaderFooter takes out what it takes and every other byte of the
 /// page stays as it was, each stream it changes a new object, written both
-/// ways: an older sheaf's header, a stream of its own after the page's,
-/// leaves the page drawing the `q` before them, its own stream and the
-/// `Q` the header's began with; on one stream, only an older sheaf's
-/// header and footer go, not another type of artifact, an author's
-/// running head or a watermark; inline image data holding ` EI ` is
-/// counted, not scanned for, and stays; and a header across two streams
-/// is taken out of both, the third as it was.
+/// ways: another file's header, in a stream after the page's, leaves the
+/// page drawing the `q` before them, its own stream and the `Q` the
+/// header's began with; on one stream, only another file's header and
+/// footer go, not another type of artifact, an author's running head or a
+/// watermark; inline image data holding ` EI ` is counted, not scanned
+/// for, and stays; and a header across two streams is taken out of both,
+/// the third as it was.
 #[test]
 fn a_removal_takes_out_what_it_takes_and_nothing_else() {
     let dir = scratch();
-    let image = [OLDER_HEAD, b"\nq 6 0 0 1 0 0 cm ", IMAGE, b" Q"].concat();
+    let image = [MERGED_HEAD, b"\nq 6 0 0 1 0 0 cm ", IMAGE, b" Q"].concat();
     let file = acrobat_file(&[
-        &[older::Q, BODY, older::HEADER],
+        &[b"q\n", BODY, MERGED_HEAD_AFTER],
         &[MIXED],
         &[&image],
         &ACROSS,
@@ -883,8 +826,8 @@ fn a_removal_takes_out_what_it_takes_and_nothing_else() {
         let c = (doc.commit_ops(vec![fx::remove_header(&all)], "remove")).unwrap();
         assert_eq!(
             c.lines[0].text,
-            "Remove the header and footer from pages 1–4 (5 made by an older sheaf; 1 the \
-             author's left in place)",
+            "Remove the header and footer from pages 1–4 (5 from other files; 1 the author's \
+             left in place)",
             "{how:?}"
         );
         let pdf = Pdf::load_mem(&how.write(&doc)).unwrap();

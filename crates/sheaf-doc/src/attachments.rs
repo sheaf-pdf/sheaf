@@ -74,7 +74,6 @@ pub fn attachments_in<P: Objects + ?Sized>(
     for (page_no, page_id) in pages.into_iter().enumerate() {
         let mut n = 0;
         let entries = page_entries(pdf, page_id);
-        let page_annots = crate::file::PageAnnots::new(entries);
         for entry in entries {
             let Some(annot) = resolve(pdf, entry).and_then(|o| o.as_dict().ok()) else {
                 continue;
@@ -89,7 +88,7 @@ pub fn attachments_in<P: Objects + ?Sized>(
             n += 1;
             // sheaf's own are listed from the document (`Mark`); one
             // another tool has edited since is that tool's.
-            if crate::file::is_ours(pdf, entry, &page_annots) {
+            if crate::file::is_ours(pdf, entry) {
                 continue;
             }
             let Some(fs) = annot

@@ -458,14 +458,12 @@ pub(crate) struct Cx<'a> {
     /// how many on each.
     pub(crate) stayed: Vec<(PageId, usize)>,
     /// The pages where recognized text sheaf wrote that a filter takes out
-    /// stays, as a splice refuses it or a legacy layer's stream has lost
-    /// its `q`.
+    /// stays, as a splice refuses it.
     pub(crate) text_stayed: Vec<PageId>,
-    /// The pages where watermarks, backgrounds, headers or footers an
-    /// older sheaf drew keep the settings a filter takes out, as their
-    /// property lists can't be written again without them, and how many on
-    /// each.
-    pub(crate) settings_kept: Vec<(PageId, usize)>,
+    /// The pages where property lists keep the private data sheaf marked
+    /// them with that a filter takes out, as they can't be written again
+    /// without it, and how many on each.
+    pub(crate) lists_kept: Vec<(PageId, usize)>,
     /// Every annotation read from a file, by the object it was read as and
     /// which copy of it it is: what a reply's `/IRT` names.
     pub(crate) by_src: HashMap<(BlobId, ObjectId, u32), AnnotId>,
@@ -527,7 +525,7 @@ impl<'a> Cx<'a> {
             unread: Vec::new(),
             stayed: Vec::new(),
             text_stayed: Vec::new(),
-            settings_kept: Vec::new(),
+            lists_kept: Vec::new(),
             by_src: HashMap::new(),
             groups: HashMap::new(),
             prior: None,
@@ -1104,26 +1102,16 @@ fn finish(mut cx: Cx, p: &dyn Progress) -> Result<Emission> {
              what else the page draws."
         )));
     }
-    if !cx.settings_kept.is_empty() {
-        let on: Vec<PageId> = cx.settings_kept.iter().map(|&(page, _)| page).collect();
+    if !cx.lists_kept.is_empty() {
+        let on: Vec<PageId> = cx.lists_kept.iter().map(|&(page, _)| page).collect();
         let pages = crate::describe::pages_text(&on, cx.st);
-        let (n, keep, it, is) = match cx.settings_kept.iter().map(|&(_, n)| n).sum::<usize>() {
-            1 => (
-                "1 watermark, background, header or footer".to_string(),
-                "keeps",
-                "it",
-                "it's",
-            ),
-            n => (
-                format!("{n} watermarks, backgrounds, headers or footers"),
-                "keep",
-                "them",
-                "they're",
-            ),
+        let (n, lists) = match cx.lists_kept.iter().map(|&(_, n)| n).sum::<usize>() {
+            1 => (1, "property list"),
+            n => (n, "property lists"),
         };
         cx.notes.push(Note(format!(
-            "{n} an older sheaf drew on {pages} {keep} the settings it kept in {it}, which \
-             can't be taken out of {it} as {is} written."
+            "sheaf's private data stays in {n} {lists} on {pages}, which can't be written \
+             again without it."
         )));
     }
     if cx.append.is_some() {
