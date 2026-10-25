@@ -13,7 +13,8 @@ scripts/fetch-ocr-data.sh        # Tesseract language data + PaddleOCR models â†
 scripts/build-plugins.sh         # the bundled plugins (plugins/) â†’ target/plugins/
 cargo run -p sheaf-app           # the GPUI window
                                  #   (debug builds don't hand files to a running
-                                 #   sheaf unless SHEAF_SINGLE_INSTANCE=1)
+                                 #   sheaf unless SHEAF_SINGLE_INSTANCE=1; with
+                                 #   none running, they become it)
 ```
 
 **Standard operations** are in the `justfile` (`cargo install just`; `just`

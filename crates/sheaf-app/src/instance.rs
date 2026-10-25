@@ -12,7 +12,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{App, Global};
-use instance_handoff::{AppId, Args, Builder, Claim, End, Exclusive, Owner, Request, Started};
+use instance_handoff::{AppId, Args, Builder, Claim, End, Owner, Request, Started};
 
 /// sheaf's app id, as its Wayland app id and desktop file have it. It names
 /// the runtime folder (`/run/user/<uid>/sheaf` on Linux), so keep it: two
@@ -28,9 +28,9 @@ const WAIT: Duration = Duration::from_secs(3);
 pub enum Mode {
     /// Become the owner, or hand our files to it.
     Join,
-    /// Hand nothing over: hold sheaf's state if nobody does, taking no other
-    /// launch's files, and otherwise run alone, writing no state. For
-    /// `--new-instance`, the dev flags and debug builds.
+    /// Hand nothing over: become the owner if nobody is, taking later
+    /// launches' files as any owner does, and otherwise run alone, writing
+    /// no state. For `--new-instance`, the dev flags and debug builds.
     Separate,
 }
 
@@ -45,26 +45,17 @@ pub fn owns_state() -> bool {
     OWNS_STATE.load(Ordering::Relaxed)
 }
 
-/// What a launch holds, decided before GPUI starts.
-enum Held {
-    /// The lock, to serve once the app can open what comes.
-    Claim(Claim<Args>),
-    /// The state, serving nobody ([`Mode::Separate`]).
-    Exclusive(Exclusive),
-}
-
-/// What this process holds for its life: the owner it serves as, or the
-/// state it holds alone. An [`Exclusive`] is released when dropped, so it
-/// lives here until the process exits.
+/// The owner this process serves as, if it is one.
 struct Instance {
     owner: Option<Owner>,
-    _state: Option<Exclusive>,
 }
 impl Global for Instance {}
 
 /// Decided before GPUI starts.
 pub struct Launch {
-    held: Option<Held>,
+    /// The lock, when this process owns, to serve once the app can open
+    /// what comes.
+    claim: Option<Claim<Args>>,
     /// Files from later launches (and, on macOS, from Finder), absolute.
     requests: UnboundedReceiver<Vec<PathBuf>>,
     pub sink: UnboundedSender<Vec<PathBuf>>,
@@ -125,16 +116,9 @@ fn alone(mode: Mode, why: impl std::fmt::Display) {
 pub fn start(mode: Mode, paths: &[PathBuf]) -> Launch {
     let (sink, requests) = unbounded();
     let b = builder();
-    let held = match mode {
+    let claim = match mode {
         Mode::Join => match b.start(&request(paths)) {
-            Started::Owner(claim) => {
-                if let Some(e) = claim.listen_error() {
-                    // Still the owner (the only state writer); launches just
-                    // can't reach us, and run alone.
-                    log::warn!("sheaf instance socket in {}: {e}", claim.dir().display());
-                }
-                Some(Held::Claim(claim))
-            }
+            Started::Owner(claim) => Some(claim),
             Started::HandedOff(owner) => {
                 if !owner.confirmed() {
                     log::warn!("the running sheaf ({owner}) didn't confirm it took the files");
@@ -146,16 +130,25 @@ pub fn start(mode: Mode, paths: &[PathBuf]) -> Launch {
                 None
             }
         },
-        Mode::Separate => match b.exclusive() {
-            Ok(state) => Some(Held::Exclusive(state)),
+        // Taking the lock is the decision: an owner already running keeps
+        // its launches, and this one runs alone.
+        Mode::Separate => match b.try_own() {
+            Ok(claim) => Some(claim),
             Err(why) => {
                 alone(mode, why);
                 None
             }
         },
     };
+    if let Some(claim) = &claim
+        && let Some(e) = claim.listen_error()
+    {
+        // Still the owner (the only state writer); launches just can't
+        // reach us, and run alone.
+        log::warn!("sheaf instance socket in {}: {e}", claim.dir().display());
+    }
     Launch {
-        held,
+        claim,
         requests,
         sink,
     }
@@ -164,25 +157,17 @@ pub fn start(mode: Mode, paths: &[PathBuf]) -> Launch {
 impl Launch {
     /// Hold the lock for the app's life and open what later launches send.
     pub fn serve(self, cx: &mut App) {
-        let (owner, state) = match self.held {
-            Some(Held::Claim(claim)) => {
-                let owner = claim
-                    .on_end(|end| {
-                        if !still_owns(end) {
-                            OWNS_STATE.store(false, Ordering::Relaxed);
-                            log::warn!("no longer sheaf's owner ({end}): keeping no settings");
-                        }
-                    })
-                    .serve(handler(self.sink.clone()));
-                (Some(owner), None)
-            }
-            Some(Held::Exclusive(state)) => (None, Some(state)),
-            None => (None, None),
-        };
-        cx.set_global(Instance {
-            owner,
-            _state: state,
+        let owner = self.claim.map(|claim| {
+            claim
+                .on_end(|end| {
+                    if !still_owns(end) {
+                        OWNS_STATE.store(false, Ordering::Relaxed);
+                        log::warn!("no longer sheaf's owner ({end}): keeping no settings");
+                    }
+                })
+                .serve(handler(self.sink.clone()))
         });
+        cx.set_global(Instance { owner });
         let mut requests = self.requests;
         cx.spawn(async move |cx| {
             while let Some(paths) = requests.next().await {
@@ -196,10 +181,7 @@ impl Launch {
 /// Quit: tell later launches to wait for the lock rather than hand files
 /// to a process on its way out, and write the state's last changes.
 pub fn quit(cx: &mut App) {
-    if let Some(Instance {
-        owner: Some(owner), ..
-    }) = cx.try_global::<Instance>()
-    {
+    if let Some(Instance { owner: Some(owner) }) = cx.try_global::<Instance>() {
         owner.stop();
     }
     crate::state::flush(cx);

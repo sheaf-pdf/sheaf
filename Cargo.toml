@@ -82,7 +82,7 @@ in-progress = "0.1"
 # the running sheaf. sheaf's own crate, published as
 # sheaf-pdf/instance-handoff. Pinned exactly, as its README asks: until
 # 0.1.0 a later alpha may change the API and what two builds share.
-instance-handoff = "=0.1.0-alpha.1"
+instance-handoff = "=0.1.0-alpha.2"
 
 # Zed's workspace patches for crates GPUI uses, mirrored from the
 # [patch.crates-io] of Zed's Cargo.toml at the snapshot's rev.
