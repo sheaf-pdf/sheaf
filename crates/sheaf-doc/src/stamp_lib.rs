@@ -504,8 +504,12 @@ fn shown_matrix(geom: &Geom) -> Affine {
 /// Pages `pages` of `src`, each by its index, as Form XObjects in `dst`
 /// ([`PageForm`]): each page's streams as one, as a viewer draws them, and
 /// its resources (its own, or what it inherits) copied over, what the
-/// pages share, fonts and images, once. Nothing else of a page is copied:
-/// not its annotations, nor what points back at its document.
+/// pages share, fonts and images, once. A page with none makes a form
+/// whose `/Resources` is empty: PDF 2.0 requires a form's (the Arlington
+/// model's `XObjectFormType1`), and a reader before it may draw a form
+/// without them with the resources of the page it's on (ISO 32000-1
+/// 7.8.3). Nothing else of a page is copied: not its annotations, nor
+/// what points back at its document.
 pub fn page_forms(src: &Src, pages: &[u32], dst: &mut Pdf) -> Result<Vec<PageForm>> {
     let mut map = HashMap::new();
     let mut out = Vec::with_capacity(pages.len());
@@ -539,9 +543,10 @@ pub fn page_forms(src: &Src, pages: &[u32], dst: &mut Pdf) -> Result<Vec<PageFor
             let Affine { a, b, c, d, e, f } = matrix;
             form.set("Matrix", [a, b, c, d, e, f].map(Object::from).to_vec());
         }
-        if let Some(r) = resources {
-            form.set("Resources", r);
-        }
+        form.set(
+            "Resources",
+            resources.unwrap_or_else(|| Dictionary::new().into()),
+        );
         let form = Stream::new(form, content.into_bytes());
         out.push(PageForm {
             id: dst.add_object(compressed(form)),
@@ -689,6 +694,29 @@ mod tests {
         let form = page_form(&alone, &mut Pdf::with_version("1.5")).unwrap();
         let shown = form.geom.shown();
         assert_eq!((shown.width, shown.height), (size.width, size.height));
+    }
+
+    /// A page with no resources becomes a form whose `/Resources` is
+    /// empty, never one without: what it draws uses none, and not the
+    /// page's it's placed on.
+    #[test]
+    fn a_page_with_no_resources_is_a_form_with_none() {
+        let mut pdf = Pdf::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let content = pdf.add_object(Stream::new(dictionary! {}, b"0 0 10 10 re f".to_vec()));
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
+        });
+        let bytes = finish(&mut pdf, pages_id, vec![page], None, Vec::new()).unwrap();
+        let stamp = crate::forms::fixture::source(bytes);
+        let mut dst = Pdf::with_version("1.5");
+        let form = page_form(&stamp, &mut dst).unwrap();
+        let dict = &dst.get_object(form.id).unwrap().as_stream().unwrap().dict;
+        assert_eq!(
+            dict.get(b"Resources").unwrap(),
+            &Object::Dictionary(Dictionary::new())
+        );
     }
 
     /// A page cropped off the origin and turned a quarter becomes a form

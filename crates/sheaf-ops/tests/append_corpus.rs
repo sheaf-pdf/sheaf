@@ -73,7 +73,6 @@ use sheaf_doc::effects::{Flags, judge};
 use sheaf_doc::forms::Report;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::sigs::Verdict;
-use sheaf_doc::geom::Geom;
 use sheaf_doc::materialize::{
     Ask, AskAnswers, How, Note, Onto, SaveHow, SaveStop, Strategy, StrategyKind, Why,
     forced_append, materialize, plan, removal, save_rewritten, save_with, write_file,
@@ -85,12 +84,12 @@ use sheaf_doc::tx::fixture::{
     move_pages, remove_header, remove_watermark, set_header, set_watermark, update,
     watermark as fx_watermark,
 };
-use sheaf_doc::{
-    Actor, Annot, AnnotId, AnnotKind, Box2, CommitOpts, Document, EditError, OcrWord, PageId, Pt,
-};
-use sheaf_edit::{BatesSpec, HeaderFooterSpec, Margins, Op, PageRef, Rotation, Z};
+use sheaf_doc::{Actor, Annot, AnnotId, AnnotKind, CommitOpts, Document, EditError, PageId};
+use sheaf_edit::{Margins, Op, PageRef, Z};
 
 mod common;
+
+use common::{BATES, HEADER, corpus_header, note, word_on};
 
 /// A directory of its own for `test`'s copies, empty.
 fn scratch(test: &str) -> PathBuf {
@@ -121,28 +120,6 @@ fn remove(path: &Path) {
 /// open without a password.
 fn opened(path: &Path) -> Option<Document> {
     sheaf_doc::open::file(path, None).ok().map(|o| o.doc)
-}
-
-/// A note saying `text`.
-fn note(text: &str) -> Annot {
-    Annot {
-        id: AnnotId(0),
-        kind: AnnotKind::Note {
-            pos: Pt { x: 72.0, y: 72.0 },
-        },
-        color: [255, 230, 0],
-        opacity: 1.0,
-        stroke: 1.0,
-        author: "sheaf".into(),
-        contents: text.into(),
-        modified: String::new(),
-        created: String::new(),
-        fill: None,
-        dashed: false,
-        cloudy: false,
-        turn: Rotation::R0,
-        name: String::new(),
-    }
 }
 
 /// What a save's reasons are, by kind: each's name.
@@ -677,31 +654,10 @@ fn watermark_round_trips() {
 /// by hand. Unset, it takes every file.
 const HEADER_ONLY: &str = "SHEAF_HEADER_ONLY";
 
-/// The text at the left of the header every file takes, and its Bates
-/// numbers' prefix.
-const HEADER: &str = "SHEAF-CORPUS-HEADER";
-const BATES: &str = "SHEAFBATES";
-
 /// The others whose headers and footers a header and footer of sheaf's
 /// replaces: Acrobat and an older sheaf (§11.4). A corpus file has none
 /// of sheaf's own.
 const REPLACED: [PagOrigin; 2] = [PagOrigin::Acrobat, PagOrigin::SheafLegacy];
-
-/// The header and footer every file takes: [`HEADER`] at the header's
-/// left, "Page <<1>> of <<N>>" at the footer's center, and its Bates
-/// number, six digits after [`BATES`] from 1, at its right.
-fn corpus_header() -> HeaderFooterSpec {
-    let mut spec = fx_header(HEADER);
-    spec.texts[4] = "Page <<1>> of <<N>>".into();
-    spec.texts[5] = "<<bates>>".into();
-    spec.bates = Some(BatesSpec {
-        prefix: BATES.into(),
-        suffix: String::new(),
-        digits: 6,
-        start: 1,
-    });
-    spec
-}
 
 /// What a header and footer's round trips through a copy of a file came
 /// to, each way's together.
@@ -1033,23 +989,6 @@ impl Took {
     /// Which pages took text, in order.
     fn pages(&self) -> Vec<bool> {
         self.words.iter().map(Option::is_some).collect()
-    }
-}
-
-/// `text` as an engine reads it on a page shown as `geom` shows it: one
-/// word, in the view frame's points, across the page a quarter of the way
-/// down.
-fn word_on(geom: &Geom, text: &str) -> OcrWord {
-    let shown = geom.shown();
-    OcrWord {
-        text: text.into(),
-        rect: Box2 {
-            x: shown.width * 0.1,
-            y: shown.height * 0.25,
-            w: shown.width * 0.6,
-            h: shown.height * 0.02,
-        },
-        confidence: 1.0,
     }
 }
 

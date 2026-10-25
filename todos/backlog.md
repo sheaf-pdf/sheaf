@@ -642,6 +642,137 @@ phase; they're triaged between phases.
   `u64` version in clean.rs too, or check each call's image size. The
   bug is upstream's: worth an issue or a PR to imageproc.
 
+### B40: The Arlington model gives AnnotSquare `/CA` from PDF 2.0
+
+- **Found:** 2026-10-24, the Arlington checks (F22)
+- **Where:** upstream's `tsv/latest/AnnotSquare.tsv`
+  (vendor/arlington-pdf-model); its `tsv/1.7` AnnotSquare has no CA
+- **Severity:** annoyance (an error in the model)
+- **What happens:** a Square mark's `/CA` in a file below 2.0 is a
+  `too-new` finding.
+- **Expected:** `/CA` from 1.4. ISO 32000-1 Table 170 gives every markup
+  annotation `/CA` from 1.4, Table 169 makes Square one, and AnnotCircle,
+  Square's twin in Table 177, has it from 1.4.
+- **Repro:** `every_mark_kind_holds` without the allowance row
+- **Notes:** held by `AnnotSquare CA too-new` in
+  `crates/sheaf-ops/tests/arlington_allowed.tsv`. Worth reporting to
+  pdf-association/arlington-pdf-model, with B45; a public report, so
+  Greg approves it first.
+
+### B41: A connector is a Link annotation with every mark's keys
+
+- **Found:** 2026-10-24, the Arlington checks (F22)
+- **Where:** the connector's emission (`emit/annots.rs`)
+- **Severity:** wrong output (minor)
+- **What happens:** a connector is written as a Link annotation with the
+  keys every mark has. `/CA` is a Link key only from PDF 2.0
+  (ISO 32000-2 Table 166); `/T` and `/CreationDate` aren't Link keys.
+- **Expected:** a Link holds only Link keys, or the connector is another
+  kind of annotation.
+- **Repro:** `every_mark_kind_holds` without the allowance rows
+- **Notes:** sheaf reads a connector's opacity back from `/CA`, and
+  `/SheafAnnot`'s staleness digest covers the standard keys, so changing
+  it is a design question. Held by `AnnotLink CA too-new` and
+  `AnnotLink T` / `CreationDate` `unlisted`.
+
+### B42: sheaf's marks never raise the file's PDF version
+
+- **Found:** 2026-10-24, the Arlington checks (F22)
+- **Where:** `Emission::needs` (marks have none), the planner
+- **Severity:** wrong output
+- **What happens:** marks write keys newer than the file's version:
+  1.4 (`/NM`, `/CA`, the appearance's ExtGState `ca`/`CA`/`BM`), 1.5
+  (`/CreationDate`, Square and Circle `/RD` and `/BE`, Caret, Polygon,
+  PolyLine, `/IRT`, `/State`), 1.6 (`/RT`, `/IT`, `/CL`) and 1.7
+  (FreeText `/RD`, `/BS`, `/LE`, pdf-issues #592; FileSpecification
+  `/UF`; `/Measure`).
+- **Expected:** the save raises the version, except where that would
+  give up signatures (below).
+- **Repro:** `a_pdf_1_3_file_holds`; 1,244 findings in the corpus tier
+- **Notes:** a raise writes the catalog (M10.5 §11.7), which no
+  signature allows (§9.3). F22's step 5 tried it (a per-kind
+  `mark_needs` in `emit/annots.rs`, `cx.needs` in `Page::mark`,
+  `needs_after` over the marks) and it broke sheaf-cli's
+  `a_signed_file_appended_keeps_its_signatures` (corpus 0000581, a signed
+  1.4 file). **Ruling (Greg, 2026-10-24):** keep §9.3's promise. Marks
+  raise the version only when the save has no signatures to keep, and
+  signed files keep the allowance; revisit with the rest of M11. The
+  conditional raise is its own PR (gated paths), with a signed-file case
+  so the allowance row stays used. Held by `AnnotText CreationDate
+  too-new`.
+
+### B43: The standard 14 fonts are written as `/BaseFont` alone
+
+- **Found:** 2026-10-24, the Arlington checks (F22)
+- **Where:** the font resources of headers, watermarks and mark
+  appearances
+- **Severity:** wrong output, in PDF 2.0 files
+- **What happens:** a standard 14 font has no `/FirstChar`, `/LastChar`,
+  `/Widths` or `/FontDescriptor`.
+- **Expected:** PDF 2.0 asks every simple font for all four
+  (ISO 32000-2 Table 109); before 2.0 they're optional for the
+  standard 14 only.
+- **Repro:** `a_pdf_2_0_file_holds`; corpus 0048641, 0113565, 0203319
+- **Notes:** writing them (always, or in 2.0 files) changes every font
+  resource sheaf writes, so it's its own PR with `just gates`. sheaf has
+  the AFM metrics. Held by four `FontType1 … missing` rows that apply
+  from 2.0.
+
+### B44: An Append's new objects can take numbers the file refers to but doesn't have
+
+- **Found:** 2026-10-24, the Arlington checks (F22)
+- **Where:** an Append's numbering from `/Size`
+- **Severity:** wrong output
+- **What happens:** corpus 0117296's signature widgets have
+  `/P 174 0 R`, an object the file doesn't have (`/Size 174`). The note an
+  Append adds becomes object 174, so the widgets' `/P` names the note.
+- **Expected:** new objects take numbers nothing in the file refers to.
+- **Repro:** `just tier-arlington` on `forms/safedocs/0117296.pdf`
+  without the allowance rows
+- **Notes:** fixing it means knowing every reference in the file (the
+  7k gate path). Also check whether a stable-numbering Rewrite can do the
+  same. Held by 19 rows scoped to 0117296.
+
+### B45: Arlington requires `/DA` on button fields
+
+- **Found:** 2026-10-24, the Arlington checks (F22)
+- **Where:** the model's FieldBtn* tables
+- **Severity:** annoyance (a question for the model)
+- **What happens:** a radio field that a save writes apart from its
+  widget (BaseObjectsMissing), where neither the field nor the form has
+  `/DA`, is a `missing` finding (0976876).
+- **Expected:** ISO 32000-2 Table 228 asks `/DA` only of variable-text
+  fields.
+- **Repro:** `just tier-arlington` on `forms/safedocs/0976876.pdf`
+  without the allowance row
+- **Notes:** could go upstream with B40. Held by a row scoped to
+  0976876.
+
+### B46: The Arlington carried rule matches a merged object's finding against every object of the sources
+
+- **Found:** 2026-10-24, the Arlington checks' review (F22)
+- **Where:** `Report::beyond` (`crates/sheaf-doc/src/arlington/check.rs`)
+- **Severity:** a gap in a test-only check
+- **What happens:** a finding in an object sheaf merged over a source's
+  dictionary is carried when any object of a source has a like one (the
+  same table, key, rule and value, numbers aside; a `missing` finding's
+  value is always "absent", and `too-new` compares none), not only the
+  object it was emitted over. A page that loses its `/MediaBox` or
+  `/Resources` in a save is missed when some page of the source lacks one
+  too.
+- **Expected:** carried only from the source object the merged one was
+  emitted over.
+- **Repro:** `a_merged_objects_finding_is_carried_from_any_object_of_a_source`
+  pins the gap and flips with the fix.
+- **Notes:** Built objects are never carried, so sheaf's own writers
+  aren't affected; the corpus tier carried 18,670 findings (4,539
+  `missing`). Fix: record each merged object's source object
+  (`Hold::written` has each key: a page's, field's or widget's source,
+  the primary's root objects, the same number in an Append), carry only
+  from its findings, and triage what the tier then finds. `PageRes`,
+  `Filtered` and `PagesNode` keys need their source worked out from their
+  page.
+
 ## Features
 
 ### F1: Basic calculator
@@ -1284,28 +1415,6 @@ phase; they're triaged between phases.
   license is unverified. `scripts/fetch-ocr-data.sh` would fetch the new
   files. [build-or-adopt.md](build-or-adopt.md), entry 13.
 
-### F22: Check what sheaf writes against the Arlington PDF Model
-
-- **Found:** 2026-10-23, the build-or-adopt audit
-- **What:** a test-only checker that reads the Arlington PDF Model's TSV
-  files
-  ([pdf-association/arlington-pdf-model](https://github.com/pdf-association/arlington-pdf-model),
-  Apache-2.0) and checks every object sheaf builds: annotations,
-  appearance streams' resource dictionaries, form fields, the catalog
-  and trailer keys it writes, and later StructElems and output intents.
-  It checks keys, types, required entries and version predicates. Run it
-  over the emission in the existing save tiers.
-- **Why:** PDF interoperability is required, and viewers are lenient, so
-  a malformed key can pass PDFium and pdf.js and still fail Acrobat or a
-  validator. krilla runs Arlington in CI for the same reason.
-- **Overlap:** F9 (`conformance/`); M14 PDF/A; M17 PDF/UA; the interop
-  tests with qpdf and pdf.js.
-- **Notes:** no Rust implementation exists; TestGrammar (C++) and
-  veraPDF's Arlington service do. The TSVs are data: vendor a pinned
-  copy under the test fixtures with its license, or read them from
-  `../pdf-corpus/tools`. Start with the objects sheaf creates, not every
-  object it copies. [build-or-adopt.md](build-or-adopt.md), entry 94.
-
 ### F23: hayro-syntax as a second reader in the lazy-reader corpus test
 
 - **Found:** 2026-10-23, the build-or-adopt audit
@@ -1324,6 +1433,26 @@ phase; they're triaged between phases.
   It needs whole-file bytes (an mmap works). Its repair differs from
   PDFium's, so expect a triage list. Decide at F13's triage, not
   mid-milestone. [build-or-adopt.md](build-or-adopt.md), entry 1.
+
+### F24: sheaf's private names as second- or third-class names
+
+- **Found:** 2026-10-24, the Arlington checks (F22)
+- **What:** rename the keys `/SheafAnnot` (a mark), `/SheafBlock` (a
+  block's stream) and `/SheafGenerators` (the catalog), and the
+  marked-content names `/SheafGen` and `/SheafOcrBlock`
+  (`private::KEYS`), to a registered second-class prefix (e.g.
+  `SHEF_Annot`) or third-class `XX` names, or move the page and form data
+  under `/PieceInfo`, the spec's place for an application's private data.
+  Or keep them.
+- **Why:** ISO 32000-2 Annex E keeps first-class names for the spec. A
+  validator could flag them, or a future spec key could collide.
+  Arlington counts them as unlisted "other"; the checker exempts them by
+  name from the `unlisted` rule, and a renamed set would need no
+  exemption.
+- **Overlap:** M10.5's private data (`private.rs`); the sidecar format
+- **Notes:** pre-alpha, so a rename has no compatibility cost (clean over
+  compat). A decision for Greg. Registering a prefix is with the PDF
+  Association's registry.
 
 ## Closed
 
@@ -1700,6 +1829,65 @@ phase; they're triaged between phases.
 - **Repro:** Create from Scans in the app.
 - **Notes:** M5's scanner intake (ROADMAP) reworks this path; do it
   there.
+
+### F22: Check what sheaf writes against the Arlington PDF Model
+
+- **Closed:** 2026-10-24. Done in the Arlington checks PR: the model's
+  `tsv/latest` at `d148fee` (2026-10-21) is vendored in
+  `vendor/arlington-pdf-model` with its LICENSE, NOTICE.txt and a
+  SOURCE.md, and read by the test-only `sheaf_doc::arlington` (behind
+  `fixtures`): the TSVs; their predicates, 19 functions implemented
+  (4,515 of the model's 4,729 calls), `fn:Deprecated` marking what it
+  wraps and still allowing it, any other counted as a check not made;
+  and a walk from the trailer as written that follows the Link column,
+  each object's table chosen by TestGrammar's scoring (ported,
+  Apache-2.0). Its rules: types, required entries (inherited ones too),
+  too new for the file's version, deprecated, allowed values, direct and
+  indirect, SpecialCase, unresolved, unreached, malformed trees, and in
+  an object sheaf built whole, a key the model doesn't list that's no
+  second- or third-class name nor sheaf's private key; every unlisted key
+  is counted by its kind of name. `Hold::written` holds only what a save
+  or export wrote (the objects an Append's cross-reference section lists,
+  read or not; the objects a Rewrite derived; never a copy of a file's),
+  each built whole or merged by its key; `Report::beyond` carries a
+  finding in a merged object that the file read has too, in any of its
+  objects (per object is B46), and
+  `crates/sheaf-ops/tests/arlington_allowed.tsv` holds the rest for a
+  backlog entry (B40–B45), by file and by version. Tests: sheaf-doc's
+  `arlington::` units (54, each rule fault-checked);
+  `crates/sheaf-ops/tests/arlington.rs`'s 38 default tests, every
+  save-side writer both ways (`every_mark_kind_holds` to
+  `a_pdf_2_0_file_holds`), the exports, Combine, the summary, images, a
+  scan and the stamps, and the allowances (each `*` row needed, each
+  entry open, B43 only from 2.0); and
+  `what_sheaf_writes_on_every_form_holds_to_arlington` (`just
+  tier-arlington`, in `premerge`): 4,389 of 4,392 forms (3 don't open),
+  2,062,906 objects as 127 tables, 11,345,111 keys, 150,604 checks not
+  made, 18,670 findings carried from the forms, 1,289 allowed, none
+  left, in a minute; its form and save counts are asserted. Two writer
+  fixes: a form `stamp_lib::page_forms` makes of a page without
+  resources gets an empty `/Resources` (library stamps, page stamps,
+  page watermarks and the summary's page pictures), and a file of no
+  pages has no content stream.
+- **Found:** 2026-10-23, the build-or-adopt audit
+- **What:** a test-only checker that reads the Arlington PDF Model's TSV
+  files
+  ([pdf-association/arlington-pdf-model](https://github.com/pdf-association/arlington-pdf-model),
+  Apache-2.0) and checks every object sheaf builds: annotations,
+  appearance streams' resource dictionaries, form fields, the catalog
+  and trailer keys it writes, and later StructElems and output intents.
+  It checks keys, types, required entries and version predicates. Run it
+  over the emission in the existing save tiers.
+- **Why:** PDF interoperability is required, and viewers are lenient, so
+  a malformed key can pass PDFium and pdf.js and still fail Acrobat or a
+  validator. krilla runs Arlington in CI for the same reason.
+- **Overlap:** F9 (`conformance/`); M14 PDF/A; M17 PDF/UA; the interop
+  tests with qpdf and pdf.js.
+- **Notes:** no Rust implementation exists; TestGrammar (C++) and
+  veraPDF's Arlington service do. The TSVs are data: vendor a pinned
+  copy under the test fixtures with its license, or read them from
+  `../pdf-corpus/tools`. Start with the objects sheaf creates, not every
+  object it copies. [build-or-adopt.md](build-or-adopt.md), entry 94.
 
 ## Sources checked
 

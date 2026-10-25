@@ -34,6 +34,16 @@ Rules for an oracle:
 | **pyHanko** | Signature integrity: what a signature covers and whether its digest holds | 0.37.0 | Offline, through `uv` in `../pdf-corpus/tools/inventory.py`, which writes the `signatures/` manifest. MIT | `forms::sigs::integrity`'s tier `the_corpus_s_signatures_agree_with_pyhanko` (B5) |
 | **pikepdf, pypdf** | The corpus inventories' structure facts | pikepdf 10.17.0 | Offline, through `uv` in the corpus tools. MPL-2.0, BSD-3 | `../pdf-corpus` manifests |
 | **Acrobat** | What users see; Preflight | Current | By hand | Hand checks in slice notes; `docs/prior-art/acrobat.md` |
+| **The Arlington PDF Model** | The objects sheaf writes, against ISO 32000-2's grammar: each key's types, required entries (inherited ones too), the version a key, type or value came in, deprecations, allowed values, direct and indirect references. Never the files sheaf reads, most of which break a rule somewhere | PDF Association's `d148fee` (2026-10-21), `tsv/latest`, vendored in `vendor/arlington-pdf-model` (backlog F22) | In process, test-only: `sheaf_doc::arlington`, behind `fixtures`, reads the TSVs and walks a written file from its trailer as TestGrammar does. A predicate it doesn't implement is counted as a check not made, never guessed. It holds only what a save or export wrote; a finding in an object sheaf merged over a file's dictionary that the file has too, in any of its objects, is carried (per object is backlog B46). A key the model doesn't list fails only in an object sheaf built whole, when it's no second- or third-class name nor sheaf's private key. Anything else fails unless `crates/sheaf-ops/tests/arlington_allowed.tsv` holds it for a backlog entry, by file and PDF version; each of its rows must be needed, and name an open entry. Apache-2.0 data | `crates/sheaf-ops/tests/arlington.rs`: every writer on documents built in code, each save both ways; `just tier-arlington` over every corpus form, in `premerge`, its counts of forms and saves asserted |
+
+The Arlington reader is new code, so it is held to the model's own cells
+and to TestGrammar's behavior (Apache-2.0, studied and ported with
+attribution) by its unit tests. Like TestGrammar, it checks an object as
+the table it fits best, so tables that differ only in what's absent
+can't be told apart: a button field without `/Ff` fits every button table
+and is checked as a push button (the model gives `/Ff` no default; ISO
+32000-1's 0 makes it a check box). Where the model and the spec differ,
+the spec decides, and the allowance says so.
 
 ## Adopting next
 
@@ -43,7 +53,6 @@ there.
 
 | Oracle | Would check | License, how |
 |---|---|---|
-| **The Arlington PDF Model** (backlog F22) | Every object sheaf writes, against the spec's grammar: keys, types, required entries, the versions they belong to. Held to the objects in sheaf's own outputs (round trips, fixtures), not to the corpus's files, most of which break a rule somewhere | Apache-2.0 data (TSV), read by a test-only checker |
 | **poppler** (`pdftoppm`, `pdftotext`) and **MuPDF** (`mutool draw`, `mutool show`) in `interop.rs` | That sheaf's output opens and renders without errors in two more viewer families: Linux desktops (Evince, Okular) and MuPDF-based viewers | GPL and AGPL, separate processes; `poppler-utils`, `mupdf-tools`. Linux |
 | **libtiff** (`tiffinfo`, `tiffcp`) | sheaf's CCITT G4 output decoded independently: TIFF export, and G4 images in PDFs (it would have caught B24) | libtiff licence (BSD-style), separate process; `libtiff-tools` |
 | **veraPDF**, on a Java runtime | That sheaf's saves of a file that passes PDF/A or PDF/UA still pass, or say why (proposal 39's Note); the `conformance/` tier (backlog F9). The same runtime serves EU DSS at M12 | GPLv3+ or MPLv2+, separate process; `default-jre-headless` |
