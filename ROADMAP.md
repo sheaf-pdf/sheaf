@@ -8,8 +8,13 @@ tools. Adobe's cloud features (shared review, Send for Signature, Document
 Cloud storage) are not included; see [Not planned](#not-planned).
 
 Ordering principle: among milestones whose dependencies are met, the next
-thing a tax/audit preparer would otherwise open Acrobat for comes first. The hardest engine work (in-place content editing)
-comes late, once the object-layer groundwork from earlier milestones exists.
+thing a tax/audit preparer would otherwise open Acrobat for comes first.
+The hardest engine work (in-place content editing) comes late, once the
+object-layer groundwork from earlier milestones exists. Between
+milestones, work with a wide reach can go first (Greg, 2026-10-23):
+capability or speed that much of sheaf uses, or work that can be
+published as a library of its own. See
+[Between milestones](#between-milestones) and [Libraries](#libraries).
 
 The README [feature tables](README.md#features) remain the authoritative
 per-feature status. This file groups and orders the 📋 and ❓ items from them.
@@ -29,15 +34,15 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 | M7 | **Viewing & output**: page modes, split view, panels, print, image/TIFF/text export | Viewing and printing never need Acrobat | Done | — |
 | M8 | **Page tools**: split, insert/replace, crop, labels, headers/footers, Bates, watermarks | Binder assembly is complete | Done | — |
 | M9 | **Markup completion**: mark editing, remaining annotation types, custom stamps, replies and status, PDFlyer stamps/connectors/tape, FDF/XFDF, measurement | Review workflow parity | Done | — |
-| M10 | **Forms**: fill, calculate, create, import/export, flatten | Tax forms are filled and calculated in sheaf | Paused after slice 5; resumes next, after between-milestones work: the move to instance-handoff, a bug-fix PR and the content interpreter | Nothing unbuilt (it waited, by a ruling, for all of M10.5: done) |
+| M10 | **Forms**: fill, calculate, create, import/export, flatten | Tax forms are filled and calculated in sheaf | Paused after slice 5; slices 6–17 resume after the [between-milestones work](#between-milestones): object streams and B3, the linearization crate, F15, `sheaf search`, and roles and labels on sheaf-ui's widgets | Nothing unbuilt (it waited, by a ruling, for all of M10.5: done) |
 | M10.5 | **The edit API**: page content in the model, one op vocabulary over one primitive, saves as outputs, one emitter for screen and file | M11–M15 edit content without reworking the core | Done | — |
-| M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | Planned | M10 slice 15, for flattening in Remove Hidden Information; M10 slices 23–26 if sanitize removes field scripts rather than whole fields (open) |
-| M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | Sketched | M10 slices 23–26 if signing creates new signature fields (open) |
+| M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | Planned; after M10 slices 6–17 and Fill & Sign (2026-10-23) | M10 slice 15, for flattening in Remove Hidden Information; M10 slices 23–26 if sanitize removes field scripts rather than whole fields (open) |
+| M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | Sketched. Fill & Sign (slice 1) comes right after M10 slices 6–17, ahead of the rest (2026-10-23) | M10 slices 23–26 if signing creates new signature fields (open) |
 | M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | Sketched | M11 (image editing) |
 | M14 | **Document processing**: compare, optimize, PDF/A | Archival and output parity | Sketched | Nothing unbuilt |
 | M15 | **Automation**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | Sketched; CLI groundwork shipped | Batch: each step's milestone (M10's `sheaf form` for fill and flatten, M11 for redact by pattern, M14 for optimize). Parity audit and stabilization: last, after everything else |
 | M16 | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from any combination of ops, with approval | Agents work on documents through sheaf's own ops | Sketched | Nothing unbuilt |
-| M17 | **Accessibility**: sheaf itself usable with a screen reader and the keyboard; PDF/UA documents: tags, validation, a review view | People who use assistive technology can use sheaf and read what it writes | Sketched | The app: nothing unbuilt. Documents: M14's PDF/A validator, if PDF/UA's rules share it (open) |
+| M17 | **Accessibility**: sheaf itself usable with a screen reader and the keyboard; PDF/UA documents: tags, validation, a review view | People who use assistive technology can use sheaf and read what it writes | Sketched; its first slice (roles and labels on sheaf-ui's widgets) is between-milestones work (2026-10-23) | The app: nothing unbuilt. Documents: M14's PDF/A validator, if PDF/UA's rules share it (open) |
 
 **Depends on** lists the unbuilt work a milestone needs first, or the part
 of it named after "for": it uses that work's code, types or
@@ -49,11 +54,12 @@ pre-release, so dependencies decide the order.
 
 The work that's left, by dependency. Arrows run from a milestone to the
 work it unblocks: solid arrows are needed, dotted ones are soft, open or
-"comes last".
+a ruling on order ("comes first", "comes last").
 
 ```mermaid
 graph LR
   fin["Done: M5 except two slices, M6–M9, M10 slices 1–5, M10.5, the content interpreter (M11 slice 3)"]
+  Btw["Between milestones: object streams and B3, the linearization crate, F15, sheaf search, widget roles"]
   M5r["M5: separator sheets, scanners (deferred)"]
   M10a["M10 slices 6–17: appearances, filling, flatten, form data"]
   M10b["M10 slices 18–29: calculation, Prepare Form, detection, plugin API"]
@@ -69,6 +75,8 @@ graph LR
   Panel["Agent panel (Pending)"]
 
   fin --> M10a --> M10b
+  fin --> Btw
+  Btw -.->|"comes first (ruling)"| M10a
   fin --> M5r
   fin --> M11
   M10a -->|"slice 15: flatten fields"| M11
@@ -101,6 +109,95 @@ Each milestone is broken into slices when it starts, as M1–M4 were. Slices
 below are a first cut.
 
 ---
+
+### Between milestones
+
+Ordered by reach, not milestone (Greg, 2026-10-23). These come first,
+in this order:
+
+1. ~~**The content interpreter:** M11's slice, pulled forward~~: done
+   (#50).
+2. **Object streams, and B3.** A Rewrite writes no object streams
+   today: it re-serializes each member as a plain object (M10.5 §11.6).
+   - **What it costs.** Measured with qpdf on the corpus (2026-10-23),
+     unpacking object streams grows the IRS forms by a median 88% (all
+     70 use them; fw4.pdf by 178%) and a sample of 377 safedocs files by
+     15%. Every Save As to a new unsigned file pays it, and so does
+     every save that removes content or replaces text, and every export.
+     First, the same measurement through sheaf's own Rewrite.
+   - **Packing on Rewrite** in `serialize/`, with ISO 32000-1 7.5.7's
+     exclusions and each container encrypted once (the M10.5 plan's
+     §20; [build-or-adopt](todos/build-or-adopt.md) entry 66).
+   - **Grouped by the pages that use them,** so the linearization crate
+     reuses the grouping: page 1's objects never share a container with
+     later pages'.
+   - **B3:** Properties says whether Fast Web View still holds after an
+     incremental save.
+3. **The linearization crate** (Fast Web View, moved from M14): page 1's
+   objects first, a linearization dictionary and hint tables, so a
+   viewer reading byte ranges over a network shows page 1 before the
+   rest arrives.
+   - **Why a crate.** No Rust crate writes linearized files. lopdf
+     0.46's `SaveOptions.linearize` is a flag that nothing acts on, and
+     outside Rust, qpdf (C++) is the usual tool (build-or-adopt entry
+     67). It's published as in-progress and instance-handoff were; see
+     [Libraries](#libraries).
+   - **Independent of any object model,** sheaf's or lopdf's, in three
+     steps:
+     - **Plan:** the caller describes the graph (each object's id, what
+       it refers to, which pages use it); the crate returns the order,
+       the new object numbers and the object-stream groups.
+     - **Serialize:** the caller writes each object with those numbers.
+     - **Assemble:** the crate writes the linearization dictionary
+       (padded to a fixed width, so the offsets settle in one more
+       pass), the hint tables and the first page's cross-reference
+       section.
+   - **A checker** says whether a file is linearized and still holds.
+     It is B3's check, and a test oracle beside qpdf's.
+   - **Written from ISO 32000-1 Annex F,** with qpdf (Apache-2.0) as
+     the reference and the oracle, not translated, so the crate stays
+     MIT OR Apache-2.0 with no notices for code taken from qpdf.
+   - **A lopdf adapter** could fill lopdf's empty flag upstream.
+   - **In sheaf, a writer option beside object streams,** used by a
+     full rewrite to a new file: a "Fast Web View" choice in Save As,
+     `--linearize` on `sheaf edit -o`, and later M14's Optimize.
+   - **Not an edit and not a transform plugin.** Any later byte change,
+     an incremental save included, voids it, so it can't live in the
+     document. sheaf's own writer already has the object graph and each
+     page's objects. A bytes-in, bytes-out plugin would have to parse and
+     write the whole file again.
+   - **No "keep it linearized" preference:** that would make every save
+     of such a file a full rewrite, which breaks signatures and gives up
+     the incremental save.
+   - **Signed files** get the usual ask, since a rewrite breaks their
+     signatures.
+   - **Checked** with `qpdf --check-linearization`. Perhaps also with
+     PDFium's availability API (`FPDFAvail_*`): page 1 renders from the
+     file's first part alone. Whether pdfium-render binds it is
+     unverified.
+4. **F15: a Rewrite that doesn't load the whole file.** Every Rewrite
+   of a large file pays for the eager load (Export Flattened peaks at
+   513 MB on the heavy 7k file), and it's the same Rewrite path as 2
+   and 3.
+5. **`sheaf search`** over files and folders: the CLI half of
+   [Search across files](#search-across-files) (Pending). It's small:
+   each file opens as a `Session` and runs `Text::search`.
+6. **Roles and labels on sheaf-ui's widgets:** M17's first slice,
+   pulled forward. Every dialog built after it inherits them, and every
+   dialog built before it has to be retrofitted; M10 and M11 add many.
+   The rest of M17's app half stays in M17.
+
+After these, in order (2026-10-23):
+1. **M10 slices 6–17:** appearances, filling, flatten, form data.
+2. **Fill & Sign,** M12's slice 1, ahead of the rest of M12
+   ([M12](#m12-signatures) says why).
+3. **M11,** security and redaction. It needs M10's flatten (slice 15), and it
+   has the most preparer value left.
+4. Then M16, M10 slices 18–29 and the rest, in an order still open.
+
+PDF/A conversion (M14) and tagging PDF/UA documents (M17) waited on the
+content interpreter, which landed in #50. PAdES signing (M12) is
+deferred until RustCrypto's cms 0.3 round (build-or-adopt D2).
 
 ### M5: Scan & OCR
 
@@ -383,8 +480,9 @@ kickoff and the bugs found, is in [`todos/m11.md`](todos/m11.md).
   unreferenced objects. Export Clean Copy becomes one preset.
 - Passwords and permissions: set, change, remove; AES-256. Permissions are
   shown and kept, not enforced.
-- Preserve encryption on save (today a save writes a plain file), with no
-  plaintext copies on disk.
+- Encryption kept on save: done in M10.5 (slices 7, 9 and 10). Every
+  save, Append, Rewrite, Save As and recovery sidecar keeps the file's
+  encryption; what's left is slice 1's ([`todos/m11.md`](todos/m11.md)).
 - Certificate encryption: moved to after M12 (decided 2026-10-14), which
   builds the certificate stores it needs.
 
@@ -418,6 +516,18 @@ Each may change it as real use finds what it needs.
 
 Slices: Fill & Sign → sign with PKCS#12 → verify panel → Windows store and
 PKCS#11 → timestamps + LTV → certify/lock.
+
+**Fill & Sign goes early** (2026-10-23): right after M10 slices 6–17,
+ahead of the rest of M12.
+- Nothing blocks it. RustCrypto's cms 0.3 round (build-or-adopt D2)
+  matters only to digital signatures.
+- M9's dynamic stamps (name and initials from the identity in
+  `settings.toml`) and image stamps already do about half of it.
+- It pairs with forms: an 8879 is filled, then signed.
+- **Open:** the script font for typed signatures (build-or-adopt entry
+  56), and where saved signatures are kept. sheaf never writes
+  `settings.toml`, and `state.json` is disposable, so they're a third
+  kind of file, as [spell check](#spell-check)'s word list is.
 
 Signing appends: it must never rewrite earlier revisions, and M10.5's
 Append (slice 10) provides that. On a signed file, a save that has to
@@ -466,25 +576,10 @@ on M11's image redaction for image editing.
   subsetting (skrifa to read the programs, subsetter for TrueType and
   OpenType ones where renumbering their glyphs is acceptable; bare CFF
   and Type 1, which no crate subsets, built on read-fonts:
-  `todos/build-or-adopt.md` entry 62), object streams, removing unused
-  objects.
-- Fast Web View (linearization): page 1's objects first, a linearization
-  dictionary and hint tables, so a viewer reading byte ranges over a
-  network shows page 1 before the rest arrives.
-  - **A writer option, beside object streams,** used by a full rewrite to
-    a new file: a "Fast Web View" choice in Save As and in Optimize, and
-    `--linearize` on `sheaf edit -o`.
-  - **Not an edit and not a transform plugin.** Any later byte change,
-    an incremental save included, voids it, so it can't live in the
-    document. sheaf's own writer already has the object graph and each
-    page's objects. A bytes-in, bytes-out plugin would have to parse and
-    write the whole file again.
-  - **No "keep it linearized" preference:** that would make every save of
-    such a file a full rewrite, which breaks signatures and gives up the
-    incremental save.
-  - **Signed files** get the usual ask, since a rewrite breaks their
-    signatures.
-  - **Checked** with `qpdf --check-linearization`.
+  `todos/build-or-adopt.md` entry 62),
+  removing unused objects, and Fast Web View as a choice. Object-stream
+  packing and the linearization crate moved to the
+  [between-milestones work](#between-milestones) (2026-10-23).
 - PDF/A convert and validate ❓.
 - Preflight-lite (font embedding, color spaces, transparency checks) ❓.
 - Accessibility and PDF/UA moved to [M17](#m17-accessibility).
@@ -643,6 +738,10 @@ the target ❓
 - **Open:** the review as a panel in the main window, or a review mode
   of its own, as Acrobat's Reading Order tool is.
 
+**Its first slice goes early** (2026-10-23): roles and labels on
+sheaf-ui's widgets are [between-milestones work](#between-milestones),
+so the dialogs M10 and M11 add reach screen readers from the start.
+
 **Decide at kickoff:** which part goes first (the app's can run beside
 other milestones), and how far to go on PDF/UA.
 
@@ -651,6 +750,42 @@ keyboard paths → the page view's tree → the tags tree in the model →
 validation → the review view → tagging untagged files.
 
 ---
+
+## Libraries
+
+Work that's reusable on its own is published as a crate, as
+`in-progress` (progress and cancellation) and `instance-handoff`
+(single-instance launching) were. A candidate stays where the plan has
+it. What changes is that its API keeps sheaf's types out from the start.
+Candidates, most valuable first (2026-10-23; crate facts in
+[build-or-adopt](todos/build-or-adopt.md)):
+
+1. **Linearization** ([between milestones](#between-milestones), item
+   3). Scheduled.
+2. **The PDF layer** (backlog F13, "Maybe published"). No crate offers
+   an owned object model that keeps reals at f64 and dictionaries in
+   order, reads lazily under caps with byte spans, and appends to a
+   file with encryption (entry 1). Deferred with F13. Meanwhile the
+   content interpreter (#50) keeps its core free of sheaf's
+   blocks and markers (`annot`, `private`) where it can, so it can move
+   into this crate later.
+3. **Form scripts** (M10 slices 18–22): the AF functions and pdf.js's
+   form-script library on boa, as a WebAssembly guest (entry 24). Any
+   Rust program that fills PDF forms needs this.
+4. **PAdES signing and LTV** (M12). No Rust crate does it; pyHanko
+   (Python, MIT) is the oracle (entry 54). It waits on RustCrypto's cms
+   0.3 round (D2). Plan it as a crate at M12's kickoff.
+
+Deferred: **scanner access** (M5's `sheaf-scanner`) and **Kodak patch
+codes**, with M5's scanner work (Greg, 2026-10-23: no physical scanners
+to test with). No maintained Rust crate does SANE or TWAIN (entries
+5–8), and none reads patch codes (entry 12), so both are candidates
+again when M5 resumes.
+
+Not candidates:
+- the durable file writes (crates for atomic replacement exist);
+- the plugin host (it's sheaf's command registry and UI);
+- the OCR engine trait (thin over the engines' own crates).
 
 ## Parity checklist
 
@@ -699,8 +834,8 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | Digital signatures | M12 |
 | Certificate encryption ❓ | M12 follow-up |
 | Compare documents | M14 |
-| Optimize / reduce file size | M14 |
-| Fast Web View (linearize on save) | M14 |
+| Optimize / reduce file size | M14 (object streams: between milestones) |
+| Fast Web View (linearize on save) | Between milestones (the linearization crate); M14 (in Optimize) |
 | Preflight / accessibility checker ❓ | M14 (preflight), M17 (accessibility) |
 | PDF/UA validate, and a review view for the manual checks ❓ | M17 |
 | sheaf itself with a screen reader and the keyboard | M17 |
@@ -830,14 +965,20 @@ only through sheaf's own code. Found while planning M9.
 
 ### File contention: more than one process editing a PDF
 
-**A known bug, deferred (2026-10-14).** Suppose another process changes a
-PDF while sheaf has it open: a colleague's sheaf on a file server,
-Acrobat, or a sync client. sheaf's next save then silently overwrites or
-mangles those changes, and the recovery file beside the PDF is offered to
-the wrong person. It only happens when more than one process edits the
-same file. The bug, and the design so far (detect changes before saving,
-a lock file, merge later), are in
-[`todos/file-contention.md`](todos/file-contention.md).
+**Mostly fixed in M10.5; the rest deferred.** Suppose another process
+changes a PDF while sheaf has it open: a colleague's sheaf on a file
+server, Acrobat, or a sync client. Since M10.5 (its proposal 33), sheaf
+re-checks the file before every write. When another program changed it,
+nothing is written, and the save asks: Save As…, Overwrite or Cancel. A
+recovery file is offered only while its PDF is the one it was written
+against.
+- **What's left,** in [`todos/file-contention.md`](todos/file-contention.md):
+  - the check when a window comes to the front, keeping the rest of what
+    the original file had (`ReplaceFileW` on Windows, its group on Linux
+    and macOS), and saying plainly that another program has the file
+    open;
+  - a lock file that warns the second person before they start;
+  - merging, later.
 - **Overlap:** M9 slice 1 (single instance) removes one user's two sheaf
   processes. Slice 2 creates the local state folder the recovery files
   would move to. Slice 3 makes mark ids unique. Slice 4 keeps every
@@ -896,8 +1037,9 @@ Advanced Search does: "which of this client's PDFs has this EIN?"
 - **Overlap:** M15's batch actions (a search's files as a batch's input)
   and M11's redact by pattern, both over many files; M16 (an agent could
   call it).
-- **Where:** the CLI is small and can follow M10.5's PR 6 (slice 19's
-  `Session`) directly; it needn't wait for M15.
+- **Where:** the CLI is placed in the
+  [between-milestones work](#between-milestones), item 5 (2026-10-23).
+  The GUI stays here.
 
 ### Spell check
 
