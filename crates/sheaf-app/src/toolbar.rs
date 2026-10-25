@@ -1,7 +1,7 @@
 //! The configurable toolbar, app side: layouts of command ids kept in
 //! `toolbar.json` beside `keymap.json`, resolved against the
 //! [`CommandRegistry`] each frame into `sheaf_ui::toolbar` items with their
-//! icon, help and state. See `todos/toolbar.md`.
+//! icon, help and state. See `plan/complete/toolbar.md`.
 //!
 //! ```json
 //! {

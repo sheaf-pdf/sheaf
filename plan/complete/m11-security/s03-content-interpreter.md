@@ -1,0 +1,1805 @@
+# M11 slice 3: Content interpreter
+
+Status: done · Part of [M11: Security & redaction](../../m11-security/README.md)
+
+**Content interpreter** (pulled forward, done 2026-10-23, wrapped up
+2026-10-24; `sheaf-doc/src/content/`; proposal 6; bug 13).
+- **On M10.5's `content/`** (lex, splice, `Balance`, `TextBag`; M10.5
+  §13): it adds `ContentStack.rewrite` (the new base: setting it
+  absorbs the current filters, and later filters apply to its output)
+  and `Static::Ops`, and lowers redaction as definitions evaluated
+  per page at emit (`Rewrite::Redact { areas, policy }`, M10.5 §20),
+  not as bytes in the model. [Slice 3 built the interpreter and its
+  writer on `content/` and left `ContentStack.rewrite` and
+  `Static::Ops` to slice 5, whose `Rewrite::Redact` is their first
+  producer: with none, they could be checked end to end only through
+  a variant made for tests.]
+- Operators, graphics and text state: `cm`, `q`/`Q`, `Tc`, `Tw`, `Tz`,
+  `TL`, `Ts`, `Tr`, `Tm`, `Td`, `TD`, `T*`, `'` and `"`.
+- Fonts, giving glyph boxes:
+  - widths from `/Widths` and CID `/W`;
+  - heights from `/FontDescriptor` (`Ascent`, `Descent`, `FontBBox`);
+  - the standard 14 fonts' metrics;
+  - Type3 `FontMatrix`.
+  [The wrap-up added embedded programs, read through skrifa and
+  read-fonts, for each glyph's outline box and the heights a
+  descriptor lacks, and the predefined CMaps, from hayro-cmap, for
+  their CIDs and text; and `text_bag`, the removal check's, reads
+  content through the interpreter.]
+- Form XObjects, instanced per use; inline images; marked content
+  (`/ActualText`, `/OC`); clipping.
+- A writer that turns the operations back into streams, on
+  `content/`'s `ContentWriter`.
+- Check, over a corpus (IRS forms, a bank statement, a scanned and
+  OCR'd binder, a tagged Word export):
+  - decode then encode renders the same in PDFium;
+  - glyph boxes match PDFium's character boxes within a tolerance.
+  [Run over the corpus's forms, the pool sample, its scans and
+  conformance's PDF/UA files in place of the bank statement and the
+  Word export, which are still Asks.]
+
+## Notes
+
+Done (pulled forward, 2026-10-23): the content interpreter (proposal
+6, taken as recommended; bug 13), on its own between milestones, after
+M10.5 and before M10 resumes, since M13, M14 and M17 build on it as
+M11 does; branch `content-interpreter`, from `8cdc589`. `content::
+interp` reads content as PDFium's `CPDF_StreamContentParser` does, on
+M10.5's toolkit (lex, the concatenation, `ResCx`, `ContentWriter`),
+never lopdf's `Content`: every operator in the graphics and text
+state it's drawn in; each glyph shown, with its origin, advance and
+box from the font as PDFium reads it (`Foreign`, a source's `Fonts`);
+each Form XObject drawn per use, a use past 40 deep refused and passed
+over as PDFium skips it, and a use within itself refused at once
+(PDFium draws it to that depth); paths, images (inline too), shadings,
+the clip and marked content (`/MCID`, `/ActualText`, `/OC`); all
+bounded under `ContentLimits`, fonts' streams within the page's
+budget, with no recursion past `form_depth`. What it reads is written
+again (`interp::encode`), text moved to each line from the interpreted
+state. Over 54,009 corpus pages, every glyph it matches to a character
+PDFium makes is within a thousandth of a point of it (117,464,508;
+117,492,213 after the wrap-up); the glyphs and characters the tier
+can't match or explain (91,304 and 27,994; 73,296 and 279 after the
+wrap-up) are held to a checked-in count per file; and pages written
+again render as before. `text_bag` stayed on its own walk at first
+(exact on the interpreter; reverted under a stricter rule than the
+slice's); Greg took the swap, and the wrap-up (below) made the removal
+check the interpreter's first caller. The rewrite base went to slice
+5; nothing redaction-specific is built.
+- **Limits, the conformance files and the font model** (step 1).
+  source/limits.rs: `ContentLimits.form_depth` (40, PDFium's
+  `kMaxFormLevel`), `states` (`q`s saved at once, 1 << 16; PDFium has
+  no cap, so it bounds memory only), `operators` and `glyphs` (1 << 24
+  each, counted across every form use); the "`q` isn't capped" doc
+  line rewritten; the lexer's `operands` cap is the operand stack.
+  forms/corpus.rs: `CONFORMANCE` and `Corpus::conformance()` (backlog
+  F9's reader, as `scans()`: the manifest's `claims`, `expect` and
+  `struct_tree` columns; 540 rows claim PDF/UA), tested in
+  `forms::tests::the_corpus_is_where_its_manifest_is`. font/afm.rs
+  reads `Ascender`, `Descender`, `FontBBox` and each glyph's `B` box;
+  std14.rs: `Std14::metrics()` (the box's top and bottom for Symbol
+  and ZapfDingbats), `glyph_width`, `glyph_box` and `named` (a subset
+  tag stripped, then PDFium's 89-name table, `kAltFontNames`, in any
+  case). font/foreign.rs (new): `Foreign`, a file's font as read
+  (`FontKind`: Type1, MMType1, TrueType, Type3, `Type0(Descendant)`;
+  `FontApprox`: codes, widths, heights, boxes; `VerticalMetrics`; the
+  shared `FontMetrics`), with `codes`, `cid`, `width`, `vertical`,
+  `metrics`, `glyph_box` and `code_text`, every metric in glyph
+  units; `/W` and `/W2` kept as the ranges they're given in, the first
+  for a CID winning, so a 2³¹ range costs what one CID does; embedded
+  CMaps (codespace, cidrange, cidchar, `/WMode`, the `/UseCMap` chain
+  through streams within `depth`); Type3 boxes from each CharProc's
+  `d1` (the review made its streams' reads count against the page:
+  below). `text_bag`'s `Decoder` and `CMap`
+  moved here, shared with the widths (`Encoded`), `FontDecoders`
+  wrapping it still. `Fonts` (a source's fonts by object, each read
+  once; `get`, `stock`) and `FontScope` (one interpretation's picks by
+  owner and name). font/tests.rs: ten tests, hostile `/W`, `/Widths`
+  and `/Differences` among them.
+- **The interpreter's core** (step 2). content/interp/ (new, public,
+  reached by its path, so its names don't meet `content::GState`,
+  `TextMode` and `Rewrite`): `interpret(objects, &Concat, resources,
+  &Limits, &Fonts, Opts, visit) -> Result<Summary, InterpError>`;
+  `Opts { forms: Forms::{Descend, Report} }`; `Event { at, state,
+  marks, kind }`; `At` (the form use it's in, the token, its range,
+  `operands()`, `operand(i)`, `range()`, `content()`); `Kind::{Op,
+  Text, FormBegin, FormEnd, FormRefused}` (step 3 added the rest);
+  `TextShow` (string, font, `stock`, size, mode, `start`, `offset`,
+  `trm()`, lazy `glyphs()`); `Glyph` (bytes, code, CID, origin,
+  advance, quad, approx, invisible, pen; `text()`, `tm()`); `Quad`;
+  `UseId` (the chain of `Do` offsets: `path()`, `depth()`);
+  `FormUse` (form, id, matrix, bbox, oc); `Refused::{Cycle, Depth}`;
+  `Summary`; `InterpError::{Lex, XObject, Limit(Cap)}` and `Cap::
+  {Operators, Glyphs, States, Marked, Decompressed}`; `State` and
+  `TextState`. PDFium's rules, from its source: an operand not a
+  number is 0 and a non-finite one changes nothing; `Tz` with exactly
+  one operand; a `Q` with nothing saved passed over, `q` saving the
+  text matrix and position; `Tw` on a single-byte code 32 only; a
+  `Tf` name the resources lack draws in stock Helvetica; an
+  ExtGState's `/Font` by name; resource categories found in the
+  page's where a form's lack them (`FindResourceHolder`); a form
+  starting in `AddForm`'s state; Type3 text filled whatever `Tr`
+  says. content/fixture.rs (new; `cfg(any(test, feature =
+  "fixtures"))`, the feature sheaf-render, sheaf-ops and fuzz/ turn
+  on): `operators()`, `fonts()`, `forms()`, `cycles()`, `chain(n)` and
+  `fan_out(levels, uses)`, each with its quads worked by hand.
+  sheaf-render tests/content_interp.rs (new): every fixture glyph
+  against PDFium's character (52 then; 56 with step 3's clips).
+- **Paths, images, shadings, clips and marked content** (step 3).
+  `Kind::{Path, Image, Shading, Ignored, MarkedBegin, MarkedEnd,
+  MarkedPoint}`, each after its operator's `Op`: `PathDrawn`
+  (segments, `Seg::{Move, Line, Curve, Close}`, in PageSpace; paint;
+  the `W`/`W*` rule; bounds as far as a stroke paints: half the
+  width, √2 times at square caps, the miter limit's at a join or
+  curve, 0.5 pt for width 0); `ImageDrawn` (`ImageOf::{XObject,
+  Inline { data }}`, the unit square through the CTM in PDFium's
+  rotated-bounds order, stencil, smask, a stencil `/Mask`, oc; no
+  sample decoded); `ShadingDrawn` (the clip's bounds within `/BBox`);
+  `Mark` (tag, props, mcid, actual_text, oc, stream, at) and `Marks`,
+  the ranges each event is in. `State` gained `line_cap`, `line_join`,
+  `miter_limit` and `clip` (`Clip`, `ClipPart::{Path, Text}`,
+  `clip_bounds()`): `W`/`W*` pending until the path ends, text in
+  modes 4–7 (never Type3) clipping at `ET` within PDFium's 1,024
+  objects, each form's `/BBox`; a part inside the last rectangle
+  replaces it (`AppendPathWithAutoMerge`); dropped without recursion.
+  Paths built as PDFium builds them (`ParsePathObject` after an `m`,
+  a move after a move, a trailing move dropped, the one-point rules,
+  `b*` closing). Marked content read tolerantly (below). writer.rs:
+  `Paint::of`, `fills`, `strokes`, `TextMode::clips`; lex.rs:
+  `image_entry` replaced `image_color_space`. Fixtures `images()`,
+  `clips()`, `marked()`; PDFium's image objects (13 quads, forms
+  composed through `FPDFPageObj_GetMatrix`).
+- **The writer and the fuzz target** (step 4). `ContentWriter::
+  operation(operands, op)`: an operator as read, one a line, an
+  inline image its whole token. interp/encode.rs: `encode(objects,
+  &Concat, resources, &Limits, &Fonts) -> Result<Encoded,
+  EncodeError>`, `Encoded { content, forms }` (each form once, from
+  its first use), `EncodeError::{Interp, Unwritable { form, at, why:
+  Unwritable::{Line, InlineLength} }}`, `State::moved` and
+  `next_line_of` shared with the interpreter; lex.rs `image_length`.
+  Fixtures `every()`, `fuzz_page()`, `Fixture::encoded`.
+  interp/encode_tests.rs: each fixture decoded, encoded and decoded
+  again, every drawn event equal (exact since step 6), Balance and
+  `names_used` the same, the written text checked by hand; a 512-case
+  proptest of each fixture's steps shuffled (20,000 once). PDFium:
+  `fixtures_written_again_draw_the_same`, pixel for pixel at 1,024 px
+  through an update section. Fuzz: `source::fuzz::interp` (two
+  streams on `fuzz_page`, drawn, encoded, drawn again, the same
+  events), fuzz/fuzz_targets/interp.rs and its `[[bin]]`, the
+  fuzz.yml matrix, a `write_fuzz_seeds` arm, and
+  `fuzz_bodies_survive_mutated_fixtures` running it on stable (a
+  600-case loop over the interpreter's pages); `CONTENT_TOKENS` and
+  `pdf.dict` gained what text positioning, forms and `/OC` need.
+- **`text_bag` on the interpreter, tried and kept apart** (step 5;
+  below; taken in the wrap-up). Kept from it: `Forms::Report` reads no XObject, a `Do` an
+  operator like another (forms/safedocs/0221018.pdf's form 10 0 R
+  draws 14 0 R, which can't be read, and Report refused the form,
+  though the removal check judges each XObject alone;
+  `a_form_that_cant_be_read_stops_only_what_draws_it`); a fast path
+  for simple fonts whose codes are bytes (`Foreign::byte_widths`,
+  `text::bytes_end`: the same sums in the same order, `Tc`/`Tw` not
+  added when both are 0, which can't change a sum, checked to the bit
+  by the `byte_codes_end_where_laid_out` proptest); `Fonts::stock()`
+  built once.
+- **The PDFium corpus tiers** (step 6), in content_interp.rs, ignored,
+  narrowed by `SHEAF_INTERP_ONLY` (as `SHEAF_REALIZE_ONLY`), each file
+  on a thread, PDFium behind its lock, a panic caught as the file's:
+  `every_page_is_interpreted_within_the_caps`,
+  `glyph_boxes_are_pdfium_characters_on_every_page` and
+  `pages_written_again_render_the_same`, over every form, the pool
+  sample (400 of its 402 lines; 2 are forms), every scan and the 540
+  PDF/UA files; and `standard_14_widths_are_pdfium_s_faces_but_where_guessed`
+  (ignored: it holds only where PDFium draws in its own faces). They
+  found errors in steps 1–4, fixed with tests: a `TJ` laid out as one
+  text object (`TextShow.offset`, `start` where the operator starts,
+  the pen moving after the whole `TJ`: about 4,000 drifting glyphs);
+  standard 14 widths as PDFium's own faces draw them, guessed per
+  code (`Foreign::width_guessed`, `Std14::drawn_otherwise` and its
+  86-glyph `ADDED` table, measured from PDFium's faces); a guess
+  carried along its line (`TextState.guessed`; `Glyph.approx` a
+  `FontApprox`); Type3 boxes, widths and `/FontBBox` rounded and
+  truncated as PDFium keeps them, a turned-over box kept; `approx.
+  heights` wherever ascent equals descent; and `encode` writing a
+  `Tm` of the text matrix and an absolute `Td` (`line_matrix` gone),
+  so positions come out to the bit (it had moved 120 pages past the
+  allowance).
+- **Wrap-up** (step 7). gate_7k.rs: an `interp` part per fixture in
+  a process of its own (`interp_part`): every page read and
+  interpreted, `Descend`, each glyph laid out with its quad, a fresh
+  `Fonts` each run, `measure(QUICK_RUNS)`; `INTERP`
+  (`SHEAF_GATE_INTERP`) and `InterpBudget` (`INTERP_SYNTHETIC`,
+  `INTERP_HEAVY`, `INTERP_SCANNED`), asserted only when set; the
+  module doc's slice paragraph. Docs: document-model.md's "The
+  content interpreter (M11 slice 3, between milestones)" under the
+  toolkit, its `text_bag` and Std14 lines; ROADMAP (M13, M14 and
+  M17's dependencies, the graph, M11's slice list and shared
+  infrastructure, M13's and M17's text); this plan's status line,
+  slice 3, slice 5 (the rewrite base and the rename) and bug 13.
+  README's tables name no interpreter: unchanged.
+- **The review's fixes** (after step 7; what it found is below). The
+  work per page is bounded by what's lexed and built, not only by
+  operators: `ContentLimits.interpreted` (bytes of content lexed,
+  each form use charged its length, 2³⁰, `Cap::Interpreted`) and
+  `segments` (path segments, of the path being built and of all
+  painted or made the clip, 2²³, `Cap::Segments`), with
+  `Summary.interpreted` and `.segments`; text in a clipping mode past
+  the 1,024 objects PDFium's clip takes keeps no glyphs. Fonts read
+  within the page's budget: `Foreign::read(…, budget)` and
+  `Fonts::get` / `FontScope::font` return `Result<_, TooLarge>`, each
+  font's streams (`/ToUnicode`, its CMap's chain, its CharProcs, each
+  stream once, cached by object id) charged as `Foreign.cost`, once an
+  interpretation for a font by object whether it's cached or not (so a
+  page costs the same whichever page read it first), each time for a
+  dictionary; past it the page is `Cap::Decompressed`. A CMap chain
+  cut short (a stream that can't be read, or past `depth`) sets
+  `approx.codes`. Codes split as PDFium splits them
+  (`CPDF_CMap::GetNextChar`): a two-byte code cut off at a string's
+  end padded with a 0 (Identity, and an embedded CMap of one two-byte
+  range), an embedded CMap of one range of another length a byte a
+  code, of more ranges by PDFium's mixed rule (`CheckFourByteCodeRange`,
+  a code 0 for bytes no range begins), and `Tw` on code 32 only where
+  the CMap sizes it a byte (`Foreign::word_spaced`). A `TJ` that passes
+  over an empty string loses its last adjustment, as PDFium's
+  `Handle_ShowText_Positioning` looks for it past the strings it kept
+  (PDFium agrees on the fixture). Geometry an `f32` can't hold fails
+  (`InterpError::NotFinite`): the CTM after `cm`, a form's matrix and
+  `/BBox`, the line and pen, each string's glyphs by a bound in `f64`
+  from the font's extent (`Foreign::extent`, `TextShow::bounded`, below
+  3e37), a path's points and bounds, an image's corners, a shading's
+  bounds. `Foreign::matrix` and `Foreign::text` had no caller and went;
+  `Forms::Report`, `glyph_box` and `TextShow::trm` stay, named by the
+  sketches. Fixtures: `operators()` gained the empty-string `TJ`s (37
+  glyphs), `fonts()` the cut-off Identity-H codes (24), `inherited()`
+  (new: a form whose own resources have only `/XObject`, its font,
+  property list and inline image's color space the page's), and
+  `standard_14()` (a standard 14 font with Adobe's `/Widths`, which the
+  default PDFium tests' Helvetica, Helvetica-Bold and Courier now
+  have; the stock Helvetica's glyphs are held to their origins only).
+  The tiers: tier 1 asserts no page failed and every box finite, and
+  prints the most bytes and segments a page came to; tier 2 fails on a
+  page not compared and on a file with more unexplained glyphs or
+  characters than `content_interp_unexplained.tsv` lists (324 files;
+  `SHEAF_INTERP_WRITE_UNEXPLAINED` writes it again), and counts a
+  leftover character as an `/ActualText`'s only near a glyph under one;
+  tier 3 fails on a page not written again. The fuzz body takes the
+  fonts' parts after `%%font` lines (`FONT_PART`: `/CM`'s CMap, `/T3`'s
+  `a` CharProc, `/I2`'s `/W` and `/V`'s `/W2`, `/T3`'s `/FontMatrix`;
+  the wrap-up added a sixth, `/TT`'s program, which the CIDFonts share),
+  compares a hash of every glyph's, path's, image's and form's place
+  to the bit (`Drawn`), not counts; its stable test mutates 200 cases
+  a page (was 600) and the two font-part pages too, and the seeds gain
+  them. Tests: `codes_split_as_pdfium_splits_them`,
+  `reading_a_font_is_charged_to_its_budget`,
+  `a_cmap_chain_read_in_part_is_guessed`,
+  `a_form_finds_what_its_resources_lack_in_the_page_s`,
+  `a_form_of_whitespace_costs_its_length_each_use`,
+  `fonts_decompress_within_the_page_s_budget`,
+  `geometry_past_an_f32_fails`, and `each_cap_is_held_to`'s new caps.
+- **Deleted:** `Foreign::matrix` and `Foreign::text` (added by this
+  slice, never published: no retired.rs row; the wrap-up gave
+  `Foreign::text` back, crate-private, for `text_bag`). `FontDecoders`
+  and `text_bag`'s walk stayed in this commit (the swap was reverted,
+  below) and went in the wrap-up, which made retired.rs's
+  `RETIRED_M11` for `FontDecoders`; `stamps::strip` stays gone (M10.5
+  slice 17; retired.rs holds it, and rg finds no definition). The only
+  text retired is limits.rs' "`q` isn't capped".
+
+Deviations from the plan:
+- **The rewrite base is slice 5's** (`ContentStack.rewrite`, the base
+  whose setting absorbs the filters, and `Static::Ops`). The brief
+  allowed it only if checked end to end through the emitter. Nothing
+  sets it until `Rewrite::Redact`, which is out of scope, and an
+  identity variant to test it would be code for tests on the gated
+  Append and Rewrite paths. The writer half is checked at the content
+  level (fixtures, the proptest, the fuzz target, and every corpus
+  page written again through an update section and rendered). Slice 5
+  now carries it, and the rename the two `Rewrite`s need.
+- **The wider corpus in place of the bank statement and the tagged
+  Word export** (both still Asks): every form, the pool sample, every
+  scan (other tools' text layers) and conformance's 540 files that
+  claim PDF/UA (1,264 pages, 537 with a structure tree; 235 are
+  "fail" test files).
+- **Marked content is read tolerantly, as PDFium reads it,** not
+  strictly as `content::marked` does: a `BDC` whose named list
+  `/Properties` lacks (or that is neither a name nor a dictionary)
+  opens nothing, so its `EMC` closes the range around it; a stray
+  `EMC` is passed over; a range left open ends where its content
+  does, at an empty operator at its end; a form's `EMC`s can't end
+  its drawer's ranges. Marked points keep their list.
+- **A refused form use is skipped,** a `FormRefused` event and
+  `Summary.refused`, never a page error: past 40 deep, as PDFium skips
+  it; within itself, at once, where PDFium draws it. PDFium's own
+  cycle check compares the buffers it reads each use into, which it
+  makes afresh for every use of a stream read from a file, filtered or
+  not (`CPDF_StreamAcc` copies a file's stream), so it draws a
+  self-drawing form 40 deep: a cycle refused means the interpreter
+  reports less than PDFium draws (`Refused::Cycle` says so), and slice
+  5 fails closed on any refusal.
+- **Bounds PDFium hasn't** (the review): bytes lexed and path segments
+  per page, fonts' streams within the page's budget, and geometry an
+  `f32` can't hold an error where PDFium carries infinities on. None
+  comes near a corpus page (tier 1: 17,864,912 bytes, 60× under its
+  cap; 995,739 segments, 8.4×; no page fails).
+- **Lowered positioning is a `Tm` of the text matrix plus an
+  absolute `Td`,** not one `Tm` with the line folded in (as planned):
+  PDFium places the line by the same sums then, to the bit; the fold
+  re-rounded and moved 120 corpus pages. A `Td` that moves nothing is
+  written as it is: any operator ends PDFium's reading of path
+  operators after an `m`, and dropping it drew `100 100 m Td l S` as
+  a line (the proptest).
+- **Predefined CMaps were approximate.** Identity-H and -V were known
+  by name; any other predefined name (`UniJIS-UCS2-H`) wasn't bundled,
+  so codes split by the `/ToUnicode` codespace, CIDs were unknown and
+  `approx.codes` was set. The wrap-up reads them from hayro-cmap's
+  bundle (below); only names neither it nor PDFium has stay so. PDFium
+  ignores `usecmap` and `/UseCMap`; sheaf follows the stream chain.
+- **Heights follow PDFium's face** (step 2 corrected step 1): only a
+  descriptor with a `/FontBBox` that isn't all 0, with `Ascent` and
+  `Descent`, is exact (and, since the wrap-up, a program that gives
+  them as `CheckFontMetrics` takes them); everything else is
+  `approx.heights`, the
+  descriptor's values, Adobe's AFM, the box or a fixed guess standing
+  in, since PDFium takes them from the face it draws in (its own for
+  the standard 14 on Linux, Arial or Helvetica elsewhere). So the
+  standard 14 aren't asserted exactly on heights: their glyphs are
+  held to origin, containment and equality along the line. A Type3
+  font's ascent and descent are `A`'s top and `g`'s bottom.
+- **A glyph's quad was the metric box,** PDFium's loose box without
+  the outline union (`GetLooseBounds`), so it lay within PDFium's and
+  equalled it where the outline lay inside; `Foreign::glyph_box` gives
+  the outline where sheaf knows it without a program (Type3, the
+  non-embedded standard 14). Vertical glyphs take PDFium's em-wide
+  column. The wrap-up unites the outline where a program gives it, so
+  the quad is PDFium's loose box (below).
+- **More of PDFium than the plan named,** each tested: the alias table
+  is `cfx_standardfont.cpp`'s `kAltFontNames` (not cfx_fontmapper.cpp);
+  numbers cut to whole ones where PDFium cuts them, a `Descent` over
+  10 negated; a Type3 font without `/FontMatrix` on the identity; an
+  ExtGState `/Font` by name (one given by reference draws in stock
+  Helvetica, as in PDFium); a form's `Tz`, `TL`, `Ts` and text matrix
+  reset at its start (the spec says inherited); stroke bounds past
+  half the width (above); the clip merge and the 1,024-object text
+  clip cap; `InterpError::XObject` for a form or image that can't be
+  read (fail closed); `Kind::Ignored` for PostScript and unknown
+  XObjects.
+- **`Unwritable::InlineLength`:** an inline image whose `/L` isn't its
+  data's length is refused by `encode`, since where `/L` runs past
+  the content the lexer ends the image at `EI`, and in the encoding
+  `/L` may reach (the fuzz target found it).
+- **The tier matches glyphs to characters by origin, code point, size
+  and box,** in widening passes, not by origin and code point alone,
+  which paired overprints wrongly; `/ActualText` characters are taken
+  at their text object's origin first. A glyph PDFium bounds by a box
+  with no area, or by its outline alone (ascent equal to descent), is
+  held to its origin; one past tolerance where another glyph at the
+  same origin could be its character is counted as ambiguous and
+  listed (7). Pages that differ past the allowance are compared with
+  PDFium's own render of the file loaded again (0171994's 24 pages).
+- **The `text_bag` swap was made, proven exact and reverted** for
+  speed (below), under a stricter rule than the slice's; Greg took it
+  (2026-10-23/24), and the wrap-up reapplied it. The slice's
+  scope kept the swap where every corpus count is unchanged and no
+  asserted gate worse; step 5 found every count unchanged and the
+  gated sections it measured equal (one-mark Append 16.24 against
+  16.26 ms, the reopened reorder 737.8 against 733.7 ms; no gate_7k
+  run was made with the swap in), and reverted it because `text_bag`
+  alone was slower (synthetic +4%, scanned +37%), a step-level "no
+  slower" rule the brief didn't state (the review). So the slice's
+  criterion appears met on what was measured; Greg rules (For Greg).
+  The one difference from the old bags, the hash of an empty string
+  shown in no font, stands for no text (PDFium shows no empty string),
+  outside the plan's equal-or-checked-superset rule; Greg accepted it
+  with the swap.
+- **The default PDFium tests give their standard 14 fonts `/Widths`**
+  (`fixture::standard_14`, Adobe's), and hold the stock Helvetica's
+  glyphs to their origins: without them PDFium takes the widths, as
+  the heights, from the face it draws in, Arial on Windows and
+  Helvetica on macOS, so the tests would hold Linux's widths on every
+  OS (the review). The ignored `standard_14_widths_…` test holds the
+  AFM widths where PDFium draws its own faces.
+- **The step 6 tier runs about 50 minutes for the pixels** (four
+  minutes for the boxes, ten seconds for the walk), not the hour or
+  more first guessed.
+
+**`text_bag`, and why it was kept apart at first.** Swapped onto the interpreter
+(`Forms::Report`, one `Fonts` for the old file and one for the joined
+view in removal.rs, and the three test callers), the bags were
+compared old against new on every stream the removal check reads as
+content (page streams, forms with appearances, tiling patterns, Type3
+CharProcs, and each page's streams as one): forms 4,389 files
+(43,812 streams, 24,533 pages, 417,755 forms, 2,116 patterns, 4,341
+CharProcs), the pool sample 402, scans 709, PDF/UA 540, the 7k
+fixtures; words equal on every joined page (forms 10,486,700, pool
+8,159,986, scans 974,737, PDF/UA 243,576, 7k 8,890,000); the same
+streams refused; every corpus count the baseline's, and the ignored
+watermark, header and OCR tiers alike on the files tried. But an
+interleaved A/B in release (11 rounds, paired ratio, null A/B
+±1%) had it slower: synthetic 7k streams +4.1–4.3%, scanned +36–38%
+(1.4 ms per 7,000 pages), heavy 5% faster; the gated scanned sections
+(one mark 16.24 against 16.26 ms, the reopened reorder 737.8 against
+733.7 ms) equal. The interpreter lays out every glyph (dependent f32
+adds) and costs 20–50 ns more an operator (q/Q 52 against 19 ns, path
+operators 96 against 42), which `text_bag` doesn't need. Reverted
+from the step's own copies (cmp). The swapped files were kept in the
+run's scratch directory (`interp/step5/swapped/`), which may not
+last. A single dispatch per operator is the next speedup; with it the
+removal check could move. After the review the swap is kept on disk
+too, as a patch against the step-5 tree (before step 6's changes) and
+the swapped files, in this worktree's `target/interp-text-bag-swap/`
+(`swap.patch`, `files/`), for the orchestrator to keep on a branch.
+Greg took the swap (2026-10-23/24, its slower cases with it); the
+wrap-up reapplied it from those files onto the reviewed tree, proved
+it again and made the interpreter faster (below).
+
+Consumer sketches (types and calls, for the slices to start from;
+each may change the interpreter as its real use needs):
+- **M11 slice 5, text and OCR under an area.** The page's stack gets
+  `ContentStack.rewrite = Rewrite::Redact { areas, policy }`, a
+  `SymObject::Deferred` body evaluated per page at emit, later
+  filters applying to its output. Evaluating it: `PageContent::read`,
+  then `interpret(src.pdf(), content.concat(), page.resources, lim,
+  &fonts, Opts { forms: Forms::Descend }, visit)`, with `fonts` the
+  source's `Fonts` kept beside its `DrawnForms`. On `Kind::Text(show)`
+  every `glyph` of `show.glyphs()`, in every render mode
+  (`show.mode`, `glyph.invisible`: OCR text too), is removed when
+  `glyph.quad` (PDFium's loose box: the metrics' box united with the
+  outline's where the font's program says it) shrunk 10% a side
+  meets an area; a removal's key is
+  `(at.stream.cloned(), at.op.clone(), glyph.bytes.clone())`. Fail
+  closed (the page refused, the export saying so) on
+  `Summary.refused > 0`, `glyph.approx.codes` or `.widths` near an
+  area (a width guessed, or moved by one), and text near an area in
+  no font (`show.font == None`, which PDFium doesn't draw but others
+  may); `approx.heights` or `approx.boxes` (no program says the
+  outline, as for the standard 14 not embedded, which PDFium draws in
+  a face of its own or the system's) takes a conservative box (the
+  font's `/FontBBox`, else 1.2 em), since most IRS Helvetica is
+  non-embedded and its heights and outlines vary by OS; ascent equal
+  to descent gives a metrics' box with no height. Writing: each stream with removals is written as
+  `encode` writes it (`ContentWriter::operation` for every operator
+  as read, `Td`/`TD`/`T*`/`'`/`"` lowered), a text operator with
+  removals as runs of survivors, each a `Tm` of `show`'s text matrix
+  and an absolute `Td` to `glyph.pen` (never the pen folded into the
+  `Tm`, which re-rounds), then a `Tj` of their bytes
+  (`show.string[glyph.bytes]`); so later text doesn't move (PETS
+  2023). Lowering places lines, not strings: a `Tj` or `TJ` after one
+  with removals on the same line starts where that one ended, so it
+  too is written after a `Tm` of its text matrix and an absolute `Td`
+  to where it started (its first glyph's `pen`), every text-showing
+  operator in a rewritten stream so, simplest. The overlay text and
+  any font sheaf adds go through `ContentWriter::text` and `Res`,
+  never a foreign name. A form use
+  with removals (`FormBegin(use)`, `use.id`) gets a copy written for
+  that use, its `Do` in the drawer pointed at the copy by a new
+  resource name; other uses keep the form. Type3 glyphs are removed
+  as glyphs, their box from `Foreign::glyph_box` (`d1`), where a
+  standard 14 glyph drawn without a program has Adobe's outline box
+  too: the tight boxes proposal 9's PDFium check compares; a CharProc
+  that draws an image or path is slice 6's, which needs a public
+  glyph-name-to-CharProc lookup on `Foreign` (to add). `/ActualText`:
+  a `MarkedBegin(mark)` with `mark.actual_text` whose range
+  (`Event.marks`) holds a removed glyph is rewritten through
+  `content::without_keys` at `(mark.stream, mark.at)`, its text gone
+  or cut to the survivors'. Checked by interpreting the output (no
+  quad under an area; survivors' origins exact) and proposal 9's
+  PDFium boxes; and the removal check (removal.rs' `stream_text`)
+  judges each XObject on its own with `Forms::Report` (since the
+  wrap-up). `/ToUnicode` and `/Widths` pruning wants each
+  font's used codes, the same `Usage` walk as M14's.
+- **M11 slice 6, images, paths and clips under an area.**
+  `Kind::Image(img)`: `img.quad` (PageSpace) against each area; wholly
+  covered goes; partly covered is decoded, its samples under the area
+  filled (the area into sample space through the inverse of the
+  quad's matrix), and encoded again: an `ImageOf::XObject(id)` shared
+  elsewhere is cloned for this use first, an `ImageOf::Inline { data
+  }` rewritten in place (its token, `at.op`); `img.smask` and
+  `img.mask` likewise, a stencil (`img.stencil`) by its own samples.
+  `Kind::Path(p)`: `p.segments` and `p.bounds`; wholly inside, its
+  construction operators and painting operator go (`PathDrawn` needs
+  its first operator's offset, to add then); partly, clipped by the
+  polygon crate and written through `ContentWriter`; a clip-only path
+  (`p.paint` none, `p.clip` some) is kept. `Kind::Shading(s)`:
+  `s.bounds` wholly inside goes, else kept (the stated limit). The
+  clip: `event.state.clip.parts()` and `clip_bounds()` may skip work,
+  never drop content as clipped away, since a text clip's outline may
+  pass its quads. Per-use form copies as slice 5's.
+- **M13, objects: select, move, delete, add, edit within a line.**
+  An object is a text run (a `TextShow`, or a glyph range of one), a
+  path, an image, a shading or a form use, named by `(Option<UseId>,
+  At::range())`, its stream and its operators' span, its run's size
+  and direction on the page from `TextShow::trm`, and found by a
+  hit test of `Glyph.quad`, `ImageDrawn.quad`, `PathDrawn.bounds`
+  then its segments, or a `FormUse`'s `bbox` through its `matrix`;
+  §20's object query unifies those with placed layers. Delete splices
+  the range (`content::splice`, safe or refused), else rewrites the
+  stream without it as `encode` writes. Move wraps it in `q cm … Q`
+  (the `cm` in its user space, from `event.state.ctm`), its text
+  positioned absolutely first (`encode`'s lowering). Add puts layers
+  on the stack (`Static::Image { blob, matrix }`, §20; text as
+  `ContentWriter::text`). Editing within a line replaces a
+  `TextShow`'s codes: the new text encoded in the foreign font
+  (`Foreign::encode`, which M13 adds, through the `/ToUnicode`
+  inverse and the codes the subset has, else a substitute font), its
+  width from `Foreign::width`, written as runs with an absolute `Td`
+  so the rest of the line keeps its place, or moves as a reflow says;
+  as `Rewrite::Edit { ops }`, evaluated at emit.
+- **M14, optimize.** A `Usage` visitor over every page (`Descend`):
+  per `Foreign::id()`, the codes (`glyph.code`) and CIDs (`glyph.cid`)
+  shown, across forms and Type3 fonts (whose CharProcs each code
+  reaches), for subsetting (skrifa and subsetter) and the
+  `/ToUnicode` and `/Widths` pruning slice 5 wants; per
+  `ImageOf::XObject(id)`, the largest scale it's shown at
+  (`ImageDrawn.quad` against its `/Width` and `/Height`), for
+  downsampling; the resources each page and form reaches (the names
+  of `Tf`, `Do`, `gs`, `sh`, `cs`/`CS`, `scn` patterns and `BDC`
+  lists, `FormBegin.form`, `ImageOf` and `ShadingDrawn.shading` ids),
+  so the rest go; and what's drawn under hidden optional content
+  (`Mark.oc`, `FormUse.oc`, `ImageDrawn.oc`) for proposal 12's hidden
+  layers. One `Fonts` a source reads each font once; a refused use
+  keeps what its form names.
+- **M17, reading order from marked content and the structure tree.**
+  `interpret` with `Descend`; on each `Text`, `Image` and `Path`
+  event the innermost `Mark` of `event.marks.iter()` with a `mcid`
+  is its content item, keyed by `(owner, mcid)`, the owner the
+  page's `/StructParents` (`PageFacts.struct_parents`) where
+  `mark.stream` is None, else the form use's form's `/StructParents`
+  (`FormUse.form`); `/ParentTree` maps it to its `StructElem`
+  (`Key::StructElem`, §20), and the tree's `/K` order is the reading
+  order, the text of each item in event order (`Glyph::text`, or
+  `Mark.actual_text` in its place, as PDFium's text page reads it).
+  Content in no MCID range that isn't an `/Artifact` is untagged, for
+  the validator to report.
+
+B4: the interpreter doesn't make B4's proposed fix exact by itself.
+The emitter decides a page is untouched when its blocks can't be read
+(`stack`, `PageContent::read`); the exact fix keys off that fact
+(the proposed `Source::readable`), not the interpreter's, which adds
+caps, form reads and `XObject` errors the emitter doesn't apply, so a
+page the emitter reads whole could still be one the interpreter
+refuses.
+
+Slice 5 renames one `Rewrite`: `content::Rewrite` (a marked range's
+property list written again, `without_keys`) and the model's
+`Rewrite::Redact` would share a name (slice 5's text says so).
+
+What review found and was fixed (the plan's adversarial review,
+before the steps):
+- `text_bag`'s only production caller is the removal check
+  (removal.rs' `stream_text`); OCR and search read PDFium's
+  characters. So the swap moved the removal check and the oracle's
+  measure at once, and only an old-against-new comparison of the bags
+  could show nothing was lost: step 5 made it.
+- `text_bag` never descends into forms, which the removal check judges
+  as objects of their own, so the swap had to use `Forms::Report`; and
+  a None bag vetoes (removal.rs' `ok_or`), so a new refusal (a cap)
+  would change MARKED's vetoes: counted as a difference.
+- `content::marked` is strict and PDFium tolerant; PDFium skips a
+  cyclic or deep form and draws the rest of the page; PDFium has no
+  `q` cap, so `states` bounds memory only, far above any page.
+- The form cap is named `form_depth`, since `Limits.forms` is
+  AcroForm's; the operand stack reuses `ContentLimits.operands`; every
+  `ContentLimits` literal uses `..Limits::DEFAULT.content`, so new
+  fields broke nothing.
+- The lexer's `Step` is crate-private, so events carry their own
+  ranges and operands; computed numbers go through `object::real`.
+- The AFM reader read only widths; the aliases come from PDFium's
+  source, not memory; PDFium's loose box unites the outline, so the
+  comparison is containment plus equality where the outline lies
+  inside (the wrap-up: equality on every side where a program gives
+  the outline); PDFium honors an ExtGState `/Font`, `text_bag` didn't.
+- retired.rs' rows carry M10.5 slice numbers, so an M11 row would
+  need a list of its own (nothing retired then; the wrap-up made
+  `RETIRED_M11`); and B4's answer.
+- The machine was at load 56–65 while planning: timing gates once,
+  at the end, after two quiet checks.
+
+What the slice's review found (24 findings, after step 7), each
+checked against the code (and PDFium where it says what PDFium does)
+and fixed, with a test shown failing with the fix off:
+- **Work per page wasn't bounded by bytes:** a form of whitespace or
+  comments costs its length each use but adds one operator, so a
+  fan-out of a 150 MB form lexed petabytes inside every cap (two
+  findings). `ContentLimits.interpreted` charges each use.
+- **Fonts' streams weren't charged to the page** (four findings): each
+  font read its CharProcs, CMap chain and `/ToUnicode` within a fresh
+  256 MB, a font written as a dictionary read anew each name, so a
+  page of 10,000 fonts sharing one bomb CharProc inflated terabytes. A
+  CharProc cut short by the budget was taken for one with no `d1`, its
+  width 0, unflagged; a CMap chain cut short left `approx.codes`
+  unset. Now each font's streams come out of the page's budget, fail
+  closed past it, CharProcs are read once a stream, and a chain cut
+  short is guessed.
+- **A `TJ` passing over an empty string kept its last adjustment,**
+  where PDFium loses it (PDFium agrees on `[(a) -1000 ()] TJ (b) Tj`:
+  `b` where `a` ends). Fixed, with fixture cases either way.
+- **A two-byte code cut off at a string's end** was the lone byte, not
+  PDFium's byte and a 0, so it took another CID's width and a `Tw`
+  PDFium doesn't add (PDFium agrees on `<00010A>` and `<000120>` with
+  `6 Tw`). Codes are now split as `GetNextChar` splits them, the mixed
+  rule's 0 and one range's scheme with them.
+- **The tiers held too little:** tier 2 asserted only matched glyphs
+  past tolerance, so missing text (forms not drawn, glyphs 20 pt off)
+  passed; tier 1 didn't assert failures or non-finite boxes; tier 3
+  didn't assert pages left unwritten; and the summary's "every glyph
+  PDFium makes a character of within a thousandth" overstated it (two
+  findings). Now each is asserted, tier 2 against a per-file count
+  list, its `/ActualText` excuse limited to characters near a glyph
+  under one; with forms not descended tier 2 fails (3,943,092
+  unexplained characters, 706 files past the list), and with form
+  glyphs moved 20 pt (458,748 past tolerance, 693 files past the
+  list); the summary now says what's held.
+- **The default PDFium tests held non-embedded standard 14 widths**
+  on every OS, where PDFium takes them from the system's face (two
+  findings; plausible, CI's first run would have shown it): their
+  fonts now have `/Widths`, the stock Helvetica held to origins.
+- **The swap's revert was attributed to the brief's rule,** which it
+  wasn't (above, and For Greg); the swap is now kept on disk too.
+- **Docs that said more than holds:** "a string can be taken out
+  without moving the text after it" (lines, not strings, are placed:
+  the slice 5 sketch now re-places the next text operator); "refused
+  as PDFium passes it over" for a cycle (every file stream, not only
+  filtered ones); `TextState`'s line matrix and `Form.data`'s Report
+  case, both gone; `near` in the encode tests, now `same`.
+- **The branch predates main's `46f14e6`:** ROADMAP.md and
+  gate_7k.rs's module doc conflict at the rebase (the other files
+  merge clean), to resolve to main's conventions: no finished work
+  under Depends on (M13 `M11 (image editing)`, M14 nothing unbuilt,
+  M17's documents only M14's validator), `fin -->` edges (`fin -->
+  M14`, now on the branch too), `fin` naming M10.5 and the content
+  interpreter, M10's row no longer waiting on the interpreter, and
+  the module doc's slice paragraph beside M5's.
+- **The fuzz target fuzzed only content:** it now takes the fonts'
+  CMap, CharProc, `/W`, `/W2` and `/FontMatrix` from its input, and
+  checks positions, not counts; the stable test's interp cases went
+  from 600 to 200 a page, for CI's slower runners.
+- **Memory and geometry under the caps:** a path, or the clip, could
+  hold gigabytes within the operator cap; text in a clipping mode past
+  PDFium's 1,024 objects kept its glyphs; and products that overflow
+  gave glyphs and paths of infinities or NaN, unflagged. Now
+  `segments`, the clip's text cap, and `NotFinite`.
+- **Public API with no caller:** `Foreign::matrix` and `Foreign::text`
+  went; `Forms::Report` (the removal check's, with the swap),
+  `glyph_box` (slice 5's outline boxes) and `TextShow::trm` (M13's
+  selection) are named in the sketches.
+- **No default test of a form's resources falling back to the
+  page's** (`FindResourceHolder`), nor of a color space doing so:
+  `fixture::inherited()`, in the interp tests and PDFium's.
+
+Found while building:
+- **Predefined CJK CMaps aren't bundled** (`UniJIS-UCS2-H` and the
+  like): such fonts split codes by the `/ToUnicode` codespace, their
+  CIDs unknown, flagged `approx.codes`; slice 5 fails closed on them.
+  hayro-cmap bundles 65 (build-or-adopt entry 26; For Greg). Resolved
+  in the wrap-up.
+- **PDFium's cycle check compares buffer pointers,** which every use
+  of a stream read from a file makes afresh, filtered or not, so it
+  draws a self-drawing form 40 deep; the interpreter refuses at once
+  (backlog B47). **PDFium ignores CMap reuse** (`usecmap` a no-op, `/UseCMap`
+  unread); sheaf follows the stream chain.
+- **Heights vary by OS in PDFium** for every font whose descriptor has
+  no box (the standard 14 above all); `approx.heights` alone mustn't
+  fail slice 5 closed.
+- **PDFium draws text in an ExtGState font given by reference in stock
+  Helvetica,** and resets `Tz`, `TL` and `Ts` at a form's start, where
+  the spec says they're inherited.
+- **PDFium's text page reads a span's `/ActualText` as its
+  characters,** splitting the glyph's box among them; what it extracts
+  there is that text, which slice 5's check and proposal 9 must
+  expect.
+- **A `BDC` naming a list `/Properties` lacks** opens nothing in
+  PDFium, so its `EMC` closes the enclosing range; `content::marked`
+  (strict) keeps it, so the two readings differ on such content
+  (backlog B57, logged at the wrap-up's review).
+- **PDFium caps the text in a clip at 1,024 objects** (past that it
+  clips nothing), and bounds mesh shadings (types 4–7) by the decoded
+  mesh, where ours are the clip within `/BBox` (conservative).
+- **A Type3 `d1` box with no area is none,** as in PDFium, which then
+  bounds the glyph by what its CharProc draws; sheaf falls back to the
+  `/FontBBox` (backlog B59, logged at the wrap-up's review). PDFium keeps vertical metrics as int16 and CIDs as
+  uint16 (not modelled), and works a Type3 font's ascent and descent
+  out at each `Tf` (`CheckType3FontMetrics`).
+- **The lexer's PDF 2.0 `/L` rule** makes an inline image's end depend
+  on the bytes after it when `/L` runs past the content's end; PDFium
+  8fdce8e1 ignores `/L` for inline images. `encode` refuses such
+  images; the rule is the lexer's (M10.5's), to look at (backlog B48).
+- **PDFium refreshes a text object's orientation** at `BT`, `Tm`,
+  `cm` and `Tz`, not at a form's start, so text shown in a form before
+  any of those may draw otherwise once a `Td` is lowered to `Tm`; and
+  a form with no resources of its own, drawn from parents with
+  different color spaces, lexes its unfiltered inline images
+  differently per parent, while `encode` writes it once, from its
+  first use. Neither showed in the tier (backlog B49).
+- **The old `text_bag` hashes an empty string shown in no font** (10
+  page streams in forms/safedocs/0178555.pdf and 4015534.pdf), a hash
+  that stands for no text. Gone with the swap (Greg accepted the
+  difference).
+- **forms/safedocs/0221018.pdf's form 10 0 R draws XObject 14 0 R,
+  which can't be read** ("invalid indirect object at byte offset
+  377590"); `Descend` fails closed on it, as slice 5 will. qpdf and
+  MuPDF read it, a bad reference in its `/Font` dropped (backlog
+  B50).
+- **PDFium reads codes renamed by `/Differences` through the base
+  encoding,** not the glyph names: 120,024 glyphs matched a character
+  of another code point. Its own standard 14 faces differ from Adobe's
+  AFM (86 glyphs missing, a few wider), and system faces differ
+  again. Its vertical loose box is an em of the font size in
+  PageSpace whatever the text matrix's scale. In right-to-left text
+  its generated characters become pieces `FPDFText_IsGenerated`
+  doesn't report. Its text page drops lone-space strings, consecutive
+  spaces and duplicates (91,304 glyphs and 27,994 characters left
+  unexplained, mostly glyphs whose text sheaf doesn't know and
+  zero-width characters). These are backlog F17's reasons.
+- **PDFium renders some files differently from one load to the next**
+  (forms/safedocs/0171994: 30–349 px), past realize's 16 px
+  allowance.
+- **The clip's memory** was bounded only by the operator and glyph
+  caps (gigabytes at worst, the review found); the `segments` cap now
+  bounds what a path and the clip's paths hold (2²³ segments of 28
+  bytes, a few hundred MB at worst with the parts' nodes), and text
+  in a clipping mode keeps glyphs only within PDFium's 1,024 objects,
+  so the glyph cap bounds its quads (32 bytes each).
+- **PDFium's text page drops a string in the glyphless OCR font
+  shown just after another** (`<0001> Tj <0002> Tj` makes one
+  character), so `fonts()`' cut-off codes are followed in `/T3B`
+  (F17).
+- **`text_bag`'s `FontDecoders` reads each font's `/ToUnicode` within
+  a fresh page cap** (as before the slice, now `Decoder::of_text`), so
+  the removal check's font reading isn't bounded per page as the
+  interpreter's now is; the swap, or slice 5, would bound it. Resolved
+  in the wrap-up: `FontDecoders` is gone, and `text_bag` reads fonts
+  within the page's budget.
+- **An embedded CMap with no mappings at all:** PDFium's
+  `CIDFromCharCode` may take each code for its own CID where its table
+  is empty, where sheaf gives 0; unverified, and no corpus glyph showed
+  it (backlog B51).
+- **`fuzz_bodies_survive_mutated_fixtures`' 60 s wall-time assert is
+  load-sensitive:** it failed in full parallel sheaf-doc runs at load
+  34–67 (alone 7–11 s; `interp` added about 1.5 s, before the review
+  cut its cases to 200 a page: 7.0 s alone at load 7). Added to
+  backlog B23's notes.
+- **lopdf's Flate decoding is lenient** (partial output, not an
+  error), as PDFium's is; the wrap-up found it decodes past where
+  zlib stops (backlog F27, research).
+
+Measured (AMD EPYC 7302P, 32 threads, release unless marked):
+- **The tiers** (`../pdf-corpus`, `SHEAF_CORPUS` unset, no "skipped:
+  no corpus"; step 6's full runs, the first two run again in full
+  after the review's fixes, release). Interpreted: 54,009 pages (forms
+  24,256, pool 22,792, scans 5,697, PDF/UA 1,264), no panic, none past
+  a cap, unreadable or failed, no use refused, no box not finite,
+  glyphs laid out always `Summary.glyphs`; 3 forms don't open (xref);
+  6 s. Glyph boxes: 54,004 pages (4422502 refused by PDFium), 0 not
+  compared, 117,464,507 glyphs matched (117,464,508 after the review:
+  a glyph of a space PDFium's line passed over is now matched, after
+  the review's fixes), 0 past tolerance, about 222 s:
+
+  | Class | Glyphs | Origin, most | Past the loose box | Unequal, most |
+  |---|---|---|---|---|
+  | simple | 95,315,511 | 1.2e-4 | p99 6.3e-5 | 9.8e-4 |
+  | CID horizontal | 20,277,565 | 1.2e-4 | most 4.9e-4 | 3.7e-4 |
+  | CID vertical | 1,283 | 0 | 0 | 0 |
+  | Type3 | 118,656 | 0 | — | 1.2e-4 |
+  | rotated or skewed | 1,704,836 | 1.2e-4 | most 2.4e-4 | 8.2e-4 |
+  | codes or widths guessed | 46,656 | counted, not held | | |
+
+  The tolerance is 1e-3 pt for every class held (origin, past the
+  loose box, sides unequal where the outline lies inside). 7 glyphs
+  matched ambiguously (1 simple, 6 Type3), listed; 120 bounded by
+  PDFium with no area, held to their origin; glyphs with no character
+  101,595 duplicates, 2,829,133 spaces, 185,671 under ActualText,
+  91,304 unexplained; characters with no glyph 57,509 ActualText,
+  27,995 unexplained; 106 of each far off the page. After the review:
+  2,829,132 spaces, 27,994 characters unexplained, the rest the same;
+  the unexplained held per file in `content_interp_unexplained.tsv`
+  (324 files; most in scans' other tools' text layers). Tier 3 was
+  run after the review on six files (forms 4, pool 1, scans 1: 25
+  pages, none differ, none unwritten). Written again:
+  54,004 pages pixel-identical at 1,024 px but 2 within the 16 px
+  allowance (1 and 2 px) and 24 of 0171994 drawn as PDFium draws the
+  file loaded again (30–44 px from its first load, 0 from the reload);
+  none left unwritten; 2,964 s (the tightened control's full run, the
+  same counts: 3,032 s).
+- **The corpus maxima behind the caps,** which stay as step 1 set
+  them: operators 1,217,210 (pool 0891127 page 99; cap 2²⁴, 13.8×),
+  glyphs 41,050 (forms 0345957 page 5; 2²⁴, 409×), form uses 745
+  (bounded by operators), form depth 10 (40), states saved 67
+  (65,536), marked nesting 9 (512); and the review's: bytes lexed
+  17,864,912 and path segments 995,739 (both pool 0607374 page 10;
+  caps 2³⁰, 60×, and 2²³, 8.4×).
+- **Fixtures against PDFium** (default tests): 70 glyphs (56 before
+  the review) and 13 images where PDFium puts them within 1e-3; every
+  fixture written again pixel-identical.
+- **Fuzz:** 300 s of `interp` (`-dict=fuzz/pdf.dict -rss_limit_mb=2048
+  -timeout=10`, load 36–43): 335,125 runs, no crash, coverage 4,287 to
+  5,361, features 8,512 to 24,438, corpus 26 to 2,894, peak RSS 567
+  MB; after steps 4 and 6's last changes, 30 s and 2 × 120 s more, no
+  crash; after the review (fonts' parts, positions hashed), 180 s from
+  the new seeds at load 4–6: 122,153 runs, no crash, coverage 6,209,
+  features 28,512, corpus 2,554, peak RSS 536 MB.
+- **The swap's A/B:** above.
+- **The gates** (`gate_7k`, release, `--test-threads=1`, one run,
+  started once the 1-minute load was 3.73 and 3.68 on two checks 30 s
+  apart, 3.82 at the start and 3.01 at the end; 11 of 11 pass, 853 s).
+  The new rows, every page interpreted (median of five, `Descend`,
+  each glyph's quad taken, a fresh `Fonts` a run), each fixture in a
+  process of its own:
+
+  | Fixture | Time | Peak RSS | RSS added | Operators | Glyphs |
+  |---|---|---|---|---|---|
+  | synthetic | 1,032 ms (budget 2,000) | 31.0 MB (64) | 1.98 MB | 805,000 | 27,981,115 |
+  | heavy | 729 ms (1,500) | 88.5 MB (180) | 11.6 MB | 735,000 | 17,092,804 |
+  | scanned | 86.8 ms (150) | 516 MB (1,024) | 1.95 MB | 28,000 | 0 |
+
+  The budgets are about twice five processes' medians taken before at
+  load 4–7 (1,052 ms, 31 MB; 739 ms, 88 MB; 73.7 ms, 516 MB), asserted
+  only with `SHEAF_GATE_INTERP`; with it set they were shown failing
+  at 100 ms (the synthetic's time) and 8 MB (the heavy's peak), and
+  passing unset. About 37 ns a glyph on the synthetic, quad and all.
+  After the review's fixes (the bound on each string's geometry, the
+  word-space rule, the segment and byte counts), the interp part
+  alone, each fixture in its own process, at load 3.0–3.8 after two
+  quiet checks: synthetic 1,241 and 1,199 ms (+16–20%), 30.9 MB peak;
+  heavy 806 and 802 ms (+10%), 88.6 MB; scanned 71.5 ms, 516 MB; all
+  within the proposed budgets. The other rows weren't run again: the
+  review's fixes reach no gated path (`text_bag` reads fonts as it
+  did, and nothing gated interprets).
+  The rest, against M10.5 slice 20's (this slice's code reaches none
+  of their paths; the gate harness gained only the new part):
+
+  | Row | Synthetic | Heavy | Scanned |
+  |---|---|---|---|
+  | geometry walk (asserted < 100 and < 250 ms); ready (asserted < 1 s on the heavy) | 50.2 ms; 55.5 ms | 82.9 ms; 369 ms | 62.8 ms; 485 ms |
+  | snapshot, published (asserted < 50 µs) | 0.241, 0.371 µs | 0.280, 0.401 µs | 0.241, 0.371 µs |
+  | `Tx::check` of a delete of every page (asserted < 1 ms) | 0.416 ms | 0.415 ms | 0.428 ms |
+  | realize + open + render 1,024 px, an edited page (asserted < 15 and < 25 ms) | 12.1 ms (slice 20: 12.0) | 22.3 ms (21.5) | 33.6 ms |
+  | engines after 220 groups: weighed, RSS added, open (asserted ≤ 96 MB, ≤ 96 MB, ≤ 6) | 28.9 MB, 41.7 MB, 6 | 28.9 MB, 65.5 MB, 6 | 29.0 MB, 61.4 MB, 6 |
+  | thumbnail strip (asserted ≥ 310 pages/s, ≤ 96 MB weighed and added) | 414 pages/s, 80.7 MB, 25.7 MB | 342 pages/s, 80.7 MB, 65.5 MB | 162 pages/s |
+  | crop all pages, and validated after a delete (asserted < 200 ms) | 13.6, 15.5 ms | 12.1, 15.6 ms | 10.3, 15.6 ms |
+  | Bates apply (asserted < 50 ms) and its Rewrite's fonts (asserted 1) | 0.627 ms, 1 | 0.652 ms, 1 | 0.647 ms, 1 |
+  | census of a watermark and a PNG background (asserted 1, 1, 1, 0; page resources) | as asserted; 1 of 1 | as asserted; 70 of 70 | as asserted; 7,000 of 7,000 |
+  | recognized text on every page: census (asserted); the Append | 1, 7,000; 10.04 s | 1, 7,000; 10.10 s | 1, 7,000; 10.01 s |
+  | one-mark Append on the scanned (asserted < 50 ms) | | | 20.1 ms (slice 20: 30.0) |
+  | "Page n of N", saved, every page moved: the Append (asserted ≤ 1 s), the section (asserted ≤ 8 MB) | 471 ms, 1.36 MB | 515 ms, 1.47 MB | 446 ms, 1.37 MB |
+  | the same on the file opened again: the Append (asserted ≤ 1 s on the scanned; accepted misses elsewhere), the section | 1,053 ms, 3.31 MB | 1,334 ms, 3.33 MB | 760 ms, 3.32 MB |
+  | proposal 8's draws (accepted misses on the synthetic and heavy) | 21.6, 19.6, 19.1, 31.7 ms | 39.2, 34.9, 32.2, 41.8 ms | 33.7, 32.1, 31.0, 39.5 ms |
+
+  The Rewrite against slice 8's writer: synthetic 145 ms, 1.08×;
+  heavy 741 ms in the gates' part and 777 ms alone, 1.05× and 1.10×,
+  under the 1.2× flag; RSS added 51.2 and 253 MB (≤ 1.5× slice 8's).
+  History's 200 OCR versions at most 236 MB (≤ 256 MB); AddMark 0.021
+  ms and a full reorder 0.959 ms at 20,000 marks (< 1 and < 2 ms);
+  1,000 mark adds on the heavy 0.033 ms (blank 0.022 ms); ready on
+  20,000 sheaf marks 544 ms (< 1 s). The scanned's reopened Append
+  passed on the first run (760 ms), so no rerun.
+- **The corpus suite** (`SHEAF_CORPUS` unset, no "skipped: no
+  corpus"; debug builds, optimized), every count #29's:
+  materialize_corpus's identity 4,389 of 4,392 written, 2,269,688
+  primary objects surviving, 919,465 copied as they were, 432 changed
+  by `keep_only`, 0 failed; 2,901 forms without their first page, 0
+  failed; every page duplicated, 4,389, 0 failed; inserted twice into
+  the 1040, 1,098, 0 failed; four times, 0 differ; the logo, 0 of
+  2,037,600 bytes differ. append_corpus: 4,389 marked, 3,770
+  appended, 259 rewritten (211 RemovalCheck, 34 BaseObjectsMissing,
+  14 BaseUnsound), 360 asked, 0 failed, vetoes 0 derived and 211 on
+  the files' own objects (after the rebase onto main `8155fa1`, whose
+  fixes moved one file: 260 rewritten, 15 BaseUnsound, 359 asked); the oracle finds text gone from 2,899 of
+  2,901 (none from 0016064 and 0112654). encrypted_corpus: the
+  Rewrite keeps 573 of 573 and the Append 572 (0630899 declined). The
+  content corpus: 10,482,008 words drawn, as before the slice. No
+  save writes different bytes (`text_bag` and every save path are as
+  they were), so the interop tests weren't run again.
+- **The workspace:** `cargo test --workspace` through the capped
+  runner, 1,750 passed, 0 failed, 61 ignored (M10.5 slice 20: 1,707
+  and 57; the four new ignored are the three tiers and the standard
+  14 widths); after the review 1,757 passed (its seven new tests), 0
+  failed, 61 ignored, no "skipped: no corpus"; the content corpus's
+  10,482,008 words and append_corpus's MARKED and ORACLE counts the
+  baseline's again (`text_bag` reads fonts as before); fmt, workspace
+  clippy (-D warnings), the macOS and Windows clippy simulation, and
+  the Windows checks of sheaf-doc and sheaf-render's tests, clean.
+
+Checked by tests, and each new check shown to fail with its behavior
+off (restored from the step's own copy, checked with cmp; every
+proptest seed a fault run wrote deleted; append_rewrite_tests.txt
+kept): `MissingWidth` and the widths ×1.02 (the font tests; tier 2,
+24,982 simple and 1,574 CID glyphs past tolerance); the cycle check
+and the depth cap, apart and together (the tests fail; together the
+test binary overflows its stack, SIGABRT, inside the capped runner,
+as `fuzz_bodies_survive_mutated_fixtures` does); `Tz` left out of the
+advance (the operators test and PDFium's); the `/BBox` clip
+(`clips_cut_what_is_drawn_after_them`); strict `EMC`
+(`marked_content_is_read_as_pdfium_reads_it`); the clip's
+non-recursive drop (a 100,000-part clip overflows); PDFium's path
+reading; `TD`'s leading skipped (the pixel test, the encode tests,
+PDFium's glyph test, tier 3 on its sample; the round trip by
+construction can't see an interpreter fault, so a writer fault was
+shown to fail it on every fixture and the proptest); the byte fast
+path's `&&` as `||` (its proptest); Report reading XObjects (both
+Report tests); the operator cap at 4,096 (tier 1 reports the 1040's
+pages, and passes once the Limit is swallowed too); per-string pens
+(the long-`TJ` test); a guessed width not carried (`a_width_guessed_
+moves_what_follows_it`); the face table, Type3 truncation, the
+turned-over clamp and the one-height flag (the font tests); the
+folded `Tm` (the encode tests, and tier 3: 112 pages on the 79 files
+that had differed); and the gate's budgets set low. The review's, the
+same way: the empty-string `TJ` rule (the operators test, and PDFium's
+glyph test: 4 glyphs not PDFium's); the cut-off code and `Tw` (PDFium's
+glyph test, 4); the mixed rule (its font test); each font's fresh
+budget (the 1,000-font page reads to the end), a cached font free (the
+budget test), CharProcs read per name (the budget test fails at the
+cost), the chain's flags (its test); the bytes and segments charges,
+each of three (each cap's test, the whitespace fan-out); the
+`NotFinite` checks (each case); `FindResourceHolder`'s page fallback
+and the color spaces' (the inherited test); the fuzz body's position
+hash against a writer one ulp off (the stable test); tier 1's failure
+assert (1,641 pages), tier 2's list (forms not drawn, glyphs 20 pt
+off: above) and tier 3's unwritten assert (2 problems on two files).
+
+For Greg:
+- **The interpreter's 7k budget** (`SHEAF_GATE_INTERP`, unasserted
+  until you rule): 2,000 ms and 64 MB peak on the synthetic, 1,500 ms
+  and 180 MB on the heavy, 150 ms and 1,024 MB on the scanned, about
+  twice what it measured before the review (1.65× on the synthetic
+  after it: 1.2 s, the fixes' bounds costing 16–20%). The scanned's
+  peak is mostly its 474 MB of bytes, which the source holds; the RSS
+  interpreting adds (1.6–11.8 MB) is printed too, if you'd rather
+  budget that. **Ruled** (2026-10-23/24): set after the speed step,
+  the scanned's on the RSS it adds; the wrap-up set them (its For
+  Greg).
+- **The tolerances:** a thousandth of a point for every glyph class
+  held, origin and box; guessed codes or widths counted, not held;
+  standard 14 heights held to containment and equality along the line
+  only (PDFium's face varies by OS; CI's macOS and Windows runs are
+  the first check of containment there); and the glyphs and
+  characters the tier can't explain held to each file's count, not to
+  0 (91,304 and 27,994, of about 117 million; 73,296 and 279 after
+  the wrap-up, which holds glyphs over a program on every side).
+- **Standard 14 widths without `/Widths` or a program depend on
+  PDFium's face, as heights do** (the review): sheaf has Adobe's AFM
+  widths, and PDFium's own faces' where they differ, so it's exact
+  against PDFium where PDFium draws in its own faces (a system without
+  the fonts, as here), not where it draws in Arial (Windows) or
+  Helvetica (macOS). Recommended for slice 5: take them as exact
+  (Adobe's metrics are what Acrobat and the spec draw by), and run
+  proposal 9's PDFium check where PDFium draws its own faces, or allow
+  what a system face moves; the default PDFium tests now give their
+  fonts `/Widths`, so CI holds nothing face-dependent.
+- **The deferrals:** the rewrite base and `Static::Ops` to slice 5
+  (no producer before `Rewrite::Redact`), and `text_bag`'s swap. The
+  slice's rule for the swap (every corpus count unchanged, no asserted
+  gate worse) appears met on what step 5 measured: every count the
+  same, the gated scanned sections equal (16.24 against 16.26 ms;
+  737.8 against 733.7 ms); it was reverted under a stricter, unstated
+  "no slower" rule, `text_bag` alone being 4% slower on the synthetic
+  and 37% on the scanned (a few milliseconds at 7,000 pages). Take it
+  now (reapply from `target/interp-text-bag-swap/` onto step 6's
+  changes, run gate_7k once, retire `FontDecoders` in retired.rs; it
+  gives the interpreter its caller and bounds the removal check's font
+  reading per page), or after the per-operator speedup? **Ruled**
+  (2026-10-23/24): take it, with a speed step after it; done in the
+  wrap-up. The rewrite base stays slice 5's.
+- **The new caps** (the review): `interpreted` 2³⁰ bytes (60× the
+  corpus's most) and `segments` 2²³ (8.4×, a pool CAD page's 995,739;
+  a few hundred MB of paths and clip at worst). Raise `segments` to
+  2²⁴, the operators', at about twice the worst-case memory? **Ruled**
+  (2026-10-23/24): no, `segments` stays 2²³.
+- **skrifa and hayro-cmap aren't in this PR.** The build-or-adopt
+  audit (plan/research/build-or-adopt/README.md, #34 and #42, merged after this
+  branch was cut from `8cdc589`) has this PR's wrap-up adopt
+  skrifa/read-fonts (entry 25: tight glyph boxes, and the heights
+  PDFium's `CheckFontMetrics` takes from the program) and hayro-cmap's
+  65 predefined CMaps with Adobe's BSD-3 notice (entry 26, F18), and
+  add backlog F17 (hayro-interpret as a second corpus oracle). The
+  slice was planned before that, so neither is built: the places they
+  plug in are `FontApprox::heights` and `::boxes` (the program's
+  metrics and outlines) and `::codes` (a predefined CMap), each
+  counted by the tiers today (46,656 glyphs with codes or widths
+  guessed). Here, as a follow-up step, or at slice 5's start?
+  **Ruled** (2026-10-23/24): here, "lean on skrifa"; done in the
+  wrap-up, with F17 logged.
+
+Left for later (the wrap-up's own list is at its end):
+- **Slice 5:** the rewrite base, `Rewrite::Redact`, the rename, and
+  the writing of survivors from the sketch; a public glyph-name to
+  CharProc lookup on `Foreign`; `Foreign::encode` is M13's.
+- ~~Font programs and predefined CMaps~~ (done in the wrap-up), and
+  backlog F17 (logged).
+- **Slice 6:** `PathDrawn`'s first operator's offset; the polygon
+  crate.
+- ~~The per-operator cost, then the `text_bag` swap~~ (done in the
+  wrap-up).
+- ~~The rebase onto main~~ (done: onto `8155fa1`).
+- **Tier 3's runtime** (50 minutes) is the orchestrator's pre-merge
+  run's longest; `SHEAF_INTERP_ONLY` narrows it (`just tier-interp`
+  runs the three tiers).
+
+After the wrap-up (2026-10-24; a second commit in the same PR, on
+`42c910f` and main `8155fa1`), Greg's rulings of 2026-10-23/24 carried
+out: the `text_bag` swap taken, a speed step after it, the 7k budgets
+set after that, `segments` kept at 2²³, tier 3's control tightened,
+skrifa and hayro-cmap adopted, skrifa and subsetter named in the
+plans, backlog F17, and a justfile recipe for the tiers.
+- **`text_bag` on the interpreter** (step 1). Reapplied by hand from
+  `target/interp-text-bag-swap/` onto the reviewed tree: `text_bag(
+  objects, content, resources, lim, fonts: &Fonts) -> Result<TextBag,
+  InterpError>` interprets with `Forms::Report`; an operator that
+  ends a word (`BT`, `ET`, `Td`, `TD`, `Tm`, `T*`, `'`, `"`) flushes
+  the run, and a string shown in a font that isn't the stock one adds
+  its text (`Foreign::text`, back as crate-private), else its bytes'
+  hash. removal.rs' `Walk` holds one `Fonts` and the joined view makes
+  its own; corpus.rs makes one a file, ocr_tests' `words` and
+  append_corpus's `drawn_words` one a document. Test:
+  `forms_are_their_own_and_gs_picks_the_font`; the lex-error test
+  matches `InterpError::Lex`. `FontDecoders` and the old walk went
+  (`RETIRED_M11`, below), with `Decoder::of_text`; `Decoder` is
+  private to foreign.rs again.
+- **One dispatch, and per-call setup** (step 2). interp/op.rs: a
+  crate-private `Op`, a variant for each operator the interpreter
+  reads (painting `Op::Paint(Paint)`, `F` read as `f`; clipping
+  `Op::Clip(FillRule)`), decoded once a step (`Op::of`); `Run::step`
+  dispatches with one match, path operators to `Builder::build`,
+  every other step ending PDFium's reading of path operators
+  (`Builder::interrupt`), state operators to `State::set` (both now
+  returning nothing); `State::moved` (encode's) maps its bytes through
+  `Op::of`; `Paint::of` went (new in `42c910f`, never published). The
+  page's `ResCx` is a local the run borrows (no `Rc` a call; a form's
+  own is `Option<Box<ResCx>>`), and the stock Helvetica is taken only
+  where a font is missing. Two levers of `text_bag`'s own: it flushes
+  only a run that isn't empty, and `Foreign::width_guessed_in`
+  (crate-private, replacing `guesses_widths`) checks a simple font's
+  bytes against its guessed widths, skipped once the line is guessed.
+  Test: `each_operator_decodes_to_its_op` (every name to its `Op`, no
+  two sharing one but `f` and `F`, unknown names, prefixes and the
+  empty name `Other`). A fast path for whole numbers in `number()`
+  measured within noise and was reverted.
+- **The interest set, and cheaper `q`/`Q`** (step 3). `Opts { forms,
+  wants }`: `Wants { ops: Ops, text, paths }` (`ALL`, the default, and
+  `NONE`), `Ops` a `u64` set over `Op` (`F` with `f`, every operator
+  the interpreter doesn't read with `Other`; `Ops::of`, a `const fn`).
+  An `Op` event is built only where it's wanted, and text and paths
+  likewise; the layout, the glyph and segment counts and their caps,
+  `NotFinite`, path geometry, the clip and `Summary` are worked out
+  whatever the interest; forms, images, shadings and marked content
+  are always handed. `text_bag::WANTS` asks for its eight operators
+  and the text, `encode` for operators only. A path's segments go
+  into a buffer the builder keeps (`Builder::end -> Option<Ended<'_>>`,
+  `Clip::with_path(&[Seg])`, `rectangle()` an array), so no path
+  allocates once it has grown. `FontScope` keeps its picks in a `Vec`
+  and hands out a `FontId` (public, opaque, `Copy`; `get`, `stock`):
+  `TextState.font` is a crate-private `Option<FontId>`, `TextShow.font`
+  an `Option<&Foreign>`, and the clip's nodes are `Rc`, so a `q`
+  copies no atomic count. Test: `a_smaller_interest_only_filters` (six
+  interests, each fixture and the fuzz page, eight contents on the
+  clips page at default and tight caps: every event the full run's
+  filtered, to the bit; `Result` and `Summary` equal).
+- **The predefined CMaps** (step 4). `hayro-cmap = "0.1"` in sheaf-doc
+  (0.1.0, Apache-2.0 OR MIT; with hayro-postscript 0.1.0, Apache-2.0
+  OR MIT, and brotli 8.0.4, BSD-3-Clause AND MIT, which its bundled
+  maps need: `load_embedded` and its parser are behind `embed-cmaps`,
+  which takes the whole crate). font/predefined.rs: PDFium's
+  `kPredefinedCMaps` as a table (each map's split, two bytes or lead
+  bytes, its collection, whether its codes are their own text), names
+  looked up PDFium's way without `-H`/`-V`; the 65 bundled maps, each
+  parsed at most once (`OnceLock`); `Collection::ordered`
+  (`CharsetFromOrdering`) and `to_unicode` (Adobe-<collection>-UCS2).
+  foreign.rs: `Codes::Predefined { map, scheme }` for codes, CIDs
+  (`lookup_cid_code`, sized as PDFium sizes the code; 0 where the map
+  has none), widths and `Tw`; `CidText`, where a Type0 font has no
+  `/ToUnicode` stream, as PDFium's `GetUnicodeFromCharCode` reads it
+  (a UCS2 or UTF16 map's code its own text; another predefined map's
+  CID, or Identity's where `/CIDSystemInfo` orders GB1, CNS1, Japan1
+  or Korea1, through Adobe-<collection>-UCS2); an embedded CMap's
+  predefined base read for the codes it maps none of (`CidMap.base`).
+  `approx.codes` stays for names neither hayro-cmap bundles nor
+  PDFium knows, and for non-Identity bases. Notices:
+  packaging/licenses' `LICENSE-cmap-resources` (a header, then
+  hayro-cmap's `assets/LICENSE.txt` word for word) and
+  `LICENSE-brotli` (brotli's BSD-3 and MIT, covering
+  brotli-decompressor and alloc-*, which lopdf already linked with no
+  notice shipped); README's licence paragraph names them, its stale
+  "hayro" gone; backlog F18's CMap bullet marked done. Fixture
+  `predefined()` (90ms-RKSJ-H and UniJIS-UCS2-H over the glyphless
+  TrueType) in `every()`, its fonts (`/RK`, `/UJ`) on the fuzz page.
+  Tests: `predefined_cmaps_are_adobe_s`, `type0_text_as_pdfium_reads_it`,
+  `every_bundled_cmap_parses`, `schemes_by_pdfium_s_names`,
+  `predefined_cmaps_place_their_glyphs`, more cases in
+  `embedded_cmap_over_the_one_it_uses` and
+  `identity_h_widths_from_w_and_dw`; PDFium places the fixture's
+  glyphs where sheaf does.
+- **Font programs** (steps 5 and 6). skrifa 0.44 and read-fonts 0.41,
+  default features off but `std` (the copy GPUI's swash already builds
+  on Linux, so no new version; cosmic-text's 0.40 stays GPUI's;
+  skrifa, read-fonts and font-types MIT OR Apache-2.0, bytemuck_derive
+  Zlib OR Apache-2.0 OR MIT). font/program.rs (crate-private; the
+  public `FontProgram::{None, Read, Malformed}` and
+  `Foreign::program()`): `/FontFile`, `/FontFile2` or `/FontFile3`
+  decompressed within the page's budget, charged to the font's cost,
+  told apart by its bytes; codes mapped to glyphs as PDFium maps them
+  (TrueType cmaps by the symbolic flag, `/Encoding` and
+  `/Differences`, FreeType's format 2 and 4 readers and its psnames
+  charmap; Type 1 and CFF by name, charset or built-in encoding, a CFF
+  `/Encoding` read by sheaf's own code; `/CIDToGIDMap`, Identity or a
+  charged stream; CID-keyed charsets); each glyph's box FreeType's
+  unscaled control box, normalized PDFium's way (`Foreign::char_box`,
+  crate-private): a simple font's 256 at read time, a CIDFont's drawn
+  as asked behind a per-font cache. Bounded: composites counted
+  first (4,096 glyphs, 32 deep; and, from the review, 65,535 points),
+  charstrings within fuel (2²⁴ bytes a font shared out, at least 2¹⁴ a
+  glyph), and a Type 1 program scanned ahead of read-fonts
+  (font/type1.rs: procedures 16 deep, from the review integers 256 in
+  a row, work 64 times its size), its charstrings found by name
+  there, read once as the face opens; a glyph past a bound has its box
+  unknown. From the review, what drawing costs (charstring evaluated,
+  glyph data read) is charged to the page's budget: a simple font's
+  as it's read, a CIDFont's glyph once an interpretation it's shown. Heights as `CheckFontMetrics` takes them.
+  Tricky fonts (FreeType's list, by name) have their boxes unknown.
+  `Fonts::for_text()` reads no program, for the removal check, corpus,
+  ocr_tests and append_corpus. `Summary.decompressed`, and a tier-1
+  measure of it. Step 6: `Glyph.quad` is PDFium's loose box, the metric
+  cell united in text space with the outline's (`char_box * size /
+  1000` from the origin, a side under 0.01 taken out as PDFium takes
+  it out: the top a thousandth of the size above the bottom, the right
+  the advance past the left), in PDFium's order (`Laid` carries the
+  width in glyph units for it); Type3 `d1` and standard 14 AFM boxes
+  aren't united. `FontApprox::boxes` now means the outline isn't
+  known: no program read (none, `Fonts::for_text`, the non-embedded
+  standard 14), a malformed or tricky one, a face that isn't exact, a
+  Type3 glyph with no box, and per glyph a code whose box is unknown
+  (`Foreign::outlined`). `Foreign::extent` takes in the outlines (a
+  simple font's 256 boxes, a CIDFont's `OUTLINE_REACH`, 2³¹). Fixture
+  `programs()` (hand-built TrueType, bare CFF, Type 1 in clear text and
+  eexec, a CIDFontType2 over Identity, each checked against system
+  FreeType, and `/PS`, a CFF whose metrics are smaller than its
+  outlines). Tests: `outline_boxes_are_the_program_s`,
+  `heights_from_the_program_where_the_descriptor_lacks_them`,
+  `malformed_programs_fall_back`, `programs_past_their_work_are_unknown`,
+  `type1_procedures_nest_within_the_scan_s_depth`,
+  `a_program_is_charged_to_the_budget`,
+  `decompressed_counts_each_font_s_program`,
+  `glyph_boxes_take_in_their_outlines`,
+  `text_past_an_f32_is_refused_alike_with_programs_or_without`;
+  PDFium's default test holds every glyph over a program to its loose
+  box on every side. Fuzz: a sixth `FONT_PART`, `/TT`'s program, which
+  the CIDFonts share; six font-part seeds (two pages, each fixture
+  program), `the_font_part_fixtures_give_a_program_that_reads`;
+  pdf.dict's font-program tokens.
+- **Tier 2 tightened** (step 6, content_interp.rs `check`). A glyph
+  over a program with nothing guessed (`exact`) is held to PDFium's
+  loose box on every side within the tolerance; text turned but by
+  quarter turns (PDFium unites the boxes' bounds in PageSpace) holds
+  PDFium's box and lies within `bounds(T(bounds(T⁻¹(L))))`; vertical
+  glyphs only where the text space is unscaled. One file is allowed by
+  count, `PROGRAM_DECODED_OTHERWISE` (forms/safedocs/5208359.pdf, 38
+  glyphs: its program `482 0 R` is a corrupt Flate stream lopdf
+  decodes whole and PDFium can't load, drawing in a substitute face;
+  backlog F27), as exports.rs allows 0070616. Tier 1 counts fonts by
+  program and glyphs by whether their outline is known.
+- **Tier 3's control** (step 7). Already tight in `42c910f` (the copy
+  compared with the reloaded original, pixel for pixel, within
+  `ANTI_ALIASING_PX`); its stale wording went ("no more than PDFium's
+  own"), and the ignore strings say `just tier-interp`.
+- **The justfile** (step 7). `tier-interp` under the corpus group (in
+  release, the three tiers by `--exact`, about 55 minutes;
+  `SHEAF_INTERP_ONLY` narrows it), in `premerge` before
+  `_corpus-ran`; the standard 14 widths test stays out (it holds only
+  where PDFium draws its own faces) and is run by hand, as the recipe
+  and its ignore string say; `interp` in `fuzz_targets`.
+- **The plans** (step 7). m10.md decision 11 and slice 7 name skrifa
+  and subsetter, with a For Greg item: subsetter renumbers glyphs,
+  which breaks slice 7's rule that a subset keeps each glyph's number;
+  ROADMAP's M13 font matching and M14 Optimize name them;
+  build-or-adopt entries 25 and 26 say what was taken. ROADMAP's M11
+  shared infrastructure notes the wrap-up.
+- **The 7k gate** (step 8). `interp_part` asserts budgets under
+  `SHEAF_GATE_INTERP` (`InterpBudget { ms, peak_mb, added_mb }`: the
+  synthetic and heavy their time and peak, the scanned its time and
+  the RSS interpreting adds), and measures every page's text bag
+  (`Fonts::for_text`, as the removal check reads), with no gate, so
+  the removal check's read stays measured now the A/B harness is gone.
+  `Foreign::char_box` is `#[inline]`: the heavy's row went from 1,150
+  to 1,070 ms with nothing else changed (below).
+- **Deleted:** `FontDecoders` (in `RETIRED_M11`, a table of M11's own
+  in retired.rs, in `LEDGERS` as "M11 slice"); `text_bag`'s lex walk
+  and its imports; `Decoder::of_text` and `font::Decoder`'s re-export;
+  `Paint::of` and `guesses_widths` (new in `42c910f`, never
+  published); the "predefined CMap unknown" path for bundled names;
+  the bare metric box as `Glyph.quad` where a program gives the
+  outline; `FontApprox::boxes`' Type3-only meaning. The A/B harness
+  (`text_bag_old.rs` with the old walk's twin and `OLD_WALK`,
+  removal.rs' branch for it, sheaf-ops' `text_bag_ab.rs`) lived from
+  step 1 to step 8 and was never committed. rg finds none of
+  `FontDecoders`, `text_bag_old`, `OLD_WALK`, `of_text` or
+  `text_bag_ab` under crates/ and fuzz/.
+
+Deviations:
+- **Tier 3 was already tight in `42c910f`,** so the reference control
+  wasn't applied again: step 7 verified and fault-checked it.
+- **Backlog numbers B47 and up, F25 and up,** not B40 and F24: main
+  (`origin/main`, after #47 and #49) already has B39 to B46 and F24,
+  and IDs are never reused, so these won't clash at the rebase. F17
+  replaced the placeholder; B23 gained the fuzz test's new cost
+  rather than a new entry.
+- **`Glyph.quad` changed meaning:** the loose box where a program
+  gives the outline (the metric box elsewhere), and
+  `FontApprox::boxes` "the outline isn't known" (every non-Type3 font
+  whose program isn't read, the standard 14 and every font under
+  `Fonts::for_text` among them). Slice 5's sketch says so.
+- **`Fonts::for_text`:** `Fonts::get` charges a cached font's whole
+  cost to each interpretation that picks it, so programs (CJK fonts of
+  5–20 MB) in the removal check's fonts could veto pages past the 256
+  MB budget; text needs no program, so its fonts read none. A string
+  shown past an em of about 10³⁰ points may be refused where programs
+  are read and not under `for_text` (outlines reach further than
+  metrics); the test shows the split and no page comes near it.
+- **The CMap scheme table is sheaf's copy of PDFium's**
+  (`kPredefinedCMaps`), since hayro-cmap keeps codespaces private (an
+  upstream PR, backlog F25). Identity fonts get CID text where their
+  ordering is an Adobe one, as PDFium's `kCID` case does (31 of the 69
+  files whose bags changed); embedded CMaps get none, as PDFium on
+  Linux gives none. Where a `/ToUnicode` is present, splitting and
+  lookup are as before, without PDFium's per-code fallback to CID
+  text (backlog B52). CNS-EUC-H/-V (bundled, but not in PDFium's
+  table) and the Table 118 names hayro-cmap lacks (83pv-RKSJ-V,
+  90pv-RKSJ-V, KSCpc-EUC-V, GBK2K-EUC-*) keep `approx.codes`; so does a
+  font whose embedded CMap uses a non-Identity base, at font level
+  (backlog B55).
+- **`PROPTEST_CASES` can't raise the interpreter's proptests:**
+  `ProptestConfig::with_cases(512)` overrides it, so each 20,000-case
+  run (`runs_of_operators_draw_as_their_encoding`,
+  `byte_codes_end_where_laid_out`) set `with_cases` from a scratch copy
+  and restored it (cmp).
+- **`Summary.decompressed` was added,** with a tier-1 measure, to show
+  programs keep far under `ContentLimits.decompressed` (17,945,356
+  bytes at most, 6.7%).
+- **Extra levers, each measured alone:** T1 and T2 (`text_bag`'s empty
+  run, the guessed-width scan) and P (path and clip buffers); D (font
+  ids, an `Rc` clip) kept on its targeted benchmark though the
+  fixtures can't show it (the scanned has no font or clip, the
+  synthetic no `q`). Wants has no `clips` part: the clip decides what
+  a shading paints and whether it's `NotFinite`, so it's built
+  whatever the interest. Nor are painted paths' PageSpace geometry and
+  stroke bounds skipped where paths aren't wanted, as the brief's
+  lever had it: `NotFinite` and the segments cap rest on them, and
+  `a_smaller_interest_only_filters` holds `Result` and `Summary` the
+  same for every interest, so skipping them would let `text_bag`
+  accept pages the full interpreter refuses (only the `Event` isn't
+  built). The whole-corpus proofs ran on each step's
+  kept levers together, each lever's own effect measured on its own
+  tree.
+- **Programs:** tricky fonts are known by name only, not by FreeType's
+  hinting-table checksums (backlog B54); heights come from a program
+  only where its units are 1,000 an em; a glyph space scaled in a way
+  sheaf doesn't model sets `approx.boxes`; widths aren't taken from a
+  program where `/Widths` is missing (backlog B53). Not copied from
+  PDFium, and documented on `Glyph.quad`: its degenerate loose box for
+  a char box with no area, and a glyph bounded by its outline alone
+  where ascent equals descent.
+- **The text-bag gate row** is the wrap-up's own (the brief allowed
+  it), unasserted; and `char_box`'s `#[inline]` is a speedup found
+  while measuring the budgets, output-identical by construction (an
+  inlining hint; no fast-math), kept on its five runs.
+
+Measured (AMD EPYC 7302P, 32 threads, release unless marked; timings
+after `just quiet`):
+- **`text_bag` against the old walk** (`text_bag_ab`, 11 rounds
+  alternating, paired new/old median; a null A/B first for the noise
+  floor, about ±2%; the old walk's own time moves ±1% on the synthetic
+  and heavy and ±5% on the scanned between builds, from code layout
+  alone):
+
+  | Fixture | Step 1 (swap only) | After the wrap-up | Null, then and now |
+  |---|---|---|---|
+  | synthetic | 1.100, 1.104 (1.85 against 1.65–1.69 s) | 1.023, 1.024 | 0.979, 0.998 |
+  | heavy | 0.962, 0.968 | 0.945, 0.956 | 0.982, 1.002 |
+  | scanned | 1.439, 1.441 (5.8–6.0 against 4.0 ms) | 1.309, 1.318 (4.91–5.07 against 3.74–3.84 ms) | 1.016, 1.007 |
+
+  By lever (two runs each; synthetic, heavy, scanned): A2 1.099,
+  0.968/0.944, 1.352/1.376; B 1.090/1.082, 0.970/0.938, 1.354/1.367
+  (empty content 0.993 → 0.758 ms per 7,000 calls); T1 1.084, 0.976,
+  1.299/1.309; T2 1.028/1.018, 0.949/0.960, 1.230/1.247; N (rejected)
+  1.021/1.019, 0.973/0.966, 1.248/1.256; C 1.017–1.026, 0.935–0.965,
+  1.310–1.318; P 1.021, 0.942, 1.262; D 1.022, 0.937/0.942,
+  1.313/1.283. A branch around one call moved the scanned fixture 9%
+  with no change in work (two diagnostic builds), so its few percent
+  between builds are layout. The gated scanned sections stayed equal
+  to the old walk's throughout: one mark 16.20 against 16.13 ms at
+  step 1, 15.73 against 15.77 ms at the end; the reopened reorder
+  727.4 against 729.0 ms, then 716.8 against 717.4 ms.
+- **Per operator** (ns an operator, median of 9 passes; the
+  interpreter alone, `text_bag`, the old walk):
+
+  | Operator | Step 1 | After the wrap-up |
+  |---|---|---|
+  | `q Q` | 50.7, 52.0, 19.3 | 40.9, 36.6, 19.7 |
+  | `q Q` after a font and a clip | 48.2, 57.1, 19.5 (step 3's start) | 41.5, 37.4, 19.5 |
+  | `0 g` | 52.1, 54.6, 35.1 | 42.6, 40.7, 32.7 |
+  | `cm` | 203.9, 204.7, 131.2 | 198.1, 194.6, 134.9 |
+  | `BT ET` | 46.6, 82.6, 50.7 | 40.0, 41.6, 58.1 |
+  | `T*` | 43.6, 85.8, 51.3 | 35.0, 36.2, 55.2 |
+  | `(a) Tj` after a font | 158.9, 184.8, 132.6 (step 3's start) | 172.9, 190.4, 130.7 |
+  | `m l S` | 92.2, 95.3, 40.0 | 99.1, 93.4, 41.3 |
+  | `re W n` | 186.1, 183.9, 47.1 (step 3's start) | 133.7, 124.0, 49.3 |
+
+  Per call (7,000 calls on the scanned file's resources; the
+  interpreter, `text_bag`, the old walk): empty content 0.98 (no
+  `text_bag` figure at step 1; 1.19 at step 2's start), 1.04 ms →
+  0.928, 0.926, 1.003 ms; the scanned page 5.00 (5.10), 3.79 ms →
+  4.834, 4.801, 3.596 ms; `q Q` 1.678, 1.671, 1.462; `cm` 3.298,
+  3.263, 2.738; `/Im0 Do` 1.627, 1.625, 1.444. `Tj`'s rise is steps
+  4–5's (the interpreter alone 158 → 173 ns; step 6 measured equal
+  before and after its own change).
+- **The 7k interp rows** (each fixture's interp part in five processes
+  of its own, after `just quiet`, load 1.3–2.3; medians of the five
+  medians):
+
+  | Fixture | Time | Peak RSS | RSS added | Text bags | Words and hashes |
+  |---|---|---|---|---|---|
+  | synthetic | 1,018 ms (budget 1,600) | 31.2 MB (48) | 1.75 MB | 1,890 ms | 5,390,000 |
+  | heavy | 1,072 ms (1,700) | 89.3 MB (140) | 12.2 MB | 1,560 ms | 3,500,000 |
+  | scanned | 71.5 ms (115) | 515 MB | 0.52 MB (4) | 14.3 ms | 0 |
+
+  The five runs: synthetic 1,015–1,022 ms; heavy 1,068–1,075 ms;
+  scanned 70.7–72.2 ms, 0.46–0.71 MB added. Before the wrap-up (after
+  the review): synthetic 1,241 and 1,199 ms, heavy 806 and 802 ms,
+  scanned 71.5 ms. The synthetic is the speed step's (−16%). The
+  heavy's +33% is its 70 embedded TrueType programs (77 KB each):
+  with programs unread (`for_text`) it took 762–771 ms; with them read
+  and the union off, 785–807 ms; a warm font cache saves 25–30 ms of
+  reading; so the union costs about 16 ns a glyph over its 17,092,804
+  glyphs (about 20 before `char_box` was inlined: 1,147–1,157 ms).
+  Budgets about 1.6 times the medians (times and peaks); the
+  scanned's added RSS, too small for a ratio to mean much, 4 MB, under
+  the 7 MB a kilobyte kept a page would add. With `SHEAF_GATE_INTERP`
+  set and each budget set low (100 ms on the synthetic, 8 MB peak on
+  the heavy, 0.1 MB added on the scanned) each assert failed, and
+  unset each passed. The words and hashes sum to the A/B's 7k page
+  words, 8,890,000.
+- **The tiers in full** (`../pdf-corpus`, `SHEAF_CORPUS` unset, no
+  "skipped"). Interpreted: 54,009 pages, no failure, every box finite;
+  the maxima as before but bytes decompressed, 17,864,912 before
+  programs and 17,945,356 with them (pool 0607374 page 10; 6.7% of
+  2²⁸); fonts 16,918 with no program, 50,520 read, 5 malformed (all
+  in 5208359); glyphs 93,203,599 with their outline known, 27,486,964
+  not. Glyph boxes, before (`42c910f`) and after:
+
+  | | Before | After |
+  |---|---|---|
+  | glyphs matched | 117,464,508 | 117,492,213 |
+  | held to the loose box on every side | 0 | 90,677,142 (simple 69,439,648, most 1.1e1 in 5208359's 38, the rest within 1e-3, p99 6.3e-5; CID horizontal 20,255,762, most 4.9e-4; rotated or skewed 981,732, 330,772 of them turned, most 3.1e-4) |
+  | unequal where the outline lies within, most | simple 9.8e-4, CID 3.7e-4 | simple 2.4e-4, CID 1.2e-4 |
+  | codes or widths guessed (matched) | 46,656 | 3,637 |
+  | fonts labelled "codes guessed" (all glyphs) | 60,808 | 72 (six veraPDF CMap tests, 12 each) |
+  | CID horizontal, vertical | 20,277,566, 1,283 | 20,346,171, 3,392 |
+  | matched to another code point | 120,024 | 122,457 |
+  | unexplained glyphs, characters | 91,304, 27,994 | 73,296, 279 |
+  | past tolerance | 0 | 0, and 5208359's 38 allowed |
+
+  The unexplained list was written again twice (step 4: 35 files
+  lower, 33 gone; step 6: 4 lower), none raised. The other code points
+  are Adobe's 2023 UCS2 data against PDFium's older tables (CID 231 is
+  U+2002); positions all agree. Tier 3, the tightened control:
+  forms 26 of 24,251 pages differ, 2 within 16 px (0054344 1 px,
+  0106273 2 px) and 24 of 0171994 drawn as PDFium draws the file
+  loaded again (30–44 px from the first load, 0 from the reload);
+  pool 0 of 22,792, scans 0 of 5,697, PDF/UA 0 of 1,264; none left
+  unwritten (4422502 PDFium refuses). The final `just tier-interp`
+  (on the final code, release): tier 1 in 7 s, tiers 2 and 3 side by
+  side behind PDFium's lock in 2,911 s, every count as above.
+- **CJK glyphs:** 46,656 matched glyphs with codes or widths guessed
+  became 3,637, and no CID or width differed from PDFium's in any
+  class; tier 3 on 16 CJK files, 0 of 100 pages differ. The bundle
+  decompresses once to 463,445 bytes (250,740 of brotli), 12 ms and
+  1.2 MB of RSS the first time; a map parses once, in 13 µs to 3.4
+  ms; nothing is charged to a page.
+- **Programs against PDFium** (a temporary check over the tier-2
+  corpus, each glyph's `char_box` laid out PDFium's way against
+  `FPDFText_GetCharBox`, within 2e-3 pt): TrueType 23,705,093 matched,
+  174 not (all in 5208359, whose damaged cross-reference table lopdf
+  and PDFium rebuild otherwise), 495 in tricky fonts unknown;
+  CIDFontType0 1,534,419, 0, 12 unknown; CIDFontType2 19,046,139, 3
+  (Devanagari marks in 0137778, where libfreetype gives sheaf's box),
+  1,833 tricky; Type 1 46,390,866, 0; MMType1 635, 0. Its first run
+  found ten differences from FreeType, each fixed (CID-keyed CFF
+  matrices, FreeType's format 4 and 2 `cmap`s, empty glyphs and its
+  `loca` sanitizing, composite anchors it refuses, `/Encoding`
+  references, its psnames charmap, CFF encodings as it loads them,
+  the font matrix through `FT_Outline_Transform`, its glyph count).
+- **The bags** (`old_and_new_bags_are_equal`, the whole corpus, every
+  stream the removal check reads, after every step). Step 1: words
+  equal on every joined page (forms 10,486,700, pool 8,159,986, scans
+  974,737, PDF/UA 243,576, 7k 8,890,000), the same refusals (409
+  streams and 1 form in forms, 49 in pool, 1 in scans, 8 in PDF/UA),
+  the only difference the accepted empty-string hash (0178555 objects
+  311, 314, 315, 322; 4015534 objects 116, 118, 122, 125, 127, 129).
+  Steps 2, 3, 5 and 6: equal to the step before, line for line. Step
+  4: 69 files more, each with a Type0 font with no `/ToUnicode` over a
+  predefined CMap now read or Identity with an Adobe ordering, checked
+  apart from sheaf with `qpdf --json` (mutool for 6614490, whose
+  cross-reference table qpdf can't read): Identity-Japan1 22 files,
+  UniJIS-UTF16-H 19, 90ms-RKSJ-H 18, UniJIS-UCS2-H 17, 90ms-RKSJ-V 9,
+  Identity-GB1 5, Identity-CNS1 4, UniCNS-UTF16-H 4, 90msp-RKSJ-H 3,
+  UniGB-UCS2-H, GBK-EUC-H, UniGB-UTF16-H and UniCNS-UCS2-H one each.
+  Page words: forms −21,282, pool +108, scans +2,386, PDF/UA −23, 7k
+  the same, refusals the same; words can fall, where strings each
+  hashed alone join into fewer words. Per file (page words): forms
+  0004934 −21, 0020174 −1, 0026602 −782, 0121222 −167, 0124411 −78,
+  0150632, 0202364 and 0231237 0, 0208686 −116, 0238027 −484, 0239933
+  −6,919, 0274607 −4,028, 0289616 −103, 0306586 −2,325, 0330248 −3,
+  0369403 −2,334, 0402991 −1,436, 0446302 −41, 0488353 +86, 0614186
+  −843, 0724744 −152, 0754802 −20, 0883199 −92, 1070016 −151, 1314652
+  −1,243, 7573576 −29; pool 3239385 +108; scans 0000908 +2,483,
+  0002381 −3, 0003459 +205, 0003865 0, 0004325 −71, 0005462 +41,
+  0005707 −2, 0009937 +46, 0012932 −7, 0013825 +203, 0014935 −649,
+  0015239 +69, 0017615 −2, 0020703 −84, 0027802 +141, 0045795 +16;
+  conformance safedocs/0001978 −5 and veraPDF's two 7.21.7/8.4.5.8
+  Unicode character map tests −9 each. The other 23 changed only
+  hashes to text of as many words.
+- **The corpus suite:** every asserted count the baseline's after each
+  step: MARKED 4,389 of 4,392, 3,770 appended, 260 rewritten (211
+  RemovalCheck, 34 BaseObjectsMissing, 15 BaseUnsound), 359 asked, 0
+  failed, vetoes 0 derived and 211 on the files' own objects; ORACLE
+  text gone from 2,899 of 2,901 (none from 0016064, 0112654);
+  materialize_corpus 4,389 written, 2,269,688, 919,465 and 432, 2,901
+  without their first page, 4,389 duplicated, 1,098 inserted twice,
+  four times 0 differ, the logo 0 of 2,037,600; encrypted_corpus 573
+  of 573 and 572 (0630899 declined). The content corpus, which isn't
+  asserted, drew 10,460,726 words (10,482,008 before): the forms'
+  −21,282 page words above, file by file. The bags of those 69 files
+  are what tier-append's deleted-means-deleted, crop and OCR tiers
+  read too (premerge's).
+- **Proofs per step:** the interpreter's proptests at 20,000 cases
+  each (`runs_of_operators_draw_as_their_encoding`,
+  `byte_codes_end_where_laid_out`; 19–20 s in release), no seed left;
+  tiers 1–3 on a sample of ten files (forms 0171994, 0345957, 0289616,
+  2299033, 0142164, 0178555; pool 0607374, 0891127; scans 0027802;
+  conformance 0001842), equal to the step before but times, and tier
+  3's 0171994 pages within the allowance or drawn as the reload.
+- **Fuzz:** `just fuzz interp` 60 s after step 4 (59,434 runs), 120 s
+  after step 5 (91,260 runs, coverage 11,278, peak RSS 554 MB), 60 s
+  after step 6 (34,921 runs), each with no crash; at the end, `just
+  fuzz interp 120` on the final code at load 1.7: 57,248 runs, no
+  crash, coverage 11,562 to 11,794, features 43,559 to 45,499, corpus
+  3,125 to 3,498, peak RSS 573 MB.
+- **The gates** (`SHEAF_GATE_INTERP=1 just gates` on the final code,
+  after `just quiet` at load 2.7 and 1.8; 12 of 12 pass, 2,907 s):
+  realize + open + render an edited page 11.8 ms on the synthetic (<
+  15) and 21.5 ms on the heavy (< 25); the thumbnail strip 413 and
+  354 pages/s (≥ 310); the scanned's one-mark Append 24.6 ms (< 50)
+  and its reopened Append 759 ms (≤ 1 s, on the first run); geometry
+  walk 47.8 and 78.0 ms (< 100, < 250); ready on the heavy 359 ms (<
+  1 s), on 20,000 sheaf marks 531 ms; history's 200 OCR versions 236
+  MB (≤ 256); AddMark 0.021 ms and a full reorder 0.986 ms at 20,000
+  marks; the Rewrite against slice 8's writer 152 and 149 ms on the
+  synthetic (1.13× and 1.12×) and 794 ms on the heavy (1.12×), under
+  the 1.2× flag; the 500-page scan's RSS added 187 and 183 MB (< 400).
+  The interp rows, asserted: synthetic 1,019 ms and 31.1 MB peak,
+  heavy 1,068 ms and 89.4 MB, scanned 71.5 ms and 0.71 MB added; the
+  text bags 1,887, 1,560 and 14.3 ms. The opt-in rows (the flatten's
+  RSS, proposal 8's draws, the reopened Append on the synthetic and
+  heavy) miss as accepted.
+- **The workspace:** `just precommit`, all passed: markers, fmt,
+  locks; the workspace's tests with the corpus (`cargo test
+  --workspace` through the capped runner, 1,838 passed, 0 failed, 62
+  ignored, no "skipped: no corpus", 619 s); interop 19 of 19; the
+  release properties 2 of 2; no new proptest seed; the macOS and
+  Windows clippy simulation; Windows clippy of sheaf-util, sheaf-doc
+  and sheaf-ops; and `cargo check --target x86_64-pc-windows-msvc -p
+  sheaf-render --all-targets`, clean. Workspace clippy (-D warnings)
+  clean. The corpus counts printed again at the end: as above, and
+  10,460,726 words drawn.
+
+Checked by tests, each new check shown to fail with its behavior off
+(restored from the step's own copy, checked with cmp; every proptest
+seed a fault run wrote deleted; append_rewrite_tests.txt kept): the
+`Op` table (TD read as Td; an extra `BTx`); `width_guessed_in` (its
+first byte skipped; its early-out turned over); the interest set (the
+segment count skipped where paths aren't wanted; a wanted `T*`
+dropped); the predefined split (a mixed map read as two bytes: three
+font tests, `predefined_cmaps_place_their_glyphs` and PDFium's glyph
+test) and CID text (off: three tests); the outline union (off: three
+sheaf-doc tests, PDFium's fixture test 12 of 109 glyphs, tier 2 on a
+sample 38,094 past tolerance) and the turned rule (boxes 0.01 wider:
+all 186 turned glyphs held in 0001978 fail); programs (none read:
+the outline and height tests; a malformed one a panic: the fallback
+test; its bytes not charged: the budget test); tier 3's control (a
+glyph planted elsewhere, as large as the reload's own difference:
+0171994 alone 60 px from the first load and 32 from the reload, the
+79 files that had differed 576 and 225, failing it each time; a 0.5
+pt move, 16 px, stays within the allowance) and the folded `Tm`
+(forms 112 of 721 pages and pool 16 of 1,776 differ, 96 problems on
+78 of the 79 files, and three encode tests); `RETIRED_M11` (the old
+walk's file back: four hits); and the interp budgets set low (above).
+A count control would have failed the planted glyph here too, as
+PDFium drew the copy as it draws the file loaded again; it passes
+such an error only where PDFium draws the copy as it drew the first
+load (the reference run's 351 against 702 px).
+
+What the review found (24 findings on the wrap-up, each checked
+against the code first; each new check shown to fail with its
+behavior off, restored from the review's own copy and checked with
+cmp, no proptest seed left):
+- **The Type 1 scan recursed once an integer in a row** (blocker):
+  each integer reads the next token ahead, and an integer there reads
+  ahead in turn, with no bound but fuel, which a first chain hardly
+  burns; a program of 200,000 integers overflowed the fuzz binary's
+  stack. Fixed: `INTS_AHEAD` (256) bounds the lookaheads nested, the
+  program refused past it (real ones have a dozen or so). The scan's
+  peek stays recursive, not lexing one token as the review proposed:
+  its fuel must count what read-fonts' own recursive peek costs.
+  Tests `type1_integers_run_within_the_scan_s_lookahead` and a
+  100,000-integer case in `malformed_programs_fall_back`; the fuzz
+  seeds' `hostile_program_fixtures` (300 integers; the `loca` below).
+  Fault: the bound off fails the first and overflows the second's
+  stack.
+- **read-fonts' recursion was described in public before a repro:**
+  checked apart from sheaf (a crate of its own on read-fonts 0.41 and
+  0.46, in the scratch directory): 0.41 overflows its stack on a
+  million `{` or 200,000 integers in a Type 1 program's clear text,
+  and takes 92 ms on 2,000 integers; 0.43.0 and later (an iterative
+  `read_proc`, `accept_blob_start`) read them in 1–20 ms. Fixed
+  upstream and public, so no report file. type1.rs' doc, F26 and
+  these notes now say so without the mechanics; F26 became the skrifa
+  bump.
+- **`Face::sfnt`'s `loca` check underflowed** where the record's
+  offset is past the data and no table's is greater (a panic with
+  overflow checks): `saturating_sub`. Test
+  `a_loca_record_past_the_end_is_read_past` (fixture
+  `loca_past_end_program`), and a fuzz seed; fault: `-` again panics.
+- **A CIDFont's program was opened again for each glyph drawn** (four
+  findings, one cause): a Type 1 program scanned and parsed per CID,
+  and `Face::open` built its view three times. Fixed: the face keeps
+  the Type 1 font and charstrings read once as it opens (`View::Type1`
+  borrows them), `open` matches one view, `clone_shape` is gone, and
+  `CidGlyphs::drawn` draws outside its lock and not at all for a face
+  that isn't exact. Test `a_cid_font_s_program_is_read_once` (2,000
+  CIDs over a MiB program, 0.01 s); fault: read again per view, 6.5
+  s, past its 2 s.
+- **Drawing work wasn't bounded by the page** (two findings): per-glyph
+  fuel let a CIDFont's 65,536 glyphs evaluate 2³⁰ bytes, and fonts
+  sharing one small program each drew it again, charged only its
+  bytes. Fixed by charging what drawing costs to the page's budget
+  (`ContentLimits.decompressed`): bytes of charstring evaluated, and
+  for TrueType the glyph data the composite count reads and a byte a
+  point and component drawn. A simple font's glyphs are drawn as it's
+  read, into its cost, which every pick charges as before; a
+  CIDFont's are drawn as asked, so the interpreter charges each
+  glyph's recorded cost the first time an interpretation shows it
+  (`Foreign::charge_outlines`), whichever page drew it, and a
+  CIDFont's `A` and `g`, drawn for its heights, go into its cost. A
+  CID-keyed CFF's charset is mapped once a face (`Face::cids`), not
+  scanned per CID. Each glyph's fuel stays its own share, so its box
+  doesn't hang on which glyphs any page drew before (the review's
+  shared pool would have); the page's budget bounds the sum. Not
+  taken: faces cached by stream (the charge covers it), the composite
+  memo kept per face (bounded and charged). The worst a page can now
+  cost drawing is about 4 s: a subroutine bomb burns a glyph's 5.6 MB
+  of fuel in about 80 ms, and 256 MB holds about 45 of them. Test
+  `fonts_sharing_a_heavy_program_end_within_the_budget` (a thousand
+  simple fonts, then a thousand CIDFonts, over one 200-byte CFF: past
+  a 32 MiB budget in 1.2 s); faults: no simple font's charge, within
+  the budget after 75 s; no CIDFont's, after 77 s.
+  `decompressed_counts_each_font_s_program`,
+  `a_program_is_charged_to_the_budget` and
+  `the_font_part_fixtures_give_a_program_that_reads` count the drawing
+  now.
+- **CID 0 read as U+FFFD:** PDFium's own tables map CID 0 to U+FFFD in
+  every collection (its `cmaps/*/Adobe-*-UCS2_*.inc`), so
+  `code_text` stays as PDFium reads it; but the removal check's bags
+  no longer take it for text: `Foreign::text` has none for a CID 0,
+  so a string of unmapped codes hashes, as it did before the
+  predefined CMaps, and doesn't match another of the same length.
+  Cases in `type0_text_as_pdfium_reads_it` (Identity's `0000`,
+  90ms-RKSJ-H's unmapped `80`); fault: the filter off fails them. One
+  corpus file's bags moved: forms/safedocs/0402991 draws 547 words,
+  not 538, its strings of unmapped codes hashed and splitting the
+  words around them (the content corpus 10,460,735 words, 10,460,726
+  before); MARKED (4,389 marked, 3,770, 260, 359, vetoes 0 and 211)
+  and the ORACLE (2,899 of 2,901) as before.
+- **A composite's points weren't capped:** past 65,535 the glyph is
+  unknown before skrifa allocates for them all. skrifa fails such a
+  glyph anyway, after the allocation, so no outcome shows the guard;
+  it was checked by reading skrifa 0.44 (`ensure_point_count_limit`
+  after `required_buffer_size`).
+- **`cid_box`'s raised top could overflow** an `i32`:
+  `saturating_add`, PDFium's sum wherever it's defined.
+- **Path buffers held a cap-sized path's capacity twice:** the built
+  and placed buffers now swap as a path ends, and the one handed back
+  shrinks to 2¹⁶ segments; output unchanged.
+- **Tier 1's per-file font counts keyed fonts by address,** which a
+  dictionary font's is only within its page: now a font by number
+  once a file, a dictionary font once a page.
+- **5208359's allowance was a ceiling on the whole file:** now exactly
+  38 glyphs of the font over `482 0 R` (`Shown.program`), the file's
+  others held as every file's, and the tier fails where that count
+  moves either way. Fault: 37 fails it.
+- **The scanned row's RSS budget below what the brief quoted** (two
+  findings): the 11.8 MB was the heavy row's; slice 3's step 7
+  measured the scanned at 1.58–1.95 MB added (loads 3.8–6.6). Run
+  again today, alternating, quiet: `42c910f` 1.58–1.89 MB, the
+  current code 0.46–0.58 (the same with glibc's thresholds pinned).
+  `42c910f` added 1.5–1.8 MB whether it interpreted one page or
+  7,000: a one-time allocation, reading the stock Helvetica (1.3 MB,
+  measured), which every interpretation picked first until the speed
+  step's lever B picked it only where a font is missing. The 4 MB
+  budget stays, with that in `InterpBudget`'s doc.
+- **document-model.md's `text_bag` bullet** still said the bags were
+  the old walk's: reworded.
+- **Found items missing from the backlog:** B57 (`content::marked`
+  against the interpreter on an unknown `/Properties` name), B58 (the
+  unbundled Table 118 maps), B59 (a Type3 `d1` box with no area),
+  linked from the Found lists.
+- **The accepted empty-string difference had no test:**
+  `codes_no_font_reads_are_their_bytes_hash` shows an empty string
+  adds nothing, in no font or one, and ends no word; fault: `show`'s
+  early return off fails it.
+- **The paths' interest lever's departure wasn't recorded:** in
+  Deviations now.
+- **FreeType's credit:** program.rs' cmap format 2 and 4 readers, its
+  psnames charmap and its CFF encoding follow FreeType's routines
+  closely (the binary search's overlap handling is
+  `tt_cmap4_char_map_binary`'s), so they're taken as derived, under
+  the FTL (FreeType is FTL or GPLv2): `packaging/licenses/
+  LICENSE-freetype` (the credit line and the FTL), README's licence
+  paragraph, F18. libpdfium builds FreeType in and its LICENSE has no
+  FreeType notice, which this covers too.
+- **`read_file`'s own `is_stream`:** foreign.rs' is shared.
+- **`Foreign::text` made a `String` a code:** it pushes each code's
+  text into one.
+
+Checked after the review: `just corpus` (1,842 passed, 0 failed, 62
+ignored, no "skipped: no corpus"), the corpus counts above but the
+content corpus's 10,460,735 words (the CID 0 finding's); tiers 1
+and 2 in full (209 s): 54,009 pages, none past a cap or failed;
+fonts shown 16,919 with no program (16,918 before: a dictionary font
+now counts once a page), 50,520 read, 5 malformed; the most a page
+took from its budget 17,980,634 bytes (17,945,356 before, the
+drawing now charged; 6.7% of the cap); tier 2's counts unchanged
+(117,492,213 glyphs matched, 0 past tolerance, the 38 of `482 0 R`,
+every unexplained count as listed). Tier 3 not run again (encode
+unchanged; the path buffers' swap is output-identical, the
+interpreter's tests and proptests pass): the orchestrator's
+pre-merge. `just fuzz interp 120` (51,448 runs, no crash), and the
+review's two crashing inputs run through the fuzz binary without
+one; `just seeds`, `just locks`, `just markers`, fmt, clippy of the
+changed crates, `just clippy-nonlinux`, `just check-windows` and
+sheaf-render's Windows check, clean. The gates weren't run again
+(the orchestrator's): the scanned interp row measured above.
+
+Pre-merge (2026-10-25, rebased onto main `6d71ab3`, with #47 and
+#49): `just precommit` passed (the workspace with the corpus, interop
+19, properties 2, seeds, the non-Linux clippy and the Windows check);
+`just premerge` passed but tier-realize's predicate on
+pool/safedocs/0874/0874785.pdf page 0 (B4, accepted; its pixels 7 of
+13,290 within 16 px, scans 0 of 1,769). tier-append's counts are the
+last pre-merge's to the line (crop 2423 appended, 862 rewritten, 1104
+asked; deleted means deleted both ways; recognized text 1416 and 8702
+appended; headers 5802 reorders): the 69 files' changed bags moved no
+verdict. tier-interp: tier 1's 54,009 pages, tier 2's counts as above
+(38 past tolerance, all `482 0 R`'s), tier 3's forms 26 of 24,251 (2
+within 16 px, 24 drawn as the reload), pool, scans and PDF/UA 0.
+tier-exports only B9's 0070616; tier-watermark, tier-lexer,
+tier-codes and tier-arlington (2,062,906 objects) pass.
+`SHEAF_GATE_INTERP=1 just gates`: 13 of 13 pass, the scanned
+reopened Append 882 ms. The interp rows after the review's fixes,
+five processes each after `just quiet`: synthetic 1,162–1,176 ms
+(median 1,168; 1,018 before the fixes, 1,199–1,241 before the
+wrap-up), heavy 949–951 ms (1,072 before the fixes), scanned 70.6 ms and
+0.52 MB added; each within its budget. Neither the synthetic's +15%
+nor the heavy's −11% since the fixes is bisected (for Greg).
+
+Found:
+- **The union costs about 16 ns a glyph** on the heavy 7k (above);
+  not a bug, for Greg.
+- **lopdf decodes a corrupt Flate stream past where zlib stops**
+  (5208359's `482 0 R`), so sheaf reads a program PDFium can't load
+  (research, backlog F27, as Greg ruled on 2026-10-24).
+- **PDFium falls back per code to a CID's text** where a `/ToUnicode`
+  lacks the code; sheaf hashes the string (backlog B52).
+- **Widths aren't taken from a program** where `/Widths` is missing
+  (backlog B53); **tricky fonts are known by name only** (B54); an
+  **embedded CMap over a predefined base guesses every code**, not
+  just those the base maps (B55).
+- **KSCpc-EUC-V and the 83pv/90pv -V maps** are in PDFium's table but
+  in no Adobe bundle; they stay guessed (backlog B58, logged at the
+  review).
+- **read-fonts 0.41's Type 1 parser** reads a program in work and
+  depth that grow faster than the program; type1.rs bounds what it's
+  handed. The review checked it apart from sheaf: fixed upstream and
+  public since read-fonts 0.43.0, so nothing to report (backlog F26:
+  a skrifa past 0.46).
+- **hayro-cmap keeps its codespace ranges private** (backlog F25: an
+  upstream PR would let predefined.rs's split table go).
+- **FreeType misreads a negative CFF `FontBBox` integer in operator
+  29;** PDFium, through it, draws such a font otherwise (the fixtures
+  use 28). **PDFium makes no character** for a text object whose
+  glyphs' outlines give it no width. **Adobe's 2023 UCS2 data** gives
+  2,433 glyphs another code point than PDFium's older tables. All
+  three went into F17's reasons.
+- **retired.rs misses a retired type named through a re-export in a
+  `use` and as `Type::method`:** with sheaf-ops' A/B harness back
+  (`use sheaf_doc::content::FontDecoders`, `FontDecoders::read`), the
+  ledger passed; the old walk's file, which names the type, failed
+  (backlog B56).
+- **lopdf, brotli-decompressor and alloc-* were linked with no notice
+  shipped** (lopdf's `/BrotliDecode`); `LICENSE-brotli` covers them
+  now.
+- **`fuzz_bodies_survive_mutated_fixtures` grew about a second** (the
+  four more font-part seeds and the programs page), at its 60 s wall
+  clock (backlog B23's notes).
+- Slice 3's own still open, now in the backlog: B47 (the cycle check),
+  B48 (the lexer's `/L` rule), B49 (orientation and inline images in
+  forms written once), B50 (0221018's `14 0 R`), B51 (an empty
+  embedded CMap); PDFium's text-page quirks into F17.
+
+For Greg:
+- **The interp budgets** (`SHEAF_GATE_INTERP`, opt-in as the other
+  unratified gates are): 1,600 ms and 48 MB peak on the synthetic,
+  1,700 ms and 140 MB on the heavy, 115 ms and 4 MB of RSS added on
+  the scanned, about 1.6 times five quiet processes' medians (the
+  scanned's RSS a floor, not a ratio: 0.46–0.71 MB now, 1.5–2.0 MB
+  before the speed step, at any load, the difference the stock
+  Helvetica no longer read on a page without text). Assert them
+  always, or keep them opt-in?
+- **Drawing charged to the page's budget** (the review): a page's 256
+  MB now covers what its fonts' programs cost to draw as well as
+  decompress, so a page of hostile programs costs at most about 4 s
+  drawing. Real glyphs cost hundreds of bytes; tiers 1 and 2 moved no
+  count (below). A separate cap instead of the shared budget?
+- **FreeType's FTL credit** ships (`LICENSE-freetype`), program.rs'
+  readers taken as derived from FreeType's routines: confirm, or rule
+  them reimplemented from behavior.
+- **What still lags the old walk:** `text_bag` is 2% slower on the
+  synthetic and 31% on the scanned (about a millisecond for 7,000
+  pages; the gated sections equal), 5% faster on the heavy. Per
+  operator, `cm` (195 against 135 ns, number parsing and the
+  finiteness check), `q`/`Q` (37 against 20: `State`'s copy), path
+  operators (93 against 41) and `Tj` (190 against 131: layout and the
+  string's allocation). Candidates, none tried: a borrowed string
+  where a literal has no escape, and a lighter save for `q`. Landed
+  as is, as the brief allows. **Ruled** (Greg, 2026-10-24): "m11 perf
+  sounds fine".
+- **The review's fixes moved the interp rows** (measured at the
+  pre-merge, above): the synthetic's median 1,018 to 1,168 ms (+15%;
+  still under the 1,199–1,241 before the wrap-up), the heavy's 1,072
+  to 950 ms (−11%), both within budget. Not bisected: bisect them, or
+  leave them?
+- **The union's cost** (the heavy's interp row +33%, 16 ns a glyph):
+  the price of PDFium's loose box. A cheaper path for consumers that
+  don't need the outline (an interest bit, as for paths) is possible
+  if slice 5 or M13 finds it matters.
+- **The text-bag gate row:** unasserted (1,890, 1,560 and 14.3 ms);
+  the removal check's read at 7k is otherwise unmeasured now the A/B
+  harness is gone. A budget on it too?
+- **skrifa 0.44 / read-fonts 0.41**, the copy GPUI's swash builds, so
+  no new version; current is 0.49 / 0.46, and hayro-interpret (F17)
+  wants ^0.46. A bump is real work (monthly breaking 0.x releases);
+  with GPUI's next bump, or when F17 lands?
+- **The notices:** `LICENSE-cmap-resources` and `LICENSE-brotli`
+  ship; brotli is the whole crate (its encoder too), since hayro-cmap's
+  bundle needs its `embed-cmaps` feature.
+- **Changed counts:** none asserted. The content corpus's words fell
+  21,273 (CJK text where hashes were; 21,282 before the review hashed
+  strings with a CID 0 again, which gave 0402991 back 9), and the bags
+  of 69 files changed, which premerge's tier-append tiers read (deleted means
+  deleted, crop, OCR): they may move there, a gain to explain.
+- **5208359's 38 glyphs** (`PROGRAM_DECODED_OTHERWISE`): ruled
+  (Greg, 2026-10-24). The allowance is accepted, by exact count, and
+  5208359 stays in the corpus for now. What sheaf should read from a
+  corrupt Flate stream is research (F27), decided on merit, not by
+  PDFium's recovery: a broken file made an unreliable target here.
+- **The hayro-cmap upstream PR** (F25), and **skrifa past 0.46**
+  (F26): read-fonts fixed its Type 1 parser's recursion in 0.43, in
+  public, so there's no report to send.
+- **M10 slice 7's subsetter conflict:** subsetter renumbers glyphs,
+  slice 7's rule keeps them (m10.md's For Greg there).
+- **Premerge tiers that read the bags** (tier-append) are the
+  orchestrator's; the 69 files are those of the per-file list above
+  with the 23 whose word counts didn't move.
+
+Left for later:
+- **Slice 5:** as above; it reads `Glyph.quad` as PDFium's loose box
+  and `approx.boxes` as "outline unknown".
+- **The lagging operators** (For Greg), if the gates or slice 5 want
+  them.
+- **A skrifa bump** with GPUI's, or with F17.
+- **Backlog B47–B59, F17, F25, F26 and F27**, triaged between phases.

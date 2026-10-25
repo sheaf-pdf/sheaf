@@ -59,7 +59,7 @@ there.
 
 ## By milestone
 
-Written into each milestone's plan (`todos/m10.md`, `todos/m11.md`, and
+Written into each milestone's plan (`plan/m10-forms/README.md`, `plan/m11-security/README.md`, and
 ROADMAP's M12, M14 and M17), to be applied at its kickoff.
 
 | Milestone | Oracle | Would check | License, how |
@@ -103,4 +103,4 @@ deferred slices: CI sees no scanner driver.
   monorepo, and it implements its own SHA-2, RSA, DER and CMS. Neither a
   dependency nor an oracle (Greg, 2026-10-23).
 - **Code from GPL, LGPL or AGPL projects,** as code: MuPDF's and
-  Okular's are studied for behavior only (`todos/m10.md`, `todos/m11.md`).
+  Okular's are studied for behavior only (`plan/m10-forms/README.md`, `plan/m11-security/README.md`).

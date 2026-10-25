@@ -1,0 +1,25 @@
+# M10 proposals
+
+Proposals (accepted at kickoff). Part of [M10: Forms](../README.md).
+
+4. [Fill first, scripts after, detection last](p04-fill-first-scripts-after-detection-last.md)
+5. [A page keeps its form through every page tool](p05-page-keeps-form-through-every-page.md)
+6. [**A hybrid form loses its XFA copy on the first save that changes the](p06-hybrid-form-loses-xfa-copy-first.md)
+7. [**Usage rights go when the form changes; a replaced value forces a](p07-usage-rights-go-when-form-changes.md)
+8. [**The field tree and values live in `DocState`; the file stays](p08-field-tree-values-live-docstate-file.md)
+9. [One undo step per committed field](p09-one-undo-step-per-committed-field.md)
+10. [**sheaf writes the appearance of every field it changes. It never](p10-sheaf-writes-appearance-every-field-it.md)
+11. [**Appearances use the field's own font; a bundled Unicode font](p11-appearances-use-field-s-own-font.md)
+12. [**The JavaScript layer is pdf.js's `scripting_api`, with the AF](p12-javascript-layer-pdf-js-s-scripting.md)
+13. [Scripts get Acrobat's form objects, and nothing that reaches out](p13-scripts-get-acrobat-s-form-objects.md)
+14. [The Select tool fills; Prepare Form is a mode with its own keys](p14-select-tool-fills-prepare-form-mode.md)
+15. [**Prepare Form covers every field type, and editing fields in](p15-prepare-form-covers-every-field-type.md)
+16. [**Detection proposes fields for review; it never adds them on its](p16-detection-proposes-fields-review-it-never.md)
+17. [**Form data: FDF and XFDF are musts; CSV, text and JSON are](p17-form-data-fdf-xfdf-are-musts.md)
+18. [**Flatten draws what would print, then removes the fields:](p18-flatten-draws-what-would-print-then.md)
+19. [XFA-only forms get a notice, not support](p19-xfa-only-forms-get-notice-not.md)
+20. [Where the code goes](p20-where-code-goes.md)
+21. [Real forms come from Greg's corpus, outside the repo](p21-real-forms-come-from-greg-s.md)
+22. [What M10 leaves to M11, M12 and M15](p22-what-m10-leaves-m11-m12-m15.md)
+23. [**Plugin API 0.5 reads and fills fields; plugins never run document](p23-plugin-api-0-5-reads-fills.md)
+24. [Settings and state](p24-settings-state.md)

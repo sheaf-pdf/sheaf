@@ -1036,7 +1036,7 @@ const RETIRED: &[(&str, u8)] = &[
     ("tx::flatten::unkept", 20),
 ];
 
-/// Every name M5 retired, with the slice of `todos/m5-intake.md` that
+/// Every name M5 retired, with the slice of `plan/m05-scan/README.md` that
 /// retired it.
 const RETIRED_M5: &[(&str, u8)] = &[
     // A scan is `intake` over the files' frames, a page at a time: the
@@ -1055,7 +1055,7 @@ const RETIRED_M5: &[(&str, u8)] = &[
     ("scan_dialog::ScanEvent::Created", 2),
 ];
 
-/// Every name M11 retired, with the slice of `todos/m11.md` that retired
+/// Every name M11 retired, with the slice of `plan/m11-security/README.md` that retired
 /// it.
 const RETIRED_M11: &[(&str, u8)] = &[
     // `text_bag` reads content as the interpreter does, its fonts a

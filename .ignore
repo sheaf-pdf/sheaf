@@ -1,0 +1,3 @@
+# Finished work: plans and notes of finished milestones and slices. rg skips
+# it; read a file there by its path, or search it with `rg --no-ignore-dot`.
+plan/complete/

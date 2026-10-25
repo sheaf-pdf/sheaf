@@ -1,7 +1,7 @@
 # bench
 
 The measurements behind M10.5's planning
-([`todos/m10.5-edit-api.md`](../todos/m10.5-edit-api.md), proposal 16),
+([`plan/complete/m10.5-edit-api/README.md`](../plan/complete/m10.5-edit-api/README.md), proposal 16),
 kept so they can be re-run, and the generators of the 7k fixtures the gate
 harness runs on.
 

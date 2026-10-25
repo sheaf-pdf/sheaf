@@ -701,7 +701,7 @@ pub(crate) struct AnnotEditor {
 }
 
 /// What happened to a document, for listeners outside the view (plugins,
-/// see `todos/plugins.md`).
+/// see `plan/complete/m06-plugins.md`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum DocEvent {
     /// The file has opened: what it says besides its pages is read into

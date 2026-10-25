@@ -1,4 +1,4 @@
-# The disallowed-methods bans of the lint ledger (todos/m10.5-edit-api.md,
+# The disallowed-methods bans of the lint ledger (plan/complete/m10.5-edit-api/README.md,
 # Lint ledgers), landed in M10.5 slice 19. Test code is allowed them (the
 # crate root's `cfg_attr(test, allow(...))`); a legitimate use elsewhere
 # carries an `#[allow]` with its reason.

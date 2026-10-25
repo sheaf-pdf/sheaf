@@ -1,0 +1,90 @@
+# Between milestones
+
+Status: in progress
+
+Ordered by reach, not milestone (Greg, 2026-10-23). These come first,
+in this order:
+
+1. ~~**The content interpreter:** M11's slice, pulled forward~~: done
+   (#50).
+2. **Object streams, and B3.** A Rewrite writes no object streams
+   today: it re-serializes each member as a plain object (M10.5 §11.6).
+   - **What it costs.** Measured with qpdf on the corpus (2026-10-23),
+     unpacking object streams grows the IRS forms by a median 88% (all
+     70 use them; fw4.pdf by 178%) and a sample of 377 safedocs files by
+     15%. Every Save As to a new unsigned file pays it, and so does
+     every save that removes content or replaces text, and every export.
+     First, the same measurement through sheaf's own Rewrite.
+   - **Packing on Rewrite** in `serialize/`, with ISO 32000-1 7.5.7's
+     exclusions and each container encrypted once (the M10.5 plan's
+     §20; [build-or-adopt](../research/build-or-adopt/README.md) entry 66).
+   - **Grouped by the pages that use them,** so the linearization crate
+     reuses the grouping: page 1's objects never share a container with
+     later pages'.
+   - **B3:** Properties says whether Fast Web View still holds after an
+     incremental save.
+3. **The linearization crate** (Fast Web View, moved from M14): page 1's
+   objects first, a linearization dictionary and hint tables, so a
+   viewer reading byte ranges over a network shows page 1 before the
+   rest arrives.
+   - **Why a crate.** No Rust crate writes linearized files. lopdf
+     0.46's `SaveOptions.linearize` is a flag that nothing acts on, and
+     outside Rust, qpdf (C++) is the usual tool (build-or-adopt entry
+     67). It's published as in-progress and instance-handoff were; see
+     [Libraries](../libraries.md).
+   - **Independent of any object model,** sheaf's or lopdf's, in three
+     steps:
+     - **Plan:** the caller describes the graph (each object's id, what
+       it refers to, which pages use it); the crate returns the order,
+       the new object numbers and the object-stream groups.
+     - **Serialize:** the caller writes each object with those numbers.
+     - **Assemble:** the crate writes the linearization dictionary
+       (padded to a fixed width, so the offsets settle in one more
+       pass), the hint tables and the first page's cross-reference
+       section.
+   - **A checker** says whether a file is linearized and still holds.
+     It is B3's check, and a test oracle beside qpdf's.
+   - **Written from ISO 32000-1 Annex F,** with qpdf (Apache-2.0) as
+     the reference and the oracle, not translated, so the crate stays
+     MIT OR Apache-2.0 with no notices for code taken from qpdf.
+   - **A lopdf adapter** could fill lopdf's empty flag upstream.
+   - **In sheaf, a writer option beside object streams,** used by a
+     full rewrite to a new file: a "Fast Web View" choice in Save As,
+     `--linearize` on `sheaf edit -o`, and later M14's Optimize.
+   - **Not an edit and not a transform plugin.** Any later byte change,
+     an incremental save included, voids it, so it can't live in the
+     document. sheaf's own writer already has the object graph and each
+     page's objects. A bytes-in, bytes-out plugin would have to parse and
+     write the whole file again.
+   - **No "keep it linearized" preference:** that would make every save
+     of such a file a full rewrite, which breaks signatures and gives up
+     the incremental save.
+   - **Signed files** get the usual ask, since a rewrite breaks their
+     signatures.
+   - **Checked** with `qpdf --check-linearization`. Perhaps also with
+     PDFium's availability API (`FPDFAvail_*`): page 1 renders from the
+     file's first part alone. Whether pdfium-render binds it is
+     unverified.
+4. **F15: a Rewrite that doesn't load the whole file.** Every Rewrite
+   of a large file pays for the eager load (Export Flattened peaks at
+   513 MB on the heavy 7k file), and it's the same Rewrite path as 2
+   and 3.
+5. **`sheaf search`** over files and folders: the CLI half of
+   [Search across files](../pending.md#search-across-files) (Pending). It's small:
+   each file opens as a `Session` and runs `Text::search`.
+6. **Roles and labels on sheaf-ui's widgets:** M17's first slice,
+   pulled forward. Every dialog built after it inherits them, and every
+   dialog built before it has to be retrofitted; M10 and M11 add many.
+   The rest of M17's app half stays in M17.
+
+After these, in order (2026-10-23):
+1. **M10 slices 6–17:** appearances, filling, flatten, form data.
+2. **Fill & Sign,** M12's slice 1, ahead of the rest of M12
+   ([M12](../m12-signatures/README.md) says why).
+3. **M11,** security and redaction. It needs M10's flatten (slice 15), and it
+   has the most preparer value left.
+4. Then M16, M10 slices 18–29 and the rest, in an order still open.
+
+PDF/A conversion (M14) and tagging PDF/UA documents (M17) waited on the
+content interpreter, which landed in #50. PAdES signing (M12) is
+deferred until RustCrypto's cms 0.3 round (build-or-adopt D2).

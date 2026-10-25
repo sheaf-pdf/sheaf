@@ -1,7 +1,7 @@
 //! How a document pane shows its pages: the page mode (single or two-up,
 //! continuous or one spread at a time), rotate view, zoom, and the page
 //! geometry that follows from them. A document has one pane, or two when
-//! the window is split (see todos/m7.md).
+//! the window is split (see plan/complete/m07-viewing.md).
 
 use std::ops::Range;
 use std::time::Instant;

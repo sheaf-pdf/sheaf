@@ -1,7 +1,8 @@
 //! Every form in Greg's corpus opens, and the form check runs on it (M10
 //! slice 1). What it finds is the baseline later slices compare with:
-//! printed here (`--nocapture`), and recorded in `todos/m10.md`'s slice
-//! notes. And every form reads as its manifest row says (slice 2). Skips
+//! printed here (`--nocapture`), and recorded in slice 1's notes
+//! (`plan/complete/m10-forms/s01-forms-corpus-form-check.md`). And every
+//! form reads as its manifest row says (slice 2). Skips
 //! when there's no corpus (see `sheaf_doc::forms::corpus`).
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
@@ -28,7 +29,8 @@ struct Outcome {
 /// Open the file in PDFium as the app does and, if `draw`, draw its first
 /// page's appearances. PDFium is called from one thread only: sheaf
 /// holds one lock across every use of it (slice 1's note in
-/// `todos/m10.md`), so more threads wouldn't open files faster.
+/// `plan/complete/m10-forms/s01-forms-corpus-form-check.md`), so more
+/// threads wouldn't open files faster.
 fn open(bytes: &[u8], draw: bool) -> Result<(u32, FormType), String> {
     let engine = PdfiumEngine::open_bytes(bytes.into(), None);
     engine

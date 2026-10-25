@@ -10,7 +10,7 @@ changed, and rows for more PDF crates. Its verdicts, need by need for
 every milestone and the backlog (fonts and text, signatures and
 cryptography, redaction geometry, image codecs, conformance, and the
 app's infrastructure), are in
-[todos/build-or-adopt.md](../../todos/build-or-adopt.md).
+[plan/research/build-or-adopt/README.md](../../plan/research/build-or-adopt/README.md).
 
 ## Summary
 
@@ -22,7 +22,7 @@ app's infrastructure), are in
 | **gpui-kit** (formerly gpui-component) | Longbridge's component library: 75+ components, AccessKit | **Don't adopt; borrow selectively.** Spike measured and documented in [../gpui-kit-eval.md](../gpui-kit-eval.md). |
 | **gpui-pdf** | A small PDF *viewer* component on hayro, split out of the Zorite app | **Don't adopt; borrow** `forms.rs` (MIT) when forms work starts. |
 | **pdfium-render** | PDFium bindings; sheaf's renderer today | Keep. Expose PDFium's progressive (pausable) render API. |
-| **hayro** | Pure-Rust PDF renderer, in parts (syntax, interpret, CMaps, image decoders) | An oracle, not an engine (`todos/m10.5-edit-api.md:6153`); re-check the renderer at M14's kickoff. Its parts are taken one by one: hayro-cmap for M11's content interpreter, and its image decoders proposed for M11's redaction. |
+| **hayro** | Pure-Rust PDF renderer, in parts (syntax, interpret, CMaps, image decoders) | An oracle, not an engine (`plan/complete/m10.5-edit-api/README.md`); re-check the renderer at M14's kickoff. Its parts are taken one by one: hayro-cmap for M11's content interpreter, and its image decoders proposed for M11's redaction. |
 | **lopdf** | Object-level PDF read/write; sheaf's object layer | Vendored and patched (`vendor/lopdf/SHEAF.md`); sheaf writes through its own serializer (`sheaf-doc/src/serialize/`). Long term, in-house what sheaf uses and drop it (backlog F13); fixes go upstream meanwhile. |
 | **pdfplumber** (Rust port) | Python pdfplumber port; tables are close to the original, words aren't | Take only `pdfplumber-core`'s table finder, fed from PDFium. Benchmark and plan [below](#table-extraction-via-pdfplumber-core). |
 | **mupdf-rs** | MuPDF bindings | **AGPL. Don't use.** Copy the display-list *idea* only. |
@@ -73,13 +73,13 @@ app's infrastructure), are in
   None of them changes sheaf today. Adding gpui-kit as a dependency
   ([below](#gpui-kit)) would turn on the macro path rewrite in each crate
   that adds it. Later snapshots can change these edits, so each bump reads
-  them (README, "Updating GPUI").
+  them (`docs/building.md`, "Updating GPUI").
 - It can't carry patches. Its 0.3.9 release is exactly the Zed commit sheaf
   had pinned, which made the switch free.
 - **sheaf uses it since 2026-10-17** (`gpui = { package = "gpui-pre",
   version = "=0.3.9" }`), because sheaf keeps no patches against Zed. It
   doesn't follow semver; bumping the exact pin is a deliberate review with a
-  compatibility check (README, "Updating GPUI"). The switch needed no source
+  compatibility check (`docs/building.md`, "Updating GPUI"). The switch needed no source
   changes: the Linux build graph stayed at 665 crates (`cargo tree -p
   sheaf-app -e normal`, unique name and version), and the lockfile grew by 9
   (a `windows-sys` 0.48 tree, below).
@@ -378,4 +378,4 @@ collapsing whitespace, compared by position in the grid.
    `markup_tools`.
 2. If good: "Select table → Copy as TSV / Export CSV" command, using Lattice by default
    and Stream as a fallback, with per-axis strategy in an advanced popover.
-3. Wire it as a host capability so plugins can call it (see [`todos/plugins.md`](../../todos/plugins.md)).
+3. Wire it as a host capability so plugins can call it (see [`plan/complete/m06-plugins.md`](../../plan/complete/m06-plugins.md)).

@@ -1,7 +1,7 @@
 # Document model and edit history
 
 Status: accepted 2026-10-11. Decides the shape of `sheaf-doc` for M2+.
-M10.5 (the edit API, `todos/m10.5-edit-api.md`) rebuilt it in twenty
+M10.5 (the edit API, `plan/complete/m10.5-edit-api/README.md`) rebuilt it in twenty
 slices, each of which wrote its section below; slice 20 made the last
 pass, with the invariants and the tests that hold them.
 
@@ -247,7 +247,7 @@ synthetic fixture and 72–80 ms on the heavy one, against gates of 100 and
 
 ## Invariants, and the tests that hold them (M10.5)
 
-The design's twelve rules (§2 of `todos/m10.5-edit-api.md`), its
+The design's twelve rules (§2 of `plan/complete/m10.5-edit-api/README.md`), its
 registry rule and "nothing ships unproduced", as M10.5 left them, each
 with what holds it. "Corpus" tiers read `../pdf-corpus` (or
 `$SHEAF_CORPUS`) and skip without it; "ignored" ones run before a merge.
@@ -1273,7 +1273,7 @@ Costs and how they're bounded:
 
 Every change to a document is an **op** (`sheaf_edit::Op`), said by its
 caller, lowered in a **transaction** (`Tx`) into the prims history keeps,
-and committed as one version (§6 of `todos/m10.5-edit-api.md`). The old
+and committed as one version (§6 of `plan/complete/m10.5-edit-api/README.md`). The old
 `Edit` enum and `compute`, which said and did a change at once, are gone,
 and so is every place a caller guessed what its edit made.
 
@@ -1552,7 +1552,7 @@ what it changed, as a `ChangeSet`, which is how the app (one door, one
 refresh), its panels and plugins follow the document. An OCR run, a
 scan and a plugin call are each a group of versions that undo as one
 step. History is kept to a byte budget, pruning the oldest versions, the
-saved one too (§8 and §14 of `todos/m10.5-edit-api.md`).
+saved one too (§8 and §14 of `plan/complete/m10.5-edit-api/README.md`).
 
 ```rust
 pub enum Base { Current, At(VersionId) }          // the version a Tx was made on
@@ -1909,7 +1909,7 @@ nothing is reopened or read back, and what the screen shows stays.
 
 Saves, Save As, extracted pages, Clean Copy, Export Flattened, print and
 recovery sidecars reach their bytes through `serialize/` (§11.7 of
-`todos/m10.5-edit-api.md`). lopdf's writer still writes:
+`plan/complete/m10.5-edit-api/README.md`). lopdf's writer still writes:
 
 - the derived copies, in memory, until slice 17 deleted them (crop's
   went in slice 15, the watermark's in 16, the header's last);
@@ -2038,7 +2038,7 @@ file's). A source keeps no stamp: the record holds the file's.
 
 ### Saves are outputs (M10.5 slice 9)
 
-A save is an output, never an edit (§9 of `todos/m10.5-edit-api.md`): it
+A save is an output, never an edit (§9 of `plan/complete/m10.5-edit-api/README.md`): it
 writes a version's state and leaves a record of what it wrote, and no
 version, state or source changes, so undo across a save is exact and the
 screen keeps what it shows. Slice 9 built it under `materialize/`: a save
@@ -2880,7 +2880,7 @@ group's pages and its AcroForm only their fields, so in the group's
 engine a page's index is its place in the group. PDFium loads the base
 and the section as two segments through `FPDF_LoadCustomDocument`,
 without copying the base, and an edit reopens only its group's engine
-(`todos/m10.5-edit-api.md`, §10.1 and §10.3).
+(`plan/complete/m10.5-edit-api/README.md`, §10.1 and §10.3).
 Before anything depended on that, slice 2 measured it with three
 throwaway spikes against written criteria and set the realizer's and the
 engine pool's numbers from the results. The spike code is gone; this
@@ -3207,7 +3207,7 @@ the source's bytes by the same emitter and serializer as saves; and one
 engine pool, on one thread, opens and keeps the engines. What a page
 draws is a key (`RenderKey`), which the app's images are found by, so an
 edit re-renders only what it changed and nothing is invalidated by hand.
-Nothing reaches disk (§10 of `todos/m10.5-edit-api.md`).
+Nothing reaches disk (§10 of `plan/complete/m10.5-edit-api/README.md`).
 
 ```rust
 pub struct ViewInputs { marks: MarkDraw, generators, ocr_over, widgets, foreign: bool,
@@ -3678,7 +3678,7 @@ naming none, it fails).
 A page's text is read from what it draws, as its pixels are: the text
 service reads each page's characters from the engine and page its view
 renders from, under the inputs its caller passes, so the screen, the
-file and the text agree (§10.5 of `todos/m10.5-edit-api.md`). An
+file and the text agree (§10.5 of `plan/complete/m10.5-edit-api/README.md`). An
 inserted file's page, a duplicate, a crop, a page with recognized text
 or a header not yet saved, and every page of a source PDFium refuses have
 the text they draw. Printing, print preview and page images come from
@@ -3921,7 +3921,7 @@ asks PDFium four things a character.
 A crop is a box edit: it changes the page's `Geom` and nothing else, so
 nothing stored moves (Coordinates), no copy of the page is made, and an
 incremental save writes only the cropped pages' dictionaries (§5,
-proposal 27 and bugs 16 and 28 of `todos/m10.5-edit-api.md`). Crop Pages
+proposal 27 and bugs 16 and 28 of `plan/complete/m10.5-edit-api/README.md`). Crop Pages
 by margins is one op; Trim White measures each page through the views
 and commits its crops as ops; the dialog previews either through the
 realizer.
@@ -4113,7 +4113,7 @@ the page as it shows then. Setting one is an op and so is taking one
 off; a file sheaf saved with one finds it again when it opens; and what
 other programs drew of its kind goes from the pages it draws on (§3.5,
 §6.5, §11.4, proposals 30, 31 and 39 and bugs 16–18 and 28 of
-`todos/m10.5-edit-api.md`). The derived copy that drew a watermark into
+`plan/complete/m10.5-edit-api/README.md`). The derived copy that drew a watermark into
 a copy of each page is gone, and with it `watermark::install` and
 `read`, the per-page ExtGState, font and image, the `/SheafWM*` names
 and `SheafSettings`, which nothing writes now.
@@ -4444,7 +4444,7 @@ writes the page or a view draws it, found again from `/SheafGenerators`
 when the file opens. Its page tokens are live, read from the document as
 it's written, and its Bates numbers, date and file are fixed when it's
 set (§3.5, §6.5, §7.1–7.2, §9.1, §11.3–11.4, §11.9, proposals 8 and 31
-and bugs 16, 24, 28 and 29 of `todos/m10.5-edit-api.md`). The legacy
+and bugs 16, 24, 28 and 29 of `plan/complete/m10.5-edit-api/README.md`). The legacy
 header went with it: `stamps::install`, its catalog record
 `/SheafHeaderFooter`, Bates numbers counted at each Rewrite, the
 `LegacyHeaderFooter` Rewrite and the Full sidecar; and so did derived
@@ -4749,7 +4749,7 @@ after the page's isolated content and before the generators drawn over
 it, and found again in a reopened file by that stream's marker. A layer
 a file holds is like any other, saved or not: a re-OCR or Clear takes it
 out, an older sheaf's too, and the save says so (§3.4, §6.1, §6.4, §7.1,
-§11.4, §11.9, §13, proposal 26 and bug 14 of `todos/m10.5-edit-api.md`).
+§11.4, §11.9, §13, proposal 26 and bug 14 of `plan/complete/m10.5-edit-api/README.md`).
 The legacy installer went with it: `text_layer::install`, `strip` and
 `has_layer`, `[q, base…, layer]` with `/SheafOcrLayer` and `/SheafOcr`,
 and the emitter's special cases for it.
@@ -4959,7 +4959,7 @@ and a document with no window is a `sheaf_ops::session::Session`, which
 every subcommand runs on, Combine hands to a window, and `sheaf edit`, the
 first producer of persisted Op JSON, edits with ops naming things as a
 person sees them (§3.4, §3.9, §6.1, §6.3, §12, §14, §15, proposals 10, 35
-and 40 and bugs 16, 21, 22 and 29 of `todos/m10.5-edit-api.md`).
+and 40 and bugs 16, 21, 22 and 29 of `plan/complete/m10.5-edit-api/README.md`).
 
 ```rust
 pub struct ExportFrom { pub snap: Snapshot, pub cx: Arc<LowerCx> }    // sheaf_doc::export
@@ -5689,7 +5689,7 @@ its edits hold. WIT 0.2 and 0.3, their adapter and their fixture are gone
 with no shim. The PDFs sheaf makes in memory have one builder,
 `serialize::built`, and model-level code names no lopdf `ObjectId`
 (§2 rule 7, §6.3, §6.6 to §6.8, §8.4, §8.5, §14.1, §14.3, proposals 11,
-18, 19 and 20 and bugs 27 and 30 of `todos/m10.5-edit-api.md`).
+18, 19 and 20 and bugs 27 and 30 of `plan/complete/m10.5-edit-api/README.md`).
 
 ```rust
 pub struct Published { pub snap: Snapshot, lowering: Lowering }      // sheaf_doc

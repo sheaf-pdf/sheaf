@@ -49,7 +49,7 @@ sheaf-cli = { path = "crates/sheaf-cli" }
 # vendored sources for gpui-pre-apple's build.rs). sheaf keeps no patches
 # against Zed, so it lets gpui-pre do the snapshotting. gpui-pre doesn't
 # follow semver and breaking changes are routine: pin it exactly and bump it
-# deliberately, with a compatibility check (README, "Updating GPUI").
+# deliberately, with a compatibility check (docs/building.md, "Updating GPUI").
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["wayland", "x11"] }
 
@@ -107,7 +107,8 @@ windows-capture = { git = "https://github.com/zed-industries/windows-capture.git
 xim-ctext = { git = "https://github.com/zed-industries/xim-rs.git", rev = "16f35a2c881b815a2b6cdfd6687988e84f8447d8" }
 
 # Not Zed's. lopdf 0.45.0 reads an earlier revision of some hybrid-reference
-# files (todos/m10.md, slice 2's note). vendor/lopdf is lopdf's main at
+# files (plan/complete/m10-forms/s02-field-model-form-facts.md, the note).
+# vendor/lopdf is lopdf's main at
 # 39492cb, which fixes that (#598) and brings 22 other commits since 0.45.0,
 # a refactor of the reader, writer and encryption code among them. sheaf's
 # patch on top adds LazyPdf (each object read when it's asked for, under

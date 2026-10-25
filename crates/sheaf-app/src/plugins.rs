@@ -2,7 +2,7 @@
 //! contribute (commands, menu items, key bindings, presets, marks, panels),
 //! and running their calls against the active document with the UI they
 //! ask for. The runtime itself lives in `sheaf-plugin`; see
-//! `todos/plugins.md` for the design.
+//! `plan/complete/m06-plugins.md` for the design.
 //!
 //! Plugins live in `<config dir>/plugins/`, one directory per plugin
 //! holding a `sheaf-plugin.toml`, a `plugin.wasm` and its `icons/`. The plugins that ship

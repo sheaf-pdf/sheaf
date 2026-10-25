@@ -46,7 +46,7 @@ setup-system:
       sudo apt-get install -y $pkgs
     else
       echo "Not Debian or Ubuntu: install the equivalents of"; echo "  $pkgs"
-      echo "(README.md's Building section has Windows; macOS needs Xcode's tools.)"
+      echo "(docs/building.md has Windows; macOS needs Xcode's tools.)"
     fi
 
 # The pinned toolchain (rust-toolchain.toml, with wasm32-wasip2), the
@@ -147,7 +147,7 @@ doctor:
     echo "Corpus:"
     corpus=${SHEAF_CORPUS:-$(dirname "{{justfile_directory()}}")/pdf-corpus}
     if [ -e "$corpus/forms/manifest.tsv" ]; then printf '  %-16s %s\n' "pdf-corpus" "$corpus"
-    else printf '  %-16s %s\n' "pdf-corpus" "MISSING at $corpus: the corpus tests need it (fetch-pdf-corpus fetch --out $corpus; README.md, Building)"; fi
+    else printf '  %-16s %s\n' "pdf-corpus" "MISSING at $corpus: the corpus tests need it (fetch-pdf-corpus fetch --out $corpus; docs/building.md)"; fi
     echo "Test memory cap:"
     if [ "$(uname -s)" = Linux ] && systemctl --user show-environment >/dev/null 2>&1; then echo "  on (scripts/test-capped.sh, MemoryMax ${SHEAF_TEST_MEMORY_MAX:-48G})"; else echo "  off (no user systemd)"; fi
 
@@ -259,13 +259,14 @@ check-windows:
 
 # ----- What CI can't run --------------------------------------------------
 
-# Before a commit, the checks CI can't run: no conflict markers, fmt, the
-# workspace with the corpus, interop, the release properties, no new
-# proptest seeds, and the macOS/Windows clippy. Gates run apart, on a
-# quiet machine (`just gates`). Logs and a summary in target/just/.
+# Before a commit, the checks CI can't run: no conflict markers, the plan's
+# links and tables, fmt, the workspace with the corpus, interop, the
+# release properties, no new proptest seeds, and the macOS/Windows clippy.
+# Gates run apart, on a quiet machine (`just gates`). Logs and a summary in
+# target/just/.
 [doc("Before a commit: the checks CI can't run (logs in target/just/); gates apart")]
 [group('local')]
-precommit: (_steps "precommit" "markers fmt-check locks corpus interop properties seeds clippy-nonlinux check-windows")
+precommit: (_steps "precommit" "markers plan-check fmt-check locks corpus interop properties seeds clippy-nonlinux check-windows")
 
 # Before a PR merges: the ignored corpus tiers, in full (append_corpus's,
 # the export tier, realize_corpus's pixels and predicate, PDFium's resave
@@ -275,6 +276,11 @@ precommit: (_steps "precommit" "markers fmt-check locks corpus interop propertie
 [doc("Before a PR merges: every ignored corpus tier (two hours or more)")]
 [group('local')]
 premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington _corpus-ran")
+
+[doc("The plan agrees with itself: tables against files, status lines, links, size budgets (AGENTS.md)")]
+[group('local')]
+plan-check:
+    python3 scripts/check-plan.py
 
 [doc("No merge-conflict markers in tracked or untracked files (git grep; binaries and ignored files skipped)")]
 [group('local')]
