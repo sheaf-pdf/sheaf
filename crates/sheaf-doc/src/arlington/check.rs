@@ -1,3 +1,14 @@
+// Parts of this file are adapted from TestGrammar, the Arlington PDF
+// Model's checker (pdf-association/arlington-pdf-model, `TestGrammar/src`,
+// Copyright 2020-2022 PDF Association, Inc.), under the Apache License,
+// Version 2.0: `Walk::score` (from `CParsePDF::recommended_link_for_object`),
+// `Walk::array_rows` (from `CParsePDF::parse_object`'s order), `is_date`
+// (from `is_valid_pdf_date_string`) and `Class::of` (from
+// `is_second_class_pdf_name` and `is_third_class_pdf_name`). Those parts
+// stay under Apache-2.0 alone, whichever of sheaf's licenses the rest of
+// the file is taken under. Each one's doc says how it differs from
+// TestGrammar. The license and NOTICE.txt are in vendor/arlington-pdf-model.
+
 //! The walk: from the trailer as the file writes it, every object it
 //! reaches, each checked against the table it's reached as. Links are
 //! followed as TestGrammar follows them (upstream's

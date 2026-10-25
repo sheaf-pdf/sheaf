@@ -720,6 +720,8 @@ PDFium (BSD-3), hayro (Apache-2.0/MIT), Tesseract and its glyphless `pdf.ttf`
 codes made with rxing (Apache-2.0). MuPDF is deliberately not used (AGPL).
 lopdf (MIT) is vendored with a patch in `vendor/lopdf`. The Arlington PDF
 Model's TSVs (PDF Association, Apache-2.0) are vendored in
-`vendor/arlington-pdf-model` for tests only. Text in the standard 14 fonts
+`vendor/arlington-pdf-model` for tests only, and parts of the test-only
+checker that reads them are adapted from its TestGrammar (Apache-2.0; see
+`crates/sheaf-doc/src/arlington/check.rs`). Text in the standard 14 fonts
 is laid out with Adobe's Core 14 AFM metrics (Adobe's notice) and the Adobe
 Glyph List (BSD-3), in `crates/sheaf-doc/assets`.
