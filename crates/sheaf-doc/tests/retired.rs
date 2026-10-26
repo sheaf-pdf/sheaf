@@ -1,7 +1,8 @@
 //! The retired-symbols ledger (M10.5 §17): every name the edit API took
 //! out, with the slice that took it out ([`RETIRED`]), and every name a
-//! later milestone's slice took out, in a table of the milestone's own
-//! ([`RETIRED_M5`], [`RETIRED_M11`]). Nothing under `crates/` may define
+//! later milestone's slice, or an item's between milestones, took out, in
+//! a table of its own ([`RETIRED_M5`], [`RETIRED_M11`],
+//! [`RETIRED_OBJECT_STREAMS`]). Nothing under `crates/` may define
 //! one again or refer to it. Each slice adds its rows in the commit that
 //! deletes the names.
 //!
@@ -1063,11 +1064,21 @@ const RETIRED_M11: &[(&str, u8)] = &[
     ("content::text_bag::FontDecoders", 3),
 ];
 
+/// Every name object streams (between milestones) retired, with the
+/// slice of `plan/complete/object-streams.md` that retired it.
+const RETIRED_OBJECT_STREAMS: &[(&str, u8)] = &[
+    // Fast Web View is the file the dialog shows, the saved record's once
+    // a save wrote it (`PropertiesContext::linearized`, B3): not the
+    // source as opened, which a save never replaces.
+    ("properties::Properties::linearized", 1),
+];
+
 /// The ledgers, with the words a hit names its slice by.
 const LEDGERS: &[(&[(&str, u8)], &str)] = &[
     (RETIRED, "slice"),
     (RETIRED_M5, "M5 slice"),
     (RETIRED_M11, "M11 slice"),
+    (RETIRED_OBJECT_STREAMS, "object streams slice"),
 ];
 
 /// Last segments only a path matches: names the new design uses again

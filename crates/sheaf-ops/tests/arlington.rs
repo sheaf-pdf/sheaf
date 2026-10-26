@@ -19,7 +19,13 @@
 //! fails its test unless `arlington_allowed.tsv` holds it for a backlog
 //! entry, and a row there that no test needs fails too. Each test names
 //! the tables it must have checked, so one that holds the wrong objects
-//! fails too.
+//! fails too. A Rewrite or an export of a file that used object streams
+//! (its cross-references a stream, or a hybrid's) packs objects into
+//! object streams of its own, built whole and held, unless the encryption
+//! it writes doesn't pack ([`packs`]): each test checks one as
+//! `ObjectStream` exactly when what it saved packed. The encrypted
+//! forms are written with a table and with a stream, so packed object
+//! streams are checked encrypted too.
 //!
 //! The recovery sidecar isn't here: its record isn't kept, and the
 //! emission that writes it is a save's, an Append's section or a
@@ -47,7 +53,7 @@ use std::sync::Arc;
 use common::{How, StrategyKind, scratch};
 use in_progress::NoProgress;
 use lopdf::xref::XrefType;
-use lopdf::{LazyPdf, Object, ObjectId, dictionary};
+use lopdf::{LazyPdf, Object, ObjectId, XrefKind, dictionary};
 use sheaf_doc::arlington::{
     Allowance, Allowances, Finding, Hold, Made, Report, Rule, Unlisted, check, check_at,
     file_version,
@@ -56,8 +62,8 @@ use sheaf_doc::export::{Export, ExportFrom, Out, PRINT_ANSWERS, materialized};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::fixture::{Form, every_kind, every_mark_kind, mark_blobs, note};
 use sheaf_doc::labels::LabelSpec;
-use sheaf_doc::materialize::ObjKey;
 use sheaf_doc::materialize::emit::PdfVersion;
+use sheaf_doc::materialize::{Encryption, ObjKey};
 use sheaf_doc::serialize::fixture as crypt;
 use sheaf_doc::source::OpenError;
 use sheaf_doc::store::{BlobKind, Origin};
@@ -91,6 +97,22 @@ struct Checked {
     /// merged, at the version of the file written: what a merged object
     /// may carry ([`files_read`]).
     sources: Vec<Report>,
+    /// Whether what wrote it packed objects into object streams, as a
+    /// Rewrite or an export of a file that used them does ([`packs`]): its
+    /// object streams are held, and checked as `ObjectStream`.
+    packs: bool,
+}
+
+/// Whether a Rewrite or an export of `doc`'s file, written encrypted as
+/// `encryption` says, packs objects into object streams, as the object
+/// streams plan has it: the file used them (decision 1: its
+/// cross-references are a stream, or a hybrid's), and the encryption it
+/// writes, if any, packs (decision 4: not an Identity `/StmF` under an
+/// encrypting `/StrF`: `Crypt::packs`).
+fn packs(doc: &Document, encryption: Encryption) -> bool {
+    let (xref, crypt) = (doc.primary().xref(), doc.primary().crypt());
+    let crypt = crypt.filter(|_| encryption == Encryption::Keep);
+    (xref.kind == XrefKind::Stream || xref.hybrid) && crypt.is_none_or(|c| c.packs())
 }
 
 /// `bytes`, a file sheaf wrote, opened with `password` to be checked.
@@ -118,6 +140,7 @@ fn checked(
         report,
         version,
         sources: files_read(read, version),
+        packs: false,
     }
 }
 
@@ -156,6 +179,7 @@ fn held(doc: &mut Document, how: Option<How>, path: &Path) -> Checked {
         report,
         version,
         sources: files_read(doc.store(), version),
+        packs: strategy == StrategyKind::Rewrite && packs(doc, Encryption::Keep),
     }
 }
 
@@ -207,7 +231,10 @@ fn last_saved(what: &str, doc: &Document, read: &Store) -> Checked {
     assert_eq!(record.strategy, StrategyKind::Rewrite, "{what}");
     let bytes = std::fs::read(&*record.path).unwrap();
     let hold = |pdf: &LazyPdf| Hold::written(&record.map, doc.state(), doc.store(), pdf, None);
-    checked(what, &bytes, doc.primary().password(), hold, read)
+    Checked {
+        packs: packs(doc, Encryption::Keep),
+        ..checked(what, &bytes, doc.primary().password(), hold, read)
+    }
 }
 
 /// The export `make` makes of `doc`'s current version, the user's, what
@@ -216,15 +243,14 @@ fn last_saved(what: &str, doc: &Document, read: &Store) -> Checked {
 /// which its numbering from 1 lists (as `ObjKey::Base`).
 fn exported(what: &str, doc: &Document, make: impl FnOnce(ExportFrom) -> Export) -> Checked {
     let e = make(doc.export_from(Actor::User));
+    let packs = packs(doc, e.profile.encryption);
     let (state, out) = materialized(e, &PRINT_ANSWERS, &NoProgress).unwrap();
     let hold = |pdf: &LazyPdf| Hold::written(&out.record.map, &state, doc.store(), pdf, None);
-    checked(
-        what,
-        &out.bytes,
-        doc.primary().password(),
-        hold,
-        doc.store(),
-    )
+    let password = doc.primary().password();
+    Checked {
+        packs,
+        ..checked(what, &out.bytes, password, hold, doc.store())
+    }
 }
 
 /// The allowances file, read.
@@ -233,7 +259,8 @@ fn allowances() -> Allowances {
 }
 
 /// `checked` found nothing sheaf answers for that no allowance holds, and
-/// checked an object as each of `tables`. Its counts are printed.
+/// checked an object as each of `tables`, and as `ObjectStream` exactly
+/// when what wrote it packed ([`Checked::packs`]). Its counts are printed.
 fn clean(checked: &Checked, tables: &[&str]) {
     clean_against(checked, tables, &allowances());
 }
@@ -263,6 +290,12 @@ fn clean_against(checked: &Checked, tables: &[&str], allowances: &Allowances) {
     assert!(
         unchecked.is_empty(),
         "{what}: nothing checked as {unchecked:?}"
+    );
+    let streams = report.checked.contains_key("ObjectStream");
+    assert_eq!(
+        streams, checked.packs,
+        "{what}: object streams checked: {streams}, packed: {}",
+        checked.packs
     );
 }
 
@@ -665,26 +698,35 @@ fn apart(mut f: Form, to: &str) -> Form {
 
 sheaf_doc::both_ways!(encrypted_files_hold, encrypted_files_hold_appended: encrypted_files);
 
-/// A form encrypted with RC4, AES-128 and AES-256, each given a note: the
-/// trailer and its `/ID`, and the encryption dictionary a Rewrite writes
-/// as the file stores it, which an Append leaves where it is.
+/// A form encrypted with RC4 (40- and 128-bit), AES-128 and AES-256, its
+/// cross-references a table and a stream, each given a note: the trailer
+/// and its `/ID`, and the encryption dictionary a Rewrite writes as the
+/// file stores it, which an Append leaves where it is; a stream file's
+/// Rewrite packs, each object stream encrypted as a stream.
 fn encrypted_files(how: How) {
     let dir = scratch(&format!("arlington-encrypted-{how:?}"));
     let plain = crypt::form();
-    for (name, state) in crypt::rc4_aes_128_and_aes_256(&plain) {
-        let [table, _] = crypt::encrypted(&plain, &state, |_| {});
-        let path = dir.join(format!("{name}.pdf"));
-        std::fs::write(&path, table).unwrap();
-        let mut doc = sheaf_doc::open::file(&path, Some(crypt::USER)).unwrap().doc;
-        let p0 = doc.page(0).unwrap();
-        doc.commit_ops(vec![fx::add(p0, &note())], "Note").unwrap();
-        let checked = held(&mut doc, Some(how), &path);
-        let mut tables = vec!["FileTrailer", "TrailerIDArray", "AnnotText"];
-        if how == How::Rewritten {
-            tables.push("EncryptionStandard");
+    let states =
+        std::iter::once(crypt::rc4_40(&plain)).chain(crypt::rc4_aes_128_and_aes_256(&plain));
+    for (name, state) in states {
+        let written = crypt::encrypted(&plain, &state, |_| {});
+        for ((kind, trailer), bytes) in [("table", "FileTrailer"), ("stream", "XRefStream")]
+            .into_iter()
+            .zip(written)
+        {
+            let path = dir.join(format!("{name}-{kind}.pdf"));
+            std::fs::write(&path, bytes).unwrap();
+            let mut doc = sheaf_doc::open::file(&path, Some(crypt::USER)).unwrap().doc;
+            let p0 = doc.page(0).unwrap();
+            doc.commit_ops(vec![fx::add(p0, &note())], "Note").unwrap();
+            let checked = held(&mut doc, Some(how), &path);
+            let mut tables = vec![trailer, "TrailerIDArray", "AnnotText"];
+            if how == How::Rewritten {
+                tables.push("EncryptionStandard");
+            }
+            println!("{name}, {kind}:");
+            clean(&checked, &tables);
         }
-        println!("{name}:");
-        clean(&checked, &tables);
     }
 }
 

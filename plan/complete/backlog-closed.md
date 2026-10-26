@@ -460,3 +460,63 @@ Entries move here when they close, saying where they went. IDs are never reused.
 - **Notes:** pre-alpha, so a rename has no compatibility cost (clean over
   compat). A decision for Greg. Registering a prefix is with the PDF
   Association's registry.
+
+### B3: Properties says "Fast Web View: Yes" after an incremental save
+
+- **Closed:** 2026-10-26, fixed in the object-streams PR, slice 1
+  ([object-streams.md](object-streams.md), decision 9). The
+  vendored lopdf's `LazyPdf::open` counts a file linearized only when its
+  first object, read whole within 1,024 bytes of the header, is a
+  dictionary whose `/Linearized` is 1 (a number whose floor is 1, as
+  qpdf reads it) and whose `/L`, a direct integer, is the file's length
+  from the header (`holds_linearization`, `XrefFacts::linearized`);
+  an Append's output record says not linearized; and File > Properties'
+  Fast Web View reads the saved record when it describes the file shown
+  (`PropertiesContext::linearized`), since a save never replaces the
+  primary. Tests: sheaf-doc
+  `source::lazy_tests::a_linearization_holds_while_its_length_is_the_file_s`
+  and `materialize::append_tests::a_linearized_file_appended_to_is_linearized_no_more`
+  (on `serialize::fixture::linearized_file`); sheaf-app
+  `docview::tests::properties_says_no_fast_web_view_once_a_save_appends`
+  (the repro, without a reopen); sheaf-ops interop's
+  `a_linearized_file_appended_to_is_linearized_no_more` (`qpdf
+  --linearize`, then a sheaf Append) and append_corpus's
+  `linearization_agrees_with_qpdf_before_and_after_an_append`: sheaf and
+  `qpdf --check-linearization` agree on each of the pool sample's 402
+  files, 150 linearized before a forced Append and 0 after (the old flag
+  said 216 and 216). realize_corpus's linearized row went from 2,523
+  files to 1,791. They agree on the pool, not on every file: sheaf
+  follows Annex F and wants the whole dictionary within the first 1,024
+  bytes, while qpdf 12.3.2 asks only that the object start there, so a
+  dictionary ending at byte 1,025 is linearized to qpdf and not to
+  sheaf. No pool file is such; the linearization crate's checker (item
+  3) keeps the rule or changes it on purpose.
+- **Found:** 2026-10-22, Claude, while Greg and Claude discussed where
+  linearization belongs (M14), during M10.5 slice 18
+- **Where:** the vendored lopdf's `vendor/lopdf/src/lazy.rs:443`, which
+  sets `XrefFacts.linearized`; `crates/sheaf-doc/src/materialize/append.rs:477`,
+  which carries it into the output record; shown by
+  `crates/sheaf-app/src/properties_dialog.rs:147`
+- **Severity:** wrong output
+- **What happens:** a file counts as linearized whenever `/Linearized`
+  appears within 1,024 bytes of its header. An Append keeps the input's
+  flag, and a reopen finds the same dictionary at the top. So after
+  sheaf (or any tool) appends an update to a linearized file,
+  Properties still says Fast Web View: Yes. The dictionary's `/L` and
+  hint tables no longer describe the file, and readers drop the fast
+  path.
+- **Expected:** Yes only when the linearization dictionary still holds.
+  At least `/L` must equal the file's length (ISO 32000-1 Annex F: an
+  updated file whose `/L` doesn't match isn't treated as linearized).
+  After an Append, the output record says not linearized.
+- **Repro:** found by reading the code, not yet run. Take a linearized
+  corpus file (the pool sample has 216), add a mark, save (an Append),
+  and open Properties. `qpdf --check-linearization` on the saved file
+  should disagree with sheaf.
+- **Notes:**
+  - The fix is small: compare `/L` with the file length where the
+    flag is set, and write `false` in the Append's record.
+  - realize_corpus groups its stats by this flag, so its "linearized"
+    row includes files updated after linearizing.
+  - Writing linearized files is M14's (Optimize: linearization as a
+    writer option).

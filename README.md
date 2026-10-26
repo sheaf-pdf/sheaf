@@ -129,8 +129,10 @@ status.
   bytes. What you delete or replace is gone from the saved file, not left
   in an earlier revision. Encrypted files stay encrypted. A signed file
   keeps its signatures, or sheaf asks before breaking them. A file another
-  program changed is never overwritten unasked. Crash recovery, and an
-  edit history you can step back through, branches included.
+  program changed is never overwritten unasked. A file sheaf writes whole
+  (a Save As, an export) packs its objects into object streams when the
+  original did, so it doesn't grow. Crash recovery, and an edit history
+  you can step back through, branches included.
 - **Output.** Export pages to PNG, JPEG, TIFF (black-and-white G4,
   grayscale or color) or text. Export a flattened copy, or a clean copy
   without comments and marks. Print with sheaf's own preview (CUPS on
@@ -170,12 +172,12 @@ first. [ROADMAP.md](ROADMAP.md) has the detail.
 | M10, part 1: Forms groundwork | The form check; forms that survive page tools and saves |
 | M10.5: The edit API | One set of edits behind the app, `sheaf edit` and plugins. For you: saves that really remove what you delete and keep encryption, and the same edits from the command line and plugins |
 | The content interpreter (from M11) | Reading what each page draws: the groundwork for redaction, content editing and accessible documents. Nothing new on screen yet |
+| Object streams | Smaller files when sheaf rewrites a file (a Save As, an export, a save that removes something): an IRS form now shrinks by about an eighth, where it grew by half. File > Properties says whether Fast Web View still holds after a save |
 
 **Next, in this order**
 
 | Work | What it brings |
 |---|---|
-| Object streams | Smaller files when sheaf rewrites a file (a Save As, an export, a save that removes something), which today can nearly double an IRS form's size |
 | Fast Web View | Linearized files, which show page 1 before the rest arrives over a network; a choice in Save As |
 | Leaner rewrites | Rewriting a large file without loading all of it into memory |
 | `sheaf search` | Text search across files and folders from the command line |

@@ -7,22 +7,13 @@ in this order:
 
 1. ~~**The content interpreter:** M11's slice, pulled forward~~: done
    (#50).
-2. **Object streams, and B3.** A Rewrite writes no object streams
-   today: it re-serializes each member as a plain object (M10.5 §11.6).
-   - **What it costs.** Measured with qpdf on the corpus (2026-10-23),
-     unpacking object streams grows the IRS forms by a median 88% (all
-     70 use them; fw4.pdf by 178%) and a sample of 377 safedocs files by
-     15%. Every Save As to a new unsigned file pays it, and so does
-     every save that removes content or replaces text, and every export.
-     First, the same measurement through sheaf's own Rewrite.
-   - **Packing on Rewrite** in `serialize/`, with ISO 32000-1 7.5.7's
-     exclusions and each container encrypted once (the M10.5 plan's
-     §20; [build-or-adopt](../research/build-or-adopt/README.md) entry 66).
-   - **Grouped by the pages that use them,** so the linearization crate
-     reuses the grouping: page 1's objects never share a container with
-     later pages'.
-   - **B3:** Properties says whether Fast Web View still holds after an
-     incremental save.
+2. ~~**Object streams, and B3**~~: done
+   ([object-streams.md](../complete/object-streams.md)). A Rewrite and
+   every export of a file that used object streams pack them again,
+   grouped by the pages that use them, each container encrypted once:
+   the IRS forms now shrink by a median 12.9% on a Save As (they grew by
+   half), and Properties' Fast Web View holds after an incremental save
+   (B3). Packing on Append is [B62](../backlog/B62.md).
 3. **The linearization crate** (Fast Web View, moved from M14): page 1's
    objects first, a linearization dictionary and hint tables, so a
    viewer reading byte ranges over a network shows page 1 before the
@@ -32,6 +23,11 @@ in this order:
      outside Rust, qpdf (C++) is the usual tool (build-or-adopt entry
      67). It's published as in-progress and instance-handoff were; see
      [Libraries](../libraries.md).
+   - **Builds on object streams' grouping:** `serialize::group` (pure:
+     each object's number and the pages that use it in, containers out,
+     page 1's apart), which moves into the crate, and
+     `materialize::graph::page_uses`, the bounded walk sheaf will
+     describe its graph's page uses with.
    - **Independent of any object model,** sheaf's or lopdf's, in three
      steps:
      - **Plan:** the caller describes the graph (each object's id, what
@@ -42,8 +38,13 @@ in this order:
        (padded to a fixed width, so the offsets settle in one more
        pass), the hint tables and the first page's cross-reference
        section.
-   - **A checker** says whether a file is linearized and still holds.
-     It is B3's check, and a test oracle beside qpdf's.
+   - **A checker** says whether a file is linearized and still holds:
+     the full check (the hint tables, the first page's section), and a
+     test oracle beside qpdf's. B3's minimum, Annex F's `/L` against the
+     file's length, is in the lazy reader since object streams' slice 1.
+     It wants the whole dictionary within the first 1,024 bytes (Annex
+     F), where qpdf wants only its start there: the checker decides
+     which on purpose.
    - **Written from ISO 32000-1 Annex F,** with qpdf (Apache-2.0) as
      the reference and the oracle, not translated, so the crate stays
      MIT OR Apache-2.0 with no notices for code taken from qpdf.

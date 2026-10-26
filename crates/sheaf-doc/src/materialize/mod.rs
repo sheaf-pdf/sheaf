@@ -24,8 +24,15 @@
 //! 6. writes the file through [`serialize::full`](crate::serialize::full):
 //!    an object neither emitted nor changed by `keep_only` is copied as its
 //!    source has it, when the numbers are stable, the base sound and the
-//!    encryption the same (§11.6); everything else is written, an object
-//!    stream's members as objects of their own;
+//!    encryption the same (§11.6); everything else is written. A source
+//!    that used object streams (its cross-reference section is a stream,
+//!    or it's a hybrid, which becomes a stream file) is packed: what's
+//!    written anew that may go in one does, grouped by the pages that use
+//!    it ([`graph::page_uses`]), its containers numbered first where the
+//!    source's own were on a stable save, else after the objects. A
+//!    table's objects, and any under an encryption that leaves streams in
+//!    the clear but not strings, are written on their own, an object
+//!    stream's members too;
 //! 7. checks what it wrote ([`verify::output`]): the form, and in debug
 //!    builds the encryption. A check that fails stops the save.
 //!
@@ -129,6 +136,7 @@ pub use saving::{SaveHow, SaveReport, Written, save_with, write_file};
 
 use crate::serialize::crypt::Crypt;
 use crate::serialize::full::{self, Body, Layout};
+use crate::serialize::objstm;
 use emit::{EmitBase, EmitScope, PdfVersion};
 use record::{BitSet, ObjMap, RootValues, TreeShape};
 use removal::Mode;
@@ -287,8 +295,27 @@ fn rewrite(
     let in_use: HashSet<u32> = src.pdf().ids().map(|id| id.0).collect();
     let numbers = number::stable(&e, &input.target, src, &loaded, &in_use, prev)?;
     let owned = std::mem::take(&mut e.owned);
+    // A source that used object streams writes them again (a hybrid's
+    // table goes), unless its encryption would leave their strings in the
+    // clear.
+    let used_streams = src.xref().kind == XrefKind::Stream || src.xref().hybrid;
+    let pack = used_streams && crypt.as_deref().is_none_or(Crypt::packs);
+    let kind = if pack {
+        XrefKind::Stream
+    } else {
+        src.xref().kind
+    };
+    // The numbers the source's own containers had, which a stable save's
+    // containers take first, once nothing else has them.
+    let mut reuse: Vec<u32> = match pack && stable {
+        true => (loaded.objects.iter())
+            .filter(|(id, obj)| id.0 < crate::serialize::NUMBERS && objstm::is_container(obj))
+            .map(|(id, _)| id.0)
+            .collect(),
+        false => Vec::new(),
+    };
     let mut version = e.version;
-    if src.xref().kind == XrefKind::Stream {
+    if kind == XrefKind::Stream {
         version = version.max(PdfVersion::XREF_STREAMS);
     }
     if crypt.as_deref().is_some_and(is_aes) {
@@ -326,6 +353,13 @@ fn rewrite(
     let kept = kept::keep_only(&mut graph.pdf, &tree, &removed);
     notes.extend(kept.notes.into_iter().map(Note));
     graph.pdf.prune_objects();
+    // A container something still names keeps its number, so the
+    // reference doesn't come to name a new one.
+    reuse.retain(|&n| {
+        (graph.pdf.objects.range((n, 0)..=(n, u16::MAX)))
+            .next()
+            .is_none()
+    });
     let encrypt = src.crypt().map(|c| c.at());
     let reads = |id| src.pdf().object_unkept(id).is_ok();
     let checked = verify::Primary {
@@ -360,9 +394,22 @@ fn rewrite(
         graph.renumber(&dense, blob);
     }
     p.check()?;
+    let shape = written_tree(&graph.pdf);
+    p.check()?;
 
     let bytes = src.bytes();
     let graph = &graph;
+    // Which pages use each object, which its container is grouped by.
+    let uses = || {
+        let pages = shape.pages();
+        let nodes = shape.nodes.iter().map(|node| node.id);
+        let stop: HashSet<ObjectId> = pages.iter().copied().chain(nodes).collect();
+        graph::page_uses(&pages, &stop, |id, to| {
+            if let Some(obj) = graph.pdf.objects.get(&id) {
+                append::refs(obj, to);
+            }
+        })
+    };
     let written = || (graph.pdf.objects.iter()).filter(|(_, obj)| !full::left_out(obj));
     let bodies = written().map(|(&id, obj)| -> Result<(ObjectId, Body<'_>)> {
         let key = graph.key(id, blob);
@@ -384,11 +431,15 @@ fn rewrite(
     };
     let layout = Layout {
         trailer: &graph.pdf.trailer,
-        kind: src.xref().kind,
+        kind,
         version,
         crypt: crypt.as_deref(),
         encrypt_at,
         xref_from: if stable { numbers.start() } else { 1 },
+        pack: pack.then_some(full::Pack {
+            uses: &uses,
+            reuse: &reuse,
+        }),
     };
     let (out, xref) = full::write_bodies(bodies, &layout, p)?;
     let inputs = emit::form::inputs(&input.target, src);
@@ -453,7 +504,7 @@ fn rewrite(
                 .ok(),
             ..RootValues::of(&graph.pdf)
         }),
-        tree: Arc::new(written_tree(&graph.pdf)),
+        tree: Arc::new(shape),
         drawn: Arc::new(drawn),
         transforms: plan.transforms.as_slice().into(),
     };

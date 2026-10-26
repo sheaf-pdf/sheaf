@@ -691,7 +691,7 @@ mod tests {
 
     use super::*;
     use crate::forms::fixture::{Form, every_kind, every_mark_kind, hybrid_reference};
-    use crate::serialize::fixture::encrypted;
+    use crate::serialize::fixture::{encrypted, linearized_file};
     use crate::source::lazy_tests::{plaintext, stream, with_table};
 
     /// Mutations of each fixture.
@@ -984,6 +984,7 @@ mod tests {
             hybrid_reference(),
             aes_table,
             aes_stream,
+            linearized_file(),
         ]
     }
 

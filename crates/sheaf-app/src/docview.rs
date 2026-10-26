@@ -4199,6 +4199,12 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return None;
         };
+        // A save never replaces the primary, so the file's own record says
+        // what a save did to it: an Append's, that it's linearized no more.
+        let linearized = match doc.model.saved_record() {
+            Some(rec) if Some(&*rec.path) == self.path() => rec.xref.linearized,
+            _ => doc.model.primary().xref().linearized,
+        };
         Some(crate::properties_dialog::PropertiesContext {
             path: self.path().map(Path::to_path_buf),
             name: self.file_name(),
@@ -4208,6 +4214,7 @@ impl DocView {
                 .map(|p| p.geom.shown())
                 .map(|s| (s.width, s.height)),
             dirty: doc.model.is_dirty(),
+            linearized,
         })
     }
 
@@ -7048,6 +7055,65 @@ mod tests {
                 assert!(sheaf_doc::recovery::find(&path).is_some());
                 ran.store(true, Ordering::Relaxed);
                 cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
+            }
+        });
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    /// File > Properties says the Fast Web View of the file shown (B3): a
+    /// linearized file's is Yes, and once a mark is saved after it, an
+    /// Append, whose update voids the linearization, No, without opening
+    /// the file again, though the source the view opened, which a save
+    /// never replaces, still says Yes. In a headless app; the file is in
+    /// a `sheaf-` temporary directory, which the recent files leave out.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn properties_says_no_fast_web_view_once_a_save_appends() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
+        let path = dir.path().join("linearized.pdf");
+        std::fs::write(&path, sheaf_doc::serialize::fixture::linearized_file()).unwrap();
+        let (model, _) = as_the_view_opens(&path, false).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        gpui_platform::headless().run({
+            let ran = ran.clone();
+            move |cx| {
+                let doc = Doc::new(model, cx.focus_handle(), Default::default());
+                let view = cx.new(|cx| {
+                    let mut view = DocView::unopened(path.clone(), None, false, Instant::now(), cx);
+                    view.state = State::Ready(Box::new(doc));
+                    view
+                });
+                cx.spawn(async move |cx| {
+                    let saving = cx.update(|cx| {
+                        view.update(cx, |v, cx| {
+                            assert!(v.properties_context().unwrap().linearized);
+                            let page = shown(v).page_id(0).unwrap();
+                            let rect = Box2 {
+                                x: 72.0,
+                                y: 72.0,
+                                w: 100.0,
+                                h: 50.0,
+                            };
+                            let square = v.new_annot(AnnotKind::Square { rect }, [200, 0, 0]);
+                            assert!(v.add_annot(page, square, "Square", cx).is_some());
+                            v.save(cx)
+                        })
+                    });
+                    assert!(saving.await, "saved");
+                    cx.update(|cx| {
+                        view.update(cx, |v, _| {
+                            assert!(!v.properties_context().unwrap().linearized);
+                            let model = &shown(v).model;
+                            let record = model.saved_record().unwrap();
+                            assert_eq!(record.strategy, materialize::StrategyKind::Append);
+                            assert!(model.primary().xref().linearized, "the source as opened");
+                        })
+                    });
+                    ran.store(true, Ordering::Relaxed);
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
             }
         });
         assert!(ran.load(Ordering::Relaxed));

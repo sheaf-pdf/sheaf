@@ -1,6 +1,6 @@
 # M10: Forms
 
-Status: paused · after slice 5; slices 6–17 resume after the [between-milestones work](../between/README.md): object streams and B3, the linearization crate, F15, `sheaf search`, and roles and labels on sheaf-ui's widgets
+Status: paused · after slice 5; slices 6–17 resume after the [between-milestones work](../between/README.md): the linearization crate, F15, `sheaf search`, and roles and labels on sheaf-ui's widgets
 
 Proves: Tax forms are filled and calculated in sheaf · Depends on: Nothing unbuilt (it waited, by a ruling, for all of M10.5: done)
 

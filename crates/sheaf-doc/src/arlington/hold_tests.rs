@@ -16,6 +16,7 @@ use crate::materialize::record::ObjMap;
 use crate::materialize::rewrite_tests::{info, make_pdf, opened, tempdir, thread_mark};
 use crate::materialize::{ObjKey, StrategyKind, save_appended, save_rewritten};
 use crate::model::Document;
+use crate::serialize::fixture::object_streams_of;
 use crate::source::Limits;
 use crate::store::{BlobId, Store};
 use crate::tx::fixture as fx;
@@ -157,8 +158,9 @@ fn an_object_a_section_lists_is_held_though_it_doesnt_read() {
 }
 
 /// A Rewrite holds the objects it derived, the root objects and pages as
-/// merged and the mark's as built, and none it copied: not the primary's
-/// own at their numbers, nor the inserted file's.
+/// merged and the mark's as built, and the object streams it packed
+/// objects into as built, which no key names; and none it copied: not the
+/// primary's own at their numbers, nor the inserted file's.
 #[test]
 fn a_rewrite_holds_what_it_derived_but_copies() {
     let dir = tempdir();
@@ -179,8 +181,15 @@ fn a_rewrite_holds_what_it_derived_but_copies() {
     let copies = copies_of(&record.map, b);
     assert!(!copies.is_empty(), "the Rewrite copies b.pdf's");
     let primary = record.map.identity.expect("stable numbering");
+    let streams = object_streams_of(&pdf);
+    assert!(!streams.is_empty(), "a stream file's Rewrite packs");
+    for id in &streams {
+        assert_eq!(held.get(id), Some(&Made::Built), "{id:?}");
+    }
     let named: Vec<ObjectId> = record.map.keys.values().copied().collect();
-    let own: Vec<ObjectId> = pdf.ids().filter(|id| !named.contains(id)).collect();
+    let own: Vec<ObjectId> = (pdf.ids())
+        .filter(|id| !named.contains(id) && !streams.contains(id))
+        .collect();
     assert!(
         !own.is_empty(),
         "the primary's own objects are at their numbers"

@@ -103,8 +103,10 @@ Marked `sheaf:` in the source.
     and `xref()`
     (`XrefFacts`: the newest section's kind and start, the trailer's
     `/Size`, the largest cross-reference stream number, `/ID`, the
-    header's offset, whether a section is hybrid, linearization, the
-    number of sections).
+    header's offset, whether a section is hybrid, whether a
+    linearization holds (its first object, whole within 1,024 bytes, has
+    `/Linearized` 1 and an `/L` that is the file's length, Annex F's
+    minimum; B3), the number of sections).
   - `object_unkept` (M10.5 slice 6) reads an object as `object` does
     but doesn't keep it, unless it was kept already. `get` keeps every
     object it reads for as long as the `LazyPdf` lives, and the content

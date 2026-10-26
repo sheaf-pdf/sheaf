@@ -22,7 +22,10 @@ use lopdf::{
 use super::Limits;
 use crate::forms::corpus::Corpus;
 use crate::forms::fixture::{every_kind, hybrid_reference, hybrid_update};
-use crate::serialize::fixture::{USER, attachment_only, encrypted, holds, rc4_aes_128_and_aes_256};
+use crate::serialize::fixture::{
+    PREFIX, USER, attachment_only, encrypted, holds, linearized_file, linearized_file_after,
+    rc4_aes_128_and_aes_256,
+};
 
 /// How long a hostile file may take to fail.
 pub(super) const QUICK: Duration = Duration::from_secs(5);
@@ -143,17 +146,19 @@ fn lazy_objects_equal_the_eager_load() {
     let streams = open(&written(false)).xref().clone();
     assert_eq!((streams.kind, streams.hybrid), (XrefKind::Stream, false));
     assert_eq!(streams.sections, 1);
-    let linearized = with_table(&[catalog(), pages(), (3, b"<< /Linearized 1 >>".to_vec())]);
-    let linearized = String::from_utf8(linearized)
+    // `/Linearized` in the last object, without `/L`: no linearization.
+    let named = with_table(&[catalog(), pages(), (3, b"<< /Linearized 1 >>".to_vec())]);
+    let named = String::from_utf8(named)
         .unwrap()
         .replace("/Root 1 0 R >>", "/Root 1 0 R /ID [<0102> <0304>] >>");
-    let facts = open(linearized.as_bytes()).xref().clone();
+    let facts = open(named.as_bytes()).xref().clone();
     assert_eq!(
         (facts.size, facts.linearized, facts.hybrid),
-        (4, true, false)
+        (4, false, false)
     );
     assert_eq!(facts.id, Some([vec![1, 2], vec![3, 4]]));
     assert!(!streams.linearized);
+    assert!(open(&linearized_file()).xref().linearized);
 
     // Threads reading at once read the same, the first read of each
     // object kept.
@@ -197,6 +202,107 @@ fn a_file_with_a_100_byte_prefix_reads_identically() {
         // Only the members of object streams have none.
         assert_eq!(spans == eager.objects.len(), classic);
         assert!(spans > 0);
+    }
+}
+
+/// A linearization holds while its dictionary is the file's first object,
+/// whole within 1,024 bytes of the header, its `/Linearized` is 1 (a
+/// number whose floor is 1, as qpdf reads it) and its `/L` is a direct
+/// integer, the file's length from the header (ISO 32000-1, Annex F; B3);
+/// an update appended voids it. From memory and by position alike.
+#[test]
+fn a_linearization_holds_while_its_length_is_the_file_s() {
+    let file = linearized_file();
+    let len = file.len();
+    // `file` with `from` replaced by `to`, padded to its width.
+    let edited = |from: &str, to: &str| {
+        let at = file.windows(from.len()).position(|w| w == from.as_bytes());
+        let to = format!("{to:<width$}", width = from.len());
+        let mut bytes = file.clone();
+        bytes[at.unwrap()..][..from.len()].copy_from_slice(to.as_bytes());
+        bytes
+    };
+    let l = format!("/L {len:<10}");
+    // `file` with `/Linearized` given the value `v`.
+    let version = |v: &str| {
+        edited(
+            &format!("/Linearized 1 {l}"),
+            &format!("/Linearized {v} /L {len}"),
+        )
+    };
+    // The dictionary ends `end` bytes into the file: a comment of `n`
+    // bytes before it ends it at byte `end + n`.
+    let end = file.windows(2).position(|w| w == b">>").unwrap() + 2;
+    let comment = |n: usize| [b"%".as_slice(), &vec![b'x'; n - 2], b"\n"].concat();
+    let tail = file.windows(9).rposition(|w| w == b"startxref").unwrap();
+    let prev: usize = String::from_utf8_lossy(&file[tail + 9..])
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut updated = file.clone();
+    let object = updated.len();
+    updated.extend_from_slice(b"6 0 obj\n(an update)\nendobj\n");
+    let section = updated.len();
+    updated.extend_from_slice(
+        format!(
+            "xref\n6 1\n{object:010} 00000 n \ntrailer\n<< /Size 7 /Root 1 0 R /Prev {prev} >>\n\
+             startxref\n{section}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(open(&updated).xref().sections, 2);
+    let counted = edited(&l, &format!("/L {}", len + PREFIX.len()));
+    let cases = [
+        ("/L the length", file.clone(), true),
+        (
+            "/L one past it",
+            edited(&l, &format!("/L {}", len + 1)),
+            false,
+        ),
+        ("no /L", edited(&l, ""), false),
+        ("/L a reference", edited(&l, "/L 9 0 R"), false),
+        ("/L a real", edited(&l, &format!("/L {len}.0")), false),
+        ("no /Linearized", edited("/Linearized 1", ""), false),
+        ("/Linearized 1.0", version("1.0"), true),
+        ("/Linearized 1.5", version("1.5"), true),
+        ("/Linearized 0.9", version("0.9"), false),
+        ("/Linearized 2", version("2"), false),
+        ("/Linearized true", version("true"), false),
+        ("/Linearized null", version("null"), false),
+        ("/Linearized a name", version("/One"), false),
+        (
+            "another object first",
+            linearized_file_after(b"9 0 obj\nnull\nendobj\n"),
+            false,
+        ),
+        (
+            "ending at byte 1,024",
+            linearized_file_after(&comment(1024 - end)),
+            true,
+        ),
+        // Stricter than qpdf on purpose: it asks only that the object
+        // start within the 1,024 bytes, and calls this file linearized;
+        // Annex F has the whole dictionary within them.
+        (
+            "ending at byte 1,025",
+            linearized_file_after(&comment(1025 - end)),
+            false,
+        ),
+        ("junk before", [&PREFIX[..], &file].concat(), true),
+        (
+            "junk before, counted",
+            [&PREFIX[..], &counted].concat(),
+            false,
+        ),
+        ("an update after", updated, false),
+    ];
+    for (name, bytes, holds) in cases {
+        for pdf in [open(&bytes), open_file(&bytes, None)] {
+            assert!(pdf.base_sound(), "{name}");
+            assert_eq!(pdf.xref().linearized, holds, "{name}");
+        }
     }
 }
 

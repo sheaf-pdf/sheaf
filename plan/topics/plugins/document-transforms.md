@@ -290,8 +290,9 @@ signatures instead of getting a Rewrite that breaks them.
   the tail goes through recovery's existing `PendingTail` and
   `Came::Restored` path, so later edits Append in place.
 - **Otherwise,** the first save that has to Rewrite onto the plugin's
-  file loses object streams, xref streams, linearization and the
-  plugin's signatures.
+  file loses its linearization and the plugin's signatures. Its object
+  streams and cross-reference stream are written again (since
+  [object streams](../../complete/object-streams.md) slice 2).
 - **Whole file plus a section in one write** (`Onto::Base`) reverses
   D28 and would need its own decision.
 

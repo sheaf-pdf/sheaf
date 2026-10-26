@@ -48,13 +48,20 @@
 //! - signed and certified files ([`SIGNED`]): a comment appends, or asks
 //!   first, as §9.3's table says, and appended (anyway, where it asks),
 //!   the file's bytes stay its first, every signature's byte range still
-//!   within them.
+//!   within them;
+//! - linearization against qpdf (object streams' slice 1, B3; ignored, as
+//!   a corpus tier), over the pool's sample (`bench/pool-sample.txt`), not
+//!   the forms: sheaf (its cross-reference facts, and Properties' Fast Web
+//!   View) and `qpdf --check-linearization` agree on whether each file is
+//!   linearized, and again once a mark is appended to it as "Append
+//!   anyway" appends, when neither may say it is; where the Append stops,
+//!   why is counted.
 //!
 //! The counts are asserted against their baselines ([`MARKED`],
-//! [`DELETED`], [`ORACLE`]) when the corpus is the one they were counted on (its
-//! manifest's length): a later slice that moves one says why in the plan's
-//! slice notes, and moves the baseline. Skips when there's no corpus (see
-//! `sheaf_doc::forms::corpus`).
+//! [`DELETED`], [`ORACLE`], [`LINEARIZED`]) when the corpus is the one they
+//! were counted on (its manifest's length, or the pool sample's): a later
+//! slice that moves one says why in the plan's slice notes, and moves the
+//! baseline. Skips when there's no corpus (see `sheaf_doc::forms::corpus`).
 
 // A test crate of its own, whose scratch files go in the temp directory
 // clippy.toml bans outside tests.
@@ -73,7 +80,8 @@ use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::sigs::Verdict;
 use sheaf_doc::materialize::{
     Ask, AskAnswers, How, Note, Onto, SaveHow, SaveStop, Strategy, StrategyKind, Why,
-    forced_append, materialize, plan, removal, save_rewritten, save_with, write_file,
+    forced_append, materialize, plan, removal, save_appended, save_rewritten, save_with,
+    write_file,
 };
 use sheaf_doc::model::Scope;
 use sheaf_doc::text_layer::from_engine;
@@ -2007,4 +2015,236 @@ fn a_comment_on_a_signed_file_appends_or_asks_by_what_its_signatures_allow() {
         remove(&copy);
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ----- Linearization, against qpdf -------------------------------------------
+
+/// Pool paths, comma-separated, to run
+/// [`linearization_agrees_with_qpdf_before_and_after_an_append`] on alone
+/// (`SHEAF_LINEARIZED_ONLY=pool/safedocs/5953/5953208.pdf,…`): for looking
+/// at a few files by hand. Unset, it takes the whole pool sample.
+const LINEARIZED_ONLY: &str = "SHEAF_LINEARIZED_ONLY";
+
+/// Whether sheaf and qpdf call a copy of a file linearized, each: before a
+/// mark was appended to it, and after (or why the Append stopped).
+struct Linearization {
+    was: Said,
+    after: Result<Said, String>,
+}
+
+/// Whether sheaf calls a file linearized, and qpdf: None without a qpdf.
+#[derive(Clone, Copy)]
+struct Said {
+    sheaf: bool,
+    qpdf: Option<bool>,
+}
+
+/// Whether sheaf, by the cross-reference facts of the file at `path`
+/// opened as `doc`, and `qpdf --check-linearization`, with a qpdf, call it
+/// linearized.
+fn linearized(doc: &Document, path: &Path, qpdf: Option<&Path>) -> Result<Said, String> {
+    Ok(Said {
+        sheaf: doc.primary().xref().linearized,
+        qpdf: qpdf.map(|q| common::qpdf_linearized(q, path)).transpose()?,
+    })
+}
+
+/// Adds what `said` says to `counts`, files linearized to sheaf and to
+/// qpdf.
+fn count(counts: &mut [usize; 2], said: Said) {
+    counts[0] += usize::from(said.sheaf);
+    counts[1] += usize::from(said.qpdf == Some(true));
+}
+
+/// A copy of `entry`'s file, read by sheaf and (with a qpdf) qpdf, then a
+/// note on its first page appended as "Append anyway" appends
+/// ([`save_appended`]), and the file read again: None when it doesn't
+/// open.
+fn appended_linearization(
+    entry: &Entry,
+    corpus: &Corpus,
+    dir: &Path,
+    qpdf: Option<&Path>,
+) -> Option<Result<Linearization, String>> {
+    let path = copy_of(entry, corpus, dir, "lin-")?;
+    let outcome = (|| {
+        let mut doc = opened(&path)?;
+        Some(linearization(&mut doc, &path, qpdf))
+    })();
+    remove(&path);
+    outcome
+}
+
+/// [`appended_linearization`]'s reads of `doc`, opened from `path`, and
+/// its Append.
+fn linearization(
+    doc: &mut Document,
+    path: &Path,
+    qpdf: Option<&Path>,
+) -> Result<Linearization, String> {
+    let was = linearized(doc, path, qpdf).map_err(|e| format!("before the Append: {e}"))?;
+    let stopped = |why: String| {
+        Ok(Linearization {
+            was,
+            after: Err(why),
+        })
+    };
+    let Some(page) = doc.page(0) else {
+        return stopped("no page to mark".into());
+    };
+    let before = std::fs::read(path).unwrap();
+    if let Err(e) = doc.commit_ops(vec![add(page, &note(MARK))], "mark") {
+        return Err(format!("no mark: {e}"));
+    }
+    let report = match save_appended(doc, path) {
+        Ok(report) => report,
+        Err(stop) => return stopped(stop.to_string()),
+    };
+    if report.strategy != Some(StrategyKind::Append) {
+        return Err(format!("saved as {:?}", report.strategy));
+    }
+    if !std::fs::read(path).unwrap().starts_with(&before) {
+        return Err("an Append that doesn't keep the file's bytes first".into());
+    }
+    if doc.saved_record().map(|r| r.xref.linearized) != Some(false) {
+        return Err("the Append's record says it's linearized".into());
+    }
+    let again = opened(path).ok_or("the appended file doesn't open")?;
+    let after = linearized(&again, path, qpdf).map_err(|e| format!("after the Append: {e}"))?;
+    Ok(Linearization {
+        was,
+        after: Ok(after),
+    })
+}
+
+/// What the pool sample's linearizations came to (object streams' slice
+/// 1): of its 402 files, those that open, every one; those linearized, to
+/// sheaf and qpdf alike, 150 (66 more name `/Linearized` at their start,
+/// but their `/L` is short of their length: they were updated after they
+/// were linearized); and those whose Append stopped, none. Each count is
+/// exact: a slice that moves one says why in its notes.
+const LINEARIZED: LinearizedBaseline = LinearizedBaseline {
+    sample: 402,
+    files: 402,
+    linearized: 150,
+    stopped: 0,
+};
+
+struct LinearizedBaseline {
+    sample: usize,
+    files: usize,
+    linearized: usize,
+    stopped: usize,
+}
+
+/// Every file of the pool's sample read by sheaf and by `qpdf
+/// --check-linearization`, then read again after a mark appended to it
+/// (B3): they agree on whether it's linearized, and after an Append, whose
+/// `/L` is no longer the file's length and whose record says so, neither
+/// says it is. Without a qpdf, it says so and checks sheaf's half alone,
+/// the baseline's counts included.
+#[test]
+#[ignore = "corpus tier: cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture"]
+fn linearization_agrees_with_qpdf_before_and_after_an_append() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let qpdf = common::qpdf();
+    let dir = scratch("linearized");
+    let sample: Vec<Entry> = (common::pool_sample().into_iter())
+        .map(|path| Entry {
+            path,
+            ..Entry::default()
+        })
+        .collect();
+    assert_eq!(
+        sample.len(),
+        LINEARIZED.sample,
+        "files in the pool's sample"
+    );
+    let whole = sample.len();
+    let entries = common::narrowed(LINEARIZED_ONLY, sample, |e| &e.path);
+    let outcomes = each_entry(&entries, |e| {
+        appended_linearization(e, &corpus, &dir, qpdf.as_deref())
+    });
+    let (mut files, mut appended) = (0, 0);
+    let (mut was, mut after) = ([0; 2], [0; 2]);
+    let mut stopped: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    let (mut unopened, mut failed) = (Vec::new(), BTreeMap::new());
+    for (entry, outcome) in entries.iter().zip(outcomes) {
+        let Some(outcome) = outcome else {
+            unopened.push(entry.path.as_str());
+            continue;
+        };
+        files += 1;
+        let l = match outcome {
+            Ok(l) => l,
+            Err(e) => {
+                failed.insert(entry.path.clone(), e);
+                continue;
+            }
+        };
+        let mut wrong = Vec::new();
+        if let Said {
+            sheaf,
+            qpdf: Some(theirs),
+        } = l.was
+            && theirs != sheaf
+        {
+            wrong.push(format!(
+                "before the Append, sheaf says linearized {sheaf}, qpdf {theirs}"
+            ));
+        }
+        count(&mut was, l.was);
+        match l.after {
+            Ok(now) => {
+                appended += 1;
+                count(&mut after, now);
+                if now.sheaf || now.qpdf == Some(true) {
+                    wrong.push(format!(
+                        "after the Append, sheaf says linearized {}, qpdf {:?}",
+                        now.sheaf, now.qpdf
+                    ));
+                }
+            }
+            Err(why) => stopped.entry(why).or_default().push(&entry.path),
+        }
+        if !wrong.is_empty() {
+            failed.insert(entry.path.clone(), wrong.join("; "));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let stops: usize = stopped.values().map(Vec::len).sum();
+    let theirs = |n: usize| match qpdf {
+        Some(_) => n.to_string(),
+        None => "unasked (no qpdf)".into(),
+    };
+    println!(
+        "{files} of {} pool files: linearized to sheaf {}, to qpdf {}; {appended} appended, \
+         then linearized to sheaf {}, to qpdf {}; {stops} couldn't append; {} don't open; {} \
+         failed",
+        entries.len(),
+        was[0],
+        theirs(was[1]),
+        after[0],
+        theirs(after[1]),
+        unopened.len(),
+        failed.len(),
+    );
+    for (why, paths) in &stopped {
+        let some = paths[..paths.len().min(4)].join(", ");
+        println!("  couldn't append, {why}: {} ({some})", paths.len());
+    }
+    if !unopened.is_empty() {
+        println!("  don't open: {}", unopened.join(", "));
+    }
+    for (path, why) in &failed {
+        println!("{path}: {why}");
+    }
+    assert!(failed.is_empty());
+    if entries.len() == whole {
+        assert_eq!(files, LINEARIZED.files, "files that open");
+        assert_eq!(was[0], LINEARIZED.linearized, "files linearized");
+        assert_eq!(stops, LINEARIZED.stopped, "files that couldn't append");
+    }
 }

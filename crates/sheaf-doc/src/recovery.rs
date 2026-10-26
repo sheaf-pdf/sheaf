@@ -1186,58 +1186,68 @@ pub(crate) mod tests {
 
     /// A Full sidecar of an encrypted file, written when no section can
     /// follow the file (here its record says it can't take an update), is
-    /// the whole document encrypted as the file is: neither a header's text
-    /// nor the form's value is in it in the clear. It restores with a
-    /// record that says nothing of the file, so its first save is a
+    /// the whole document encrypted as the file is, packed when the file's
+    /// cross-references are a stream: neither a header's text nor the
+    /// form's value is in it in the clear, even inflated. It restores with
+    /// a record that says nothing of the file, so its first save is a
     /// Rewrite, and its own sidecar is Full too, against the same file.
     #[test]
     fn an_encrypted_file_s_full_sidecar_holds_no_plaintext() {
-        use crate::serialize::fixture::{USER, VALUE, encrypted, form};
+        use crate::serialize::fixture::{
+            USER, VALUE, encrypted, form, in_clear, object_streams_of,
+        };
 
         let dir = scratch();
         let plain = form();
         let [(_, state), ..] = crate::serialize::fixture::rc4_aes_128_and_aes_256(&plain);
-        let [table, _] = encrypted(&plain, &state, |_| {});
-        let pdf = dir.join("header.pdf");
-        std::fs::write(&pdf, &table).unwrap();
-        let mut model = crate::open::file(&pdf, Some(USER)).unwrap().doc;
-        let set = fx::set_header(fx::header("HEADERSECRET <<1>>"), None);
-        model.commit_ops(vec![set], "header").unwrap();
-        let mut input = model.recovery_input();
-        let saved = input.saved.as_mut().unwrap();
-        let record = SaveRecord {
-            sound: false,
-            ..SaveRecord::clone(&saved.record)
-        };
-        saved.record = Arc::new(record);
-        let (file, base) = model.file().map(|(f, s)| (f.clone(), *s)).unwrap();
-        write(&input, &file, &base, &NoProgress).unwrap();
-        assert_eq!(kind_of(&pdf), "full");
-        let sidecar = std::fs::read(sidecar_path(&pdf)).unwrap();
-        for text in [b"HEADERSECRET".as_slice(), VALUE.as_bytes()] {
-            assert!(!holds(&sidecar, text));
+        let [table, stream] = encrypted(&plain, &state, |_| {});
+        for (kind, file) in [("table", table), ("stream", stream)] {
+            let pdf = dir.join(format!("{kind}.pdf"));
+            std::fs::write(&pdf, &file).unwrap();
+            let mut model = crate::open::file(&pdf, Some(USER)).unwrap().doc;
+            let set = fx::set_header(fx::header("HEADERSECRET <<1>>"), None);
+            model.commit_ops(vec![set], "header").unwrap();
+            let mut input = model.recovery_input();
+            let saved = input.saved.as_mut().unwrap();
+            let record = SaveRecord {
+                sound: false,
+                ..SaveRecord::clone(&saved.record)
+            };
+            saved.record = Arc::new(record);
+            let (file, base) = model.file().map(|(f, s)| (f.clone(), *s)).unwrap();
+            write(&input, &file, &base, &NoProgress).unwrap();
+            assert_eq!(kind_of(&pdf), "full", "{kind}");
+            let sidecar = std::fs::read(sidecar_path(&pdf)).unwrap();
+            for text in [b"HEADERSECRET".as_slice(), VALUE.as_bytes()] {
+                assert!(!in_clear(&sidecar, text), "{kind}");
+            }
+            let rec = find(&pdf).unwrap();
+            assert!(rec.pending.bytes.is_none(), "{kind}");
+            let whole = LazyPdf::open(rec.bytes.clone(), Some(USER), &Limits::DEFAULT.reader);
+            let packed = !object_streams_of(&whole.unwrap()).is_empty();
+            assert_eq!(packed, kind == "stream", "{kind}");
+            let recovered = restored(&pdf, &rec, Some(USER));
+            assert!(recovered.is_dirty(), "{kind}");
+            assert!(!recovered.saved_record().unwrap().knows_file(), "{kind}");
+            let hf = recovered.state().header_footer().unwrap();
+            assert_eq!(
+                hf.spec.header_footer().unwrap().texts[0],
+                "HEADERSECRET <<1>>",
+                "{kind}"
+            );
+            let planned = plan(&recovered.recovery_input(), &recovered.save_target(&pdf));
+            let why = vec![Why::NoSaveRecord];
+            assert_eq!(planned.strategy, Strategy::Rewrite { why }, "{kind}");
+            sidecar_of(&recovered);
+            assert_eq!(kind_of(&pdf), "full", "{kind}");
+            let again = restored(&pdf, &find(&pdf).unwrap(), Some(USER));
+            let hf = again.state().header_footer().unwrap();
+            assert_eq!(
+                hf.spec.header_footer().unwrap().texts[0],
+                "HEADERSECRET <<1>>",
+                "{kind}"
+            );
         }
-        let rec = find(&pdf).unwrap();
-        assert!(rec.pending.bytes.is_none());
-        let recovered = restored(&pdf, &rec, Some(USER));
-        assert!(recovered.is_dirty());
-        assert!(!recovered.saved_record().unwrap().knows_file());
-        let hf = recovered.state().header_footer().unwrap();
-        assert_eq!(
-            hf.spec.header_footer().unwrap().texts[0],
-            "HEADERSECRET <<1>>"
-        );
-        let planned = plan(&recovered.recovery_input(), &recovered.save_target(&pdf));
-        let why = vec![Why::NoSaveRecord];
-        assert_eq!(planned.strategy, Strategy::Rewrite { why });
-        sidecar_of(&recovered);
-        assert_eq!(kind_of(&pdf), "full");
-        let again = restored(&pdf, &find(&pdf).unwrap(), Some(USER));
-        let hf = again.state().header_footer().unwrap();
-        assert_eq!(
-            hf.spec.header_footer().unwrap().texts[0],
-            "HEADERSECRET <<1>>"
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

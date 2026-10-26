@@ -38,6 +38,19 @@
 //! own text alone, then, flattened, each annotation's text after it, inside
 //! an `/Artifact` of its own.
 //!
+//! From object streams' slice 1 (B3), a file qpdf linearized is
+//! linearized to sheaf and to `qpdf --check-linearization`, and neither
+//! once sheaf appends to it or rewrites it.
+//!
+//! From object streams' slice 2 a Rewrite and every export of a file whose
+//! cross-references are a stream, or of a hybrid-reference file, pack
+//! what they write into object streams, and a table's don't. Each packed
+//! output, of every base, RC4-40's among them, passes `qpdf --check` with
+//! its password, and so does what `qpdf --decrypt` makes of an encrypted
+//! one; pdf.js reads with the password the pages, text and annotations it
+//! reads of the same output of the document's table base, and an
+//! encrypted one not at all without it.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`. A test
 //! whose tools are missing says so and passes. Run with
@@ -48,38 +61,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object, dictionary};
+use lopdf::{Dictionary, LazyPdf, Object, ReadLimits, XrefKind, dictionary};
 use sheaf_doc::export::{Export, ExportFrom, Out};
-use sheaf_doc::forms::fixture::{Form, outline_tree};
+use sheaf_doc::forms::fixture::{Form, hybrid_reference, outline_tree};
 use sheaf_doc::materialize::{How, StrategyKind};
 use sheaf_doc::serialize::fixture::{
     PREFIX, USER, attachment_only, edited, encrypted, form, object_streams_encrypted,
-    rc4_aes_128_and_aes_256, written,
+    object_streams_of, rc4_40, rc4_aes_128_and_aes_256, written,
 };
 use sheaf_doc::tx::fixture::{
     add, clear_ocr, delete, delete_named, flatten, header, move_pages, ocr, patch_bookmark,
     remove_header, remove_watermark, rotate, set_header, set_watermark, watermark,
 };
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DestView, OcrWord, PageId};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, DestView, Document, OcrWord, PageId};
 use sheaf_edit::{
     BatesSpec, BookmarkPatch, FlattenSet, GridPos, Margins, Op, PageRef, Rotation, Sibling, Turn, Z,
 };
 
 mod common;
-use common::scratch;
-
-/// qpdf, or None when there's none, saying so.
-fn qpdf() -> Option<PathBuf> {
-    let qpdf = std::env::var_os("SHEAF_QPDF").map_or_else(|| PathBuf::from("qpdf"), PathBuf::from);
-    let found = Command::new(&qpdf)
-        .arg("--version")
-        .output()
-        .is_ok_and(|out| out.status.success());
-    if !found {
-        println!("skipped qpdf: none at {} (set SHEAF_QPDF)", qpdf.display());
-    }
-    found.then_some(qpdf)
-}
+use common::{note, open, planned, qpdf, qpdf_linearized, saved, scratch};
 
 /// pdf.js's `pdf.mjs`, to run with node, or None when there's no node or
 /// no pdf.js, saying so.
@@ -141,9 +141,10 @@ fn bases() -> Vec<(String, Vec<u8>, Option<&'static str>)> {
 }
 
 /// `plain` unencrypted, with a table, a stream, and object streams; with
-/// bytes before its header; encrypted with RC4-128, AES-128, AES-256 and,
-/// for its attachment only, `/EFF`; and encrypted with AES-256 in an
-/// object stream. Each with its name and the password it opens with.
+/// bytes before its header; encrypted with RC4-40, RC4-128, AES-128,
+/// AES-256 and, for its attachment only, `/EFF`; and encrypted with
+/// AES-256 in an object stream. Each with its name and the password it
+/// opens with.
 fn bases_of(plain: &lopdf::Document) -> Vec<(String, Vec<u8>, Option<&'static str>)> {
     let plain = plain.clone();
     let [table, stream] = written(&plain);
@@ -164,14 +165,15 @@ fn bases_of(plain: &lopdf::Document) -> Vec<(String, Vec<u8>, Option<&'static st
             None,
         ),
     ];
-    let mut states = rc4_aes_128_and_aes_256(&plain).to_vec();
+    let mut states = vec![rc4_40(&plain)];
+    states.extend(rc4_aes_128_and_aes_256(&plain));
     states.push(("/EFF", attachment_only(&plain)));
     for (name, state) in &states {
         let [table, stream] = encrypted(&plain, state, |_| {});
         bases.push((format!("{name}, table"), table, Some(USER)));
         bases.push((format!("{name}, stream"), stream, Some(USER)));
     }
-    let aes_256 = &states[2].1;
+    let aes_256 = &states[3].1;
     bases.push((
         "AES-256, object streams".to_string(),
         object_streams_encrypted(&plain, aes_256),
@@ -200,45 +202,10 @@ fn qpdf_checks(how: How) {
         let base = dir.join(format!("{file}.pdf"));
         std::fs::write(&base, &bytes).unwrap();
         let doc = edited(&base, password);
-        let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
-        let exported = |export: fn(ExportFrom, Out) -> Export, how: &str| {
-            let path = dir.join(format!("{file}-{how}.pdf"));
-            common::exported_to(&doc, export, &path)
+        let outputs = match how {
+            How::Appended => vec![(format!("{how:?}"), how.write(&doc))],
+            How::Rewritten => ways_out(&doc, &dir, &file).to_vec(),
         };
-        let saved = (format!("{how:?}"), how.write(&doc));
-        if how == How::Appended {
-            outputs_checked(
-                &qpdf,
-                &dir,
-                &file,
-                &name,
-                password,
-                [saved],
-                &mut checked,
-                &mut failed,
-            );
-            continue;
-        }
-        let outputs = [
-            saved,
-            (
-                "Extract".into(),
-                doc.export_bytes(|f, out| Export::extract(f, &ids[..1], out)),
-            ),
-            (
-                "Print".into(),
-                doc.export_bytes(|f, _| Export::print(f, &ids, true)),
-            ),
-            (
-                "PrintClean".into(),
-                doc.export_bytes(|f, _| Export::print(f, &ids, false)),
-            ),
-            ("Clean".into(), exported(Export::clean_copy, "clean-copy")),
-            (
-                "Flattened".into(),
-                exported(Export::flattened, "flattened-copy"),
-            ),
-        ];
         outputs_checked(
             &qpdf,
             &dir,
@@ -253,6 +220,38 @@ fn qpdf_checks(how: How) {
     println!("qpdf --check: {checked} outputs, {} fail", failed.len());
     assert!(failed.is_empty(), "{failed:#?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What `doc`, edited from the base whose file is `file`, writes: a
+/// Rewrite and each export (its first page extracted, print with and
+/// without markup, Clean Copy and Export Flattened, the last two put in
+/// `dir`), each by what it is.
+fn ways_out(doc: &Document, dir: &Path, file: &str) -> [(String, Vec<u8>); 6] {
+    let ids: Vec<PageId> = doc.state().order().iter().copied().collect();
+    let exported = |export: fn(ExportFrom, Out) -> Export, how: &str| {
+        let path = dir.join(format!("{file}-{how}.pdf"));
+        common::exported_to(doc, export, &path)
+    };
+    [
+        (format!("{:?}", How::Rewritten), How::Rewritten.write(doc)),
+        (
+            "Extract".into(),
+            doc.export_bytes(|f, out| Export::extract(f, &ids[..1], out)),
+        ),
+        (
+            "Print".into(),
+            doc.export_bytes(|f, _| Export::print(f, &ids, true)),
+        ),
+        (
+            "PrintClean".into(),
+            doc.export_bytes(|f, _| Export::print(f, &ids, false)),
+        ),
+        ("Clean".into(), exported(Export::clean_copy, "clean-copy")),
+        (
+            "Flattened".into(),
+            exported(Export::flattened, "flattened-copy"),
+        ),
+    ]
 }
 
 /// `outputs` of base `name` (its file `file`), each by what it is, checked
@@ -279,16 +278,17 @@ fn outputs_checked(
     }
 }
 
-/// What pdf.js reads of a file: its pages, and each one's text and how
-/// many annotations it has.
+/// What pdf.js reads of a file, opened with the password given after it
+/// if any: its pages, and each one's text and how many annotations it
+/// has. An encrypted file given no password, or the wrong one, fails.
 const PDFJS_PAGES: &str = r#"
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const [lib, file] = process.argv.slice(2);
+const [lib, file, password] = process.argv.slice(2);
 const pdfjs = await import(pathToFileURL(lib).href);
 const data = new Uint8Array(readFileSync(file));
-const doc = await pdfjs.getDocument({ data, verbosity: 0 }).promise;
+const doc = await pdfjs.getDocument({ data, password, verbosity: 0 }).promise;
 console.log(`pages ${doc.numPages}`);
 for (let n = 1; n <= doc.numPages; n++) {
   const page = await doc.getPage(n);
@@ -339,6 +339,124 @@ fn a_prefixed_append_opens_identically_in_pdfjs_and_qpdf() {
             println!("pdf.js, {kind}: {want}");
         }
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What pdf.js reads of `path` with [`PDFJS_PAGES`], given `password`, or
+/// why it couldn't.
+fn pdfjs_read(
+    pdfjs: &Path,
+    script: &Path,
+    path: &Path,
+    password: Option<&str>,
+) -> Result<String, String> {
+    run(Command::new("node")
+        .arg(script)
+        .arg(pdfjs)
+        .arg(path)
+        .args(password))
+}
+
+/// Every base of [`form`]'s ([`bases`]) and of a hybrid-reference file's
+/// ([`hybrid_reference`], and lopdf's table of it), turned and noted,
+/// then rewritten and exported ([`ways_out`]): each output of a base whose
+/// cross-references are a stream, or a hybrid's, holds object streams,
+/// and of a table's none. Each packed one passes `qpdf --check` with its
+/// base's password, and an encrypted one's `qpdf --decrypt` passes it
+/// too. pdf.js reads each packed one, with the password, as it reads the
+/// same output of the document's table base, unpacked, and an encrypted
+/// one not at all without it.
+#[test]
+#[ignore = "needs qpdf, or node and pdf.js"]
+fn packed_outputs_read_alike_in_qpdf_and_pdfjs() {
+    let (qpdf, pdfjs) = (qpdf(), pdfjs());
+    if qpdf.is_none() && pdfjs.is_none() {
+        return;
+    }
+    let dir = scratch("interop-packed");
+    let script = dir.join("pages.mjs");
+    std::fs::write(&script, PDFJS_PAGES).unwrap();
+    let hybrid = hybrid_reference();
+    let [hybrid_table, _] = written(&lopdf::Document::load_mem(&hybrid).unwrap());
+    // Each document's bases, its unencrypted table first.
+    let documents = [
+        bases(),
+        vec![
+            ("hybrid, table".to_string(), hybrid_table, None),
+            ("hybrid".to_string(), hybrid, None),
+        ],
+    ];
+    let open = |bytes: &[u8], password| {
+        LazyPdf::open(Arc::<[u8]>::from(bytes), password, &ReadLimits::DEFAULT).unwrap()
+    };
+    let mut failed = Vec::new();
+    let (mut packed, mut checked, mut decrypted, mut read, mut refused) = (0, 0, 0, 0, 0);
+    for bases in documents {
+        let mut want: Vec<Option<String>> = Vec::new();
+        for (name, bytes, password) in bases {
+            let file = name.replace([',', ' ', '/'], "");
+            let base = dir.join(format!("{file}.pdf"));
+            std::fs::write(&base, &bytes).unwrap();
+            let source = open(&bytes, password);
+            let packs = source.xref().kind == XrefKind::Stream || source.xref().hybrid;
+            let outputs = ways_out(&edited(&base, password), &dir, &file);
+            for (i, (what, out)) in outputs.into_iter().enumerate() {
+                let name = format!("{name}, {what}");
+                let path = dir.join(format!("{file}-{what}.pdf"));
+                std::fs::write(&path, &out).unwrap();
+                let pdf = open(&out, password);
+                assert_eq!(!object_streams_of(&pdf).is_empty(), packs, "{name}");
+                let reads = (pdfjs.as_ref()).map(|p| pdfjs_read(p, &script, &path, password));
+                // The first base's outputs, unpacked, are read as the
+                // others' should be.
+                if want.len() == i {
+                    assert!(!packs && password.is_none(), "{name}: a table first");
+                    want.push(reads.map(Result::unwrap));
+                    continue;
+                }
+                if !packs {
+                    continue;
+                }
+                packed += 1;
+                if let Some(qpdf) = &qpdf {
+                    checked += 1;
+                    if let Err(e) = run(qpdf_with(qpdf, password).arg("--check").arg(&path)) {
+                        failed.push(format!("{name}: qpdf --check: {e}"));
+                    }
+                    if pdf.is_encrypted() {
+                        decrypted += 1;
+                        let plain = dir.join(format!("{file}-{what}-decrypted.pdf"));
+                        let mut decrypt = qpdf_with(qpdf, password);
+                        decrypt.arg("--decrypt").arg(&path).arg(&plain);
+                        let check = || run(Command::new(qpdf).arg("--check").arg(&plain));
+                        if let Err(e) = run(&mut decrypt).and_then(|_| check()) {
+                            failed.push(format!("{name}: qpdf --decrypt, then --check: {e}"));
+                        }
+                    }
+                }
+                let (Some(pdfjs), Some(reads)) = (&pdfjs, reads) else {
+                    continue;
+                };
+                read += 1;
+                match reads {
+                    Ok(got) if Some(&got) == want[i].as_ref() => {}
+                    got => failed.push(format!("{name}: pdf.js read {got:?}, not {:?}", want[i])),
+                }
+                if pdf.is_encrypted() {
+                    refused += 1;
+                    if let Ok(got) = pdfjs_read(pdfjs, &script, &path, None) {
+                        failed.push(format!("{name}: pdf.js read {got:?} with no password"));
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "{packed} packed outputs: qpdf --check {checked}, --decrypt then --check {decrypted}; \
+         pdf.js read {read} alike, {refused} encrypted refused without the password; {} fail",
+        failed.len()
+    );
+    assert!(failed.is_empty(), "{failed:#?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -435,6 +553,58 @@ fn pages_deleted_saved_and_undone_pass_qpdf_check() {
         "qpdf --check: pages deleted, saved and undone on each of {} bases",
         bases_of(&plain).len()
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file sheaf wrote, linearized by qpdf: sheaf's cross-reference facts
+/// read its linearization as holding, and qpdf calls it linearized. Given
+/// a note and saved as planned, an Append after its bytes, and rewritten
+/// instead, it is linearized to neither (B3).
+#[test]
+#[ignore = "needs qpdf"]
+fn a_linearized_file_appended_to_is_linearized_no_more() {
+    let Some(qpdf) = qpdf() else {
+        return;
+    };
+    let dir = scratch("interop-linearized");
+    let [plain, _] = written(&form());
+    let base = dir.join("base.pdf");
+    std::fs::write(&base, plain).unwrap();
+    std::fs::write(&base, How::Rewritten.write(&edited(&base, None))).unwrap();
+    let linearized = dir.join("linearized.pdf");
+    run(Command::new(&qpdf)
+        .arg("--linearize")
+        .arg(&base)
+        .arg(&linearized))
+    .unwrap();
+    // Whether sheaf and qpdf call the file at `path` linearized, each.
+    let read = |path: &Path| {
+        let sheaf = open(path).primary().xref().linearized;
+        (sheaf, qpdf_linearized(&qpdf, path).unwrap())
+    };
+    assert_eq!(read(&linearized), (true, true));
+    let was = std::fs::read(&linearized).unwrap();
+    // A copy of the linearized file, opened and given a note.
+    let noted = |name: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, &was).unwrap();
+        let mut doc = open(&path);
+        let mark = add(doc.page(0).unwrap(), &note("after"));
+        doc.commit_ops(vec![mark], "note").unwrap();
+        (path, doc)
+    };
+    let (path, mut doc) = noted("appended.pdf");
+    let (strategy, bytes) = planned(&mut doc, &path);
+    assert_eq!(strategy, StrategyKind::Append);
+    assert!(bytes.starts_with(&was), "an Append keeps the file's bytes");
+    assert!(!doc.saved_record().unwrap().xref.linearized);
+    assert_eq!(read(&path), (false, false), "appended");
+    let (path, mut doc) = noted("rewritten.pdf");
+    let (strategy, _) = saved(&mut doc, &path, How::Rewritten);
+    assert_eq!(strategy, StrategyKind::Rewrite);
+    assert!(!doc.saved_record().unwrap().xref.linearized);
+    assert_eq!(read(&path), (false, false), "rewritten");
+    println!("qpdf --check-linearization: linearized, then neither appended to nor rewritten");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

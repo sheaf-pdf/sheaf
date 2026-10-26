@@ -378,8 +378,9 @@ const STANDALONE_CATALOG: [&[u8]; 4] = [b"Type", b"Pages", b"AcroForm", b"OCProp
 /// A group over `src`, a damaged base, as a file of its own: `parts`
 /// numbered as [`section`] numbers them, the catalog keeping only what
 /// draws, and every object of the source they reach, decrypted, but other
-/// pages and page tree nodes, which nothing in it lists. Unencrypted, as
-/// it never leaves memory.
+/// pages and page tree nodes, which nothing in it lists. Unencrypted, and
+/// unpacked with a cross-reference table, as it never leaves memory: only
+/// PDFium reads it, to draw.
 pub(crate) fn standalone(src: &Src, parts: &[&Part], numbers: &mut Numbers) -> Result<Vec<u8>> {
     let mut objects = numbered(src, parts, numbers)?;
     let root = (objects.iter())
@@ -449,6 +450,7 @@ pub(crate) fn standalone(src: &Src, parts: &[&Part], numbers: &mut Numbers) -> R
         crypt: None,
         encrypt_at: (0, 0),
         xref_from: 0,
+        pack: None,
     };
     let bodies = (bodies.into_iter())
         .map(|(at, (key, obj))| Ok((at, full::Body::Object(Cow::Owned(obj), key))));

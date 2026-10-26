@@ -1,16 +1,19 @@
 //! Encrypted files built in code, for this crate's tests and, with the
 //! `fixtures` feature, other crates': the encryptions a save keeps
-//! (RC4-128, AES-128 and AES-256, and AES-128 for attachments only, by
-//! `/EFF`) as lopdf writes them, a form to encrypt, a file whose `/ID`
-//! is one string, and a file whose objects are in an encrypted object
-//! stream, which lopdf can't write; and what the serializer's tests
-//! share: the edit they save, the bytes some writers put before the
-//! header, a file whose cross-reference table is long, a file with a later
-//! revision cut out, which PDFium refuses, and a search of the bytes
-//! written.
+//! (RC4-40, RC4-128, AES-128 and AES-256, and AES-128 for attachments
+//! only, by `/EFF`) as lopdf writes them, a form to encrypt, a file whose
+//! `/ID` is one string, and a file whose objects are in an encrypted
+//! object stream, which lopdf can't write; and what the serializer's
+//! tests share: whole files as saves write them, packed or not, the edit
+//! they save, the bytes some writers put before the header, a file whose
+//! cross-reference table is long, a file with a later revision cut out,
+//! which PDFium refuses, a file linearized as far as Annex F's minimum
+//! (B3) tells, searches of the bytes written, as they are and as a
+//! reader inflates them, and a file's object streams.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::io::Read as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -19,14 +22,15 @@ use lopdf::encryption;
 use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
 use lopdf::xref::XrefType;
 use lopdf::{
-    Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions,
-    Stream, XrefKind, dictionary,
+    Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, LazyPdf, Object, ObjectId,
+    Permissions, Stream, XrefKind, dictionary,
 };
 
 use sheaf_edit::Turn;
 
 use super::crypt::Crypt;
-use super::{full, object};
+use super::group::Use;
+use super::{full, object, objstm};
 use crate::forms::fixture::{Form, note, outline_tree, row};
 use crate::materialize::ObjKey;
 use crate::materialize::emit::PdfVersion;
@@ -101,6 +105,18 @@ pub fn one_id(mut pdf: Pdf) -> Pdf {
     let first = pdf.trailer.get(b"ID").unwrap().as_array().unwrap()[0].clone();
     pdf.trailer.set("ID", vec![first]);
     pdf
+}
+
+/// `plain` encrypted with RC4-40 (`/V 1`), with its name: apart from
+/// [`rc4_aes_128_and_aes_256`], to chain where every encryption is tried.
+pub fn rc4_40(plain: &Pdf) -> (&'static str, EncryptionState) {
+    let version = EncryptionVersion::V1 {
+        document: plain,
+        owner_password: OWNER,
+        user_password: USER,
+        permissions: Permissions::all(),
+    };
+    ("RC4-40", EncryptionState::try_from(version).unwrap())
 }
 
 /// `plain` encrypted with RC4-128, AES-128 and AES-256, each with its
@@ -226,6 +242,35 @@ pub fn whole(
     version: &str,
     crypt: Option<&Crypt>,
 ) -> Vec<u8> {
+    write_whole(objects, base, kind, version, crypt, None)
+}
+
+/// [`whole`]'s file of version 1.7 with a cross-reference stream, packed:
+/// what may go in an object stream does, grouped by `uses`, which pages
+/// use each object.
+pub fn whole_packed(
+    objects: &BTreeMap<ObjectId, Object>,
+    base: &Dictionary,
+    crypt: Option<&Crypt>,
+    uses: &HashMap<u32, Use>,
+) -> Vec<u8> {
+    let uses = || uses.clone();
+    let pack = full::Pack {
+        uses: &uses,
+        reuse: &[],
+    };
+    write_whole(objects, base, XrefKind::Stream, "1.7", crypt, Some(pack))
+}
+
+/// [`whole`]'s file, packed as `pack` says when given.
+fn write_whole(
+    objects: &BTreeMap<ObjectId, Object>,
+    base: &Dictionary,
+    kind: XrefKind,
+    version: &str,
+    crypt: Option<&Crypt>,
+    pack: Option<full::Pack<'_>>,
+) -> Vec<u8> {
     let blob = BlobId { hash: 0, len: 0 };
     let written: Vec<(&ObjectId, &Object)> = (objects.iter())
         .filter(|(_, obj)| !full::left_out(obj))
@@ -246,6 +291,7 @@ pub fn whole(
         crypt,
         encrypt_at: (past, 0),
         xref_from: 1,
+        pack,
     };
     full::write_bodies(bodies, &layout, &NoProgress).unwrap().0
 }
@@ -389,9 +435,117 @@ pub fn revision_cut_out(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+/// A one-page file whose linearization holds as far as ISO 32000-1
+/// Annex F's minimum tells (B3): its first object is a linearization
+/// dictionary whose `/L` is the file's length. Its hint tables are none,
+/// so a full check finds them wrong. Written by hand: lopdf's writer
+/// leaves out a dictionary with `/Linearized`.
+pub fn linearized_file() -> Vec<u8> {
+    linearized_file_after(b"")
+}
+
+/// [`linearized_file`], with `lead` between its header and its first
+/// object, and `/L` the length still.
+pub fn linearized_file_after(lead: &[u8]) -> Vec<u8> {
+    const L: &str = "/L 0000000000";
+    let mut out = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    out.extend_from_slice(lead);
+    let content = b"q 0 0 1 RG 72 72 m 540 720 l S Q";
+    let objects = [
+        (
+            5,
+            format!("<< /Linearized 1 {L} /O 3 /E 0 /N 1 /T 0 /H [0 0] >>").into_bytes(),
+        ),
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> \
+              /Contents 4 0 R >>"
+                .to_vec(),
+        ),
+        (
+            4,
+            [
+                format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+                content,
+                b"\nendstream",
+            ]
+            .concat(),
+        ),
+    ];
+    let mut offsets = BTreeMap::new();
+    for (number, body) in objects {
+        offsets.insert(number, out.len());
+        out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+        out.extend_from_slice(&body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+    for offset in offsets.values() {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    let tail = format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+    out.extend_from_slice(tail.as_bytes());
+    let at = out
+        .windows(L.len())
+        .position(|w| w == L.as_bytes())
+        .unwrap();
+    let length = format!("/L {:<10}", out.len());
+    out[at..at + L.len()].copy_from_slice(length.as_bytes());
+    out
+}
+
 /// Whether `bytes` hold `text` anywhere.
 pub fn holds(bytes: &[u8], text: &[u8]) -> bool {
     bytes.windows(text.len()).any(|w| w == text)
+}
+
+/// Whether `bytes` hold `text` where a reader finds it with no key: as it
+/// is ([`holds`]) or in hex, as a string written `<…>` holds it, in either
+/// case of digit; in the bytes, or in a stream's data that inflates, as an
+/// object stream's members do, which a search of the bytes misses.
+pub fn in_clear(bytes: &[u8], text: &[u8]) -> bool {
+    let hex = |digits: &[u8; 16]| -> Vec<u8> {
+        (text.iter())
+            .flat_map(|&b| [digits[usize::from(b >> 4)], digits[usize::from(b & 15)]])
+            .collect()
+    };
+    let forms = [
+        text.to_vec(),
+        hex(b"0123456789ABCDEF"),
+        hex(b"0123456789abcdef"),
+    ];
+    let found = |hay: &[u8]| forms.iter().any(|form| holds(hay, form));
+    // A stream's data: after `stream` and its end of line, to `endstream`.
+    let data = |at: usize| {
+        let data = &bytes[at..];
+        let data = data.strip_prefix(b"\r").unwrap_or(data);
+        let data = data.strip_prefix(b"\n")?;
+        let end = data.windows(9).position(|w| w == b"endstream")?;
+        Some(&data[..end])
+    };
+    let inflates_to_it = |data: &[u8]| {
+        // What inflates before an error: of encrypted data, nothing.
+        let mut inflated = Vec::new();
+        let _ = flate2::read::ZlibDecoder::new(data).read_to_end(&mut inflated);
+        found(&inflated)
+    };
+    found(bytes)
+        || (bytes.windows(6).enumerate())
+            .filter(|&(at, w)| w == b"stream" && !bytes[..at].ends_with(b"end"))
+            .filter_map(|(at, _)| data(at + 6))
+            .any(inflates_to_it)
+}
+
+/// The object streams `pdf`'s table lists, by number, read as objects: a
+/// search of the bytes would find a string or a name that says `/ObjStm`
+/// too.
+pub fn object_streams_of(pdf: &LazyPdf) -> Vec<ObjectId> {
+    (pdf.ids())
+        .filter(|&id| pdf.get(id).is_ok_and(objstm::is_container))
+        .collect()
 }
 
 /// `path` opened as the app opens it, with `password`, its first page

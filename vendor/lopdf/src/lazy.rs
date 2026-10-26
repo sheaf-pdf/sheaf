@@ -207,7 +207,11 @@ pub struct XrefFacts {
     pub header_offset: usize,
     /// Whether a section has a cross-reference stream at `/XRefStm`.
     pub hybrid: bool,
-    /// Whether the file says it's linearized: `/Linearized` within 1,024 bytes of the header.
+    /// Whether a linearization holds, by ISO 32000-1 Annex F's minimum: the file's first object,
+    /// complete within 1,024 bytes of the header, is a dictionary whose `/Linearized` is 1 (a
+    /// number whose floor is 1), and its `/L`, a direct integer, is the file's length counted from
+    /// the header. An update appended after it voids it, as anything else that changes the length
+    /// does. Hint tables aren't read.
     pub linearized: bool,
     /// The sections in the `/Prev` chain.
     pub sections: usize,
@@ -440,7 +444,7 @@ impl LazyPdf {
             return Err(Error::Limit(Limit::Objects));
         }
         let head = body.read_at(0..body.len().min(1024))?;
-        let linearized = head.windows(11).any(|w| w == b"/Linearized");
+        let linearized = holds_linearization(&head, body.len(), &sections);
         let trailer = resolved.trailer;
         let facts = XrefFacts {
             kind: match resolved.kind {
@@ -978,6 +982,26 @@ impl LazyPdf {
 
 fn empty_slots(size: u32) -> Box<[OnceLock<Chunk>]> {
     (0..(size as usize).div_ceil(CHUNK)).map(|_| OnceLock::new()).collect()
+}
+
+/// sheaf: whether `head`, a file's first bytes, starts with a linearization that holds for a file
+/// of `len` bytes (ISO 32000-1, Annex F; B3): its first object, read whole within `head`, is a
+/// dictionary whose `/Linearized` is the format's version 1 (a number whose floor is 1, as qpdf
+/// reads it), and its `/L` is a direct integer equal to `len`. A first object that doesn't end
+/// within `head` (qpdf asks only that it start there: Annex F has it all within the first 1,024
+/// bytes), a `/Linearized` of another value or type, or an `/L` that's missing, indirect, a real or
+/// another length, says it doesn't.
+fn holds_linearization(head: &[u8], len: usize, reader: &dyn Resolve) -> bool {
+    let first = parser::indirect_object_in(head, 0, None, reader, &mut HashSet::new(), Some(head.len()));
+    let Ok(Object::Dictionary(dict)) = first.map(|parsed| parsed.object) else {
+        return false;
+    };
+    let version = match dict.get(b"Linearized") {
+        Ok(&Object::Integer(v)) => v == 1,
+        Ok(&Object::Real(v)) => v.floor() == 1.0,
+        _ => false,
+    };
+    version && matches!(dict.get(b"L"), Ok(&Object::Integer(l)) if usize::try_from(l) == Ok(len))
 }
 
 /// The trailer's `/ID`: two strings.

@@ -178,12 +178,7 @@ fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
 /// Every form of the corpus, and the pool's sample: each file once, with
 /// every rule that picked it.
 fn files(corpus: &Corpus) -> Vec<Pick> {
-    let list = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/pool-sample.txt");
-    let pool: Vec<String> = (std::fs::read_to_string(list).unwrap().lines())
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
+    let pool = common::pool_sample();
     let mut picks: BTreeMap<String, BTreeSet<&'static str>> = BTreeMap::new();
     for entry in corpus.forms().unwrap() {
         picks.entry(entry.path).or_default().insert("corpus form");

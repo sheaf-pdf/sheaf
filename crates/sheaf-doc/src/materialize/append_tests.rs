@@ -292,6 +292,42 @@ fn both_kinds_of_cross_reference_reopen_after_an_append() {
     }
 }
 
+/// A file whose linearization holds, appended to, is linearized no more
+/// (B3): its `/L` is not the file's length now. The save's record says so,
+/// and so do the file's cross-reference facts reopened. A Rewrite writes
+/// no linearization either.
+#[test]
+fn a_linearized_file_appended_to_is_linearized_no_more() {
+    use crate::serialize::fixture::linearized_file;
+    // Whether the file at `path`, reopened, is linearized.
+    let linearized = |path: &Path| {
+        let doc = crate::open::file(path, None).unwrap().doc;
+        doc.primary().xref().linearized
+    };
+    let dir = scratch();
+    let (path, mut doc) = opened(&dir, "a.pdf", &linearized_file());
+    assert!(doc.primary().xref().linearized);
+    assert!(doc.saved_record().unwrap().xref.linearized);
+    let add = fx::add(doc.page(0).unwrap(), &square(1));
+    doc.commit_ops(vec![add], "add").unwrap();
+    let report = save_appended(&mut doc, &path).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Append));
+    let record = doc.saved_record().unwrap();
+    assert_eq!(record.xref.sections, 2);
+    assert!(!record.xref.linearized);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.starts_with(&linearized_file()));
+    assert!(!linearized(&path));
+
+    let (path, mut doc) = opened(&dir, "b.pdf", &linearized_file());
+    let add = fx::add(doc.page(0).unwrap(), &square(1));
+    doc.commit_ops(vec![add], "add").unwrap();
+    let report = save_rewritten(&mut doc, &path).unwrap();
+    assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
+    assert!(!doc.saved_record().unwrap().xref.linearized);
+    assert!(!linearized(&path));
+}
+
 /// A page moved from a node that turns its pages and boxes them to one
 /// that doesn't is written under its new node, its turn and box on itself;
 /// and a reorder within a node writes that node alone.
