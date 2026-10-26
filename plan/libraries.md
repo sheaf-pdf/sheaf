@@ -8,7 +8,7 @@ Candidates, most valuable first (2026-10-23; crate facts in
 [build-or-adopt](research/build-or-adopt/README.md)):
 
 1. **Linearization** ([between milestones](between/README.md), item
-   3). Scheduled.
+   4). Scheduled.
 2. **The PDF layer** (backlog F13, "Maybe published"). No crate offers
    an owned object model that keeps reals at f64 and dictionaries in
    order, reads lazily under caps with byte spans, and appends to a

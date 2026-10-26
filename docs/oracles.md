@@ -73,7 +73,7 @@ ROADMAP's M12, M14 and M17), to be applied at its kickoff.
 | | EU DSS | The EU's reference PAdES validation (ETSI EN 319 102-1) | LGPL, Java, separate process |
 | **M14** | veraPDF | PDF/A conversion and validation | As above |
 | | OpenJPEG (`opj_decompress`) | JPX images sheaf re-encodes, if it does | BSD-2, separate process |
-| | `qpdf --check-linearization` | Fast Web View: in use since B3 (In use, above); later what the linearization crate writes (between milestones, item 3) | As above |
+| | `qpdf --check-linearization` | Fast Web View: in use since B3 (In use, above); later what the linearization crate writes (between milestones, item 4) | As above |
 | **M17** | veraPDF | PDF/UA-1 and UA-2 | As above |
 | | PAC; NVDA, Narrator, VoiceOver, Orca | Matterhorn checks beside veraPDF's; the app with a screen reader | By hand (PAC is Windows freeware) |
 
