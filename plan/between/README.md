@@ -7,8 +7,10 @@ in this order:
 
 1. ~~**The content interpreter:** M11's slice, pulled forward~~: done
    (#50).
-2. **Object streams, and B3.** A Rewrite writes no object streams
-   today: it re-serializes each member as a plain object (M10.5 §11.6).
+2. **Object streams, and B3:** in progress, in two slices:
+   [object-streams.md](object-streams.md). A Rewrite writes no object
+   streams today: it re-serializes each member as a plain object (M10.5
+   §11.6).
    - **What it costs.** Measured with qpdf on the corpus (2026-10-23),
      unpacking object streams grows the IRS forms by a median 88% (all
      70 use them; fw4.pdf by 178%) and a sample of 377 safedocs files by
