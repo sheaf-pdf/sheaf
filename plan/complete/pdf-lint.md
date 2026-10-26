@@ -424,6 +424,12 @@ measurements, hand checks for Greg, what review found, Found.)
    `deny.toml`; B46's pin; the names pdf-lint reuses; the per-save dump.
 
    Found, for Greg (pdf-lint and setup-pdf-lint are his):
+   - The macOS archives' qpdf (qpdf's own 12.4.2 build) links OpenSSL
+     in, but loads its legacy provider, which has RC4, only from
+     `/opt/homebrew/Cellar/openssl@3/3.6.4/lib/ossl-modules`. Elsewhere
+     an RC4 file's strings stay ciphertext ("unable to load openssl
+     legacy provider"): `encrypted_files_hold` failed on macOS CI. CI now
+     sets `OPENSSL_MODULES` to the runner's openssl@3 modules.
    - pdf-lint 0.1.0 never holds object streams to `ObjectStream`; the
      stand-in covers it until it does.
    - No library decoder says qpdf was needed and isn't ready, and
