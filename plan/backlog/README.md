@@ -114,6 +114,7 @@ Status: open
 | [B59](B59.md) | A Type3 glyph whose `d1` box has no area takes the font's `/FontBBox` | annoyance | 2026-10-23, the content interpreter ; logged at its… |
 | [B60](B60.md) | Launch to first pixels takes 1.2–2 s on Windows | annoyance | M0 |
 | [B61](B61.md) | After a save, Properties still describes the file as opened | wrong output | 2026-10-26, object streams slice 1 |
+| [B62](B62.md) | Packing on Append | feature | 2026-10-26, object streams slice 2 |
 
 ## Features
 

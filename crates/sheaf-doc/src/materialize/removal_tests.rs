@@ -27,7 +27,7 @@ use crate::effects::{Removed, RemovedKind};
 use crate::forms::fixture::{Form, row};
 use crate::forms::sigs::{SigImpact, Verdict};
 use crate::model::{Document, PageId};
-use crate::serialize::fixture::holds;
+use crate::serialize::fixture::{holds, in_clear};
 use crate::source::Limits;
 use crate::store::{BlobKind, Src};
 use crate::text_layer::{OcrWord, TextLayer};
@@ -472,7 +472,7 @@ fn a_forced_misclassification_is_vetoed_and_counted() {
     assert_eq!(removal::vetoes_here().derived, before.derived + 1);
     let logged = removal::RemovalMisclassified { key }.to_string();
     assert_eq!(warnings, [logged]);
-    assert!(!holds(&std::fs::read(&path).unwrap(), b"a secret note"));
+    assert!(!in_clear(&std::fs::read(&path).unwrap(), b"a secret note"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -194,6 +194,12 @@
 //! and, measured only, the stroke page read for every symbology at 150
 //! dpi in gray and at 200 in black and white, and its patch bars alone.
 //! Every row first reads the page and must find nothing.
+//!
+//! From the object streams item's slice 2 (`plan/complete/object-streams.md`),
+//! a Rewrite packs object streams when its source used them: the heavy's
+//! Rewrite packs, the synthetic's, of a table file, doesn't, and the
+//! Rewrite's part asserts both. Beside its rows, with no gate, the same
+//! Rewrite before it packed ([`UnpackedRewrite`]).
 
 // A test crate of its own, whose scratch files go in the temp directory
 // clippy.toml bans outside tests.
@@ -212,14 +218,16 @@ use futures::StreamExt;
 use futures::executor::block_on;
 use image::{GrayImage, Rgb, RgbImage};
 use in_progress::{Level, Progress, Unit};
-use lopdf::{Dictionary, Object, ObjectId};
+use lopdf::{Dictionary, LazyPdf, Object, ObjectId, ReadLimits};
 use sheaf_doc::content::interp::{self, Opts, interpret};
 use sheaf_doc::content::{Fonts, Marker, PageContent, text_bag};
 use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
 use sheaf_doc::realize::{EngineKey, GROUP, Realizer};
-use sheaf_doc::serialize::fixture::{USER, encrypt_dict, rc4_aes_128_and_aes_256};
+use sheaf_doc::serialize::fixture::{
+    USER, encrypt_dict, object_streams_of, rc4_aes_128_and_aes_256,
+};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::{
     add, crop, delete, duplicate, header, insert, move_pages, ocr, rotate, set_header,
@@ -626,6 +634,35 @@ const SLICE8_REWRITE_HEAVY: WriterBaseline = WriterBaseline {
     added_mb: 251.0,
 };
 
+/// The same Rewrite at 3cbb0a3, before it packed object streams (the
+/// object streams plan's slice 2): its time, in milliseconds, its peak
+/// and added RSS and the file it wrote, in megabytes, each the median of
+/// five runs of `rewrites_on_the_synthetic_and_heavy_7k` in release on
+/// the AMD EPYC 7302P, each part in a process of its own. Nothing writes
+/// unpacked now, so the time without packing is this commit's, printed
+/// beside the packed Rewrite with no gate. The synthetic, a table file,
+/// isn't packed: its rows show the run's noise.
+struct UnpackedRewrite {
+    ms: f64,
+    rss_mb: f64,
+    added_mb: f64,
+    file_mb: f64,
+}
+
+const UNPACKED_REWRITE_SYNTHETIC: UnpackedRewrite = UnpackedRewrite {
+    ms: 150.0,
+    rss_mb: 89.5,
+    added_mb: 51.0,
+    file_mb: 3.37,
+};
+
+const UNPACKED_REWRITE_HEAVY: UnpackedRewrite = UnpackedRewrite {
+    ms: 774.0,
+    rss_mb: 474.0,
+    added_mb: 253.0,
+    file_mb: 17.9,
+};
+
 /// What the gate allows `materialize`'s Rewrite beside slice 8's writer:
 /// its time and the RSS it adds (M10.5 slice 9). The plan's 1.2–1.3× for
 /// the time: past 1.2× is flagged, past 1.3× fails, so a check that makes
@@ -703,6 +740,16 @@ impl Kind {
         match self {
             Kind::Synthetic => Some(&SLICE8_REWRITE_SYNTHETIC),
             Kind::Heavy => Some(&SLICE8_REWRITE_HEAVY),
+            Kind::Scanned => None,
+        }
+    }
+
+    /// The Rewrite before it packed object streams (synthetic and heavy
+    /// only).
+    fn unpacked_rewrite(self) -> Option<&'static UnpackedRewrite> {
+        match self {
+            Kind::Synthetic => Some(&UNPACKED_REWRITE_SYNTHETIC),
+            Kind::Heavy => Some(&UNPACKED_REWRITE_HEAVY),
             Kind::Scanned => None,
         }
     }
@@ -2273,7 +2320,9 @@ fn interp_part(kind: Kind) {
 /// peak and added RSS, beside slice 8's writer's ([`WriterBaseline`]),
 /// asserted within [`REWRITE_TIME_GATE`] of its time, flagged past
 /// [`REWRITE_TIME_FLAG`], and within [`REWRITE_ADDED_GATE`] of the RSS it
-/// added (slice 9).
+/// added (slice 9). Above it, with no gate, the same Rewrite before it
+/// packed object streams ([`UnpackedRewrite`]); below, the object streams
+/// it wrote, asserted some on the heavy and none on the synthetic.
 fn rewrite_part(kind: Kind) {
     let path = fixture(kind);
     let doc = sheaf_doc::open::file(&path, None).unwrap().doc;
@@ -2294,15 +2343,48 @@ fn rewrite_part(kind: Kind) {
         written = out.bytes.len();
         t
     });
+    // The object streams are counted in a Rewrite of their own: one held
+    // past its run would move the RSS rows (by 4 MB on the synthetic).
+    let out = materialize(&input, &plan, target.clone(), &NoProgress).unwrap();
+    let pdf = LazyPdf::open(Arc::<[u8]>::from(out.bytes), None, &ReadLimits::DEFAULT).unwrap();
+    let containers = object_streams_of(&pdf).len();
     let base = kind.slice8_rewrite().expect("synthetic or heavy");
+    let unpacked = kind.unpacked_rewrite().expect("synthetic or heavy");
     let what = "Rewrite, materialize";
+    let before = "Rewrite, before packing (3cbb0a3)";
     let time_gate = REWRITE_TIME_GATE * base.ms;
     let time_flag = REWRITE_TIME_FLAG * base.ms;
     let added_gate = REWRITE_ADDED_GATE * base.added_mb;
+    let measured_before = |what: String, now: f64, unit, baseline| Row {
+        what,
+        now: Some(now),
+        unit,
+        baseline,
+        gate: "none: measured at 3cbb0a3".into(),
+    };
     print_table(
         &format!("{} 7k, {what} in a process of its own", kind.name()),
         "slice 8",
         &[
+            measured_before(before.into(), unpacked.ms, "ms", base.ms),
+            measured_before(
+                format!("{before}, peak RSS"),
+                unpacked.rss_mb,
+                "MB",
+                base.rss_mb,
+            ),
+            measured_before(
+                format!("{before}, RSS added"),
+                unpacked.added_mb,
+                "MB",
+                base.added_mb,
+            ),
+            measured_before(
+                format!("{before}, the file"),
+                unpacked.file_mb,
+                "MB",
+                f64::NAN,
+            ),
             Row::time(
                 what,
                 time,
@@ -2326,6 +2408,13 @@ fn rewrite_part(kind: Kind) {
                 baseline: f64::NAN,
                 gate: String::new(),
             },
+            Row {
+                what: format!("{what}, object streams"),
+                now: Some(containers as f64),
+                unit: "",
+                baseline: f64::NAN,
+                gate: "some on the heavy, none on the synthetic, asserted".into(),
+            },
         ],
     );
     if ms(time) > time_flag {
@@ -2334,6 +2423,15 @@ fn rewrite_part(kind: Kind) {
             base.ms
         );
     }
+    // The heavy's cross-reference section is a stream, and its objects are
+    // in object streams; the synthetic's is a table, which a Rewrite
+    // leaves unpacked (bench/gen.py; the object streams plan's decision 1).
+    assert_eq!(
+        containers > 0,
+        kind == Kind::Heavy,
+        "the {} Rewrite wrote {containers} object streams",
+        kind.name()
+    );
     assert!(
         ms(time) <= time_gate,
         "the Rewrite took {time:?}, over {REWRITE_TIME_GATE}× slice 8's {} ms",

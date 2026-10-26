@@ -350,9 +350,11 @@ tier-exports:
 # An unsigned Save As of every IRS form and every pool sample file: each
 # output's size against its source's, beside qpdf's with object streams
 # unpacked and packed again, a row per file and the growth by group (the
-# log, target/just/tier-size.log, keeps the rows); each output reopens
-# and passes qpdf --check no worse than its source. About 30 s.
-[doc("An unsigned Save As's size against the source's and qpdf's, IRS forms and the pool sample (SHEAF_SIZE_ONLY narrows it)")]
+# log, target/just/tier-size.log, keeps the rows), sheaf's held to bounds
+# by group; each output is packed or not as its source used object
+# streams, reopens and passes qpdf --check no worse than its source.
+# About 30 s.
+[doc("An unsigned Save As's size against the source's and qpdf's, bounded by group, IRS forms and the pool sample (SHEAF_SIZE_ONLY narrows it)")]
 [group('corpus')]
 tier-size:
     scripts/test-capped.sh cargo test -p sheaf-ops --test rewrite_size -- --ignored --nocapture

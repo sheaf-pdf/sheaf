@@ -1,7 +1,8 @@
 //! The new writer over Greg's corpus of real forms (M10.5 slice 9):
 //! - an identity Rewrite keeps every surviving primary object at its
 //!   number, the same object there, and copies each it left alone byte for
-//!   byte (when the file's cross-references are sound);
+//!   byte (when the file's cross-references are sound); an object
+//!   stream's number holds one of the Rewrite's own, or nothing;
 //! - the same document written twice, and from two threads at once, is
 //!   the same bytes;
 //! - with a page deleted, every form writes, and the form check finds no
@@ -151,6 +152,16 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
         let (Ok(was), Ok(is)) = (before.get(id), after.get(id)) else {
             continue;
         };
+        // An object stream held the file's objects: a packed Rewrite gives
+        // its number to an object stream of its own, or to nothing.
+        let objstm = |obj: &Object| obj.type_name().is_ok_and(|t| t == b"ObjStm");
+        if objstm(was) {
+            if !objstm(is) {
+                out.failed
+                    .push(format!("{} {} was an object stream", id.0, id.1));
+            }
+            continue;
+        }
         out.survived += 1;
         if kind(was) != kind(is) {
             out.failed

@@ -4,12 +4,16 @@
 //! an update are only those it writes: an update frees nothing (M10.5
 //! slice 10). Free entries are linked in a list from entry 0. Positions are written
 //! from the header: PDFium, pdf.js and qpdf count them from `%PDF-`, past
-//! any bytes a writer put before it.
+//! any bytes a writer put before it. An object in an object stream is
+//! listed as its container and its place there (7.5.8.3's type 2), which
+//! only a stream can say. A full write's stream is deflated under the PNG
+//! Up predictor, as qpdf writes its own; an update's is written
+//! uncompressed, as it was (an Append is unchanged: B62).
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
 
-use lopdf::{Dictionary, Object, Stream};
+use lopdf::{Dictionary, Object, Stream, dictionary};
 
 use super::{Error, object};
 
@@ -20,6 +24,8 @@ pub enum Entry {
     InUse { pos: usize, generation: u16 },
     /// Free, to be used next at `generation`.
     Free { generation: u16 },
+    /// The `index`th object in object stream `container`, at generation 0.
+    Packed { container: u32, index: u16 },
 }
 
 /// A cross-reference section's entries, by object number.
@@ -34,8 +40,9 @@ pub struct Section {
     full: bool,
 }
 
-/// A row as written: its type (0 free, 1 in use), its offset from the
-/// header or the next free number, and its generation.
+/// A row as written: its type (0 free, 1 in use, 2 in an object stream),
+/// its offset from the header, the next free number or its container, and
+/// its generation or its place in the container.
 struct Row {
     kind: u8,
     field: u64,
@@ -84,7 +91,8 @@ impl Section {
     }
 
     /// The section as a table at file position `pos`, then `trailer` with
-    /// its `/Size`, and `startxref`.
+    /// its `/Size`, and `startxref`. A table can't list an object stream's
+    /// member, so one is refused.
     pub fn table(
         &self,
         out: &mut Vec<u8>,
@@ -95,7 +103,11 @@ impl Section {
         out.extend_from_slice(b"xref\n");
         for (first, rows) in self.subsections() {
             let _ = writeln!(out, "{first} {}", rows.len());
-            for row in rows {
+            for (num, row) in (first..).zip(rows) {
+                if row.kind == 2 {
+                    out.truncate(start);
+                    return Err(Error::Packed(num));
+                }
                 if row.field > 9_999_999_999 {
                     out.truncate(start);
                     return Err(Error::TooFar(row.field));
@@ -113,7 +125,10 @@ impl Section {
 
     /// The section as a stream, object `num` at file position `pos`, which
     /// lists itself, then `startxref`. `trailer`'s entries are its
-    /// dictionary's. It's written uncompressed.
+    /// dictionary's. `/W` is as narrow as the widest field needs. A full
+    /// write's rows are deflated under the PNG Up predictor, each less the
+    /// row above it, which leaves mostly zeros where offsets climb slowly;
+    /// an append's are written as they are.
     pub fn stream(
         mut self,
         out: &mut Vec<u8>,
@@ -129,6 +144,7 @@ impl Section {
             .max()
             .unwrap_or(0);
         let width = (u64::BITS - widest.leading_zeros()).div_ceil(8).max(1) as usize;
+        let columns = 1 + width + 2;
         let mut index = Vec::with_capacity(subsections.len() * 2);
         let mut data = Vec::new();
         for (first, rows) in &subsections {
@@ -151,6 +167,14 @@ impl Section {
             ],
         );
         trailer.set("Index", index);
+        if self.full {
+            data = super::deflated(&up(&data, columns));
+            trailer.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+            trailer.set(
+                "DecodeParms",
+                dictionary! { "Predictor" => 12, "Columns" => columns as i64 },
+            );
+        }
         object::indirect(out, (num, 0), &Object::Stream(Stream::new(trailer, data)))?;
         let _ = write!(out, "startxref\n{}\n%%EOF\n", pos - self.header);
         Ok(())
@@ -198,6 +222,11 @@ impl Section {
                     next = n;
                     row
                 }
+                Entry::Packed { container, index } => Row {
+                    kind: 2,
+                    field: u64::from(container),
+                    generation: index,
+                },
             });
         }
         let mut out: Vec<(u32, Vec<Row>)> = Vec::new();
@@ -209,4 +238,18 @@ impl Section {
         }
         out
     }
+}
+
+/// `rows`, each `columns` bytes, under the PNG Up predictor: each row
+/// tagged 2 and less the row above it, byte by byte, the first less zeros.
+fn up(rows: &[u8], columns: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rows.len() + rows.len() / columns);
+    let zeros = vec![0; columns];
+    let mut above = zeros.as_slice();
+    for row in rows.chunks(columns) {
+        out.push(2);
+        out.extend(row.iter().zip(above).map(|(b, a)| b.wrapping_sub(*a)));
+        above = row;
+    }
+    out
 }

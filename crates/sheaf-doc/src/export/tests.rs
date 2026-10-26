@@ -1,12 +1,13 @@
 //! Exports: the presets as the app and the command line make them (the
 //! old save.rs's extract, print, clean copy and flattened copy tests,
 //! ported), what an export keeps of what it leaves out, its gates and
-//! asks, and that one stopped writes nothing.
+//! asks, that one stopped writes nothing, and that each packs objects into
+//! object streams when its source's cross-references are a stream.
 
 use std::path::Path;
 
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, Object, StringFormat, dictionary};
+use lopdf::{Document as Pdf, LazyPdf, Object, StringFormat, XrefKind, dictionary};
 use sheaf_edit::{OutlinePolicy, PageNumbering, Rotation, Turn};
 
 use super::*;
@@ -16,6 +17,8 @@ use crate::history::FixedCount;
 use crate::materialize::ocr_tests::{HELLO_HEX, fonts_of, is_glyphless, set_layer};
 use crate::materialize::rewrite_tests::{annots_read, make_pdf, open, read_outline, tempdir};
 use crate::open::FlatOutlineItem;
+use crate::serialize::fixture::{object_streams_of, written};
+use crate::source::Limits;
 use crate::tx::fixture as fx;
 
 /// A mark of `kind`, `color`, by "t".
@@ -619,4 +622,79 @@ fn a_transform_needs_its_capability() {
         matches!(err, ExportError::Refused(Gate::Refused { .. })),
         "{err}"
     );
+}
+
+/// An export packs as a save does (decision 1 of the object-streams
+/// item): each preset's file of a document whose cross-references are a
+/// stream (an extract, print with and without markup, Clean Copy, Export
+/// Flattened and Remove Blanks' rejects) holds object streams, reads back
+/// whole, and numbers its containers after its objects, as dense numbering
+/// does; of the same document with a table, none does.
+#[test]
+fn exports_of_a_stream_file_pack_and_of_a_table_don_t() {
+    let mut f = Form::new(2);
+    let name = f.text("Name", 0, [100.0, 600.0, 300.0, 620.0]);
+    f.fill(name, "Ada");
+    let [table, stream] = written(&f.pdf);
+    for (base, packs) in [(table, false), (stream, true)] {
+        let mut model = crate::materialize::tests::open(&base, None);
+        let [first, second] = [0, 1].map(|i| model.page(i).unwrap());
+        (model.commit_ops(vec![fx::add(first, &square(100.0, 100.0))], "sq")).unwrap();
+        let both = [first, second];
+        let outputs: [(&str, Vec<u8>, usize); 6] = [
+            (
+                "extract",
+                model.export_bytes(|f, out| Export::extract(f, &[first], out)),
+                1,
+            ),
+            (
+                "print",
+                model.export_bytes(|f, _| Export::print(f, &both, true)),
+                2,
+            ),
+            (
+                "print without markup",
+                model.export_bytes(|f, _| Export::print(f, &both, false)),
+                2,
+            ),
+            ("clean copy", model.export_bytes(Export::clean_copy), 2),
+            ("flattened", model.export_bytes(Export::flattened), 2),
+            (
+                "rejects",
+                model.export_bytes(|f, out| Export::rejects(f, &[(second, "blank".into())], out)),
+                1,
+            ),
+        ];
+        for (what, bytes, pages) in outputs {
+            let what = format!("{what}, packs: {packs}");
+            let pdf = LazyPdf::open(Arc::<[u8]>::from(&bytes[..]), None, &Limits::DEFAULT.reader);
+            let pdf = pdf.unwrap();
+            let containers = object_streams_of(&pdf);
+            assert_eq!(!containers.is_empty(), packs, "{what}");
+            let kind = match packs {
+                true => XrefKind::Stream,
+                false => XrefKind::Table,
+            };
+            assert_eq!(pdf.xref().kind, kind, "{what}");
+            assert!(pdf.base_sound(), "{what}");
+            for id in pdf.ids() {
+                assert!(pdf.get(id).is_ok(), "{what}: {id:?}");
+            }
+            assert_eq!(
+                Pdf::load_mem(&bytes).unwrap().get_pages().len(),
+                pages,
+                "{what}"
+            );
+            let xref = pdf.xref().max_stream;
+            let last = (pdf.ids())
+                .filter(|id| !containers.contains(id) && Some(id.0) != xref)
+                .map(|id| id.0)
+                .max()
+                .unwrap();
+            assert!(
+                containers.iter().all(|c| c.0 > last),
+                "{what}: {containers:?}, objects to {last}"
+            );
+        }
+    }
 }

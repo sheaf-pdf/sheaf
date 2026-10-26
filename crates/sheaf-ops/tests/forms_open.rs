@@ -2,7 +2,8 @@
 //! 2): its fields, and their widgets on the pages. A damaged field tree
 //! opens with no fields, and the file still opens. PDFium's form type
 //! agrees with the class sheaf reads. A hybrid-reference file opens and
-//! saves as its newest revision.
+//! saves as its newest revision, a Rewrite of it as a file whose
+//! cross-references are a stream alone, packed into object streams.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
@@ -12,10 +13,11 @@
 
 use std::path::{Path, PathBuf};
 
-use lopdf::{Object, dictionary};
+use lopdf::{Object, XrefKind, dictionary};
 use sheaf_doc::forms::FormClass;
 use sheaf_doc::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
 use sheaf_doc::materialize::{How, StrategyKind};
+use sheaf_doc::serialize::fixture::object_streams_of;
 use sheaf_doc::tx::fixture::rotate;
 use sheaf_doc::{Document, Store};
 use sheaf_edit::Turn;
@@ -181,11 +183,16 @@ fn hybrid_saves_whole(how: How) {
         doc.commit_ops(vec![turn], "rotate").unwrap();
         doc
     };
-    // Saved as another file by a Rewrite.
+    // Saved as another file by a Rewrite: its table, there for readers
+    // older than PDF 1.5, goes, and what it wrote is packed.
     let copy = dir.join("copy.pdf");
     let report = How::Rewritten.save(&mut rotated(&path), &copy);
     assert_eq!(report.strategy, Some(StrategyKind::Rewrite));
     assert_eq!(names(&copy), ["name", "city", "sig"]);
+    let (src, _) = Store::new().read_file(&copy, None).unwrap();
+    let xref = src.pdf().xref();
+    assert!(xref.kind == XrefKind::Stream && !xref.hybrid, "{xref:?}");
+    assert!(!object_streams_of(src.pdf()).is_empty());
     // Saved in place.
     let report = how.save(&mut rotated(&path), &path);
     assert_eq!(report.strategy, Some(how.strategy()));

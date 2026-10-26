@@ -208,7 +208,8 @@ pub fn blue_in(r: &Raster, i: usize, top: f32) -> usize {
 }
 
 /// Whether `needle` is anywhere in the file: in its bytes, in a string
-/// (decoded from hex), or in a stream once decoded.
+/// (decoded from hex), or in a stream once decoded, of any object the file
+/// lists, an object stream's members among them.
 pub fn holds(bytes: &[u8], needle: &[u8]) -> bool {
     let found = |hay: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
     if found(bytes) {

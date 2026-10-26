@@ -1618,19 +1618,53 @@ pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut 
 /// object stream that only the cross-reference stream at the trailer's
 /// `/XRefStm` lists.
 pub fn hybrid_reference() -> Vec<u8> {
+    hybrid_first(&[], "")
+}
+
+/// [`hybrid_reference`] encrypted with `encrypt`, an encryption
+/// dictionary whose streams are left in the clear (`/StmF /Identity`) and
+/// whose strings aren't, `id` the first string of its `/ID`: `encrypt` is
+/// object 8, which its table lists. Its table's objects hold no string
+/// and its one stream is empty, so they're written as they are, and so
+/// are its object stream's members, whose strings such an encryption
+/// leaves in the clear with their container.
+pub fn hybrid_reference_encrypted(encrypt: &Dictionary, id: &[u8]) -> Vec<u8> {
+    // Its strings in hex, so it's text.
+    let mut hex = encrypt.clone();
+    for (_, value) in hex.iter_mut() {
+        if let Object::String(_, format) = value {
+            *format = StringFormat::Hexadecimal;
+        }
+    }
+    let mut dict = Vec::new();
+    crate::serialize::object::write(&mut dict, &Object::Dictionary(hex))
+        .expect("an encryption dictionary writes");
+    let dict = String::from_utf8(dict).expect("hex strings, names and numbers");
+    let hex: String = id.iter().map(|b| format!("{b:02X}")).collect();
+    hybrid_first(
+        &[(8, &dict)],
+        &format!(" /Encrypt 8 0 R /ID [<{hex}> <{hex}>]"),
+    )
+}
+
+/// [`hybrid_reference`]'s one section, with `more` listed in its table
+/// too and `trailer`'s keys in its trailer.
+fn hybrid_first(more: &[(u32, &str)], trailer: &str) -> Vec<u8> {
     let mut out = b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let page = hybrid_page("6 0 R 7 0 R");
+    let listed = [
+        (1, "<< /Type /Catalog /Pages 2 0 R /AcroForm 5 0 R >>"),
+        (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        (3, &page),
+        (
+            4,
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 200 20] /Length 0 >>\n\
+             stream\n\nendstream",
+        ),
+    ];
     hybrid_section(
         &mut out,
-        &[
-            (1, "<< /Type /Catalog /Pages 2 0 R /AcroForm 5 0 R >>"),
-            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
-            (3, &hybrid_page("6 0 R 7 0 R")),
-            (
-                4,
-                "<< /Type /XObject /Subtype /Form /BBox [0 0 200 20] /Length 0 >>\n\
-                 stream\n\nendstream",
-            ),
-        ],
+        &[&listed[..], more].concat(),
         &[],
         &[
             (5, "<< /Fields [6 0 R 7 0 R] >>"),
@@ -1638,6 +1672,7 @@ pub fn hybrid_reference() -> Vec<u8> {
             (7, &hybrid_text("city", "Hull", 1)),
         ],
         None,
+        trailer,
     );
     out
 }
@@ -1670,6 +1705,7 @@ pub fn hybrid_update(first: &[u8]) -> Vec<u8> {
             (11, "<< /Fields [6 0 R 7 0 R 10 0 R] >>"),
         ],
         Some(prev),
+        "",
     );
     out
 }
@@ -1690,13 +1726,15 @@ fn hybrid_text(name: &str, value: &str, i: usize) -> String {
 /// One section of a hybrid-reference file, appended to `out`: `listed`
 /// in its table, `hidden` only in its cross-reference stream, and
 /// `packed` into an object stream that only the cross-reference stream
-/// lists. The two streams take the next two object numbers.
+/// lists, `trailer`'s keys in its trailer. The two streams take the next
+/// two object numbers.
 fn hybrid_section(
     out: &mut Vec<u8>,
     listed: &[(u32, &str)],
     hidden: &[(u32, &str)],
     packed: &[(u32, &str)],
     prev: Option<usize>,
+    trailer: &str,
 ) {
     let all = listed.iter().chain(hidden).chain(packed);
     let objstm = all.map(|&(id, _)| id).max().unwrap() + 1;
@@ -1762,7 +1800,7 @@ fn hybrid_section(
         out.extend_from_slice(format!("{id} 1\n{offset:010} 00000 n \n").as_bytes());
     }
     let prev = prev.map(|p| format!(" /Prev {p}")).unwrap_or_default();
-    let trailer = format!("<< /Size {size} /Root 1 0 R /XRefStm {at}{prev} >>");
+    let trailer = format!("<< /Size {size} /Root 1 0 R /XRefStm {at}{prev}{trailer} >>");
     out.extend_from_slice(format!("trailer\n{trailer}\nstartxref\n{xref}\n%%EOF\n").as_bytes());
 }
 

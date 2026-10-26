@@ -1923,25 +1923,46 @@ recovery sidecars reach their bytes through `serialize/` (§11.7 of
   is refused and nothing is written, magnitudes are clamped to ±3.4e38,
   and nonzero ones under 1.175e-38 are 0 (Annex C). Strings keep their
   format, names are escaped, and a stream's `/Length` is its data's.
+  Integers, references, names and strings are written byte by byte, a
+  real alone through Rust's formatting, for its shortest form (object
+  streams' slice 2: the same bytes, in less time on a large Rewrite).
 - **Cross-references** (`xref`), as a table or a stream in the base's
   kind: a whole file's one subsection `[0, Size)`, every number it
   doesn't list free and the free entries linked from entry 0; an
   update's runs of the numbers it lists, and nothing freed (lopdf's
-  readers keep an earlier section's entry for a number a later one frees,
-  so an object an update unlinks stays in use and its number is never
-  given again; slice 10). A stream lists itself, with `/Index` and a `/W` as
-  narrow as its fields allow, uncompressed. Positions are written from
-  the header, so a file with bytes before `%PDF-` appends as PDFium,
-  pdf.js and qpdf read it; an offset a table's ten digits can't hold is
-  refused.
-- **A whole file** (`full`): the header at the document's version,
-  every object in number order, and one section. Object streams,
+  readers keep an earlier section's entry for a number a later one
+  frees, so an object an update unlinks stays in use and its number is
+  never given again; slice 10). A stream lists itself, with `/Index` and
+  a `/W` as narrow as its fields allow. A whole file's is deflated under
+  the PNG Up predictor (`/Predictor 12`, `/Columns` the sum of `/W`), as
+  qpdf writes its own; an update's stays uncompressed (an Append is
+  unchanged: [B62](../plan/backlog/B62.md)). An object stream's member
+  is listed as its container's number and its place there (type 2),
+  which only a stream can say: a table refuses one. Positions are
+  written from the header, so a file with bytes before `%PDF-` appends
+  as PDFium, pdf.js and qpdf read it; an offset a table's ten digits
+  can't hold is refused.
+- **A whole file** (`full`): the header at the document's version, every
+  object in number order, and one section. Object streams,
   cross-reference streams and linearization dictionaries are left out
-  (an object stream's members are written as objects of their own), and
-  the trailer keeps its keys but its old sections' own, `/Encrypt` and
-  `/ID`. A stream the save made was compressed where it was made; a
-  source's is written as stored, never re-encoded, so a Rewrite of an
-  uncompressed file stays uncompressed.
+  (an object stream's members are written anew), and the trailer keeps
+  its keys but its old sections' own, `/Encrypt` and `/ID`. A stream the
+  save made was compressed where it was made; a source's is written as
+  stored, never re-encoded, so a Rewrite of an uncompressed file stays
+  uncompressed. Asked to pack (`Layout.pack`, with a stream's section
+  only), what it writes anew that may go in an object stream
+  (`objstm::packable`, ISO 32000-1 7.5.7: not a stream, an object whose
+  generation isn't 0, nor an encryption, signature or linearization
+  dictionary) goes in a container of 100 at most, after the `/Encrypt`
+  dictionary: grouped by the pages that use it (`group`: page 1's alone,
+  then each later page's, the shared, the rest, as Annex F lays a
+  linearized file out; `Pack.uses` finds them on a thread of its own
+  while the rest is written), built on a thread per core (8 at most),
+  deflated and encrypted once, as a stream under its own number. What's
+  copied as it was stays where it is. A container whose data would be
+  more than the reader takes is written as its members, and so is
+  everything when the cross-reference stream would be left no number, or
+  under an encryption that leaves streams in the clear but not strings.
 - **An update** (`append`), after the base the source's `XrefFacts`
   describe: `/Prev` at its last section's real start, `/Root` and
   `/Info` as stored, `/Size` past every number the base uses, its
@@ -1957,21 +1978,23 @@ recovery sidecars reach their bytes through `serialize/` (§11.7 of
   keeps how it's encrypted (`Source::crypt()`: the decryption its
   password opened, the `/Encrypt` dictionary as stored, its number, and
   `/ID[0]`). A save encrypts each object it writes on its own, under the
-  number it's written as, through vendored lopdf's `encrypt_object_with`
-  (`vendor/lopdf/SHEAF.md`): strings in stream dictionaries too, an
-  embedded file by `/EFF`'s filter, and the `/Encrypt` dictionary,
-  cross-reference streams, metadata when `/EncryptMetadata` is false and
-  a signature's `/Contents` left as they are. An AES IV is the first 16
-  bytes of HMAC-SHA256, under the file key, of the object's `ObjKey`
-  (`ObjKey::bytes`, see Saves are outputs) and what it encrypts
-  (`Crypt::encrypt_as`, slice 9), so a save is deterministic, an object
-  keeps its IV whatever number it's written at, and no IV serves two
-  plaintexts, an update's section's too (`indirect_as`, slice 10; the
-  number-keyed `serialize::indirect` and `Crypt::encrypt` went). An
-  encrypted string keeps its format, a literal
-  escaped as any is, so it takes about its own length, not twice it. The
-  `/Encrypt` dictionary, its `/P` with it, is written as stored and
-  `/ID[0]` kept, so the file opens with the same passwords and
+  number it's written as, or an object stream's members with it (the
+  container encrypted once, as a stream, under its own number, so no
+  member's string is encrypted on its own), through vendored lopdf's
+  `encrypt_object_with` (`vendor/lopdf/SHEAF.md`): strings in stream
+  dictionaries too, an embedded file by `/EFF`'s filter, and the
+  `/Encrypt` dictionary, cross-reference streams, metadata when
+  `/EncryptMetadata` is false and a signature's `/Contents` left as they
+  are. An AES IV is the first 16 bytes of HMAC-SHA256, under the file
+  key, of the object's `ObjKey` (`ObjKey::bytes`, see Saves are outputs)
+  and what it encrypts (`Crypt::encrypt_as`, slice 9), so a save is
+  deterministic, an object keeps its IV whatever number it's written at,
+  and no IV serves two plaintexts, an update's section's too
+  (`indirect_as`, slice 10; the number-keyed `serialize::indirect` and
+  `Crypt::encrypt` went). An encrypted string keeps its format, a
+  literal escaped as any is, so it takes about its own length, not twice
+  it. The `/Encrypt` dictionary, its `/P` with it, is written as stored
+  and `/ID[0]` kept, so the file opens with the same passwords and
   permissions: a Rewrite with stable numbers keeps the dictionary at its
   number, an export numbered from 1 writes it as a new object, and an
   update repeats the base's reference. lopdf opens an encrypted file
@@ -2276,14 +2299,24 @@ below).
   primary's, the encryption is the same `Crypt` (`Profile.encryption`:
   `Keep` keeps it, `None` writes none), neither the emitter nor
   `keep_only` touched it, it isn't an object stream's member and its
-  generation is its header's, and the base is sound. An object stream's
-  members are written as objects of their own, encrypted each on its
-  own; on a stable save the `/Encrypt` dictionary stays at its number,
+  generation is its header's, and the base is sound. A source that used
+  object streams (its newest section a stream, or a hybrid, whose table
+  goes) is packed again, its section a stream: an object stream's
+  members, and whatever else is written anew, go in containers grouped
+  by the pages that use them (`graph::page_uses`), unless the encryption
+  leaves streams in the clear but not strings. On a stable save the
+  containers take the numbers the source's own had first, but one
+  something still names, then numbers past every one the primary and the
+  previous save used, so saving again doesn't grow `/Size`; on a dense
+  one, numbers after the objects. A table's objects, and those not
+  packed, are written as objects of their own, encrypted each on its
+  own. On a stable save the `/Encrypt` dictionary stays at its number,
   and a cross-reference stream takes a number past every one the primary
   and the previous save used.
   An AES IV is HMAC-SHA256 under the file key of the object's `ObjKey`
   and the plaintext (`Crypt::encrypt_as`), an update's section's too
-  from slice 10. The header gives the version needed: the
+  from slice 10, and a container's under `ObjKey::Container`, its
+  number. The header gives the version needed: the
   primary's header or catalog `/Version`, 1.5 for cross-reference
   streams, 1.6 for AES. The `Output` holds the bytes, the notes and an
   `OutputRecord`: the `SaveRecord` but for the stamp, which the write to
@@ -2332,7 +2365,9 @@ below).
   (flagging past 1.2×) and 1.5× the memory added
   (`rewrites_on_the_synthetic_and_heavy_7k`). Nearly a fifth of it is
   freeing: the primary's page dictionaries the emitted ones replace, and
-  the graph at the end.
+  the graph at the end. From object streams' slice 2 the heavy's Rewrite
+  packs: 808 ms (1.14×; 774 ms just before), adding 256 MB, and its file
+  is 13.8 MB where it was 17.9.
 - **Pruning's changes.** `kept::keep_only` is unchanged but for what it
   gives back: its notes, and every object it changed or added
   (`Kept.modified`), which a Rewrite re-serializes while copying the
@@ -5046,6 +5081,10 @@ profile (§12.3, proposal 10):
 | `flattened`: Export Flattened | `FlattenAnnotations { All }` | Keep, Dense, Keep |
 | `clean_copy`: Clean Copy | `RemoveMarkup { links, widgets }`, `RemovePrivateData` | Keep, Dense, Strip |
 | `rejects`: Remove Blanks' second file | `KeepPages { Drop, labels, AsKept }`, an `AddBookmark` a page | Keep, Dense, Keep |
+
+Each is written as a Rewrite is, so it packs as one does: of a source
+that used object streams, what it writes anew goes in object streams,
+numbered after its objects (Dense).
 
 A print file answers its own asks (`PRINT_ANSWERS`: signatures broken,
 an XFA part dropped): it goes to a printer or a picture, never to a file

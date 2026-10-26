@@ -45,7 +45,7 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | Digital signatures | M12 |
 | Certificate encryption ❓ | M12 follow-up |
 | Compare documents | M14 |
-| Optimize / reduce file size | M14 (object streams: between milestones) |
+| Optimize / reduce file size | M14 (packing every file, tables too, and recompressing streams); a Rewrite of a file that used object streams packs them again: between milestones ✅ |
 | Fast Web View (linearize on save) | Between milestones (the linearization crate); M14 (in Optimize) |
 | Preflight / accessibility checker ❓ | M14 (preflight), M17 (accessibility) |
 | PDF/UA validate, and a review view for the manual checks ❓ | M17 |

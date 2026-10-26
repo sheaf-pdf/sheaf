@@ -464,7 +464,7 @@ Entries move here when they close, saying where they went. IDs are never reused.
 ### B3: Properties says "Fast Web View: Yes" after an incremental save
 
 - **Closed:** 2026-10-26, fixed in the object-streams PR, slice 1
-  ([object-streams.md](../between/object-streams.md), decision 9). The
+  ([object-streams.md](object-streams.md), decision 9). The
   vendored lopdf's `LazyPdf::open` counts a file linearized only when its
   first object, read whole within 1,024 bytes of the header, is a
   dictionary whose `/Linearized` is 1 (a number whose floor is 1, as

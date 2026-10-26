@@ -23,7 +23,10 @@
 //! table it reaches it as, whichever, so a widget its structure tree
 //! reaches before its page is checked against no annotation's table.
 //! Only the objects held ([`Hold`]: what sheaf wrote) give findings and
-//! counts; the rest are walked so the held ones get their tables.
+//! counts; the rest are walked so the held ones get their tables. An
+//! object stream held, which the cross-reference section reaches and the
+//! trailer doesn't, is checked as `ObjectStream` once the walk from the
+//! trailer is done.
 //!
 //! The rules here: a value's type ([`Rule::Type`]); a required key or
 //! element ([`Rule::Missing`]), found through `/Parent` for an inheritable
@@ -67,6 +70,7 @@ use super::predicate::{self, Cx, Gate, Reference, Since, TOLERANCE, Truth};
 use crate::file::text_string;
 use crate::materialize::emit::PdfVersion;
 use crate::serialize::full::left_out;
+use crate::serialize::objstm;
 use crate::source::Limits;
 
 /// How deeply direct objects may nest in an indirect one before the walk
@@ -158,8 +162,8 @@ pub struct Finding {
     pub object: Option<ObjectId>,
     pub made: Made,
     /// Where the walk reached it from the trailer:
-    /// `Root/Pages/Kids[0]/Annots[2]`, `trailer` for the trailer, `-` for
-    /// an object it never reached.
+    /// `Root/Pages/Kids[0]/Annots[2]`, `trailer` for the trailer, `xref`
+    /// for an object stream, `-` for an object it never reached.
     pub path: String,
     /// The table and key of the row it breaks; for an unreached object,
     /// those of the object that references it, `-` for none.
@@ -319,17 +323,7 @@ pub fn check_at(pdf: &LazyPdf, bytes: &[u8], hold: &Hold, version: PdfVersion) -
         depth: 0,
         loose: false,
     });
-    loop {
-        while let Some(visit) = walk.queue.pop_front() {
-            walk.visit(visit);
-        }
-        let Some(visit) = walk.later.pop_front() else {
-            break;
-        };
-        if visit.holder.is_some_and(|id| walk.waiting.remove(&id)) {
-            walk.visit(visit);
-        }
-    }
+    walk.run();
     walk.unreached();
     walk.report
 }
@@ -544,6 +538,9 @@ impl Drop for Trail<'_> {
 #[derive(Clone)]
 enum Step<'a> {
     Trailer,
+    /// An object stream, which the cross-reference section reaches, not
+    /// the trailer.
+    Section,
     Key(&'a [u8]),
     Index(usize),
     /// A name or number tree's entry.
@@ -577,6 +574,22 @@ enum Values {
 }
 
 impl<'a> Walk<'a> {
+    /// Visits what's queued, then what waits as a `_Universal` table and
+    /// wasn't reached as another, until neither is left.
+    fn run(&mut self) {
+        loop {
+            while let Some(visit) = self.queue.pop_front() {
+                self.visit(visit);
+            }
+            let Some(visit) = self.later.pop_front() else {
+                break;
+            };
+            if visit.holder.is_some_and(|id| self.waiting.remove(&id)) {
+                self.visit(visit);
+            }
+        }
+    }
+
     /// How the object `holder` was made, when it's held: the trailer as
     /// [`Made::Merged`].
     fn made(&self, holder: Option<ObjectId>) -> Option<Made> {
@@ -1649,18 +1662,21 @@ impl<'a> Walk<'a> {
         *self.report.unchecked.entry(unchecked).or_default() += 1;
     }
 
-    /// The held objects the walk never reached, each a [`Rule::Unreached`]
-    /// finding but those referenced under a key the model doesn't list, an
-    /// integer a reached stream's `/Length` references, and the file's own
-    /// structures (object and cross-reference streams). Its table and key are those it was
-    /// referenced under in an object walked, else the key of a held object
-    /// unreached too, else `-`. One the file hasn't, or that doesn't read,
-    /// is [`Rule::Unresolved`].
+    /// The held objects the walk never reached. An object stream is
+    /// checked as one ([`Walk::object_streams`]). Each other is a
+    /// [`Rule::Unreached`] finding but those referenced under a key the
+    /// model doesn't list, an integer a reached stream's `/Length`
+    /// references, and the file's other structures (a cross-reference
+    /// stream, a linearization dictionary). Its table and key are those it
+    /// was referenced under in an object walked, else the key of a held
+    /// object unreached too, else `-`. One the file hasn't, or that doesn't
+    /// read, is [`Rule::Unresolved`].
     fn unreached(&mut self) {
         let held: Vec<(ObjectId, Made)> = match self.hold {
             Hold::All(made) => self.pdf.ids().map(|id| (id, *made)).collect(),
             Hold::Only(objects) => objects.iter().map(|(&id, &made)| (id, made)).collect(),
         };
+        self.object_streams(&held);
         let mut left = Vec::new();
         for (id, made) in held {
             if self.reached.contains_key(&id) || self.under_unlisted.contains(&id) {
@@ -1724,6 +1740,41 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// Each object stream of `held` the walk didn't reach, checked as
+    /// `ObjectStream`, and what it reaches walked: the cross-reference
+    /// section that lists its members reaches it, not the trailer, so its
+    /// path is `xref`.
+    fn object_streams(&mut self, held: &[(ObjectId, Made)]) {
+        let pdf = self.pdf;
+        let table = (grammar().table("ObjectStream")).expect("the model has object streams' table");
+        for &(id, _) in held {
+            if self.reached.contains_key(&id) {
+                continue;
+            }
+            let Ok(object) = pdf.get(id) else {
+                continue;
+            };
+            if !objstm::is_container(object) {
+                continue;
+            }
+            self.reached.insert(id, Some(table.name.as_str()));
+            let trail = Rc::new(Trail {
+                up: None,
+                step: Step::Section,
+                object,
+            });
+            self.queue.push_back(Visit {
+                object,
+                holder: Some(id),
+                table,
+                trail,
+                depth: 0,
+                loose: false,
+            });
+        }
+        self.run();
+    }
+
     /// The objects reached streams' `/Length`s reference, as the streams'
     /// bytes write them: lopdf reads a referenced length into the
     /// dictionary it gives, so the walk never sees the reference.
@@ -1782,7 +1833,8 @@ impl<'a> Trail<'a> {
     }
 
     /// The way from the trailer, its last [`PATH`] steps:
-    /// `Root/Pages/Kids[0]/Annots[2]`, a tree's entries in braces.
+    /// `Root/Pages/Kids[0]/Annots[2]`, a tree's entries in braces; from
+    /// the cross-reference section, `xref` first.
     fn path(&self) -> String {
         let mut steps = Vec::new();
         let mut at = Some(self);
@@ -1800,6 +1852,7 @@ impl<'a> Trail<'a> {
         for step in steps.into_iter().rev() {
             match step {
                 Step::Trailer => {}
+                Step::Section => path.push_str("xref"),
                 Step::Key(key) => {
                     if !path.is_empty() {
                         path.push('/');

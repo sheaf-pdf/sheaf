@@ -1065,7 +1065,7 @@ const RETIRED_M11: &[(&str, u8)] = &[
 ];
 
 /// Every name object streams (between milestones) retired, with the
-/// slice of `plan/between/object-streams.md` that retired it.
+/// slice of `plan/complete/object-streams.md` that retired it.
 const RETIRED_OBJECT_STREAMS: &[(&str, u8)] = &[
     // Fast Web View is the file the dialog shows, the saved record's once
     // a save wrote it (`PropertiesContext::linearized`, B3): not the

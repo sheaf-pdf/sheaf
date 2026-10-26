@@ -13,9 +13,12 @@ Proves: Archival and output parity · Depends on: Nothing unbuilt
   OpenType ones where renumbering their glyphs is acceptable; bare CFF
   and Type 1, which no crate subsets, built on read-fonts:
   `plan/research/build-or-adopt/README.md` entry 62),
-  removing unused objects, and Fast Web View as a choice. Object-stream
-  packing and the linearization crate moved to the
-  [between-milestones work](../between/README.md) (2026-10-23).
+  removing unused objects, and Fast Web View as a choice; packing every
+  file into object streams whatever its source, classic-table files
+  included, and recompressing streams. A Rewrite of a file that used
+  object streams packs them again ([between milestones](../between/README.md),
+  done: [object streams](../complete/object-streams.md)), and the
+  linearization crate is between-milestones work too (2026-10-23).
 - PDF/A convert and validate ❓.
 - Preflight-lite (font embedding, color spaces, transparency checks) ❓.
 - Accessibility and PDF/UA moved to [M17](../m17-accessibility/README.md).

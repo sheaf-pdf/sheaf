@@ -1,11 +1,11 @@
 //! The walk: a clean file reaches its tables with no findings, written
-//! with a table and with a cross-reference stream; each rule's finding on
-//! a fault planted in one; links chosen as TestGrammar chooses them; only
-//! held objects found in; and every walk bounded, on cycles and on deep
-//! nesting.
+//! with a table, with a cross-reference stream and packed in object
+//! streams; each rule's finding on a fault planted in one; links chosen as
+//! TestGrammar chooses them; only held objects found in; and every walk
+//! bounded, on cycles and on deep nesting.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -16,8 +16,11 @@ use super::check::{NESTING, is_date};
 use super::*;
 use crate::materialize::ObjKey;
 use crate::materialize::emit::PdfVersion;
-use crate::serialize::fixture::{USER, rc4_aes_128_and_aes_256, written as lopdf_written};
+use crate::serialize::fixture::{
+    USER, rc4_aes_128_and_aes_256, whole_packed, written as lopdf_written,
+};
 use crate::serialize::full::{Body, Layout, write_bodies, write_built};
+use crate::serialize::group::Use;
 use crate::source::Limits;
 
 /// `objects`, the catalog object 1, written as sheaf writes a file it
@@ -51,6 +54,7 @@ fn written_with(
                 crypt: None,
                 encrypt_at: (0, 0),
                 xref_from: 0,
+                pack: None,
             };
             write_bodies(bodies, &layout, &NoProgress).unwrap().0
         }
@@ -208,7 +212,9 @@ fn a_clean_file_reaches_its_tables_with_no_findings() {
     // page tree's 3 and its kid, the page's 5 and its annotation, the
     // annotation's 5 and its appearance, the form's 5, its resources' 1
     // and its ProcSet's 1. A cross-reference stream has 4 more keys than
-    // a table's trailer, and its /W's 3 elements and /Index's 2.
+    // a table's trailer, its /W's 3 elements and /Index's 2, and its
+    // /Filter and /DecodeParms, whose /Predictor and /Columns are
+    // FilterFlateDecode's.
     for (kind, trailer, keys) in [
         (XrefKind::Table, &[("FileTrailer", 1)][..], 27),
         (
@@ -217,8 +223,9 @@ fn a_clean_file_reaches_its_tables_with_no_findings() {
                 ("XRefStream", 1),
                 ("ArrayOfXRefWIntegers", 1),
                 ("ArrayOfXRefIndexIntegers", 1),
+                ("FilterFlateDecode", 1),
             ][..],
-            36,
+            40,
         ),
     ] {
         let bytes = written("1.7", &clean(), kind);
@@ -679,6 +686,49 @@ fn a_held_object_nothing_reaches_is_found() {
     );
 }
 
+/// A file the writer packed, its page and annotation in page 1's object
+/// stream and the rest in another: each object stream is checked as
+/// `ObjectStream`, the cross-reference stream as `XRefStream`, and none
+/// has a finding.
+#[test]
+fn a_packed_file_s_object_streams_are_checked_with_no_findings() {
+    let objects: BTreeMap<_, _> = (clean().into_iter())
+        .map(|(n, object)| ((n, 0), object))
+        .collect();
+    let uses = HashMap::from([(3, Use::Page(0)), (4, Use::Page(0))]);
+    let bytes = whole_packed(&objects, &dictionary! { "Root" => r(1) }, None, &uses);
+    let report = checked_as(&bytes, &Hold::All(Made::Built));
+    assert_eq!(report.findings, [], "{report}");
+    assert_eq!(report.checked.get("ObjectStream"), Some(&2), "{report}");
+    assert_eq!(report.checked.get("XRefStream"), Some(&1), "{report}");
+}
+
+/// An object stream held, which only the cross-reference section
+/// reaches, is checked as one from `xref`, where it was left out unread:
+/// its values and its keys' types.
+#[test]
+fn an_object_stream_held_is_checked_from_the_cross_reference_section() {
+    let mut objects = clean();
+    let container = dictionary! { "Type" => "ObjStm", "N" => -1, "First" => 0, "DL" => "Bogus" };
+    objects.push((6, Object::Stream(Stream::new(container, Vec::new()))));
+    let report = checked(&objects);
+    assert_eq!(
+        report.findings,
+        [
+            finding(
+                6,
+                "xref",
+                ("ObjectStream", "N"),
+                Rule::Value,
+                "-1 (not one of fn:Eval(@N>=0))"
+            ),
+            finding(6, "xref", ("ObjectStream", "DL"), Rule::Type, "/Bogus"),
+        ],
+        "{report}"
+    );
+    assert_eq!(report.checked.get("ObjectStream"), Some(&1), "{report}");
+}
+
 #[test]
 fn name_and_number_trees_are_walked_and_a_malformed_node_is_found() {
     let dest = || Object::Array(vec![r(3), Object::Name(b"Fit".to_vec())]);
@@ -914,6 +964,7 @@ fn length_referenced(length: Object, more: &[(u32, Object)]) -> Vec<u8> {
         crypt: None,
         encrypt_at: (0, 0),
         xref_from: 0,
+        pack: None,
     };
     write_bodies(bodies.into_iter().map(Ok), &layout, &NoProgress)
         .unwrap()

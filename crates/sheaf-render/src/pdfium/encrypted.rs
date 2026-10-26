@@ -1,21 +1,23 @@
 //! Encrypted files as sheaf saves them, read back by PDFium (M10.5 slice
-//! 7): RC4-128, AES-128 and AES-256 files saved by both strategies stay
-//! encrypted with their own password and show what the same edit of the
-//! unencrypted file shows; an AES-256 file whose strings are in an
-//! encrypted object stream rewrites; and a file with bytes before its
-//! header appends as the same file without them does.
+//! 7): RC4-40, RC4-128, AES-128 and AES-256 files saved by both strategies
+//! stay encrypted with their own password and show what the same edit of
+//! the unencrypted file shows, a Rewrite of one whose cross-references
+//! are a stream packed into object streams, each encrypted whole (object
+//! streams' slice 2); an AES-256 file whose strings are in an encrypted
+//! object stream rewrites into object streams of its own; and a file with
+//! bytes before its header appends as the same file without them does.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use lopdf::Object;
-use sheaf_doc::Store;
 use sheaf_doc::materialize::How;
 use sheaf_doc::serialize::fixture::{
-    BOOKMARK, FIELD, FORM_SECRETS, PREFIX, USER, VALUE, edited, encrypted, form, holds,
-    object_streams_encrypted, rc4_aes_128_and_aes_256, written,
+    BOOKMARK, FIELD, FORM_SECRETS, PREFIX, USER, VALUE, edited, encrypted, form, in_clear,
+    object_streams_encrypted, object_streams_of, rc4_40, rc4_aes_128_and_aes_256, written,
 };
 use sheaf_doc::store::BlobKind;
+use sheaf_doc::{Src, Store};
 
 use super::bookmarks::bookmarks;
 use super::*;
@@ -92,13 +94,23 @@ fn put(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
+/// An encrypted file, opened with its password.
+fn source(bytes: &[u8]) -> Src {
+    let kind = BlobKind::file(Path::new("encrypted.pdf"), Some(USER));
+    Store::new().open(bytes.into(), kind).unwrap()
+}
+
 /// An encrypted file's `/P`, as its `/Encrypt` stores it, and `/ID[0]`.
 fn kept(bytes: &[u8]) -> (Object, Vec<u8>) {
-    let kind = BlobKind::file(Path::new("encrypted.pdf"), Some(USER));
-    let src = Store::new().open(bytes.into(), kind).unwrap();
+    let src = source(bytes);
     let crypt = src.crypt().expect("encrypted");
     let p = crypt.dict().get(b"P").unwrap().clone();
     (p, crypt.first_id().expect("an /ID").to_vec())
+}
+
+/// Whether an encrypted file holds object streams, read as objects.
+fn packed(bytes: &[u8]) -> bool {
+    !object_streams_of(source(bytes).pdf()).is_empty()
 }
 
 sheaf_doc::both_ways!(
@@ -106,14 +118,17 @@ sheaf_doc::both_ways!(
     encrypted_files_reopen_in_pdfium_by_both_strategies_appended: reopen_in_pdfium
 );
 
-/// RC4-128, AES-128 and AES-256 files, with a table and with a stream,
-/// turned and noted and saved by both strategies: no output opens without
-/// the password, each shows with it what the same edit of the
-/// unencrypted file shows, and each keeps its `/P` and `/ID[0]`.
+/// RC4-40, RC4-128, AES-128 and AES-256 files, with a table and with a
+/// stream, turned and noted and saved by both strategies: no output opens
+/// without the password or says anything of the form in the clear, a
+/// stream's Rewrite is packed, each shows with the password what the same
+/// edit of the unencrypted file shows, and each keeps its `/P` and
+/// `/ID[0]`.
 fn reopen_in_pdfium(how: How) {
     let dir = scratch(&format!("both-{how:?}"));
     let plain = form();
-    for (version, state) in rc4_aes_128_and_aes_256(&plain) {
+    let states = std::iter::once(rc4_40(&plain)).chain(rc4_aes_128_and_aes_256(&plain));
+    for (version, state) in states {
         let files = encrypted(&plain, &state, |_| {})
             .into_iter()
             .zip(written(&plain));
@@ -129,11 +144,13 @@ fn reopen_in_pdfium(how: How) {
             let bytes = how.write(&edit);
             for text in FORM_SECRETS {
                 assert!(
-                    !holds(&bytes, text),
+                    !in_clear(&bytes, text),
                     "{name}: {:?}",
                     String::from_utf8_lossy(text)
                 );
             }
+            let packs = how == How::Rewritten && kind == "stream";
+            assert_eq!(packed(&bytes), packs, "{name}");
             let refused = PdfiumEngine::open_bytes(bytes.as_slice().into(), None)
                 .err()
                 .expect("opened without the password");
@@ -154,21 +171,25 @@ fn reopen_in_pdfium(how: How) {
 }
 
 /// An AES-256 file whose field and bookmark are in an object stream,
-/// encrypted whole, rewrites with no object stream and nothing in the
-/// clear, and shows what it showed.
+/// encrypted whole, rewrites into object streams of its own, with nothing
+/// in the clear, and shows what it showed.
 #[test]
 fn an_aes256_object_stream_base_rewrites() {
     let dir = scratch("object-streams");
     let plain = form();
     let [.., (_, aes_256)] = rc4_aes_128_and_aes_256(&plain);
     let base = object_streams_encrypted(&plain, &aes_256);
-    assert!(holds(&base, b"/ObjStm"));
+    assert!(packed(&base));
     let path = put(&dir, "object-streams.pdf", &base);
     let doc = sheaf_doc::open::file(&path, Some(USER)).unwrap().doc;
     let bytes = sheaf_doc::save::rewrite(&doc).unwrap();
-    assert!(!holds(&bytes, b"/ObjStm"));
+    assert!(packed(&bytes));
     for text in FORM_SECRETS {
-        assert!(!holds(&bytes, text), "{:?}", String::from_utf8_lossy(text));
+        assert!(
+            !in_clear(&bytes, text),
+            "{:?}",
+            String::from_utf8_lossy(text)
+        );
     }
     let rewritten = shown(&bytes, Some(USER));
     assert_eq!(rewritten.fields, form_fields());

@@ -19,8 +19,10 @@ use crate::labels::{LabelSpec, Style};
 use crate::model::{Document, OutlineId, PageId};
 use crate::serialize::durable::FileStamp;
 use crate::serialize::fixture::{
-    FORM_SECRETS, USER, encrypted, form, holds, object_streams_encrypted, rc4_aes_128_and_aes_256,
+    FORM_SECRETS, USER, encrypted, form, holds, in_clear, object_streams_encrypted,
+    object_streams_of, rc4_40, rc4_aes_128_and_aes_256,
 };
+use crate::serialize::objstm;
 use crate::source::Limits;
 use crate::source::lazy_tests::same;
 use crate::store::{BlobKind, Src, Store};
@@ -340,45 +342,50 @@ pub(super) fn source_of(out: &Output) -> Src {
     source(&out.bytes, None)
 }
 
-/// A file whose objects are in an object stream rewrites with each member
-/// an object of its own, at its number, and no object stream.
+/// A file whose objects are in an object stream rewrites packed: each
+/// member at its number, in an object stream again, and each stream an
+/// object of its own.
 #[test]
-fn an_object_stream_base_rewrites_with_plain_objects() {
+fn an_object_stream_base_rewrites_packed() {
     let mut pdf = file("A", 2, false);
     let mut before = Vec::new();
     pdf.save_modern(&mut before).unwrap();
-    assert!(holds(&before, b"/ObjStm"));
+    let was = lazy(&before, None);
+    assert!(!object_streams_of(&was).is_empty());
     let d = open(&before, None);
     let out = rewrite(&d, Profile::default());
-    assert!(!holds(&out.bytes, b"/ObjStm"));
-    let (was, now) = (lazy(&before, None), lazy(&out.bytes, None));
+    let now = lazy(&out.bytes, None);
     assert!(now.base_sound());
     assert_eq!(now.xref().kind, lopdf::XrefKind::Stream);
+    assert!(!object_streams_of(&now).is_empty());
     let anew = written_anew(&source(&before, None));
+    let mut packed = 0;
     for id in ids(&was) {
         let obj = was.get(id).unwrap();
         if layout(obj) {
             continue;
         }
-        assert!(
-            now.raw_span(id).is_some(),
-            "{id:?} isn't an object of its own"
-        );
+        let own = now.raw_span(id).is_some();
+        assert_eq!(own, !objstm::packable(id, obj), "{id:?}");
+        packed += usize::from(!own);
         if !anew.contains(&id) {
             assert!(same(now.get(id).unwrap(), obj), "{id:?}");
         }
     }
+    assert!(packed > 0);
 }
 
 /// An encrypted file rewrites encrypted as it was: its `/Encrypt` as
 /// stored at its number, nothing in the clear, every object reading as it
 /// did, and what the save didn't touch copied as it was, when the
-/// encryption is kept. An object stream encrypted whole rewrites as
-/// objects encrypted each on its own.
+/// encryption is kept. A base with a cross-reference stream, its objects
+/// in object streams or not, rewrites packed, each container encrypted
+/// whole; a table's doesn't.
 #[test]
 fn an_encrypted_base_rewrites_encrypted() {
     let plain = form();
-    for (name, state) in rc4_aes_128_and_aes_256(&plain) {
+    let states = std::iter::once(rc4_40(&plain)).chain(rc4_aes_128_and_aes_256(&plain));
+    for (name, state) in states {
         let [table, stream] = encrypted(&plain, &state, |_| {});
         let packed = object_streams_encrypted(&plain, &state);
         for (kind, before) in [("table", table), ("stream", stream), ("packed", packed)] {
@@ -386,9 +393,8 @@ fn an_encrypted_base_rewrites_encrypted() {
             let d = open(&before, Some(USER));
             let out = rewrite(&d, Profile::default());
             for secret in FORM_SECRETS {
-                assert!(!holds(&out.bytes, secret), "{name}: {secret:?}");
+                assert!(!in_clear(&out.bytes, secret), "{name}: {secret:?}");
             }
-            assert!(!holds(&out.bytes, b"/ObjStm"), "{name}");
             assert!(
                 matches!(
                     LazyPdf::open(Arc::from(&out.bytes[..]), None, &Limits::DEFAULT.reader),
@@ -397,6 +403,8 @@ fn an_encrypted_base_rewrites_encrypted() {
                 "{name}"
             );
             let (was, now) = (lazy(&before, Some(USER)), lazy(&out.bytes, Some(USER)));
+            let packed = !object_streams_of(&now).is_empty();
+            assert_eq!(packed, kind != "table", "{name}");
             let (crypt, back) = (
                 d.primary().crypt().unwrap().clone(),
                 crate::serialize::crypt::Crypt::of(&now).unwrap().unwrap(),

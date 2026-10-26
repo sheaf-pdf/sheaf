@@ -660,7 +660,7 @@ fn follow(obj: &mut Object, to: &dyn Fn(ObjectId) -> Result<ObjectId>) -> Result
 }
 
 /// Each reference in `obj`, to `to`.
-pub(super) fn refs(obj: &Object, to: &mut dyn FnMut(ObjectId)) {
+pub(crate) fn refs(obj: &Object, to: &mut dyn FnMut(ObjectId)) {
     match obj {
         Object::Reference(r) => to(*r),
         Object::Array(items) => items.iter().for_each(|o| refs(o, to)),

@@ -29,7 +29,7 @@ use crate::forms::{Finding, Value};
 use crate::materialize::ObjKey;
 use crate::model::{Document, FieldNode, Terminal};
 use crate::prim::{Key, Val};
-use crate::serialize::fixture::holds;
+use crate::serialize::fixture::{holds, in_clear};
 use crate::tx::fixture as fx;
 
 /// What `doc`'s current version saved to `path` plans, nothing sealed.
@@ -536,7 +536,7 @@ fn a_misjudged_removal_is_vetoed_through_the_plan() {
     assert_eq!(super::removal::vetoes_here().derived, before.derived + 1);
     let logged = super::removal::RemovalMisclassified { key }.to_string();
     assert_eq!(warnings, [logged]);
-    assert!(!holds(&std::fs::read(&path).unwrap(), b"a secret note"));
+    assert!(!in_clear(&std::fs::read(&path).unwrap(), b"a secret note"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

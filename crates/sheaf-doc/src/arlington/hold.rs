@@ -1,7 +1,8 @@
 //! What a save wrote, to hold to the model ([`Hold::written`]): the
 //! objects sheaf made, each built whole or emitted over a source's
-//! dictionary as its [`ObjKey`] says (the edit API's plan, §11.3), and
-//! never a copy of a file's object, which is the file's, faults and all.
+//! dictionary as its [`ObjKey`] says (the edit API's plan, §11.3), and the
+//! object streams a Rewrite packs objects into, built whole; never a copy
+//! of a file's object, which is the file's, faults and all.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -12,6 +13,7 @@ use super::check::{Hold, Made, each_reference, object_header};
 use crate::materialize::key::{ObjKey, Part};
 use crate::materialize::record::ObjMap;
 use crate::model::{AnnotBody, DocState};
+use crate::serialize::objstm;
 use crate::source::Limits;
 use crate::store::{BlobId, BlobKind, MemoryKind, Origin, Store};
 
@@ -29,11 +31,13 @@ impl Hold {
     ///   merged. Nothing is, when the newest section starts before the
     ///   start, or doesn't read.
     /// - **A Rewrite** (`appended` None): the object of each key in
-    ///   `map` that isn't a copy of a file's; when the blob whose objects
-    ///   are at their own numbers (`map`'s identity) is one sheaf made in
-    ///   memory, every object `map` doesn't name, as that blob's objects
-    ///   are held; and the `/Encrypt` dictionary, which a Rewrite writes
-    ///   as the source stores it, so as merged.
+    ///   `map` that isn't a copy of a file's; each object stream the
+    ///   writer packed objects into, which no key names, as built; when
+    ///   the blob whose objects are at their own numbers (`map`'s
+    ///   identity) is one sheaf made in memory, every other object `map`
+    ///   doesn't name, as that blob's objects are held; and the `/Encrypt`
+    ///   dictionary, which a Rewrite writes as the source stores it, so as
+    ///   merged.
     ///
     /// Each key is held as `made` says; an object two keys name (a widget
     /// merged with its field) is merged when either says so.
@@ -84,10 +88,16 @@ impl Hold {
                     }
                 }
                 let own = (map.identity.as_ref()).and_then(kind).and_then(of_memory);
-                if let Some(made) = own {
-                    let named: HashSet<ObjectId> = map.keys.values().copied().collect();
-                    for id in pdf.ids().filter(|id| !named.contains(id)) {
-                        hold(&mut held, id, made);
+                let named: HashSet<ObjectId> = map.keys.values().copied().collect();
+                for id in pdf.ids().filter(|id| !named.contains(id)) {
+                    match own {
+                        // One the writer packed objects into, as a Rewrite
+                        // never copies a source's.
+                        _ if pdf.get(id).is_ok_and(objstm::is_container) => {
+                            hold(&mut held, id, Made::Built)
+                        }
+                        Some(made) => hold(&mut held, id, made),
+                        None => {}
                     }
                 }
                 if let Some((_, at)) = pdf.encryption() {
@@ -203,7 +213,8 @@ fn hold(held: &mut BTreeMap<ObjectId, Made>, id: ObjectId, made: Made) {
 /// - **Built**: what a mark writes (its dictionary, its appearance, its
 ///   companion and its file's specification), what content draws with (a
 ///   resource and what it reaches), a block, the isolating `q`s and `Q`s,
-///   what the generators are, and a pinned appearance.
+///   what the generators are, a pinned appearance, and an object stream
+///   the writer packs objects into.
 /// - **Merged**, emitted over a source's dictionary whose keys it keeps:
 ///   the root objects, pages, another tool's comment and its pop-up, a
 ///   widget, a field, a bookmark, the page labels, a name tree of
@@ -233,7 +244,8 @@ fn made(
         | ObjKey::Shared(_)
         | ObjKey::Generators
         | ObjKey::Pinned(_)
-        | ObjKey::Built(_) => Made::Built,
+        | ObjKey::Built(_)
+        | ObjKey::Container(_) => Made::Built,
         ObjKey::Catalog
         | ObjKey::PagesNode(_)
         | ObjKey::Page(_)

@@ -22,7 +22,7 @@ use crate::forms::fixture::{Form, every_mark_kind, row};
 use crate::labels::{LabelSpec, Style};
 use crate::model::{Document, PageId};
 use crate::prim::{Key, Val};
-use crate::serialize::fixture::holds;
+use crate::serialize::fixture::in_clear;
 use crate::store::Src;
 use crate::tx::fixture as fx;
 
@@ -657,10 +657,18 @@ fn a_field_left_with_no_widgets_goes() {
         .filter_map(|(id, _)| st.full_name(id))
         .collect();
     assert_eq!(held, BTreeSet::from(["hidden", "kept"].map(String::from)));
+    let hidden = |bytes: &[u8]| {
+        let d = open(bytes, None);
+        let st = d.state();
+        (st.terminals())
+            .find(|&(id, ..)| st.full_name(id).as_deref() == Some("hidden"))
+            .and_then(|(_, _, term)| term.value.clone())
+    };
     let out = rewrite(&d, Profile::default());
     for (bytes, what) in [(&out.bytes, "deleted"), (&extracted, "extracted")] {
-        assert!(!holds(bytes, b"SHEAFGONE"), "{what}");
-        assert!(holds(bytes, b"SHEAFHIDDEN"), "{what}");
+        assert!(!in_clear(bytes, b"SHEAFGONE"), "{what}");
+        let value = crate::forms::field::Value::Text("SHEAFHIDDEN".into());
+        assert_eq!(hidden(bytes), Some(value), "{what}");
         let left = ["hidden", "kept"].map(String::from);
         assert_eq!(names(bytes), BTreeSet::from(left), "{what}");
         let report = crate::forms::check(bytes, None).unwrap();
@@ -1361,6 +1369,7 @@ fn an_object_written_in_the_clear_doesnt_read_back() {
             crypt: Some(crypt),
             encrypt_at: crypt.at(),
             xref_from: 1,
+            pack: None,
         };
         write_bodies(bodies, &layout, &NoProgress).unwrap().0
     };

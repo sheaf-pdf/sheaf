@@ -559,6 +559,24 @@ impl TreeShape {
         }
         TreeShape { nodes }
     }
+
+    /// Its pages, in order: each kid that isn't a node, walked from the
+    /// root as a reader lists them. A node met again is skipped, so one
+    /// listed twice, or under itself, is walked once.
+    pub fn pages(&self) -> Vec<ObjectId> {
+        let nodes: HashMap<ObjectId, &TreeNode> = (self.nodes.iter()).map(|n| (n.id, n)).collect();
+        let mut pages = Vec::new();
+        let mut seen = HashSet::new();
+        let mut stack: Vec<ObjectId> = self.nodes.first().map(|n| n.id).into_iter().collect();
+        while let Some(id) = stack.pop() {
+            match nodes.get(&id) {
+                Some(node) if seen.insert(id) => stack.extend(node.kids.iter().rev()),
+                Some(_) => {}
+                None => pages.push(id),
+            }
+        }
+        pages
+    }
 }
 
 /// What a save writes from: the state of the version it writes, the
@@ -637,5 +655,28 @@ mod tests {
         };
         assert_eq!(map.get(&other), None);
         assert_eq!(map.get(&ObjKey::Info), None);
+    }
+
+    /// A tree's pages are its kids that aren't nodes, in the order a
+    /// reader walks them; a node listed again, or under itself, is walked
+    /// once.
+    #[test]
+    fn a_tree_lists_its_pages_in_order() {
+        let node = |id: u32, kids: &[u32]| TreeNode {
+            id: (id, 0),
+            kids: kids.iter().map(|&k| (k, 0)).collect(),
+            size: kids.len(),
+            from: None,
+        };
+        let tree = TreeShape {
+            nodes: vec![
+                node(1, &[10, 2, 13, 3, 2]),
+                node(2, &[11, 12, 1]),
+                node(3, &[14, 3]),
+            ],
+        };
+        let pages: Vec<u32> = tree.pages().iter().map(|id| id.0).collect();
+        assert_eq!(pages, [10, 11, 12, 13, 14]);
+        assert_eq!(TreeShape::default().pages(), []);
     }
 }

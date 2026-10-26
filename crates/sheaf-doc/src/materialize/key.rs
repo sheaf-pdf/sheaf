@@ -109,6 +109,10 @@ pub enum ObjKey {
     ///
     /// [`PinnedAp`]: crate::model::PinnedAp
     Pinned(u128),
+    /// Object stream `n`, a container the writer packs objects into: by
+    /// its number, which only names its AES IVs, keyed by what it holds
+    /// as every object's are. No save numbers one by its key.
+    Container(u32),
 }
 
 /// What a mark writes beside its dictionary, and another tool's comment
@@ -175,7 +179,8 @@ impl ObjKey {
             | ObjKey::PageRes { .. }
             | ObjKey::Filtered { .. }
             | ObjKey::Built(_)
-            | ObjKey::Pinned(_) => false,
+            | ObjKey::Pinned(_)
+            | ObjKey::Container(_) => false,
         }
     }
 
@@ -293,6 +298,10 @@ impl ObjKey {
                 out.push(21);
                 out.extend(digest.to_be_bytes());
             }
+            ObjKey::Container(n) => {
+                out.push(22);
+                out.extend(n.to_be_bytes());
+            }
         }
         out
     }
@@ -376,6 +385,8 @@ mod tests {
             ObjKey::Built((1, 1)),
             ObjKey::Pinned(1),
             ObjKey::Pinned(2),
+            ObjKey::Container(1),
+            ObjKey::Container(2),
         ]
     }
 
@@ -446,6 +457,7 @@ mod tests {
         want.extend(1u128.to_be_bytes());
         want.extend(2u64.to_be_bytes());
         assert_eq!(filtered.bytes(), want);
+        assert_eq!(ObjKey::Container(258).bytes(), [22, 0, 0, 1, 2]);
         assert_eq!(std::mem::size_of::<ObjKey>(), 48);
         assert_eq!(
             ObjKey::AnnotPart(AnnotId(2), Part::Popup).bytes(),

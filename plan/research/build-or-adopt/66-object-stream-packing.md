@@ -23,3 +23,10 @@ Area: M14: Document processing · Part of [build or adopt](README.md)
 - **Recommendation:** **build in-house** in `serialize/`, with lopdf's
   `object_stream.rs` as a reference. Check with `qpdf --check`, PDFium
   and pdf.js reading the result back, and the corpus. High.
+- **Built:** in-house, between milestones
+  ([object streams](../../complete/object-streams.md), slice 2,
+  2026-10-26): `serialize/objstm.rs` (`packable`, the container),
+  `group.rs` (by the pages that use each object), type-2 entries and a
+  compressed cross-reference stream in `xref.rs`, packing in `full.rs`.
+  On a Rewrite and every export of a file that used object streams; not
+  on an Append ([B62](../../backlog/B62.md)).

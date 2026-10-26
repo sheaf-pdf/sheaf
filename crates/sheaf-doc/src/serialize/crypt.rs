@@ -1,9 +1,9 @@
 //! Encryption as a save writes it: each object encrypted on its own with
-//! the source's [`Crypt`], so an encrypted file saves encrypted, its
-//! `/Encrypt` dictionary as stored and its `/ID[0]` kept. An AES IV is a
-//! keyed hash of what the object is ([`ObjKey`]) and the plaintext, so
-//! output is deterministic and no IV serves two plaintexts of an object,
-//! across saves too (M10.5 §11.7).
+//! the source's [`Crypt`], an object stream whole, so an encrypted file
+//! saves encrypted, its `/Encrypt` dictionary as stored and its `/ID[0]`
+//! kept. An AES IV is a keyed hash of what the object is ([`ObjKey`]) and
+//! the plaintext, so output is deterministic and no IV serves two
+//! plaintexts of an object, across saves too (M10.5 §11.7).
 //!
 //! lopdf's walk decides what an object's encryption covers: every string,
 //! a stream dictionary's included, and every stream, an embedded file's
@@ -12,7 +12,10 @@
 //! metadata when `/EncryptMetadata` is false, or a signature's
 //! `/Contents`.
 
+use std::sync::Arc;
+
 use hmac::{Hmac, KeyInit as _, Mac as _};
+use lopdf::encryption::crypt_filters::CryptFilter;
 use lopdf::encryption::{self, EncryptionState};
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
 use sha2::Sha256;
@@ -74,6 +77,21 @@ impl Crypt {
     /// whose key isn't made from it; no other opens without one.
     pub fn first_id(&self) -> Option<&[u8]> {
         self.first_id.as_deref()
+    }
+
+    /// Whether objects may go in object streams under it. A container is
+    /// encrypted as a stream, its members' strings with it, so not when
+    /// streams are left in the clear (`/StmF /Identity`) and strings
+    /// aren't: those strings would be in the clear.
+    pub fn packs(&self) -> bool {
+        let identity = |filter: Arc<dyn CryptFilter>| filter.method() == b"Identity";
+        match (
+            self.state.get_stream_filter(),
+            self.state.get_string_filter(),
+        ) {
+            (Ok(streams), Ok(strings)) => !identity(streams) || identity(strings),
+            _ => false,
+        }
     }
 
     /// `obj`, which is `key`, encrypted as object `id`, its strings in
