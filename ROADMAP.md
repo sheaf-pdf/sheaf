@@ -24,7 +24,7 @@ In order ([between milestones](plan/between/README.md)):
 
 1. **Object streams, and B3.** A Rewrite packs object streams again, grouped
    by the pages that use them; Properties' Fast Web View check holds after
-   an incremental save ([B3](plan/backlog/B3.md)).
+   an incremental save ([B3](plan/complete/backlog-closed.md#b3-properties-says-fast-web-view-yes-after-an-incremental-save)).
 2. **The linearization crate:** Fast Web View, as a crate of its own.
 3. **[F15](plan/backlog/F15.md):** a Rewrite that doesn't load the whole
    file.

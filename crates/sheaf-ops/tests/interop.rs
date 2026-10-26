@@ -38,6 +38,10 @@
 //! own text alone, then, flattened, each annotation's text after it, inside
 //! an `/Artifact` of its own.
 //!
+//! From object streams' slice 1 (B3), a file qpdf linearized is
+//! linearized to sheaf and to `qpdf --check-linearization`, and neither
+//! once sheaf appends to it or rewrites it.
+//!
 //! qpdf is `$SHEAF_QPDF`, else `qpdf` on the PATH; pdf.js is `node` on the
 //! PATH with `$SHEAF_PDFJS`, pdfjs-dist's `legacy/build/pdf.mjs`. A test
 //! whose tools are missing says so and passes. Run with
@@ -66,20 +70,7 @@ use sheaf_edit::{
 };
 
 mod common;
-use common::scratch;
-
-/// qpdf, or None when there's none, saying so.
-fn qpdf() -> Option<PathBuf> {
-    let qpdf = std::env::var_os("SHEAF_QPDF").map_or_else(|| PathBuf::from("qpdf"), PathBuf::from);
-    let found = Command::new(&qpdf)
-        .arg("--version")
-        .output()
-        .is_ok_and(|out| out.status.success());
-    if !found {
-        println!("skipped qpdf: none at {} (set SHEAF_QPDF)", qpdf.display());
-    }
-    found.then_some(qpdf)
-}
+use common::{note, open, planned, qpdf, qpdf_linearized, saved, scratch};
 
 /// pdf.js's `pdf.mjs`, to run with node, or None when there's no node or
 /// no pdf.js, saying so.
@@ -435,6 +426,58 @@ fn pages_deleted_saved_and_undone_pass_qpdf_check() {
         "qpdf --check: pages deleted, saved and undone on each of {} bases",
         bases_of(&plain).len()
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file sheaf wrote, linearized by qpdf: sheaf's cross-reference facts
+/// read its linearization as holding, and qpdf calls it linearized. Given
+/// a note and saved as planned, an Append after its bytes, and rewritten
+/// instead, it is linearized to neither (B3).
+#[test]
+#[ignore = "needs qpdf"]
+fn a_linearized_file_appended_to_is_linearized_no_more() {
+    let Some(qpdf) = qpdf() else {
+        return;
+    };
+    let dir = scratch("interop-linearized");
+    let [plain, _] = written(&form());
+    let base = dir.join("base.pdf");
+    std::fs::write(&base, plain).unwrap();
+    std::fs::write(&base, How::Rewritten.write(&edited(&base, None))).unwrap();
+    let linearized = dir.join("linearized.pdf");
+    run(Command::new(&qpdf)
+        .arg("--linearize")
+        .arg(&base)
+        .arg(&linearized))
+    .unwrap();
+    // Whether sheaf and qpdf call the file at `path` linearized, each.
+    let read = |path: &Path| {
+        let sheaf = open(path).primary().xref().linearized;
+        (sheaf, qpdf_linearized(&qpdf, path).unwrap())
+    };
+    assert_eq!(read(&linearized), (true, true));
+    let was = std::fs::read(&linearized).unwrap();
+    // A copy of the linearized file, opened and given a note.
+    let noted = |name: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, &was).unwrap();
+        let mut doc = open(&path);
+        let mark = add(doc.page(0).unwrap(), &note("after"));
+        doc.commit_ops(vec![mark], "note").unwrap();
+        (path, doc)
+    };
+    let (path, mut doc) = noted("appended.pdf");
+    let (strategy, bytes) = planned(&mut doc, &path);
+    assert_eq!(strategy, StrategyKind::Append);
+    assert!(bytes.starts_with(&was), "an Append keeps the file's bytes");
+    assert!(!doc.saved_record().unwrap().xref.linearized);
+    assert_eq!(read(&path), (false, false), "appended");
+    let (path, mut doc) = noted("rewritten.pdf");
+    let (strategy, _) = saved(&mut doc, &path, How::Rewritten);
+    assert_eq!(strategy, StrategyKind::Rewrite);
+    assert!(!doc.saved_record().unwrap().xref.linearized);
+    assert_eq!(read(&path), (false, false), "rewritten");
+    println!("qpdf --check-linearization: linearized, then neither appended to nor rewritten");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

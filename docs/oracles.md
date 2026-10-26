@@ -29,7 +29,7 @@ Rules for an oracle:
 | Oracle | Trusted for | Version | How it runs | Where |
 |---|---|---|---|---|
 | **PDFium** | Rendering; character boxes and text; page counts; what a page reads as | `chromium/7881` (pdfium-binaries, through pdfium-render 0.9.4); the corpus manifests' `pdfium` columns are PDFium 156.0.8076.0 through pypdfium2 5.14.0 | Linked: it's also sheaf's renderer. BSD-3 | `realize_corpus`'s pixel tiers, the content lexer tier, the interpreter tiers (`content_interp.rs`: glyph boxes, write back and render) |
-| **qpdf** | File structure: `--check`, cross-reference tables, filters, encryption; repairs | Whatever is installed for `interop.rs` (12.3.2 here); 12.4.2 for the corpus manifests | Separate process (`SHEAF_QPDF`, else `/usr/bin/qpdf`). Apache-2.0 | `crates/sheaf-ops/tests/interop.rs`, serialize tests, the corpus manifests' `qpdf` columns |
+| **qpdf** | File structure: `--check`, cross-reference tables, filters, encryption; repairs; whether a linearization holds (`--check-linearization`) | Whatever is installed for the tests (12.3.2 here); 12.4.2 for the corpus manifests | Separate process (`SHEAF_QPDF`, else `/usr/bin/qpdf`). Apache-2.0 | `crates/sheaf-ops/tests/interop.rs`, serialize tests, the corpus manifests' `qpdf` columns; `rewrite_size.rs` (`just tier-size`: `--check` on each Save As no worse than on its source, and `--object-streams=disable` and `=generate` sizes as the reference); append_corpus's `linearization_agrees_with_qpdf_before_and_after_an_append` (`--check-linearization` on the pool sample, before and after an Append) |
 | **pdf.js** | Whether Firefox reads sheaf's output; its appearance rules (read as prior art, e.g. backlog B12) | pdfjs-dist 6.4.299 | Separate process under node (`SHEAF_PDFJS`). Apache-2.0 | `interop.rs` |
 | **pyHanko** | Signature integrity: what a signature covers and whether its digest holds | 0.37.0 | Offline, through `uv` in `../pdf-corpus/tools/inventory.py`, which writes the `signatures/` manifest. MIT | `forms::sigs::integrity`'s tier `the_corpus_s_signatures_agree_with_pyhanko` (B5) |
 | **pikepdf, pypdf** | The corpus inventories' structure facts | pikepdf 10.17.0 | Offline, through `uv` in the corpus tools. MPL-2.0, BSD-3 | `../pdf-corpus` manifests |
@@ -73,7 +73,7 @@ ROADMAP's M12, M14 and M17), to be applied at its kickoff.
 | | EU DSS | The EU's reference PAdES validation (ETSI EN 319 102-1) | LGPL, Java, separate process |
 | **M14** | veraPDF | PDF/A conversion and validation | As above |
 | | OpenJPEG (`opj_decompress`) | JPX images sheaf re-encodes, if it does | BSD-2, separate process |
-| | `qpdf --check-linearization` | Fast Web View (already in M14's text) | As above |
+| | `qpdf --check-linearization` | Fast Web View: in use since B3 (In use, above); later what the linearization crate writes (between milestones, item 3) | As above |
 | **M17** | veraPDF | PDF/UA-1 and UA-2 | As above |
 | | PAC; NVDA, Narrator, VoiceOver, Orca | Matterhorn checks beside veraPDF's; the app with a screen reader | By hand (PAC is Windows freeware) |
 

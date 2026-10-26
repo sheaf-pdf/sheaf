@@ -65,7 +65,6 @@ Status: open
 | ID | Title | Kind | Found |
 |---|---|---|---|
 | [B2](B2.md) | Scrolling over a dialog also scrolls the page behind it | annoyance | 2026-10-21, M10.5 |
-| [B3](B3.md) | Properties says "Fast Web View: Yes" after an incremental save | wrong output | 2026-10-22, M10.5 slice 18 |
 | [B4](B4.md) | The realizer's predicate and the emission disagree on a page that can't be read | annoyance | 2026-10-22, M10.5 slice 18. Greg merged #26 with it logged… |
 | [B9](B9.md) | A radio group keeps its value when its chosen button's page is removed | wrong output | 2026-10-22, M10.5 slice 19's export corpus tier |
 | [B10](B10.md) | After a Combine, the "XFA part holds values" bar can stay up | annoyance | 2026-10-22, M10.5 slice 19 |
@@ -114,6 +113,7 @@ Status: open
 | [B58](B58.md) | Predefined CMaps PDFium knows but no Adobe bundle has stay guessed | annoyance | 2026-10-24, the content interpreter's wrap-up |
 | [B59](B59.md) | A Type3 glyph whose `d1` box has no area takes the font's `/FontBBox` | annoyance | 2026-10-23, the content interpreter ; logged at its… |
 | [B60](B60.md) | Launch to first pixels takes 1.2–2 s on Windows | annoyance | M0 |
+| [B61](B61.md) | After a save, Properties still describes the file as opened | wrong output | 2026-10-26, object streams slice 1 |
 
 ## Features
 

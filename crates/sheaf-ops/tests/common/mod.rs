@@ -6,7 +6,9 @@
 //! pool of their own, and an OCR engine that reads nothing. And a page
 //! drawn as M5's separators are found, for the codes tests and the gate.
 //! And what the corpus tiers give a file: a note, a header and footer with
-//! Bates numbers, and a recognized word.
+//! Bates numbers, and a recognized word. And qpdf, for the tests that ask
+//! it what it makes of a file, and the pool's sample, for the tiers that
+//! take it.
 
 #![allow(dead_code)]
 // The tests' scratch files go in the temp directory, which clippy.toml
@@ -422,6 +424,16 @@ pub fn corpus_form(path: &str) -> Option<Vec<u8>> {
     Some(std::fs::read(corpus.path(&entry)).unwrap())
 }
 
+/// The pool's sample (`bench/pool-sample.txt`): its files' corpus paths.
+pub fn pool_sample() -> Vec<String> {
+    let list = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/pool-sample.txt");
+    (std::fs::read_to_string(list).unwrap().lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 /// `items`, or those of them whose corpus path (`path`) the environment
 /// variable `var` names, comma-separated, when it's set: every one it
 /// names, or a failure, as it is when it's set and names none (a leftover
@@ -444,6 +456,46 @@ pub fn narrowed<T>(var: &str, items: Vec<T>, path: impl Fn(&T) -> &str) -> Vec<T
     );
     eprintln!("narrowed by {var} to {} files", items.len());
     items
+}
+
+/// qpdf, or None when there's none, saying so.
+pub fn qpdf() -> Option<PathBuf> {
+    let qpdf = std::env::var_os("SHEAF_QPDF").map_or_else(|| PathBuf::from("qpdf"), PathBuf::from);
+    let found = Command::new(&qpdf)
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !found {
+        println!("skipped qpdf: none at {} (set SHEAF_QPDF)", qpdf.display());
+    }
+    found.then_some(qpdf)
+}
+
+/// How qpdf, run as `command`, exited (None when a signal ended it), and
+/// what it printed, its output then its errors. qpdf exits 3 when it only
+/// warns and 2 on an error.
+pub fn qpdf_said(command: &mut Command) -> (Option<i32>, String) {
+    let out = command.output().unwrap();
+    let said = [out.stdout, out.stderr].concat();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&said).into_owned(),
+    )
+}
+
+/// Whether `qpdf --check-linearization` calls the file at `path`
+/// linearized: it exits 0, or 3 when it only warns (of hint tables, which
+/// B3's check doesn't read), without saying the file "is not linearized".
+/// Any other exit is no verdict but a failure.
+pub fn qpdf_linearized(qpdf: &Path, path: &Path) -> Result<bool, String> {
+    let mut command = Command::new(qpdf);
+    let (code, said) = qpdf_said(command.arg("--check-linearization").arg(path));
+    match code {
+        Some(0 | 3) => Ok(!said.contains("is not linearized")),
+        _ => Err(format!(
+            "qpdf --check-linearization exited {code:?}: {said}"
+        )),
+    }
 }
 
 /// The text at the left of the header every corpus file takes, and its

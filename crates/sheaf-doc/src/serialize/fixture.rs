@@ -6,8 +6,8 @@
 //! stream, which lopdf can't write; and what the serializer's tests
 //! share: the edit they save, the bytes some writers put before the
 //! header, a file whose cross-reference table is long, a file with a later
-//! revision cut out, which PDFium refuses, and a search of the bytes
-//! written.
+//! revision cut out, which PDFium refuses, a file linearized as far as
+//! Annex F's minimum (B3) tells, and a search of the bytes written.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -387,6 +387,68 @@ pub fn revision_cut_out(mut bytes: Vec<u8>) -> Vec<u8> {
     );
     bytes.extend_from_slice(cut.as_bytes());
     bytes
+}
+
+/// A one-page file whose linearization holds as far as ISO 32000-1
+/// Annex F's minimum tells (B3): its first object is a linearization
+/// dictionary whose `/L` is the file's length. Its hint tables are none,
+/// so a full check finds them wrong. Written by hand: lopdf's writer
+/// leaves out a dictionary with `/Linearized`.
+pub fn linearized_file() -> Vec<u8> {
+    linearized_file_after(b"")
+}
+
+/// [`linearized_file`], with `lead` between its header and its first
+/// object, and `/L` the length still.
+pub fn linearized_file_after(lead: &[u8]) -> Vec<u8> {
+    const L: &str = "/L 0000000000";
+    let mut out = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    out.extend_from_slice(lead);
+    let content = b"q 0 0 1 RG 72 72 m 540 720 l S Q";
+    let objects = [
+        (
+            5,
+            format!("<< /Linearized 1 {L} /O 3 /E 0 /N 1 /T 0 /H [0 0] >>").into_bytes(),
+        ),
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> \
+              /Contents 4 0 R >>"
+                .to_vec(),
+        ),
+        (
+            4,
+            [
+                format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+                content,
+                b"\nendstream",
+            ]
+            .concat(),
+        ),
+    ];
+    let mut offsets = BTreeMap::new();
+    for (number, body) in objects {
+        offsets.insert(number, out.len());
+        out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+        out.extend_from_slice(&body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+    for offset in offsets.values() {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    let tail = format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+    out.extend_from_slice(tail.as_bytes());
+    let at = out
+        .windows(L.len())
+        .position(|w| w == L.as_bytes())
+        .unwrap();
+    let length = format!("/L {:<10}", out.len());
+    out[at..at + L.len()].copy_from_slice(length.as_bytes());
+    out
 }
 
 /// Whether `bytes` hold `text` anywhere.

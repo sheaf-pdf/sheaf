@@ -28,8 +28,6 @@ pub struct Properties {
     pub pages: u32,
     /// `/MarkInfo /Marked`: a tagged (accessible) PDF.
     pub tagged: bool,
-    /// Fast Web View.
-    pub linearized: bool,
     pub security: Option<Security>,
     pub fonts: Vec<Font>,
     /// The font walk stopped early (a huge file).
@@ -67,8 +65,9 @@ pub enum Embedding {
 const FONT_PAGE_LIMIT: usize = 5_000;
 
 /// The properties of `src`: its strings decrypted as it's read, its
-/// security from the `/Encrypt` it keeps, Fast Web View from the
-/// linearization its first bytes declare.
+/// security from the `/Encrypt` it keeps. Fast Web View isn't one: the
+/// dialog reads it from the file it shows, the saved record's when a save
+/// wrote it ([`lopdf::XrefFacts::linearized`]).
 pub fn read(src: &Source) -> Properties {
     let pdf = src.pdf();
     let info = pdf
@@ -114,7 +113,6 @@ pub fn read(src: &Source) -> Properties {
         modified: text(b"ModDate"),
         pages: src.page_count(),
         tagged,
-        linearized: src.xref().linearized,
         security: pdf.is_encrypted().then(|| security_of(pdf)),
         fonts,
         fonts_truncated,
@@ -394,7 +392,7 @@ mod tests {
         assert_eq!(p.version, "1.7");
         assert_eq!(p.pages, 2);
         assert!(p.tagged);
-        assert!(!p.linearized && p.security.is_none());
+        assert!(p.security.is_none());
     }
 
     #[test]

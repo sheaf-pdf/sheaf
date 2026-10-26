@@ -30,6 +30,10 @@ pub struct PropertiesContext {
     /// The current page's size as shown, in points.
     pub page_size: Option<(f32, f32)>,
     pub dirty: bool,
+    /// Fast Web View of the file shown: as sheaf last read or wrote it
+    /// (its saved record), which an update after it voids (B3), or else
+    /// as the source opened.
+    pub linearized: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -144,7 +148,7 @@ impl PropertiesDialog {
             ("Number of Pages", p.pages.to_string()),
             ("Page Size", size),
             ("Tagged PDF", yes_no(p.tagged)),
-            ("Fast Web View", yes_no(p.linearized)),
+            ("Fast Web View", yes_no(self.ctx.linearized)),
             ("Form", p.form.to_string()),
         ];
         rows.into_iter().map(|(k, v)| row(k, v)).collect()

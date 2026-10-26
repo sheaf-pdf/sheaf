@@ -271,11 +271,12 @@ precommit: (_steps "precommit" "markers plan-check fmt-check locks corpus intero
 # Before a PR merges: the ignored corpus tiers, in full (append_corpus's,
 # the export tier, realize_corpus's pixels and predicate, PDFium's resave
 # of a watermark, the content lexer and the content interpreter against
-# PDFium, codes over scans/, Arlington over what sheaf writes). Two hours
-# or more, the interpreter's tiers about one of them.
+# PDFium, codes over scans/, Arlington over what sheaf writes, and the
+# size of an unsigned Save As beside qpdf's). Two hours or more, the
+# interpreter's tiers about one of them.
 [doc("Before a PR merges: every ignored corpus tier (two hours or more)")]
 [group('local')]
-premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington _corpus-ran")
+premerge: (_steps "premerge" "tier-append tier-exports tier-realize tier-watermark tier-lexer tier-interp tier-codes tier-arlington tier-size _corpus-ran")
 
 [doc("The plan agrees with itself: tables against files, status lines, links, size budgets (AGENTS.md)")]
 [group('local')]
@@ -334,8 +335,9 @@ golden-update:
 # ----- Corpus tiers (ignored by default) ----------------------------------
 
 # append_corpus's tiers: deleted means deleted, crop, watermark, header and
-# footer, OCR over the forms and over scans/.
-[doc("append_corpus's tiers (deleted means deleted, crop, watermark, header, OCR)")]
+# footer, OCR over the forms and over scans/, and the pool sample's
+# linearization against qpdf before and after an Append.
+[doc("append_corpus's tiers (deleted means deleted, crop, watermark, header, OCR, linearization)")]
 [group('corpus')]
 tier-append:
     scripts/test-capped.sh cargo test -p sheaf-ops --test append_corpus -- --ignored --nocapture
@@ -344,6 +346,16 @@ tier-append:
 [group('corpus')]
 tier-exports:
     scripts/test-capped.sh cargo test -p sheaf-ops --test exports -- --ignored --nocapture
+
+# An unsigned Save As of every IRS form and every pool sample file: each
+# output's size against its source's, beside qpdf's with object streams
+# unpacked and packed again, a row per file and the growth by group (the
+# log, target/just/tier-size.log, keeps the rows); each output reopens
+# and passes qpdf --check no worse than its source. About 30 s.
+[doc("An unsigned Save As's size against the source's and qpdf's, IRS forms and the pool sample (SHEAF_SIZE_ONLY narrows it)")]
+[group('corpus')]
+tier-size:
+    scripts/test-capped.sh cargo test -p sheaf-ops --test rewrite_size -- --ignored --nocapture
 
 # realize_corpus: the predicate and pixels over the pool, forms and scans/.
 [doc("realize_corpus: the predicate and pixels over the pool, forms and scans/")]

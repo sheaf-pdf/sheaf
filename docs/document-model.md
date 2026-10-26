@@ -2927,7 +2927,9 @@ scanned 7k, the synthetic with leading junk, and the synthetic with a
 broken `startxref`). The first, middle and last pages are edited; two
 others are left alone. A base is in each class it has: classic table or
 xref stream (its newest section's kind, which the overlay writes), hybrid
-(`/XRefStm`), linearized, damaged (lopdf rebuilt the xref, or lopdf and
+(`/XRefStm`), linearized (`/Linearized` within 1,024 bytes of the
+header, the check before B3, which since counts only a linearization
+that holds), damaged (lopdf rebuilt the xref, or lopdf and
 PDFium count different pages), leading junk, encrypted. Times are
 medians, base → overlay, of the middle edited page drawn live at
 1,024 px; cold is the first render in a fresh engine, warm the next.

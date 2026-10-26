@@ -16,7 +16,8 @@ in this order:
      70 use them; fw4.pdf by 178%) and a sample of 377 safedocs files by
      15%. Every Save As to a new unsigned file pays it, and so does
      every save that removes content or replaces text, and every export.
-     First, the same measurement through sheaf's own Rewrite.
+     Through sheaf's own Rewrite (slice 1, against the source's bytes):
+     the IRS forms by a median 50%, fw4.pdf by 123%.
    - **Packing on Rewrite** in `serialize/`, with ISO 32000-1 7.5.7's
      exclusions and each container encrypted once (the M10.5 plan's
      §20; [build-or-adopt](../research/build-or-adopt/README.md) entry 66).
@@ -24,7 +25,7 @@ in this order:
      reuses the grouping: page 1's objects never share a container with
      later pages'.
    - **B3:** Properties says whether Fast Web View still holds after an
-     incremental save.
+     incremental save (done in slice 1).
 3. **The linearization crate** (Fast Web View, moved from M14): page 1's
    objects first, a linearization dictionary and hint tables, so a
    viewer reading byte ranges over a network shows page 1 before the
@@ -44,8 +45,13 @@ in this order:
        (padded to a fixed width, so the offsets settle in one more
        pass), the hint tables and the first page's cross-reference
        section.
-   - **A checker** says whether a file is linearized and still holds.
-     It is B3's check, and a test oracle beside qpdf's.
+   - **A checker** says whether a file is linearized and still holds:
+     the full check (the hint tables, the first page's section), and a
+     test oracle beside qpdf's. B3's minimum, Annex F's `/L` against the
+     file's length, is in the lazy reader since object streams' slice 1.
+     It wants the whole dictionary within the first 1,024 bytes (Annex
+     F), where qpdf wants only its start there: the checker decides
+     which on purpose.
    - **Written from ISO 32000-1 Annex F,** with qpdf (Apache-2.0) as
      the reference and the oracle, not translated, so the crate stays
      MIT OR Apache-2.0 with no notices for code taken from qpdf.

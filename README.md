@@ -175,7 +175,7 @@ first. [ROADMAP.md](ROADMAP.md) has the detail.
 
 | Work | What it brings |
 |---|---|
-| Object streams | Smaller files when sheaf rewrites a file (a Save As, an export, a save that removes something), which today can nearly double an IRS form's size |
+| Object streams | Smaller files when sheaf rewrites a file (a Save As, an export, a save that removes something), which today grows an IRS form by half, some to more than double |
 | Fast Web View | Linearized files, which show page 1 before the rest arrives over a network; a choice in Save As |
 | Leaner rewrites | Rewriting a large file without loading all of it into memory |
 | `sheaf search` | Text search across files and folders from the command line |

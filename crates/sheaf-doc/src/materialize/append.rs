@@ -472,7 +472,9 @@ pub fn append(
             id: update.id.clone(),
             header_offset: record.xref.header_offset,
             hybrid: false,
-            linearized: record.xref.linearized,
+            // An update voids a linearization: its `/L` is no longer the
+            // file's length (Annex F; B3).
+            linearized: false,
             sections: record.xref.sections + 1,
         },
         None => record.xref.clone(),
