@@ -16,8 +16,6 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod annot;
-#[cfg(any(test, feature = "fixtures"))]
-pub mod arlington;
 pub mod attachments;
 pub mod change;
 pub mod content;

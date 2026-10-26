@@ -35,3 +35,5 @@ sheaf-doc = { workspace = true, features = ["fixtures"] }
 sheaf-image = { workspace = true, features = ["fixtures"] }
 # The corpus's pool inventory is gzipped (realize_corpus's sample).
 flate2 = "1"
+# What sheaf writes, held to the Arlington model (tests/arlington.rs).
+pdf-lint.workspace = true

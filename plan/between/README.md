@@ -1,6 +1,6 @@
 # Between milestones
 
-Status: in progress
+Status: paused · after item 3, until Greg says
 
 Ordered by reach, not milestone (Greg, 2026-10-23). These come first,
 in this order:
@@ -14,13 +14,14 @@ in this order:
    the IRS forms now shrink by a median 12.9% on a Save As (they grew by
    half), and Properties' Fast Web View holds after an incremental save
    (B3). Packing on Append is [B62](../backlog/B62.md).
-3. **sheaf's Arlington checks on pdf-lint:** in progress,
-   [pdf-lint.md](pdf-lint.md) (Greg, 2026-10-26). sheaf's checker was
-   extracted and published as
-   [pdf-lint](https://github.com/sheaf-pdf/pdf-lint); the tests move to
-   it as a dev-dependency, CI installs it with `setup-pdf-lint`, and
-   `sheaf_doc::arlington` and the vendored model go. **Then the work
-   between milestones pauses** until Greg says.
+3. ~~**sheaf's Arlington checks on pdf-lint**~~: done
+   ([pdf-lint.md](../complete/pdf-lint.md)). sheaf's Arlington tests check what it
+   writes with [pdf-lint](https://github.com/sheaf-pdf/pdf-lint) 0.1.0,
+   a dev-dependency: each file is read from its bytes, with qpdf
+   decoding what's packed or encrypted, and CI installs that qpdf on all
+   three platforms with `setup-pdf-lint`. sheaf's checker and the
+   vendored model are gone, and pdf-lint's corrections closed B45.
+   **The work between milestones is paused** until Greg says.
 4. **The linearization crate** (Fast Web View, moved from M14): page 1's
    objects first, a linearization dictionary and hint tables, so a
    viewer reading byte ranges over a network shows page 1 before the

@@ -138,6 +138,11 @@ doctor:
     for d in vendor/pdfium vendor/ocr; do printf '  %-16s %s\n' "$d" "$( [ -e "$d" ] && echo present || echo 'MISSING (just fetch)')"; done
     echo "Oracles (docs/oracles.md):"
     have qpdf --version; have pdftotext -v; have mutool -v; have tiffinfo; have java -version
+    qpdf_v=$("${PDF_LINT_QPDF:-qpdf}" --version 2>/dev/null | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)
+    if [ -z "$qpdf_v" ]; then qpdf_ok="MISSING: the Arlington tests need qpdf 11.9 or later (docs/building.md)"
+    elif [ "$(printf '%s\n' 11.9 "$qpdf_v" | sort -V | head -1)" = 11.9 ]; then qpdf_ok="$qpdf_v, new enough"
+    else qpdf_ok="$qpdf_v, older than 11.9: set PDF_LINT_QPDF (docs/building.md)"; fi
+    printf '  %-16s %s\n' "pdf-lint's qpdf" "${PDF_LINT_QPDF:-qpdf} $qpdf_ok"
     nvm_bin=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | tail -1 || true)
     [ -n "$nvm_bin" ] && export PATH="$nvm_bin:$PATH"
     have node --version
@@ -382,10 +387,14 @@ tier-lexer:
 tier-codes:
     scripts/test-capped.sh cargo test -p sheaf-ops --test codes -- --ignored --nocapture
 
-# What sheaf writes on every form held to the Arlington PDF Model (backlog
-# F22): a mark, a header and footer and recognized text, saved as planned,
-# then a Rewrite, each save's objects checked; the form's own aren't.
-[doc("Arlington over what sheaf writes on every form: a mark, a header and footer, recognized text, then a Rewrite (SHEAF_ARLINGTON_ONLY narrows it)")]
+# What sheaf writes on every form held to the Arlington PDF Model with
+# pdf-lint (backlog F22): a mark, a header and footer and recognized text,
+# saved as planned, then a Rewrite, each save's objects checked; the
+# form's own aren't. Needs qpdf 11.9 or later (PDF_LINT_QPDF, else the
+# one on the PATH). SHEAF_ARLINGTON_ONLY=<paths, comma-separated> narrows
+# it to a few forms; SHEAF_ARLINGTON_SAVES=<file> writes each save's
+# counts there, a line each, to set one run beside another.
+[doc("pdf-lint over what sheaf writes on every form: a mark, a header and footer, recognized text, then a Rewrite; needs qpdf (SHEAF_ARLINGTON_ONLY narrows it, SHEAF_ARLINGTON_SAVES writes each save's counts)")]
 [group('corpus')]
 tier-arlington:
     scripts/test-capped.sh cargo test -p sheaf-ops --test arlington -- --ignored --nocapture

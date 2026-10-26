@@ -5,9 +5,18 @@
 //! copy, print's file with its markup and without, Remove Blanks'
 //! rejects), Combine's file, the comment summary, pages made of images
 //! and of a scan, blank pages, and the stamp library's stamps. Each is
-//! checked against the vendored model (`sheaf_doc::arlington`).
+//! checked with pdf-lint (sheaf-pdf/pdf-lint), against the model it
+//! embeds, which it corrects where the model contradicts ISO 32000-2. Each
+//! file is read as pdf-lint reads one, from its bytes, so what a writer
+//! gets wrong below its objects is found too (a `/Length` that doesn't end
+//! at `endstream`, a key written twice), and qpdf decodes what's packed
+//! into object streams or encrypted: `PDF_LINT_QPDF` names one, else it's
+//! the one on the `PATH`, and a test that needs it and finds none fails,
+//! saying so ([`lint::read`]). What the version checked at deprecates is a
+//! finding, and a field merged with its widget is checked as both tables
+//! ([`lint::options`]).
 //!
-//! What's held is what sheaf wrote (`Hold::written`): an Append's
+//! What's held is what sheaf wrote ([`lint::written`]): an Append's
 //! section, or the objects a Rewrite or an export derived, never a copy
 //! of a file's object; a file sheaf makes whole of its own (blank pages,
 //! an image's stamp) is held whole. Each object is built whole (a mark,
@@ -15,17 +24,20 @@
 //! sheaf's) or merged over a source's dictionary (the catalog, a page, a
 //! field), as its key says. A finding in a merged object that a file the
 //! document read has too, in any of its objects, checked at the version of
-//! the file written, is that file's, carried (`Report::beyond`); any other
-//! fails its test unless `arlington_allowed.tsv` holds it for a backlog
-//! entry, and a row there that no test needs fails too. Each test names
-//! the tables it must have checked, so one that holds the wrong objects
-//! fails too. A Rewrite or an export of a file that used object streams
+//! the file written, is that file's, carried ([`answered`]); a reader's
+//! finding in the file's own structure (its cross-references, header and
+//! `%%EOF`) in what sheaf wrote is never carried ([`lint::own_structure`]).
+//! Any other fails its test unless `arlington_allowed.tsv` holds it for a
+//! backlog entry, and a row there that no test needs fails too. Each test
+//! names the tables it must have checked, so one that holds the wrong
+//! objects fails too. A Rewrite or an export of a file that used object streams
 //! (its cross-references a stream, or a hybrid's) packs objects into
 //! object streams of its own, built whole and held, unless the encryption
 //! it writes doesn't pack ([`packs`]): each test checks one as
-//! `ObjectStream` exactly when what it saved packed. The encrypted
-//! forms are written with a table and with a stream, so packed object
-//! streams are checked encrypted too.
+//! `ObjectStream` exactly when what it saved packed. pdf-lint's walk
+//! leaves object streams out, and [`lint::check`] holds them to the table
+//! beside it. The encrypted forms are written with a table and with a
+//! stream, so packed object streams are checked encrypted too.
 //!
 //! The recovery sidecar isn't here: its record isn't kept, and the
 //! emission that writes it is a save's, an Append's section or a
@@ -39,12 +51,14 @@
 //! form's own objects: each is given a note, a header and footer and a
 //! recognized word, saved as planned, then rewritten, and what each save
 //! wrote is checked, a fault the form has carried as above. It prints what
-//! it checked: objects by table, keys, the checks not made and why, and
-//! the keys the model doesn't list; run on every form, its counts of forms
-//! and saves are asserted ([`FORMS`]). Skips when there's no corpus (see
+//! it checked: objects by table, keys, the checks not made and why, the
+//! keys the model doesn't list, and those the version deprecates or
+//! readers ignore; run on every form, its counts of forms and saves are
+//! asserted ([`FORMS`]). Skips when there's no corpus (see
 //! `sheaf_doc::forms::corpus`).
 
 mod common;
+mod lint;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -52,17 +66,17 @@ use std::sync::Arc;
 
 use common::{How, StrategyKind, scratch};
 use in_progress::NoProgress;
+use lint::{check, options, own_structure, read, written};
 use lopdf::xref::XrefType;
 use lopdf::{LazyPdf, Object, ObjectId, XrefKind, dictionary};
-use sheaf_doc::arlington::{
-    Allowance, Allowances, Finding, Hold, Made, Report, Rule, Unlisted, check, check_at,
+use pdf_lint::{
+    Allowance, Allowances, Finding, Hold, Made, Options, Report, Rule, Unlisted, Version,
     file_version,
 };
 use sheaf_doc::export::{Export, ExportFrom, Out, PRINT_ANSWERS, materialized};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::fixture::{Form, every_kind, every_mark_kind, mark_blobs, note};
 use sheaf_doc::labels::LabelSpec;
-use sheaf_doc::materialize::emit::PdfVersion;
 use sheaf_doc::materialize::{Encryption, ObjKey};
 use sheaf_doc::serialize::fixture as crypt;
 use sheaf_doc::source::OpenError;
@@ -92,7 +106,7 @@ struct Checked {
     what: String,
     report: Report,
     /// The file's version, as it was checked at.
-    version: PdfVersion,
+    version: Version,
     /// The checks of the files the document read, every object held as
     /// merged, at the version of the file written: what a merged object
     /// may carry ([`files_read`]).
@@ -115,7 +129,8 @@ fn packs(doc: &Document, encryption: Encryption) -> bool {
     (xref.kind == XrefKind::Stream || xref.hybrid) && crypt.is_none_or(|c| c.packs())
 }
 
-/// `bytes`, a file sheaf wrote, opened with `password` to be checked.
+/// `bytes`, a file sheaf wrote, opened with `password` as sheaf opens one:
+/// what its hold is read from ([`written`]).
 fn reopened(bytes: &[u8], password: Option<&str>) -> Result<LazyPdf, String> {
     let limits = &sheaf_doc::source::Limits::DEFAULT.reader;
     LazyPdf::open(Arc::<[u8]>::from(bytes), password, limits)
@@ -124,22 +139,24 @@ fn reopened(bytes: &[u8], password: Option<&str>) -> Result<LazyPdf, String> {
 
 /// `bytes`, a file `what` wrote, opened with `password`, and checked,
 /// holding what `hold` says of it; what a merged object may carry is what
-/// the files `read` read have.
+/// the files `store` read have.
 fn checked(
     what: &str,
     bytes: &[u8],
     password: Option<&str>,
     hold: impl FnOnce(&LazyPdf) -> Hold,
-    read: &Store,
+    store: &Store,
 ) -> Checked {
     let pdf = reopened(bytes, password).unwrap();
-    let report = check(&pdf, bytes, &hold(&pdf));
-    let version = file_version(&pdf);
+    let file = read(what, bytes, password);
+    let mut report = check(&file, &hold(&pdf), &options());
+    own_structure(&mut report, 0);
+    let version = file_version(&file);
     Checked {
         what: what.into(),
         report,
         version,
-        sources: files_read(read, version),
+        sources: files_read(store, version),
         packs: false,
     }
 }
@@ -148,20 +165,24 @@ fn checked(
 /// `version`, a file's sheaf wrote: what a merged object of a document of
 /// `store`'s, written in that file, may carry. What sheaf made in memory
 /// carries nothing.
-fn files_read(store: &Store, version: PdfVersion) -> Vec<Report> {
-    let file = |kind: &BlobKind| {
-        matches!(
-            kind,
-            BlobKind::Pdf {
-                origin: Origin::File(_),
-                ..
-            }
-        )
+fn files_read(store: &Store, version: Version) -> Vec<Report> {
+    let at = Options {
+        version: Some(version),
+        ..options()
     };
-    (store.sources().iter())
-        .filter(|src| file(src.blob().kind()))
-        .map(|src| check_at(src.pdf(), src.bytes(), &Hold::All(Made::Merged), version))
-        .collect()
+    let mut reports = Vec::new();
+    for src in store.sources() {
+        let BlobKind::Pdf {
+            origin: Origin::File(path),
+            ..
+        } = src.blob().kind()
+        else {
+            continue;
+        };
+        let file = read(&path.display().to_string(), src.bytes(), src.password());
+        reports.push(check(&file, &Hold::All(Made::Merged), &at));
+    }
+    reports
 }
 
 /// `doc` saved to `path` `how`, whatever the plan would decide, or as the
@@ -202,7 +223,7 @@ fn save_checked(
     from: usize,
     strategy: StrategyKind,
     bytes: &[u8],
-) -> Result<(Report, PdfVersion), String> {
+) -> Result<(Report, Version), String> {
     let record = doc.saved_record().ok_or("the save left no record")?;
     if record.strategy != strategy {
         return Err(format!(
@@ -211,29 +232,32 @@ fn save_checked(
         ));
     }
     let appended = (strategy == StrategyKind::Append).then_some((bytes, from));
-    let pdf = reopened(bytes, doc.primary().password())?;
-    let hold = Hold::written(&record.map, doc.state(), doc.store(), &pdf, appended);
-    let report = check(&pdf, bytes, &hold);
+    let password = doc.primary().password();
+    let pdf = reopened(bytes, password)?;
+    let hold = written(&record.map, doc.state(), doc.store(), &pdf, appended);
+    let file = read(&format!("{strategy:?}"), bytes, password);
+    let mut report = check(&file, &hold, &options());
+    own_structure(&mut report, appended.map_or(0, |(_, from)| from));
     let Hold::Only(objects) = &hold else {
         return Err(format!("{strategy:?}: a save holds the objects it wrote"));
     };
     if objects.keys().all(|&id| Some(id) == report.trailer) {
         return Err(format!("{strategy:?}: nothing held but the trailer"));
     }
-    Ok((report, file_version(&pdf)))
+    Ok((report, file_version(&file)))
 }
 
 /// What `doc`'s last save wrote, a file of its own written whole, checked
 /// as [`held`] checks a Rewrite: what a merged object may carry is what
-/// the files `read` read have.
-fn last_saved(what: &str, doc: &Document, read: &Store) -> Checked {
+/// the files `store` read have.
+fn last_saved(what: &str, doc: &Document, store: &Store) -> Checked {
     let record = doc.saved_record().unwrap();
     assert_eq!(record.strategy, StrategyKind::Rewrite, "{what}");
     let bytes = std::fs::read(&*record.path).unwrap();
-    let hold = |pdf: &LazyPdf| Hold::written(&record.map, doc.state(), doc.store(), pdf, None);
+    let hold = |pdf: &LazyPdf| written(&record.map, doc.state(), doc.store(), pdf, None);
     Checked {
         packs: packs(doc, Encryption::Keep),
-        ..checked(what, &bytes, doc.primary().password(), hold, read)
+        ..checked(what, &bytes, doc.primary().password(), hold, store)
     }
 }
 
@@ -245,7 +269,7 @@ fn exported(what: &str, doc: &Document, make: impl FnOnce(ExportFrom) -> Export)
     let e = make(doc.export_from(Actor::User));
     let packs = packs(doc, e.profile.encryption);
     let (state, out) = materialized(e, &PRINT_ANSWERS, &NoProgress).unwrap();
-    let hold = |pdf: &LazyPdf| Hold::written(&out.record.map, &state, doc.store(), pdf, None);
+    let hold = |pdf: &LazyPdf| written(&out.record.map, &state, doc.store(), pdf, None);
     let password = doc.primary().password();
     Checked {
         packs,
@@ -270,7 +294,7 @@ fn clean_against(checked: &Checked, tables: &[&str], allowances: &Allowances) {
     let sources: Vec<&Report> = checked.sources.iter().collect();
     let (what, report) = (&checked.what, &checked.report);
     println!("{what}: {report}");
-    let beyond = report.beyond(&sources);
+    let beyond = answered(report, &sources);
     let left = left(&beyond, checked.version, allowances);
     println!(
         "{} findings: {} carried from the files read, {} allowed",
@@ -299,9 +323,18 @@ fn clean_against(checked: &Checked, tables: &[&str], allowances: &Allowances) {
     );
 }
 
+/// The findings of `report`, of what sheaf wrote, that sheaf answers for:
+/// all of those in an object it built, and of those in one it merged over
+/// a source's dictionary, any that no object of the files read, `sources`,
+/// has a like one of (`Report::beyond`; matching each object to its own
+/// source is backlog B46's).
+fn answered<'a>(report: &'a Report, sources: &[&Report]) -> Vec<&'a Finding> {
+    report.beyond(sources)
+}
+
 /// The findings of `beyond`, in a file of `version` a test made, that no
 /// allowance of `allowances` holds.
-fn left(beyond: &[&Finding], version: PdfVersion, allowances: &Allowances) -> Vec<String> {
+fn left(beyond: &[&Finding], version: Version, allowances: &Allowances) -> Vec<String> {
     (beyond.iter())
         .filter(|f| allowances.allows(f, version, None).is_none())
         .map(ToString::to_string)
@@ -620,9 +653,11 @@ sheaf_doc::both_ways!(merged_fields_hold, merged_fields_hold_appended: merged_fi
 /// form's document: one whose fields are each one object with their
 /// widget, and one whose fields are apart from them. The form, each field
 /// and widget merged into it, and the appearances they bring. A field one
-/// object with its widget is held to the widget's table, from the page's
-/// `/Annots` or the form's `/Fields` alike: the model's `ArrayOfFields`
-/// links `AnnotWidget` too, which its `/Subtype` fits best.
+/// object with its widget is held to both tables at once, the widget's and
+/// the field's by its `/FT` and `/Ff`, from the page's `/Annots` or the
+/// form's `/Fields` alike, as pdf-lint holds one by default: the objects
+/// held as two tables are counted, and so pinned (the Rewrite's 12, the
+/// Append's 8), so a check that took one table fails.
 fn merged_fields(how: How) {
     let dir = scratch(&format!("arlington-fields-{how:?}"));
     let path = common::write(&dir, "form.pdf", &mut common::two_page_form());
@@ -655,6 +690,11 @@ fn merged_fields(how: How) {
             "AppearanceCharacteristics",
         ],
     );
+    let two_tables = match how {
+        How::Rewritten => 12,
+        How::Appended => 8,
+    };
+    assert_eq!(checked.report.two_tables, two_tables, "{}", checked.report);
 }
 
 /// `f` with each field that's one object with its widget made two, the
@@ -836,21 +876,137 @@ fn every_allowance_for_any_file_is_needed() {
     );
 }
 
-/// Every allowance names a backlog entry that's open: a file
+/// Every allowance's reason starts with the backlog entry it's held for
+/// (`B12: …`, or `F12: …`), and the entry is open: a file
 /// `plan/backlog/B12.md` (a closed entry's moves to
 /// `plan/complete/backlog-closed.md`).
 #[test]
 fn every_allowance_names_an_open_backlog_entry() {
-    let backlog = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plan/backlog");
+    let backlog = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plan/backlog");
+    let open = |a: &&Allowance| {
+        let entry = entry(a);
+        let number = (entry.strip_prefix('B')).or_else(|| entry.strip_prefix('F'));
+        number.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            && backlog.join(format!("{entry}.md")).is_file()
+    };
     let unknown: Vec<String> = (allowances().rows())
-        .filter(|a| !backlog.join(format!("{}.md", a.entry)).is_file())
+        .filter(|a| !open(a))
         .map(named)
         .collect();
     assert!(
         unknown.is_empty(),
-        "rows whose entry isn't open in plan/backlog/:\n{}",
+        "rows whose reason doesn't start with an entry open in plan/backlog/:\n{}",
         unknown.join("\n")
     );
+}
+
+/// The carried rule ([`answered`]) matches a merged object's finding
+/// against every object of the sources, not the one it was emitted over
+/// (backlog B46): a page sheaf wrote without its `/MediaBox` is carried
+/// when any page of a source lacks one. Matching each object to its own
+/// source is B46's, and flips this.
+#[test]
+fn a_merged_objects_finding_is_carried_from_any_object_of_a_source() {
+    let missing = |n: u32, made: Made| Finding {
+        object: Some((n, 0)),
+        made,
+        path: format!("Root/Pages/Kids[{n}]"),
+        table: "PageObject".to_string(),
+        key: "MediaBox".to_string(),
+        rule: Rule::Missing,
+        value: "absent".to_string(),
+        at: None,
+    };
+    let written = Report {
+        findings: vec![missing(3, Made::Merged), missing(4, Made::Built)],
+        ..Report::default()
+    };
+    let another_page = Report {
+        findings: vec![missing(9, Made::Merged)],
+        ..Report::default()
+    };
+    let answered = answered(&written, &[&another_page]);
+    assert_eq!(answered, [&missing(4, Made::Built)]);
+}
+
+/// A fault in the file's own structure that sheaf wrote is sheaf's even
+/// when the file it saved over has one like it, where pdf-lint holds a
+/// reader's finding of no object as merged ([`own_structure`]): each
+/// cross-reference row cut to 19 bytes, in an Append's section and in a
+/// Rewrite's file, over a form whose rows are 19 bytes too. The form's
+/// own, before the Append's section, is carried.
+#[test]
+fn a_fault_in_the_structure_sheaf_writes_is_never_carried() {
+    for how in [How::Appended, How::Rewritten] {
+        let dir = scratch(&format!("arlington-rows-{how:?}"));
+        let mut f = Form::new(1);
+        f.pdf.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+        let path = dir.join("form.pdf");
+        std::fs::write(&path, misshapen(&f.bytes(), 0)).unwrap();
+        let mut doc = common::open(&path);
+        let p0 = doc.page(0).unwrap();
+        doc.commit_ops(vec![fx::add(p0, &note())], "Note").unwrap();
+        let from = section_start(&doc);
+        let (strategy, bytes) = common::saved(&mut doc, &path, how);
+        let append = strategy == StrategyKind::Append;
+        let from = if append { from } else { 0 };
+        let bytes = misshapen(&bytes, from);
+        let (report, version) = save_checked(&doc, from, strategy, &bytes).unwrap();
+        let rows = |report: &Report| {
+            (report.findings.iter())
+                .filter(|f| f.rule == Rule::Reader && f.value.contains("20 bytes"))
+                .count()
+        };
+        let sources = files_read(doc.store(), version);
+        assert_eq!(
+            sources.iter().map(rows).sum::<usize>(),
+            1,
+            "the form's rows"
+        );
+        let sources: Vec<&Report> = sources.iter().collect();
+        let answered = Report {
+            findings: answered(&report, &sources).into_iter().cloned().collect(),
+            ..Report::default()
+        };
+        assert_eq!(rows(&answered), 1, "{strategy:?}: {report}");
+        let carried = rows(&report) - rows(&answered);
+        assert_eq!(carried, usize::from(append), "{strategy:?}: {report}");
+    }
+}
+
+/// `bytes` with each cross-reference table's rows from byte `from` on
+/// cut to 19 bytes, the last before their end of line dropped and the
+/// end of line a lone `\n`, as some writers write them. The tables'
+/// `xref` keywords, which `startxref` and `/Prev` name, don't move.
+fn misshapen(bytes: &[u8], from: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(at) = (from.max(i)..bytes.len()).find(|&j| bytes[j..].starts_with(b"\nxref")) {
+        let mut j = at + b"\nxref".len();
+        while matches!(bytes[j], b'\r' | b'\n') {
+            j += 1;
+        }
+        out.extend_from_slice(&bytes[i..j]);
+        loop {
+            let end = j + bytes[j..].iter().position(|&b| b == b'\n').unwrap() + 1;
+            let header: Vec<&str> = (std::str::from_utf8(&bytes[j..end]).unwrap_or(""))
+                .split_whitespace()
+                .collect();
+            let [_, count] = header[..] else {
+                break;
+            };
+            out.extend_from_slice(&bytes[j..end]);
+            j = end;
+            for _ in 0..count.parse::<usize>().unwrap() {
+                out.extend_from_slice(&bytes[j..j + 18]);
+                out.push(b'\n');
+                j += 20;
+            }
+        }
+        i = j;
+    }
+    out.extend_from_slice(&bytes[i..]);
+    out
 }
 
 /// B43's rows hold the standard 14 fonts' widths only from PDF 2.0, as
@@ -897,7 +1053,7 @@ fn the_fonts_widths_are_allowed_only_where_pdf_2_0_asks_for_them() {
             |_| Hold::All(Made::Built),
             &Store::new(),
         );
-        let fonts: Vec<&Finding> = (checked.report.beyond(&[]).into_iter())
+        let fonts: Vec<&Finding> = (answered(&checked.report, &[]).into_iter())
             .filter(|f| f.table == "FontType1")
             .collect();
         assert_eq!(fonts.len(), 4, "{}: {}", checked.what, checked.report);
@@ -1124,7 +1280,7 @@ fn summary_held(summary: &Document, layout: Layout) {
     let record = summary.saved_record().unwrap();
     let bytes = std::fs::read(&*record.path).unwrap();
     let pdf = reopened(&bytes, None).unwrap();
-    let hold = Hold::written(&record.map, summary.state(), summary.store(), &pdf, None);
+    let hold = written(&record.map, summary.state(), summary.store(), &pdf, None);
     let Hold::Only(held) = hold else {
         panic!("a save holds the objects it wrote");
     };
@@ -1346,13 +1502,13 @@ fn a_page_stamp_holds() {
     let art = common::write(&dir, "art.pdf", &mut Form::new(1));
     let (collection, _) = sheaf_ops::stamps::add_pdf_page(&dir, "Pages", &art, 0, None).unwrap();
     let stamp = sheaf_ops::stamps::stamp_pdf(&collection, 0).unwrap();
-    let read = Store::new();
+    let store = Store::new();
     let kind = BlobKind::file(&art, None);
-    let _art = read
+    let _art = store
         .open(std::fs::read(&art).unwrap().into(), kind)
         .unwrap();
     let merged = |_: &LazyPdf| Hold::All(Made::Merged);
-    let checked = checked("Page stamp", &stamp, None, merged, &read);
+    let checked = checked("Page stamp", &stamp, None, merged, &store);
     clean(&checked, &["Catalog", "PageTreeNodeRoot", "PageObject"]);
 }
 
@@ -1361,6 +1517,15 @@ fn a_page_stamp_holds() {
 /// (`SHEAF_ARLINGTON_ONLY=forms/irs/f1040.pdf,…`): for looking at a few
 /// files by hand. Unset, it takes every file.
 const ARLINGTON_ONLY: &str = "SHEAF_ARLINGTON_ONLY";
+
+/// A file [`what_sheaf_writes_on_every_form_holds_to_arlington`] writes
+/// each save's counts to, a line each (`SHEAF_ARLINGTON_SAVES=saves.tsv`):
+/// for setting one run beside another by hand. Its columns are the corpus
+/// file, the save, the objects checked (the sum of the counts by table, in
+/// which one checked as two tables counts as each), the keys, the
+/// findings, those carried, allowed and left, and the objects checked by
+/// table (`table=n`, space-separated). Unset, it writes none.
+const ARLINGTON_SAVES: &str = "SHEAF_ARLINGTON_SAVES";
 
 /// The note's text on every corpus file's first page, and the word
 /// recognized there.
@@ -1428,6 +1593,25 @@ struct SaveChecked {
     left: Vec<String>,
 }
 
+impl SaveChecked {
+    /// This save of the corpus file `file`, as a line of the file
+    /// [`ARLINGTON_SAVES`] names.
+    fn line(&self, file: &str) -> String {
+        let r = &self.report;
+        let objects: usize = r.checked.values().sum();
+        let carried: usize = self.carried.values().sum();
+        let (allowed, left) = (self.allowed.len(), self.left.len());
+        let findings = carried + allowed + left;
+        let tables: Vec<String> = (r.checked.iter())
+            .map(|(table, n)| format!("{table}={n}"))
+            .collect();
+        let (what, keys, tables) = (&self.what, r.keys, tables.join(" "));
+        format!(
+            "{file}\t{what}\t{objects}\t{keys}\t{findings}\t{carried}\t{allowed}\t{left}\t{tables}\n"
+        )
+    }
+}
+
 /// Every corpus form given what sheaf writes most and saved as planned,
 /// then rewritten, and what each save wrote held to the Arlington model:
 /// a note and a recognized word on its first page and a header and footer
@@ -1438,12 +1622,14 @@ struct SaveChecked {
 /// an object merged over the form's that the form has too. The counts are
 /// printed: saves by what they were, objects checked by table, keys, the
 /// checks not made and what stood in their way, the keys the model doesn't
-/// list, the findings carried and allowed, and the allowances that allowed
-/// nothing here. A save that held nothing but its trailer fails. Run on
-/// every form, the counts of forms opened and not, and of saves, are
-/// asserted against their baseline ([`FORMS`]), so a form that stops
-/// opening fails too; and each allowance for one corpus file must have
-/// allowed a finding.
+/// list, those the version deprecates and those readers ignore, the
+/// findings carried and allowed, and the allowances that allowed nothing
+/// here. A save that held nothing but its trailer fails. Run on every
+/// form, the counts of forms opened and not, and of saves, are asserted
+/// against their baseline ([`FORMS`]), so a form that stops opening fails
+/// too; and each allowance for one corpus file must have allowed a
+/// finding. Each save's counts go to the file [`ARLINGTON_SAVES`] names,
+/// when it names one.
 #[test]
 #[ignore = "corpus tier: cargo test -p sheaf-ops --test arlington -- --ignored --nocapture"]
 fn what_sheaf_writes_on_every_form_holds_to_arlington() {
@@ -1458,6 +1644,7 @@ fn what_sheaf_writes_on_every_form_holds_to_arlington() {
     });
     let mut totals = Totals::default();
     let mut failed = BTreeMap::new();
+    let mut lines = String::new();
     for (entry, outcome) in entries.iter().zip(outcomes) {
         match outcome {
             Outcome::Unopened(why) => *totals.unopened.entry(why).or_default() += 1,
@@ -1468,6 +1655,9 @@ fn what_sheaf_writes_on_every_form_holds_to_arlington() {
                 if !left.is_empty() {
                     failed.insert(entry.path.clone(), left.join("\n  "));
                 }
+                for save in &form.saves {
+                    lines.push_str(&save.line(&entry.path));
+                }
                 totals.add(form);
             }
             Outcome::Failed(e) => {
@@ -1477,6 +1667,9 @@ fn what_sheaf_writes_on_every_form_holds_to_arlington() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+    if let Some(to) = std::env::var_os(ARLINGTON_SAVES) {
+        std::fs::write(to, lines).unwrap();
+    }
     totals.print(entries.len(), &allowances);
     for (path, why) in &failed {
         println!("{path}:\n  {why}");
@@ -1610,9 +1803,9 @@ fn given(doc: &mut Document) -> Result<Option<&'static str>, String> {
 /// by version.
 fn sorted_out(
     what: String,
-    (mut report, version): (Report, PdfVersion),
+    (mut report, version): (Report, Version),
     (doc, file, allowances): (&Document, &str, &Allowances),
-    sources: &mut BTreeMap<PdfVersion, Vec<Report>>,
+    sources: &mut BTreeMap<Version, Vec<Report>>,
 ) -> SaveChecked {
     let merged = report.findings.iter().any(|f| f.made == Made::Merged);
     let sources: Vec<&Report> = match merged {
@@ -1627,7 +1820,7 @@ fn sorted_out(
         *carried.entry(finding.rule).or_default() += 1;
     }
     let (mut allowed, mut left) = (Vec::new(), Vec::new());
-    for finding in report.beyond(&sources) {
+    for finding in answered(&report, &sources) {
         *carried.entry(finding.rule).or_default() -= 1;
         match allowances.allows(finding, version, Some(file)) {
             Some(allowance) => allowed.push(named(allowance)),
@@ -1662,12 +1855,17 @@ struct Totals {
     unchecked: BTreeMap<String, usize>,
     unchecked_at: BTreeMap<String, usize>,
     unlisted: BTreeMap<Unlisted, usize>,
+    /// Keys the version deprecates, and keys the model says readers
+    /// ignore, by table and key.
+    deprecated: BTreeMap<(String, String), usize>,
+    ignored: BTreeMap<(String, String), usize>,
     carried: BTreeMap<Rule, usize>,
     allowed: BTreeMap<String, usize>,
     no_table: usize,
     ties: usize,
     truncated: usize,
     two_contexts: usize,
+    two_tables: usize,
 }
 
 impl Totals {
@@ -1691,6 +1889,12 @@ impl Totals {
             for (u, n) in r.unlisted {
                 *self.unlisted.entry(u).or_default() += n;
             }
+            for (at, n) in r.deprecated {
+                *self.deprecated.entry(at).or_default() += n;
+            }
+            for (at, n) in r.ignored {
+                *self.ignored.entry(at).or_default() += n;
+            }
             for (rule, n) in save.carried {
                 *self.carried.entry(rule).or_default() += n;
             }
@@ -1701,28 +1905,35 @@ impl Totals {
             self.ties += r.ties;
             self.truncated += r.truncated;
             self.two_contexts += r.two_contexts;
+            self.two_tables += r.two_tables;
         }
     }
 
     /// The counts, of `of` files, and the allowances of `allowances` that
-    /// allowed nothing.
+    /// allowed nothing. The objects are counted once each, as pdf-lint's
+    /// `Report::objects` counts them, though one checked as two tables is
+    /// counted as each by table.
     fn print(&self, of: usize, allowances: &Allowances) {
-        let objects: usize = self.checked.values().sum();
+        let objects = self.checked.values().sum::<usize>() - self.two_tables;
         let unchecked: usize = self.unchecked.values().sum();
         let unlisted: usize = self.unlisted.values().sum();
+        let deprecated: usize = self.deprecated.values().sum();
+        let ignored: usize = self.ignored.values().sum();
         println!(
             "{} of {of} files given a note, a header and footer and a recognized word, saved as \
              planned, then rewritten; {objects} objects sheaf wrote checked as {} tables, {} \
              keys; {unchecked} checks not made for predicates that can't be told; {unlisted} \
-             keys the model doesn't list; {} with no table, {} ties, {} truncated, {} in two \
-             contexts",
+             keys the model doesn't list; {deprecated} deprecated; {ignored} that readers \
+             ignore; {} with no table, {} ties, {} truncated, {} in two contexts, {} as two \
+             tables",
             self.files,
             self.checked.len(),
             self.keys,
             self.no_table,
             self.ties,
             self.truncated,
-            self.two_contexts
+            self.two_contexts,
+            self.two_tables
         );
         for (why, n) in &self.unopened {
             println!("  not opened, {why}: {n}");
@@ -1745,6 +1956,12 @@ impl Totals {
         for (u, n) in largest(&self.unlisted, TOP) {
             println!("  unlisted: {}/{} ({}): {n}", u.table, u.key, u.class);
         }
+        for ((table, key), n) in largest(&self.deprecated, TOP) {
+            println!("  deprecated: {table}/{key}: {n}");
+        }
+        for ((table, key), n) in largest(&self.ignored, TOP) {
+            println!("  ignored: {table}/{key}: {n}");
+        }
         for (rule, n) in &self.carried {
             println!("  carried from the form, {rule}: {n}");
         }
@@ -1762,8 +1979,14 @@ impl Totals {
 fn named(allowance: &Allowance) -> String {
     let a = allowance;
     let file = (a.file.as_ref()).map_or(String::new(), |file| format!(" in {file}"));
-    let (entry, table, key, rule, line) = (&a.entry, &a.table, &a.key, a.rule, a.line);
-    format!("{entry} {table}/{key} {rule}{file} (line {line})")
+    let (table, key, rule, line) = (&a.table, &a.key, a.rule, a.line);
+    format!("{} {table}/{key} {rule}{file} (line {line})", entry(a))
+}
+
+/// The backlog entry `allowance` is held for: its reason up to the first
+/// colon (`B40: The model has…`), or none.
+fn entry(allowance: &Allowance) -> &str {
+    (allowance.reason.split_once(": ")).map_or("", |(entry, _)| entry)
 }
 
 /// What stood in the way of a check not made, as the corpus tier counts

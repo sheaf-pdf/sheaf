@@ -525,10 +525,9 @@ fn exported_asks(plan: &mut SavePlan, exported: &DocState) {
 
 /// For tests: what [`run`] writes of `e`, before it's written: the
 /// version its transforms leave, and the file of it the plan makes, its
-/// record saying where each object sits, which the Arlington checks hold
-/// ([`Hold::written`]). Its gates and asks are [`run`]'s.
-///
-/// [`Hold::written`]: crate::arlington::Hold::written
+/// record saying where each object sits, which the Arlington tests hold
+/// (`written` in sheaf-ops' `tests/lint`). Its gates and asks are
+/// [`run`]'s.
 #[cfg(any(test, feature = "fixtures"))]
 pub fn materialized(
     e: Export,

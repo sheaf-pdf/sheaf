@@ -83,6 +83,11 @@ in-progress = "0.1"
 # sheaf-pdf/instance-handoff. Pinned exactly, as its README asks: until
 # 0.1.0 a later alpha may change the API and what two builds share.
 instance-handoff = "=0.1.0-alpha.2"
+# The Arlington checker sheaf's tests hold what it writes to: sheaf's own,
+# extracted and published as sheaf-pdf/pdf-lint. Apache-2.0 only, so a
+# dev-dependency only, never in a shipped build. Pinned exactly, and
+# bumped together with CI's setup-pdf-lint `version`.
+pdf-lint = "=0.1.0"
 
 # Zed's workspace patches for crates GPUI uses, mirrored from the
 # [patch.crates-io] of Zed's Cargo.toml at the snapshot's rev.

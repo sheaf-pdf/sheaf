@@ -33,6 +33,17 @@ lists them):
 Tests run under a memory cap where Linux has a user systemd
 (`scripts/test-capped.sh`; `SHEAF_UNCAPPED=1` turns it off).
 
+The Arlington tests (`crates/sheaf-ops/tests/arlington.rs`) check what
+sheaf writes with [pdf-lint](https://github.com/sheaf-pdf/pdf-lint),
+which decodes the packed and encrypted files with qpdf 11.9 or later: the
+one on the `PATH`, or the one `PDF_LINT_QPDF` names. `just setup`
+installs the system's, which is new enough from Debian 13 and Ubuntu
+24.04; on older systems (Debian 12 has 11.3, Ubuntu 22.04 10.6), set
+`PDF_LINT_QPDF` to the one a pdf-lint release archive bundles,
+`qpdf/bin/qpdf`. `just doctor` says whether the one the tests use is new
+enough. A test that needs qpdf and finds none new enough fails, saying
+so.
+
 **The test corpus.** The corpus tests read about 16,000 real-world and
 test-suite PDFs from `../pdf-corpus` beside this checkout, or
 `$SHEAF_CORPUS`, and skip without them. The PDFs aren't in this

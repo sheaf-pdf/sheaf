@@ -2,9 +2,9 @@
 //! out, with the slice that took it out ([`RETIRED`]), and every name a
 //! later milestone's slice, or an item's between milestones, took out, in
 //! a table of its own ([`RETIRED_M5`], [`RETIRED_M11`],
-//! [`RETIRED_OBJECT_STREAMS`]). Nothing under `crates/` may define
-//! one again or refer to it. Each slice adds its rows in the commit that
-//! deletes the names.
+//! [`RETIRED_OBJECT_STREAMS`], [`RETIRED_PDF_LINT`]). Nothing under
+//! `crates/` may define one again or refer to it. Each slice adds its rows
+//! in the commit that deletes the names.
 //!
 //! A row is a path from its crate's root, such as
 //! `model::Document::marginal`. Every `.rs` file under `crates/` (but not
@@ -1073,12 +1073,32 @@ const RETIRED_OBJECT_STREAMS: &[(&str, u8)] = &[
     ("properties::Properties::linearized", 1),
 ];
 
+/// Every name the pdf-lint item (between milestones) retired, with the
+/// slice of `plan/complete/pdf-lint.md` that retired it. Only the names
+/// pdf-lint doesn't use again: its `Hold`, `Report`, `check` and the rest
+/// are the checker's own, now a dev-dependency.
+const RETIRED_PDF_LINT: &[(&str, u8)] = &[
+    // The Arlington checker is pdf-lint's, published from this module:
+    // sheaf has no checker of its own, behind `fixtures` or in its tests.
+    ("arlington", 1),
+    // A file is checked at a version by pdf-lint's `Options::version`,
+    // from the bytes its reader read: not by a lopdf file and its bytes.
+    ("arlington::check_at", 1),
+    // The model is the one pdf-lint embeds, with its corrections: sheaf
+    // vendors no tables to read.
+    ("arlington::DIR", 1),
+    // What a save wrote is held by the Arlington tests' own `written`
+    // (sheaf-ops' `tests/lint`), on pdf-lint's `Hold`.
+    ("arlington::Hold::written", 1),
+];
+
 /// The ledgers, with the words a hit names its slice by.
 const LEDGERS: &[(&[(&str, u8)], &str)] = &[
     (RETIRED, "slice"),
     (RETIRED_M5, "M5 slice"),
     (RETIRED_M11, "M11 slice"),
     (RETIRED_OBJECT_STREAMS, "object streams slice"),
+    (RETIRED_PDF_LINT, "pdf-lint slice"),
 ];
 
 /// Last segments only a path matches: names the new design uses again

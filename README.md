@@ -239,17 +239,15 @@ PDFium (BSD-3), Tesseract and its glyphless `pdf.ttf` (Apache-2.0),
 Leptonica (BSD-2), ONNX Runtime (MIT), PaddleOCR models and `oar-ocr`
 (Apache-2.0); see `packaging/licenses/`. Barcodes are read and QR codes made
 with rxing (Apache-2.0). MuPDF is deliberately not used (AGPL). lopdf (MIT)
-is vendored with a patch in `vendor/lopdf`. The Arlington PDF Model's TSVs
-(PDF Association, Apache-2.0) are vendored in `vendor/arlington-pdf-model`
-for tests only, and parts of the test-only checker that reads them are
-adapted from its TestGrammar (Apache-2.0; see
-`crates/sheaf-doc/src/arlington/check.rs`). Text in the standard 14 fonts
-is laid out with Adobe's Core 14 AFM metrics (Adobe's notice) and the Adobe
-Glyph List (BSD-3), in `crates/sheaf-doc/assets`; text in fonts over
-predefined CJK CMaps with Adobe's CMaps (BSD-3), as hayro-cmap
+is vendored with a patch in `vendor/lopdf`. sheaf's tests check what it
+writes with pdf-lint (Apache-2.0; a dev-dependency only, never shipped),
+which embeds the PDF Association's Arlington PDF Model (Apache-2.0). Text in
+the standard 14 fonts is laid out with Adobe's Core 14 AFM metrics (Adobe's
+notice) and the Adobe Glyph List (BSD-3), in `crates/sheaf-doc/assets`; text
+in fonts over predefined CJK CMaps with Adobe's CMaps (BSD-3), as hayro-cmap
 (Apache-2.0/MIT) bundles them, decompressed by the brotli crates
 (BSD-3/MIT): `LICENSE-cmap-resources` and `LICENSE-brotli` in
 `packaging/licenses/`. Embedded font programs are read following FreeType's
 routines, which libpdfium also builds in: portions of this software are
-copyright © 2026 The FreeType Project (www.freetype.org), under the
-FreeType License (`LICENSE-freetype`).
+copyright © 2026 The FreeType Project (www.freetype.org), under the FreeType
+License (`LICENSE-freetype`).

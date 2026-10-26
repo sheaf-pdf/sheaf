@@ -178,7 +178,7 @@ backlog id. "D" points to a decision for Greg.
 | [91](91-rendering-pdfium-hayro-as-second-renderer.md) | Rendering; hayro | Pending; F17 | adopt (keep PDFium); hayro an oracle | pdfium-render 0.9.4; hayro 0.8.0 | MIT OR Apache-2.0 | medium |
 | [92](92-watch-jpeg-xl-pdf.md) | JPEG XL in PDF | watch | undecided (watch) | jxl-oxide 0.12.6 | MIT OR Apache-2.0 | n/a |
 | [93](93-b5-signature-already-broken-still-asks.md) | B5's digest check | B5; F9 | build on cms 0.3.0-rc.0 | cms 0.3.0-rc.0, der 0.8, sha1 0.11, sha2 0.11 | Apache-2.0 OR MIT | high |
-| [94](94-checking-what-sheaf-writes-against-arlington.md) | Checks against Arlington | F22 | build in-house (test-only) | the Arlington PDF Model | Apache-2.0 | n/a |
+| [94](94-checking-what-sheaf-writes-against-arlington.md) | Checks against Arlington | F22 | build in-house (test-only); since published as pdf-lint (2026-10-26) | the Arlington PDF Model; pdf-lint 0.1.0 | Apache-2.0 | n/a |
 | [95](95-printing.md) | Printing | M7 (done); B28 | build in-house (keep) | printers 2.3.0 rejected | MIT | medium |
 | [96](96-single-instance-progress.md) | Single instance, progress | M9; PR #32 | adopt (Greg's crates) | instance-handoff 0.1.0-alpha.1; in-progress 0.1.0 | MIT OR Apache-2.0 | n/a |
 | [97](97-settings.md) | Settings | M15 | adopt (keep); move to 1.x | toml 0.9.12 (1.1.8 latest) | MIT OR Apache-2.0 | high |

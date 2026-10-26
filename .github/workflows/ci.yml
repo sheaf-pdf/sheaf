@@ -90,6 +90,18 @@ jobs:
         shell: bash
         run: scripts/fetch-ocr-data.sh
 
+      # pdf-lint and the qpdf it bundles: the Arlington tests decode the
+      # packed and encrypted files sheaf writes with that qpdf. The version
+      # is the dev-dependency's (pdf-lint = "=0.1.0"); bump both together.
+      - uses: sheaf-pdf/setup-pdf-lint@v1
+        id: pdf-lint
+        with:
+          version: 0.1.0
+
+      - name: pdf-lint's qpdf for the tests
+        shell: bash
+        run: echo "PDF_LINT_QPDF=${{ steps.pdf-lint.outputs.path }}/qpdf/bin/qpdf${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
+
       - name: Format
         run: cargo fmt --all -- --check
 
