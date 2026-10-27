@@ -18,14 +18,14 @@ from pdf-lint's side; and pdf-lint's `0.2.0` branch at a104227, read
 - **pdf-content-streams is in,** as "an iterator consuming operators" (Greg,
   2026-10-27: "definitely add these").
 - **Names:** `pdf-objects` for the object model (`pdf-cos` is taken),
-  `pdf-content-streams` for content (`pdf-content` is taken) and
-  `pdf-linearize` (Greg, 2026-10-27); the rest are
-  [below](#names-on-cratesio).
+  `pdf-content-streams` for content (`pdf-content` is taken),
+  `pdf-linearize` and `pdf-arlington` (Greg, 2026-10-27); the rest
+  keep their names ([below](#names-on-cratesio)).
 - **Linearization lives in the family,** a crate of its own (Greg
   leans that way, 2026-10-27; this plan agrees): [below](#linearization-a-crate-of-its-own).
 - **The family exposes writing** (encoding, encrypting, serializing)
   even where pdf-lint doesn't use it (Greg, 2026-10-27).
-- **arlington takes pdf-objects' object types,** not the notes'
+- **pdf-arlington takes pdf-objects' object types,** not the notes'
   `ObjectAccess` trait (Greg, 2026-10-27).
 - **Probably its own milestone,** "even if it's mostly work in a
   separate tool/repo", "probably taking over lopdf"
@@ -69,7 +69,7 @@ pdf-lint's workspace, unpublished, which pdf-lint 0.2.0 reads through.
 | `pdf-structure` (or `doc`) | §7.5 | to cut | Cross-references, the trailer chain, incremental sections, object streams, recovery, a lazy resolver; writing files and updates | yes (4, 5, 7) |
 | `pdf-content-streams` | §7.8, §8–9's operators | from sheaf | A page's operators as an iterator, typed; read and written | yes (16, 19) |
 | `pdf-semantics` | §7.7, §7.9, §14.3 | to start | Typed views over resolved objects, saying where a value came from | its common structures (20) |
-| `arlington` | | in pdf-lint | The model's TSVs and predicates, over pdf-objects' types | cut (2) |
+| `pdf-arlington` | | in pdf-lint | The model's TSVs and predicates, over pdf-objects' types | cut (2) |
 | `pdf-linearize` | Annex F | between milestones, item 4 | Linearized files planned and laid out; whether one holds | its own crate in the family ([below](#linearization-a-crate-of-its-own)) |
 | fonts (`pdf-font`?) | §9 | weighed | Encodings, the standard 14's metrics, embedded programs, CMaps | later |
 | `diag` | | weighed | Spans, issue codes and a sink through the layers | a convention, not a crate |
@@ -102,7 +102,7 @@ Encryption, 7.8 Content streams.
 | `pdf-filters`, `pdf-crypt` | free (unpublished) | | kept |
 | `pdf-semantics` | free | | kept |
 | `pdf-linearize` | free | | **ruled** (Greg, 2026-10-27) |
-| `arlington` | free | | `pdf-arlington`, so it doesn't read as the PDF Association's own (`arlington` is free too) |
+| `arlington` | free | | **`pdf-arlington`**, ruled (Greg, 2026-10-27), so it doesn't read as the PDF Association's own |
 | `pdf-repair` | free | | kept, for later |
 | `pdf-font` | taken | pdfluent's (1.0.0-beta.6) | `pdf-fonts` is free, for later |
 
@@ -111,7 +111,7 @@ Also taken, and not needed: `pdf-doc`, `pdf-core`, `pdf-text`,
 publishes it, and crates.io's policy doesn't allow holding one with no
 code in it, so the guard is publishing early once a crate has its first
 real version: Greg's call. The plan uses the ruled names: `pdf-objects`,
-`pdf-content-streams`, `pdf-linearize`.
+`pdf-content-streams`, `pdf-linearize`, `pdf-arlington`.
 
 ## Where pdf-lint's modules go
 
@@ -124,8 +124,8 @@ pdf-filters          §7.4     decodes       → tokenizer
 pdf-crypt            §7.6     decrypts      → RustCrypto only
 pdf-objects          §7.3     to cut        → tokenizer
 pdf-structure        §7.5     to cut        → objects, filters, crypt
-arlington                     to cut        → objects
-pdf-lint                      what's left   → structure, arlington
+pdf-arlington                 to cut        → objects
+pdf-lint                      what's left   → structure, pdf-arlington
 pdf-content-streams  §7.8     from sheaf    → tokenizer, objects
 pdf-semantics        §7.7–9   to start      → structure
 pdf-linearize        Annex F  between       → structure
@@ -135,7 +135,7 @@ pdf-linearize        Annex F  between       → structure
 |---|---|---|
 | `pdf-objects` | `object.rs`, `text.rs`, `version.rs`, and `bytes.rs`'s object parser (`value`, `name`, an indirect object's header) | One object from tokens. It records both stream extents and resolves neither. |
 | `pdf-structure` | the rest of `bytes.rs` (2,270 lines outside its tests), `filter.rs`, `source.rs` | The file: header, cross-reference sections along `/Prev`, recovery by scanning, object streams, budgets, the `Source` trait. Decrypting and decoding meet here. |
-| `arlington` | `grammar.rs`, `predicate.rs`, `extension.rs`, `xxh64.rs`, `model/` | Tables and predicates, Apache-2.0. `predicate::Cx` resolves through a closure, so it needs only pdf-objects' types; `extension.rs` reads the catalog and XMP through `Source`, and is given them instead. |
+| `pdf-arlington` | `grammar.rs`, `predicate.rs`, `extension.rs`, `xxh64.rs`, `model/` | Tables and predicates, Apache-2.0. `predicate::Cx` resolves through a closure, so it needs only pdf-objects' types; `extension.rs` reads the catalog and XMP through `Source`, and is given them instead. |
 | `pdf-lint` | `check.rs`, `allowance.rs`, `main.rs` | Rules, holds, allowances, reports, the command line. |
 
 The test-only modules (`qpdf.rs`, `json.rs`, `write.rs`, `fuzz.rs`) go
@@ -157,7 +157,7 @@ with the tests that use them. The rules behind the cuts:
 - **Faults per crate.** Each codec has its `Fault`, its error keeping
   what decoded; the reader has `Warning`. A `diag` crate under the
   codecs would give the bottom layers a dependency they don't need.
-- **pdf-objects with arlington.** The notes extract arlington first, but its
+- **pdf-objects with pdf-arlington.** The notes extract pdf-arlington first, but its
   predicates take `&Object`, so pdf-objects is cut in the same step.
 - **`text::passwords` to pdf-crypt:** a typed password's byte forms for
   each revision, which any password prompt needs.
@@ -261,7 +261,7 @@ The split:
 6. **Richness as a type parameter** (the notes): a sink sheaf passes as
    a no-op. Generic everywhere or `dyn` at some boundaries is measured
    on sheaf's 7k gate.
-7. **Licensing.** Every crate but arlington and pdf-lint is MIT OR
+7. **Licensing.** Every crate but pdf-arlington and pdf-lint is MIT OR
    Apache-2.0, so sheaf ships them without changing its licence. Code
    moving out of pdf-lint (Apache-2.0) would take the family's terms,
    Greg's to relicense; sheaf's `serialize/` is MIT OR Apache-2.0

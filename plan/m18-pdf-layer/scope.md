@@ -37,7 +37,7 @@ family, and sheaf builds without lopdf:
 | pdf-structure | 4, 5, 7, 8–10, 12–14 | reading lazily or whole, writing files and updates |
 | pdf-content-streams | 16, 17, 19 | a page's operators, read and written |
 | pdf-semantics, its common structures | 20, 21 | text strings, dates, name and number trees, the page tree, XMP claims |
-| arlington | 2 | pdf-lint's checker, on pdf-objects |
+| pdf-arlington | 2 | pdf-lint's checker, on pdf-objects |
 
 Three gains for sheaf come with it, since they're why the layer keeps
 spans at all ([sheaf.md](sheaf.md#what-sheaf-would-gain)): copies without

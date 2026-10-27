@@ -56,8 +56,8 @@ Greg decide.
   sheaf's tests stand in (`crates/sheaf-ops/tests/lint/mod.rs`, from
   line 172: each container sheaf packs, walked against the model's
   `ObjectStream` table). It can become pdf-lint's own check, with or
-  after [slice 2](slices/s02-pdf-objects-and-arlington-cut-from-pdf-lint.md)'s
-  cut of arlington. PR #58 listed it among the gaps it found.
+  after [slice 2](slices/s02-pdf-objects-and-pdf-arlington-cut-from-pdf-lint.md)'s
+  cut of pdf-arlington. PR #58 listed it among the gaps it found.
 - **ISO 32000-1 7.5.7's list,** on read: no stream, no object of
   generation other than 0, no encryption dictionary and no container's
   `/Length` object in an object stream; in a linearized file, not the

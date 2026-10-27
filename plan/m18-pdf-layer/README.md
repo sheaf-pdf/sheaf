@@ -25,7 +25,7 @@ weighed for the family: [scope](scope.md).
     iterator, read and written, from sheaf's lexer;
   - pdf-semantics' common structures (§7.7, §7.9, §14.3): text strings,
     dates, name and number trees, the page tree, XMP claims;
-  - arlington, cut too, on pdf-objects' types.
+  - pdf-arlington, cut too, on pdf-objects' types.
 - **`LazyPdf` is pdf-structure's,** its lazy strategy beside pdf-lint's
   read whole; not pdf-semantics, which is the typed layer over it
   ([crates.md](crates.md#where-lazypdf-goes-pdf-structure-not-pdf-semantics)).
@@ -46,10 +46,11 @@ weighed for the family: [scope](scope.md).
 **Rulings** (Greg, 2026-10-27; [crates.md](crates.md#rulings)):
 - the goal is a coherent family, not dropping lopdf;
 - the family exposes writing even where pdf-lint doesn't use it;
-- arlington takes pdf-objects' types;
+- pdf-arlington takes pdf-objects' types;
 - pdf-content-streams is in, as an iterator of operators;
-- the names `pdf-objects` (`pdf-cos` is taken), `pdf-content-streams`
-  (`pdf-content` is taken) and `pdf-linearize`;
+- the names ([crates.md](crates.md#names-on-cratesio)): `pdf-objects`
+  (`pdf-cos` is taken), `pdf-content-streams` (`pdf-content` is taken),
+  `pdf-linearize` and `pdf-arlington`;
 - linearization lives in the family, a crate of its own (Greg leans
   that way; the plan agrees);
 - the crate slices are done in pdf-lint's workspace by pdf-lint's own
@@ -83,7 +84,7 @@ oracles, the Arlington tests and the 7k gate.
 | Slice | Title | Status | Depends on | Where |
 |---|---|---|---|---|
 | [1](slices/s01-one-door-for-lopdf.md) | One door for lopdf | open | — | sheaf |
-| [2](slices/s02-pdf-objects-and-arlington-cut-from-pdf-lint.md) | pdf-objects and arlington, cut from pdf-lint | open | — | pdf-lint |
+| [2](slices/s02-pdf-objects-and-pdf-arlington-cut-from-pdf-lint.md) | pdf-objects and pdf-arlington, cut from pdf-lint | open | — | pdf-lint |
 | [3](slices/s03-pdf-objects-editing-and-writing.md) | pdf-objects, editing and writing | open | 1, 2 | pdf-lint |
 | [4](slices/s04-pdf-structure-cut-from-pdf-lint.md) | pdf-structure, cut from pdf-lint | open | 2 | pdf-lint |
 | [5](slices/s05-pdf-structure-lazy-reads.md) | pdf-structure, lazy reads | open | 4 | pdf-lint |
@@ -112,9 +113,6 @@ In [asks](../asks.md), one line:
   they don't touch sheaf; sheaf's slices as a milestone after the work
   between milestones, before M11, whose passwords would otherwise be
   built on lopdf's handler and then moved.
-- **arlington's name** ([crates.md](crates.md#names-on-cratesio)): rec.
-  `pdf-arlington`. `pdf-objects`, `pdf-content-streams` and
-  `pdf-linearize` are ruled (Greg, 2026-10-27).
 - **The hash:** the notes suggest BLAKE3 for both tools. sheaf's
   xxh3-128 names blobs within sheaf, and `store.rs` refuses a collision;
   BLAKE3 matters where a hash leaves sheaf (a report, a shared cache).
