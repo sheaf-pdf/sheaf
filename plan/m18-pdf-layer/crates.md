@@ -66,7 +66,7 @@ pdf-lint's workspace, unpublished, which pdf-lint 0.2.0 reads through.
 | `pdf-content` | §7.8, §8–9's operators | from sheaf | A page's operators as an iterator, typed; read and written | yes (16, 19) |
 | `pdf-semantics` | §7.7, §7.9, §14.3 | to start | Typed views over resolved objects, saying where a value came from | its common structures (20) |
 | `arlington` | | in pdf-lint | The model's TSVs and predicates, over pdf-cos's types | cut (2) |
-| `pdf-linearize`? | Annex F | between milestones, item 4 | Linearized files planned and laid out; whether one holds | its own crate in the family ([below](#linearization-a-crate-of-its-own)) |
+| `pdf-linearize` | Annex F | between milestones, item 4 | Linearized files planned and laid out; whether one holds | its own crate in the family ([below](#linearization-a-crate-of-its-own)) |
 | fonts (`pdf-font`?) | §9 | weighed | Encodings, the standard 14's metrics, embedded programs, CMaps | later |
 | `diag` | | weighed | Spans, issue codes and a sink through the layers | a convention, not a crate |
 | `pdf-repair` | | thinking | A corrected file, from fixes attached to lint findings | later; its seam kept |
@@ -79,10 +79,35 @@ owns them. What was weighed and why: [scope](scope.md#weighed-for-the-family).
 The notes' writer is pdf-cos's serializer and pdf-structure's file
 writer here, so each layer writes what it reads.
 
-On the name: ISO's whole Clause 7 is titled "Syntax", so `pdf-syntax`
-reads as all of the above. `pdf-cos` (COS, Adobe's and PDFBox's name for
-the object system) says objects only, and leaves `pdf-structure` clearly
-the file layer.
+On the names, and which are free: [below](#names-on-cratesio).
+
+## Names on crates.io
+
+Checked 2026-10-27 (Greg: "i think pdf-cos is already taken"). The
+family names its crates after ISO 32000-2's clauses where it can: 7.2
+Lexical conventions, 7.3 Objects, 7.4 Filters, 7.5 File structure, 7.6
+Encryption, 7.8 Content streams.
+
+| Working name | crates.io | Taken by | Recommended |
+|---|---|---|---|
+| `pdf-tokenizer`, `pdf-lint` | Greg's | | kept |
+| `pdf-cos` | taken | edgeparse's fork of lopdf 0.39 with f64 reals (0.39.0, 18k downloads) | **`pdf-objects`** (7.3's title, plural like `pdf-filters`); `pdf-object` is free too |
+| `pdf-syntax` | taken | pdfluent's reader (0.6.1) | not needed |
+| `pdf-content` | taken | semantic-pdf-diff's tokenizer and interpreter (0.1.13) | **`pdf-content-stream`** (7.8.2's term; it reads and writes them); `pdf-operators` is free too |
+| `pdf-structure` | free | | kept |
+| `pdf-filters`, `pdf-crypt` | free (unpublished) | | kept |
+| `pdf-semantics` | free | | kept |
+| `pdf-linearize` | free | | **ruled** (Greg, 2026-10-27) |
+| `arlington` | free | | `pdf-arlington`, so it doesn't read as the PDF Association's own (`arlington` is free too) |
+| `pdf-repair` | free | | kept, for later |
+| `pdf-font` | taken | pdfluent's (1.0.0-beta.6) | `pdf-fonts` is free, for later |
+
+Also taken, and not needed: `pdf-doc`, `pdf-core`, `pdf-text`,
+`pdf-writer` (Typst's). A free name stays free only until someone
+publishes it, and crates.io's policy doesn't allow holding one with no
+code in it, so the guard is publishing early once a crate has its first
+real version: Greg's call. This plan keeps the working names
+(`pdf-cos`, `pdf-content`) until the names are ruled.
 
 ## Where pdf-lint's modules go
 
@@ -167,7 +192,7 @@ the appearances stay sheaf's, as what a flatten reads.
 Greg (2026-10-27): "i think that linearization should likely live in
 the family of crates. should it be it's own crate or part of
 serialization. i lean towards its own one". This plan agrees: a crate
-of its own (`pdf-linearize`?), beside pdf-structure, in the family's
+of its own, `pdf-linearize` (Greg named it, 2026-10-27), beside pdf-structure, in the family's
 workspace, as planned between milestones ([item 4](../between/README.md)).
 
 Why not a part of pdf-structure's writer:

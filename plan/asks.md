@@ -9,7 +9,7 @@ are [build or adopt](research/build-or-adopt/decisions.md)'s decisions.
 ## Between milestones and the order
 
 - What comes after M11 is still open: M16, M10 slices 18–29 and the rest. [→](between/README.md)
-- **M18, the PDF layer** (proposed): its place (rec.: the crate slices whenever, sheaf's after the work between milestones and before M11); the crates' names, `pdf-linearize` among them; the hash. More planning to come. [→](m18-pdf-layer/README.md#open-questions)
+- **M18, the PDF layer** (proposed): its place (rec.: the crate slices whenever, sheaf's after the work between milestones and before M11); the crates' names (`pdf-cos` and `pdf-content` are taken: rec. `pdf-objects`, `pdf-content-stream`, `pdf-arlington`; `pdf-linearize` ruled); the hash. More planning to come. [→](m18-pdf-layer/README.md#open-questions)
 - **D4:** one Flate backend for the workspace (B26). Rec.: zlib-rs explicitly; Greg leans that way, for speed (2026-10-27, M18). [→](research/build-or-adopt/decisions.md#d4-one-flate-backend-for-the-workspace)
 - **D7:** an advisory and license check in CI (B27). Rec.: `cargo deny`. [→](research/build-or-adopt/decisions.md#d7-an-advisory-and-license-check-in-ci)
 

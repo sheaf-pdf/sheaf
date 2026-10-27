@@ -110,8 +110,10 @@ In [asks](../asks.md), one line:
   they don't touch sheaf; sheaf's slices as a milestone after the work
   between milestones, before M11, whose passwords would otherwise be
   built on lopdf's handler and then moved.
-- **Names:** `pdf-cos` or `pdf-syntax`, `pdf-structure` or `doc`,
-  `pdf-content`, `pdf-semantics`, `pdf-linearize`.
+- **Names** ([crates.md](crates.md#names-on-cratesio)): `pdf-cos` and
+  `pdf-content` are taken on crates.io; rec. `pdf-objects` and
+  `pdf-content-stream`, and `pdf-arlington` for arlington.
+  `pdf-linearize` is ruled (Greg, 2026-10-27).
 - **The hash:** the notes suggest BLAKE3 for both tools. sheaf's
   xxh3-128 names blobs within sheaf, and `store.rs` refuses a collision;
   BLAKE3 matters where a hash leaves sheaf (a report, a shared cache).
