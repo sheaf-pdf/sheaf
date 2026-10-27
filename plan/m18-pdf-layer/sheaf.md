@@ -117,10 +117,10 @@ sheaf already copies unchanged objects as they were, within limits:
   - **Both Flate backends** (Greg, 2026-10-27), zlib-rs and
     miniz_oxide, the caller naming one
     ([slice 6](slices/s06-pdf-filters-and-pdf-crypt-for-writing.md)):
-    sheaf probably zlib-rs, for speed, pdf-lint probably miniz_oxide.
+    sheaf zlib-rs, for speed, pdf-lint miniz_oxide.
     [D4](../research/build-or-adopt/decisions.md#d4-one-flate-backend-for-the-workspace)
-    stays sheaf's: one backend in every sheaf build, so the same input
-    gives the same bytes ([entry 4](../research/build-or-adopt/04-flate-one-backend-every-build.md)).
+    is ruled: zlib-rs in every sheaf build, so the same input gives the
+    same bytes ([entry 4](../research/build-or-adopt/04-flate-one-backend-every-build.md)).
   - The output cap it has, wired to sheaf's `ReadLimits`.
   - Image filters stay out: [entry
     33](../research/build-or-adopt/33-pdf-image-samples-image-s-own.md)

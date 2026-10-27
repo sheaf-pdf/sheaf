@@ -84,8 +84,8 @@ is that nothing else moved:
   in-memory document of its own over the door's types, so slice 11's
   type swap carries it along instead of converting at a second
   boundary.
-- **Writing after the model.** Slice 12 changes no output byte (D4
-  aside), so it goes once the model is in, and slice 13 drops lopdf
+- **Writing after the model.** Slice 12 changes no output byte (B26's
+  backend switch aside), so it goes once the model is in, and slice 13 drops lopdf
   after it.
 - **Move, then merge.** pdf-content-streams takes sheaf's lexer as it is (slice
   16) before its scanner moves onto pdf-tokenizer (slice 18), so each

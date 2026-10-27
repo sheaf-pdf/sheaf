@@ -10,10 +10,9 @@ the family exposes writing ([sheaf.md](../sheaf.md#pdf-filters)).
   sheaf writes today.
 - **Both Flate backends** (Greg, 2026-10-27): zlib-rs and miniz_oxide,
   one API, for decoding and encoding. pdf-lint probably takes
-  miniz_oxide, and sheaf zlib-rs, for speed. Which one every sheaf
-  build uses is
-  [D4](../../research/build-or-adopt/decisions.md#d4-one-flate-backend-for-the-workspace)'s,
-  so the same input gives the same bytes in each.
+  miniz_oxide, and sheaf zlib-rs, for speed: every sheaf build uses
+  zlib-rs ([D4](../../research/build-or-adopt/decisions.md#d4-one-flate-backend-for-the-workspace),
+  ruled 2026-10-27), so the same input gives the same bytes.
   - **Additive features, the backend named by the caller** (rec.):
     each feature compiles its backend in, and a call names the one it
     wants (a `Backend` value that exists only with its feature).

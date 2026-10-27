@@ -41,6 +41,9 @@ from pdf-lint's side; and pdf-lint's `0.2.0` branch at a104227, read
 - **pdf-filters supports both Flate backends,** zlib-rs and
   miniz_oxide: "lint probably uses oxide, sheaf probably uses zlib for
   speed" (Greg, 2026-10-27). How: [slice 6](slices/s06-pdf-filters-and-pdf-crypt-for-writing.md).
+- **No hash in the family** (Greg, 2026-10-27): each tool hashes what
+  it needs (sheaf xxh3-128, pdf-lint XXH64); BLAKE3 where a hash leaves
+  a tool and must resist tampering. Not the notes' BLAKE3 for both.
 - **Room for sheaf to be fast:** "we want to make sure that our
   abstractions leave room for sheaf to be fast and efficient" (Greg,
   2026-10-27). Decision 9 below.

@@ -9,7 +9,8 @@ the crates ([slice 7](s07-pdf-structure-writing.md)), byte for byte.
   goes.
 - Cross-reference sections, object-stream containers, whole files and
   incremental sections through pdf-structure.
-- Compression through pdf-filters, on D4's backend; encryption through
+- Compression through pdf-filters, zlib-rs named at every call (D4);
+  encryption through
   pdf-crypt, with sheaf's keyed-hash IVs (M10.5 §11.7), `same_crypt`
   answered by its `Method`.
 - sheaf keeps: what to write and its numbers (`ObjKey`, the profiles,
@@ -21,8 +22,9 @@ the crates ([slice 7](s07-pdf-structure-writing.md)), byte for byte.
 **Checked:**
 - every saved file byte for byte as before: `materialize_corpus`'s
   outputs, the determinism and release-property tests, the seeds;
-  where D4's ruling changes the Flate backend, that change alone, in
-  its own commit;
+  if [B26](../../backlog/B26.md)'s fix hasn't landed first, the switch
+  of sheaf-cli's and the tests' builds to zlib-rs alone, in its own
+  commit;
 - encrypted saves: every revision and method round trips, and
   `Crypt::packs`' Identity streams under an encrypting `/StrF` hold;
 - Append keeps signatures: the signature tests, unchanged;

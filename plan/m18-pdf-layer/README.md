@@ -59,7 +59,9 @@ weighed for the family: [scope](scope.md).
 - pdf-filters supports both Flate backends, zlib-rs and miniz_oxide:
   pdf-lint probably on miniz_oxide, sheaf probably on zlib-rs, for
   speed;
-- the abstractions leave room for sheaf to be fast and efficient.
+- the abstractions leave room for sheaf to be fast and efficient;
+- no hash in the family, and zlib-rs in every sheaf build (D4)
+  ([below](#open-questions)).
 
 ## Where it stands
 
@@ -70,7 +72,7 @@ Planned from the memo of 2026-10-26
 Architecture Notes" and pdf-lint's `0.2.0` branch (a104227), in which
 pdf-crypt is built and pdf-lint reads without qpdf. Slice 2 goes
 first, by pdf-lint's agent; sheaf's slices start when Greg says.
-Waiting on Greg ([asks](../asks.md)): the open questions below.
+Nothing waits on Greg but sheaf's start.
 
 Two tracks ([scope](scope.md#two-tracks)): the crate slices in
 pdf-lint's workspace, by pdf-lint's agent, which touch nothing of
@@ -95,7 +97,7 @@ oracles, the Arlington tests and the 7k gate.
 | [9](slices/s09-copies-without-a-second-parse.md) | Copies without a second parse, and object-stream members copied | open | 8 | sheaf |
 | [10](slices/s10-an-in-memory-document-of-sheaf-s-own.md) | An in-memory document of sheaf's own | open | 1, 8; F15 (soft) | sheaf |
 | [11](slices/s11-pdf-objects-types-through-sheaf.md) | pdf-objects' types through sheaf | open | 3, 10 | sheaf |
-| [12](slices/s12-sheaf-writes-through-pdf-structure.md) | sheaf writes through pdf-structure | open | 7, 11; D4 (ruling) | sheaf |
+| [12](slices/s12-sheaf-writes-through-pdf-structure.md) | sheaf writes through pdf-structure | open | 7, 11 | sheaf |
 | [13](slices/s13-lopdf-gone.md) | lopdf gone | open | 12 | sheaf |
 | [14](slices/s14-copies-under-renumbering.md) | Copies under renumbering | open | 9, 12 | sheaf, pdf-lint |
 | [15](slices/s15-wrap-up.md) | Wrap-up | open | 1–14, 16–21 | sheaf |
@@ -108,15 +110,20 @@ oracles, the Arlington tests and the 7k gate.
 
 ## Open questions
 
-In [asks](../asks.md), one line:
+None waiting on Greg (2026-10-27); more planning is to come. The last
+two were ruled:
 
-- **The hash:** the notes suggest BLAKE3 for both tools. sheaf's
-  xxh3-128 names blobs within sheaf, and `store.rs` refuses a collision;
-  BLAKE3 matters where a hash leaves sheaf (a report, a shared cache).
-  Benchmark first, as the notes say. Not needed for M18.
-- **D4,** which Flate backend every sheaf build uses, which slice 12
-  writes with. Greg leans zlib-rs, for speed (2026-10-27); pdf-filters
-  supports both either way (slice 6).
+- **No hash in the family.** pdf-structure hands over bytes, and each
+  tool hashes what it needs: sheaf keeps xxh3-128 for its blobs, which
+  its store hashes as it reads them and which `store.rs` checks for
+  collisions; pdf-lint keeps XXH64 for its model. BLAKE3 is for where a
+  hash leaves a tool and must resist tampering (a report, a cache shared
+  across machines), which nothing does yet. Greg's notes had suggested
+  BLAKE3 for both tools.
+- **D4: zlib-rs** in every sheaf build, for speed
+  ([D4](../research/build-or-adopt/decisions.md#d4-one-flate-backend-for-the-workspace)). pdf-filters
+  supports both backends; pdf-lint keeps miniz_oxide. B26's fix (one
+  workspace entry) can land ahead of slice 12.
 
 ## Plan files
 
