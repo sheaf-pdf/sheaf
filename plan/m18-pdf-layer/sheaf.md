@@ -71,7 +71,7 @@ sheaf already copies unchanged objects as they were, within limits:
 ### pdf-tokenizer
 
 - **Replaces:** the scanning under lopdf's object parser, through
-  pdf-cos, and under pdf-content's scanner if [slice 18](slices/s18-one-scanner.md)
+  pdf-objects, and under pdf-content's scanner if [slice 18](slices/s18-one-scanner.md)
   proves it.
 - **Differences to absorb above it:** sheaf's content lexer follows
   PDFium, the tokenizer ISO.
@@ -83,7 +83,7 @@ sheaf already copies unchanged objects as they were, within limits:
     the tokenizer marks a token unclosed.
 - **Needs:** nothing more. The policy belongs in the layers above.
 
-### pdf-cos
+### pdf-objects
 
 - **Replaces:** lopdf's `Object`, `Dictionary` and `Stream` (with
   sheaf's patch: f64 reals, dictionary order), its object parser, and

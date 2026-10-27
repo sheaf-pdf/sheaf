@@ -5,7 +5,7 @@ Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
 **What:** `source/` reads through pdf-structure's lazy reader in place
 of `LazyPdf`. The model is still lopdf's: objects are converted to
 lopdf's types at the door ([slice 1](s01-one-door-for-lopdf.md)), a
-conversion that lives only until [slice 11](s11-pdf-cos-s-types-through-sheaf.md).
+conversion that lives only until [slice 11](s11-pdf-objects-types-through-sheaf.md).
 Reading is the riskiest change, so it goes alone, where the two readers
 can be compared object by object.
 

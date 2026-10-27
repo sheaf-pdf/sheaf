@@ -12,7 +12,7 @@ what it reads.
   through pdf-filters, the budgets), `filter.rs` and `source.rs` (the
   `Source` trait, `Document`, `Trailer`, `Warning`, `Update`,
   `Encryption`).
-- It depends on pdf-cos, pdf-filters and pdf-crypt directly; qpdf stays
+- It depends on pdf-objects, pdf-filters and pdf-crypt directly; qpdf stays
   a test oracle through the crate-private `Decode`.
 - What's left in pdf-lint is the checker: `check.rs`, `allowance.rs`,
   `main.rs`.

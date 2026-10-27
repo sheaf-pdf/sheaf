@@ -17,7 +17,7 @@ trailer, new ids, adding, pruning what nothing reaches, walking.
   `serialize/built.rs`, the stamp library, the fixtures, sheaf-app's
   OCR and scan runs.
 - Its objects are the door's types, so
-  [slice 11](s11-pdf-cos-s-types-through-sheaf.md) changes them with
+  [slice 11](s11-pdf-objects-types-through-sheaf.md) changes them with
   everything else. Whether it then becomes pdf-structure's `Document`
   (pdf-lint's `source::Document` is an owned document readers fill and
   tests build) is decided there.

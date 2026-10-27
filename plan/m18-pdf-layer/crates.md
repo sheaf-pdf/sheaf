@@ -17,11 +17,14 @@ from pdf-lint's side; and pdf-lint's `0.2.0` branch at a104227, read
   coherent means: [scope](scope.md#the-goal-a-coherent-pdf-crate-family).
 - **pdf-content is in,** as "an iterator consuming operators" (Greg,
   2026-10-27: "definitely add these").
+- **Names:** `pdf-objects` for the object model (`pdf-cos` is taken)
+  and `pdf-linearize` (Greg, 2026-10-27); the rest are
+  [below](#names-on-cratesio).
 - **Linearization lives in the family,** a crate of its own (Greg
   leans that way, 2026-10-27; this plan agrees): [below](#linearization-a-crate-of-its-own).
 - **The family exposes writing** (encoding, encrypting, serializing)
   even where pdf-lint doesn't use it (Greg, 2026-10-27).
-- **arlington takes pdf-cos's object types,** not the notes'
+- **arlington takes pdf-objects' object types,** not the notes'
   `ObjectAccess` trait (Greg, 2026-10-27).
 - **Probably its own milestone,** "even if it's mostly work in a
   separate tool/repo", "probably taking over lopdf"
@@ -59,13 +62,13 @@ pdf-lint's workspace, unpublished, which pdf-lint 0.2.0 reads through.
 | Crate | ISO 32000-2 | State | What it is | In M18 |
 |---|---|---|---|---|
 | `pdf-tokenizer` | §7.2 | 0.1.0 | Lossless, zero-copy tokens; never rejects, never repairs; `no_std` | PDFium's rules as a mode (18) |
-| `pdf-cos` (or `pdf-syntax`) | §7.3 | to cut | One object at a time, lossless, with spans; owned and editable; serialized | yes (2, 3) |
+| `pdf-objects` | §7.3 | to cut | One object at a time, lossless, with spans; owned and editable; serialized | yes (2, 3) |
 | `pdf-filters` | §7.4 | 0.1.0, unpublished | The standard filters, every fault said, output capped; no image filters | encoding added (6) |
 | `pdf-crypt` | §7.6 | 0.1.0, unpublished | The standard security handler, decrypting | encrypting exposed (6) |
 | `pdf-structure` (or `doc`) | §7.5 | to cut | Cross-references, the trailer chain, incremental sections, object streams, recovery, a lazy resolver; writing files and updates | yes (4, 5, 7) |
 | `pdf-content` | §7.8, §8–9's operators | from sheaf | A page's operators as an iterator, typed; read and written | yes (16, 19) |
 | `pdf-semantics` | §7.7, §7.9, §14.3 | to start | Typed views over resolved objects, saying where a value came from | its common structures (20) |
-| `arlington` | | in pdf-lint | The model's TSVs and predicates, over pdf-cos's types | cut (2) |
+| `arlington` | | in pdf-lint | The model's TSVs and predicates, over pdf-objects' types | cut (2) |
 | `pdf-linearize` | Annex F | between milestones, item 4 | Linearized files planned and laid out; whether one holds | its own crate in the family ([below](#linearization-a-crate-of-its-own)) |
 | fonts (`pdf-font`?) | §9 | weighed | Encodings, the standard 14's metrics, embedded programs, CMaps | later |
 | `diag` | | weighed | Spans, issue codes and a sink through the layers | a convention, not a crate |
@@ -76,7 +79,7 @@ Image codecs (DCT, JPX, CCITT, JBIG2) stay outside the family:
 [entry 33](../research/build-or-adopt/33-pdf-image-samples-image-s-own.md)
 owns them. What was weighed and why: [scope](scope.md#weighed-for-the-family).
 
-The notes' writer is pdf-cos's serializer and pdf-structure's file
+The notes' writer is pdf-objects' serializer and pdf-structure's file
 writer here, so each layer writes what it reads.
 
 On the names, and which are free: [below](#names-on-cratesio).
@@ -91,9 +94,9 @@ Encryption, 7.8 Content streams.
 | Working name | crates.io | Taken by | Recommended |
 |---|---|---|---|
 | `pdf-tokenizer`, `pdf-lint` | Greg's | | kept |
-| `pdf-cos` | taken | edgeparse's fork of lopdf 0.39 with f64 reals (0.39.0, 18k downloads) | **`pdf-objects`** (7.3's title, plural like `pdf-filters`); `pdf-object` is free too |
+| `pdf-cos` | taken | edgeparse's fork of lopdf 0.39 with f64 reals (0.39.0, 18k downloads) | **`pdf-objects`**, ruled (Greg, 2026-10-27): 7.3's title, plural like `pdf-filters` |
 | `pdf-syntax` | taken | pdfluent's reader (0.6.1) | not needed |
-| `pdf-content` | taken | semantic-pdf-diff's tokenizer and interpreter (0.1.13) | **`pdf-content-stream`** (7.8.2's term; it reads and writes them); `pdf-operators` is free too |
+| `pdf-content` | taken | semantic-pdf-diff's tokenizer and interpreter (0.1.13) | open: `pdf-content-streams` (7.8's term, plural like `pdf-objects`) or `pdf-operators` (what its iterator yields); both free, as is `pdf-content-stream` |
 | `pdf-structure` | free | | kept |
 | `pdf-filters`, `pdf-crypt` | free (unpublished) | | kept |
 | `pdf-semantics` | free | | kept |
@@ -106,8 +109,8 @@ Also taken, and not needed: `pdf-doc`, `pdf-core`, `pdf-text`,
 `pdf-writer` (Typst's). A free name stays free only until someone
 publishes it, and crates.io's policy doesn't allow holding one with no
 code in it, so the guard is publishing early once a crate has its first
-real version: Greg's call. This plan keeps the working names
-(`pdf-cos`, `pdf-content`) until the names are ruled.
+real version: Greg's call. This plan says `pdf-objects`, ruled, and keeps
+`pdf-content` as a working name until its name is ruled.
 
 ## Where pdf-lint's modules go
 
@@ -118,20 +121,20 @@ so most cuts move whole files. `bytes.rs` is the one to split.
 pdf-tokenizer  §7.2  0.1.0
 pdf-filters    §7.4  decodes       → tokenizer
 pdf-crypt      §7.6  decrypts      → RustCrypto only
-pdf-cos        §7.3  to cut        → tokenizer
-pdf-structure  §7.5  to cut        → cos, filters, crypt
-arlington            to cut        → cos
+pdf-objects    §7.3  to cut        → tokenizer
+pdf-structure  §7.5  to cut        → objects, filters, crypt
+arlington            to cut        → objects
 pdf-lint             what's left   → structure, arlington
-pdf-content    §7.8  from sheaf    → tokenizer, cos
+pdf-content    §7.8  from sheaf    → tokenizer, objects
 pdf-semantics        to start      → structure
 pdf-linearize  Ann. F  between     → structure
 ```
 
 | Crate | From pdf-lint | Where it stops |
 |---|---|---|
-| `pdf-cos` | `object.rs`, `text.rs`, `version.rs`, and `bytes.rs`'s object parser (`value`, `name`, an indirect object's header) | One object from tokens. It records both stream extents and resolves neither. |
+| `pdf-objects` | `object.rs`, `text.rs`, `version.rs`, and `bytes.rs`'s object parser (`value`, `name`, an indirect object's header) | One object from tokens. It records both stream extents and resolves neither. |
 | `pdf-structure` | the rest of `bytes.rs` (2,270 lines outside its tests), `filter.rs`, `source.rs` | The file: header, cross-reference sections along `/Prev`, recovery by scanning, object streams, budgets, the `Source` trait. Decrypting and decoding meet here. |
-| `arlington` | `grammar.rs`, `predicate.rs`, `extension.rs`, `xxh64.rs`, `model/` | Tables and predicates, Apache-2.0. `predicate::Cx` resolves through a closure, so it needs only pdf-cos's types; `extension.rs` reads the catalog and XMP through `Source`, and is given them instead. |
+| `arlington` | `grammar.rs`, `predicate.rs`, `extension.rs`, `xxh64.rs`, `model/` | Tables and predicates, Apache-2.0. `predicate::Cx` resolves through a closure, so it needs only pdf-objects' types; `extension.rs` reads the catalog and XMP through `Source`, and is given them instead. |
 | `pdf-lint` | `check.rs`, `allowance.rs`, `main.rs` | Rules, holds, allowances, reports, the command line. |
 
 The test-only modules (`qpdf.rs`, `json.rs`, `write.rs`, `fuzz.rs`) go
@@ -153,8 +156,8 @@ with the tests that use them. The rules behind the cuts:
 - **Faults per crate.** Each codec has its `Fault`, its error keeping
   what decoded; the reader has `Warning`. A `diag` crate under the
   codecs would give the bottom layers a dependency they don't need.
-- **pdf-cos with arlington.** The notes extract arlington first, but its
-  predicates take `&Object`, so pdf-cos is cut in the same step.
+- **pdf-objects with arlington.** The notes extract arlington first, but its
+  predicates take `&Object`, so pdf-objects is cut in the same step.
 - **`text::passwords` to pdf-crypt:** a typed password's byte forms for
   each revision, which any password prompt needs.
 
@@ -230,7 +233,7 @@ The split:
 
 ## Decisions across the family
 
-1. **The owned type** in pdf-cos. Borrowed views are the easy half;
+1. **The owned type** in pdf-objects. Borrowed views are the easy half;
    sheaf edits. pdf-lint's `object.rs` is its start: each value owned,
    with its span, dictionaries as written.
 2. **Where each object came from,** carried up from pdf-structure: a
@@ -250,7 +253,7 @@ The split:
      container is, whole), so its decoded bytes can go into a new
      container as they are.
 4. **Read and write with a round trip:** parse, then write, gives the
-   same bytes, at the cos and structure layers.
+   same bytes, at the objects and structure layers.
 5. **Policy as a parameter:** ISO or PDFium for content, and whose
    recovery. M18 holds today's reading on the corpus; PDFium's recovery
    is [later](scope.md#weighed-for-the-family).

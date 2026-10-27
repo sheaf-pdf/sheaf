@@ -12,7 +12,7 @@ over 23,628 (Greg, 2026-10-27: "an iterator consuming operators").
   `lex::steps` hands its steps to a callback only because their
   operands borrow one buffer that's reused.
 - **Operands as written,** parsed when asked for: a number, a name, a
-  string, or a pdf-cos object for an array or a dictionary. Operand `i`
+  string, or a pdf-objects object for an array or a dictionary. Operand `i`
   from the last, as PDFium takes them (`Step::arg`).
 - **Typed operators** over it, as sheaf's interpreter has them
   (`content/interp/op.rs`): each told by its name once, with `Other`

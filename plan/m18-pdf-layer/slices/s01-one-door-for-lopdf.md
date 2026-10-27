@@ -18,7 +18,7 @@ Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
   already ([sheaf.md](../sheaf.md#what-sheaf-uses-of-lopdf-2026-10-27)).
 - **The inventory:** every method, function and trait sheaf calls on
   lopdf's types, with how many call sites, in this slice's notes. It's
-  what [slice 3](s03-pdf-cos-editing-and-writing.md)'s owned form must
+  what [slice 3](s03-pdf-objects-editing-and-writing.md)'s owned form must
   cover and what [slice 10](s10-an-in-memory-document-of-sheaf-s-own.md)'s
   document must offer. Calls that a better API would remove are marked
   so, not kept for their own sake.

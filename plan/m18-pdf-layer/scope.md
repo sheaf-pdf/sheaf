@@ -31,13 +31,13 @@ family, and sheaf builds without lopdf:
 
 | Crate | Slices | Both tools on it |
 |---|---|---|
-| pdf-tokenizer, with PDFium's rules as a mode | 18 | the scanner under pdf-cos and pdf-content |
-| pdf-cos | 2, 3, 11 | the object model, editing and writing |
+| pdf-tokenizer, with PDFium's rules as a mode | 18 | the scanner under pdf-objects and pdf-content |
+| pdf-objects | 2, 3, 11 | the object model, editing and writing |
 | pdf-filters, pdf-crypt | 6, 12 | decoding and encoding, decrypting and encrypting |
 | pdf-structure | 4, 5, 7, 8–10, 12–14 | reading lazily or whole, writing files and updates |
 | pdf-content | 16, 17, 19 | a page's operators, read and written |
 | pdf-semantics, its common structures | 20, 21 | text strings, dates, name and number trees, the page tree, XMP claims |
-| arlington | 2 | pdf-lint's checker, on pdf-cos |
+| arlington | 2 | pdf-lint's checker, on pdf-objects |
 
 Three gains for sheaf come with it, since they're why the layer keeps
 spans at all ([sheaf.md](sheaf.md#what-sheaf-would-gain)): copies without
@@ -141,7 +141,7 @@ from.
   transforms](../topics/plugins/document-transforms.md). Test cases:
   [F29](../backlog/F29.md)'s two forms.
 - **A convention, not a crate: `diag`.** Each crate's faults say where
-  in its own input; pdf-cos's spans say where in the file; a sink is a
+  in its own input; pdf-objects' spans say where in the file; a sink is a
   type parameter sheaf passes as a no-op. A crate under the codecs would
   give the bottom layers a dependency they don't need.
 - **Outside the family: image codecs** (DCT, JPX, CCITT, JBIG2).

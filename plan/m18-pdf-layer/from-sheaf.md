@@ -13,7 +13,7 @@ extract or at least work from").
   is. `vendor/lopdf/` is lopdf's MIT code: a model, not code to copy,
   except the hunks marked `sheaf:`, which are sheaf's.
 - **Coupled to** says what a module reaches besides the standard
-  library: lopdf's types become pdf-cos's when it moves; sheaf's own
+  library: lopdf's types become pdf-objects' when it moves; sheaf's own
   modules (`materialize`, `source`, `annot`, `geom`) are what has to be
   untangled first.
 
@@ -33,7 +33,7 @@ later signing tool finds one where it expects), not ISO's rule.
 
 | Module | Lines | What | Coupled to | Goes to |
 |---|---|---|---|---|
-| `serialize/object.rs` | 257 | Objects as syntax: a real in its shortest form that reads back (past i64's range too), names and strings byte by byte, for speed | lopdf's types | pdf-cos ([slice 3](slices/s03-pdf-cos-editing-and-writing.md)) |
+| `serialize/object.rs` | 257 | Objects as syntax: a real in its shortest form that reads back (past i64's range too), names and strings byte by byte, for speed | lopdf's types | pdf-objects ([slice 3](slices/s03-pdf-objects-editing-and-writing.md)) |
 | `serialize/xref.rs` | 255 | Tables and streams; free entries linked from entry 0; offsets counted from `%PDF-`, as PDFium, pdf.js and qpdf count them; an update's section lists only what it writes | lopdf's types | pdf-structure (slice 7) |
 | `serialize/crypt.rs` | 128 | What a save encrypts: every string, a stream dictionary's included, and every stream, an embedded file's by `/EFF` and a stream's own `/Crypt`; not the encryption dictionary, a cross-reference stream, metadata under `/EncryptMetadata false`, a signature's `/Contents`. That's the list pdf-crypt leaves to its caller. The IVs, a keyed hash of the object's key and its plaintext (HMAC-SHA-256), stay sheaf's | `materialize` (`ObjKey`), lopdf's encryption, hmac, sha2 | the list to pdf-structure (slices 4 and 7); the IVs are why [slice 6](slices/s06-pdf-filters-and-pdf-crypt-for-writing.md) keeps the IV the caller's |
 | `serialize/append.rs` | 700 | An incremental section after a file's last: what it writes, its cross-reference section, `/Prev` | `materialize`, `source`, `serialize/durable.rs` | its generic half to slice 7 |
@@ -56,7 +56,7 @@ Greg decide.
   sheaf's tests stand in (`crates/sheaf-ops/tests/lint/mod.rs`, from
   line 172: each container sheaf packs, walked against the model's
   `ObjectStream` table). It can become pdf-lint's own check, with or
-  after [slice 2](slices/s02-pdf-cos-and-arlington-cut-from-pdf-lint.md)'s
+  after [slice 2](slices/s02-pdf-objects-and-arlington-cut-from-pdf-lint.md)'s
   cut of arlington. PR #58 listed it among the gaps it found.
 - **ISO 32000-1 7.5.7's list,** on read: no stream, no object of
   generation other than 0, no encryption dictionary and no container's

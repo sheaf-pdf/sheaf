@@ -14,7 +14,7 @@ rules as a mode, and pdf-content's scanner moves onto it.
 - **pdf-content on it:** its own scanner goes; inline images' data is
   still found by pdf-content, which then has the tokenizer go on past
   it.
-- **pdf-cos can read under either mode,** so sheaf's model and its
+- **pdf-objects can read under either mode,** so sheaf's model and its
   content are read by the same rules.
 - **Taken only if proved:** the same tokens as pdf-content's own scanner
   on every page of sheaf's corpus, `tier-lexer` unchanged, and no slower

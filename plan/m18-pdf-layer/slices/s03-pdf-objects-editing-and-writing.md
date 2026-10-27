@@ -1,9 +1,9 @@
-# M18 slice 3: pdf-cos, editing and writing
+# M18 slice 3: pdf-objects, editing and writing
 
 Status: open · Part of [M18: the PDF layer](../README.md) · in pdf-lint's workspace, by pdf-lint's agent
 
-**What:** pdf-cos becomes the model sheaf edits and writes
-([sheaf.md](../sheaf.md#pdf-cos)): the owned type of decision 1 in
+**What:** pdf-objects becomes the model sheaf edits and writes
+([sheaf.md](../sheaf.md#pdf-objects)): the owned type of decision 1 in
 [crates.md](../crates.md#decisions-across-the-family).
 
 - **Editing:** build, change and remove values, covering
@@ -22,7 +22,7 @@ Status: open · Part of [M18: the PDF layer](../README.md) · in pdf-lint's work
 **From sheaf** ([from-sheaf.md](../from-sheaf.md#the-rest-of-the-writer-slices-3-6-and-7)):
 `serialize/object.rs`, coupled only to lopdf's types.
 
-**Where:** `crates/pdf-cos/`; from sheaf, `serialize/object.rs` and its
+**Where:** `crates/pdf-objects/`; from sheaf, `serialize/object.rs` and its
 tests.
 
 **Checked:**
