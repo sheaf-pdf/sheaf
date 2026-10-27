@@ -31,11 +31,11 @@ family, and sheaf builds without lopdf:
 
 | Crate | Slices | Both tools on it |
 |---|---|---|
-| pdf-tokenizer, with PDFium's rules as a mode | 18 | the scanner under pdf-objects and pdf-content |
+| pdf-tokenizer, with PDFium's rules as a mode | 18 | the scanner under pdf-objects and pdf-content-streams |
 | pdf-objects | 2, 3, 11 | the object model, editing and writing |
 | pdf-filters, pdf-crypt | 6, 12 | decoding and encoding, decrypting and encrypting |
 | pdf-structure | 4, 5, 7, 8–10, 12–14 | reading lazily or whole, writing files and updates |
-| pdf-content | 16, 17, 19 | a page's operators, read and written |
+| pdf-content-streams | 16, 17, 19 | a page's operators, read and written |
 | pdf-semantics, its common structures | 20, 21 | text strings, dates, name and number trees, the page tree, XMP claims |
 | arlington | 2 | pdf-lint's checker, on pdf-objects |
 
@@ -87,7 +87,7 @@ is that nothing else moved:
 - **Writing after the model.** Slice 12 changes no output byte (D4
   aside), so it goes once the model is in, and slice 13 drops lopdf
   after it.
-- **Move, then merge.** pdf-content takes sheaf's lexer as it is (slice
+- **Move, then merge.** pdf-content-streams takes sheaf's lexer as it is (slice
   16) before its scanner moves onto pdf-tokenizer (slice 18), so each
   step has one thing to prove.
 - **The gains where they're cheapest:** slice 9 right after the reader,
@@ -99,7 +99,7 @@ What else could be in a coherent family, and where each stands
 (2026-10-27). [from-sheaf.md](from-sheaf.md) has what each would start
 from.
 
-- **In M18:** pdf-content (Greg: "definitely add these"), with its
+- **In M18:** pdf-content-streams (Greg: "definitely add these"), with its
   writing half (slice 19); PDFium's rules as a pdf-tokenizer mode (slice
   18), so the family has one scanner; pdf-semantics' common structures
   (slices 20–21), each of which both tools implement today.
@@ -117,7 +117,7 @@ from.
   M17's ground: revisit there.
 - **Later: color spaces and functions** (§8.6, §7.10). The only shared
   need today is how many components a named color space has, which
-  pdf-content's caller gives (`ResCx`).
+  pdf-content-streams' caller gives (`ResCx`).
 - **Later: the rest of pdf-semantics:** the structure tree, the form's
   fields, actions and the like (pdf-lint's `Structure` and `Fields`;
   sheaf's forms and tagged content), extracted as both want the same
@@ -133,7 +133,7 @@ from.
 - **Later: pdf-repair.** The notes' clippy-style fixes, applied until the
   file lints clean: pdf-lint's `--fix`, and a sheaf "Repair document"
   command, which isn't in sheaf's plan. Its seam is kept: a finding can
-  carry a fix, applied through pdf-structure's writer and pdf-content's
+  carry a fix, applied through pdf-structure's writer and pdf-content-streams'
   splice. sheaf's Rewrite already makes the notes' structural tier on
   every save; their "append-safe" fixes meet sheaf's Append, which keeps
   signatures; the conformance tier is M14's and M17's ground, and the

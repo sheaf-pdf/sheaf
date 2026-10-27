@@ -1,4 +1,4 @@
-# M18 slice 16: pdf-content: operators
+# M18 slice 16: pdf-content-streams: operators
 
 Status: open · Part of [M18: the PDF layer](../README.md) · in pdf-lint's workspace, by pdf-lint's agent
 
@@ -20,7 +20,7 @@ over 23,628 (Greg, 2026-10-27: "an iterator consuming operators").
 - **A page as one stream:** the caller gives the page's `/Contents`
   streams, decoded; they're joined with a space, as PDFium reads them,
   and every position maps back to its stream (`content/page.rs`'s
-  `Concat`). pdf-content needs no resolver.
+  `Concat`). pdf-content-streams needs no resolver.
 - **Inline images** end by PDFium's `ReadInlineStream` rules, from the
   color spaces' components the caller gives (`ResCx`) and the filters'
   end markers.
@@ -34,17 +34,17 @@ over 23,628 (Greg, 2026-10-27: "an iterator consuming operators").
 - **Over it:** `q`/`Q` balance, marked content's ranges and the
   resource names content uses (`balance.rs`, `marked.rs`, `names.rs`).
 
-**From sheaf** ([from-sheaf.md](../from-sheaf.md#content-pdf-content-slices-16-to-19)):
+**From sheaf** ([from-sheaf.md](../from-sheaf.md#content-pdf-content-streams-slices-16-to-19)):
 `content/lex.rs`, `page.rs`'s `Concat`, `balance.rs`, `marked.rs`,
 `names.rs`, `interp/op.rs`'s operators, and their tests.
 
-**Where:** `crates/pdf-content/`.
+**Where:** `crates/pdf-content-streams/`.
 
 **Checked:**
 - sheaf's lexer tests (`content/tests.rs`) and those of the modules
   that move, moved, unchanged;
 - every page of sheaf's corpus: the same operators and operands as
-  sheaf's lexer, run in sheaf until [slice 17](s17-sheaf-s-content-on-pdf-content.md);
+  sheaf's lexer, run in sheaf until [slice 17](s17-sheaf-s-content-on-pdf-content-streams.md);
 - a fuzz body: any bytes, no panic, under the caps;
 - time beside sheaf's lexer on the heavy 7k file: no slower.
 

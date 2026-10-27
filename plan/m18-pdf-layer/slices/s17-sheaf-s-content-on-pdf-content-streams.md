@@ -1,13 +1,13 @@
-# M18 slice 17: sheaf's content on pdf-content
+# M18 slice 17: sheaf's content on pdf-content-streams
 
 Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
 
-**What:** sheaf's content reads through pdf-content
-([slice 16](s16-pdf-content-operators.md)), and its own lexer goes.
+**What:** sheaf's content reads through pdf-content-streams
+([slice 16](s16-pdf-content-streams-operators.md)), and its own lexer goes.
 
 - `content/lex.rs`, `lex::steps`, `balance.rs`, `marked.rs` and
   `names.rs` go; `page.rs` keeps reading a page's `/Contents` and hands
-  the decoded streams to pdf-content.
+  the decoded streams to pdf-content-streams.
 - What reads content moves onto its iterator and typed operators: the
   interpreter (`content/interp/`), blocks (`blocks.rs`), `text_bag`,
   the fonts' embedded CMaps (`content/font/foreign.rs`), the splice.

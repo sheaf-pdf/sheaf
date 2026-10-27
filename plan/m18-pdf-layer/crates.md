@@ -15,10 +15,11 @@ from pdf-lint's side; and pdf-lint's `0.2.0` branch at a104227, read
 - **The goal is a coherent family:** "dropping lopdf isn't exactly the
   goal here. a coherent pdf crate family is." (Greg, 2026-10-27). What
   coherent means: [scope](scope.md#the-goal-a-coherent-pdf-crate-family).
-- **pdf-content is in,** as "an iterator consuming operators" (Greg,
+- **pdf-content-streams is in,** as "an iterator consuming operators" (Greg,
   2026-10-27: "definitely add these").
-- **Names:** `pdf-objects` for the object model (`pdf-cos` is taken)
-  and `pdf-linearize` (Greg, 2026-10-27); the rest are
+- **Names:** `pdf-objects` for the object model (`pdf-cos` is taken),
+  `pdf-content-streams` for content (`pdf-content` is taken) and
+  `pdf-linearize` (Greg, 2026-10-27); the rest are
   [below](#names-on-cratesio).
 - **Linearization lives in the family,** a crate of its own (Greg
   leans that way, 2026-10-27; this plan agrees): [below](#linearization-a-crate-of-its-own).
@@ -66,7 +67,7 @@ pdf-lint's workspace, unpublished, which pdf-lint 0.2.0 reads through.
 | `pdf-filters` | §7.4 | 0.1.0, unpublished | The standard filters, every fault said, output capped; no image filters | encoding added (6) |
 | `pdf-crypt` | §7.6 | 0.1.0, unpublished | The standard security handler, decrypting | encrypting exposed (6) |
 | `pdf-structure` (or `doc`) | §7.5 | to cut | Cross-references, the trailer chain, incremental sections, object streams, recovery, a lazy resolver; writing files and updates | yes (4, 5, 7) |
-| `pdf-content` | §7.8, §8–9's operators | from sheaf | A page's operators as an iterator, typed; read and written | yes (16, 19) |
+| `pdf-content-streams` | §7.8, §8–9's operators | from sheaf | A page's operators as an iterator, typed; read and written | yes (16, 19) |
 | `pdf-semantics` | §7.7, §7.9, §14.3 | to start | Typed views over resolved objects, saying where a value came from | its common structures (20) |
 | `arlington` | | in pdf-lint | The model's TSVs and predicates, over pdf-objects' types | cut (2) |
 | `pdf-linearize` | Annex F | between milestones, item 4 | Linearized files planned and laid out; whether one holds | its own crate in the family ([below](#linearization-a-crate-of-its-own)) |
@@ -96,7 +97,7 @@ Encryption, 7.8 Content streams.
 | `pdf-tokenizer`, `pdf-lint` | Greg's | | kept |
 | `pdf-cos` | taken | edgeparse's fork of lopdf 0.39 with f64 reals (0.39.0, 18k downloads) | **`pdf-objects`**, ruled (Greg, 2026-10-27): 7.3's title, plural like `pdf-filters` |
 | `pdf-syntax` | taken | pdfluent's reader (0.6.1) | not needed |
-| `pdf-content` | taken | semantic-pdf-diff's tokenizer and interpreter (0.1.13) | open: `pdf-content-streams` (7.8's term, plural like `pdf-objects`) or `pdf-operators` (what its iterator yields); both free, as is `pdf-content-stream` |
+| `pdf-content` | taken | semantic-pdf-diff's tokenizer and interpreter (0.1.13) | **`pdf-content-streams`**, ruled (Greg, 2026-10-27): 7.8's term, plural like `pdf-objects`; its iterator is named for what it yields (`Operators`) |
 | `pdf-structure` | free | | kept |
 | `pdf-filters`, `pdf-crypt` | free (unpublished) | | kept |
 | `pdf-semantics` | free | | kept |
@@ -109,8 +110,8 @@ Also taken, and not needed: `pdf-doc`, `pdf-core`, `pdf-text`,
 `pdf-writer` (Typst's). A free name stays free only until someone
 publishes it, and crates.io's policy doesn't allow holding one with no
 code in it, so the guard is publishing early once a crate has its first
-real version: Greg's call. This plan says `pdf-objects`, ruled, and keeps
-`pdf-content` as a working name until its name is ruled.
+real version: Greg's call. The plan uses the ruled names: `pdf-objects`,
+`pdf-content-streams`, `pdf-linearize`.
 
 ## Where pdf-lint's modules go
 
@@ -118,16 +119,16 @@ The library's modules depend on each other one way only, tests aside,
 so most cuts move whole files. `bytes.rs` is the one to split.
 
 ```
-pdf-tokenizer  §7.2  0.1.0
-pdf-filters    §7.4  decodes       → tokenizer
-pdf-crypt      §7.6  decrypts      → RustCrypto only
-pdf-objects    §7.3  to cut        → tokenizer
-pdf-structure  §7.5  to cut        → objects, filters, crypt
-arlington            to cut        → objects
-pdf-lint             what's left   → structure, arlington
-pdf-content    §7.8  from sheaf    → tokenizer, objects
-pdf-semantics        to start      → structure
-pdf-linearize  Ann. F  between     → structure
+pdf-tokenizer        §7.2     0.1.0
+pdf-filters          §7.4     decodes       → tokenizer
+pdf-crypt            §7.6     decrypts      → RustCrypto only
+pdf-objects          §7.3     to cut        → tokenizer
+pdf-structure        §7.5     to cut        → objects, filters, crypt
+arlington                     to cut        → objects
+pdf-lint                      what's left   → structure, arlington
+pdf-content-streams  §7.8     from sheaf    → tokenizer, objects
+pdf-semantics        §7.7–9   to start      → structure
+pdf-linearize        Annex F  between       → structure
 ```
 
 | Crate | From pdf-lint | Where it stops |

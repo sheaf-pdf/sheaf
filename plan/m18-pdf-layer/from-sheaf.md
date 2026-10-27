@@ -74,12 +74,12 @@ Greg decide.
   `q`/`Q`, marked content that doesn't end, a resource name content
   uses that `/Resources` lacks, and resources nothing uses.
 
-## Content: pdf-content, slices 16 to 19
+## Content: pdf-content-streams, slices 16 to 19
 
 | Module | Lines | What | Coupled to | Slice |
 |---|---|---|---|---|
 | `content/lex.rs` | 967 | Tokens as PDFium's `CPDF_StreamParser` ends them; an inline image's end by PDFium's `ReadInlineStream` rules, from the resources' color spaces (`ResCx`) and the filters' end markers; caps (`ContentLimits`); errors that say where; `steps`, an operator at a time. `tier-lexer` holds it to PDFium: no page differed over 23,628 | `source::Limits`, lopdf's `Object` (operands) | 16 |
-| `content/page.rs`'s `Concat` | | A page's streams joined as PDFium reads them, every position mapped back to its stream | `ReadObjects` (the streams are the caller's in pdf-content) | 16 |
+| `content/page.rs`'s `Concat` | | A page's streams joined as PDFium reads them, every position mapped back to its stream | `ReadObjects` (the streams are the caller's in pdf-content-streams) | 16 |
 | `content/interp/op.rs` | 251 | The operators, each told by its name once, `Other` for one it doesn't know | the lexer | 16 |
 | `content/balance.rs` | 40 | A page's `q`/`Q` balance | `source::Limits` | 16 |
 | `content/marked.rs` | 195 | The ranges `BMC` and `BDC` open and `EMC` ends | `source::Limits`, lopdf's types | 16 |
@@ -88,18 +88,18 @@ Greg decide.
 | `content/writer.rs` | 710 | Content written the same way every time, resources named by digest when it's finished | sheaf's fonts, `annot`, `geom`, `ReadObjects`, `serialize/object.rs`, lopdf's types | 19 |
 | `content/res.rs` | 141 | Resources by what they are, a digest each | lopdf's types | 19 |
 
-- The lexer's rules become pdf-content's PDFium policy
+- The lexer's rules become pdf-content-streams' PDFium policy
   ([sheaf.md](sheaf.md#pdf-tokenizer) has where they differ from the
   tokenizer's ISO rules), and slice 18 moves its scanner onto
   pdf-tokenizer if that's proved. `balance`, `marked` and `names` need
   only the lexer, and give pdf-lint its content checks.
-- `splice` and `writer` are pdf-content's writing half, which pdf-repair
+- `splice` and `writer` are pdf-content-streams' writing half, which pdf-repair
   would want too (taking a broken operator out without decoding the
   stream into operations). `writer` is untangled from sheaf's fonts and
   geometry first.
 - **The interpreter** (`content/interp/`, 3,566 lines) draws as PDFium
   draws and is tied to sheaf's geometry: it stays sheaf's, on
-  pdf-content.
+  pdf-content-streams.
 
 ## pdf-semantics: slices 20 and 21
 

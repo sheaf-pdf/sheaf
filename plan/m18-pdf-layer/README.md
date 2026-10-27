@@ -21,7 +21,7 @@ weighed for the family: [scope](scope.md).
     writing;
   - pdf-structure (§7.5): cross-references, object streams, the lazy
     reader and the file writer;
-  - pdf-content (§7.8, and §8–9's operators): a page's operators as an
+  - pdf-content-streams (§7.8, and §8–9's operators): a page's operators as an
     iterator, read and written, from sheaf's lexer;
   - pdf-semantics' common structures (§7.7, §7.9, §14.3): text strings,
     dates, name and number trees, the page tree, XMP claims;
@@ -47,8 +47,9 @@ weighed for the family: [scope](scope.md).
 - the goal is a coherent family, not dropping lopdf;
 - the family exposes writing even where pdf-lint doesn't use it;
 - arlington takes pdf-objects' types;
-- pdf-content is in, as an iterator of operators;
-- the names `pdf-objects` (`pdf-cos` is taken) and `pdf-linearize`;
+- pdf-content-streams is in, as an iterator of operators;
+- the names `pdf-objects` (`pdf-cos` is taken), `pdf-content-streams`
+  (`pdf-content` is taken) and `pdf-linearize`;
 - linearization lives in the family, a crate of its own (Greg leans
   that way; the plan agrees);
 - the crate slices are done in pdf-lint's workspace by pdf-lint's own
@@ -96,10 +97,10 @@ oracles, the Arlington tests and the 7k gate.
 | [13](slices/s13-lopdf-gone.md) | lopdf gone | open | 12 | sheaf |
 | [14](slices/s14-copies-under-renumbering.md) | Copies under renumbering | open | 9, 12 | sheaf, pdf-lint |
 | [15](slices/s15-wrap-up.md) | Wrap-up | open | 1–14, 16–21 | sheaf |
-| [16](slices/s16-pdf-content-operators.md) | pdf-content: operators | open | 3 | pdf-lint |
-| [17](slices/s17-sheaf-s-content-on-pdf-content.md) | sheaf's content on pdf-content | open | 11, 16 | sheaf |
+| [16](slices/s16-pdf-content-streams-operators.md) | pdf-content-streams: operators | open | 3 | pdf-lint |
+| [17](slices/s17-sheaf-s-content-on-pdf-content-streams.md) | sheaf's content on pdf-content-streams | open | 11, 16 | sheaf |
 | [18](slices/s18-one-scanner.md) | One scanner: PDFium's rules as a pdf-tokenizer mode | open | 16 | pdf-lint |
-| [19](slices/s19-pdf-content-writing.md) | pdf-content, writing | open | 16, 17 | sheaf, pdf-lint |
+| [19](slices/s19-pdf-content-streams-writing.md) | pdf-content-streams, writing | open | 16, 17 | sheaf, pdf-lint |
 | [20](slices/s20-pdf-semantics-the-common-structures.md) | pdf-semantics: the common structures | open | 3, 5 | pdf-lint |
 | [21](slices/s21-sheaf-on-pdf-semantics.md) | sheaf on pdf-semantics | open | 11, 20 | sheaf |
 
@@ -111,9 +112,8 @@ In [asks](../asks.md), one line:
   they don't touch sheaf; sheaf's slices as a milestone after the work
   between milestones, before M11, whose passwords would otherwise be
   built on lopdf's handler and then moved.
-- **Names** ([crates.md](crates.md#names-on-cratesio)): `pdf-content` is
-  taken on crates.io: `pdf-content-streams` or `pdf-operators`?
-  `pdf-arlington` for arlington (rec.). `pdf-objects` and
+- **arlington's name** ([crates.md](crates.md#names-on-cratesio)): rec.
+  `pdf-arlington`. `pdf-objects`, `pdf-content-streams` and
   `pdf-linearize` are ruled (Greg, 2026-10-27).
 - **The hash:** the notes suggest BLAKE3 for both tools. sheaf's
   xxh3-128 names blobs within sheaf, and `store.rs` refuses a collision;

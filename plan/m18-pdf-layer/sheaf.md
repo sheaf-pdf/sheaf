@@ -71,7 +71,7 @@ sheaf already copies unchanged objects as they were, within limits:
 ### pdf-tokenizer
 
 - **Replaces:** the scanning under lopdf's object parser, through
-  pdf-objects, and under pdf-content's scanner if [slice 18](slices/s18-one-scanner.md)
+  pdf-objects, and under pdf-content-streams' scanner if [slice 18](slices/s18-one-scanner.md)
   proves it.
 - **Differences to absorb above it:** sheaf's content lexer follows
   PDFium, the tokenizer ISO.
@@ -180,13 +180,13 @@ sheaf already copies unchanged objects as they were, within limits:
   item 4) is independent of any object model, and F15's Rewrite that
   doesn't load the file whole reads through the lazy resolver.
 
-### pdf-content
+### pdf-content-streams
 
 - **Replaces:** `content/lex.rs` and its `steps`, `balance.rs`,
   `marked.rs`, `names.rs` and `page.rs`'s joining of a page's streams
-  ([slices 16](slices/s16-pdf-content-operators.md) and
-  [17](slices/s17-sheaf-s-content-on-pdf-content.md)); then
-  `writer.rs`, `res.rs` and `splice.rs` ([slice 19](slices/s19-pdf-content-writing.md)).
+  ([slices 16](slices/s16-pdf-content-streams-operators.md) and
+  [17](slices/s17-sheaf-s-content-on-pdf-content-streams.md)); then
+  `writer.rs`, `res.rs` and `splice.rs` ([slice 19](slices/s19-pdf-content-streams-writing.md)).
 - **A correction to the notes:** they say content is shared by the
   linter and "Sheaf rendering". PDFium renders sheaf's pages. sheaf's
   lexer feeds its interpreter (what a page holds, what an edit changes),
