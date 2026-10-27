@@ -12,6 +12,9 @@ from pdf-lint's side; and pdf-lint's `0.2.0` branch at a104227, read
 
 ## Rulings
 
+- **M18 starts now,** slice 2 first, by pdf-lint's agent (Greg,
+  2026-10-27: "we're going to start on m18 immediately but probably
+  with slice 2 in the pdf-lint agent").
 - **The goal is a coherent family:** "dropping lopdf isn't exactly the
   goal here. a coherent pdf crate family is." (Greg, 2026-10-27). What
   coherent means: [scope](scope.md#the-goal-a-coherent-pdf-crate-family).
@@ -29,7 +32,7 @@ from pdf-lint's side; and pdf-lint's `0.2.0` branch at a104227, read
   `ObjectAccess` trait (Greg, 2026-10-27).
 - **Probably its own milestone,** "even if it's mostly work in a
   separate tool/repo", "probably taking over lopdf"
-  ([F13](../backlog/F13.md)) (Greg, 2026-10-27). M18 is proposed on
+  ([F13](../complete/backlog-closed.md#f13-in-house-what-sheaf-uses-of-lopdf-and-drop-the-dependency)) (Greg, 2026-10-27). M18 is proposed on
   that.
 - **The crates are pdf-lint's agent's work:** "A lot of this work will
   happen over in pdf-lint under a different agent" (Greg, 2026-10-27).

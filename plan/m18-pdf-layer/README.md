@@ -1,8 +1,8 @@
 # M18: The PDF layer
 
-Status: proposed · planned 2026-10-27; its place in the order waits on Greg
+Status: in progress · started 2026-10-27, slice 2 first, in pdf-lint's workspace
 
-Proves: pdf-lint and sheaf read and write PDF through one coherent family of crates; lopdf is gone, and sheaf copies more of what didn't change · Depends on: nothing unbuilt; [F15](../backlog/F15.md) first (soft)
+Proves: pdf-lint and sheaf read and write PDF through one coherent family of crates; lopdf is gone, and sheaf copies more of what didn't change · Depends on: nothing unbuilt
 
 ## Summary
 
@@ -11,7 +11,7 @@ A coherent family of PDF crates, split from
 keeping the bytes it read and where they were, with pdf-lint and sheaf
 both on them (Greg, 2026-10-27: "dropping lopdf isn't exactly the goal
 here. a coherent pdf crate family is."). sheaf leaves lopdf
-([F13](../backlog/F13.md)) on the way. What coherent means, and what was
+([F13](../complete/backlog-closed.md#f13-in-house-what-sheaf-uses-of-lopdf-and-drop-the-dependency)) on the way. What coherent means, and what was
 weighed for the family: [scope](scope.md).
 
 - **The crates** ([crates.md](crates.md)):
@@ -63,13 +63,14 @@ weighed for the family: [scope](scope.md).
 
 ## Where it stands
 
-Status: **proposed** (2026-10-27). Planned from the memo of 2026-10-26
+Status: **in progress** (2026-10-27). Greg: "we're going to start on
+m18 immediately but probably with slice 2 in the pdf-lint agent."
+Planned from the memo of 2026-10-26
 (now [sheaf.md](sheaf.md)), Greg's "PDF Linter & Sheaf: Crate
 Architecture Notes" and pdf-lint's `0.2.0` branch (a104227), in which
-pdf-crypt is built and pdf-lint reads without qpdf. Nothing is started,
-and more planning is to come (Greg). Waiting on Greg
-([asks](../asks.md)): its place in the order, and the open questions
-below.
+pdf-crypt is built and pdf-lint reads without qpdf. Slice 2 goes
+first, by pdf-lint's agent; sheaf's slices start when Greg says.
+Waiting on Greg ([asks](../asks.md)): the open questions below.
 
 Two tracks ([scope](scope.md#two-tracks)): the crate slices in
 pdf-lint's workspace, by pdf-lint's agent, which touch nothing of
@@ -109,10 +110,6 @@ oracles, the Arlington tests and the 7k gate.
 
 In [asks](../asks.md), one line:
 
-- **Its place:** rec. the crate slices whenever Greg wants them, since
-  they don't touch sheaf; sheaf's slices as a milestone after the work
-  between milestones, before M11, whose passwords would otherwise be
-  built on lopdf's handler and then moved.
 - **The hash:** the notes suggest BLAKE3 for both tools. sheaf's
   xxh3-128 names blobs within sheaf, and `store.rs` refuses a collision;
   BLAKE3 matters where a hash leaves sheaf (a report, a shared cache).

@@ -3,7 +3,7 @@
 Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
 
 **What:** what's left of lopdf goes, and the vendored crate with it
-([F13](../../backlog/F13.md)'s end).
+([F13](../../complete/backlog-closed.md#f13-in-house-what-sheaf-uses-of-lopdf-and-drop-the-dependency)'s end).
 
 - The last uses: `LazyPdf` and lopdf's reader where anything still
   reaches them, its writer in tests and fixtures, `decode_text_string`,

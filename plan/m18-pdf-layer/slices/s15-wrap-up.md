@@ -7,7 +7,7 @@ Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
 - **Docs:** `docs/architecture.md` (the PDF layer and its crates),
   `docs/document-model.md` (it names lopdf on 47 lines, and tests read
   it), `docs/building.md`, `docs/oracles.md` where lopdf was an oracle.
-- **Plan:** [F13](../../backlog/F13.md) closed; [Libraries](../../libraries.md)'
+- **Plan:** [Libraries](../../libraries.md)'
   item 2 says what's published and what waits; build-or-adopt entries
   1, 2 and 29 updated; the backlog entries that named lopdf's
   behaviour rechecked.

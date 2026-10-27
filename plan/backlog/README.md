@@ -132,7 +132,6 @@ Status: open
 | [F10](F10.md) | Redo OCR: replace another tool's text layer | feature | 2026-10-22, M10.5 |
 | [F11](F11.md) | Plugin memory and time limits in settings.toml | feature | 2026-10-22, M10.5 |
 | [F12](F12.md) | A qpdf plugin | feature | 2026-10-22, M10.5 |
-| [F13](F13.md) | In-house what sheaf uses of lopdf and drop the dependency | feature | 2026-10-22, M10.5 slice 19 |
 | [F15](F15.md) | A Rewrite that doesn't load the whole file (the flatten export's memory gate) | feature | 2026-10-22, M10.5 slice 19 |
 | [F16](F16.md) | Turn QR codes into links | feature | 2026-10-23, M10.5 |
 | [F17](F17.md) | hayro-interpret as a second corpus oracle beside PDFium | feature | 2026-10-24, the content interpreter's wrap-up |

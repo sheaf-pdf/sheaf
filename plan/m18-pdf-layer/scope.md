@@ -7,7 +7,7 @@ goes, what was weighed for the family and left for later, and why.
 
 Greg (2026-10-27): "dropping lopdf isn't exactly the goal here. a
 coherent pdf crate family is." lopdf goes as part of it
-([F13](../backlog/F13.md)), with the copies it blocked.
+([F13](../complete/backlog-closed.md#f13-in-house-what-sheaf-uses-of-lopdf-and-drop-the-dependency)), with the copies it blocked.
 
 Coherent means, for this plan:
 
@@ -62,8 +62,8 @@ is that nothing else moved:
 
 - **The crates** (slices 2–7, 16, 18 and 20; 19 starts in sheaf): in
   pdf-lint's workspace, by pdf-lint's own agent (Greg, 2026-10-27).
-  They don't touch sheaf, so they could go ahead of sheaf's milestone
-  order. Their files here are sheaf's side of the spec; their rows follow
+  They don't touch sheaf, and they go first: slice 2 starts M18 (Greg,
+  2026-10-27). Their files here are sheaf's side of the spec; their rows follow
   what lands in pdf-lint.
 - **sheaf** (slices 1, 8–15, 17 and 21; 14 and 19 add to the crates
   too): a milestone, never mixed into another (F13's "never

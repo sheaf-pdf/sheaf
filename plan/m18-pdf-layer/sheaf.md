@@ -5,7 +5,7 @@ crate replaces in sheaf and what sheaf needs from it, and what the
 switch would show. The crates themselves are [crates.md](crates.md).
 Written 2026-10-26 as a memo in `plan/topics/` (exploring), moved here
 when Greg asked for the milestone's plan (2026-10-27). It builds on
-[F13](../backlog/F13.md) and [build-or-adopt entry
+[F13](../complete/backlog-closed.md#f13-in-house-what-sheaf-uses-of-lopdf-and-drop-the-dependency) and [build-or-adopt entry
 1](../research/build-or-adopt/01-pdf-object-layer.md) (the object
 layer's survey), and doesn't repeat them.
 
