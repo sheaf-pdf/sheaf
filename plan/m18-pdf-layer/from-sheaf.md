@@ -74,45 +74,62 @@ Greg decide.
   `q`/`Q`, marked content that doesn't end, a resource name content
   uses that `/Resources` lacks, and resources nothing uses.
 
-## Content: the content crate, later
+## Content: pdf-content, slices 16 to 19
 
-| Module | Lines | What | Coupled to |
-|---|---|---|---|
-| `content/lex.rs` | 967 | Tokens as PDFium's `CPDF_StreamParser` ends them; an inline image's end by PDFium's `ReadInlineStream` rules, from the resources' color spaces (`ResCx`) and the filters' end markers; caps (`ContentLimits`); errors that say where. `tier-lexer` holds it to PDFium: no page differed over 23,628 | `source::Limits`, lopdf's `Object` (operands) |
-| `content/balance.rs` | 40 | A page's `q`/`Q` balance | `source::Limits` |
-| `content/marked.rs` | 195 | The ranges `BMC` and `BDC` open and `EMC` ends | `source::Limits`, lopdf's types |
-| `content/names.rs` | 189 | The resource names content uses, and what `/Resources` must keep | `source::Limits` |
-| `content/splice.rs` | 554 | Ranges taken out of a page's streams, every other byte as it was, only where that can't change what's drawn after | `source::Limits` |
-| `content/writer.rs` | 710 | Content written the same way every time, resources named by digest when it's finished | `annot`, `geom`, `serialize/object.rs`, lopdf's types |
+| Module | Lines | What | Coupled to | Slice |
+|---|---|---|---|---|
+| `content/lex.rs` | 967 | Tokens as PDFium's `CPDF_StreamParser` ends them; an inline image's end by PDFium's `ReadInlineStream` rules, from the resources' color spaces (`ResCx`) and the filters' end markers; caps (`ContentLimits`); errors that say where; `steps`, an operator at a time. `tier-lexer` holds it to PDFium: no page differed over 23,628 | `source::Limits`, lopdf's `Object` (operands) | 16 |
+| `content/page.rs`'s `Concat` | | A page's streams joined as PDFium reads them, every position mapped back to its stream | `ReadObjects` (the streams are the caller's in pdf-content) | 16 |
+| `content/interp/op.rs` | 251 | The operators, each told by its name once, `Other` for one it doesn't know | the lexer | 16 |
+| `content/balance.rs` | 40 | A page's `q`/`Q` balance | `source::Limits` | 16 |
+| `content/marked.rs` | 195 | The ranges `BMC` and `BDC` open and `EMC` ends | `source::Limits`, lopdf's types | 16 |
+| `content/names.rs` | 189 | The resource names content uses, and what `/Resources` must keep | `source::Limits` | 16 |
+| `content/splice.rs` | 554 | Ranges taken out of a page's streams, every other byte as it was, only where that can't change what's drawn after | the lexer, `Concat`, `source::Limits` | 19 |
+| `content/writer.rs` | 710 | Content written the same way every time, resources named by digest when it's finished | sheaf's fonts, `annot`, `geom`, `ReadObjects`, `serialize/object.rs`, lopdf's types | 19 |
+| `content/res.rs` | 141 | Resources by what they are, a digest each | lopdf's types | 19 |
 
-- The lexer's rules become the PDFium policy of the content crate
+- The lexer's rules become pdf-content's PDFium policy
   ([sheaf.md](sheaf.md#pdf-tokenizer) has where they differ from the
-  tokenizer's ISO rules). `balance`, `marked` and `names` need only the
-  lexer, and give pdf-lint its content checks.
-- `splice` and `writer` are the content crate's writing half, which
-  pdf-repair would want (taking a broken operator out without decoding
-  the stream into operations). `writer` reaches sheaf's annotations and
+  tokenizer's ISO rules), and slice 18 moves its scanner onto
+  pdf-tokenizer if that's proved. `balance`, `marked` and `names` need
+  only the lexer, and give pdf-lint its content checks.
+- `splice` and `writer` are pdf-content's writing half, which pdf-repair
+  would want too (taking a broken operator out without decoding the
+  stream into operations). `writer` is untangled from sheaf's fonts and
   geometry first.
 - **The interpreter** (`content/interp/`, 3,566 lines) draws as PDFium
-  draws and is tied to sheaf's geometry: it stays sheaf's.
+  draws and is tied to sheaf's geometry: it stays sheaf's, on
+  pdf-content.
 
-## pdf-semantics candidates, later
+## pdf-semantics: slices 20 and 21
+
+| What | sheaf | pdf-lint |
+|---|---|---|
+| Text strings (7.9.2.2) | read: `file.rs`'s `text_string`; written in three places: `save.rs`, `stamp_lib.rs`, `annot.rs` | `text.rs`: decoded, every departure said |
+| Dates (7.9.4) | written: `annot::pdf_date_now` | checked: `check::is_date` |
+| Name trees (7.9.6) | `attachments::name_tree`; the scripts' tree in `materialize/emit/form.rs` | `predicate::Trees` |
+| Number trees (7.9.7) | `labels.rs`: read (`collect_nums`) and written (`number_tree`) | the checker's walk |
+| The page tree (7.7.3) | `source/pages.rs` (428 lines): `/Kids` depth first, inherited keys up `/Parent`, stopping at `/Count` where PDFium does | the checker's walk, as ISO has it |
+| XMP claims (14.3.2) | `source/conformance.rs` (149 lines): PDF/A and PDF/UA, on quick-xml | `extension.rs`: the extension subsets |
+
+- pdf-lint could report where PDFium's pages differ from the tree's
+  (a `/Count` that's wrong, a page listed twice), once both walks are
+  pdf-semantics' policies.
+- A PDF/A profile in pdf-lint needs the conformance claim.
+
+## Fonts, later
 
 | Module | Lines | What | Coupled to |
 |---|---|---|---|
-| `source/conformance.rs` | 149 | PDF/A and PDF/UA claims from XMP | lopdf's `LazyPdf`, quick-xml |
-| `source/pages.rs` | 428 | The page tree as PDFium walks it: `/Kids` depth first, inherited keys up `/Parent`, stopping at `/Count` where PDFium does | `content`, `geom`, lopdf's types |
 | `content/font/encoding.rs` | 254 | Simple fonts' encodings, code to glyph name, glyph name to text | nothing |
 | `content/font/afm.rs` | 101 | The standard 14 fonts' metrics (`assets/afm`, Adobe's licence in `assets/LICENSE-afm`) | nothing |
 | `content/font/type1.rs` | 451 | A Type 1 program's tokens | nothing |
 | `content/font/predefined.rs` | 277 | The predefined CMaps a Type 0 font's `/Encoding` names | hayro-cmap |
 
-- pdf-lint's `extension.rs` reads XMP too (for extension subsets): one
-  XMP reader could serve both, and a PDF/A profile needs the claim.
-- pdf-lint could report where PDFium's pages differ from the tree's
-  (a `/Count` that's wrong, a page listed twice).
-- A simple font's `/Widths` against the standard 14's metrics would
-  build on the font modules.
+The rest of sheaf's font reading (`foreign.rs`, `program.rs` on skrifa)
+is tied to its interpreter. A simple font's `/Widths` against the
+standard 14's metrics would build on these, when pdf-lint wants font
+checks ([scope](scope.md#weighed-for-the-family)).
 
 ## Test infrastructure
 

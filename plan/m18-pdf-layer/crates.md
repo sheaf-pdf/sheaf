@@ -12,6 +12,13 @@ from pdf-lint's side; and pdf-lint's `0.2.0` branch at a104227, read
 
 ## Rulings
 
+- **The goal is a coherent family:** "dropping lopdf isn't exactly the
+  goal here. a coherent pdf crate family is." (Greg, 2026-10-27). What
+  coherent means: [scope](scope.md#the-goal-a-coherent-pdf-crate-family).
+- **pdf-content is in,** as "an iterator consuming operators" (Greg,
+  2026-10-27: "definitely add these").
+- **Linearization lives in the family,** a crate of its own (Greg
+  leans that way, 2026-10-27; this plan agrees): [below](#linearization-a-crate-of-its-own).
 - **The family exposes writing** (encoding, encrypting, serializing)
   even where pdf-lint doesn't use it (Greg, 2026-10-27).
 - **arlington takes pdf-cos's object types,** not the notes'
@@ -51,17 +58,23 @@ pdf-lint's workspace, unpublished, which pdf-lint 0.2.0 reads through.
 
 | Crate | ISO 32000-2 | State | What it is | In M18 |
 |---|---|---|---|---|
-| `pdf-tokenizer` | §7.2 | 0.1.0 | Lossless, zero-copy tokens; never rejects, never repairs; `no_std` | used |
-| `pdf-cos` (or `pdf-syntax`) | §7.3 | to cut | One object at a time, lossless, with spans; owned and editable; serialized | yes |
-| `pdf-filters` | §7.4 | 0.1.0, unpublished | The standard filters, every fault said, output capped; no image filters | encoding added |
-| `pdf-crypt` | §7.6 | 0.1.0, unpublished | The standard security handler, decrypting | encrypting exposed |
-| `pdf-structure` (or `doc`) | §7.5 | to cut | Cross-references, the trailer chain, incremental sections, object streams, recovery, a lazy resolver; writing files and updates | yes |
-| `arlington` | | in pdf-lint | The model's TSVs and predicates, over pdf-cos's types | cut |
-| content operators (`pdf-content`?) | §7.8 | considering | A content stream's operators and operands | later |
-| `pdf-semantics` | §7.7 on | thinking | Typed views over resolved objects, saying where a value came from | later |
-| `diag` | | thinking | Spans, issue codes and a sink through the layers | not needed |
-| `pdf-repair` | | thinking | A corrected file, from fixes attached to lint findings | later |
+| `pdf-tokenizer` | §7.2 | 0.1.0 | Lossless, zero-copy tokens; never rejects, never repairs; `no_std` | PDFium's rules as a mode (18) |
+| `pdf-cos` (or `pdf-syntax`) | §7.3 | to cut | One object at a time, lossless, with spans; owned and editable; serialized | yes (2, 3) |
+| `pdf-filters` | §7.4 | 0.1.0, unpublished | The standard filters, every fault said, output capped; no image filters | encoding added (6) |
+| `pdf-crypt` | §7.6 | 0.1.0, unpublished | The standard security handler, decrypting | encrypting exposed (6) |
+| `pdf-structure` (or `doc`) | §7.5 | to cut | Cross-references, the trailer chain, incremental sections, object streams, recovery, a lazy resolver; writing files and updates | yes (4, 5, 7) |
+| `pdf-content` | §7.8, §8–9's operators | from sheaf | A page's operators as an iterator, typed; read and written | yes (16, 19) |
+| `pdf-semantics` | §7.7, §7.9, §14.3 | to start | Typed views over resolved objects, saying where a value came from | its common structures (20) |
+| `arlington` | | in pdf-lint | The model's TSVs and predicates, over pdf-cos's types | cut (2) |
+| `pdf-linearize`? | Annex F | between milestones, item 4 | Linearized files planned and laid out; whether one holds | its own crate in the family ([below](#linearization-a-crate-of-its-own)) |
+| fonts (`pdf-font`?) | §9 | weighed | Encodings, the standard 14's metrics, embedded programs, CMaps | later |
+| `diag` | | weighed | Spans, issue codes and a sink through the layers | a convention, not a crate |
+| `pdf-repair` | | thinking | A corrected file, from fixes attached to lint findings | later; its seam kept |
 | `pdf-lint` | | 0.1.0; 0.2.0 unreleased | Rules, profiles and reports; Apache-2.0 for the embedded model | on the crates |
+
+Image codecs (DCT, JPX, CCITT, JBIG2) stay outside the family:
+[entry 33](../research/build-or-adopt/33-pdf-image-samples-image-s-own.md)
+owns them. What was weighed and why: [scope](scope.md#weighed-for-the-family).
 
 The notes' writer is pdf-cos's serializer and pdf-structure's file
 writer here, so each layer writes what it reads.
@@ -84,6 +97,9 @@ pdf-cos        §7.3  to cut        → tokenizer
 pdf-structure  §7.5  to cut        → cos, filters, crypt
 arlington            to cut        → cos
 pdf-lint             what's left   → structure, arlington
+pdf-content    §7.8  from sheaf    → tokenizer, cos
+pdf-semantics        to start      → structure
+pdf-linearize  Ann. F  between     → structure
 ```
 
 | Crate | From pdf-lint | Where it stops |
@@ -141,9 +157,51 @@ What's semantic is sheaf's layer over it, in `sheaf-doc/src/source/`:
 the page table with its inherited keys, walked as PDFium walks it
 (`pages.rs`), annotations' appearances (`appearance.rs`), XMP's
 conformance claims (`conformance.rs`), and text strings
-(`lopdf::decode_text_string`). Those are pdf-semantics candidates, but
-they carry PDFium's rules and sheaf's needs, so they stay in sheaf for
-M18 ([scope](scope.md#later)).
+(`lopdf::decode_text_string`). The page table's walk and the
+conformance claims go to pdf-semantics, the walk as a policy, PDFium's
+for sheaf ([slice 20](slices/s20-pdf-semantics-the-common-structures.md));
+the appearances stay sheaf's, as what a flatten reads.
+
+## Linearization: a crate of its own
+
+Greg (2026-10-27): "i think that linearization should likely live in
+the family of crates. should it be it's own crate or part of
+serialization. i lean towards its own one". This plan agrees: a crate
+of its own (`pdf-linearize`?), beside pdf-structure, in the family's
+workspace, as planned between milestones ([item 4](../between/README.md)).
+
+Why not a part of pdf-structure's writer:
+
+- **Its own part of the spec** (Annex F), with its own format, the hint
+  tables' bit-packed page offset and shared object tables, its own tests,
+  and qpdf's `--check-linearization` for an oracle.
+- **Reading as much as writing.** The full check (the hint tables
+  against the file's layout, the first page's section) is what pdf-lint
+  wants, beside the plan and the assembly a writer wants. Inside a
+  writer, the check would have no home.
+- **Independent of any object model,** as its plan has it: the caller
+  describes the graph (each object's id, what it refers to, which pages
+  use it) and gets back the order, the numbers and the object-stream
+  groups, so any writer can use it, lopdf's through an adapter.
+- **pdf-structure stays smaller,** and a writer that never linearizes
+  doesn't carry it.
+
+The split:
+
+- **pdf-linearize:** the plan (`serialize/group.rs` moves into it), the
+  hint tables both ways, the linearization dictionary (padded, so the
+  offsets settle in one more pass), and the full check.
+- **pdf-structure:** writing the sections a linearized file has, as for
+  any file; and at open, B3's check (`/L` against the file's length)
+  among the facts as written, which sheaf reads on every open.
+- **The direction:** pdf-linearize lays out what pdf-structure writes
+  and checks what it reads, so it depends on pdf-structure, never the
+  reverse. Its plan, hint tables and dictionary need nothing; until
+  pdf-structure writes ([slice 7](slices/s07-pdf-structure-writing.md)),
+  it assembles through the writer its caller gives (sheaf's
+  `serialize/`).
+- **sheaf's half** stays sheaf's, between milestones: the Fast Web View
+  choice in Save As, `--linearize`, later M14's Optimize.
 
 ## Decisions across the family
 
@@ -170,7 +228,7 @@ M18 ([scope](scope.md#later)).
    same bytes, at the cos and structure layers.
 5. **Policy as a parameter:** ISO or PDFium for content, and whose
    recovery. M18 holds today's reading on the corpus; PDFium's recovery
-   is [later](scope.md#later).
+   is [later](scope.md#weighed-for-the-family).
 6. **Richness as a type parameter** (the notes): a sink sheaf passes as
    a no-op. Generic everywhere or `dyn` at some boundaries is measured
    on sheaf's 7k gate.

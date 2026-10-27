@@ -2,39 +2,54 @@
 
 Status: proposed · planned 2026-10-27; its place in the order waits on Greg
 
-Proves: sheaf reads and writes PDF through its own crates, with lopdf gone, and copies more of what didn't change · Depends on: nothing unbuilt; [F15](../backlog/F15.md) first (soft)
+Proves: pdf-lint and sheaf read and write PDF through one coherent family of crates; lopdf is gone, and sheaf copies more of what didn't change · Depends on: nothing unbuilt; [F15](../backlog/F15.md) first (soft)
 
 ## Summary
 
-sheaf takes over lopdf ([F13](../backlog/F13.md)) through a family of
-crates split from [pdf-lint](https://github.com/sheaf-pdf/pdf-lint),
-which Greg owns, each keeping the bytes it read and where they were
-(Greg, 2026-10-27: "This is probably it's own milestone on its own (even
-if it's mostly work in a separate tool/repo)... I think this is probably
-taking over lopdf").
+A coherent family of PDF crates, split from
+[pdf-lint](https://github.com/sheaf-pdf/pdf-lint), which Greg owns, each
+keeping the bytes it read and where they were, with pdf-lint and sheaf
+both on them (Greg, 2026-10-27: "dropping lopdf isn't exactly the goal
+here. a coherent pdf crate family is."). sheaf leaves lopdf
+([F13](../backlog/F13.md)) on the way. What coherent means, and what was
+weighed for the family: [scope](scope.md).
 
-- **The crates** ([crates.md](crates.md)): pdf-tokenizer (§7.2, on
-  crates.io), pdf-cos (§7.3, the object model, cut from pdf-lint),
-  pdf-filters (§7.4) and pdf-crypt (§7.6), which exist and gain
-  writing, and pdf-structure (§7.5, cross-references, object streams,
-  the lazy reader and the file writer). arlington is cut too, on
-  pdf-cos's types. pdf-lint reads through the same crates.
+- **The crates** ([crates.md](crates.md)):
+  - pdf-tokenizer (§7.2, on crates.io), with PDFium's rules as a mode;
+  - pdf-cos (§7.3), the object model, cut from pdf-lint;
+  - pdf-filters (§7.4) and pdf-crypt (§7.6), which exist and gain
+    writing;
+  - pdf-structure (§7.5): cross-references, object streams, the lazy
+    reader and the file writer;
+  - pdf-content (§7.8, and §8–9's operators): a page's operators as an
+    iterator, read and written, from sheaf's lexer;
+  - pdf-semantics' common structures (§7.7, §7.9, §14.3): text strings,
+    dates, name and number trees, the page tree, XMP claims;
+  - arlington, cut too, on pdf-cos's types.
 - **`LazyPdf` is pdf-structure's,** its lazy strategy beside pdf-lint's
-  read whole; it isn't pdf-semantics, which would be the typed layer
-  sheaf builds over it in `source/` ([crates.md](crates.md#where-lazypdf-goes-pdf-structure-not-pdf-semantics)).
+  read whole; not pdf-semantics, which is the typed layer over it
+  ([crates.md](crates.md#where-lazypdf-goes-pdf-structure-not-pdf-semantics)).
 - **In sheaf** ([sheaf.md](sheaf.md)): one door to the PDF types, the
   reader, an in-memory document of sheaf's own, the model, the writer,
-  then lopdf deleted.
+  content and the common structures through the family, then lopdf
+  deleted.
 - **The gains** that keeping spans buys: copies without a second parse,
   object-stream members copied as decoded, and copies under
   renumbering.
-- **Later, not M18** ([scope](scope.md#later)): the content operators
-  crate, pdf-semantics, PDFium's recovery as a policy, pdf-repair, a
-  `diag` crate, the other speed seams, publishing.
+- **Later** ([scope](scope.md#weighed-for-the-family)): fonts, the rest
+  of pdf-semantics, PDFium's recovery as a policy, pdf-repair, the
+  other speed seams, publishing.
+- **Linearization** joins the family as a crate of its own, beside
+  pdf-structure, keeping its place between milestones
+  ([crates.md](crates.md#linearization-a-crate-of-its-own)).
 
 **Rulings** (Greg, 2026-10-27; [crates.md](crates.md#rulings)):
+- the goal is a coherent family, not dropping lopdf;
 - the family exposes writing even where pdf-lint doesn't use it;
 - arlington takes pdf-cos's types;
+- pdf-content is in, as an iterator of operators;
+- linearization lives in the family, a crate of its own (Greg leans
+  that way; the plan agrees);
 - the crate slices are done in pdf-lint's workspace by pdf-lint's own
   agent ("A lot of this work will happen over in pdf-lint under a
   different agent");
@@ -53,13 +68,13 @@ and more planning is to come (Greg). Waiting on Greg
 ([asks](../asks.md)): its place in the order, and the open questions
 below.
 
-It has two tracks ([scope](scope.md#two-tracks)): slices 2–7 in
+Two tracks ([scope](scope.md#two-tracks)): the crate slices in
 pdf-lint's workspace, by pdf-lint's agent, which touch nothing of
 sheaf's (their files here are sheaf's side of the spec, and their rows
-follow what lands there), and slices 1 and 8–15 in sheaf, a milestone
-of their own. Each sheaf slice is proved by
-what didn't move: `source::lazy_tests`, `materialize_corpus`'s counts
-and bytes, the interop oracles, the Arlington tests and the 7k gate.
+follow what lands there), and sheaf's slices, a milestone of their own.
+Each sheaf slice is proved by what didn't move: `source::lazy_tests`,
+`materialize_corpus`'s counts and bytes, `tier-lexer`, the interop
+oracles, the Arlington tests and the 7k gate.
 
 ## Slices
 
@@ -79,7 +94,13 @@ and bytes, the interop oracles, the Arlington tests and the 7k gate.
 | [12](slices/s12-sheaf-writes-through-pdf-structure.md) | sheaf writes through pdf-structure | open | 7, 11; D4 (ruling) | sheaf |
 | [13](slices/s13-lopdf-gone.md) | lopdf gone | open | 12 | sheaf |
 | [14](slices/s14-copies-under-renumbering.md) | Copies under renumbering | open | 9, 12 | sheaf, pdf-lint |
-| [15](slices/s15-wrap-up.md) | Wrap-up | open | 1–14 | sheaf |
+| [15](slices/s15-wrap-up.md) | Wrap-up | open | 1–14, 16–21 | sheaf |
+| [16](slices/s16-pdf-content-operators.md) | pdf-content: operators | open | 3 | pdf-lint |
+| [17](slices/s17-sheaf-s-content-on-pdf-content.md) | sheaf's content on pdf-content | open | 11, 16 | sheaf |
+| [18](slices/s18-one-scanner.md) | One scanner: PDFium's rules as a pdf-tokenizer mode | open | 16 | pdf-lint |
+| [19](slices/s19-pdf-content-writing.md) | pdf-content, writing | open | 16, 17 | sheaf, pdf-lint |
+| [20](slices/s20-pdf-semantics-the-common-structures.md) | pdf-semantics: the common structures | open | 3, 5 | pdf-lint |
+| [21](slices/s21-sheaf-on-pdf-semantics.md) | sheaf on pdf-semantics | open | 11, 20 | sheaf |
 
 ## Open questions
 
@@ -89,7 +110,8 @@ In [asks](../asks.md), one line:
   they don't touch sheaf; sheaf's slices as a milestone after the work
   between milestones, before M11, whose passwords would otherwise be
   built on lopdf's handler and then moved.
-- **Names:** `pdf-cos` or `pdf-syntax`, `pdf-structure` or `doc`.
+- **Names:** `pdf-cos` or `pdf-syntax`, `pdf-structure` or `doc`,
+  `pdf-content`, `pdf-semantics`, `pdf-linearize`.
 - **The hash:** the notes suggest BLAKE3 for both tools. sheaf's
   xxh3-128 names blobs within sheaf, and `store.rs` refuses a collision;
   BLAKE3 matters where a hash leaves sheaf (a report, a shared cache).
@@ -104,7 +126,8 @@ In [asks](../asks.md), one line:
   where `LazyPdf` goes, the decisions across the family
 - [What sheaf takes](sheaf.md): where sheaf stands, its use of lopdf,
   crate by crate, the gains
-- [Scope](scope.md): the extent, the two tracks, the order, what's later
+- [Scope](scope.md): the goal, the extent, the two tracks, the order,
+  what was weighed and what's later
 - [What sheaf has for the crates](from-sheaf.md): sheaf's code pdf-lint's
   agent can take or work from, by slice, and checks pdf-lint could add
 - Build or adopt: [entry 1](../research/build-or-adopt/01-pdf-object-layer.md)

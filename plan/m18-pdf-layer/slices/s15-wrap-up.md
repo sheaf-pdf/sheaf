@@ -14,7 +14,7 @@ Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
 - **pdf-lint:** if 0.2.0 or later is out, sheaf's dev-dependency moves
   to it, and `PDF_LINT_QPDF` and the macOS `OPENSSL_MODULES` step go
   ([sheaf.md](../sheaf.md#pdf-lint-without-qpdf)).
-- **What's later** ([scope](../scope.md#later)) stays listed there, each
+- **What's later** ([scope](../scope.md#weighed-for-the-family)) stays listed there, each
   with what it waits for.
 
 **Checked:** `just plan-check`, `just precommit`, `just premerge`.

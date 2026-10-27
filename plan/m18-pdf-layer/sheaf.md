@@ -71,8 +71,8 @@ sheaf already copies unchanged objects as they were, within limits:
 ### pdf-tokenizer
 
 - **Replaces:** the scanning under lopdf's object parser, through
-  pdf-cos. `content/lex.rs` (967 lines) could sit on it later, with the
-  content crate ([scope](scope.md#later)).
+  pdf-cos, and under pdf-content's scanner if [slice 18](slices/s18-one-scanner.md)
+  proves it.
 - **Differences to absorb above it:** sheaf's content lexer follows
   PDFium, the tokenizer ISO.
   - A run of digits, signs and points is a number to PDFium (`--5`,
@@ -179,6 +179,42 @@ sheaf already copies unchanged objects as they were, within limits:
 - **Builds on it later:** the linearization crate (between milestones,
   item 4) is independent of any object model, and F15's Rewrite that
   doesn't load the file whole reads through the lazy resolver.
+
+### pdf-content
+
+- **Replaces:** `content/lex.rs` and its `steps`, `balance.rs`,
+  `marked.rs`, `names.rs` and `page.rs`'s joining of a page's streams
+  ([slices 16](slices/s16-pdf-content-operators.md) and
+  [17](slices/s17-sheaf-s-content-on-pdf-content.md)); then
+  `writer.rs`, `res.rs` and `splice.rs` ([slice 19](slices/s19-pdf-content-writing.md)).
+- **A correction to the notes:** they say content is shared by the
+  linter and "Sheaf rendering". PDFium renders sheaf's pages. sheaf's
+  lexer feeds its interpreter (what a page holds, what an edit changes),
+  which is why its rules must be PDFium's: the model has to agree with
+  the pixels.
+- **Needs:**
+  - PDFium's rules, held by `tier-lexer`, as a policy beside ISO's;
+  - inline images' ends by PDFium's rules, from the color spaces' components
+    sheaf gives (`ResCx`);
+  - operands as written, parsed only when asked for, and typed operators
+    the interpreter reads;
+  - its caps and errors (`LexErrorKind`);
+  - no slower than sheaf's lexer: the interpreter, blocks and text bags
+    lex every page they read.
+- **Stays sheaf's:** the interpreter, which draws as PDFium draws.
+
+### pdf-semantics
+
+- **Replaces** ([slice 21](slices/s21-sheaf-on-pdf-semantics.md)):
+  sheaf's text strings (one reader, three writers), its dates, its name
+  and number trees, the page table's walk and the conformance claims.
+- **Needs:**
+  - the page tree walked as PDFium walks it, as a policy, on the open
+    path: the 7k gate's open walks it;
+  - where a value came from (inherited, defaulted), which Properties
+    and form reading want;
+  - writing as well as reading: sheaf writes text strings, dates and
+    number trees.
 
 ## The notes' speed seams, against sheaf today
 

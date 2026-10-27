@@ -31,6 +31,10 @@ in this order:
      outside Rust, qpdf (C++) is the usual tool (build-or-adopt entry
      67). It's published as in-progress and instance-handoff were; see
      [Libraries](../libraries.md).
+   - **In the PDF crate family** (Greg, 2026-10-27): a crate of its
+     own beside pdf-structure, in the family's workspace, its checker
+     serving pdf-lint too. Where its parts go, and how it assembles
+     before pdf-structure writes: [M18's crates](../m18-pdf-layer/crates.md#linearization-a-crate-of-its-own).
    - **Builds on object streams' grouping:** `serialize::group` (pure:
      each object's number and the pages that use it in, containers out,
      page 1's apart), which moves into the crate, and
