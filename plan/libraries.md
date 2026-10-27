@@ -11,11 +11,14 @@ Candidates, most valuable first (2026-10-23; crate facts in
 [build-or-adopt](research/build-or-adopt/README.md)):
 
 1. **Linearization** ([between milestones](between/README.md), item
-   4). Scheduled.
-2. **The PDF layer** (backlog F13, "Maybe published"). No crate offers
+   4). Scheduled, as a crate of the PDF family
+   ([M18](m18-pdf-layer/crates.md#linearization-a-crate-of-its-own)).
+2. **The PDF layer** (F13's "Maybe published", now M18). No crate offers
    an owned object model that keeps reals at f64 and dictionaries in
    order, reads lazily under caps with byte spans, and appends to a
-   file with encryption (entry 1). Deferred with F13. Meanwhile the
+   file with encryption (entry 1). Under way as
+   [M18](m18-pdf-layer/README.md) (2026-10-27): a family of crates split
+   from pdf-lint rather than one layer crate. Meanwhile the
    content interpreter (#50) keeps its core free of sheaf's
    blocks and markers (`annot`, `private`) where it can, so it can move
    into this crate later.

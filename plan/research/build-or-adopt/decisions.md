@@ -104,6 +104,13 @@ bytes at levels 1, 6 and 9. Entry 4, B26.
    changes instead.
 3. Leave it to feature unification.
 
+**Ruled 2026-10-27 (Greg): 1, zlib-rs.** "go with both recommendations":
+zlib-rs, named once in the workspace, in every sheaf build, for speed.
+pdf-filters supports both backends, the caller naming one, and pdf-lint
+keeps miniz_oxide (M18, slice 6); sheaf names zlib-rs at every call
+once it compresses through pdf-filters (M18 slice 12). The check on
+memory sources goes with [B26](../../backlog/B26.md)'s fix.
+
 ### D5: M11's image decoding (slice 6)
 
 PDFium can't decode for re-encoding: `FPDFImageObj_GetBitmap` converts to

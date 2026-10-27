@@ -9,7 +9,6 @@ are [build or adopt](research/build-or-adopt/decisions.md)'s decisions.
 ## Between milestones and the order
 
 - What comes after M11 is still open: M16, M10 slices 18–29 and the rest. [→](between/README.md)
-- **D4:** one Flate backend for the workspace (B26). Rec.: zlib-rs explicitly. [→](research/build-or-adopt/decisions.md#d4-one-flate-backend-for-the-workspace)
 - **D7:** an advisory and license check in CI (B27). Rec.: `cargo deny`. [→](research/build-or-adopt/decisions.md#d7-an-advisory-and-license-check-in-ci)
 
 ## M10: Forms
