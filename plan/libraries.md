@@ -15,7 +15,9 @@ Candidates, most valuable first (2026-10-23; crate facts in
 2. **The PDF layer** (backlog F13, "Maybe published"). No crate offers
    an owned object model that keeps reals at f64 and dictionaries in
    order, reads lazily under caps with byte spans, and appends to a
-   file with encryption (entry 1). Deferred with F13. Meanwhile the
+   file with encryption (entry 1). Planned as
+   [M18](m18-pdf-layer/README.md) (proposed): a family of crates split
+   from pdf-lint rather than one layer crate. Meanwhile the
    content interpreter (#50) keeps its core free of sheaf's
    blocks and markers (`annot`, `private`) where it can, so it can move
    into this crate later.

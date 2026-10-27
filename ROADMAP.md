@@ -36,6 +36,9 @@ Then [M10](plan/m10-forms/README.md) slices 6–17, Fill & Sign
 ([M12](plan/m12-signatures/README.md) slice 1), [M11](plan/m11-security/README.md),
 then M16, M10 slices 18–29 and the rest, in an order still open.
 
+[M18](plan/m18-pdf-layer/README.md), the PDF layer (lopdf taken over by
+crates split from pdf-lint), is proposed: its place waits on Greg.
+
 Deferred: [M5](plan/m05-scan/README.md)'s scanners and separator sheets (no
 scanners to test against), PAdES signing (RustCrypto's cms 0.3 round).
 
@@ -62,6 +65,7 @@ M0–M4 (spikes, viewer, organizer, markup, polish) made v0.1: see
 | [M15](plan/m15-automation/README.md) | **Automation**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | Sketched; CLI groundwork shipped | Batch: each step's milestone. Parity audit: last |
 | [M16](plan/m16-agent/README.md) | **Agent tools (MCP)**: `sheaf mcp`, through which an agent reads a document as a plugin does and builds transactions from ops, with approval | Agents work on documents through sheaf's own ops | Sketched | Nothing unbuilt |
 | [M17](plan/m17-accessibility/README.md) | **Accessibility**: sheaf with a screen reader and the keyboard; PDF/UA documents | People who use assistive technology can use sheaf and read what it writes | Sketched; its first slice goes early | Documents: M14's PDF/A validator, if PDF/UA's rules share it (open) |
+| [M18](plan/m18-pdf-layer/README.md) | **The PDF layer**: lopdf taken over by crates split from pdf-lint (pdf-cos, pdf-structure, pdf-filters, pdf-crypt), which pdf-lint reads through too | sheaf reads and writes PDF through its own crates, and copies more of what didn't change | Proposed; its place waits on Greg | Nothing unbuilt; F15 first (soft) |
 
 **Depends on** lists the unbuilt work a milestone needs first, or the part
 named after "for". Finished work isn't listed. "(open)" marks an edge that
@@ -84,6 +88,7 @@ graph LR
   M16["M16 Agent tools (MCP)"]
   M17a["M17: the app, with a screen reader and the keyboard"]
   M17b["M17: PDF/UA documents"]
+  M18["M18 The PDF layer (proposed)"]
   Panel["Agent panel (Pending)"]
 
   fin --> M10a --> M10b
@@ -108,12 +113,16 @@ graph LR
   fin --> M17b
   M14 -.-|"shared: validator (open)"| M17b
   M5r & M10b & M12 & M13 & M15a & M16 & M17a & M17b -.-> M15b
+  fin --> M18
+  Btw -.->|"F15 first (soft)"| M18
+  M18 -.->|"passwords on pdf-crypt (open)"| M11
 
   classDef done fill:#e4e4e4,stroke:#8a8a8a,color:#555
   classDef pending stroke-dasharray:5 5
   class fin done
   class Panel pending
   class M5r pending
+  class M18 pending
 ```
 
 ## Everything else
