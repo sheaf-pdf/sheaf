@@ -27,6 +27,10 @@ and sheaf's read on demand, which `LazyPdf` does today
 - **Read whole** is every object read through the same code: pdf-lint
   reads that way.
 
+**From sheaf** ([from-sheaf.md](../from-sheaf.md#reading-slice-5s-models)):
+B3's `holds_linearization`, `source/limits.rs`, the fuzz bodies of
+`source/fuzz.rs` and the differential test `source/lazy_tests.rs`.
+
 **Where:** `crates/pdf-structure/`.
 
 **Checked:**

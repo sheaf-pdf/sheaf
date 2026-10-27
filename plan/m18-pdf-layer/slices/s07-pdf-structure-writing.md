@@ -22,6 +22,11 @@ sheaf's `serialize/`, moved, MIT OR Apache-2.0 as sheaf's code is.
 - **sheaf keeps the policy:** which objects, their numbers (`ObjKey`),
   the profiles, durable writes (`serialize/durable.rs`).
 
+**From sheaf** ([from-sheaf.md](../from-sheaf.md#object-streams-57-slice-7-and-pdf-lint)):
+object streams as #57 landed them (`objstm.rs`, `group.rs`, `full.rs`'s
+containers, `Crypt::packs`), and `xref.rs`, `append.rs`, `crypt.rs`,
+each with what it's coupled to.
+
 **Where:** `crates/pdf-structure/`; from sheaf, `serialize/`'s generic
 code and tests.
 

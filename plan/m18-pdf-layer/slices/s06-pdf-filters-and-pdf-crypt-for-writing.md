@@ -36,6 +36,10 @@ the family exposes writing ([sheaf.md](../sheaf.md#pdf-filters)).
     AES-256's file key) from the caller, for M11's new passwords;
   - `writer::dictionary`, its salts fixed, stays the tests'.
 
+**From sheaf** ([from-sheaf.md](../from-sheaf.md#the-rest-of-the-writer-slices-3-6-and-7)):
+why the IV stays the caller's (`serialize/crypt.rs`), and the PNG Up
+predictor sheaf's cross-reference streams use (`serialize/xref.rs`).
+
 **Where:** `crates/pdf-filters/`, `crates/pdf-crypt/`.
 
 **Checked:**

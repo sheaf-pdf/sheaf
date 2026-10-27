@@ -105,6 +105,8 @@ In [asks](../asks.md), one line:
 - [What sheaf takes](sheaf.md): where sheaf stands, its use of lopdf,
   crate by crate, the gains
 - [Scope](scope.md): the extent, the two tracks, the order, what's later
+- [What sheaf has for the crates](from-sheaf.md): sheaf's code pdf-lint's
+  agent can take or work from, by slice, and checks pdf-lint could add
 - Build or adopt: [entry 1](../research/build-or-adopt/01-pdf-object-layer.md)
   (the object layer), [entry 2](../research/build-or-adopt/02-lopdf-fixes-upstream.md)
   (lopdf fixes upstream), [entry 29](../research/build-or-adopt/29-standard-security-handler-read-r2-r6.md)

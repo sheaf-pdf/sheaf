@@ -17,6 +17,10 @@ which change nothing pdf-lint does.
 - **`text::passwords` to pdf-crypt.**
 - pdf-lint keeps the rest and depends on both.
 
+**From sheaf** ([from-sheaf.md](../from-sheaf.md#for-pdf-lint-itself)):
+the `ObjectStream` check pdf-lint 0.1.0 skips, which sheaf's tests
+stand in for, can land with or after arlington's cut.
+
 **Where:** pdf-lint's workspace, `crates/pdf-lint/src/` into
 `crates/pdf-cos/` and `crates/arlington/`.
 

@@ -17,6 +17,10 @@ what it reads.
 - What's left in pdf-lint is the checker: `check.rs`, `allowance.rs`,
   `main.rs`.
 
+**From sheaf** ([from-sheaf.md](../from-sheaf.md#the-rest-of-the-writer-slices-3-6-and-7)):
+`serialize/crypt.rs`'s list of what's encrypted and what isn't, to set
+beside the reader's.
+
 **Where:** `crates/pdf-lint/src/` into `crates/pdf-structure/`.
 
 **Checked:**

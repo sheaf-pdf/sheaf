@@ -68,6 +68,7 @@ Each waits for a user that needs it; none is needed to drop lopdf.
   (lexer, writer, splice), and `lopdf::content` is only a test oracle.
   Its PDFium rules would become a policy, beside ISO's for a validator,
   when M13's content editing or a pdf-lint content check wants it.
+  What it would start from: [from-sheaf.md](from-sheaf.md#content-the-content-crate-later).
 - **pdf-semantics.** sheaf's candidates are `source/pages.rs` (the page
   table, inherited keys, walked as PDFium walks it), `appearance.rs`,
   `conformance.rs`, and text strings; pdf-lint's are `text.rs` and its

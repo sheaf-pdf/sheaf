@@ -19,6 +19,9 @@ Status: open · Part of [M18: the PDF layer](../README.md) · in pdf-lint's work
 - **Caps** on depth and size, as pdf-lint's `NESTING` is now, from one
   limits value.
 
+**From sheaf** ([from-sheaf.md](../from-sheaf.md#the-rest-of-the-writer-slices-3-6-and-7)):
+`serialize/object.rs`, coupled only to lopdf's types.
+
 **Where:** `crates/pdf-cos/`; from sheaf, `serialize/object.rs` and its
 tests.
 
