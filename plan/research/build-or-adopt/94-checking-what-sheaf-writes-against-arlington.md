@@ -10,3 +10,6 @@ Area: Backlog items · Part of [build or adopt](README.md)
   do. krilla runs Arlington in CI.
 - **Recommendation:** **build** a small test-only reader of the TSVs
   (F22).
+- **Since:** built, then extracted and published as pdf-lint (2026-10-26;
+  Apache-2.0), which sheaf's tests now check with as a dev-dependency
+  ([pdf-lint](../../complete/pdf-lint.md)).

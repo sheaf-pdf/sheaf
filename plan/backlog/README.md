@@ -97,7 +97,6 @@ Status: open
 | [B42](B42.md) | sheaf's marks never raise the file's PDF version | wrong output | 2026-10-24, the Arlington checks |
 | [B43](B43.md) | The standard 14 fonts are written as `/BaseFont` alone | wrong output | 2026-10-24, the Arlington checks |
 | [B44](B44.md) | An Append's new objects can take numbers the file refers to but doesn't have | wrong output | 2026-10-24, the Arlington checks |
-| [B45](B45.md) | Arlington requires `/DA` on button fields | annoyance | 2026-10-24, the Arlington checks |
 | [B46](B46.md) | The Arlington carried rule matches a merged object's finding against every object of the sources | other | 2026-10-24, the Arlington checks' review |
 | [B47](B47.md) | A form that draws itself is refused at once; PDFium draws it 40 deep | wrong output | 2026-10-23, M11 slice 3 |
 | [B48](B48.md) | An inline image's end depends on what follows it when `/L` runs past the content | wrong output | 2026-10-23, M11 slice 3 |
@@ -115,6 +114,8 @@ Status: open
 | [B60](B60.md) | Launch to first pixels takes 1.2–2 s on Windows | annoyance | M0 |
 | [B61](B61.md) | After a save, Properties still describes the file as opened | wrong output | 2026-10-26, object streams slice 1 |
 | [B62](B62.md) | Packing on Append | feature | 2026-10-26, object streams slice 2 |
+| [B63](B63.md) | pdf-lint shows a long UTF-16 string two ways in an encrypted file | annoyance | 2026-10-26, the pdf-lint item's slice 1 |
+| [B64](B64.md) | CI's paths filter still names todos/ and skips only the root's Markdown | annoyance | 2026-10-26, the pdf-lint item's slice 1 |
 
 ## Features
 
@@ -144,6 +145,7 @@ Status: open
 | [F26](F26.md) | skrifa past 0.46, for read-fonts' Type 1 parser of 0.43 and later | feature | 2026-10-24, the content interpreter's wrap-up |
 | [F27](F27.md) | Research: what sheaf should read from a corrupt Flate stream (corpus 5208359) | research | 2026-10-24, the content interpreter's wrap-up |
 | [F28](F28.md) | Register the `SHEF` prefix before the first release | feature | 2026-10-25, F24 |
+| [F29](F29.md) | Research: how the Arlington tier holds a damaged form pdf-lint reads nothing of | research | 2026-10-26, the pdf-lint item's slice 1 |
 
 Outside material already compared against sheaf: [sources
 checked](../complete/backlog-sources-checked.md).

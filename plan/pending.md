@@ -195,7 +195,7 @@ Advanced Search does: "which of this client's PDFs has this EIN?"
   and M11's redact by pattern, both over many files; M16 (an agent could
   call it).
 - **Where:** the CLI is placed in the
-  [between-milestones work](between/README.md), item 5 (2026-10-23).
+  [between-milestones work](between/README.md), item 6 (2026-10-23).
   The GUI stays here.
 
 ### Spell check

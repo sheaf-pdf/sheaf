@@ -1,6 +1,6 @@
 # Between milestones
 
-Status: in progress
+Status: paused · after item 3, until Greg says
 
 Ordered by reach, not milestone (Greg, 2026-10-23). These come first,
 in this order:
@@ -14,7 +14,15 @@ in this order:
    the IRS forms now shrink by a median 12.9% on a Save As (they grew by
    half), and Properties' Fast Web View holds after an incremental save
    (B3). Packing on Append is [B62](../backlog/B62.md).
-3. **The linearization crate** (Fast Web View, moved from M14): page 1's
+3. ~~**sheaf's Arlington checks on pdf-lint**~~: done
+   ([pdf-lint.md](../complete/pdf-lint.md)). sheaf's Arlington tests check what it
+   writes with [pdf-lint](https://github.com/sheaf-pdf/pdf-lint) 0.1.0,
+   a dev-dependency: each file is read from its bytes, with qpdf
+   decoding what's packed or encrypted, and CI installs that qpdf on all
+   three platforms with `setup-pdf-lint`. sheaf's checker and the
+   vendored model are gone, and pdf-lint's corrections closed B45.
+   **The work between milestones is paused** until Greg says.
+4. **The linearization crate** (Fast Web View, moved from M14): page 1's
    objects first, a linearization dictionary and hint tables, so a
    viewer reading byte ranges over a network shows page 1 before the
    rest arrives.
@@ -66,14 +74,14 @@ in this order:
      PDFium's availability API (`FPDFAvail_*`): page 1 renders from the
      file's first part alone. Whether pdfium-render binds it is
      unverified.
-4. **F15: a Rewrite that doesn't load the whole file.** Every Rewrite
+5. **F15: a Rewrite that doesn't load the whole file.** Every Rewrite
    of a large file pays for the eager load (Export Flattened peaks at
    513 MB on the heavy 7k file), and it's the same Rewrite path as 2
    and 3.
-5. **`sheaf search`** over files and folders: the CLI half of
+6. **`sheaf search`** over files and folders: the CLI half of
    [Search across files](../pending.md#search-across-files) (Pending). It's small:
    each file opens as a `Session` and runs `Text::search`.
-6. **Roles and labels on sheaf-ui's widgets:** M17's first slice,
+7. **Roles and labels on sheaf-ui's widgets:** M17's first slice,
    pulled forward. Every dialog built after it inherits them, and every
    dialog built before it has to be retrofitted; M10 and M11 add many.
    The rest of M17's app half stays in M17.

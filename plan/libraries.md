@@ -1,14 +1,17 @@
 # Libraries
 
 Work that's reusable on its own is published as a crate, as
-`in-progress` (progress and cancellation) and `instance-handoff`
-(single-instance launching) were. A candidate stays where the plan has
-it. What changes is that its API keeps sheaf's types out from the start.
+`in-progress` (progress and cancellation), `instance-handoff`
+(single-instance launching) and `pdf-lint` (sheaf's Arlington checker,
+with the `pdf-tokenizer` it reads with; sheaf's tests check with it
+since [pdf-lint](complete/pdf-lint.md)) were. A candidate stays where the
+plan has it. What changes is that its API keeps sheaf's types out from
+the start.
 Candidates, most valuable first (2026-10-23; crate facts in
 [build-or-adopt](research/build-or-adopt/README.md)):
 
 1. **Linearization** ([between milestones](between/README.md), item
-   3). Scheduled.
+   4). Scheduled.
 2. **The PDF layer** (backlog F13, "Maybe published"). No crate offers
    an owned object model that keeps reals at f64 and dictionaries in
    order, reads lazily under caps with byte spans, and appends to a

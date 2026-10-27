@@ -400,8 +400,8 @@ mod tests {
             let name = String::from_utf8_lossy(key.name);
             assert!(key.name.starts_with(b"SHEF_"), "{name}");
             assert_eq!(
-                crate::arlington::Class::of(key.name),
-                crate::arlington::Class::Second,
+                pdf_lint::Class::of(key.name),
+                pdf_lint::Class::Second,
                 "{name}"
             );
         }

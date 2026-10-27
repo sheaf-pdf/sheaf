@@ -5301,6 +5301,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-lint"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae8496f4f7282c17cdddd4e8cee756c28949e8c814d1b6bd87a0e2f4cbbfe23f"
+dependencies = [
+ "anyhow",
+ "pdf-tokenizer",
+]
+
+[[package]]
+name = "pdf-tokenizer"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a2a366e8b944154ce8ce6a531f3e9ea3e5c3788e05cc2e25b98558362cb2a73"
+
+[[package]]
 name = "pdfium-render"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6790,6 +6806,7 @@ dependencies = [
  "lopdf",
  "md-5 0.11.0",
  "num-bigint",
+ "pdf-lint",
  "proc-macro2",
  "proptest",
  "quick-xml",
@@ -6871,6 +6888,7 @@ dependencies = [
  "in-progress",
  "log",
  "lopdf",
+ "pdf-lint",
  "regex",
  "serde",
  "serde_json",

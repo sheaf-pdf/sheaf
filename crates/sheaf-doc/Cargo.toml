@@ -6,9 +6,9 @@ license.workspace = true
 publish = false
 
 [features]
-# Forms and encrypted files built in code, the lookup for Greg's corpus
-# of real ones (`forms::fixture`, `serialize::fixture`, `forms::corpus`)
-# and the Arlington checker (`arlington`), for other crates' tests.
+# Forms and encrypted files built in code, and the lookup for Greg's
+# corpus of real ones (`forms::fixture`, `serialize::fixture`,
+# `forms::corpus`), for other crates' tests.
 fixtures = []
 
 [dependencies]
@@ -85,3 +85,6 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 # and says where each hit is.
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+# The private names sheaf writes are second-class names, as pdf-lint
+# tells them (`private`'s tests).
+pdf-lint.workspace = true

@@ -1,6 +1,6 @@
 //! Which objects share an object stream: grouped by the pages that use
 //! them, in the parts Annex F lays a linearized file out in, so the
-//! linearization crate (between milestones, item 3) can reuse it. A pure
+//! linearization crate (between milestones, item 4) can reuse it. A pure
 //! function of each object's number and its use, with no lopdf or
 //! materializer types in it.
 

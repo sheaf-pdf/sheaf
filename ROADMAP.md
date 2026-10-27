@@ -20,7 +20,10 @@ to [plan/complete/](plan/complete/). For agents: [AGENTS.md](AGENTS.md).
 
 ## Now and next
 
-In order ([between milestones](plan/between/README.md)):
+**Paused until Greg says.** The last item done was sheaf's Arlington
+checks on pdf-lint ([done](plan/complete/pdf-lint.md)): the tests use the
+published checker, and sheaf's copy is gone. When the work resumes, in
+order ([between milestones](plan/between/README.md)):
 
 1. **The linearization crate:** Fast Web View, as a crate of its own, on
    object streams' grouping by page ([done](plan/complete/object-streams.md)).
@@ -67,8 +70,8 @@ open, or a ruling on order.
 
 ```mermaid
 graph LR
-  fin["Done: M5 except two slices, M6–M9, M10 slices 1–5, M10.5, the content interpreter (M11 slice 3), object streams and B3"]
-  Btw["Between milestones: the linearization crate, F15, sheaf search, widget roles"]
+  fin["Done: M5 except two slices, M6–M9, M10 slices 1–5, M10.5, the content interpreter (M11 slice 3), object streams and B3, the Arlington checks on pdf-lint"]
+  Btw["Between milestones (paused): the linearization crate, F15, sheaf search, widget roles"]
   M5r["M5: separator sheets, scanners (deferred)"]
   M10a["M10 slices 6–17: appearances, filling, flatten, form data"]
   M10b["M10 slices 18–29: calculation, Prepare Form, detection, plugin API"]

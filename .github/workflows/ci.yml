@@ -90,6 +90,30 @@ jobs:
         shell: bash
         run: scripts/fetch-ocr-data.sh
 
+      # pdf-lint and the qpdf it bundles: the Arlington tests decode the
+      # packed and encrypted files sheaf writes with that qpdf. The version
+      # is the dev-dependency's (pdf-lint = "=0.1.0"); bump both together.
+      - uses: sheaf-pdf/setup-pdf-lint@v1
+        id: pdf-lint
+        with:
+          version: 0.1.0
+
+      - name: pdf-lint's qpdf for the tests
+        shell: bash
+        run: echo "PDF_LINT_QPDF=${{ steps.pdf-lint.outputs.path }}/qpdf/bin/qpdf${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
+
+      # qpdf's macOS build links OpenSSL in, but RC4 is in OpenSSL's legacy
+      # provider, a module it looks for only in the Homebrew Cellar it was
+      # built against (openssl@3 3.6.4). Without it, an RC4 file's strings
+      # stay ciphertext. The runner's own openssl@3 has the module.
+      - name: OpenSSL's legacy provider for that qpdf (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          modules="$(brew --prefix openssl@3)/lib/ossl-modules"
+          test -f "$modules/legacy.dylib" || { echo "no legacy.dylib in $modules"; exit 1; }
+          echo "OPENSSL_MODULES=$modules" >> "$GITHUB_ENV"
+
       - name: Format
         run: cargo fmt --all -- --check
 

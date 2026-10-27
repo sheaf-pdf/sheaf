@@ -520,3 +520,25 @@ Entries move here when they close, saying where they went. IDs are never reused.
     row includes files updated after linearizing.
   - Writing linearized files is M14's (Optimize: linearization as a
     writer option).
+
+### B45: Arlington requires `/DA` on button fields
+
+- **Closed:** 2026-10-26. pdf-lint's embedded model corrects the
+  FieldBtn* tables' /DA (corrections.tsv; ISO 32000-2 Table 228); the
+  allowance row went. Done in the pdf-lint item's slice 1
+  ([pdf-lint.md](pdf-lint.md)): `just tier-arlington` on
+  pdf-lint 0.1.0 finds no `/DA` missing in 0976876's radio field, and
+  the corpus tier's 72 such findings carried from other forms (50
+  FieldBtnRadio, 20 FieldBtnCheckbox, 2 FieldBtnPush) are gone too.
+- **Found:** 2026-10-24, the Arlington checks (F22)
+- **Where:** the model's FieldBtn* tables
+- **Severity:** annoyance (a question for the model)
+- **What happens:** a radio field that a save writes apart from its
+  widget (BaseObjectsMissing), where neither the field nor the form has
+  `/DA`, is a `missing` finding (0976876).
+- **Expected:** ISO 32000-2 Table 228 asks `/DA` only of variable-text
+  fields.
+- **Repro:** `just tier-arlington` on `forms/safedocs/0976876.pdf`
+  without the allowance row
+- **Notes:** could go upstream with B40. Held by a row scoped to
+  0976876.
