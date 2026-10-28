@@ -899,14 +899,7 @@ fn register(m: &Manifest, dir: &Path, cx: &mut App) -> Vec<String> {
                 },
                 None => workspace.clone(),
             };
-            match KeyBinding::load(
-                keys,
-                action,
-                context,
-                false,
-                None,
-                cx.keyboard_mapper().as_ref(),
-            ) {
+            match KeyBinding::load(keys, action, context, false, None, cx) {
                 Ok(b) => bindings.push(b),
                 Err(e) => errors.push(format!("command {:?}: keys {keys:?}: {e}", c.id)),
             }

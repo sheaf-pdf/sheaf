@@ -142,24 +142,37 @@ deliberate review (once a milestone or so):
    Published crates can't carry Zed's patches, so sheaf repeats them; drop
    any that cargo warns are not used. If Zed now needs a newer Rust (its
    `rust-toolchain.toml`), move ours with it.
-5. Read the `Cargo.lock` diff. Besides the `gpui-pre-*` versions, expect only
-   the crates gpui-pre's published manifests take from crates.io where Zed
-   builds from git (`zed-font-kit`, `zed-xim`, `zed-scap`, `wasm_thread`) and
-   their own dependencies (at 0.3.9 `xim-parser`, and `dirs` 5 where Zed has
-   6); explain anything else. Diff each crate swapped to crates.io, and each
-   of its dependencies that resolves differently, against the source at
-   Zed's git rev, and wherever the code differs in behavior add a
-   `[patch.crates-io]` to that rev, as for `xim-ctext`.
+5. Read the `Cargo.lock` diff. Besides the `gpui-pre-*` versions, expect
+   only what Zed's `Cargo.toml` moved between the two revs (at 0.3.10, wgpu
+   29 → 30 and taffy 0.13 → 0.15) and what gpui-pre's published manifests
+   resolve differently from Zed's build; explain anything else. Those
+   differences come in two kinds:
+   - crates gpui-pre takes from crates.io where Zed builds from git
+     (`zed-font-kit`, `zed-xim`, `zed-scap`, `wasm_thread`, and since 0.3.10
+     `wgpu`), with their own dependencies (`xim-parser`, and `dirs` 5 where
+     Zed has 6);
+   - exact pins (`=`) in Zed's `Cargo.toml` that gpui-pre's manifests don't
+     keep: at 0.3.10 taffy's `=0.15.0` became `0.15.0`, which resolves
+     0.15.1. Compare each `=` pin with the version locked.
+
+   Diff each against the source Zed builds, and wherever the code differs
+   in behavior add a `[patch.crates-io]` to Zed's rev or tag, as for
+   `xim-ctext` and `taffy`. Where gpui-pre's own edits need the crates.io
+   release, a patch to Zed's rev won't build (gpui-pre-wgpu is adapted to
+   wgpu 30.0.1); say in the `Cargo.toml` comment what the release lacks.
    [Prior art](prior-art/rust-ecosystem.md#gpui-pre) has what each
    differed in last time.
 6. Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
    warnings` and `cargo test --workspace`, then a UI smoke test: open a
    corpus PDF with `--timing --selftest-save out.pdf` and with
    `--selftest-annot out.pdf` (a `--script` ending in `{"quit": true}`
-   closes the window), and look at the window. Put the timings in the
-   bump's commit message and compare them with the last bump's (`git log
-   -- Cargo.toml`). Fix what broke in the same change; Windows CI covers
-   the Windows backend.
+   closes the window), and look at the window: under both builds, the same
+   view at the same window size should look the same. Put the timings in
+   the bump's commit message and compare them with the last bump's (`git
+   log -- Cargo.toml`). Fix what broke in the same change. Windows CI
+   covers the Windows backend; macOS CI builds the macOS one and runs its
+   tests, but sheaf-app's window tests are Linux-only, so a change to the
+   macOS backend needs a run on a Mac.
 
 ## Packaging
 

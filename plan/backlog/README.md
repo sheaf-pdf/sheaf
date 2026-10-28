@@ -116,6 +116,9 @@ Status: open
 | [B62](B62.md) | Packing on Append | feature | 2026-10-26, object streams slice 2 |
 | [B63](B63.md) | pdf-lint shows a long UTF-16 string two ways in an encrypted file | annoyance | 2026-10-26, the pdf-lint item's slice 1 |
 | [B64](B64.md) | CI's paths filter still names todos/ and skips only the root's Markdown | annoyance | 2026-10-26, the pdf-lint item's slice 1 |
+| [B65](B65.md) | Under X11 a new window sometimes opens 20 px larger each way | annoyance | 2026-10-27, the gpui-pre 0.3.10 bump |
+| [B66](B66.md) | On Wayland, first pixels sometimes take 3–4 s instead of 0.3 s | annoyance | 2026-10-27, the gpui-pre 0.3.10 bump |
+| [B67](B67.md) | A Rewrite to another file can lose a block's text without saying so | wrong output | 2026-10-27, the gpui-pre 0.3.10 bump |
 
 ## Features
 

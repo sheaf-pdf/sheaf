@@ -84,14 +84,7 @@ pub fn load(cx: &mut App) -> Vec<String> {
                     continue;
                 }
             };
-            match KeyBinding::load(
-                &keys,
-                action,
-                predicate.clone(),
-                false,
-                None,
-                cx.keyboard_mapper().as_ref(),
-            ) {
+            match KeyBinding::load(&keys, action, predicate.clone(), false, None, cx) {
                 Ok(b) => bindings.push(b),
                 Err(e) => errors.push(format!("{keys}: {e}")),
             }

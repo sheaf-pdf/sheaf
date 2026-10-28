@@ -42,16 +42,21 @@ sheaf-image = { path = "crates/sheaf-image" }
 sheaf-cli = { path = "crates/sheaf-cli" }
 
 # GPUI comes from gpui-pre: Longbridge's weekly crates.io snapshot of Zed
-# main, its crates renamed gpui-pre-*. 0.3.9 is zed@93d7456. The sources are
+# main, its crates renamed gpui-pre-*. 0.3.10 is zed@08cbb88. The sources are
 # Zed's at that commit plus a few packaging edits marked "Modified for
-# gpui-pre" (at 0.3.9: `$crate` paths in `actions!`, a gpui-kit path facade
+# gpui-pre" (at 0.3.10: `$crate` paths in `actions!`, a gpui-kit path facade
 # in the proc macros that does nothing unless the crate depends on gpui-kit,
-# vendored sources for gpui-pre-apple's build.rs). sheaf keeps no patches
+# vendored sources for gpui-pre-apple's build.rs, and gpui-pre-wgpu adapted
+# to crates.io's wgpu 30.0.1). Zed builds wgpu from git (3b3506e, for
+# gfx-rs/wgpu#10230, a Vulkan panic on surface teardown) and gpui-pre can't
+# publish that; a patch to that rev wouldn't build gpui-pre-wgpu's adapted
+# sources, so sheaf ships 30.0.1 without the fix, as it shipped 29.0.4, until
+# a 30.x release has it (`cargo update -p wgpu`). sheaf keeps no patches
 # against Zed, so it lets gpui-pre do the snapshotting. gpui-pre doesn't
 # follow semver and breaking changes are routine: pin it exactly and bump it
 # deliberately, with a compatibility check (docs/building.md, "Updating GPUI").
-gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["wayland", "x11"] }
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["wayland", "x11"] }
 
 # PDF engines. NOTE: the `pdfium` crate (newinnovations) is GPL-3 — do not use it.
 pdfium-render = "0.9.4"
@@ -110,6 +115,12 @@ windows-capture = { git = "https://github.com/zed-industries/windows-capture.git
 # decode, so under X11 an input method (ibus, fcitx) committing any of them
 # panics. Drop this once a zed-xim release depends on xim-ctext 0.4.
 xim-ctext = { git = "https://github.com/zed-industries/xim-rs.git", rev = "16f35a2c881b815a2b6cdfd6687988e84f8447d8" }
+# Also Zed's build: Zed's Cargo.toml pins taffy `=0.15.0`, but gpui-pre's
+# manifest asks for `0.15.0`, which resolves 0.15.1 (2026-10-25: about 500
+# lines of layout changes, among them relative offsets in block and float
+# layout, and baselines). This is taffy's v0.15.0 tag. Drop it once Zed pins
+# a later taffy that gpui-pre resolves too, or gpui-pre keeps Zed's `=`.
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "eb6450694f33e2b7413e40677f230ff63f0fc194" }
 
 # Not Zed's. lopdf 0.45.0 reads an earlier revision of some hybrid-reference
 # files (plan/complete/m10-forms/s02-field-model-form-facts.md, the note).
