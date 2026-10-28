@@ -133,8 +133,8 @@ graph LR
 - [Pending](plan/pending.md): proposals not yet placed in a milestone.
   [Parity checklist](plan/parity.md) · [Libraries](plan/libraries.md) ·
   [Not planned](plan/not-planned.md).
-- [Topics](plan/topics/): code signing, the installer, the GPUI bump, file
-  contention, and [plugins](plan/topics/plugins/README.md).
+- [Topics](plan/topics/): code signing, the installer, file contention,
+  and [plugins](plan/topics/plugins/README.md).
 - [Build or adopt](plan/research/build-or-adopt/README.md): every need,
   crate by crate (audit, 2026-10-23).
 - [Finished work](plan/complete/): the plans and slice notes of finished

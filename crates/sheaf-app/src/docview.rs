@@ -23,8 +23,8 @@ use futures::StreamExt;
 use futures::channel::oneshot;
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, ObjectFit,
-    RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window, div,
-    img, point, prelude::*, px, relative, rgb, rgba,
+    RenderImage, ScrollEvent, ScrollHandle, SharedString, Subscription, Task, Window, div, img,
+    point, prelude::*, px, relative, rgb, rgba,
 };
 use sheaf_doc::export::{Export, ExportError, ExportFrom, Exported, Out};
 use sheaf_doc::geom::{Affine, Geom};
@@ -3949,7 +3949,7 @@ impl DocView {
     fn on_wheel(
         &mut self,
         ix: usize,
-        ev: &ScrollWheelEvent,
+        ev: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -5098,9 +5098,7 @@ impl DocView {
                 .track_scroll(&pane.scroll)
                 .overflow_scroll()
                 .size_full()
-                .on_scroll_wheel(
-                    cx.listener(move |v, ev, window, cx| v.on_wheel(ix, ev, window, cx)),
-                )
+                .on_scroll(cx.listener(move |v, ev, window, cx| v.on_wheel(ix, ev, window, cx)))
                 .cursor(page_cursor)
                 .on_mouse_down(
                     gpui::MouseButton::Left,

@@ -42,8 +42,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext as _, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta, ScrollWheelEvent, TouchPhase,
-    WindowHandle, point, px,
+    MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta, ScrollEvent, ScrollSource,
+    TouchPhase, WindowHandle, point, px,
 };
 use serde_json::Value;
 
@@ -168,8 +168,9 @@ async fn run_step(
         return Ok(());
     }
     if let Some(keys) = step.get("keys").and_then(Value::as_str) {
+        let os = cx.update(|cx| cx.platform_info().os);
         for k in keys.split_whitespace() {
-            let ks = Keystroke::parse(k).map_err(|e| format!("{k}: {e:?}"))?;
+            let ks = Keystroke::parse_with_os(k, os).map_err(|e| format!("{k}: {e:?}"))?;
             cx.update_window(handle.into(), |_, window, cx| {
                 window.dispatch_keystroke(ks, cx)
             })
@@ -180,14 +181,16 @@ async fn run_step(
         return Ok(());
     }
     if let Some(text) = step.get("type").and_then(Value::as_str) {
+        let os = cx.update(|cx| cx.platform_info().os);
         for ch in text.chars() {
-            let ks = Keystroke::parse(
+            let ks = Keystroke::parse_with_os(
                 if ch == ' ' {
                     "space".to_string()
                 } else {
                     ch.to_string()
                 }
                 .as_str(),
+                os,
             )
             .map_err(|e| format!("{ch}: {e:?}"))?;
             cx.update_window(handle.into(), |_, window, cx| {
@@ -225,11 +228,12 @@ async fn run_step(
     if let Some(c) = coords("scroll").filter(|c| c.len() == 3) {
         cx.update_window(handle.into(), |_, window, cx| {
             window.dispatch_event(
-                PlatformInput::ScrollWheel(ScrollWheelEvent {
+                PlatformInput::Scroll(ScrollEvent {
                     position: point(px(c[0]), px(c[1])),
                     delta: ScrollDelta::Pixels(point(px(0.0), px(c[2]))),
                     modifiers: Modifiers::default(),
                     touch_phase: TouchPhase::Moved,
+                    source: ScrollSource::Pointer,
                 }),
                 cx,
             );

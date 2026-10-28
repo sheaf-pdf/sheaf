@@ -1,9 +1,11 @@
-# GPUI bump: gpui-pre 0.3.9 → next snapshot
+# GPUI bump: gpui-pre 0.3.9 → 0.3.10
 
-Status: **planned** (2026-10-21). Waiting for the next gpui-pre release;
-nothing in the tree has changed yet. This memo records what the bump
-needs, checked against Zed main, and the steps. The procedure itself is
-the README's "Updating GPUI".
+Status: done
+
+Planned 2026-10-21, before 0.3.10 was out, against Zed main `5adae44`;
+done 2026-10-27 on 0.3.10 (zed@`08cbb88`). The memo is as planned; what
+the real bump found is under [Notes](#notes). The procedure itself is
+[docs/building.md](../../docs/building.md#updating-gpui)'s "Updating GPUI".
 
 ## Where things stand
 
@@ -191,3 +193,42 @@ bigger.
 - `target/`: its own target dir, about 15 GB.
 
 Delete it after the bump, or reuse it to repeat the trial on 0.3.10.
+
+## Notes
+
+What 0.3.10 turned out to be, against the plan above:
+
+- **Zed `08cbb88`** (2026-10-25), 77 commits past `5adae44` and 202 past
+  `93d7456`; 16 of the 77 in the GPUI crates. Most of those move the macOS
+  backend to objc2 (about 3k lines: windows, menus, clipboard, events,
+  open and save panels).
+- **A second break, after `5adae44`:** keystroke parsing takes the host OS
+  (Zed #65970). `KeyBinding::load` takes `cx` instead of a keyboard mapper
+  (`keymap.rs`, `plugins.rs`), and `Keystroke::parse` takes only
+  `&'static str`, so `script.rs` parses with `parse_with_os`. With the
+  scroll rename: 4 files, +15/−27. sheaf binds no `secondary-` keys.
+- **taffy, patched:** Zed's own bump to taffy 0.15 (#65950) pins
+  `=0.15.0`, and gpui-pre's manifest asks for `0.15.0`, which resolved
+  0.15.1. sheaf's `[patch.crates-io]` takes the v0.15.0 tag (its sources
+  are crates.io's 0.15.0). The README's step 5 now names relaxed `=` pins.
+- **wgpu:** as planned. 30.0.1 is still the newest release, without
+  gfx-rs/wgpu#10230's fix; the `Cargo.toml` comment says so.
+- **gpui-pre's edits:** the three planned in gpui-pre-wgpu, and the three
+  from 0.3.9 unchanged. Every other source file matches Zed's at the rev.
+- **`Cargo.lock`:** as listed, but `glow` stayed and `drm` didn't come;
+  besides, `cocoa` 0.26 and `cocoa-foundation` 0.2 left (the objc2 move),
+  as did the older `foldhash` and `hashbrown`; taffy 0.13 → 0.15.0 from git.
+- **Checks:** clippy `-D warnings` and the non-Linux simulation clean;
+  sheaf-app's 159 and sheaf-ui's 11 tests pass. The smoke test on Wayland
+  and X11, 0.3.9 and 0.3.10 side by side on `forms/irs/f1040es.pdf`: the
+  saves byte-identical, X11 screenshots at the same window size
+  pixel-identical, no panic on either. Timings in the commit message.
+- **Found, in both versions:** [B65](../backlog/B65.md) (an X11 window
+  sometimes opens 20 px larger) and [B66](../backlog/B66.md) (Wayland's
+  first frame sometimes waits 3–4 s).
+- **Not run here:** macOS by hand (CI builds it and runs its tests;
+  sheaf-app's window tests are Linux-only), and resizing by hand.
+- **Leftovers:** `~/.cache/sheaf-gpui-eval/zed` (the blobless Zed clone,
+  updated to `08cbb88`) is worth keeping for the next bump;
+  `sheaf-trial` and its target can go.
+

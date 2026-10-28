@@ -16,8 +16,8 @@ app's infrastructure), are in
 
 | Crate | What it is | Verdict |
 |---|---|---|
-| **gpui** (Zed) | The UI framework sheaf uses, at Zed commit `93d7456` by way of gpui-pre | Stay on it. Since 2026-10-17, no patches against Zed and no fork: Zed takes little beyond bug fixes, so a patch would be ours to rebase forever. Send bug fixes upstream as PRs. |
-| **gpui-pre** | Longbridge's weekly crates.io snapshot of Zed's gpui: near-verbatim, its few packaging edits marked `Modified for gpui-pre` | **Adopted 2026-10-17**, pinned exactly (`=0.3.9`, zed@`93d7456`). With no patches of our own, it does the snapshotting for us; we review and bump it deliberately. |
+| **gpui** (Zed) | The UI framework sheaf uses, at Zed commit `08cbb88` by way of gpui-pre | Stay on it. Since 2026-10-17, no patches against Zed and no fork: Zed takes little beyond bug fixes, so a patch would be ours to rebase forever. Send bug fixes upstream as PRs. |
+| **gpui-pre** | Longbridge's weekly crates.io snapshot of Zed's gpui: near-verbatim, its few packaging edits marked `Modified for gpui-pre` | **Adopted 2026-10-17**, pinned exactly (`=0.3.10`, zed@`08cbb88`). With no patches of our own, it does the snapshotting for us; we review and bump it deliberately. |
 | **gpui-ce** | Community fork moving away from Zed (Parley text system, animation) | Watch it. Re-check around 2027-04. |
 | **gpui-kit** (formerly gpui-component) | Longbridge's component library: 75+ components, AccessKit | **Don't adopt; borrow selectively.** Spike measured and documented in [../gpui-kit-eval.md](../gpui-kit-eval.md). |
 | **gpui-pdf** | A small PDF *viewer* component on hayro, split out of the Zorite app | **Don't adopt; borrow** `forms.rs` (MIT) when forms work starts. |
@@ -58,8 +58,8 @@ app's infrastructure), are in
 - Longbridge (huacnlee) publishes a **near-verbatim** snapshot of Zed main to
   crates.io about weekly, renamed `gpui-pre-*` (19 crates, one-to-one with
   Zed's). About 137k downloads in its first month.
-- Its edits to Zed's sources are marked `// Modified for gpui-pre`. At 0.3.9
-  there are three, and every other source file matches zed@`93d7456`:
+- Its edits to Zed's sources are marked `// Modified for gpui-pre`. At 0.3.10
+  there are four, and every other source file matches zed@`08cbb88`:
   - `actions!` derives `$crate::Action` instead of `gpui::Action`.
   - Every proc-macro entry point in gpui-pre-macros passes its output through
     `gpui_pre_facade_paths::rewrite` ("Injected by gpui-kit's
@@ -68,7 +68,12 @@ app's infrastructure), are in
     gpui-kit it rewrites the `gpui::` and `gpui_platform::` paths in the
     generated code to `gpui_kit::` and `gpui_kit::platform::`.
   - gpui-pre-apple's `build.rs` reads copies of gpui sources under
-    `vendor/gpui`.
+    `vendor/gpui` (the same as Zed's at the rev).
+  - Since 0.3.10, gpui-pre-wgpu builds against crates.io's wgpu 30.0.1, not
+    Zed's git wgpu: `wgpu_context.rs` and `wgpu_atlas.rs` drop
+    `default_queue` from the device descriptor, and `wgpu_renderer.rs`
+    calls `is_srgb()` for the git rev's `has_srgb_suffix()` (the same test
+    in 30.0.1).
 
   None of them changes sheaf today. Adding gpui-kit as a dependency
   ([below](#gpui-kit)) would turn on the macro path rewrite in each crate
@@ -77,12 +82,20 @@ app's infrastructure), are in
 - It can't carry patches. Its 0.3.9 release is exactly the Zed commit sheaf
   had pinned, which made the switch free.
 - **sheaf uses it since 2026-10-17** (`gpui = { package = "gpui-pre",
-  version = "=0.3.9" }`), because sheaf keeps no patches against Zed. It
+  version = "=0.3.10" }` since 2026-10-27, 0.3.9 before), because sheaf
+  keeps no patches against Zed. It
   doesn't follow semver; bumping the exact pin is a deliberate review with a
   compatibility check (`docs/building.md`, "Updating GPUI"). The switch needed no source
   changes: the Linux build graph stayed at 665 crates (`cargo tree -p
   sheaf-app -e normal`, unique name and version), and the lockfile grew by 9
   (a `windows-sys` 0.48 tree, below).
+- **The 0.3.10 bump** (2026-10-27, 202 Zed commits) needed two source
+  changes in sheaf-app. `ScrollWheelEvent` became `ScrollEvent` (Zed
+  #65805). Keystroke parsing takes the host OS (Zed #65970):
+  `KeyBinding::load` takes `cx` instead of a keyboard mapper, and
+  `Keystroke::parse` takes only `&'static str`, so the script runner parses
+  with `parse_with_os`. sheaf binds no `secondary-` keys, so no binding
+  changed meaning.
 - Switching to it is free at build time (measured in the gpui-kit spike: clean
   release build 210 s → 211 s, binary unchanged, startup unchanged).
 - The cost is the lock-in. Every crate built on gpui-pre (gpui-kit, gpui-pdf)
@@ -91,7 +104,7 @@ app's infrastructure), are in
   `gpui-pre-*` crates at that version and `[patch.crates-io]`-ing them, and
   redoing it on every upgrade.
 - Its published manifests take crates.io releases where Zed builds from git.
-  At 0.3.9, each compared with the source at Zed's rev:
+  At 0.3.10, each compared with the source at Zed's rev:
   - `zed-font-kit`: same source, but asks for `dirs` 5 where Zed's rev has
     6, which brings `dirs-sys` 0.4, `redox_users` 0.4 and a `windows-sys`
     0.48 tree into the lockfile. dirs' Linux code is the same in 5 and 6,
@@ -102,6 +115,15 @@ app's infrastructure), are in
     (`repeat_n`, an elided lifetime). Its `xim-ctext` differed in behavior,
     so sheaf patches it (next bullet).
   - `zed-scap` and `wasm_thread`: not built for sheaf.
+  - `wgpu` (since 0.3.10): Zed builds gfx-rs/wgpu at git `3b3506e` for
+    gfx-rs/wgpu#10230, a Vulkan panic on surface teardown ("Trying to
+    destroy a SwapchainAcquireSemaphore that is still in use by a
+    SurfaceTexture") that 29.0.4 and 30.0.1 both have. gpui-pre publishes
+    against 30.0.1 and adapts gpui-pre-wgpu to it, so a patch to Zed's rev
+    wouldn't build. **Not patched:** sheaf ships 30.0.1 without the fix, as
+    it shipped 29.0.4. gpui-pre asks for `^30.0.1`, so a 30.x release with
+    the fix arrives with `cargo update -p wgpu`; check wgpu's releases on
+    each bump.
 - **Patched to parity: `xim-ctext`.** The crates.io `zed-xim` resolves
   `xim-ctext` 0.3.0 (2022), not Zed's fork of it at xim-rs `16f35a2` (the
   rev in Zed's `crates/gpui_linux/Cargo.toml`). zed-xim offers the input
@@ -120,6 +142,15 @@ app's infrastructure), are in
   decoding (and also handles `ESC ( B` after a GB2312 part, which the fork
   doesn't), so once a zed-xim release depends on it, a bug fix Zed could
   take, the patch can go.
+- **Patched to parity: `taffy`** (since 0.3.10). Zed's `Cargo.toml` pins
+  `taffy = "=0.15.0"`; gpui-pre's manifest asks for `0.15.0`, which
+  resolves 0.15.1 (released 2026-10-25). 0.15.1 changes
+  about 500 lines of layout: relative offsets in block and float layout,
+  container baselines, grid and flexbox details. sheaf's `[patch.crates-io]`
+  takes taffy's `v0.15.0` tag, whose sources are the crates.io 0.15.0
+  release's. Zed's other `=` pins in sheaf's lock (the objc2 crates)
+  resolve as Zed's; gpui-pre relaxes hot reload's dioxus and subsecond
+  pins too, but that feature is off.
 
 ### gpui-ce
 
