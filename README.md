@@ -59,7 +59,7 @@ magnitude snappier than Acrobat on the same machine.
 |---|---|---|
 | Windows (x64) | **1** | Primary daily-driver target. Must be fast on older hardware. |
 | Linux (x64, Wayland + X11) | **1** | Development platform. |
-| macOS (arm64) | 2 | Should mostly fall out of the Linux work. Not blocking releases. |
+| macOS (arm64), 12 or later | 2 | Should mostly fall out of the Linux work. Not blocking releases. GPUI's Metal shaders need macOS 12. |
 
 Tier 1 platforms gate every release. So far sheaf is used and tested day to
 day on Linux; CI builds and tests it on Linux, Windows and macOS.

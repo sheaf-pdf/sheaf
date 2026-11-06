@@ -42,21 +42,25 @@ sheaf-image = { path = "crates/sheaf-image" }
 sheaf-cli = { path = "crates/sheaf-cli" }
 
 # GPUI comes from gpui-pre: Longbridge's weekly crates.io snapshot of Zed
-# main, its crates renamed gpui-pre-*. 0.3.10 is zed@08cbb88. The sources are
+# main, its crates renamed gpui-pre-*. 0.3.11 is zed@f816e1f. The sources are
 # Zed's at that commit plus a few packaging edits marked "Modified for
-# gpui-pre" (at 0.3.10: `$crate` paths in `actions!`, a gpui-kit path facade
+# gpui-pre" (at 0.3.11: `$crate` paths in `actions!`, a gpui-kit path facade
 # in the proc macros that does nothing unless the crate depends on gpui-kit,
 # vendored sources for gpui-pre-apple's build.rs, and gpui-pre-wgpu adapted
-# to crates.io's wgpu 30.0.1). Zed builds wgpu from git (3b3506e, for
-# gfx-rs/wgpu#10230, a Vulkan panic on surface teardown) and gpui-pre can't
-# publish that; a patch to that rev wouldn't build gpui-pre-wgpu's adapted
-# sources, so sheaf ships 30.0.1 without the fix, as it shipped 29.0.4, until
-# a 30.x release has it (`cargo update -p wgpu`). sheaf keeps no patches
+# to crates.io's wgpu 30.0.1). Zed builds wgpu from git (cddb2f5, for
+# gfx-rs/wgpu#10230, a Vulkan panic on surface teardown, and #10348, WebGL
+# only) and gpui-pre can't publish that; a patch to that rev wouldn't build
+# gpui-pre-wgpu's adapted sources, so sheaf ships 30.0.1 without the fix, as
+# it shipped 29.0.4, until a 30.x release has it (`cargo update -p wgpu`).
+# Cargo.lock holds icu_segmenter (GPUI's line breaking since 0.3.11) at
+# Zed's 2.3.0: 2.4.0 has other break data, so a `cargo update` that moves
+# it needs the same review. Since 0.3.11 GPUI's Metal shaders need macOS 12
+# or later. sheaf keeps no patches
 # against Zed, so it lets gpui-pre do the snapshotting. gpui-pre doesn't
 # follow semver and breaking changes are routine: pin it exactly and bump it
 # deliberately, with a compatibility check (docs/building.md, "Updating GPUI").
-gpui = { package = "gpui-pre", version = "=0.3.10" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["wayland", "x11"] }
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland", "x11"] }
 
 # PDF engines. NOTE: the `pdfium` crate (newinnovations) is GPL-3 — do not use it.
 pdfium-render = "0.9.4"

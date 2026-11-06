@@ -144,16 +144,24 @@ deliberate review (once a milestone or so):
    `rust-toolchain.toml`), move ours with it.
 5. Read the `Cargo.lock` diff. Besides the `gpui-pre-*` versions, expect
    only what Zed's `Cargo.toml` moved between the two revs (at 0.3.10, wgpu
-   29 → 30 and taffy 0.13 → 0.15) and what gpui-pre's published manifests
-   resolve differently from Zed's build; explain anything else. Those
-   differences come in two kinds:
+   29 → 30 and taffy 0.13 → 0.15; at 0.3.11, `icu_segmenter` new and
+   `metal` gone) and what gpui-pre's published manifests resolve
+   differently from Zed's build; explain anything else. Those differences
+   come in three kinds:
    - crates gpui-pre takes from crates.io where Zed builds from git
      (`zed-font-kit`, `zed-xim`, `zed-scap`, `wasm_thread`, and since 0.3.10
      `wgpu`), with their own dependencies (`xim-parser`, and `dirs` 5 where
      Zed has 6);
    - exact pins (`=`) in Zed's `Cargo.toml` that gpui-pre's manifests don't
      keep: at 0.3.10 taffy's `=0.15.0` became `0.15.0`, which resolves
-     0.15.1. Compare each `=` pin with the version locked.
+     0.15.1. Compare each `=` pin with the version locked;
+   - crates new in Zed's `Cargo.toml`, which cargo locks at their newest
+     release where Zed's `Cargo.lock` has the one Zed tested: at 0.3.11
+     `icu_segmenter` 2.4.0 (other line-break data, and the rest of the icu
+     family up with it) where Zed has 2.3.0. Compare each new crate with
+     Zed's lock. To lock Zed's version, add it to a member's
+     `[dependencies]` with an `=` pin, build, then drop the line: the lock
+     keeps it.
 
    Diff each against the source Zed builds, and wherever the code differs
    in behavior add a `[patch.crates-io]` to Zed's rev or tag, as for
