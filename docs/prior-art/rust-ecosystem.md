@@ -16,8 +16,8 @@ app's infrastructure), are in
 
 | Crate | What it is | Verdict |
 |---|---|---|
-| **gpui** (Zed) | The UI framework sheaf uses, at Zed commit `08cbb88` by way of gpui-pre | Stay on it. Since 2026-10-17, no patches against Zed and no fork: Zed takes little beyond bug fixes, so a patch would be ours to rebase forever. Send bug fixes upstream as PRs. |
-| **gpui-pre** | Longbridge's weekly crates.io snapshot of Zed's gpui: near-verbatim, its few packaging edits marked `Modified for gpui-pre` | **Adopted 2026-10-17**, pinned exactly (`=0.3.10`, zed@`08cbb88`). With no patches of our own, it does the snapshotting for us; we review and bump it deliberately. |
+| **gpui** (Zed) | The UI framework sheaf uses, at Zed commit `f816e1f` by way of gpui-pre | Stay on it. Since 2026-10-17, no patches against Zed and no fork: Zed takes little beyond bug fixes, so a patch would be ours to rebase forever. Send bug fixes upstream as PRs. |
+| **gpui-pre** | Longbridge's weekly crates.io snapshot of Zed's gpui: near-verbatim, its few packaging edits marked `Modified for gpui-pre` | **Adopted 2026-10-17**, pinned exactly (`=0.3.11`, zed@`f816e1f`). With no patches of our own, it does the snapshotting for us; we review and bump it deliberately. |
 | **gpui-ce** | Community fork moving away from Zed (Parley text system, animation) | Watch it. Re-check around 2027-04. |
 | **gpui-kit** (formerly gpui-component) | Longbridge's component library: 75+ components, AccessKit | **Don't adopt; borrow selectively.** Spike measured and documented in [../gpui-kit-eval.md](../gpui-kit-eval.md). |
 | **gpui-pdf** | A small PDF *viewer* component on hayro, split out of the Zorite app | **Don't adopt; borrow** `forms.rs` (MIT) when forms work starts. |
@@ -58,8 +58,9 @@ app's infrastructure), are in
 - Longbridge (huacnlee) publishes a **near-verbatim** snapshot of Zed main to
   crates.io about weekly, renamed `gpui-pre-*` (19 crates, one-to-one with
   Zed's). About 137k downloads in its first month.
-- Its edits to Zed's sources are marked `// Modified for gpui-pre`. At 0.3.10
-  there are four, and every other source file matches zed@`08cbb88`:
+- Its edits to Zed's sources are marked `// Modified for gpui-pre`. At 0.3.11
+  there are four, the same as at 0.3.10, and every other source file
+  matches zed@`f816e1f`:
   - `actions!` derives `$crate::Action` instead of `gpui::Action`.
   - Every proc-macro entry point in gpui-pre-macros passes its output through
     `gpui_pre_facade_paths::rewrite` ("Injected by gpui-kit's
@@ -82,7 +83,8 @@ app's infrastructure), are in
 - It can't carry patches. Its 0.3.9 release is exactly the Zed commit sheaf
   had pinned, which made the switch free.
 - **sheaf uses it since 2026-10-17** (`gpui = { package = "gpui-pre",
-  version = "=0.3.10" }` since 2026-10-27, 0.3.9 before), because sheaf
+  version = "=0.3.11" }` since 2026-11-06, 0.3.10 from 2026-10-27, 0.3.9
+  before), because sheaf
   keeps no patches against Zed. It
   doesn't follow semver; bumping the exact pin is a deliberate review with a
   compatibility check (`docs/building.md`, "Updating GPUI"). The switch needed no source
@@ -96,6 +98,12 @@ app's infrastructure), are in
   `Keystroke::parse` takes only `&'static str`, so the script runner parses
   with `parse_with_os`. sheaf binds no `secondary-` keys, so no binding
   changed meaning.
+- **The 0.3.11 bump** (2026-11-06, 85 Zed commits, 30 of them in the GPUI
+  crates) needed no source changes. Text now wraps at UAX #14 line breaks
+  (Zed #64624) through a new dependency, `icu_segmenter`, which sheaf's
+  lock holds at Zed's 2.3.0 (below). GPUI's Metal shaders now need macOS 12
+  (Zed #65994). The rest: frame pacing and the animation clock, deferred
+  window-close cleanup, Wayland activation requests, an arena soundness fix.
 - Switching to it is free at build time (measured in the gpui-kit spike: clean
   release build 210 s → 211 s, binary unchanged, startup unchanged).
 - The cost is the lock-in. Every crate built on gpui-pre (gpui-kit, gpui-pdf)
@@ -104,7 +112,7 @@ app's infrastructure), are in
   `gpui-pre-*` crates at that version and `[patch.crates-io]`-ing them, and
   redoing it on every upgrade.
 - Its published manifests take crates.io releases where Zed builds from git.
-  At 0.3.10, each compared with the source at Zed's rev:
+  At 0.3.11 as at 0.3.10, each compared with the source at Zed's rev:
   - `zed-font-kit`: same source, but asks for `dirs` 5 where Zed's rev has
     6, which brings `dirs-sys` 0.4, `redox_users` 0.4 and a `windows-sys`
     0.48 tree into the lockfile. dirs' Linux code is the same in 5 and 6,
@@ -115,10 +123,12 @@ app's infrastructure), are in
     (`repeat_n`, an elided lifetime). Its `xim-ctext` differed in behavior,
     so sheaf patches it (next bullet).
   - `zed-scap` and `wasm_thread`: not built for sheaf.
-  - `wgpu` (since 0.3.10): Zed builds gfx-rs/wgpu at git `3b3506e` for
-    gfx-rs/wgpu#10230, a Vulkan panic on surface teardown ("Trying to
-    destroy a SwapchainAcquireSemaphore that is still in use by a
-    SurfaceTexture") that 29.0.4 and 30.0.1 both have. gpui-pre publishes
+  - `wgpu` (since 0.3.10): Zed builds gfx-rs/wgpu from git (`3b3506e`,
+    since 0.3.11 `cddb2f5`) for gfx-rs/wgpu#10230, a Vulkan panic on
+    surface teardown ("Trying to destroy a SwapchainAcquireSemaphore that
+    is still in use by a SurfaceTexture") that 29.0.4 and 30.0.1 both
+    have; `cddb2f5` adds #10348, a WebGL resize fix sheaf doesn't need.
+    30.0.1 is still the newest release (2026-11-06). gpui-pre publishes
     against 30.0.1 and adapts gpui-pre-wgpu to it, so a patch to Zed's rev
     wouldn't build. **Not patched:** sheaf ships 30.0.1 without the fix, as
     it shipped 29.0.4. gpui-pre asks for `^30.0.1`, so a 30.x release with
@@ -151,6 +161,13 @@ app's infrastructure), are in
   release's. Zed's other `=` pins in sheaf's lock (the objc2 crates)
   resolve as Zed's; gpui-pre relaxes hot reload's dioxus and subsecond
   pins too, but that feature is off.
+- **Locked to parity: `icu_segmenter`** (since 0.3.11). GPUI wraps text
+  with it since Zed #64624; Zed's `Cargo.toml` asks for `2.3.0` and Zed's
+  lock has 2.3.0. A crate new to sheaf's lock resolves its newest release,
+  2.4.0, whose line, word, grapheme and sentence break data and line-break
+  code all differ from 2.3.0's, and which takes the rest of the icu family
+  (`url` uses it, through `idna`) to 2.4. sheaf's lock holds 2.3.0
+  instead, so the icu family stays where it was.
 
 ### gpui-ce
 
