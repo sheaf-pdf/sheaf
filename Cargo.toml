@@ -92,11 +92,14 @@ in-progress = "0.1"
 # sheaf-pdf/instance-handoff. Pinned exactly, as its README asks: until
 # 0.1.0 a later alpha may change the API and what two builds share.
 instance-handoff = "=0.1.0-alpha.2"
-# The Arlington checker sheaf's tests hold what it writes to: sheaf's own,
-# extracted and published as sheaf-pdf/pdf-lint. Apache-2.0 only, so a
-# dev-dependency only, never in a shipped build. Pinned exactly, and
-# bumped together with CI's setup-pdf-lint `version`.
-pdf-lint = "=0.1.0"
+# The PDF family, from sheaf-pdf/pdf-lint main (M18): MIT OR Apache-2.0.
+# pdf-lint itself (Apache-2.0) runs as a standalone CLI oracle in tests,
+# never linked as a library.
+pdf-objects = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
+pdf-filters = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", features = ["zlib-rs"] }
+pdf-crypt = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
+pdf-structure = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main", features = ["zlib-rs"] }
+pdf-content-streams = { git = "https://github.com/sheaf-pdf/pdf-lint", branch = "main" }
 
 # Zed's workspace patches for crates GPUI uses, mirrored from the
 # [patch.crates-io] of Zed's Cargo.toml at the snapshot's rev.

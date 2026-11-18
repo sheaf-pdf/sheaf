@@ -6,11 +6,13 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 tools_dir := env("SHEAF_TOOLS", home_directory() / ".local/share/sheaf-tools")
+pdf_lint := env("SHEAF_PDF_LINT", tools_dir / "pdf-lint/pdf-lint")
 pdfjs := env("SHEAF_PDFJS", tools_dir / "pdfjs/node_modules/pdfjs-dist/legacy/build/pdf.mjs")
 verapdf := env("SHEAF_VERAPDF", tools_dir / "verapdf/verapdf")
 logs := justfile_directory() / "target/just"
 
 # Versions the setup recipes install; docs/oracles.md says why each.
+pdf_lint_version := "0.2.0-rc.1"
 pdfjs_version := "6.4.299"
 verapdf_version := "1.30.3"
 verapdf_key := "13DD102B4DD69354D12DE5A83184863278B17FE7"
@@ -69,11 +71,44 @@ fetch *args:
     scripts/fetch-ocr-data.sh {{args}}
 
 # The oracle tools that aren't system packages, under $SHEAF_TOOLS
-# (~/.local/share/sheaf-tools): pdf.js, veraPDF, and uv for the corpus
-# tools' Python.
-[doc("pdf.js, veraPDF and uv under $SHEAF_TOOLS (~/.local/share/sheaf-tools)")]
+# (~/.local/share/sheaf-tools): pdf-lint, pdf.js, veraPDF, and uv for the
+# corpus tools' Python.
+[doc("pdf-lint, pdf.js, veraPDF and uv under $SHEAF_TOOLS (~/.local/share/sheaf-tools)")]
 [group('setup')]
-setup-oracles: setup-pdfjs setup-verapdf setup-uv
+setup-oracles: setup-pdf-lint setup-pdfjs setup-verapdf setup-uv
+
+# pdf-lint {{pdf_lint_version}} from sheaf-pdf/pdf-lint, verified against its
+# release SHA-256, for the Arlington tests (tests/arlington.rs).
+[doc("pdf-lint, verified by SHA-256, for the Arlington tests")]
+[group('setup')]
+setup-pdf-lint:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -x "{{pdf_lint}}" ] && [[ "$("{{pdf_lint}}" --version 2>/dev/null | head -1)" == "pdf-lint {{pdf_lint_version}}" ]]; then
+      echo "pdf-lint {{pdf_lint_version}} is installed"; exit 0
+    fi
+    case "$(uname -s)-$(uname -m)" in
+      Linux-x86_64)   plat="linux-x86_64" ;;
+      Linux-aarch64)  plat="linux-aarch64" ;;
+      Darwin-arm64)   plat="macos-arm64" ;;
+      Darwin-x86_64)  plat="macos-x86_64" ;;
+      *) echo "unsupported platform for setup-pdf-lint: $(uname -s)-$(uname -m)"; exit 1 ;;
+    esac
+    name="pdf-lint-{{pdf_lint_version}}-$plat"
+    file="$name.tar.gz"
+    base="https://github.com/sheaf-pdf/pdf-lint/releases/download/pdf-lint-v{{pdf_lint_version}}"
+    work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+    curl -sSfL -o "$work/$file" "$base/$file"
+    curl -sSfL -o "$work/$file.sha256" "$base/$file.sha256"
+    want=$(awk '{print $1}' "$work/$file.sha256")
+    if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$work/$file" | awk '{print $1}')
+    else got=$(shasum -a 256 "$work/$file" | awk '{print $1}'); fi
+    [ "$got" = "$want" ] || { echo "$file SHA-256 $got != $want"; exit 1; }
+    tar -xzf "$work/$file" -C "$work"
+    rm -rf "{{tools_dir}}/pdf-lint"
+    mkdir -p "{{tools_dir}}"
+    mv "$work/$name" "{{tools_dir}}/pdf-lint"
+    "{{pdf_lint}}" --version
 
 # pdfjs-dist {{pdfjs_version}} for the interop tests (needs node and npm,
 # e.g. through nvm).
@@ -138,11 +173,9 @@ doctor:
     for d in vendor/pdfium vendor/ocr; do printf '  %-16s %s\n' "$d" "$( [ -e "$d" ] && echo present || echo 'MISSING (just fetch)')"; done
     echo "Oracles (docs/oracles.md):"
     have qpdf --version; have pdftotext -v; have mutool -v; have tiffinfo; have java -version
-    qpdf_v=$("${PDF_LINT_QPDF:-qpdf}" --version 2>/dev/null | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)
-    if [ -z "$qpdf_v" ]; then qpdf_ok="MISSING: the Arlington tests need qpdf 11.9 or later (docs/building.md)"
-    elif [ "$(printf '%s\n' 11.9 "$qpdf_v" | sort -V | head -1)" = 11.9 ]; then qpdf_ok="$qpdf_v, new enough"
-    else qpdf_ok="$qpdf_v, older than 11.9: set PDF_LINT_QPDF (docs/building.md)"; fi
-    printf '  %-16s %s\n' "pdf-lint's qpdf" "${PDF_LINT_QPDF:-qpdf} $qpdf_ok"
+    if [ -x "{{pdf_lint}}" ]; then printf '  %-16s %s\n' "pdf-lint" "$("{{pdf_lint}}" --version 2>/dev/null | head -1) ({{pdf_lint}})"
+    elif command -v pdf-lint >/dev/null 2>&1; then printf '  %-16s %s\n' "pdf-lint" "$(pdf-lint --version 2>/dev/null | head -1)"
+    else printf '  %-16s %s\n' "pdf-lint" "MISSING (just setup-pdf-lint)"; fi
     nvm_bin=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | tail -1 || true)
     [ -n "$nvm_bin" ] && export PATH="$nvm_bin:$PATH"
     have node --version
@@ -190,16 +223,18 @@ boundaries:
     #!/usr/bin/env bash
     set -euo pipefail
     bad=$(cargo tree -p sheaf-image -e normal --prefix none | awk '{print $1}' | sort -u \
-      | grep -E '^(lopdf|pdfium-render|gpui-pre|tesseract|oar-ocr|ort|sheaf-(doc|render|ocr|ops|ui|app|plugin|print))$' || true)
+      | grep -E '^(lopdf|pdf-.*|pdfium-render|gpui-pre|tesseract|oar-ocr|ort|sheaf-(doc|render|ocr|ops|ui|app|plugin|print))$' || true)
     [ -z "$bad" ] || { echo "sheaf-image depends on: $bad"; exit 1; }
     deps=$(cargo tree -p sheaf-util -e normal --prefix none | awk '{print $1}' | sort -u | xargs)
     [ "$deps" = "sheaf-util twox-hash" ] || { echo "sheaf-util depends on: $deps"; exit 1; }
     bad=$(cargo tree -p sheaf-edit -e normal --prefix none | awk '{print $1}' | sort -u \
       | grep -E '^sheaf-' | grep -vx 'sheaf-edit' || true)
     [ -z "$bad" ] || { echo "sheaf-edit depends on: $bad"; exit 1; }
-    bad=$(cargo tree --workspace -e all -i lopdf --prefix depth | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
-      | grep -vx 'sheaf-doc' || true)
-    [ -z "$bad" ] || { echo "crates outside sheaf-doc depend on lopdf directly: $bad"; exit 1; }
+    for pkg in lopdf pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams; do
+      bad=$(cargo tree --workspace -e all -i "$pkg" --prefix depth 2>/dev/null | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
+        | grep -vx 'sheaf-doc' || true)
+      [ -z "$bad" ] || { echo "crates outside sheaf-doc depend on $pkg directly: $bad"; exit 1; }
+    done
     cargo build -p sheaf-edit --target wasm32-wasip2
 
 [doc("Workspace clippy, -D warnings")]
@@ -393,11 +428,10 @@ tier-codes:
 # What sheaf writes on every form held to the Arlington PDF Model with
 # pdf-lint (backlog F22): a mark, a header and footer and recognized text,
 # saved as planned, then a Rewrite, each save's objects checked; the
-# form's own aren't. Needs qpdf 11.9 or later (PDF_LINT_QPDF, else the
-# one on the PATH). SHEAF_ARLINGTON_ONLY=<paths, comma-separated> narrows
+# form's own aren't. SHEAF_ARLINGTON_ONLY=<paths, comma-separated> narrows
 # it to a few forms; SHEAF_ARLINGTON_SAVES=<file> writes each save's
 # counts there, a line each, to set one run beside another.
-[doc("pdf-lint over what sheaf writes on every form: a mark, a header and footer, recognized text, then a Rewrite; needs qpdf (SHEAF_ARLINGTON_ONLY narrows it, SHEAF_ARLINGTON_SAVES writes each save's counts)")]
+[doc("pdf-lint over what sheaf writes on every form: a mark, a header and footer, recognized text, then a Rewrite (SHEAF_ARLINGTON_ONLY narrows it, SHEAF_ARLINGTON_SAVES writes each save's counts)")]
 [group('corpus')]
 tier-arlington:
     scripts/test-capped.sh cargo test -p sheaf-ops --test arlington -- --ignored --nocapture

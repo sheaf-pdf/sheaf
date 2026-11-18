@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use pdf_lint::{Hold, Made};
+use super::{Hold, Made};
 use sheaf_doc::materialize::key::{ObjKey, Part};
 use sheaf_doc::materialize::record::ObjMap;
 use sheaf_doc::model::{AnnotBody, DocState};
@@ -357,7 +357,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use pdf_lint::{Hold, Made, Rule};
+    use super::super::{Hold, Made, Rule};
     use sheaf_doc::forms::fixture::{Form, every_mark_kind};
     use sheaf_doc::materialize::record::ObjMap;
     use sheaf_doc::materialize::{ObjKey, StrategyKind, save_appended, save_rewritten};

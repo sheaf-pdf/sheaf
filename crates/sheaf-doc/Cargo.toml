@@ -22,6 +22,10 @@ sheaf-edit.workspace = true
 # How far an open has read (M10.5 §14.2).
 in-progress.workspace = true
 lopdf.workspace = true
+pdf-objects.workspace = true
+pdf-filters.workspace = true
+pdf-crypt.workspace = true
+pdf-structure.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
@@ -85,6 +89,4 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 # and says where each hit is.
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
-# The private names sheaf writes are second-class names, as pdf-lint
-# tells them (`private`'s tests).
-pdf-lint.workspace = true
+pdf-content-streams.workspace = true

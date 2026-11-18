@@ -385,7 +385,7 @@ measurements, hand checks for Greg, what review found, Found.)
    - **Two contexts** (B44, 0117296): a key is unlisted only when no
      table that reaches the object lists it, so 13 of B44's 19 rows went;
      B44 stays open on 6.
-   - **[B63](../backlog/B63.md), new, a pdf-lint bug:** `render` cuts a
+   - **[B63](backlog-closed.md#b63-pdf-lint-shows-a-long-utf-16-string-two-ways-in-an-encrypted-file), new, a pdf-lint bug:** `render` cuts a
      byte string at 80 bytes but a text string at 80 characters. In an
      encrypted file, the reader puts qpdf's plaintext in plain-view
      objects and tokenizes an object stream's strings as bytes, so a

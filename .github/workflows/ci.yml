@@ -90,29 +90,11 @@ jobs:
         shell: bash
         run: scripts/fetch-ocr-data.sh
 
-      # pdf-lint and the qpdf it bundles: the Arlington tests decode the
-      # packed and encrypted files sheaf writes with that qpdf. The version
-      # is the dev-dependency's (pdf-lint = "=0.1.0"); bump both together.
+      # pdf-lint, run as a CLI oracle by the Arlington tests (tests/arlington.rs);
+      # from 0.2.0 it decodes and decrypts files itself, with no qpdf.
       - uses: sheaf-pdf/setup-pdf-lint@v1
-        id: pdf-lint
         with:
-          version: 0.1.0
-
-      - name: pdf-lint's qpdf for the tests
-        shell: bash
-        run: echo "PDF_LINT_QPDF=${{ steps.pdf-lint.outputs.path }}/qpdf/bin/qpdf${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
-
-      # qpdf's macOS build links OpenSSL in, but RC4 is in OpenSSL's legacy
-      # provider, a module it looks for only in the Homebrew Cellar it was
-      # built against (openssl@3 3.6.4). Without it, an RC4 file's strings
-      # stay ciphertext. The runner's own openssl@3 has the module.
-      - name: OpenSSL's legacy provider for that qpdf (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          modules="$(brew --prefix openssl@3)/lib/ossl-modules"
-          test -f "$modules/legacy.dylib" || { echo "no legacy.dylib in $modules"; exit 1; }
-          echo "OPENSSL_MODULES=$modules" >> "$GITHUB_ENV"
+          version: 0.2.0-rc.1
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -122,7 +104,7 @@ jobs:
         # No PDFs, OCR or windows under it (see crates/sheaf-image/src/lib.rs).
         run: |
           bad=$(cargo tree -p sheaf-image -e normal --prefix none | awk '{print $1}' | sort -u \
-            | grep -E '^(lopdf|pdfium-render|gpui-pre|tesseract|oar-ocr|ort|sheaf-(doc|render|ocr|ops|ui|app|plugin|print))$' || true)
+            | grep -E '^(lopdf|pdf-.*|pdfium-render|gpui-pre|tesseract|oar-ocr|ort|sheaf-(doc|render|ocr|ops|ui|app|plugin|print))$' || true)
           if [ -n "$bad" ]; then echo "sheaf-image depends on: $bad"; exit 1; fi
 
       - name: sheaf-util stays byte helpers
@@ -142,13 +124,15 @@ jobs:
           if [ -n "$bad" ]; then echo "sheaf-edit depends on: $bad"; exit 1; fi
           cargo build -p sheaf-edit --target wasm32-wasip2
 
-      - name: Only sheaf-doc reaches lopdf
+      - name: Only sheaf-doc reaches the PDF layer crates
         shell: bash
         # M18 slice 1: every other crate reaches the PDF layer through sheaf_doc::pdf.
         run: |
-          bad=$(cargo tree --workspace -e all -i lopdf --prefix depth | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
-            | grep -vx 'sheaf-doc' || true)
-          if [ -n "$bad" ]; then echo "crates outside sheaf-doc depend on lopdf directly: $bad"; exit 1; fi
+          for pkg in lopdf pdf-objects pdf-filters pdf-crypt pdf-structure pdf-content-streams; do
+            bad=$(cargo tree --workspace -e all -i "$pkg" --prefix depth 2>/dev/null | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
+              | grep -vx 'sheaf-doc' || true)
+            if [ -n "$bad" ]; then echo "crates outside sheaf-doc depend on $pkg directly: $bad"; exit 1; fi
+          done
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

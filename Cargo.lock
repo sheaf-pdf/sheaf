@@ -143,6 +143,7 @@ dependencies = [
  "cipher 0.5.2",
  "cpubits",
  "cpufeatures 0.3.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -746,6 +747,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -1024,8 +1026,10 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
+ "block-buffer 0.12.1",
  "crypto-common 0.2.2",
  "inout 0.2.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -1927,6 +1931,7 @@ dependencies = [
  "const-oid",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -3370,6 +3375,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
 dependencies = [
  "typenum",
+ "zeroize",
 ]
 
 [[package]]
@@ -5338,20 +5344,90 @@ dependencies = [
 ]
 
 [[package]]
-name = "pdf-lint"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae8496f4f7282c17cdddd4e8cee756c28949e8c814d1b6bd87a0e2f4cbbfe23f"
+name = "pdf-color"
+version = "0.1.0-alpha.2"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
 dependencies = [
- "anyhow",
+ "pdf-objects",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pdf-content-streams"
+version = "0.1.0-alpha.1"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "memchr",
+ "pdf-color",
+ "pdf-filters",
+ "pdf-objects",
  "pdf-tokenizer",
+ "thiserror 2.0.21",
+ "tinyvec",
+ "twox-hash",
+]
+
+[[package]]
+name = "pdf-crypt"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "aes 0.9.3",
+ "cbc 0.2.1",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
+ "md-5 0.11.0",
+ "rc4",
+ "sha2 0.11.0",
+ "stringprep",
+ "thiserror 2.0.21",
+ "unicode-normalization",
+ "zeroize",
+]
+
+[[package]]
+name = "pdf-filters"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "miniz_oxide 0.9.1",
+ "thiserror 2.0.21",
+ "zlib-rs",
+]
+
+[[package]]
+name = "pdf-objects"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "memchr",
+ "pdf-tokenizer",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pdf-structure"
+version = "0.1.0-alpha.1"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "libc",
+ "pdf-crypt",
+ "pdf-filters",
+ "pdf-objects",
+ "pdf-tokenizer",
+ "same-file",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "pdf-tokenizer"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2a366e8b944154ce8ce6a531f3e9ea3e5c3788e05cc2e25b98558362cb2a73"
+version = "0.2.2"
+source = "git+https://github.com/sheaf-pdf/pdf-lint?branch=main#327bd44aaefa5cf6d16cec19696440793c191fe9"
+dependencies = [
+ "memchr",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "pdfium-render"
@@ -6060,6 +6136,15 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "rc4"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "840038b674daa9f7a7957440d937951d15c0143c056e631e529141fd780e0c92"
+dependencies = [
+ "cipher 0.5.2",
 ]
 
 [[package]]
@@ -6843,7 +6928,11 @@ dependencies = [
  "lopdf",
  "md-5 0.11.0",
  "num-bigint",
- "pdf-lint",
+ "pdf-content-streams",
+ "pdf-crypt",
+ "pdf-filters",
+ "pdf-objects",
+ "pdf-structure",
  "proc-macro2",
  "proptest",
  "quick-xml",
@@ -6923,7 +7012,6 @@ dependencies = [
  "image",
  "in-progress",
  "log",
- "pdf-lint",
  "regex",
  "serde",
  "serde_json",

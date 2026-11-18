@@ -240,7 +240,8 @@ Leptonica (BSD-2), ONNX Runtime (MIT), PaddleOCR models and `oar-ocr`
 (Apache-2.0); see `packaging/licenses/`. Barcodes are read and QR codes made
 with rxing (Apache-2.0). MuPDF is deliberately not used (AGPL). lopdf (MIT)
 is vendored with a patch in `vendor/lopdf`. sheaf's tests check what it
-writes with pdf-lint (Apache-2.0; a dev-dependency only, never shipped),
+writes with the `pdf-lint` CLI binary (Apache-2.0; run as a separate process
+in tests only, never linked or shipped),
 which embeds the PDF Association's Arlington PDF Model (Apache-2.0). Text in
 the standard 14 fonts is laid out with Adobe's Core 14 AFM metrics (Adobe's
 notice) and the Adobe Glyph List (BSD-3), in `crates/sheaf-doc/assets`; text

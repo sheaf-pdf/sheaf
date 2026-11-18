@@ -243,10 +243,9 @@ sheaf already copies unchanged objects as they were, within limits:
 
 ## pdf-lint without qpdf
 
-pdf-lint 0.2.0 (unreleased) decodes and decrypts through pdf-filters and
+pdf-lint 0.2.0-rc.1 decodes and decrypts through pdf-filters and
 pdf-crypt, and keeps qpdf for its own tests; its archives hold none.
-Once it's out, a bump of sheaf's dev-dependency lets sheaf's tests read
-through pdf-lint alone, and drops `PDF_LINT_QPDF` and the macOS
-`OPENSSL_MODULES` step PR #58 added (the bundled qpdf loads OpenSSL's
-legacy provider only from the Homebrew path it was built against). It
-needs no M18 slice and waits only for the release and the pause.
+sheaf's Arlington tests now run the `pdf-lint` 0.2.0-rc.1 CLI binary as a
+separate process (`sheaf-pdf/setup-pdf-lint@v1` in CI, `just setup-pdf-lint`
+locally), dropping the `pdf-lint` library dependency, `PDF_LINT_QPDF`, the
+macOS `OPENSSL_MODULES` step PR #58 added, and the 17 `B63` allowances.

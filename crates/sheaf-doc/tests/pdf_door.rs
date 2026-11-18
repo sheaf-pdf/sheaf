@@ -1,7 +1,8 @@
 //! M18 slice 1's guard: every crate in the workspace reaches the PDF
 //! layer through `sheaf_doc::pdf` (`crates/sheaf-doc/src/pdf.rs`, or
 //! `crates/sheaf-doc/src/pdf/`). No other `.rs` file under `crates/`
-//! may name `lopdf` in a `use`, path or macro body.
+//! may name `lopdf` or any `pdf_*` family crate in a `use`, path or
+//! macro body.
 
 use std::path::{Path, PathBuf};
 
@@ -12,8 +13,18 @@ use syn::{Ident, UseTree};
 const DOOR_FILE: &str = "sheaf-doc/src/pdf.rs";
 const DOOR_DIR: &str = "sheaf-doc/src/pdf/";
 
+const BANNED: &[&str] = &[
+    "lopdf",
+    "pdf_tokenizer",
+    "pdf_objects",
+    "pdf_filters",
+    "pdf_crypt",
+    "pdf_structure",
+    "pdf_content_streams",
+];
+
 #[test]
-fn only_the_door_names_lopdf() {
+fn only_the_door_names_the_pdf_layer_crates() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("crates/ parent");
@@ -32,13 +43,13 @@ fn only_the_door_names_lopdf() {
         let file = syn::parse_file(&src).unwrap_or_else(|e| panic!("{shown}: {e}"));
         let mut scan = Scan::default();
         scan.visit_file(&file);
-        for line in scan.lines {
-            hits.push(format!("crates/{shown}:{line}"));
+        for (line, name) in scan.lines {
+            hits.push(format!("crates/{shown}:{line} ({name})"));
         }
     }
     assert!(
         hits.is_empty(),
-        "files outside sheaf_doc::pdf name `lopdf` directly; reach it through \
+        "files outside sheaf_doc::pdf name a PDF-layer crate directly; reach it through \
          `sheaf_doc::pdf` (or `crate::pdf` in sheaf-doc):\n{}",
         hits.join("\n")
     );
@@ -49,16 +60,16 @@ fn a_probe_catches_uses_paths_and_macros_but_not_strings() {
     let src = r#"
 use lopdf::Object;
 use crate::pdf::Dictionary;
-fn f() -> lopdf::Result<()> {
-    let _s = "lopdf::Object in a string is fine";
-    let _d = lopdf::dictionary! { "K" => 1 };
+fn f() -> pdf_structure::Result<()> {
+    let _s = "lopdf::Object and pdf_objects::Dict in a string are fine";
+    let _d = pdf_objects::dict! { "K" => 1 };
     Ok(())
 }
 "#;
     let file = syn::parse_file(src).unwrap();
     let mut scan = Scan::default();
     scan.visit_file(&file);
-    let lines: Vec<usize> = scan.lines.into_iter().collect();
+    let lines: Vec<usize> = scan.lines.into_iter().map(|(l, _)| l).collect();
     assert_eq!(lines, [2, 4, 6]);
 }
 
@@ -87,13 +98,15 @@ fn shown(path: &Path) -> String {
 
 #[derive(Default)]
 struct Scan {
-    lines: std::collections::BTreeSet<usize>,
+    lines: std::collections::BTreeSet<(usize, &'static str)>,
 }
 
 impl Scan {
     fn check(&mut self, ident: &Ident) {
-        if ident == "lopdf" {
-            self.lines.insert(ident.span().start().line);
+        for &banned in BANNED {
+            if ident == banned {
+                self.lines.insert((ident.span().start().line, banned));
+            }
         }
     }
 

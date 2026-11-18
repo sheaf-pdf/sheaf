@@ -395,15 +395,14 @@ mod tests {
         assert!(is_sheaf_nm(b"sheaf:12") && is_sheaf_nm(b"sheaf-anon:ab"));
         assert!(!is_sheaf_nm(b"sheafy") && !is_sheaf_nm(b"a1b2-c3"));
         // Every name sheaf writes is a second-class name (ISO 32000-2 Annex
-        // E): its prefix, `SHEF_`, then the rest.
+        // E): a 4-byte registered prefix (`SHEF`), `_`, then a non-empty key.
+        let is_second_class = |n: &[u8]| {
+            n.len() > 5 && n[4] == b'_' && n[..4].iter().all(|&b| b.is_ascii_graphic() && b != b'_')
+        };
         for key in KEYS.iter().filter(|k| k.places != [Place::Nm]) {
             let name = String::from_utf8_lossy(key.name);
             assert!(key.name.starts_with(b"SHEF_"), "{name}");
-            assert_eq!(
-                pdf_lint::Class::of(key.name),
-                pdf_lint::Class::Second,
-                "{name}"
-            );
+            assert!(is_second_class(key.name), "{name}");
         }
     }
 
