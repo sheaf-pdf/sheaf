@@ -8,8 +8,8 @@
 //! [`full::write_built`]: crate::serialize::full::write_built
 //! [`Memory`]: crate::store::Origin::Memory
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use anyhow::{Context as _, Result, bail};
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_edit::{Fit, PageSize};
 
 use crate::store::{BlobKind, MemoryKind, Src, Store};

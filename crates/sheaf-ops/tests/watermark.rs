@@ -18,10 +18,10 @@ use common::{
     HALF_A_ROW, blue_in, clean, corpus_form, holds, open, scratch, two_page_form, values, write,
     written,
 };
-use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::content::{PagOrigin, PaginationKind};
 use sheaf_doc::export::Export;
 use sheaf_doc::materialize::How;
+use sheaf_doc::pdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::text_layer::fixture as saved;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{OcrWord, TextLayer};
@@ -37,7 +37,7 @@ fn pages_pdf(dir: &Path, name: &str, contents: &[&[u8]]) -> PathBuf {
     let pages = pdf.new_object_id();
     let font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" };
     let resources = pdf.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
-    let kids: Vec<lopdf::Object> = (contents.iter())
+    let kids: Vec<sheaf_doc::pdf::Object> = (contents.iter())
         .map(|content| {
             let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
             let page = dictionary! {
@@ -388,7 +388,7 @@ fn acrobat_pdf(dir: &Path, name: &str, streams: &[&[u8]]) -> PathBuf {
         },
         b"0 0 1 rg BT /F1 48 Tf 4 12 Td (ACROBAT) Tj ET".to_vec(),
     ));
-    let contents: Vec<lopdf::Object> = (streams.iter())
+    let contents: Vec<sheaf_doc::pdf::Object> = (streams.iter())
         .map(|s| {
             pdf.add_object(Stream::new(dictionary! {}, s.to_vec()))
                 .into()
@@ -644,7 +644,7 @@ fn merged_pdf(dir: &Path, name: &str) -> PathBuf {
           0.7071 0.7071 -0.7071 0.7071 200 300 cm BT 0.784 0.118 0.118 rg /F2 72 Tf 0 0 Td \
           (DRAFT) Tj ET\nQ\nEMC\n",
     ];
-    let contents: Vec<lopdf::Object> = (streams.iter())
+    let contents: Vec<sheaf_doc::pdf::Object> = (streams.iter())
         .map(|s| {
             pdf.add_object(Stream::new(dictionary! {}, s.to_vec()))
                 .into()

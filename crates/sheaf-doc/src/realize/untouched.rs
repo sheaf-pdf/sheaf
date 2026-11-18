@@ -26,7 +26,7 @@
 
 use std::collections::HashSet;
 
-use lopdf::{Object, ObjectId};
+use crate::pdf::{Object, ObjectId};
 
 use super::{MarkDraw, ViewInputs};
 use crate::annot::AnnotId;
@@ -383,7 +383,7 @@ mod emitted {
     use std::borrow::Cow;
     use std::collections::HashMap;
 
-    use lopdf::{Dictionary, Object, ObjectId};
+    use crate::pdf::{Dictionary, Object, ObjectId};
 
     use super::ViewInputs;
     use crate::geom::{Geom, Rect};

@@ -67,8 +67,6 @@ use std::sync::Arc;
 use common::{How, StrategyKind, scratch};
 use in_progress::NoProgress;
 use lint::{check, options, own_structure, read, written};
-use lopdf::xref::XrefType;
-use lopdf::{LazyPdf, Object, ObjectId, XrefKind, dictionary};
 use pdf_lint::{
     Allowance, Allowances, Finding, Hold, Made, Options, Report, Rule, Unlisted, Version,
     file_version,
@@ -78,6 +76,8 @@ use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::fixture::{Form, every_kind, every_mark_kind, mark_blobs, note};
 use sheaf_doc::labels::LabelSpec;
 use sheaf_doc::materialize::{Encryption, ObjKey};
+use sheaf_doc::pdf::xref::XrefType;
+use sheaf_doc::pdf::{LazyPdf, Object, ObjectId, XrefKind, dictionary};
 use sheaf_doc::serialize::fixture as crypt;
 use sheaf_doc::source::OpenError;
 use sheaf_doc::store::{BlobKind, Origin};
@@ -1020,12 +1020,12 @@ fn the_fonts_widths_are_allowed_only_where_pdf_2_0_asks_for_them() {
         ("2.0", "NotAStandardFont", true),
         ("2.0", "Helvetica", true),
     ] {
-        let mut pdf = lopdf::Document::with_version(version);
+        let mut pdf = sheaf_doc::pdf::Document::with_version(version);
         let pages = pdf.new_object_id();
         let font = pdf.add_object(dictionary! {
             "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base_font,
         });
-        let content = pdf.add_object(lopdf::Stream::new(
+        let content = pdf.add_object(sheaf_doc::pdf::Stream::new(
             dictionary! {},
             b"BT /F1 12 Tf (A) Tj ET".to_vec(),
         ));
@@ -1286,7 +1286,7 @@ fn summary_held(summary: &Document, layout: Layout) {
     };
     let named = |id: &ObjectId, key: &[u8], value: &[u8]| {
         let dict = match pdf.get(*id) {
-            Ok(Object::Dictionary(d) | Object::Stream(lopdf::Stream { dict: d, .. })) => d,
+            Ok(Object::Dictionary(d) | Object::Stream(sheaf_doc::pdf::Stream { dict: d, .. })) => d,
             _ => return false,
         };
         dict.get(key).and_then(Object::as_name).ok() == Some(value)

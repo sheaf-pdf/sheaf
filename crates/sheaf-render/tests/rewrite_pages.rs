@@ -10,10 +10,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::materialize::{
     Profile, SaveInput, SavePlan, SaveTarget, Strategy, Why, materialize,
 };
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::{duplicate, insert};
 use sheaf_doc::{Document, FixedCount, Src, Store};

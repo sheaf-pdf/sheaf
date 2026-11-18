@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use lopdf::Object;
 use sheaf_doc::forms::fixture::Form;
+use sheaf_doc::pdf::Object;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sheaf-cli-form-{name}-{}", std::process::id()));

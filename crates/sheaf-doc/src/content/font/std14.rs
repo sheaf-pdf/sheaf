@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use lopdf::{Object, dictionary};
+use crate::pdf::{Object, dictionary};
 use sheaf_edit::FontChoice;
 use unicode_normalization::UnicodeNormalization;
 

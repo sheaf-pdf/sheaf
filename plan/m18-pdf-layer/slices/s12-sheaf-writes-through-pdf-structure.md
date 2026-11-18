@@ -3,7 +3,7 @@
 Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
 
 **What:** sheaf's `serialize/` keeps the policy and hands the writing to
-the crates ([slice 7](s07-pdf-structure-writing.md)), byte for byte.
+the crates ([slice 7](../../complete/m18-pdf-layer/s07-pdf-structure-writing.md)), byte for byte.
 
 - Objects through pdf-objects' serializer; sheaf's `serialize/object.rs`
   goes.

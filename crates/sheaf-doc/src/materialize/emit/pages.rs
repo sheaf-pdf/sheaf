@@ -29,8 +29,8 @@
 //! - **What sheaf draws** over the page ([`super::content`]) goes into its
 //!   `/Contents` and `/Resources` last.
 
+use crate::pdf::{Dictionary, LazyPdf, Object};
 use anyhow::{Context as _, Result};
-use lopdf::{Dictionary, LazyPdf, Object};
 
 use super::{Cx, RotatePolicy, Shown};
 use crate::geom::{Geom, Rect};

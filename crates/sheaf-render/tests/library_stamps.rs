@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::add;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Document, FixedCount, Store};
@@ -31,7 +31,7 @@ fn one_page(
     pdf: &mut Pdf,
     media: [i64; 4],
     content: Object,
-    xobjects: lopdf::Dictionary,
+    xobjects: sheaf_doc::pdf::Dictionary,
 ) -> Vec<u8> {
     let pages = pdf.new_object_id();
     let font = pdf.add_object(dictionary! {

@@ -72,7 +72,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, Object, ObjectId};
 use sheaf_doc::content::{Fonts, PagOrigin, PageContent, PaginationKind, TextBag, text_bag};
 use sheaf_doc::effects::{Flags, judge};
 use sheaf_doc::forms::Report;
@@ -84,6 +83,7 @@ use sheaf_doc::materialize::{
     write_file,
 };
 use sheaf_doc::model::Scope;
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId};
 use sheaf_doc::text_layer::from_engine;
 use sheaf_doc::tx::fixture::{
     add, bookmark, clear_ocr, crop, delete, delete_annots, delete_bookmark, header as fx_header,

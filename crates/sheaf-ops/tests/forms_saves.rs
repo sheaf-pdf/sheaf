@@ -11,14 +11,14 @@
 
 use std::path::Path;
 
-use lopdf::{
-    Document as Pdf, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions, dictionary,
-};
 use sheaf_doc::export::Export;
 use sheaf_doc::forms::fixture::{Form, detached, note, outline_tree};
 use sheaf_doc::forms::sigs::{Integrity, Verdict};
 use sheaf_doc::forms::{Finding, Value, check};
 use sheaf_doc::materialize::{Ask, AskAnswers, Note, SaveReport, SaveStop, StrategyKind, Why};
+use sheaf_doc::pdf::{
+    Document as Pdf, EncryptionState, EncryptionVersion, Object, ObjectId, Permissions, dictionary,
+};
 use sheaf_doc::tx::fixture::{
     add, bookmark, delete, duplicate, insert, move_pages, patch_bookmark, rotate,
 };

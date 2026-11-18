@@ -782,10 +782,10 @@ mod tests {
 
     use std::sync::Arc;
 
-    use lopdf::LazyPdf;
     use pdf_lint::{Document, Hold, Made, Object, ObjectId, Options, Report, Rule, Version, dict};
     use sheaf_doc::forms::fixture::Form;
     use sheaf_doc::materialize::save_rewritten;
+    use sheaf_doc::pdf::LazyPdf;
     use sheaf_doc::serialize::fixture::object_streams_of;
     use sheaf_doc::source::Limits;
 

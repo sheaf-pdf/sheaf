@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 
 /// A PDF of `n` pages saying "<tag> page i", bookmarked "<tag> i" each.
 fn pdf(dir: &Path, tag: &str, n: usize) -> PathBuf {
@@ -79,9 +79,10 @@ fn sheaf(args: &[&str]) -> std::process::Output {
 /// Top-level outline titles and, for each, its children's titles.
 fn outline(path: &Path) -> Vec<(String, Vec<String>)> {
     let pdf = Pdf::load(path).unwrap();
-    let title =
-        |d: &lopdf::Dictionary| lopdf::decode_text_string(d.get(b"Title").unwrap()).unwrap();
-    let kids = |parent: &lopdf::Dictionary| {
+    let title = |d: &sheaf_doc::pdf::Dictionary| {
+        sheaf_doc::pdf::decode_text_string(d.get(b"Title").unwrap()).unwrap()
+    };
+    let kids = |parent: &sheaf_doc::pdf::Dictionary| {
         let mut out = Vec::new();
         let mut next = parent.get(b"First").ok().map(|o| o.as_reference().unwrap());
         while let Some(id) = next {

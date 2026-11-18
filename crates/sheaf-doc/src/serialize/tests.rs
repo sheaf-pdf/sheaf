@@ -12,12 +12,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use in_progress::NoProgress;
-use lopdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
-use lopdf::{
+use crate::pdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
+use crate::pdf::{
     Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, LazyPdf, LoadOptions, Object,
     ObjectId, Permissions, Stream, StringFormat, XrefKind, dictionary,
 };
+use in_progress::NoProgress;
 use sheaf_edit::Rotation;
 
 use super::append::{self, Base};
@@ -748,7 +748,7 @@ fn a_container_lists_each_member_where_it_is() {
         data.len(),
         first + bytes.iter().map(|(_, b)| b.len() + 1).sum::<usize>()
     );
-    let read = lopdf::ObjectStream::new(&stream).unwrap();
+    let read = crate::pdf::ObjectStream::new(&stream).unwrap();
     assert_eq!(read.objects.len(), 7);
     for (num, obj) in &members {
         assert_eq!(&read.objects[&(*num, 0)], obj, "object {num}");
@@ -1096,7 +1096,7 @@ fn ivs_are_keyed_by_what_the_object_is() {
         let mut back = crypt
             .encrypt_as(id, &ObjKey::Catalog, &text("a value"))
             .unwrap();
-        lopdf::encryption::decrypt_object(crypt.state(), id, &mut back).unwrap();
+        crate::pdf::encryption::decrypt_object(crypt.state(), id, &mut back).unwrap();
         assert_eq!(back, text("a value"), "{name}");
     }
 }
@@ -1223,7 +1223,7 @@ fn as_written() -> (i64, [Vec<u8>; 4]) {
 }
 
 /// `bytes` opened with the user password.
-fn open_as_user(bytes: &[u8]) -> lopdf::Result<LazyPdf> {
+fn open_as_user(bytes: &[u8]) -> crate::pdf::Result<LazyPdf> {
     LazyPdf::open(
         Arc::<[u8]>::from(bytes),
         Some(USER),
@@ -1260,7 +1260,7 @@ fn rewrites_stay_encrypted() {
                 assert!(
                     matches!(
                         LazyPdf::open(Arc::<[u8]>::from(&bytes[..]), None, &Limits::DEFAULT.reader),
-                        Err(lopdf::Error::InvalidPassword)
+                        Err(crate::pdf::Error::InvalidPassword)
                     ),
                     "{name}"
                 );
@@ -1662,7 +1662,7 @@ fn containers_encrypt_once_as_the_reader_decrypts() {
         assert!(
             matches!(
                 LazyPdf::open(Arc::<[u8]>::from(&bytes[..]), None, &Limits::DEFAULT.reader),
-                Err(lopdf::Error::InvalidPassword)
+                Err(crate::pdf::Error::InvalidPassword)
             ),
             "{name}"
         );
@@ -1957,7 +1957,7 @@ fn in_object_streams(pages: usize, per: usize, junk: Option<u32>) -> Vec<u8> {
         let at = (pdf.max_id + 1 + junk, 0);
         pdf.catalog_mut().unwrap().set("Junk", at);
     }
-    let options = lopdf::SaveOptions::builder()
+    let options = crate::pdf::SaveOptions::builder()
         .use_object_streams(true)
         .use_xref_streams(true)
         .max_objects_per_stream(per)

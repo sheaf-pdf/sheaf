@@ -9,8 +9,8 @@ mod common;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_image::codes::fixture::{Degradation::Threshold, degrade};
 use sheaf_image::codes::{self, Code, PageCodes, Patch, Reader as _, Symbology};
 use sheaf_render::Renderer;

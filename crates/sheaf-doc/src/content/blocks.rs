@@ -12,7 +12,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId};
 
 use super::balance::Balance;
 use super::lex::{self, LexError, ResCx, Step, Tok};
@@ -752,8 +752,8 @@ impl DrawnForms {
             Some(
                 match form.decompressed_content_with_limit(lim.content.decompressed) {
                     Ok(data) => Ok((data, own)),
-                    Err(lopdf::Error::Decompress(
-                        lopdf::DecompressError::MemoryLimitExceeded { .. },
+                    Err(crate::pdf::Error::Decompress(
+                        crate::pdf::DecompressError::MemoryLimitExceeded { .. },
                     )) => Err(true),
                     Err(_) => Err(false),
                 },

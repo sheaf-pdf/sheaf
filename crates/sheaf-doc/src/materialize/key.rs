@@ -10,7 +10,7 @@
 //!
 //! [`SaveRecord`]: super::SaveRecord
 
-use lopdf::ObjectId;
+use crate::pdf::ObjectId;
 
 use crate::annot::AnnotId;
 use crate::content::ResId;

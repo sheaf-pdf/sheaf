@@ -7,7 +7,7 @@
 //! ([`Measured`], [`Scale`]); the values, parsing what's typed and the PDF
 //! are here.
 
-use lopdf::{Dictionary, Object, dictionary};
+use crate::pdf::{Dictionary, Object, dictionary};
 
 pub use sheaf_edit::measure::*;
 
@@ -230,7 +230,7 @@ pub fn scale_of<P: Objects + ?Sized>(pdf: &P, measure: &Dictionary) -> Option<Sc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::Document as Pdf;
+    use crate::pdf::Document as Pdf;
 
     fn p(x: f32, y: f32) -> Pt {
         Pt { x, y }

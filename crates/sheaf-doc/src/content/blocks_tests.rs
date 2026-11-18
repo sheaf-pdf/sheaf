@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 
 use super::*;
 use crate::source::Limits;
@@ -65,7 +65,7 @@ fn marked_ranges_have_their_lists() {
         &Object::Array(vec![
             1.into(),
             Object::string_literal("b)"),
-            Object::String(vec![10], lopdf::StringFormat::Hexadecimal),
+            Object::String(vec![10], crate::pdf::StringFormat::Hexadecimal),
         ])
     );
     // Named lists, found or not.

@@ -53,8 +53,8 @@ pub mod xref;
 
 use std::io::Write as _;
 
+use crate::pdf::{Dictionary, Object, ObjectId, StringFormat};
 use anyhow::Context as _;
-use lopdf::{Dictionary, Object, ObjectId, StringFormat};
 
 use crate::materialize::ObjKey;
 use crypt::Crypt;
@@ -64,7 +64,7 @@ use crypt::Crypt;
 /// (`ReadLimits::max_objects`), so a file sheaf writes is one it reads,
 /// and a full write's cross-reference section, which lists every number
 /// from 0, has at most that many rows.
-pub const NUMBERS: u32 = lopdf::ReadLimits::DEFAULT.max_objects;
+pub const NUMBERS: u32 = crate::pdf::ReadLimits::DEFAULT.max_objects;
 
 /// Why the serializer wrote nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

@@ -1,7 +1,7 @@
 //! The content writer: what each call writes, names bound at the end, and
 //! the same bytes from the same calls on any thread.
 
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 
 use super::*;
 use crate::annot::{Box2, Pt};

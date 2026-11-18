@@ -28,7 +28,7 @@
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
-use lopdf::{Object, ObjectId};
+use crate::pdf::{Object, ObjectId};
 
 use super::{Event, Forms, InterpError, Kind, Ops, Opts, Wants, interpret};
 use crate::annot::Pt;

@@ -5,9 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use crate::pdf::{Object, dictionary};
 use im::Vector;
 use in_progress::NoProgress;
-use lopdf::{Object, dictionary};
 use sheaf_edit::{
     AnnotRef, BatesSpec, Delta, HeaderFooterSpec, LabelStyle, MarkPatch, Op, Turn, Vec2,
 };

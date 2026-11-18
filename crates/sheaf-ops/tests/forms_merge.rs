@@ -12,11 +12,11 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::fixture::Form;
 use sheaf_doc::materialize::StrategyKind;
 use sheaf_doc::model::ScriptState;
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_doc::tx::fixture::{duplicate, replace, rotate};
 use sheaf_doc::{Commit, Document, Notice, PageId};
 use sheaf_edit::{Margins, Turn};

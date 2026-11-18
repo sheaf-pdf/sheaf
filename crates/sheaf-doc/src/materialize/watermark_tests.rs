@@ -6,8 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lopdf::xref::XrefType;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::xref::XrefType;
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{BlobSel, GridPos, Turn, WatermarkContent, WatermarkSpec, Z};
 
 use super::append_tests::{appended_in_place, file, keys_at, planned_in_place, written};
@@ -655,7 +655,8 @@ fn encrypted(how: How) {
     assert!(!holds(&out, b"MARKSECRET"), "{how:?}");
     assert!(!holds(&out, id.to_string().as_bytes()), "{how:?}");
     let lim = &Limits::DEFAULT.reader;
-    let pdf = lopdf::LazyPdf::open(std::sync::Arc::<[u8]>::from(out), Some(USER), lim).unwrap();
+    let pdf =
+        crate::pdf::LazyPdf::open(std::sync::Arc::<[u8]>::from(out), Some(USER), lim).unwrap();
     let json = pdf.catalog().unwrap().get(b"SHEF_Generators").unwrap();
     let json = pdf.dereference(json).unwrap().1.as_str().unwrap().to_vec();
     assert!(

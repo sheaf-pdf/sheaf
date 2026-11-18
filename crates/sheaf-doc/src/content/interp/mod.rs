@@ -71,7 +71,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
 use std::rc::Rc;
 
-use lopdf::{Object, ObjectId};
+use crate::pdf::{Object, ObjectId};
 
 pub use clip::{Clip, ClipPart};
 pub use encode::{EncodeError, Encoded, Unwritable, encode};
@@ -309,7 +309,7 @@ pub enum InterpError {
     #[error("XObject {} {} R can't be read: {error}", .xobject.0, .xobject.1)]
     XObject {
         xobject: ObjectId,
-        error: lopdf::Error,
+        error: crate::pdf::Error,
     },
     #[error("past the cap on {0}")]
     Limit(Cap),
@@ -1274,7 +1274,7 @@ fn category<'x>(
     objects: &'x impl ReadObjects,
     resources: &'x Object,
     key: &[u8],
-) -> Option<&'x lopdf::Dictionary> {
+) -> Option<&'x crate::pdf::Dictionary> {
     let resources = direct(objects, resources)?.as_dict().ok()?;
     direct(objects, resources.get(key).ok()?)?.as_dict().ok()
 }

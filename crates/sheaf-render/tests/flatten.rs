@@ -17,9 +17,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lopdf::{Object, Stream, dictionary};
 use sheaf_doc::export::{Export, printed};
 use sheaf_doc::forms::fixture::Form;
+use sheaf_doc::pdf::{Object, Stream, dictionary};
 use sheaf_doc::tx::Actor;
 use sheaf_doc::tx::fixture::{add, flatten, set_watermark, watermark};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2};

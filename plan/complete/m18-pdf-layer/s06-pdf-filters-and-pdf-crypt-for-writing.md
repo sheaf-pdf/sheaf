@@ -1,9 +1,9 @@
 # M18 slice 6: pdf-filters and pdf-crypt, for writing
 
-Status: open · Part of [M18: the PDF layer](../README.md) · in pdf-lint's workspace, by pdf-lint's agent
+Status: done · Part of [M18: the PDF layer](../../m18-pdf-layer/README.md) · in pdf-lint's workspace, by pdf-lint's agent
 
 **What:** the codecs encode as well as decode, by Greg's ruling that
-the family exposes writing ([sheaf.md](../sheaf.md#pdf-filters)).
+the family exposes writing ([sheaf.md](../../m18-pdf-layer/sheaf.md#pdf-filters)).
 
 - **pdf-filters:** Flate encoding, and the PNG predictors' encoding (Up,
   which sheaf's cross-reference streams use), and any other filter
@@ -25,17 +25,17 @@ the family exposes writing ([sheaf.md](../sheaf.md#pdf-filters)).
     `flate2/zlib-rs` and changed the shipped app's bytes unseen (D4).
     Named by the caller, a dependency's feature can't change anyone's
     output.
-- **Room for sheaf to be fast** ([crates.md](../crates.md#decisions-across-the-family),
+- **Room for sheaf to be fast** ([crates.md](../../m18-pdf-layer/crates.md#decisions-across-the-family),
   decision 9): decoding and encoding into a buffer the caller gives,
   and no copy of data that needs no decoding.
-- **pdf-crypt** ([sheaf.md](../sheaf.md#pdf-crypt)):
+- **pdf-crypt** ([sheaf.md](../../m18-pdf-layer/sheaf.md#pdf-crypt)):
   - `encrypt_string` and `encrypt_stream` without the `writer` feature,
     the IV still the caller's;
   - a dictionary builder that takes its random bytes (salts, and
     AES-256's file key) from the caller, for M11's new passwords;
   - `writer::dictionary`, its salts fixed, stays the tests'.
 
-**From sheaf** ([from-sheaf.md](../from-sheaf.md#the-rest-of-the-writer-slices-3-6-and-7)):
+**From sheaf** ([from-sheaf.md](../../m18-pdf-layer/from-sheaf.md#the-rest-of-the-writer-slices-3-6-and-7)):
 why the IV stays the caller's (`serialize/crypt.rs`), and the PNG Up
 predictor sheaf's cross-reference streams use (`serialize/xref.rs`).
 
@@ -46,8 +46,12 @@ predictor sheaf's cross-reference streams use (`serialize/xref.rs`).
   decrypt, likewise, every revision and method;
 - every test on both backends; on each, the same bytes as sheaf's
   compression today on that backend, for sheaf's settings
-  ([slice 12](s12-sheaf-writes-through-pdf-structure.md) holds sheaf's
+  ([slice 12](../../m18-pdf-layer/slices/s12-sheaf-writes-through-pdf-structure.md) holds sheaf's
   outputs to it);
 - throughput on each backend beside flate2's, on sheaf's corpus streams;
 - the builder's dictionaries open in qpdf, pdf.js and PDFium;
 - fuzz bodies for the encoders.
+
+## Notes
+
+Landed on `sheaf-pdf/pdf-lint` `main` (`pdf-filters` with `miniz_oxide` and `zlib-rs` `Backend` + Flate/PNG-Up encoding; `pdf-crypt` with encryption and caller-supplied IVs/salts).

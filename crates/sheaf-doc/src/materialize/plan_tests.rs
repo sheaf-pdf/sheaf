@@ -12,8 +12,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::pdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{BookmarkPatch, Turn, Z};
 
 use super::removal_tests::{layer, note, opened, said, scratch, text_file, warned};

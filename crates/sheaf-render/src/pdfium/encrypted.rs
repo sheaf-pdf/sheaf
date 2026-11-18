@@ -10,8 +10,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use lopdf::Object;
 use sheaf_doc::materialize::How;
+use sheaf_doc::pdf::Object;
 use sheaf_doc::serialize::fixture::{
     BOOKMARK, FIELD, FORM_SECRETS, PREFIX, USER, VALUE, edited, encrypted, form, in_clear,
     object_streams_encrypted, object_streams_of, rc4_40, rc4_aes_128_and_aes_256, written,

@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use lopdf::{Document as Pdf, Object, ObjectId};
+use crate::pdf::{Document as Pdf, Object, ObjectId};
 
 use super::copy::is_page_node;
 

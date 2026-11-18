@@ -10,7 +10,7 @@
 //! [`materialize::save_with`]: crate::materialize::save_with
 //! [`materialize::write_file`]: crate::materialize::write_file
 
-use lopdf::{Object, StringFormat};
+use crate::pdf::{Object, StringFormat};
 
 #[cfg(any(test, feature = "fixtures"))]
 pub use whole::{rewrite, rewrite_to_path};

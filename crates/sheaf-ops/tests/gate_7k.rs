@@ -218,12 +218,12 @@ use futures::StreamExt;
 use futures::executor::block_on;
 use image::{GrayImage, Rgb, RgbImage};
 use in_progress::{Level, Progress, Unit};
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId, ReadLimits};
 use sheaf_doc::content::interp::{self, Opts, interpret};
 use sheaf_doc::content::{Fonts, Marker, PageContent, text_bag};
 use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::materialize::{AskAnswers, Profile, SaveInput, SaveTarget, materialize};
 use sheaf_doc::open::{Facts, FileAnnot, FileAnnots, FileBody};
+use sheaf_doc::pdf::{Dictionary, LazyPdf, Object, ObjectId, ReadLimits};
 use sheaf_doc::realize::{EngineKey, GROUP, Realizer};
 use sheaf_doc::serialize::fixture::{
     USER, encrypt_dict, object_streams_of, rc4_aes_128_and_aes_256,
@@ -2091,7 +2091,7 @@ fn section_in_memory(doc: &mut Document, work: &Path) -> Duration {
     let (t, ()) = timed(|| {
         let input = doc.save_input(v).unwrap();
         let plan = plan(&input, &doc.save_target(work));
-        let file = lopdf::FileBytes::new(std::fs::File::open(work).unwrap()).unwrap();
+        let file = sheaf_doc::pdf::FileBytes::new(std::fs::File::open(work).unwrap()).unwrap();
         let out = append::append(&input, &plan, Arc::new(file), Mode::Veto, &NoProgress).unwrap();
         assert!(!out.bytes.is_empty(), "the section is empty");
     });
@@ -2171,7 +2171,7 @@ fn clean_part(kind: Kind) {
         bytes = made.bytes.expect("a clean copy to bytes");
         t
     });
-    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let pdf = sheaf_doc::pdf::Document::load_mem(&bytes).unwrap();
     let (check, _) = measure(RUNS, || {
         let (t, found) = timed(|| sheaf_doc::private::found(&pdf));
         assert_eq!(found, []);
@@ -3269,9 +3269,9 @@ fn marked(mark: impl Fn(u64) -> Annot) -> Document {
 /// as Acrobat's Insert Pages copies them.
 fn sheaf_marks(mark: impl Fn(u64) -> Annot) -> Vec<u8> {
     let blank = sheaf_doc::store::blank(&Store::new(), PAGES);
-    let mut pdf = lopdf::Document::load_mem(blank.bytes()).unwrap();
-    let pages: Vec<lopdf::ObjectId> = pdf.page_iter().collect();
-    let mut annots: HashMap<lopdf::ObjectId, Vec<Object>> = HashMap::new();
+    let mut pdf = sheaf_doc::pdf::Document::load_mem(blank.bytes()).unwrap();
+    let pages: Vec<sheaf_doc::pdf::ObjectId> = pdf.page_iter().collect();
+    let mut annots: HashMap<sheaf_doc::pdf::ObjectId, Vec<Object>> = HashMap::new();
     for i in 0..SHEAF_MARKS {
         let id = i % (SHEAF_MARKS - SHEAF_COPIES);
         let written = sheaf_doc::serialize::built::to_pdf(&mark(u64::from(id) + 1), &mut pdf);
@@ -3411,7 +3411,7 @@ fn scan_of_500_black_and_white_pages() {
             })
         });
         assert_eq!(report.pages as u64, INTAKE_PAGES, "{name}");
-        let written = lopdf::Document::load(&out).unwrap();
+        let written = sheaf_doc::pdf::Document::load(&out).unwrap();
         assert_eq!(written.get_pages().len() as u64, INTAKE_PAGES, "{name}");
         let bytes = std::fs::metadata(&out).unwrap().len();
         std::fs::remove_file(&out).unwrap();
@@ -3770,7 +3770,7 @@ fn aes_256(kind: Kind, fixture: &Path) -> PathBuf {
     let path = fixture.with_file_name(format!("{}-{PAGES}-aes256.pdf", kind.name()));
     let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     if modified(&path) < modified(fixture) {
-        let mut pdf = lopdf::Document::load(fixture).unwrap();
+        let mut pdf = sheaf_doc::pdf::Document::load(fixture).unwrap();
         if !pdf.trailer.has(b"ID") {
             let id = Object::string_literal("sheaf 7k gate id");
             pdf.trailer.set("ID", vec![id.clone(), id]);

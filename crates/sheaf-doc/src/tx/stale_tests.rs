@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
+use crate::pdf::{Object, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Object, dictionary};
 use sheaf_edit::{Anchor, Bring, Op, OutlineBring, PageRef, PageSel, Rotation, Turn};
 
 use super::fixture as fx;

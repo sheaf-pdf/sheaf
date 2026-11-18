@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
-use lopdf::Object;
+use crate::pdf::Object;
 use unicode_normalization::UnicodeNormalization;
 
 use super::Fonts;

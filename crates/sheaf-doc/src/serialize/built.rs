@@ -17,8 +17,8 @@
 
 use std::collections::HashMap;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use anyhow::{Context as _, Result};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 
 use crate::annot::{Annot, AnnotKind, Appearance};
 #[cfg(any(test, feature = "fixtures"))]

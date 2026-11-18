@@ -28,8 +28,8 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId};
 use anyhow::{Context, Result};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 use quick_xml::events::{BytesStart, Event};
 
 use super::read::FormClass;
@@ -1484,7 +1484,7 @@ mod tests {
     /// The font a `/DA` sets, as `da_font` read it through lopdf's
     /// `Content::decode` before it lexed: what it must still find.
     fn decoded_font(da: &[u8]) -> Option<Vec<u8>> {
-        let content = lopdf::content::Content::decode(da).ok()?;
+        let content = crate::pdf::content::Content::decode(da).ok()?;
         let tf = content
             .operations
             .iter()

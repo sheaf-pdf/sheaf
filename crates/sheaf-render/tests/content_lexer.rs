@@ -26,10 +26,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
 use pdfium_render::prelude::*;
 use sheaf_doc::content::{PageContent, ResCx, Tok};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
+use sheaf_doc::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 use sheaf_doc::source::{Limits, PageFacts};
 use sheaf_doc::store::{BlobKind, Store};
 

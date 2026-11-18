@@ -8,7 +8,7 @@
 //! [`WORDS`]. And pages drawing contents of a test's own
 //! ([`pages_drawing`]).
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::OcrWord;
 
 use super::TextLayer;

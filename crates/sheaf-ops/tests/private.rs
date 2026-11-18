@@ -11,8 +11,8 @@ mod common;
 use std::path::Path;
 
 use common::{open, scratch};
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::export::Export;
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::text_layer::fixture as saved;
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_render::pdfium::PdfiumEngine;

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{Rotation, Turn};
 
 use super::append;

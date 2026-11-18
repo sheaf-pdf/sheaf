@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
 
-use lopdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use proptest::prelude::*;
 
 use super::*;
@@ -130,7 +130,7 @@ fn names_decode_their_escapes() {
 
 #[test]
 fn operands_read_as_objects() {
-    use lopdf::StringFormat::{Hexadecimal, Literal};
+    use crate::pdf::StringFormat::{Hexadecimal, Literal};
     let o = |s: &[u8]| object(s, 8);
     assert_eq!(o(b"12"), Some(Object::Integer(12)));
     assert_eq!(o(b"-.5"), Some(Object::Real(-0.5)));
@@ -496,11 +496,14 @@ fn flate(data: &[u8]) -> Stream {
     )
 }
 
-fn read(pdf: &impl ReadObjects, page: &lopdf::Dictionary) -> Result<PageContent, ContentFault> {
+fn read(
+    pdf: &impl ReadObjects,
+    page: &crate::pdf::Dictionary,
+) -> Result<PageContent, ContentFault> {
     PageContent::read(pdf, &contents(page), &Limits::DEFAULT)
 }
 
-fn page_dict(pdf: &Pdf, page: ObjectId) -> lopdf::Dictionary {
+fn page_dict(pdf: &Pdf, page: ObjectId) -> crate::pdf::Dictionary {
     pdf.get_dictionary(page).unwrap().clone()
 }
 

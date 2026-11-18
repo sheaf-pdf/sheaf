@@ -58,9 +58,9 @@ use std::io;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+use crate::pdf::{ByteSource, LazyPdf, Object, ObjectId, Stream, XrefFacts, XrefKind};
 use anyhow::{Context as _, Result, bail};
 use in_progress::Progress;
-use lopdf::{ByteSource, LazyPdf, Object, ObjectId, Stream, XrefFacts, XrefKind};
 
 use super::emit::{self, Emission, EmitBase, EmitScope, SymObject};
 use super::key::ObjKey;

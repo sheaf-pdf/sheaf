@@ -27,13 +27,13 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use lopdf::{LazyPdf, Object, ObjectId};
 use sheaf_doc::Document;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::{Finding, Report};
 use sheaf_doc::materialize::{
     Output, Profile, SaveInput, SaveTarget, materialize, plan as save_plan,
 };
+use sheaf_doc::pdf::{LazyPdf, Object, ObjectId};
 use sheaf_doc::source::Limits;
 use sheaf_doc::tx::fixture::{delete, duplicate, file};
 use sheaf_edit::{Bring, FormBring, Op, OutlineBring, Rotation};
@@ -74,7 +74,7 @@ fn same(a: &Object, b: &Object) -> bool {
             x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_ok_and(|w| same(v, w)))
         }
         (Object::Stream(x), Object::Stream(y)) => {
-            let dict = |d: &lopdf::Dictionary| {
+            let dict = |d: &sheaf_doc::pdf::Dictionary| {
                 let mut d = d.clone();
                 d.remove(b"Length");
                 Object::Dictionary(d)

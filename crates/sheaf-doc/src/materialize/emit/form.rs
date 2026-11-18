@@ -53,7 +53,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, StringFormat};
 
 use super::Cx;
 use crate::annot::AnnotId;

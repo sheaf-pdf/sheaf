@@ -20,8 +20,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::pdf::{Object, ObjectId, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Object, ObjectId, dictionary};
 use proptest::prelude::*;
 use sheaf_edit::{
     Anchor, AnnotRef, BatesSpec, BlobSel, BookmarkPatch, BookmarkRef, BoxSpec, Bring, Delta,

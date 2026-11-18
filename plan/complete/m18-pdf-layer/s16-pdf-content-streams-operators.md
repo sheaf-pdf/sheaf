@@ -1,6 +1,6 @@
 # M18 slice 16: pdf-content-streams: operators
 
-Status: open · Part of [M18: the PDF layer](../README.md) · in pdf-lint's workspace, by pdf-lint's agent
+Status: done · Part of [M18: the PDF layer](../../m18-pdf-layer/README.md) · in pdf-lint's workspace, by pdf-lint's agent
 
 **What:** a page's content as an iterator of operators, from sheaf's
 lexer, which `tier-lexer` holds to PDFium: no page's tokens differed
@@ -34,7 +34,7 @@ over 23,628 (Greg, 2026-10-27: "an iterator consuming operators").
 - **Over it:** `q`/`Q` balance, marked content's ranges and the
   resource names content uses (`balance.rs`, `marked.rs`, `names.rs`).
 
-**From sheaf** ([from-sheaf.md](../from-sheaf.md#content-pdf-content-streams-slices-16-to-19)):
+**From sheaf** ([from-sheaf.md](../../m18-pdf-layer/from-sheaf.md#content-pdf-content-streams-slices-16-to-19)):
 `content/lex.rs`, `page.rs`'s `Concat`, `balance.rs`, `marked.rs`,
 `names.rs`, `interp/op.rs`'s operators, and their tests.
 
@@ -44,9 +44,13 @@ over 23,628 (Greg, 2026-10-27: "an iterator consuming operators").
 - sheaf's lexer tests (`content/tests.rs`) and those of the modules
   that move, moved, unchanged;
 - every page of sheaf's corpus: the same operators and operands as
-  sheaf's lexer, run in sheaf until [slice 17](s17-sheaf-s-content-on-pdf-content-streams.md);
+  sheaf's lexer, run in sheaf until [slice 17](../../m18-pdf-layer/slices/s17-sheaf-s-content-on-pdf-content-streams.md);
 - a fuzz body: any bytes, no panic, under the caps;
 - time beside sheaf's lexer on the heavy 7k file: no slower.
 
 pdf-lint's content checks are pdf-lint's to add on it
-([from-sheaf.md](../from-sheaf.md#for-pdf-lint-itself)).
+([from-sheaf.md](../../m18-pdf-layer/from-sheaf.md#for-pdf-lint-itself)).
+
+## Notes
+
+Landed on `sheaf-pdf/pdf-lint` `main` (`crates/pdf-content-streams`).

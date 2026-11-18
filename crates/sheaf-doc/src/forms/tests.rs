@@ -2,7 +2,7 @@
 //! one for each problem it looks for. And on the corpus's 1040-ES, when
 //! the corpus is there.
 
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 
 use super::check::{Finding, Report, check, check_latest};
 use super::corpus::{Corpus, parse_manifest};
@@ -724,7 +724,7 @@ fn text_from_the_file_prints_escaped() {
 
 #[test]
 fn encrypted_forms_are_read_with_their_password() {
-    use lopdf::{EncryptionState, EncryptionVersion, Permissions, StringFormat};
+    use crate::pdf::{EncryptionState, EncryptionVersion, Permissions, StringFormat};
     let mut f = every_kind();
     let bare = f.text("bare", 0, row(6));
     f.dict(bare)

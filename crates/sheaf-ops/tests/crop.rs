@@ -18,10 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use common::open;
-use lopdf::{Dictionary, Document as Pdf, Stream, dictionary};
 use sheaf_doc::content::{PagOrigin, PaginationKind};
 use sheaf_doc::geom::Rect;
 use sheaf_doc::materialize::{How, StrategyKind};
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, Stream, dictionary};
 use sheaf_doc::prim::Key;
 use sheaf_doc::realize::{EngineKey, ViewInputs};
 use sheaf_doc::serialize::fixture::revision_cut_out;
@@ -84,7 +84,7 @@ fn one_page(dir: &Path, name: &str, page: Dictionary, content: &[u8]) -> PathBuf
 fn file_of(pages: Vec<(Dictionary, &[u8])>) -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
-    let kids: Vec<lopdf::Object> = (pages.into_iter())
+    let kids: Vec<sheaf_doc::pdf::Object> = (pages.into_iter())
         .map(|(mut page, content)| {
             let content = pdf.add_object(Stream::new(dictionary! {}, content.to_vec()));
             page.set("Type", "Page");
@@ -106,7 +106,7 @@ fn file_of(pages: Vec<(Dictionary, &[u8])>) -> Vec<u8> {
 }
 
 /// A box's numbers, as a page's keys hold them.
-fn numbers(v: [i64; 4]) -> Vec<lopdf::Object> {
+fn numbers(v: [i64; 4]) -> Vec<sheaf_doc::pdf::Object> {
     v.map(Into::into).to_vec()
 }
 
@@ -989,7 +989,7 @@ fn pages_alike_cropped_apart_stay_apart() {
         dictionary! {},
         b"0 g 300 300 100 100 re f".to_vec(),
     ));
-    let page = |annots: Vec<lopdf::Object>| {
+    let page = |annots: Vec<sheaf_doc::pdf::Object>| {
         dictionary! {
             "Type" => "Page", "Parent" => pages_id, "Contents" => content, "Annots" => annots,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
@@ -997,14 +997,14 @@ fn pages_alike_cropped_apart_stay_apart() {
     };
     let alike = [page(Vec::new()), page(Vec::new())].map(|p| pdf.add_object(p));
     let links = alike.map(|to| {
-        let rect: Vec<lopdf::Object> = vec![10.into(), 10.into(), 30.into(), 30.into()];
-        let dest: Vec<lopdf::Object> = vec![to.into(), "Fit".into()];
+        let rect: Vec<sheaf_doc::pdf::Object> = vec![10.into(), 10.into(), 30.into(), 30.into()];
+        let dest: Vec<sheaf_doc::pdf::Object> = vec![to.into(), "Fit".into()];
         let link =
             dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => rect, "Dest" => dest };
         pdf.add_object(link).into()
     });
     let linking = pdf.add_object(page(links.to_vec()));
-    let kids: Vec<lopdf::Object> = [alike[0], alike[1], linking].map(Into::into).to_vec();
+    let kids: Vec<sheaf_doc::pdf::Object> = [alike[0], alike[1], linking].map(Into::into).to_vec();
     pdf.objects.insert(
         pages_id,
         dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 3 }.into(),
@@ -1024,9 +1024,9 @@ fn pages_alike_cropped_apart_stay_apart() {
     }
     for how in [How::Rewritten, How::Appended] {
         let saved = Pdf::load_mem(&how.write(&doc)).unwrap();
-        let pages: Vec<lopdf::ObjectId> = saved.get_pages().into_values().collect();
+        let pages: Vec<sheaf_doc::pdf::ObjectId> = saved.get_pages().into_values().collect();
         let annots = saved.get_page_annotations(pages[2]).unwrap();
-        let to: Vec<lopdf::ObjectId> = (annots.iter())
+        let to: Vec<sheaf_doc::pdf::ObjectId> = (annots.iter())
             .map(|link| {
                 link.get(b"Dest").unwrap().as_array().unwrap()[0]
                     .as_reference()

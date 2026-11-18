@@ -25,7 +25,7 @@
 //!
 //! [`RootValues`]: crate::materialize::record::RootValues
 
-use lopdf::{Dictionary, Object};
+use crate::pdf::{Dictionary, Object};
 
 use super::PdfVersion;
 
@@ -104,7 +104,7 @@ pub(crate) const GENERATORS: &str = "SHEF_Generators";
 /// `/SHEF_Generators`' object: its JSON, a string of its own
 /// ([`crate::generate::catalog_json`]).
 pub(crate) fn generators(json: Vec<u8>) -> Object {
-    Object::String(json, lopdf::StringFormat::Literal)
+    Object::String(json, crate::pdf::StringFormat::Literal)
 }
 
 /// What an Append's catalog names that its emission decided: the page

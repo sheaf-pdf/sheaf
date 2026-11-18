@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::pdf::{Document as Pdf, Object, ObjectId, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_edit::{BatesSpec, FlattenSet, Transform, Z};
 
 use super::removal_tests::{opened, scratch};
@@ -160,7 +160,7 @@ fn everything(dir: &Path) -> Document {
 fn dynamic_page() -> Vec<u8> {
     let mut pdf = Pdf::with_version("1.7");
     let pages = pdf.new_object_id();
-    let content = lopdf::Stream::new(dictionary! {}, b"0 0 1 RG 4 w 2 2 196 76 re S".to_vec());
+    let content = crate::pdf::Stream::new(dictionary! {}, b"0 0 1 RG 4 w 2 2 196 76 re S".to_vec());
     let content = pdf.add_object(content);
     let page = pdf.add_object(dictionary! {
         "Type" => "Page", "Parent" => pages, "Contents" => content,
@@ -203,7 +203,7 @@ fn stripped(doc: &Document, filtered: bool) -> Result<Vec<u8>, ExportError> {
 }
 
 /// Every annotation of `pdf`'s pages, in order, by object.
-fn annots(pdf: &Pdf) -> Vec<(ObjectId, lopdf::Dictionary)> {
+fn annots(pdf: &Pdf) -> Vec<(ObjectId, crate::pdf::Dictionary)> {
     (pdf.get_pages().into_values())
         .flat_map(|page| {
             let list = pdf.get_dictionary(page).unwrap().get(b"Annots").ok();
@@ -263,7 +263,7 @@ fn a_file_without_private_data_holds_none() {
         .collect();
     let unique: BTreeSet<&[u8]> = names.iter().copied().collect();
     assert_eq!(unique.len(), names.len(), "{names:?}");
-    let named = |d: &lopdf::Dictionary, said: &str| {
+    let named = |d: &crate::pdf::Dictionary, said: &str| {
         d.get(b"Contents").and_then(Object::as_str).ok() == Some(said.as_bytes())
     };
     let find = |said: &str| annots.iter().find(|(_, d)| named(d, said)).unwrap();

@@ -26,7 +26,7 @@ mod type1;
 
 use std::sync::Arc;
 
-use lopdf::Object;
+use crate::pdf::Object;
 
 pub use foreign::{
     Descendant, FontApprox, FontId, FontKind, FontScope, Fonts, Foreign, TooLarge, VerticalMetrics,

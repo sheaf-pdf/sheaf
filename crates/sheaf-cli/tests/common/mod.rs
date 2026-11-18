@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 
 /// A new, empty folder for test `name`.
 pub fn scratch(name: &str) -> PathBuf {

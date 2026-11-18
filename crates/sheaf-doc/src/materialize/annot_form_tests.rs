@@ -8,8 +8,8 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_edit::{Rotation, Turn};
 
 use super::graph::Graph;

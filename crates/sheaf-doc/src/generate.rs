@@ -36,7 +36,7 @@
 
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object, StringFormat, dictionary};
+use crate::pdf::{Dictionary, Object, StringFormat, dictionary};
 use serde::{Deserialize, Serialize};
 use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Z};
 

@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use lopdf::{Object, Stream, dictionary};
+use crate::pdf::{Object, Stream, dictionary};
 
 use super::{Font, FontRes, Unencoded};
 use crate::content::ResId;

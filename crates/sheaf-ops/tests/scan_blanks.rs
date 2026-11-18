@@ -5,7 +5,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use image::{Rgb, RgbImage};
-use lopdf::Document as Pdf;
+use sheaf_doc::pdf::Document as Pdf;
 use sheaf_ocr::OcrConfig;
 use sheaf_ops::scan::{ScanOptions, scan};
 use sheaf_ops::{NoProgress, Tracker};

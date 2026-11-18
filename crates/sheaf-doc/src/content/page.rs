@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId, Stream};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Stream};
 
 use super::lex::{self, LexError, ResCx, Tok};
 use crate::source::Limits;
@@ -189,26 +189,26 @@ impl Join {
 pub trait ReadObjects {
     /// Object `id`, its references followed, read once and kept where the
     /// reader keeps what it reads: resources, which pages share.
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object>;
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object>;
 
     /// Object `id`, its references followed, handed to `read`; a source
     /// reads it without keeping it: a page's streams, each read once to
     /// lex.
-    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> lopdf::Result<R>;
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R>;
 }
 
 impl ReadObjects for LazyPdf {
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         self.get_object(id)
     }
 
-    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> lopdf::Result<R> {
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
         let mut object = self.object_unkept(id)?;
         let mut chain = 0;
         while let Object::Reference(next) = *object {
             chain += 1;
             if chain > Limits::DEFAULT.reader.max_depth {
-                return Err(lopdf::Error::Limit(lopdf::Limit::Depth));
+                return Err(crate::pdf::Error::Limit(crate::pdf::Limit::Depth));
             }
             object = self.object_unkept(next)?;
         }
@@ -216,12 +216,12 @@ impl ReadObjects for LazyPdf {
     }
 }
 
-impl ReadObjects for lopdf::Document {
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+impl ReadObjects for crate::pdf::Document {
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         self.get_object(id)
     }
 
-    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> lopdf::Result<R> {
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
         self.get_object(id).map(read)
     }
 }
@@ -232,7 +232,7 @@ pub enum ContentFault {
     #[error("stream {} {} R can't be read: {error}", .stream.0, .stream.1)]
     Stream {
         stream: ObjectId,
-        error: lopdf::Error,
+        error: crate::pdf::Error,
     },
     #[error("its streams decode to more than {0} bytes")]
     TooLarge(usize),
@@ -272,9 +272,9 @@ impl PageContent {
             let data = stream
                 .decompressed_content_with_limit(left)
                 .map_err(|e| match e {
-                    lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
-                        ..
-                    }) => ContentFault::TooLarge(cap),
+                    crate::pdf::Error::Decompress(
+                        crate::pdf::DecompressError::MemoryLimitExceeded { .. },
+                    ) => ContentFault::TooLarge(cap),
                     e => ContentFault::Stream {
                         stream: id,
                         error: e,
@@ -351,9 +351,9 @@ impl PageContent {
 
 /// A read of `id` that failed: Ok when there's no such object, which
 /// reads as null.
-fn missing(id: ObjectId, e: lopdf::Error) -> Result<(), ContentFault> {
+fn missing(id: ObjectId, e: crate::pdf::Error) -> Result<(), ContentFault> {
     match e {
-        lopdf::Error::MissingXrefEntry | lopdf::Error::ObjectNotFound(_) => Ok(()),
+        crate::pdf::Error::MissingXrefEntry | crate::pdf::Error::ObjectNotFound(_) => Ok(()),
         error => Err(ContentFault::Stream { stream: id, error }),
     }
 }

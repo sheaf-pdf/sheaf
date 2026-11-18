@@ -20,8 +20,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId};
 use anyhow::Result;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
 use super::emit::Syms;
 use super::key::ObjKey;
@@ -182,7 +182,7 @@ impl<'a> Closure<'a> {
             Object::Dictionary(d) => Object::Dictionary(self.sym_dict(syms, d, scope, false)),
             Object::Stream(s) => {
                 let dict = self.sym_dict(syms, &s.dict, scope, true);
-                let mut stream = lopdf::Stream::new(dict, s.content.clone());
+                let mut stream = crate::pdf::Stream::new(dict, s.content.clone());
                 stream.allows_compression = s.allows_compression;
                 Object::Stream(stream)
             }
@@ -272,7 +272,7 @@ impl<'a> Closure<'a> {
         };
         let read = match src.pdf().object_unkept(obj) {
             Ok(o) => o,
-            Err(lopdf::Error::MissingXrefEntry | lopdf::Error::ObjectNotFound(_)) => {
+            Err(crate::pdf::Error::MissingXrefEntry | crate::pdf::Error::ObjectNotFound(_)) => {
                 return Some(Ok((key, Object::Null)));
             }
             Err(e) => {
@@ -315,7 +315,7 @@ pub(crate) fn page_named(
 /// and its information dictionary, null. The written file has its own of
 /// each, and a copy of one would bring its file's whole structure along.
 /// Any other dictionary typed `/Catalog` is the written catalog too.
-pub(crate) fn document_level(pdf: &lopdf::LazyPdf) -> HashMap<ObjectId, Option<ObjKey>> {
+pub(crate) fn document_level(pdf: &crate::pdf::LazyPdf) -> HashMap<ObjectId, Option<ObjKey>> {
     let mut out = HashMap::new();
     let trailer = pdf.trailer();
     if let Ok(info) = trailer.get(b"Info").and_then(Object::as_reference) {
@@ -423,7 +423,7 @@ pub(crate) fn remap<P: Objects + ?Sized>(
             for (k, v) in s.dict.iter() {
                 dict.set(k.clone(), remap(src, v, dst, map)?);
             }
-            let mut stream = lopdf::Stream::new(dict, s.content.clone());
+            let mut stream = crate::pdf::Stream::new(dict, s.content.clone());
             stream.allows_compression = s.allows_compression;
             Object::Stream(stream)
         }

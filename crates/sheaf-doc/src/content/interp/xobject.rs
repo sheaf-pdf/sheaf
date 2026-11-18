@@ -9,7 +9,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId};
 
 use super::text::Quad;
 use crate::content::page::{ReadObjects, direct};
@@ -155,7 +155,7 @@ impl XObject {
         objects: &impl ReadObjects,
         id: ObjectId,
         budget: usize,
-    ) -> Result<XObject, lopdf::Error> {
+    ) -> Result<XObject, crate::pdf::Error> {
         let read = objects.read(id, |object| {
             let Object::Stream(stream) = object else {
                 return Ok(XObject::None);
@@ -170,9 +170,9 @@ impl XObject {
             }
             let data = match stream.decompressed_content_with_limit(budget) {
                 Ok(data) => data,
-                Err(lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
-                    ..
-                })) => return Ok(XObject::TooLarge),
+                Err(crate::pdf::Error::Decompress(
+                    crate::pdf::DecompressError::MemoryLimitExceeded { .. },
+                )) => return Ok(XObject::TooLarge),
                 Err(e) => return Err(e),
             };
             Ok(XObject::Form(Form {
@@ -197,7 +197,7 @@ impl XObject {
         match read {
             Ok(read) => read,
             // An object that isn't there is null, as in PDFium.
-            Err(lopdf::Error::MissingXrefEntry | lopdf::Error::ObjectNotFound(_)) => {
+            Err(crate::pdf::Error::MissingXrefEntry | crate::pdf::Error::ObjectNotFound(_)) => {
                 Ok(XObject::None)
             }
             Err(e) => Err(e),

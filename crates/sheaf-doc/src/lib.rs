@@ -38,6 +38,7 @@ pub mod memory;
 pub mod model;
 pub mod open;
 pub mod page_chars;
+pub mod pdf;
 pub mod portfolio;
 pub mod prim;
 pub mod private;

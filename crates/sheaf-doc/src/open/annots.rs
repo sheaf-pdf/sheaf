@@ -10,8 +10,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
+use crate::pdf::ObjectId;
 use in_progress::Progress;
-use lopdf::ObjectId;
 
 use super::Renamed;
 use crate::annot::{Annot, AnnotId, AnnotKind};

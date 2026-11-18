@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use lopdf::{LazyPdf, Object, ObjectId};
+use crate::pdf::{LazyPdf, Object, ObjectId};
 use serde::Deserialize;
 use sheaf_edit::Z;
 

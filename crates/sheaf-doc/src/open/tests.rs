@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::Rotation;
 
 use super::*;
@@ -482,7 +482,7 @@ fn a_reserialized_mark_stays_a_mark() {
             }
             d.set(
                 "Contents",
-                Object::String(utf16, lopdf::StringFormat::Hexadecimal),
+                Object::String(utf16, crate::pdf::StringFormat::Hexadecimal),
             );
         }
         if d.has(b"T") {

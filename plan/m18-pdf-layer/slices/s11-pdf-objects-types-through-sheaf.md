@@ -9,7 +9,7 @@ hands sheaf pdf-objects objects as they are.
 
 - `sheaf_doc::pdf`'s `Object`, `Dictionary`, `Stream`, `ObjectId`,
   `StringFormat` and its constructor macro point at pdf-objects, and every
-  call site moves to pdf-objects' API ([slice 3](s03-pdf-objects-editing-and-writing.md)).
+  call site moves to pdf-objects' API ([slice 3](../../complete/m18-pdf-layer/s03-pdf-objects-editing-and-writing.md)).
 - [Slice 10](s10-an-in-memory-document-of-sheaf-s-own.md)'s document
   holds pdf-objects objects; it moves into pdf-structure if the two agree.
 - `serialize/` writes pdf-objects objects, with sheaf's own

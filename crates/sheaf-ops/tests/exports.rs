@@ -35,7 +35,6 @@ use std::sync::Arc;
 
 use common::{How, holds, nothing_found, scratch, told};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::export::{
     Export, ExportError, ExportFrom, Gate, Out, PRINT_ANSWERS, preflight, run,
 };
@@ -43,6 +42,7 @@ use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::fixture::{Form, append_revision, note, row};
 use sheaf_doc::forms::{Report, check};
 use sheaf_doc::materialize::{AskAnswers, SaveRecord};
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{Actor, Document, PageId};
 use sheaf_edit::{BatesSpec, HeaderFooterSpec};

@@ -30,14 +30,14 @@ use std::sync::Arc;
 use futures::StreamExt;
 use futures::executor::block_on;
 
-use lopdf::xref::XrefType;
-use lopdf::{
-    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, ReadLimits, Stream, dictionary,
-};
 use sheaf_doc::export::{Export, print_preview};
 use sheaf_doc::forms::fixture::{Form, every_mark_kind, write_marks};
 use sheaf_doc::layers::LayerId;
 use sheaf_doc::model::Mark;
+use sheaf_doc::pdf::xref::XrefType;
+use sheaf_doc::pdf::{
+    Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, ReadLimits, Stream, dictionary,
+};
 use sheaf_doc::realize::{EngineKey, GROUP, OcgOverride, PageView, Realization, ViewInputs};
 use sheaf_doc::serialize::fixture::{
     USER, encrypted, form, holds, rc4_aes_128_and_aes_256, revision_cut_out,

@@ -11,7 +11,7 @@
 //!
 //! [`ContentWriter`]: super::ContentWriter
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId};
 
 use super::names::ResKind;
 use super::page::ReadObjects;
@@ -99,11 +99,11 @@ pub fn reserved_shallow(sink: &mut dyn Sink, resources: Option<&Object>) -> Rese
 struct Unread;
 
 impl ReadObjects for Unread {
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object> {
-        Err(lopdf::Error::ObjectNotFound(id))
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
+        Err(crate::pdf::Error::ObjectNotFound(id))
     }
 
-    fn read<R>(&self, id: ObjectId, _: impl FnOnce(&Object) -> R) -> lopdf::Result<R> {
-        Err(lopdf::Error::ObjectNotFound(id))
+    fn read<R>(&self, id: ObjectId, _: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
+        Err(crate::pdf::Error::ObjectNotFound(id))
     }
 }

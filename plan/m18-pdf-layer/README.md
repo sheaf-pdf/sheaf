@@ -86,13 +86,13 @@ oracles, the Arlington tests and the 7k gate.
 
 | Slice | Title | Status | Depends on | Where |
 |---|---|---|---|---|
-| [1](slices/s01-one-door-for-lopdf.md) | One door for lopdf | open | — | sheaf |
-| [2](slices/s02-pdf-objects-and-pdf-arlington-cut-from-pdf-lint.md) | pdf-objects and pdf-arlington, cut from pdf-lint | open | — | pdf-lint |
-| [3](slices/s03-pdf-objects-editing-and-writing.md) | pdf-objects, editing and writing | open | 1, 2 | pdf-lint |
-| [4](slices/s04-pdf-structure-cut-from-pdf-lint.md) | pdf-structure, cut from pdf-lint | open | 2 | pdf-lint |
-| [5](slices/s05-pdf-structure-lazy-reads.md) | pdf-structure, lazy reads | open | 4 | pdf-lint |
-| [6](slices/s06-pdf-filters-and-pdf-crypt-for-writing.md) | pdf-filters and pdf-crypt, for writing | open | — | pdf-lint |
-| [7](slices/s07-pdf-structure-writing.md) | pdf-structure, writing | open | 3, 5, 6 | pdf-lint |
+| [1](../complete/m18-pdf-layer/s01-one-door-for-lopdf.md) | One door for lopdf | done | — | sheaf |
+| [2](../complete/m18-pdf-layer/s02-pdf-objects-and-pdf-arlington-cut-from-pdf-lint.md) | pdf-objects and pdf-arlington, cut from pdf-lint | done | — | pdf-lint |
+| [3](../complete/m18-pdf-layer/s03-pdf-objects-editing-and-writing.md) | pdf-objects, editing and writing | done | 1, 2 | pdf-lint |
+| [4](../complete/m18-pdf-layer/s04-pdf-structure-cut-from-pdf-lint.md) | pdf-structure, cut from pdf-lint | done | 2 | pdf-lint |
+| [5](../complete/m18-pdf-layer/s05-pdf-structure-lazy-reads.md) | pdf-structure, lazy reads | done | 4 | pdf-lint |
+| [6](../complete/m18-pdf-layer/s06-pdf-filters-and-pdf-crypt-for-writing.md) | pdf-filters and pdf-crypt, for writing | done | — | pdf-lint |
+| [7](../complete/m18-pdf-layer/s07-pdf-structure-writing.md) | pdf-structure, writing | done | 3, 5, 6 | pdf-lint |
 | [8](slices/s08-sheaf-reads-through-pdf-structure.md) | sheaf reads through pdf-structure | open | 1, 5 | sheaf |
 | [9](slices/s09-copies-without-a-second-parse.md) | Copies without a second parse, and object-stream members copied | open | 8 | sheaf |
 | [10](slices/s10-an-in-memory-document-of-sheaf-s-own.md) | An in-memory document of sheaf's own | open | 1, 8; F15 (soft) | sheaf |
@@ -101,11 +101,11 @@ oracles, the Arlington tests and the 7k gate.
 | [13](slices/s13-lopdf-gone.md) | lopdf gone | open | 12 | sheaf |
 | [14](slices/s14-copies-under-renumbering.md) | Copies under renumbering | open | 9, 12 | sheaf, pdf-lint |
 | [15](slices/s15-wrap-up.md) | Wrap-up | open | 1–14, 16–21 | sheaf |
-| [16](slices/s16-pdf-content-streams-operators.md) | pdf-content-streams: operators | open | 3 | pdf-lint |
+| [16](../complete/m18-pdf-layer/s16-pdf-content-streams-operators.md) | pdf-content-streams: operators | done | 3 | pdf-lint |
 | [17](slices/s17-sheaf-s-content-on-pdf-content-streams.md) | sheaf's content on pdf-content-streams | open | 11, 16 | sheaf |
-| [18](slices/s18-one-scanner.md) | One scanner: PDFium's rules as a pdf-tokenizer mode | open | 16 | pdf-lint |
+| [18](../complete/m18-pdf-layer/s18-one-scanner.md) | One scanner: PDFium's rules as a pdf-tokenizer mode | done | 16 | pdf-lint |
 | [19](slices/s19-pdf-content-streams-writing.md) | pdf-content-streams, writing | open | 16, 17 | sheaf, pdf-lint |
-| [20](slices/s20-pdf-semantics-the-common-structures.md) | pdf-semantics: the common structures | open | 3, 5 | pdf-lint |
+| [20](../complete/m18-pdf-layer/s20-pdf-semantics-the-common-structures.md) | pdf-semantics: the common structures | done | 3, 5 | pdf-lint |
 | [21](slices/s21-sheaf-on-pdf-semantics.md) | sheaf on pdf-semantics | open | 11, 20 | sheaf |
 
 ## Open questions

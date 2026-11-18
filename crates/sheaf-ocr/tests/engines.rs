@@ -6,7 +6,7 @@
 //! exactly the path the app uses.
 
 #[cfg(any(feature = "tesseract", feature = "oar"))]
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 #[cfg(any(feature = "tesseract", feature = "oar"))]
 use sheaf_edit::Rotation;
 use sheaf_image::raster::PixelFormat;

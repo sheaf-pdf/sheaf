@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
+use crate::pdf::encryption::crypt_filters::CryptFilter;
+use crate::pdf::encryption::{self, EncryptionState};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 use hmac::{Hmac, KeyInit as _, Mac as _};
-use lopdf::encryption::crypt_filters::CryptFilter;
-use lopdf::encryption::{self, EncryptionState};
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
 use sha2::Sha256;
 
 use crate::materialize::ObjKey;
@@ -41,7 +41,7 @@ pub struct Crypt {
 impl Crypt {
     /// How `pdf` is encrypted, or None when it isn't. The `/Encrypt`
     /// dictionary is read as `pdf` stores it.
-    pub fn of(pdf: &LazyPdf) -> lopdf::Result<Option<Crypt>> {
+    pub fn of(pdf: &LazyPdf) -> crate::pdf::Result<Option<Crypt>> {
         let Some((state, at)) = pdf.encryption() else {
             return Ok(None);
         };
@@ -97,13 +97,18 @@ impl Crypt {
     /// `obj`, which is `key`, encrypted as object `id`, its strings in
     /// their formats. The same object under the same key and number
     /// encrypts to the same bytes.
-    pub fn encrypt_as(&self, id: ObjectId, key: &ObjKey, obj: &Object) -> lopdf::Result<Object> {
+    pub fn encrypt_as(
+        &self,
+        id: ObjectId,
+        key: &ObjKey,
+        obj: &Object,
+    ) -> crate::pdf::Result<Object> {
         let iv_key = key.bytes();
         let mut obj = obj.clone();
         encryption::encrypt_object_with(&self.state, id, &mut obj, &mut |payload| {
             self.iv(&iv_key, payload)
         })
-        .map_err(lopdf::Error::Decryption)?;
+        .map_err(crate::pdf::Error::Decryption)?;
         Ok(obj)
     }
 

@@ -10,8 +10,8 @@
 
 use std::io::Write;
 
+use crate::pdf::{Document as Pdf, Object, Stream, dictionary};
 use anyhow::{Result, bail};
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_edit::Fit;
 use sheaf_image::io::{PageImage, Pixels};
 
@@ -133,7 +133,7 @@ pub(crate) fn image_stream(page: &PageImage) -> Result<Stream> {
     })
 }
 
-fn flate(mut dict: lopdf::Dictionary, data: &[u8]) -> Result<Stream> {
+fn flate(mut dict: crate::pdf::Dictionary, data: &[u8]) -> Result<Stream> {
     let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     enc.write_all(data)?;
     dict.set("Filter", "FlateDecode");

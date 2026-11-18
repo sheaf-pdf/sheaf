@@ -9,9 +9,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::pdf::content::{Content, Operation};
+use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use in_progress::NoProgress;
-use lopdf::content::{Content, Operation};
-use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 
 use super::*;
 use crate::history::FixedCount;
@@ -89,7 +89,7 @@ fn text(text: &str) -> Vec<u8> {
 /// `pdf` as lopdf writes it, with a cross-reference table.
 pub(crate) fn bytes(pdf: &Pdf) -> Vec<u8> {
     let mut pdf = pdf.clone();
-    pdf.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+    pdf.reference_table.cross_reference_type = crate::pdf::xref::XrefType::CrossReferenceTable;
     let mut out = Vec::new();
     pdf.save_to(&mut out).unwrap();
     out
@@ -356,7 +356,7 @@ fn an_object_stream_base_rewrites_packed() {
     let out = rewrite(&d, Profile::default());
     let now = lazy(&out.bytes, None);
     assert!(now.base_sound());
-    assert_eq!(now.xref().kind, lopdf::XrefKind::Stream);
+    assert_eq!(now.xref().kind, crate::pdf::XrefKind::Stream);
     assert!(!object_streams_of(&now).is_empty());
     let anew = written_anew(&source(&before, None));
     let mut packed = 0;
@@ -398,7 +398,7 @@ fn an_encrypted_base_rewrites_encrypted() {
             assert!(
                 matches!(
                     LazyPdf::open(Arc::from(&out.bytes[..]), None, &Limits::DEFAULT.reader),
-                    Err(lopdf::Error::InvalidPassword)
+                    Err(crate::pdf::Error::InvalidPassword)
                 ),
                 "{name}"
             );

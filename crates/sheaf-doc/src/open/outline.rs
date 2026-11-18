@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 use sheaf_edit::{DestView, TextStyle};
 
 use crate::Source;

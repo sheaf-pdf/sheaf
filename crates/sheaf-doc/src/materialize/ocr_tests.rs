@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 use sheaf_edit::Turn;
 
 use super::append_tests::{planned_in_place, written};
@@ -590,7 +590,7 @@ fn a_page_that_cant_be_read_is_saved_without_its_text() {
     let page = pdf.get_pages()[&1];
     let content = pdf.get_dictionary(page).unwrap().get(b"Contents").unwrap();
     let content = content.as_reference().unwrap();
-    let bad = lopdf::Stream::new(Dictionary::new(), b"0 0 9 9 re f EMC".to_vec());
+    let bad = crate::pdf::Stream::new(Dictionary::new(), b"0 0 9 9 re f EMC".to_vec());
     pdf.objects.insert(content, Object::Stream(bad));
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();

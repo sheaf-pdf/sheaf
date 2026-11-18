@@ -13,8 +13,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{BatesSpec, FontChoice, HeaderFooterSpec, LabelStyle, Op, PageSel};
 
 use super::others_tests::{BODY, acrobat_file};

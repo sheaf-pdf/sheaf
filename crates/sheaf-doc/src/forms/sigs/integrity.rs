@@ -53,6 +53,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+use crate::pdf::{Dictionary, Object};
 use cms::cert::x509::Certificate;
 use cms::cert::x509::ext::pkix::SubjectKeyIdentifier;
 use cms::content_info::ContentInfo;
@@ -60,7 +61,6 @@ use cms::signed_data::{EncapsulatedContentInfo, SignerIdentifier, SignerInfo, Si
 use cms::spki::AlgorithmIdentifierOwned;
 use der::asn1::{ObjectIdentifier, OctetString, UintRef};
 use der::{Any, Decode, EncodingRules, Reader, SliceReader, Tag, Tagged};
-use lopdf::{Dictionary, Object};
 use num_bigint::BigUint;
 
 use crate::attachments::{Objects, resolve};

@@ -28,8 +28,8 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 
+use crate::pdf::{LazyPdf, Object, ObjectId, XrefFacts};
 use in_progress::{NoProgress, Progress};
-use lopdf::{LazyPdf, Object, ObjectId, XrefFacts};
 use sheaf_edit::PageSize;
 
 use crate::content::{ContentError, DrawnForms, Marker, PageBlocks};
@@ -104,7 +104,7 @@ pub enum OpenError {
     #[error("the password is wrong, or the file needs one")]
     Password,
     #[error("reading the file: {0}")]
-    Pdf(lopdf::Error),
+    Pdf(crate::pdf::Error),
     #[error(transparent)]
     PageTree(#[from] PageTreeError),
     #[error(transparent)]
@@ -120,10 +120,10 @@ impl OpenError {
     }
 }
 
-impl From<lopdf::Error> for OpenError {
-    fn from(e: lopdf::Error) -> OpenError {
+impl From<crate::pdf::Error> for OpenError {
+    fn from(e: crate::pdf::Error) -> OpenError {
         match e {
-            lopdf::Error::InvalidPassword => OpenError::Password,
+            crate::pdf::Error::InvalidPassword => OpenError::Password,
             e => OpenError::Pdf(e),
         }
     }
@@ -242,7 +242,7 @@ impl Source {
         self.crypt.as_ref()
     }
 
-    pub fn object(&self, id: ObjectId) -> lopdf::Result<Arc<Object>> {
+    pub fn object(&self, id: ObjectId) -> crate::pdf::Result<Arc<Object>> {
         self.pdf.object(id)
     }
 

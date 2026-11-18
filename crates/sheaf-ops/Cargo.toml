@@ -19,8 +19,7 @@ anyhow.workspace = true
 log.workspace = true
 # Renders come back on oneshot channels (sheaf-render's engine pool).
 futures.workspace = true
-# Stamp collections are PDFs; favorites are JSON.
-lopdf.workspace = true
+# Favorites are JSON.
 serde_json.workspace = true
 regex.workspace = true
 serde.workspace = true

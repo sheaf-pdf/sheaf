@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::materialize::Came;
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::tx::fixture::{self, ocr};
 use sheaf_doc::{Box2, Document, FixedCount, OcrWord, PageChars, Pt, Query, Store};
 use sheaf_edit::{Rotation, Turn};

@@ -217,7 +217,7 @@ fn turned_doc() -> Document {
     let mut f = sheaf_doc::forms::fixture::Form::new(2);
     let first = f.pages[0];
     f.dict(first).set("Rotate", 90);
-    let crop: Vec<lopdf::Object> = vec![20.into(), 30.into(), 600.into(), 770.into()];
+    let crop: Vec<sheaf_doc::pdf::Object> = vec![20.into(), 30.into(), 600.into(), 770.into()];
     f.dict(first).set("CropBox", crop);
     opened(&f.bytes(), "turned.pdf")
 }
@@ -225,7 +225,7 @@ fn turned_doc() -> Document {
 /// One page, with another tool's comment on it: a square by Pat Reviewer
 /// saying "From review".
 fn commented() -> Document {
-    use lopdf::{Object, dictionary};
+    use sheaf_doc::pdf::{Object, dictionary};
     let mut f = sheaf_doc::forms::fixture::Form::new(1);
     let rect: Vec<Object> = vec![40.into(), 40.into(), 80.into(), 80.into()];
     let square = f.pdf.add_object(dictionary! {
@@ -2502,7 +2502,7 @@ fn an_uploaded_image_becomes_a_page_stamp() {
         sheaf_doc::save::rewrite(d).unwrap()
     });
     // Each stamp's appearance draws the stamp's page.
-    let pdf = lopdf::Document::load_mem(&saved).unwrap();
+    let pdf = sheaf_doc::pdf::Document::load_mem(&saved).unwrap();
     let page = *pdf.get_pages().values().next().unwrap();
     let annots = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap();
     let annots = annots.as_array().unwrap();

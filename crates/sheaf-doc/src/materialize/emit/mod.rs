@@ -79,9 +79,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Object, ObjectId};
 use anyhow::{Context as _, Result, bail};
 use in_progress::Progress;
-use lopdf::{Dictionary, Object, ObjectId};
 
 use super::copy::{Closure, Pages, Scope};
 use super::key::{NameTree, ObjKey};

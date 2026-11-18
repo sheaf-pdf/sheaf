@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 
 use crate::attachments::resolve;
 use crate::file::pdf_text;
@@ -67,7 +67,7 @@ const FONT_PAGE_LIMIT: usize = 5_000;
 /// The properties of `src`: its strings decrypted as it's read, its
 /// security from the `/Encrypt` it keeps. Fast Web View isn't one: the
 /// dialog reads it from the file it shows, the saved record's when a save
-/// wrote it ([`lopdf::XrefFacts::linearized`]).
+/// wrote it ([`crate::pdf::XrefFacts::linearized`]).
 pub fn read(src: &Source) -> Properties {
     let pdf = src.pdf();
     let info = pdf
@@ -323,8 +323,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use lopdf::encryption::crypt_filters::{Aes256CryptFilter, CryptFilter};
-    use lopdf::{
+    use crate::pdf::encryption::crypt_filters::{Aes256CryptFilter, CryptFilter};
+    use crate::pdf::{
         Document as Pdf, EncryptionState, EncryptionVersion, Permissions, Stream, dictionary,
     };
 

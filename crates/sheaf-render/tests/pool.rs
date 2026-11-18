@@ -25,8 +25,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::executor::block_on;
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::forms::fixture::{Form, row};
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::serialize::fixture::{USER, encrypted, form, rc4_aes_128_and_aes_256};
 use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};
@@ -972,7 +972,12 @@ enum Annots {
 }
 
 /// Annotation `d` at `rect`, its appearance a box of `color` filling it.
-fn with_appearance(f: &mut Form, d: lopdf::Dictionary, rect: [i64; 4], color: &str) -> ObjectId {
+fn with_appearance(
+    f: &mut Form,
+    d: sheaf_doc::pdf::Dictionary,
+    rect: [i64; 4],
+    color: &str,
+) -> ObjectId {
     let [x0, y0, x1, y1] = rect;
     let ap = f.pdf.add_object(Stream::new(
         dictionary! {

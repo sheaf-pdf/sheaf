@@ -1,8 +1,8 @@
 //! What a file claims to conform to, from its XMP metadata: PDF/A (ISO
 //! 19005) and PDF/UA (ISO 14289), each claim an attribute or an element.
 
+use crate::pdf::LazyPdf;
 use anyhow::{Context, Result};
-use lopdf::LazyPdf;
 use quick_xml::NsReader;
 use quick_xml::events::Event;
 use quick_xml::name::{LocalName, Namespace, ResolveResult};

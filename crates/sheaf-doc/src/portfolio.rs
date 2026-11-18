@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId};
 
 use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text;
@@ -216,7 +216,7 @@ pub fn field_text<P: Objects + ?Sized>(pdf: &P, v: &Object) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{Document as Pdf, dictionary};
+    use crate::pdf::{Document as Pdf, dictionary};
 
     #[test]
     fn reads_schema_folders_and_initial_file() {

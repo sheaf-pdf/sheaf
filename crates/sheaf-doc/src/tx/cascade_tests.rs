@@ -3,8 +3,8 @@
 //! with that rule switched off finds it missing. Then validation, which
 //! fails and never repairs (§6.4), and what a duplicate copies (bug 12).
 
+use crate::pdf::{Object, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Object, dictionary};
 use sheaf_edit::{
     AnnotRef, BookmarkRef, Imported, LabelStyle, Local, MarkKind, Op, PageLabelRange, PageRef,
     PageSel, ScopeSel, Sibling, Turn,

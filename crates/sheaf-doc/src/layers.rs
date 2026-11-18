@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId};
 
 use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text;
@@ -225,7 +225,7 @@ pub fn ocg_patch(src: &Source, off: &BTreeSet<LayerId>) -> Option<Object> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{Document as Pdf, dictionary};
+    use crate::pdf::{Document as Pdf, dictionary};
 
     fn sample() -> (Pdf, ObjectId, ObjectId, ObjectId) {
         let mut pdf = Pdf::with_version("1.7");

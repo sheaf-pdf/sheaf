@@ -14,8 +14,8 @@ pub mod xfdf;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, dictionary};
 use anyhow::{Context, Result};
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId, dictionary};
 
 use sheaf_edit::{AnnotRef, BlobSel, NewMark, Op, PageRef};
 

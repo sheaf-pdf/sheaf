@@ -38,7 +38,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 
 use super::field::{
     Action, Border, BorderStyle, Choice, Color, Field, FieldId, FieldKind, Mk, Trigger, Value,
@@ -718,9 +718,9 @@ impl<'a, P: Objects + ?Sized> Reader<'a, P> {
             Object::String(s, _) => std::borrow::Cow::Borrowed(s.as_slice()),
             Object::Stream(s) => match s.decompressed_content_with_limit(max) {
                 Ok(c) => std::borrow::Cow::Owned(c),
-                Err(lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
-                    ..
-                })) => {
+                Err(crate::pdf::Error::Decompress(
+                    crate::pdf::DecompressError::MemoryLimitExceeded { .. },
+                )) => {
                     self.damage(too_long());
                     return None;
                 }

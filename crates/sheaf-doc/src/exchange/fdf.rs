@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
+use crate::pdf::{Document as Pdf, Object, dictionary};
 use anyhow::{Context, Result};
-use lopdf::{Document as Pdf, Object, dictionary};
 
 use super::Comments;
 use crate::serialize::built::Built;

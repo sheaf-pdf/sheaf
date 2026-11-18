@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use lopdf::{Object, dictionary};
+use crate::pdf::{Object, dictionary};
 use sheaf_edit::{Rotation, Turn};
 
 use super::fixture::{every_input, hiding, layer, their_comment};
@@ -358,7 +358,7 @@ fn a_group_opens_as_the_base_and_its_section() {
     assert_eq!(opened.segments.len(), 2);
     assert!(Arc::ptr_eq(&opened.segments[0], src.bytes()));
     let whole: Arc<[u8]> = opened.segments.concat().into();
-    let pdf = lopdf::LazyPdf::open(whole, None, &lopdf::ReadLimits::DEFAULT).unwrap();
+    let pdf = crate::pdf::LazyPdf::open(whole, None, &crate::pdf::ReadLimits::DEFAULT).unwrap();
     assert!(pdf.xref().size > src.xref().size);
     assert_eq!(pdf.xref().sections, src.xref().sections + 1);
     d.commit_ops(vec![header("Final")], "Header").unwrap();

@@ -24,8 +24,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::LazyLock;
 
-use lopdf::content::{Content, Operation};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
+use crate::pdf::content::{Content, Operation};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
@@ -1599,7 +1599,7 @@ pub fn every_mark_kind() -> Vec<Annot> {
 /// each object in `ids` (and anything it adds) in the new revision.
 pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut Pdf)) -> Vec<u8> {
     let prev = Pdf::load_mem(bytes).expect("the previous revision");
-    let mut doc = lopdf::IncrementalDocument::create_from(bytes.to_vec(), prev);
+    let mut doc = crate::pdf::IncrementalDocument::create_from(bytes.to_vec(), prev);
     for &id in ids {
         doc.opt_clone_object_to_new_document(id)
             .expect("an object in the previous revision");

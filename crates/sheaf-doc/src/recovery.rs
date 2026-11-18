@@ -626,8 +626,8 @@ pub fn discard_untitled(claim: &Claim) {
 pub(crate) mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use crate::pdf::{Document as Pdf, LazyPdf, Object, Stream, dictionary};
     use in_progress::NoProgress;
-    use lopdf::{Document as Pdf, LazyPdf, Object, Stream, dictionary};
     use sheaf_edit::Rotation;
 
     use super::*;
@@ -1050,8 +1050,8 @@ pub(crate) mod tests {
     fn an_encrypted_sidecar_holds_no_plaintext() {
         use std::collections::BTreeMap;
 
-        use lopdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
-        use lopdf::{EncryptionState, EncryptionVersion, Permissions, XrefKind};
+        use crate::pdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
+        use crate::pdf::{EncryptionState, EncryptionVersion, Permissions, XrefKind};
 
         use crate::serialize::fixture::{OWNER, encrypted, whole};
         use crate::serialize::tests::{NOTE, mark, notes};

@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use image::{GrayImage, Luma, Rgb, RgbImage};
-use lopdf::Document as Pdf;
 use sheaf_doc::materialize::{AskAnswers, StrategyKind};
+use sheaf_doc::pdf::Document as Pdf;
 use sheaf_doc::recovery;
 use sheaf_doc::{Actor, EditError, JobKind, TextLayer};
 use sheaf_edit::{Op, PageRef, PageSel, PageSize, PageSource, Rotation, Turn};

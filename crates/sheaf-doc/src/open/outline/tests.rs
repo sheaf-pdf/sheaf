@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use lopdf::{Dictionary, Object, ObjectId, StringFormat, dictionary};
+use crate::pdf::{Dictionary, Object, ObjectId, StringFormat, dictionary};
 use sheaf_edit::DestView;
 
 use super::*;

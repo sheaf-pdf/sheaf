@@ -7,11 +7,11 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use lopdf::{LazyPdf, Object, ObjectId, Stream, XrefKind};
 use pdf_lint::{Hold, Made};
 use sheaf_doc::materialize::key::{ObjKey, Part};
 use sheaf_doc::materialize::record::ObjMap;
 use sheaf_doc::model::{AnnotBody, DocState};
+use sheaf_doc::pdf::{LazyPdf, Object, ObjectId, Stream, XrefKind};
 use sheaf_doc::serialize::objstm;
 use sheaf_doc::source::Limits;
 use sheaf_doc::store::{BlobId, BlobKind, MemoryKind, Origin, Store};
@@ -357,11 +357,11 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use lopdf::{LazyPdf, Object, ObjectId};
     use pdf_lint::{Hold, Made, Rule};
     use sheaf_doc::forms::fixture::{Form, every_mark_kind};
     use sheaf_doc::materialize::record::ObjMap;
     use sheaf_doc::materialize::{ObjKey, StrategyKind, save_appended, save_rewritten};
+    use sheaf_doc::pdf::{LazyPdf, Object, ObjectId};
     use sheaf_doc::serialize::fixture::object_streams_of;
     use sheaf_doc::source::Limits;
     use sheaf_doc::store::{BlobId, Store};

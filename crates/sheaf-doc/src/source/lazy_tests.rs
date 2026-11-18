@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lopdf::encryption::DecryptionError;
-use lopdf::xref::XrefType;
-use lopdf::{
+use crate::pdf::encryption::DecryptionError;
+use crate::pdf::xref::XrefType;
+use crate::pdf::{
     ByteSource, Document as Pdf, Error, FileBytes, LazyPdf, Limit, LoadOptions, Object, ObjectId,
     ReadLimits, Stream, StringFormat, XrefKind, dictionary,
 };

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use lopdf::{Dictionary, Object};
+use crate::pdf::{Dictionary, Object};
 
 use super::lex::{self, LexError, LexErrorKind, ResCx, Step, Tok};
 use super::page::{Concat, ReadObjects, SpanAcross, direct};

@@ -8,9 +8,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::pdf::content::{Content, Operation};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 use in_progress::NoProgress;
-use lopdf::content::{Content, Operation};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 use sheaf_edit::{AnnotRef, BookmarkPatch, DestView, Op, PageRef, Patch, Rotation, Sibling, Turn};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
@@ -52,7 +52,7 @@ pub(crate) fn make_pdf(
                 Operation::new("ET", vec![]),
             ],
         };
-        let content_id = doc.add_object(lopdf::Stream::new(
+        let content_id = doc.add_object(crate::pdf::Stream::new(
             dictionary! {},
             content.encode().unwrap(),
         ));
@@ -607,7 +607,7 @@ fn an_xref_stream_is_appended_to() {
 /// `path`'s bytes, written with a cross-reference table and a trailer.
 fn classic(path: &Path) -> Vec<u8> {
     let mut pdf = Pdf::load(path).unwrap();
-    pdf.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+    pdf.reference_table.cross_reference_type = crate::pdf::xref::XrefType::CrossReferenceTable;
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
     bytes
@@ -699,7 +699,7 @@ fn plant_unknown_mark(path: &Path) {
     let mut pdf = Pdf::load(path).unwrap();
     let page0 = pdf.get_pages()[&1];
     let json = r#"{"id":77,"kind":{"Hexagon":{"rect":{"x":1,"y":1,"w":5,"h":5}}},"color":[1,2,3],"opacity":1.0,"stroke":1.0,"author":"future","contents":"from a newer sheaf","modified":""}"#;
-    let ap = pdf.add_object(lopdf::Stream::new(
+    let ap = pdf.add_object(crate::pdf::Stream::new(
         dictionary! { "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 60.into(), 60.into()] },
         b"0 0 60 60 re S".to_vec(),
     ));
@@ -1906,7 +1906,7 @@ fn a_reply_names_a_comment(how: How) {
 fn stamp_page(tag: &str) -> Vec<u8> {
     let mut out = Pdf::with_version("1.5");
     let pages_id = out.new_object_id();
-    let content = out.add_object(lopdf::Stream::new(
+    let content = out.add_object(crate::pdf::Stream::new(
         dictionary! {},
         format!("% {tag}\n1 0 0 rg 0 0 100 50 re f").into_bytes(),
     ));
@@ -1953,7 +1953,7 @@ fn attachment(stem: &str, size: usize) -> crate::annot::AnnotKind {
 
 /// An appearance's one form: its name in the resources, its number,
 /// and the form.
-fn drawn_form<'a>(pdf: &'a Pdf, annot: &Dictionary) -> (Vec<u8>, ObjectId, &'a lopdf::Stream) {
+fn drawn_form<'a>(pdf: &'a Pdf, annot: &Dictionary) -> (Vec<u8>, ObjectId, &'a crate::pdf::Stream) {
     let n = annot.get(b"AP").unwrap().as_dict().unwrap();
     let n = n.get(b"N").unwrap().as_reference().unwrap();
     let ap = pdf.get_object(n).unwrap().as_stream().unwrap();
@@ -2261,7 +2261,7 @@ fn caret_and_strikeout(how: How) {
     let annots_of = |bytes: &[u8]| {
         let pdf = Pdf::load_mem(bytes).unwrap();
         let page0 = pdf.get_pages()[&1];
-        let list: Vec<lopdf::Dictionary> = pdf
+        let list: Vec<crate::pdf::Dictionary> = pdf
             .get_dictionary(page0)
             .unwrap()
             .get(b"Annots")
@@ -2271,7 +2271,7 @@ fn caret_and_strikeout(how: How) {
             .iter()
             .map(|o| pdf.dereference(o).unwrap().1.as_dict().unwrap().clone())
             .collect();
-        let ids: Vec<lopdf::ObjectId> = pdf
+        let ids: Vec<crate::pdf::ObjectId> = pdf
             .get_dictionary(page0)
             .unwrap()
             .get(b"Annots")
@@ -2643,7 +2643,7 @@ crate::both_ways!(
 /// its `/P` and `/ID[0]` are the original's. Saved as another file, it's
 /// a Rewrite; in place, an Append keeps its bytes.
 fn encrypted_source_saves(how: How) {
-    use lopdf::{EncryptionState, EncryptionVersion, Permissions};
+    use crate::pdf::{EncryptionState, EncryptionVersion, Permissions};
     let dir = tempdir();
     let plain = make_pdf(&dir, "plain.pdf", "E", 2, &[("Top", 0, 0)]);
     let enc = dir.join("enc.pdf");
@@ -2701,7 +2701,7 @@ fn encrypted_source_saves(how: How) {
         .unwrap();
     let lazy = |path: &Path, password| {
         let bytes = sheaf_util::read_file(path).unwrap();
-        lopdf::LazyPdf::open(bytes, password, &crate::source::Limits::DEFAULT.reader)
+        crate::pdf::LazyPdf::open(bytes, password, &crate::source::Limits::DEFAULT.reader)
     };
     let crypt = |path: &Path| {
         let pdf = lazy(path, Some("secret")).unwrap();
@@ -2717,7 +2717,7 @@ fn encrypted_source_saves(how: How) {
         assert!(bytes.starts_with(&original));
         assert!(matches!(
             lazy(&enc, None),
-            Err(lopdf::Error::InvalidPassword)
+            Err(crate::pdf::Error::InvalidPassword)
         ));
         assert_eq!(crypt(&enc).dict(), was.dict());
         let saved = crate::file::load_pdf(&enc, Some("secret")).unwrap();
@@ -2736,7 +2736,7 @@ fn encrypted_source_saves(how: How) {
     );
     assert!(matches!(
         lazy(&out, None),
-        Err(lopdf::Error::InvalidPassword)
+        Err(crate::pdf::Error::InvalidPassword)
     ));
     let now = crypt(&out);
     assert_eq!(now.dict().get(b"P").ok(), was.dict().get(b"P").ok());

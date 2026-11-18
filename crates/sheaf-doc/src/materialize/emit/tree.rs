@@ -20,8 +20,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::pdf::{Dictionary, Object, ObjectId};
 use anyhow::{Context as _, Result, bail};
-use lopdf::{Dictionary, Object, ObjectId};
 
 use super::Cx;
 use crate::materialize::copy::Scope;

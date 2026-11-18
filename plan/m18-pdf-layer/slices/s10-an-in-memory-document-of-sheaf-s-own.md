@@ -5,7 +5,7 @@ Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
 **What:** lopdf's eager `Document` leaves sheaf's production code
 ([sheaf.md](../sheaf.md#what-sheaf-uses-of-lopdf-2026-10-27): 39 files),
 for a document type behind the door with only what sheaf calls on it
-([slice 1](s01-one-door-for-lopdf.md)'s inventory): objects by id, the
+([slice 1](../../complete/m18-pdf-layer/s01-one-door-for-lopdf.md)'s inventory): objects by id, the
 trailer, new ids, adding, pruning what nothing reaches, walking.
 
 - **Loaded whole** through pdf-structure ([slice 8](s08-sheaf-reads-through-pdf-structure.md)),

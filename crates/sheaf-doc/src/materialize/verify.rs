@@ -73,8 +73,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId};
 use anyhow::{Result, bail};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
 use super::Note;
 use super::graph::Graph;
@@ -557,11 +557,11 @@ pub(crate) fn section(s: &Section) -> Result<()> {
 /// encrypted wrong.
 #[cfg(debug_assertions)]
 pub(crate) fn reads_back_section(
-    file: impl lopdf::ByteSource + 'static,
+    file: impl crate::pdf::ByteSource + 'static,
     password: Option<&str>,
     objects: &BTreeMap<ObjectId, (ObjKey, Object)>,
 ) -> Result<()> {
-    let read = lopdf::LazyPdf::open(file, password, &crate::source::Limits::DEFAULT.reader)?;
+    let read = crate::pdf::LazyPdf::open(file, password, &crate::source::Limits::DEFAULT.reader)?;
     for (&id, (_, obj)) in objects {
         let Ok(back) = read.object_unkept(id) else {
             bail!("object {} {} doesn't read back", id.0, id.1);
@@ -657,7 +657,7 @@ fn shown(items: &[&str]) -> String {
 #[cfg(debug_assertions)]
 fn reads_back(out: &Written, graph: &Graph) -> Result<()> {
     use std::sync::Arc;
-    let read = lopdf::LazyPdf::open(
+    let read = crate::pdf::LazyPdf::open(
         Arc::from(out.bytes),
         out.password,
         &crate::source::Limits::DEFAULT.reader,
@@ -810,7 +810,7 @@ mod section_tests {
         let record = doc.saved_record().unwrap();
         assert!(record.xref.size < 100);
         let at = ObjectId::from((100, 0));
-        let obj = Object::Dictionary(lopdf::dictionary! { "A" => to });
+        let obj = Object::Dictionary(crate::pdf::dictionary! { "A" => to });
         let objects = BTreeMap::from([(at, (ObjKey::Annot(AnnotId(7)), obj))]);
         let mapped = (record.map.keys.values()).map(|id| id.0).collect();
         let used = |n: u32| record.present.contains(n);

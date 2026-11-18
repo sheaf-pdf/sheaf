@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 
 use super::encoding::Encoding;
 use super::*;

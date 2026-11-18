@@ -142,6 +142,14 @@ jobs:
           if [ -n "$bad" ]; then echo "sheaf-edit depends on: $bad"; exit 1; fi
           cargo build -p sheaf-edit --target wasm32-wasip2
 
+      - name: Only sheaf-doc reaches lopdf
+        shell: bash
+        # M18 slice 1: every other crate reaches the PDF layer through sheaf_doc::pdf.
+        run: |
+          bad=$(cargo tree --workspace -e all -i lopdf --prefix depth | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
+            | grep -vx 'sheaf-doc' || true)
+          if [ -n "$bad" ]; then echo "crates outside sheaf-doc depend on lopdf directly: $bad"; exit 1; fi
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

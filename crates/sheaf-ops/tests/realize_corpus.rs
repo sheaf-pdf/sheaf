@@ -50,11 +50,11 @@ use std::io::{BufRead, BufReader, Read as _};
 use std::path::Path;
 use std::sync::Arc;
 
-use lopdf::Object;
 use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::forms::{FieldKind, Value};
 use sheaf_doc::model::{FieldNode, Terminal};
+use sheaf_doc::pdf::Object;
 use sheaf_doc::prim::{Key, Prim, Val};
 use sheaf_doc::realize::{EngineKey, PageView, Realizer, ViewInputs, emission_is_base, untouched};
 use sheaf_doc::serialize::crypt::Crypt;
@@ -357,8 +357,8 @@ fn check(path: &Path, tier: Tier, set: Set) -> Outcome {
     let src = d.primary().clone();
     let xref = src.xref();
     out.classes.insert(match xref.kind {
-        lopdf::XrefKind::Table => "classic table",
-        lopdf::XrefKind::Stream => "xref stream",
+        sheaf_doc::pdf::XrefKind::Table => "classic table",
+        sheaf_doc::pdf::XrefKind::Stream => "xref stream",
     });
     for (class, is) in [
         ("hybrid", xref.hybrid),

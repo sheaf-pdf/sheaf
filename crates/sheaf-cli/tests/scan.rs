@@ -14,8 +14,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use common::{ok, run, scratch};
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::content::Marker;
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 
 /// Each page's heading, the words OCR must find there, and its body: the
 /// size it's set in and enough ordinary lines for orientation detection

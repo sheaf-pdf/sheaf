@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 
 use super::{Limits, ObjRef, Source};
 use crate::geom::{Affine, Rect};

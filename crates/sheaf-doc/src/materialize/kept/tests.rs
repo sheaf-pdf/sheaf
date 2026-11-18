@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use lopdf::content::{Content, Operation};
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::content::{Content, Operation};
+use crate::pdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
@@ -98,7 +98,7 @@ fn link(pdf: &mut Pdf, from: ObjectId, to: ObjectId) {
     page.set("Annots", annots);
 }
 
-fn catalog(pdf: &mut Pdf) -> &mut lopdf::Dictionary {
+fn catalog(pdf: &mut Pdf) -> &mut crate::pdf::Dictionary {
     let id = pdf.trailer.get(b"Root").unwrap().as_reference().unwrap();
     pdf.get_dictionary_mut(id).unwrap()
 }

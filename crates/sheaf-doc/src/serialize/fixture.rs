@@ -17,14 +17,14 @@ use std::io::Read as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use in_progress::NoProgress;
-use lopdf::encryption;
-use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
-use lopdf::xref::XrefType;
-use lopdf::{
+use crate::pdf::encryption;
+use crate::pdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
+use crate::pdf::xref::XrefType;
+use crate::pdf::{
     Dictionary, Document as Pdf, EncryptionState, EncryptionVersion, LazyPdf, Object, ObjectId,
     Permissions, Stream, XrefKind, dictionary,
 };
+use in_progress::NoProgress;
 
 use sheaf_edit::Turn;
 

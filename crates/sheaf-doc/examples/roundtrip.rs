@@ -11,8 +11,8 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use lopdf::content::{Content, Operation};
-use lopdf::{Document, Object, Stream, dictionary};
+use sheaf_doc::pdf::content::{Content, Operation};
+use sheaf_doc::pdf::{Document, Object, Stream, dictionary};
 use sheaf_doc::store::{BlobKind, Store};
 
 fn synth_pdf(path: &std::path::Path) -> Result<()> {

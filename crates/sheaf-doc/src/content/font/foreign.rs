@@ -27,7 +27,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use lopdf::{Dictionary, Object, ObjectId, dictionary};
+use crate::pdf::{Dictionary, Object, ObjectId, dictionary};
 
 use super::encoding::{Encoding, glyph_text};
 use super::predefined::{self, Collection, Split};
@@ -1660,7 +1660,7 @@ fn decompressed(
 /// `decoded`, a stream's content decompressed within `budget`, charged to
 /// it: None where it can't be decoded.
 pub(super) fn charged(
-    decoded: lopdf::Result<Vec<u8>>,
+    decoded: crate::pdf::Result<Vec<u8>>,
     budget: &mut usize,
 ) -> Result<Option<Vec<u8>>, TooLarge> {
     match decoded {
@@ -1668,9 +1668,9 @@ pub(super) fn charged(
             *budget = budget.saturating_sub(data.len());
             Ok(Some(data))
         }
-        Err(lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded { .. })) => {
-            Err(TooLarge)
-        }
+        Err(crate::pdf::Error::Decompress(crate::pdf::DecompressError::MemoryLimitExceeded {
+            ..
+        })) => Err(TooLarge),
         Err(_) => Ok(None),
     }
 }
@@ -1912,7 +1912,7 @@ impl Fonts {
                 "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
                 "Encoding" => "WinAnsiEncoding",
             };
-            let none = lopdf::Document::new();
+            let none = crate::pdf::Document::new();
             let read = Foreign::read(&none, &helvetica, &Limits::DEFAULT, &mut 0);
             Arc::new(read.expect("a font by name alone has no stream to decompress"))
         };

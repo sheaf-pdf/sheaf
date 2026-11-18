@@ -7514,8 +7514,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn a_combined_document_opens_in_its_window_as_made() {
-        use lopdf::{Object, dictionary};
         use sheaf_doc::forms::fixture::{Form, row};
+        use sheaf_doc::pdf::{Object, dictionary};
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
         let form = |name: &str| {
             let mut f = Form::new(1);
@@ -8020,7 +8020,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn remove_watermark_is_planned_and_counts_the_author_s() {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         use sheaf_doc::tx::fixture::{set_watermark, watermark};
         use sheaf_edit::Z;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -8247,7 +8247,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn remove_header_footer_is_planned_and_counts_the_author_s() {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         use sheaf_doc::tx::fixture::{header, set_header};
         use std::sync::atomic::{AtomicBool, Ordering};
         // Two Letter pages, the first with a running head of the author's,
@@ -8435,8 +8435,8 @@ mod tests {
 
     /// A square another tool drew, by `author`, with its appearance.
     #[cfg(target_os = "linux")]
-    fn their_square(pdf: &mut lopdf::Document, author: &str) -> lopdf::ObjectId {
-        use lopdf::{Object, Stream, dictionary};
+    fn their_square(pdf: &mut sheaf_doc::pdf::Document, author: &str) -> sheaf_doc::pdf::ObjectId {
+        use sheaf_doc::pdf::{Object, Stream, dictionary};
         let ap = pdf.add_object(Stream::new(
             dictionary! {
                 "Type" => "XObject", "Subtype" => "Form",
@@ -8618,7 +8618,7 @@ mod tests {
     /// shows.
     #[cfg(target_os = "linux")]
     fn layered() -> Vec<u8> {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         let mut pdf = Pdf::with_version("1.7");
         let ocg = pdf.add_object(dictionary! {
             "Type" => "OCG", "Name" => Object::string_literal("Notes"),
@@ -8872,7 +8872,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn a_print_preview_that_cant_be_made_is_tried_once() {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         let dir = tempfile::Builder::new().prefix("sheaf-").tempdir().unwrap();
         let path = dir.path().join("unread.pdf");
         let mut pdf = Pdf::load_mem(&said(1)).unwrap();
@@ -9222,7 +9222,7 @@ mod tests {
     /// A file of `n` Letter pages, each saying "page i".
     #[cfg(target_os = "linux")]
     fn said(n: usize) -> Vec<u8> {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         let mut pdf = Pdf::with_version("1.7");
         let root = pdf.new_object_id();
         let font = pdf.add_object(dictionary! {

@@ -1,7 +1,7 @@
 //! TextBags: the same words whatever fonts and codes draw them, read
 //! through `/ToUnicode`, `/Differences` and the base encodings.
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use crate::pdf::{Document as Pdf, Object, Stream, dictionary};
 
 use super::*;
 use crate::source::Limits;

@@ -3,7 +3,7 @@
 Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
 
 **What:** sheaf reads and writes the common structures through
-pdf-semantics ([slice 20](s20-pdf-semantics-the-common-structures.md)),
+pdf-semantics ([slice 20](../../complete/m18-pdf-layer/s20-pdf-semantics-the-common-structures.md)),
 and its own copies go.
 
 - **Text strings:** `file.rs`'s `text_string`, and the three encoders

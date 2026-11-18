@@ -6,8 +6,8 @@
 
 use std::collections::BTreeSet;
 
+use crate::pdf::Document as Pdf;
 use in_progress::NoProgress;
-use lopdf::Document as Pdf;
 
 use super::fixture as fx;
 use super::stale_tests::{on, planned};

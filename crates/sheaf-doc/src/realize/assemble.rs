@@ -12,9 +12,9 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
+use crate::pdf::{Dictionary, Object, ObjectId, Stream, XrefKind};
 use anyhow::{Context as _, Result, bail};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Object, ObjectId, Stream, XrefKind};
 
 use super::alloc::Numbers;
 use crate::layers::{LayerId, ocg_patch};
@@ -470,7 +470,7 @@ fn refs(obj: &Object, to: &mut dyn FnMut(ObjectId)) {
 
 #[cfg(test)]
 mod tests {
-    use lopdf::dictionary;
+    use crate::pdf::dictionary;
 
     use super::*;
 

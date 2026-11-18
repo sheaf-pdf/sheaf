@@ -4,7 +4,9 @@
 //!
 //! Usage: cargo run -p sheaf-doc --example encrypt_pdf <in.pdf> <out.pdf> <user-password> [owner-password]
 
-use lopdf::{Document, EncryptionState, EncryptionVersion, Object, Permissions, StringFormat};
+use sheaf_doc::pdf::{
+    Document, EncryptionState, EncryptionVersion, Object, Permissions, StringFormat,
+};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

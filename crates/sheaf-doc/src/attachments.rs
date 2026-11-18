@@ -4,8 +4,8 @@
 
 use std::collections::HashSet;
 
+use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId};
 use anyhow::{Context, Result, bail};
-use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId};
 
 use crate::annot::AnnotId;
 use crate::file::pdf_text;
@@ -170,19 +170,19 @@ pub fn attachment_bytes<P: Objects + ?Sized>(
 }
 
 /// An embedded file stream's bytes, decoded.
-pub(crate) fn file_bytes(stream: &lopdf::Stream) -> Result<Vec<u8>> {
+pub(crate) fn file_bytes(stream: &crate::pdf::Stream) -> Result<Vec<u8>> {
     decoded(stream, None)
 }
 
 /// The bytes of the file an attachment mark holds, `stream`, which the
 /// mark says is `size` bytes: none past that is decoded, so a small
 /// stream can't swell into a large one the mark didn't say.
-pub(crate) fn mark_file_bytes(stream: &lopdf::Stream, size: u64) -> Result<Vec<u8>> {
+pub(crate) fn mark_file_bytes(stream: &crate::pdf::Stream, size: u64) -> Result<Vec<u8>> {
     decoded(stream, Some(usize::try_from(size).unwrap_or(usize::MAX)))
 }
 
 /// `stream`'s bytes, decoded, at most `limit` of them.
-fn decoded(stream: &lopdf::Stream, limit: Option<usize>) -> Result<Vec<u8>> {
+fn decoded(stream: &crate::pdf::Stream, limit: Option<usize>) -> Result<Vec<u8>> {
     let bytes = match limit {
         Some(limit) => stream.decompressed_content_with_limit(limit),
         None => stream.decompressed_content(),
@@ -339,18 +339,18 @@ fn folder_key(key: &str) -> Option<(i64, &str)> {
 /// stamp collection, the user's own file (`stamp_lib`), and tests' files.
 pub trait Objects {
     /// Object `id`, its references followed.
-    fn get_object(&self, id: ObjectId) -> lopdf::Result<&Object>;
+    fn get_object(&self, id: ObjectId) -> crate::pdf::Result<&Object>;
 
-    fn get_dictionary(&self, id: ObjectId) -> lopdf::Result<&Dictionary>;
+    fn get_dictionary(&self, id: ObjectId) -> crate::pdf::Result<&Dictionary>;
 
     /// `object`, or what its chain of references ends at, with the last
     /// reference's id.
     fn dereference<'a>(
         &'a self,
         object: &'a Object,
-    ) -> lopdf::Result<(Option<ObjectId>, &'a Object)>;
+    ) -> crate::pdf::Result<(Option<ObjectId>, &'a Object)>;
 
-    fn catalog(&self) -> lopdf::Result<&Dictionary>;
+    fn catalog(&self) -> crate::pdf::Result<&Dictionary>;
 
     /// Object `id`, its references followed; None when it can't be read.
     fn object(&self, id: ObjectId) -> Option<&Object> {
@@ -363,43 +363,43 @@ pub trait Objects {
 }
 
 impl Objects for Pdf {
-    fn get_object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+    fn get_object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         Pdf::get_object(self, id)
     }
 
-    fn get_dictionary(&self, id: ObjectId) -> lopdf::Result<&Dictionary> {
+    fn get_dictionary(&self, id: ObjectId) -> crate::pdf::Result<&Dictionary> {
         Pdf::get_dictionary(self, id)
     }
 
     fn dereference<'a>(
         &'a self,
         object: &'a Object,
-    ) -> lopdf::Result<(Option<ObjectId>, &'a Object)> {
+    ) -> crate::pdf::Result<(Option<ObjectId>, &'a Object)> {
         Pdf::dereference(self, object)
     }
 
-    fn catalog(&self) -> lopdf::Result<&Dictionary> {
+    fn catalog(&self) -> crate::pdf::Result<&Dictionary> {
         Pdf::catalog(self)
     }
 }
 
 impl Objects for LazyPdf {
-    fn get_object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+    fn get_object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         LazyPdf::get_object(self, id)
     }
 
-    fn get_dictionary(&self, id: ObjectId) -> lopdf::Result<&Dictionary> {
+    fn get_dictionary(&self, id: ObjectId) -> crate::pdf::Result<&Dictionary> {
         LazyPdf::get_dictionary(self, id)
     }
 
     fn dereference<'a>(
         &'a self,
         object: &'a Object,
-    ) -> lopdf::Result<(Option<ObjectId>, &'a Object)> {
+    ) -> crate::pdf::Result<(Option<ObjectId>, &'a Object)> {
         LazyPdf::dereference(self, object)
     }
 
-    fn catalog(&self) -> lopdf::Result<&Dictionary> {
+    fn catalog(&self) -> crate::pdf::Result<&Dictionary> {
         LazyPdf::catalog(self)
     }
 }
@@ -430,7 +430,7 @@ pub(crate) fn once<'a, P: Objects + ?Sized>(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use lopdf::{Stream, dictionary};
+    use crate::pdf::{Stream, dictionary};
 
     /// A one-page file with a named attachment, a compressed one and a
     /// file-attachment annotation.

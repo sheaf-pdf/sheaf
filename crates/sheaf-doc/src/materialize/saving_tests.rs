@@ -9,8 +9,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use crate::pdf::{Document as Pdf, Object};
 use in_progress::{Level, NoProgress, Progress, Unit};
-use lopdf::{Document as Pdf, Object};
 use sheaf_edit::{Op, Rotation, Turn};
 
 use super::{
@@ -548,7 +548,7 @@ fn appends_one_after_another_reopen() {
     }
     let bytes = std::fs::read(&path).unwrap();
     assert!(bytes.starts_with(&original));
-    let lazy = lopdf::LazyPdf::open(
+    let lazy = crate::pdf::LazyPdf::open(
         std::sync::Arc::<[u8]>::from(bytes.as_slice()),
         None,
         &crate::source::Limits::DEFAULT.reader,

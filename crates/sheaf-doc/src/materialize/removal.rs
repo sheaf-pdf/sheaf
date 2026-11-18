@@ -52,7 +52,7 @@ use std::fmt;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId, Stream};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, Stream};
 
 use super::append::refs;
 use super::emit::AllowedDrops;
@@ -379,7 +379,9 @@ impl<'a> Walk<'a> {
         let obj = match s.old.object_unkept(item.id) {
             Ok(obj) => obj,
             // Not in the file: nothing of it is readable there.
-            Err(lopdf::Error::MissingXrefEntry | lopdf::Error::ObjectNotFound(_)) => return,
+            Err(crate::pdf::Error::MissingXrefEntry | crate::pdf::Error::ObjectNotFound(_)) => {
+                return;
+            }
             Err(_) => {
                 self.seen.insert(item.id.0);
                 self.unread.get_or_insert(self.key(item.id));
@@ -765,14 +767,14 @@ struct Joined<'a> {
 }
 
 impl ReadObjects for Joined<'_> {
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         match self.section.get(&id) {
             Some((_, obj)) => Ok(obj),
             None => ReadObjects::object(self.old, id),
         }
     }
 
-    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> lopdf::Result<R> {
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
         match self.section.get(&id) {
             Some((_, obj)) => Ok(read(obj)),
             None => ReadObjects::read(self.old, id, read),

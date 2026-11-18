@@ -6,8 +6,8 @@
 //! Only `<annots>` (and `<f>`, the file they're on) for now; M10's form
 //! data goes beside them as `<fields>`.
 
+use crate::pdf::{Dictionary, LazyPdf, Object, StringFormat};
 use anyhow::{Context, Result, bail};
-use lopdf::{Dictionary, LazyPdf, Object, StringFormat};
 use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
 

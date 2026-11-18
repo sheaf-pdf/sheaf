@@ -44,10 +44,10 @@ use std::process::Command;
 use std::time::Instant;
 
 use common::scratch;
-use lopdf::{XrefFacts, XrefKind};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::materialize::emit::PdfVersion;
 use sheaf_doc::materialize::{Ask, AskAnswers, SaveStop, StrategyKind};
+use sheaf_doc::pdf::{XrefFacts, XrefKind};
 use sheaf_doc::serialize::fixture::object_streams_of;
 use sheaf_ops::NoProgress;
 use sheaf_ops::session::{SaveTo, Session};

@@ -27,6 +27,10 @@ use syn::{
 /// `ObjectId`, each with why.
 const ALLOWED: &[(&str, &str)] = &[
     (
+        "pdf.rs",
+        "the single door to the PDF object and structure layer (M18 slice 1)",
+    ),
+    (
         "source/",
         "a source's objects as its file numbers them, read lazily (§3.1)",
     ),

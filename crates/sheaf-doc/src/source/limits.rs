@@ -8,7 +8,7 @@ pub struct Limits {
     /// cross-reference stream may decompress to, the sections in the
     /// `/Prev` chain, object numbers, and the depth of a resolution path
     /// or a chain of references.
-    pub reader: lopdf::ReadLimits,
+    pub reader: crate::pdf::ReadLimits,
     pub page_tree: PageTreeLimits,
     pub forms: FormLimits,
     pub content: ContentLimits,
@@ -111,7 +111,7 @@ pub struct ContentLimits {
 
 impl Limits {
     pub const DEFAULT: Limits = Limits {
-        reader: lopdf::ReadLimits::DEFAULT,
+        reader: crate::pdf::ReadLimits::DEFAULT,
         page_tree: PageTreeLimits {
             depth: 1024,
             pages: 0xFFFFF - 1,

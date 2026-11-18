@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId, XrefFacts};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId, XrefFacts};
 use sheaf_util::Checksum;
 
 use super::emit::PdfVersion;

@@ -45,8 +45,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::pdf::{Object, ObjectId};
 use anyhow::Result;
-use lopdf::{Object, ObjectId};
 
 use super::append::refs;
 use super::copy;
@@ -1106,7 +1106,7 @@ fn parent_of(rec: &AnnotRec) -> Option<String> {
 
 /// The page link `id` of `pdf` goes to: its `/Dest`'s, or its GoTo
 /// action's, when that's an explicit destination.
-fn dest_page(pdf: &lopdf::LazyPdf, id: ObjectId) -> Option<ObjectId> {
+fn dest_page(pdf: &crate::pdf::LazyPdf, id: ObjectId) -> Option<ObjectId> {
     let link = pdf.get_dictionary(id).ok()?;
     let dest = match link.get(b"Dest") {
         Ok(dest) => dest,

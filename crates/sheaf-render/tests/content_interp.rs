@@ -146,7 +146,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
-use lopdf::{Dictionary, Object, ObjectId, Stream, dictionary};
 use pdfium_render::prelude::*;
 use sheaf_doc::content::fixture::{self, Fixture};
 use sheaf_doc::content::interp::{
@@ -156,6 +155,7 @@ use sheaf_doc::content::{FontApprox, FontKind, FontProgram, Fonts, Foreign, Page
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::{Affine, Rect};
 use sheaf_doc::materialize::ObjKey;
+use sheaf_doc::pdf::{Dictionary, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::serialize::append::{self, Base};
 use sheaf_doc::source::{Limits, PageFacts};
 use sheaf_doc::store::{BlobKind, Src, Store};
@@ -504,7 +504,7 @@ fn images_are_where_pdfium_puts_them() {
 
 /// A file of one page, 5,000 points wide, `content` drawn with `fonts`.
 fn one_page(fonts: Dictionary, content: String) -> Vec<u8> {
-    let mut pdf = lopdf::Document::with_version("1.7");
+    let mut pdf = sheaf_doc::pdf::Document::with_version("1.7");
     let stream = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
     let pages = pdf.new_object_id();
     let page = pdf.add_object(dictionary! {
@@ -601,7 +601,7 @@ fn standard_14_widths_are_pdfium_s_faces_but_where_guessed() {
                 "BaseFont" => std14.name(),
                 "Encoding" => dictionary! { "Differences" => differences },
             };
-            let none = lopdf::Document::new();
+            let none = sheaf_doc::pdf::Document::new();
             let foreign = Foreign::read(&none, &font, &Limits::DEFAULT, &mut 0).expect("no stream");
             // Lines far enough apart that PDFium takes no `A` for one of
             // the line's before it (`CPDF_TextPage::ProcessTextObjectItems`).
@@ -1460,7 +1460,7 @@ struct Showing {
 /// descriptor's, or its descendant's, first of `/FontFile`, `/FontFile2`
 /// and `/FontFile3` that's a reference.
 fn program_of(src: &Src, font: &Foreign) -> Option<ObjectId> {
-    fn dict<'a>(pdf: &'a lopdf::LazyPdf, o: &'a Object) -> Option<&'a Dictionary> {
+    fn dict<'a>(pdf: &'a sheaf_doc::pdf::LazyPdf, o: &'a Object) -> Option<&'a Dictionary> {
         pdf.dereference(o).ok()?.1.as_dict().ok()
     }
     let pdf = src.pdf();

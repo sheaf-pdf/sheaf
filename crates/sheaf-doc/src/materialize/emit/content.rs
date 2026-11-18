@@ -116,7 +116,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use lopdf::{Dictionary, Object, ObjectId, Stream, StringFormat, dictionary};
+use crate::pdf::{Dictionary, Object, ObjectId, Stream, StringFormat, dictionary};
 
 use super::{Cx, Deferred, PdfVersion};
 use crate::content::sink::{self, Sink as _};

@@ -2752,7 +2752,7 @@ pub(crate) fn file_in(store: &Store, stream: &ObjRef, size: u64) -> Result<BlobR
         .src
         .pdf()
         .read(stream.id, |o| match o {
-            lopdf::Object::Stream(s) => crate::attachments::mark_file_bytes(s, size),
+            crate::pdf::Object::Stream(s) => crate::attachments::mark_file_bytes(s, size),
             _ => bail!("the embedded file isn't a stream"),
         })
         .context("reading the embedded file")??;
@@ -2802,7 +2802,7 @@ pub(crate) mod history_tests;
 mod tests {
     use std::path::PathBuf;
 
-    use lopdf::ObjectId;
+    use crate::pdf::ObjectId;
     use sheaf_edit::{
         AnnotRef, BookmarkPatch, BookmarkRef, HeaderFooterSpec, LabelStyle, Local, Op, PageRef,
         PageSel, Patch, Sibling, Turn,
@@ -3525,7 +3525,7 @@ mod tests {
 
     /// A form of one page, its field `a` with a keystroke script.
     fn scripted() -> Vec<u8> {
-        use lopdf::{Object, dictionary};
+        use crate::pdf::{Object, dictionary};
         let mut f = crate::forms::fixture::Form::new(1);
         let a = f.text("a", 0, crate::forms::fixture::row(0));
         let js = dictionary! {
@@ -4315,9 +4315,12 @@ mod tests {
             assert_eq!(saved.geom(0).rotate, want, "{case}");
             assert_eq!(rotation(&d, 0), want, "{case}");
             if incremental && by.is_none() {
-                let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
+                let pdf = crate::pdf::Document::load_mem(saved.bytes()).unwrap();
                 let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
-                let rotate = dict.get(b"Rotate").and_then(lopdf::Object::as_i64).ok();
+                let rotate = dict
+                    .get(b"Rotate")
+                    .and_then(crate::pdf::Object::as_i64)
+                    .ok();
                 assert_eq!(rotate, own, "{case}: the page's own /Rotate");
             }
         }
@@ -4360,7 +4363,7 @@ mod tests {
             false => saved(&mut d),
         };
         assert_eq!(shown(&d), before, "{incremental}");
-        let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
+        let pdf = crate::pdf::Document::load_mem(saved.bytes()).unwrap();
         let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
         let annots = dict.get(b"Annots").unwrap().as_array().unwrap();
         let (_, annot) = pdf.dereference(&annots[0]).unwrap();
@@ -4554,7 +4557,7 @@ mod tests {
         assert_eq!(plain.notices, []);
 
         let written = &d.state().marks_on(page).next().unwrap();
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let main = crate::serialize::built::to_pdf(written, &mut pdf).main;
         let utf16: Vec<u8> = [0xFE, 0xFF]
             .into_iter()
@@ -4621,7 +4624,7 @@ mod tests {
 
     #[test]
     fn bookmark_styles_come_from_the_file() {
-        use lopdf::{Object, dictionary};
+        use crate::pdf::{Object, dictionary};
         let mut f = crate::forms::fixture::Form::new(3);
         let item = |title: &str, color: Option<f32>, flags: i64| {
             let mut d = dictionary! { "Title" => Object::string_literal(title), "F" => flags };
@@ -4696,7 +4699,7 @@ mod tests {
     /// save, which leaves it the file's item (M10.5 bug 15).
     fn uri_bookmark_kept(how: How) {
         use crate::forms::fixture::{Form, outline_tree};
-        use lopdf::{Object, dictionary};
+        use crate::pdf::{Object, dictionary};
         let mut f = Form::new(3);
         let pages = f.pages.clone();
         let link = f.pdf.add_object(dictionary! {
@@ -4737,7 +4740,7 @@ mod tests {
         // opens, and whether it has an `/SE`.
         let written = |bytes: Vec<u8>| -> Vec<(Option<u32>, Option<String>, bool)> {
             let src = crate::forms::fixture::source(bytes.clone());
-            let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+            let pdf = crate::pdf::Document::load_mem(&bytes).unwrap();
             let uri = |id| {
                 let item = pdf.get_dictionary(id).ok()?;
                 let action = pdf.get_dictionary(item.get(b"A").ok()?.as_reference().ok()?);
@@ -4784,7 +4787,7 @@ mod tests {
     #[test]
     fn a_bookmark_after_a_deep_branch_keeps_its_own_item() {
         use crate::forms::fixture::{Form, outline_tree};
-        use lopdf::{Object, dictionary};
+        use crate::pdf::{Object, dictionary};
         let mut f = Form::new(2);
         let link = f.pdf.add_object(dictionary! {
             "S" => "URI",
@@ -4815,7 +4818,7 @@ mod tests {
         // Where the saved file's "Site" sends a reader.
         let uri = |bytes: Vec<u8>| {
             let src = crate::forms::fixture::source(bytes.clone());
-            let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+            let pdf = crate::pdf::Document::load_mem(&bytes).unwrap();
             let item = (crate::open::outline(&src).into_iter())
                 .find(|i| i.title == "Site")
                 .unwrap();
@@ -5073,9 +5076,9 @@ mod tests {
         assert!(matches!(stamp_held(&opened, id), Some(FormRef::Base(at)) if at.src == primary));
 
         // Another tool's stamp, adopted: no blob, the file's form.
-        use lopdf::dictionary;
+        use crate::pdf::dictionary;
         let mut f = fixture::Form::new(1);
-        let form = f.pdf.add_object(lopdf::Stream::new(
+        let form = f.pdf.add_object(crate::pdf::Stream::new(
             dictionary! {
                 "Type" => "XObject", "Subtype" => "Form",
                 "BBox" => vec![0.into(), 0.into(), 100.into(), 40.into()],
@@ -5183,7 +5186,7 @@ mod tests {
         assert_eq!(d.store().bytes(), before + held);
         // The stamp's page draws its square, whichever PDF holds it.
         let square = |form: &FormRef| {
-            let pdf = lopdf::Document::load_mem(&form.to_pdf().unwrap()).unwrap();
+            let pdf = crate::pdf::Document::load_mem(&form.to_pdf().unwrap()).unwrap();
             let drawn = pdf.objects.values().filter_map(|o| o.as_stream().ok());
             let drawn: Vec<Vec<u8>> = drawn
                 .map(|s| {
@@ -5879,8 +5882,8 @@ mod tests {
         let file = saved(&mut d);
         assert_eq!(layer_texts(&d).len(), 1);
         assert!(!d.is_dirty());
-        let pdf = lopdf::Document::load_mem(file.bytes()).unwrap();
-        let block = |o: &lopdf::Object| {
+        let pdf = crate::pdf::Document::load_mem(file.bytes()).unwrap();
+        let block = |o: &crate::pdf::Object| {
             let stream = o.as_stream().ok();
             stream.and_then(|s| crate::materialize::ocr_tests::ocr_block(&s.dict))
         };
@@ -6230,8 +6233,8 @@ mod tests {
     /// object a save reads: an info dictionary, a form with XFA, an outline
     /// root, page labels, names and an open action.
     fn rooted() -> (Vec<u8>, BTreeMap<&'static str, ObjectId>) {
-        use lopdf::{Object, dictionary};
-        let mut pdf = lopdf::Document::with_version("1.7");
+        use crate::pdf::{Object, dictionary};
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let root = pdf.new_object_id();
         let mut ids = BTreeMap::new();
         let mut nodes = Vec::new();
@@ -6262,7 +6265,7 @@ mod tests {
             root,
             dictionary! { "Type" => "Pages", "Kids" => nodes, "Count" => 4 }.into(),
         );
-        let xfa = pdf.add_object(lopdf::Stream::new(dictionary! {}, b"<xdp/>".to_vec()));
+        let xfa = pdf.add_object(crate::pdf::Stream::new(dictionary! {}, b"<xdp/>".to_vec()));
         let form = pdf.add_object(dictionary! {
             "Fields" => Vec::<Object>::new(), "XFA" => xfa,
             "DA" => Object::string_literal("/Helv 0 Tf 0 g"),
@@ -6361,7 +6364,7 @@ mod tests {
         let past = used.last().unwrap() + 1;
         assert!(!rec.present.contains(0) && !rec.present.contains(past));
         // Roots: the keys a save doesn't emit from the state.
-        fn keys(d: &lopdf::Dictionary) -> Vec<&[u8]> {
+        fn keys(d: &crate::pdf::Dictionary) -> Vec<&[u8]> {
             let mut keys: Vec<&[u8]> = d.iter().map(|(k, _)| k.as_slice()).collect();
             keys.sort();
             keys

@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 
-use lopdf::{Dictionary, Object, StringFormat};
+use crate::pdf::{Dictionary, Object, StringFormat};
 
 use crate::source::{ContentLimits, Limits};
 

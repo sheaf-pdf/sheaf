@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
-use lopdf::{LazyPdf, Object, Stream, dictionary};
+use crate::pdf::{LazyPdf, Object, Stream, dictionary};
 
 use super::Limits;
 use crate::PageId;
@@ -60,7 +60,7 @@ pub fn sheaf_annot(data: &[u8]) {
     for entry in page.annots.iter() {
         let _ = crate::file::sheaf_mark(pdf, entry);
         let _ = crate::file::is_ours(pdf, entry);
-        if let Ok((_, lopdf::Object::Dictionary(d))) = pdf.dereference(entry) {
+        if let Ok((_, crate::pdf::Object::Dictionary(d))) = pdf.dereference(entry) {
             let _ = crate::annot::staleness(pdf, d, false);
         }
     }
@@ -128,7 +128,7 @@ pub fn lexer(data: &[u8]) {
 /// those keys. Returns how many were made.
 pub fn splice(data: &[u8]) -> usize {
     let lim = &Limits::DEFAULT;
-    let mut pdf = lopdf::Document::with_version("1.7");
+    let mut pdf = crate::pdf::Document::with_version("1.7");
     let (first, second) = data.split_at(data.len() / 2);
     let streams = [first, second].map(|s| pdf.add_object(Stream::new(dictionary! {}, s.to_vec())));
     let piece = dictionary! { "ADBE_CompoundType" => dictionary! { "Private" => "Header" } };
@@ -252,25 +252,26 @@ fn font_parts(data: &[u8]) -> Vec<&[u8]> {
 #[cfg(any(test, feature = "fixtures"))]
 fn with_fonts(page: &content::fixture::Fixture, parts: &[&[u8]]) -> content::fixture::Fixture {
     let mut pdf = page.pdf.clone();
-    let font = |name: &[u8]| -> lopdf::ObjectId {
+    let font = |name: &[u8]| -> crate::pdf::ObjectId {
         let fonts = page
             .resources()
             .and_then(|r| r.as_dict().ok()?.get(b"Font").ok());
         let font = fonts.and_then(|f| f.as_dict().ok()?.get(name).ok()?.as_reference().ok());
         font.expect("the fuzz page has the font")
     };
-    let get = |pdf: &lopdf::Document, id, key: &[u8]| -> Option<Object> {
+    let get = |pdf: &crate::pdf::Document, id, key: &[u8]| -> Option<Object> {
         Some(pdf.get_dictionary(id).ok()?.get(key).ok()?.clone())
     };
-    let descendant = |pdf: &lopdf::Document, name| match get(pdf, font(name), b"DescendantFonts") {
-        Some(Object::Array(fonts)) => fonts.first().and_then(|f| f.as_reference().ok()),
-        _ => None,
-    };
+    let descendant =
+        |pdf: &crate::pdf::Document, name| match get(pdf, font(name), b"DescendantFonts") {
+            Some(Object::Array(fonts)) => fonts.first().and_then(|f| f.as_reference().ok()),
+            _ => None,
+        };
     let array = |part: &[u8]| match content::object(part, Limits::DEFAULT.content.depth) {
         Some(array @ Object::Array(_)) => Some(array),
         _ => None,
     };
-    let mut set_stream = |id: Option<lopdf::ObjectId>, data: &[u8]| {
+    let mut set_stream = |id: Option<crate::pdf::ObjectId>, data: &[u8]| {
         if let Some(stream) = id.and_then(|id| pdf.get_object_mut(id).ok()?.as_stream_mut().ok()) {
             stream.set_plain_content(data.to_vec());
         }
@@ -683,11 +684,11 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::time::{Duration, Instant};
 
-    use lopdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
-    use lopdf::xref::XrefType;
-    use lopdf::{EncryptionState, EncryptionVersion, Permissions};
+    use crate::pdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
+    use crate::pdf::xref::XrefType;
+    use crate::pdf::{EncryptionState, EncryptionVersion, Permissions};
 
-    use lopdf::{Document as Pdf, Object, ObjectId};
+    use crate::pdf::{Document as Pdf, Object, ObjectId};
 
     use super::*;
     use crate::forms::fixture::{Form, every_kind, every_mark_kind, hybrid_reference};
@@ -1090,7 +1091,7 @@ mod tests {
         let number: HashMap<ObjectId, ObjectId> =
             (4..).zip(&entries).map(|(n, id)| (*id, (n, 0))).collect();
         // The appearance that draws a form: the page stamp's.
-        let draws_a_form = |d: &lopdf::Dictionary| {
+        let draws_a_form = |d: &crate::pdf::Dictionary| {
             let n = d
                 .get(b"AP")
                 .and_then(Object::as_dict)

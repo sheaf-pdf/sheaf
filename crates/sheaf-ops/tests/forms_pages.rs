@@ -14,12 +14,12 @@
 use std::collections::BTreeMap;
 
 use futures::executor::block_on;
-use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_doc::content::PagOrigin;
 use sheaf_doc::export::Export;
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{Form, source};
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_doc::realize::ViewInputs;
 use sheaf_doc::tx::fixture::{
     delete, header, remove_watermark, set_header, set_watermark, watermark,

@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use lopdf::{Object, ObjectId, Stream, StringFormat, dictionary};
+use crate::pdf::{Object, ObjectId, Stream, StringFormat, dictionary};
 use proptest::prelude::*;
 
 use super::*;
@@ -1138,7 +1138,7 @@ fn tree_file(nodes: &[Node], roots: &[usize]) -> Vec<u8> {
     let id = |i: usize| -> ObjectId { (base + i as u32, 0) };
     let mut on_page = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
-        let mut d = lopdf::Dictionary::new();
+        let mut d = crate::pdf::Dictionary::new();
         if let Some(name) = &n.name {
             d.set("T", Object::string_literal(name.as_str()));
         }

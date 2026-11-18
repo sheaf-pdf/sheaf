@@ -61,10 +61,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, LazyPdf, Object, ReadLimits, XrefKind, dictionary};
 use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::forms::fixture::{Form, hybrid_reference, outline_tree};
 use sheaf_doc::materialize::{How, StrategyKind};
+use sheaf_doc::pdf::{Dictionary, LazyPdf, Object, ReadLimits, XrefKind, dictionary};
 use sheaf_doc::serialize::fixture::{
     PREFIX, USER, attachment_only, edited, encrypted, form, object_streams_encrypted,
     object_streams_of, rc4_40, rc4_aes_128_and_aes_256, written,
@@ -145,7 +145,7 @@ fn bases() -> Vec<(String, Vec<u8>, Option<&'static str>)> {
 /// AES-256 and, for its attachment only, `/EFF`; and encrypted with
 /// AES-256 in an object stream. Each with its name and the password it
 /// opens with.
-fn bases_of(plain: &lopdf::Document) -> Vec<(String, Vec<u8>, Option<&'static str>)> {
+fn bases_of(plain: &sheaf_doc::pdf::Document) -> Vec<(String, Vec<u8>, Option<&'static str>)> {
     let plain = plain.clone();
     let [table, stream] = written(&plain);
     let mut packed = Vec::new();
@@ -377,7 +377,7 @@ fn packed_outputs_read_alike_in_qpdf_and_pdfjs() {
     let script = dir.join("pages.mjs");
     std::fs::write(&script, PDFJS_PAGES).unwrap();
     let hybrid = hybrid_reference();
-    let [hybrid_table, _] = written(&lopdf::Document::load_mem(&hybrid).unwrap());
+    let [hybrid_table, _] = written(&sheaf_doc::pdf::Document::load_mem(&hybrid).unwrap());
     // Each document's bases, its unencrypted table first.
     let documents = [
         bases(),
@@ -914,7 +914,7 @@ struct Stored {
 
 /// The first page's annotations' `/Rect`s in `bytes`, each by subtype.
 fn rects_in(bytes: &[u8]) -> Vec<(String, [f32; 4])> {
-    let pdf = lopdf::Document::load_mem(bytes).unwrap();
+    let pdf = sheaf_doc::pdf::Document::load_mem(bytes).unwrap();
     let first = pdf.get_pages()[&1];
     let mut out: Vec<(String, [f32; 4])> = (pdf.get_page_annotations(first).unwrap().iter())
         .map(|a| {
@@ -1043,7 +1043,7 @@ fn with_acrobat_s_watermark() -> Form {
     let piece = dictionary! { "ADBE_CompoundType" => dictionary! {
         "DocSettings" => dictionary! {}, "Private" => "Watermark",
     } };
-    let form = f.pdf.add_object(lopdf::Stream::new(
+    let form = f.pdf.add_object(sheaf_doc::pdf::Stream::new(
         dictionary! {
             "Type" => "XObject", "Subtype" => "Form", "PieceInfo" => piece,
             "BBox" => vec![0.into(), 0.into(), 300.into(), 60.into()],
@@ -1051,7 +1051,7 @@ fn with_acrobat_s_watermark() -> Form {
         },
         b"0 0 1 rg BT /F1 48 Tf 4 12 Td (ACROBAT) Tj ET".to_vec(),
     ));
-    let theirs = f.pdf.add_object(lopdf::Stream::new(
+    let theirs = f.pdf.add_object(sheaf_doc::pdf::Stream::new(
         dictionary! {},
         b"/Artifact <</Type /Pagination /Subtype /Watermark>> BDC q \
           1 0 0 1 150 350 cm /Fm0 Do Q EMC"
@@ -1481,7 +1481,7 @@ fn a_clean_copy_reads_in_pdfjs() {
     let page = *pdf.get_pages().get(&1).unwrap();
     let header: &[u8] = b"/Artifact <</Type/Pagination/Subtype/Header/SHEF_Gen (g1)>> BDC\n\
         q\nBT\n0 0 0 rg\n/F1 10 Tf\n1 0 0 1 72 748.8 Tm\n(Draft) Tj\nET\nQ\nEMC\n";
-    let header = pdf.add_object(lopdf::Stream::new(dictionary! {}, header.to_vec()));
+    let header = pdf.add_object(sheaf_doc::pdf::Stream::new(dictionary! {}, header.to_vec()));
     let dict = pdf.get_dictionary_mut(page).unwrap();
     let mut contents = dict.get(b"Contents").unwrap().as_array().unwrap().clone();
     // After the page's own content, inside the streams that isolate it.
@@ -1497,7 +1497,7 @@ fn a_clean_copy_reads_in_pdfjs() {
     .unwrap();
     let path = dir.join("clean.pdf");
     let clean = common::exported_to(&doc, Export::clean_copy, &path);
-    let clean = lopdf::Document::load_mem(&clean).unwrap();
+    let clean = sheaf_doc::pdf::Document::load_mem(&clean).unwrap();
     assert_eq!(sheaf_doc::private::found(&clean), []);
     for (what, path) in [("merged", &base), ("clean", &path)] {
         if let Some(qpdf) = &qpdf {

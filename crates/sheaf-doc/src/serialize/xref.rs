@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 
-use lopdf::{Dictionary, Object, Stream, dictionary};
+use crate::pdf::{Dictionary, Object, Stream, dictionary};
 
 use super::{Error, object};
 

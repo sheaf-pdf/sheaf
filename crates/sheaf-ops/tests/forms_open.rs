@@ -13,10 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
-use lopdf::{Object, XrefKind, dictionary};
 use sheaf_doc::forms::FormClass;
 use sheaf_doc::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
 use sheaf_doc::materialize::{How, StrategyKind};
+use sheaf_doc::pdf::{Object, XrefKind, dictionary};
 use sheaf_doc::serialize::fixture::object_streams_of;
 use sheaf_doc::tx::fixture::rotate;
 use sheaf_doc::{Document, Store};

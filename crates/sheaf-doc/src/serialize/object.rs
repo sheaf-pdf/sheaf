@@ -6,7 +6,7 @@
 
 use std::io::Write as _;
 
-use lopdf::{Dictionary, Object, ObjectId, StringFormat};
+use crate::pdf::{Dictionary, Object, ObjectId, StringFormat};
 
 use super::Error;
 

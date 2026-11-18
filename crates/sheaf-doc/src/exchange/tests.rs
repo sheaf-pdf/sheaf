@@ -1,11 +1,11 @@
 use super::*;
 use crate::annot::{Annot, AnnotKind, Pt};
 use crate::model::Document;
+use crate::pdf::{Document as Pdf, Stream, dictionary};
 use crate::prim::Key;
 use crate::tx::fixture::add;
 use crate::tx::{Actor, CommitOpts, EditError, JobKind, Stale};
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_edit::Rotation;
 
 /// Comments a test makes, each on its page, as a data file holds them.
@@ -492,7 +492,10 @@ fn our_marks_bring_their_stamps_and_files() {
     let page = marks[0].stamp.as_ref().unwrap().to_pdf().unwrap();
     assert_eq!(*stamp, crate::store::blob_id(&page).stem());
     assert_eq!(
-        lopdf::Document::load_mem(&page).unwrap().get_pages().len(),
+        crate::pdf::Document::load_mem(&page)
+            .unwrap()
+            .get_pages()
+            .len(),
         1
     );
     assert!(

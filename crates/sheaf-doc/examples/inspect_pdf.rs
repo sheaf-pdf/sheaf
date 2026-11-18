@@ -8,7 +8,7 @@ fn main() -> anyhow::Result<()> {
     let [path, rest @ ..] = args.as_slice() else {
         anyhow::bail!("usage: inspect_pdf <file.pdf> [password]");
     };
-    let raw = lopdf::Document::load(path)?;
+    let raw = sheaf_doc::pdf::Document::load(path)?;
     println!(
         "raw: encrypted={} objects={} pages={} trailer_keys={:?}",
         raw.is_encrypted(),

@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use lopdf::{Dictionary, Object};
+use crate::pdf::{Dictionary, Object};
 
 use super::font::{Font, Unencoded};
 use super::names::ResKind;
@@ -94,7 +94,7 @@ pub struct GState {
 impl GState {
     /// It as an ExtGState resource.
     fn res(self) -> Res {
-        let mut dict = lopdf::dictionary! { "Type" => "ExtGState" };
+        let mut dict = crate::pdf::dictionary! { "Type" => "ExtGState" };
         if let Some(a) = self.fill_alpha {
             dict.set("ca", a.clamp(0.0, 1.0));
         }

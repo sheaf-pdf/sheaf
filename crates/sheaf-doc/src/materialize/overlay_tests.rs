@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Object, ObjectId, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Object, ObjectId, dictionary};
 use sheaf_edit::{Rotation, Turn};
 
 use super::emit::{self, Emission, EmitBase, EmitScope, Overlay, RotatePolicy, SymObject};
@@ -763,7 +763,7 @@ fn an_inserted_form_s_defaults_are_pushed_down_as_a_save_pushes_them() {
 /// configuration an object of its own: the bytes and the layers.
 fn layered() -> (Vec<u8>, [ObjectId; 3]) {
     let mut pdf = file("A", 1, false);
-    let group = |pdf: &mut lopdf::Document, name: &str| {
+    let group = |pdf: &mut crate::pdf::Document, name: &str| {
         pdf.add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal(name) })
     };
     let ids = [
@@ -815,7 +815,7 @@ fn the_ocg_patch_turns_the_layer_off_in_the_default_config() {
     );
     assert_eq!(listed(b"Order"), [grid, notes, orphan]);
     // Put in the catalog, it reads as those layers off.
-    let mut pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let mut pdf = crate::pdf::Document::load_mem(&bytes).unwrap();
     let root = pdf.trailer.get(b"Root").unwrap().as_reference().unwrap();
     pdf.get_dictionary_mut(root)
         .unwrap()

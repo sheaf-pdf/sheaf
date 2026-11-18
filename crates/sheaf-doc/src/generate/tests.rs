@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use lopdf::dictionary;
+use crate::pdf::dictionary;
 use sheaf_edit::{FontChoice, GridPos, HeaderFooterSpec, Rotation, Z};
 
 use super::*;

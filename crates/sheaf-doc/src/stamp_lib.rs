@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use anyhow::{Context, Result, bail};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{PageSize, Rotation};
 
 use crate::attachments::Objects;
@@ -370,7 +370,7 @@ fn text_string(s: &str) -> Object {
         for u in s.encode_utf16() {
             b.extend(u.to_be_bytes());
         }
-        Object::String(b, lopdf::StringFormat::Hexadecimal)
+        Object::String(b, crate::pdf::StringFormat::Hexadecimal)
     }
 }
 

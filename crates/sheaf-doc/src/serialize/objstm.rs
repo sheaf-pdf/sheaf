@@ -2,14 +2,14 @@
 //! container of them as the writer packs it, its members as direct
 //! objects after a header of where each starts, deflated.
 
-use lopdf::{Dictionary, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Dictionary, Object, ObjectId, Stream, dictionary};
 
 use super::object;
 
 /// The most a container's data may hold, as sheaf's reader decompresses
 /// it: [`ReadLimits::max_decompressed`](lopdf::ReadLimits), so a file
 /// sheaf writes is one it reads.
-pub const MAX_DATA: usize = lopdf::ReadLimits::DEFAULT.max_decompressed;
+pub const MAX_DATA: usize = crate::pdf::ReadLimits::DEFAULT.max_decompressed;
 
 /// Whether a container whose data is `len` bytes is one the reader takes.
 pub fn fits(len: usize) -> bool {

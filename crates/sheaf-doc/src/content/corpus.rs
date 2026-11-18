@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
-use lopdf::{Object, ObjectId};
+use crate::pdf::{Object, ObjectId};
 
 use super::tests::blank;
 use super::*;
@@ -165,7 +165,7 @@ fn untiled(s: &[u8], res: &ResCx) -> Option<String> {
 
 /// lopdf's count of `bytes`' `q`s and `Q`s, the reference.
 fn decoded_balance(bytes: &[u8]) -> Option<Balance> {
-    let content = lopdf::content::Content::decode(bytes).ok()?;
+    let content = crate::pdf::content::Content::decode(bytes).ok()?;
     let mut balance = Balance::default();
     for op in &content.operations {
         balance.take(op.operator.as_bytes());

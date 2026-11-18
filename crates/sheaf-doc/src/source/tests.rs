@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use lopdf::{Object, ObjectId};
+use crate::pdf::{Object, ObjectId};
 use sheaf_edit::{PageSize, Rotation};
 
 use super::lazy_tests::{QUICK, catalog, plaintext, stream, with_table};
@@ -336,7 +336,7 @@ fn a_broken_object_every_page_names_is_read_once() {
     for _ in 0..2 {
         assert!(matches!(
             src.pdf().get((3, 0)),
-            Err(lopdf::Error::IndirectObject { .. })
+            Err(crate::pdf::Error::IndirectObject { .. })
         ));
     }
 }
@@ -633,7 +633,7 @@ fn an_encrypted_source_keeps_how_it_is_encrypted() {
             assert_eq!(crypt.dict(), &encrypt_dict(&state), "{name}");
             let [first, _] = src.xref().id.as_ref().unwrap();
             assert_eq!(crypt.first_id(), Some(&first[..]), "{name}");
-            let filters = |state: &lopdf::EncryptionState| {
+            let filters = |state: &crate::pdf::EncryptionState| {
                 [
                     state.default_stream_filter().to_vec(),
                     state.default_string_filter().to_vec(),

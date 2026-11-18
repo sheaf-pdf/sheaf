@@ -6,8 +6,8 @@
 
 use std::path::Path;
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::{Document, FixedCount, FlatOutlineItem, Store};
 use sheaf_edit::DestView;

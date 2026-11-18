@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use lopdf::Object;
+use crate::pdf::Object;
 
 use super::*;
 use crate::forms::corpus::Corpus;
@@ -12,7 +12,7 @@ use crate::source::Limits;
 use crate::store::{BlobKind, Store};
 
 /// One signature field, `Sig`, on a page with a text field, `a.b`.
-fn signable() -> (Form, lopdf::ObjectId) {
+fn signable() -> (Form, crate::pdf::ObjectId) {
     let mut f = Form::new(1);
     let b = f.text("b", 0, row(1));
     f.group("a", &[b]);

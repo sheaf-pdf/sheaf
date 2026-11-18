@@ -34,8 +34,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::pdf::{Document as Pdf, Object, ObjectId};
 use anyhow::{Result, bail};
-use lopdf::{Document as Pdf, Object, ObjectId};
 
 use super::append::Refused;
 use super::emit::Emission;
@@ -342,7 +342,7 @@ pub fn dense(
 
 #[cfg(test)]
 mod tests {
-    use lopdf::{Stream, dictionary};
+    use crate::pdf::{Stream, dictionary};
 
     use super::*;
 

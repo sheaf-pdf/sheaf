@@ -15,8 +15,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lopdf::xref::XrefType;
-use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::xref::XrefType;
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, Stream, dictionary};
 use sheaf_doc::tx::fixture::{move_pages, rotate};
 use sheaf_edit::{Rotation, Turn};
 use sheaf_image::raster::{PixelFormat, Raster};

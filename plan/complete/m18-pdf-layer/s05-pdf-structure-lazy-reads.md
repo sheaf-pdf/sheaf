@@ -1,10 +1,10 @@
 # M18 slice 5: pdf-structure, lazy reads
 
-Status: open · Part of [M18: the PDF layer](../README.md) · in pdf-lint's workspace, by pdf-lint's agent
+Status: done · Part of [M18: the PDF layer](../../m18-pdf-layer/README.md) · in pdf-lint's workspace, by pdf-lint's agent
 
 **What:** one reader, two strategies (the notes): pdf-lint's read whole,
 and sheaf's read on demand, which `LazyPdf` does today
-([crates.md](../crates.md#where-lazypdf-goes-pdf-structure-not-pdf-semantics)).
+([crates.md](../../m18-pdf-layer/crates.md#where-lazypdf-goes-pdf-structure-not-pdf-semantics)).
 `LazyPdf` is the model and the oracle, not code to copy.
 
 - **A byte source read by position:** in memory, or a file read in
@@ -27,7 +27,7 @@ and sheaf's read on demand, which `LazyPdf` does today
 - **Read whole** is every object read through the same code: pdf-lint
   reads that way.
 
-**From sheaf** ([from-sheaf.md](../from-sheaf.md#reading-slice-5s-models)):
+**From sheaf** ([from-sheaf.md](../../m18-pdf-layer/from-sheaf.md#reading-slice-5s-models)):
 B3's `holds_linearization`, `source/limits.rs`, the fuzz bodies of
 `source/fuzz.rs` and the differential test `source/lazy_tests.rs`.
 
@@ -38,5 +38,9 @@ B3's `holds_linearization`, `source/limits.rs`, the fuzz bodies of
 - whole and lazy agree, object for object, on sheaf's corpus;
 - a fuzz body that opens and reads lazily, under the caps;
 - open and per-object times beside `LazyPdf`'s on sheaf's heavy 7k
-  file, a bench here; [slice 8](s08-sheaf-reads-through-pdf-structure.md)
+  file, a bench here; [slice 8](../../m18-pdf-layer/slices/s08-sheaf-reads-through-pdf-structure.md)
   holds the 7k gate.
+
+## Notes
+
+Landed on `sheaf-pdf/pdf-lint` `main` (`pdf_structure::Reading`, `FileBytes`, `Limits`, `Facts`, `Record`, `Recovery::Verified` and `Recovery::Pdfium`).

@@ -249,10 +249,10 @@ pub(crate) fn counted_pages(opened: &Snapshot, selected: &[usize]) -> (Vec<PageI
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{Document as Pdf, Object, Stream, dictionary};
     use sheaf_doc::Document;
     use sheaf_doc::generate::header;
     use sheaf_doc::model::WatermarkGen;
+    use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
     use sheaf_edit::Z;
 
     /// A file of three Letter pages, a header on each: Acrobat's, the

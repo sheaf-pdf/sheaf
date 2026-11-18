@@ -663,7 +663,7 @@ mod tests {
     /// the first and a block at (100..250, 500..600) on the second, opened
     /// from `dir` as the app opens them.
     fn blocks(dir: &std::path::Path) -> Document {
-        use lopdf::{Document as Pdf, Object, Stream, dictionary};
+        use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
         let mut pdf = Pdf::with_version("1.7");
         let root = pdf.new_object_id();
         let drawn: [&[u8]; 2] = [

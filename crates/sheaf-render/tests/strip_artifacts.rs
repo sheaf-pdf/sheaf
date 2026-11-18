@@ -12,10 +12,10 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::content::{
     DrawnForms, PagOrigin, PageBlocks, PageContent, PaginationKind, ResCx, contents, splice_each,
 };
+use sheaf_doc::pdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::source::Limits;
 use sheaf_edit::Rotation;
 use sheaf_image::raster::{PixelFormat, Raster};

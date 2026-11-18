@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::Context;
 
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_edit::Rotation;
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::PageIndex;

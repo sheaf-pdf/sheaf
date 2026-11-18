@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId};
 use serde::{Deserialize, Serialize};
 
 use crate::attachments::{Objects, once, resolve};
@@ -365,7 +365,7 @@ fn letters(n: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{Document as Pdf, dictionary};
+    use crate::pdf::{Document as Pdf, dictionary};
 
     fn range(start: u32, style: Style, prefix: &str, first: u32) -> LabelRange {
         LabelRange {
@@ -443,7 +443,7 @@ mod tests {
 #[cfg(test)]
 mod edit_tests {
     use super::*;
-    use lopdf::Document as Pdf;
+    use crate::pdf::Document as Pdf;
 
     fn r(start: u32, style: Style, prefix: &str, first: u32) -> LabelRange {
         LabelRange {
@@ -500,8 +500,8 @@ mod edit_tests {
         let tree = number_tree(&ranges);
         let mut pdf = Pdf::with_version("1.7");
         let tree_id = pdf.add_object(tree);
-        let catalog =
-            pdf.add_object(lopdf::dictionary! { "Type" => "Catalog", "PageLabels" => tree_id });
+        let catalog = pdf
+            .add_object(crate::pdf::dictionary! { "Type" => "Catalog", "PageLabels" => tree_id });
         pdf.trailer.set("Root", catalog);
         assert_eq!(label_ranges(&pdf).unwrap(), ranges);
     }

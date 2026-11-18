@@ -23,7 +23,7 @@ pub mod integrity;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, LazyPdf, Object, ObjectId};
 
 use super::{Field, FieldKind, FileForm};
 use crate::attachments::{Objects, resolve};

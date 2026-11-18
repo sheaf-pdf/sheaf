@@ -7,14 +7,14 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 pub struct PdfFile {
-    inner: lopdf::Document,
+    inner: crate::pdf::Document,
 }
 
 impl PdfFile {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let inner =
-            lopdf::Document::load(path).with_context(|| format!("loading {}", path.display()))?;
+        let inner = crate::pdf::Document::load(path)
+            .with_context(|| format!("loading {}", path.display()))?;
         Ok(Self { inner })
     }
 
@@ -28,14 +28,14 @@ impl PdfFile {
         Ok(())
     }
 
-    pub fn into_inner(self) -> lopdf::Document {
+    pub fn into_inner(self) -> crate::pdf::Document {
         self.inner
     }
 }
 
 use std::collections::HashMap;
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId};
 use sheaf_edit::Rotation;
 
 use crate::annot::{Annot, AnnotKind, Box2, Pt, from_json};
@@ -205,7 +205,7 @@ impl ForeignAnnot {
 /// A name for an annotation without `/NM`, from what it says: the same
 /// every time it's read, so a reply made in sheaf can name it, and a save
 /// writes it in as its `/NM`.
-pub fn anon_name(dict: &lopdf::Dictionary) -> String {
+pub fn anon_name(dict: &crate::pdf::Dictionary) -> String {
     // The fields one after another, each ended by a byte no text has, and
     // their checksum: stable across builds, unlike std's hasher.
     let mut fields: Vec<u8> = Vec::new();
@@ -223,13 +223,13 @@ pub fn anon_name(dict: &lopdf::Dictionary) -> String {
     ] {
         let v = dict.get(key).ok();
         match v {
-            Some(lopdf::Object::Array(a)) => {
+            Some(crate::pdf::Object::Array(a)) => {
                 for o in a {
                     // As an f32, as reals were read before, so names stay.
                     eat(format!("{:.2}", o.as_float().unwrap_or(0.0) as f32).as_bytes());
                 }
             }
-            Some(lopdf::Object::Name(n)) => eat(n),
+            Some(crate::pdf::Object::Name(n)) => eat(n),
             Some(o) => eat(pdf_text(o).as_bytes()),
             None => eat(b""),
         }
@@ -238,7 +238,7 @@ pub fn anon_name(dict: &lopdf::Dictionary) -> String {
 }
 
 /// What an annotation is called in threads: its `/NM`, else [`anon_name`].
-pub fn thread_name(dict: &lopdf::Dictionary) -> String {
+pub fn thread_name(dict: &crate::pdf::Dictionary) -> String {
     dict.get(b"NM")
         .ok()
         .map(pdf_text)
@@ -313,11 +313,11 @@ impl AnnotsInFile {
 }
 
 /// [`load_pdf`] for a file in memory.
-pub fn load_pdf_mem(bytes: &[u8], password: Option<&str>) -> Result<lopdf::Document> {
-    let mut pdf = lopdf::Document::load_mem(bytes)?;
+pub fn load_pdf_mem(bytes: &[u8], password: Option<&str>) -> Result<crate::pdf::Document> {
+    let mut pdf = crate::pdf::Document::load_mem(bytes)?;
     if pdf.is_encrypted() {
-        let options = lopdf::LoadOptions::with_password(password.unwrap_or(""));
-        pdf = lopdf::Document::load_mem_with_options(bytes, options)
+        let options = crate::pdf::LoadOptions::with_password(password.unwrap_or(""));
+        pdf = crate::pdf::Document::load_mem_with_options(bytes, options)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("decrypting")?;
     }
@@ -330,13 +330,13 @@ pub fn load_pdf_mem(bytes: &[u8], password: Option<&str>) -> Result<lopdf::Docum
 /// the `/Encrypt` dictionary out, so lopdf's own writer would write the
 /// file unencrypted; sheaf's writers take the encryption from the source
 /// instead ([`Source::crypt`](crate::source::Source::crypt)), and keep it.
-pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> {
+pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<crate::pdf::Document> {
     let mut pdf =
-        lopdf::Document::load(path).with_context(|| format!("loading {}", path.display()))?;
+        crate::pdf::Document::load(path).with_context(|| format!("loading {}", path.display()))?;
     if pdf.is_encrypted() {
         // lopdf only parses an encrypted file's objects when it has the
         // password at load time, so load again with it.
-        pdf = lopdf::Document::load_with_password(path, password.unwrap_or(""))
+        pdf = crate::pdf::Document::load_with_password(path, password.unwrap_or(""))
             .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("decrypting {}", path.display()))?;
     }
@@ -388,7 +388,7 @@ fn pdf_doc_char(b: u8) -> char {
 }
 
 /// Decode a PDF text string: UTF-16BE with BOM, else PDFDoc/Latin-1.
-pub fn pdf_text(o: &lopdf::Object) -> String {
+pub fn pdf_text(o: &crate::pdf::Object) -> String {
     match o.as_str() {
         Ok(bytes) => pdf_text_bytes(bytes),
         Err(_) => String::new(),
@@ -435,7 +435,7 @@ fn is_listed_subtype(s: &str) -> bool {
 /// or its attachment's file.
 pub fn annots_in<P: Objects + ?Sized>(
     pdf: &P,
-    pages: impl IntoIterator<Item = (lopdf::ObjectId, Rotation)>,
+    pages: impl IntoIterator<Item = (crate::pdf::ObjectId, Rotation)>,
 ) -> AnnotsInFile {
     let mut out = AnnotsInFile::default();
     for (i, (page_id, turn)) in pages.into_iter().enumerate() {
@@ -457,7 +457,7 @@ pub fn annots_in<P: Objects + ?Sized>(
         let mut found = Vec::new();
         // Other tools', each by its place in `found`, and their
         // dictionaries, to convert together.
-        let mut dicts: Vec<(usize, &lopdf::Dictionary)> = Vec::new();
+        let mut dicts: Vec<(usize, &crate::pdf::Dictionary)> = Vec::new();
         for (slot, entry) in list.iter().enumerate() {
             let Ok((object, obj)) = pdf.dereference(entry) else {
                 continue;
@@ -569,7 +569,7 @@ pub fn annots_in<P: Objects + ?Sized>(
             });
         }
         if !dicts.is_empty() {
-            let (at, dicts): (Vec<usize>, Vec<&lopdf::Dictionary>) = dicts.into_iter().unzip();
+            let (at, dicts): (Vec<usize>, Vec<&crate::pdf::Dictionary>) = dicts.into_iter().unzip();
             let marks = crate::import::convert_page(pdf, &dicts, turn, Default::default());
             for ((i, dict), m) in at.into_iter().zip(dicts).zip(marks) {
                 if let Found::Foreign(f) = &mut found[i].found {
@@ -590,10 +590,12 @@ pub fn annots_in<P: Objects + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{Object, Stream, dictionary};
+    use crate::pdf::{Object, Stream, dictionary};
 
     /// `pdf`'s pages, none of them turned, as [`annots_in`] takes them.
-    fn upright(pdf: &lopdf::Document) -> impl Iterator<Item = (lopdf::ObjectId, Rotation)> + '_ {
+    fn upright(
+        pdf: &crate::pdf::Document,
+    ) -> impl Iterator<Item = (crate::pdf::ObjectId, Rotation)> + '_ {
         pdf.page_iter().map(|page| (page, Rotation::R0))
     }
 
@@ -603,10 +605,10 @@ mod tests {
     /// computes is written as the digits it always was.
     #[test]
     fn reals_keep_their_digits() {
-        use lopdf::content::{Content, Operation};
+        use crate::pdf::content::{Content, Operation};
         const TEXTS: [&str; 3] = ["0.1", "123456.789", "306.1234567890123"];
         let reals = || TEXTS.map(|t| Object::Real(t.parse().unwrap())).to_vec();
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let ops = format!("{} {} m\n{} w", TEXTS[1], TEXTS[2], TEXTS[0]);
         let content = pdf.add_object(Stream::new(dictionary! {}, ops.clone().into_bytes()));
@@ -624,7 +626,7 @@ mod tests {
         let mut first = Vec::new();
         pdf.save_to(&mut first).unwrap();
 
-        let mut read = lopdf::Document::load_mem(&first).unwrap();
+        let mut read = crate::pdf::Document::load_mem(&first).unwrap();
         let mut written = Vec::new();
         read.save_to(&mut written).unwrap();
         let array = format!("[{}]", TEXTS.join(" "));
@@ -633,7 +635,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&written)
         );
-        let again = lopdf::Document::load_mem(&written).unwrap();
+        let again = crate::pdf::Document::load_mem(&written).unwrap();
         let dict = again.get_dictionary(page).unwrap();
         assert_eq!(
             dict.get(b"SheafReals").unwrap().as_array().unwrap(),
@@ -659,8 +661,8 @@ mod tests {
 
     #[test]
     fn their_threads_read_with_states_and_groups() {
-        use lopdf::{Object, Stream, dictionary};
-        let mut pdf = lopdf::Document::with_version("1.7");
+        use crate::pdf::{Object, Stream, dictionary};
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
         let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
@@ -717,8 +719,8 @@ mod tests {
     /// kept.
     #[test]
     fn a_mark_this_build_cant_read_is_another_tool_s() {
-        use lopdf::{Object, Stream, dictionary};
-        let mut pdf = lopdf::Document::with_version("1.7");
+        use crate::pdf::{Object, Stream, dictionary};
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
         let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
@@ -788,8 +790,8 @@ mod tests {
     /// tool's Caret, a StrikeOut is another tool's.
     #[test]
     fn a_strike_grouped_under_a_sheaf_caret_is_its_companion() {
-        use lopdf::{Object, Stream, dictionary};
-        let mut pdf = lopdf::Document::with_version("1.7");
+        use crate::pdf::{Object, Stream, dictionary};
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
         let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
@@ -837,7 +839,7 @@ mod tests {
         );
         let note = crate::serialize::built::to_pdf(&note, &mut pdf).main;
         let note = pdf.add_object(note);
-        let grouped = |pdf: &mut lopdf::Document, under| {
+        let grouped = |pdf: &mut crate::pdf::Document, under| {
             pdf.add_object(dictionary! {
                 "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(),
                 "IRT" => under, "RT" => "Group",
@@ -881,16 +883,16 @@ mod tests {
     /// with its object.
     #[test]
     fn reads_foreign_and_sheaf_annotations() {
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
         let note = pdf.add_object(dictionary! {
             "Type" => "Annot",
             "Subtype" => "Text",
             "Rect" => Object::Array(vec![100.0.into(), 700.0.into(), 120.0.into(), 720.0.into()]),
-            "T" => Object::String(b"Reviewer".to_vec(), lopdf::StringFormat::Literal),
-            "Contents" => Object::String(vec![0xFE, 0xFF, 0x00, b'H', 0x00, b'i', 0x20, 0x14], lopdf::StringFormat::Hexadecimal),
-            "M" => Object::String(b"D:20260101120000Z".to_vec(), lopdf::StringFormat::Literal),
+            "T" => Object::String(b"Reviewer".to_vec(), crate::pdf::StringFormat::Literal),
+            "Contents" => Object::String(vec![0xFE, 0xFF, 0x00, b'H', 0x00, b'i', 0x20, 0x14], crate::pdf::StringFormat::Hexadecimal),
+            "M" => Object::String(b"D:20260101120000Z".to_vec(), crate::pdf::StringFormat::Literal),
         });
         let link = pdf.add_object(dictionary! {
             "Type" => "Annot",
@@ -964,7 +966,7 @@ mod tests {
     /// the stamp converted through its appearance.
     #[test]
     fn annotations_read_from_a_source_as_loaded() {
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
         let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
         let text = |s: &str| Object::string_literal(s);

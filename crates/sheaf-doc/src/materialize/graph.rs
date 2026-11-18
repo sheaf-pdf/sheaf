@@ -10,8 +10,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::pdf::{Document as Pdf, Object, ObjectId, Stream};
 use anyhow::{Context, Result, bail};
-use lopdf::{Document as Pdf, Object, ObjectId, Stream};
 
 use super::emit::{Emission, SymObject, Syms};
 use super::key::ObjKey;
@@ -338,7 +338,7 @@ fn follow(obj: &mut Object, to: &mut dyn FnMut(ObjectId) -> Option<ObjectId>) {
 mod tests {
     use std::cell::RefCell;
 
-    use lopdf::dictionary;
+    use crate::pdf::dictionary;
 
     use super::*;
     use crate::materialize::append::refs;

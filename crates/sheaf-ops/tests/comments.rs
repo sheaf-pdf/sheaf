@@ -10,9 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::export::Export;
 use sheaf_doc::materialize::AskAnswers;
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::save::text_string;
 use sheaf_doc::tx::fixture::add;
 use sheaf_doc::{Actor, Annot, AnnotId, AnnotKind, Box2, Pt};
@@ -465,7 +465,7 @@ fn links_are_foreign_records() {
     let doc = comments::open(&path, None).unwrap().doc;
     let st = doc.state();
     let p0 = st.order()[0];
-    let theirs: Vec<(String, Option<lopdf::ObjectId>)> = (st.foreign_on(p0))
+    let theirs: Vec<(String, Option<sheaf_doc::pdf::ObjectId>)> = (st.foreign_on(p0))
         .map(|(_, f)| (f.summary.subtype.clone(), f.src.as_ref().map(|o| o.id)))
         .collect();
     assert_eq!(theirs, [("Link".to_string(), Some(link))]);

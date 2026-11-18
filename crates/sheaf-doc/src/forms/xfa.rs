@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use lopdf::{Dictionary, Object};
+use crate::pdf::{Dictionary, Object};
 use quick_xml::events::{BytesStart, Event};
 
 use crate::attachments::{Objects, resolve};

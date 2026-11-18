@@ -22,14 +22,14 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use image::GrayImage;
-use lopdf::xref::XrefType;
-use lopdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::export::{Export, ExportFrom, Out};
 use sheaf_doc::forms::corpus::Corpus;
 use sheaf_doc::forms::fixture::{Form, Rect, source};
 use sheaf_doc::forms::{FileForm, Finding, Report, Value, check};
 use sheaf_doc::geom::Geom;
 pub use sheaf_doc::materialize::{How, StrategyKind};
+use sheaf_doc::pdf::xref::XrefType;
+use sheaf_doc::pdf::{Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture as fx;
 use sheaf_doc::{

@@ -6,8 +6,8 @@
 
 use std::path::Path;
 
+use crate::pdf::{Document as Pdf, LazyPdf, Object, StringFormat, XrefKind, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, LazyPdf, Object, StringFormat, XrefKind, dictionary};
 use sheaf_edit::{OutlinePolicy, PageNumbering, Rotation, Turn};
 
 use super::*;
@@ -81,7 +81,7 @@ fn run_it(e: Export) -> Result<Exported, ExportError> {
 }
 
 /// The subtypes of the annotations `pdf`'s page `page` lists, sorted.
-fn subtypes(pdf: &Pdf, page: lopdf::ObjectId) -> Vec<String> {
+fn subtypes(pdf: &Pdf, page: crate::pdf::ObjectId) -> Vec<String> {
     let dict = pdf.get_dictionary(page).unwrap();
     let Ok(annots) = dict.get(b"Annots") else {
         return Vec::new();

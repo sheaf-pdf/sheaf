@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 
 /// Pages: 0 text, 1 empty, 2 "intentionally left blank", 3 a link on an
 /// empty page, 4 a lone signature stroke, 5 another empty page.

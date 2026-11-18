@@ -8,8 +8,8 @@
 //! of it left. Opened again, the block is the file's, kept in its slot,
 //! and a second flatten adds another after it.
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{FlattenSet, Rotation};
 
 use super::How;

@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
 use crate::content::{self, ContentFault, PageContent, ResCx, Tok};
 use crate::source::Limits;
@@ -372,7 +372,7 @@ fn entries(at: ObjectId, dict: &Dictionary, f: &mut dyn FnMut(ObjectId, Said)) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{Stream, dictionary};
+    use crate::pdf::{Stream, dictionary};
 
     /// The table derives what Strip takes out of lists and streams, and
     /// matches names exactly or by prefix as it says.

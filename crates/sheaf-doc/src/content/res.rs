@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId};
 
 use super::FontRes;
 

@@ -14,9 +14,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use in_progress::NoProgress;
-use lopdf::Object;
 use sheaf_doc::forms::corpus::{Corpus, each_entry};
 use sheaf_doc::materialize::{Came, How};
+use sheaf_doc::pdf::Object;
 use sheaf_doc::serialize::crypt::Crypt;
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::rotate;

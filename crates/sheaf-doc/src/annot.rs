@@ -35,8 +35,8 @@
 
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Object, Stream, StringFormat, dictionary};
 use anyhow::Context as _;
-use lopdf::{Dictionary, Object, Stream, StringFormat, dictionary};
 use serde::{Deserialize, Serialize};
 use sheaf_edit::Rotation;
 use unicode_normalization::UnicodeNormalization;
@@ -289,7 +289,7 @@ pub const MARKED: &str = "Marked";
 pub const REVIEW_STATES: [&str; 5] = ["None", "Accepted", "Rejected", "Cancelled", "Completed"];
 
 /// A box array as `[x0, y0, x1, y1]`, normalized.
-pub fn box_of(arr: &[lopdf::Object]) -> Option<[f32; 4]> {
+pub fn box_of(arr: &[crate::pdf::Object]) -> Option<[f32; 4]> {
     if arr.len() != 4 {
         return None;
     }
@@ -2860,7 +2860,7 @@ mod tests {
     #[test]
     fn marks_in_a_save_share_their_resources() {
         let marks = crate::forms::fixture::holding(&crate::forms::fixture::every_mark_kind());
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let mut cx = WriteCx::new();
         let mut fonts = std::collections::BTreeSet::new();
         let mut states = std::collections::BTreeSet::new();
@@ -2963,7 +2963,7 @@ mod tests {
             turn: Rotation::R90,
             name: String::new(),
         };
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let Written { main: dict, .. } = to_pdf(&a, &mut pdf);
         let ap = dict.get(b"AP").unwrap().as_dict().unwrap();
         let stream = pdf
@@ -3054,7 +3054,7 @@ mod tests {
         text.contents = "Up".into();
         text.turn = Rotation::R90;
         assert_eq!(text.upright().bounds().w, 200.0, "it reads wide");
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let main = to_pdf(&text, &mut pdf).main;
         let ap = main.get(b"AP").unwrap().as_dict().unwrap();
         let id = ap.get(b"N").unwrap().as_reference().unwrap();
@@ -3130,7 +3130,7 @@ mod tests {
 
     #[test]
     fn fills_dashes_and_arrowheads_reach_the_file() {
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let mut square = mark(AnnotKind::Square {
             rect: bx(10.0, 10.0, 100.0, 50.0),
         });
@@ -3212,7 +3212,7 @@ mod tests {
             rect: bx(10.0, 10.0, 24.0, 24.0),
             glyph: "✓".into(),
         });
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let main = to_pdf(&tick, &mut pdf).main;
         assert_eq!(main.get(b"Subtype").unwrap().as_name().unwrap(), b"Stamp");
         assert_eq!(main.get(b"Name").unwrap().as_name().unwrap(), b"Tick");
@@ -3261,7 +3261,7 @@ mod tests {
 
     #[test]
     fn polygons_and_callouts_write_their_keys() {
-        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut pdf = crate::pdf::Document::with_version("1.7");
         let mut poly = mark(AnnotKind::Polygon {
             points: vec![
                 Pt { x: 10.0, y: -10.0 },

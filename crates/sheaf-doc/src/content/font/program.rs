@@ -29,7 +29,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
-use lopdf::{Dictionary, Object};
+use crate::pdf::{Dictionary, Object};
 use skrifa::MetadataProvider;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};

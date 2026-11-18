@@ -23,7 +23,7 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
-use lopdf::{Object, dictionary};
+use crate::pdf::{Object, dictionary};
 
 use crate::annot::{Box2, Pt};
 use crate::content::{BlockId, ContentWriter, Glyphless, Reserved, ResourceNeeds, TextMode};
@@ -186,7 +186,7 @@ pub(crate) fn block(
 
 #[cfg(test)]
 mod tests {
-    use lopdf::Document as Pdf;
+    use crate::pdf::Document as Pdf;
     use sheaf_edit::Rotation;
 
     use super::*;

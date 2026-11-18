@@ -366,7 +366,7 @@ fn the_command_line_is_as_its_goldens_say() {
         match case.name {
             "edit-force-refused" => assert_eq!(std::fs::read(&taken).unwrap(), b"taken"),
             "edit-force-replaces" => {
-                let pdf = lopdf::Document::load(&taken).unwrap();
+                let pdf = sheaf_doc::pdf::Document::load(&taken).unwrap();
                 assert_eq!(pdf.get_pages().len(), 4);
             }
             _ => {}

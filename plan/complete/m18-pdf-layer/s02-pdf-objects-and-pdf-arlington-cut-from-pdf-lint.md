@@ -1,8 +1,8 @@
 # M18 slice 2: pdf-objects and pdf-arlington, cut from pdf-lint
 
-Status: open · Part of [M18: the PDF layer](../README.md) · in pdf-lint's workspace, by pdf-lint's agent
+Status: done · Part of [M18: the PDF layer](../../m18-pdf-layer/README.md) · in pdf-lint's workspace, by pdf-lint's agent
 
-**What:** the first cuts of [crates.md](../crates.md#where-pdf-lints-modules-go),
+**What:** the first cuts of [crates.md](../../m18-pdf-layer/crates.md#where-pdf-lints-modules-go),
 which change nothing pdf-lint does.
 
 - **pdf-objects:** `object.rs`, `text.rs`, `version.rs`, and `bytes.rs`'s
@@ -17,7 +17,7 @@ which change nothing pdf-lint does.
 - **`text::passwords` to pdf-crypt.**
 - pdf-lint keeps the rest and depends on both.
 
-**From sheaf** ([from-sheaf.md](../from-sheaf.md#for-pdf-lint-itself)):
+**From sheaf** ([from-sheaf.md](../../m18-pdf-layer/from-sheaf.md#for-pdf-lint-itself)):
 the `ObjectStream` check pdf-lint 0.1.0 skips, which sheaf's tests
 stand in for, can land with or after pdf-arlington's cut.
 
@@ -31,3 +31,7 @@ stand in for, can land with or after pdf-arlington's cut.
 - each new crate's own unit tests and fuzz body, moved with its code;
 - `cargo tree`: pdf-arlington doesn't reach pdf-structure's code, pdf-objects
   reaches only pdf-tokenizer.
+
+## Notes
+
+Landed on `sheaf-pdf/pdf-lint` `main` (`crates/pdf-objects`, `crates/pdf-arlington`).

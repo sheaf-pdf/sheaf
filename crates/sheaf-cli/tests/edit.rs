@@ -10,11 +10,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use common::{binder, edits, ok, run, scratch, sheaf};
-use lopdf::{Document as Pdf, Object};
 use serde_json::{Value, json};
 use sheaf_doc::effects::SigClass;
 use sheaf_doc::forms::corpus::{Corpus, Entry};
 use sheaf_doc::forms::sigs::{Pending, sig_impact};
+use sheaf_doc::pdf::{Document as Pdf, Object};
 
 /// What marks an example in docs/document-model.md: the line before its
 /// `json` block.

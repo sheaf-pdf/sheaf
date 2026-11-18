@@ -19,9 +19,9 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::thread::ScopedJoinHandle;
 
+use crate::pdf::{Dictionary, Object, ObjectId, XrefFacts, XrefKind};
 use anyhow::{Context as _, Result, bail};
 use in_progress::Progress;
-use lopdf::{Dictionary, Object, ObjectId, XrefFacts, XrefKind};
 
 use super::crypt::Crypt;
 use super::group::{self, Use};
@@ -267,7 +267,7 @@ fn file<'a>(
 /// each object written anew at its number, unencrypted, with a
 /// cross-reference table and the header `pdf`'s version gives. The same
 /// document writes the same bytes, so it interns as the same blob.
-pub fn write_built(pdf: &lopdf::Document) -> Result<Vec<u8>> {
+pub fn write_built(pdf: &crate::pdf::Document) -> Result<Vec<u8>> {
     let Some(version) = PdfVersion::parse(pdf.version.as_bytes()) else {
         bail!("{:?} isn't a PDF version", pdf.version);
     };

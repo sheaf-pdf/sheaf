@@ -19,8 +19,8 @@
 
 use std::io::Write;
 
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use image::{Rgb, RgbImage};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 
 use super::interp::Encoded;
 use super::{Foreign, Glyphless, PageContent, contents};

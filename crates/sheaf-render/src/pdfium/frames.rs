@@ -360,7 +360,7 @@ fn char_boxes_lie_within_a_sixteenth_of_a_point_of_pdfium_s() {
 /// A Letter page the file turns 90°, its crop box off the origin, with a
 /// line of Helvetica across the page and one drawn up it.
 fn turned_text() -> Vec<u8> {
-    use lopdf::{Document, Stream, dictionary};
+    use sheaf_doc::pdf::{Document, Stream, dictionary};
     let mut pdf = Document::with_version("1.5");
     let pages = pdf.new_object_id();
     let font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" };

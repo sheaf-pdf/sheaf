@@ -20,8 +20,8 @@
 
 use std::collections::HashMap;
 
+use crate::pdf::ObjectId;
 use anyhow::{Context as _, Result, bail};
-use lopdf::ObjectId;
 
 use crate::materialize::ObjKey;
 use crate::serialize::NUMBERS;

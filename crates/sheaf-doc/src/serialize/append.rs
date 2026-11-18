@@ -23,8 +23,8 @@ use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::pdf::{Dictionary, Object, ObjectId, XrefKind};
 use anyhow::Result;
-use lopdf::{Dictionary, Object, ObjectId, XrefKind};
 
 use super::crypt::Crypt;
 use super::durable::{self, FileStamp, WriteError, read_range, startxref};

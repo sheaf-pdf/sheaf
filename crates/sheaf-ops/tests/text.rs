@@ -28,11 +28,11 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::executor::block_on;
-use lopdf::xref::XrefType;
-use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::geom::Geom;
 use sheaf_doc::materialize::How;
+use sheaf_doc::pdf::xref::XrefType;
+use sheaf_doc::pdf::{Document as Pdf, Stream, dictionary};
 use sheaf_doc::realize::{EngineKey, GroupKey, ViewInputs};
 use sheaf_doc::serialize::fixture::revision_cut_out;
 use sheaf_doc::store::BlobKind;

@@ -37,8 +37,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::pdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use in_progress::NoProgress;
-use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary};
 use proptest::prelude::*;
 use sheaf_edit::{Anchor, HeaderFooterSpec, Op, PageRef, Style as MarkStyle, Turn, Z};
 

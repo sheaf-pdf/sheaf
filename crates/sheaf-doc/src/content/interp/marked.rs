@@ -7,7 +7,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object, ObjectId};
+use crate::pdf::{Dictionary, Object, ObjectId};
 
 use super::UseId;
 use crate::content::Props;

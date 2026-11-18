@@ -8,11 +8,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use in_progress::NoProgress;
-use lopdf::xref::XrefType;
-use lopdf::{
+use crate::pdf::xref::XrefType;
+use crate::pdf::{
     ByteSource, Dictionary, Document as Pdf, LazyPdf, Object, ObjectId, Stream, dictionary,
 };
+use in_progress::NoProgress;
 use sheaf_edit::{Rotation, Turn};
 
 use super::append::append;

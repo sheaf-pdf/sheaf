@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use in_progress::NoProgress;
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_edit::{GridPos, Op, Turn, WatermarkContent, Z};
 
 use super::append_tests::{appended_in_place, keys_at, planned_in_place, square, written};
@@ -504,7 +504,10 @@ fn an_empty_block_keeps_its_page_in_scope() {
     let (mut dict, _) = stream(&pdf, ids[3]);
     let empty = sheaf_util::checksum(&[]).to_be_bytes().to_vec();
     let marker = dict.get_mut(b"SHEF_Block").unwrap().as_dict_mut().unwrap();
-    marker.set("L", Object::String(empty, lopdf::StringFormat::Hexadecimal));
+    marker.set(
+        "L",
+        Object::String(empty, crate::pdf::StringFormat::Hexadecimal),
+    );
     dict.remove(b"Filter");
     let block = pdf.add_object(Stream::new(dict, Vec::new()));
     let mut entries: Vec<Object> = ids.iter().map(|&i| Object::Reference(i)).collect();

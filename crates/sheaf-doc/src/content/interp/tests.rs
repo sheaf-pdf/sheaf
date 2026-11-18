@@ -7,7 +7,7 @@
 
 use std::ops::{ControlFlow, Range};
 
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use crate::pdf::{Document as Pdf, Object, Stream, dictionary};
 use proptest::prelude::*;
 
 use super::state::number;
@@ -830,7 +830,7 @@ fn fonts_sharing_a_heavy_program_end_within_the_budget() {
         "Encoding" => "Identity-H", "DescendantFonts" => vec![cid_font.into()],
     };
     for (font, shown) in [(simple, "(A)"), (composite, "<0002>")] {
-        let mut fonts = lopdf::Dictionary::new();
+        let mut fonts = crate::pdf::Dictionary::new();
         let mut content = Vec::new();
         for n in 0..1000 {
             fonts.set(format!("F{n}"), pdf.add_object(font.clone()));
@@ -857,7 +857,7 @@ fn a_form_of_whitespace_costs_its_length_each_use() {
     let mut pdf = Pdf::with_version("1.7");
     let mut leaf = vec![b' '; 1 << 20];
     leaf.extend(b"n");
-    let form = |content: Vec<u8>, xobjects: lopdf::Dictionary| {
+    let form = |content: Vec<u8>, xobjects: crate::pdf::Dictionary| {
         Stream::new(
             dictionary! {
                 "Type" => "XObject", "Subtype" => "Form",
@@ -904,7 +904,7 @@ fn fonts_decompress_within_the_page_s_budget() {
             "CharProcs" => dictionary! { "a" => bomb },
         }
     };
-    let fonts: lopdf::Dictionary = (0..1000)
+    let fonts: crate::pdf::Dictionary = (0..1000)
         .map(|i| (format!("F{i}"), font().into()))
         .collect();
     let resources: Object = dictionary! { "Font" => fonts }.into();
@@ -1072,14 +1072,14 @@ struct Unreadable<'a> {
 }
 
 impl ReadObjects for Unreadable<'_> {
-    fn object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+    fn object(&self, id: ObjectId) -> crate::pdf::Result<&Object> {
         match id == self.id {
-            true => Err(lopdf::Error::InvalidStream("unreadable".into())),
+            true => Err(crate::pdf::Error::InvalidStream("unreadable".into())),
             false => self.pdf.get_object(id),
         }
     }
 
-    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> lopdf::Result<R> {
+    fn read<R>(&self, id: ObjectId, read: impl FnOnce(&Object) -> R) -> crate::pdf::Result<R> {
         self.object(id).map(read)
     }
 }

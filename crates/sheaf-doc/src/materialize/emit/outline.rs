@@ -25,8 +25,8 @@
 
 use std::collections::HashMap;
 
+use crate::pdf::{Dictionary, Object};
 use im::Vector;
-use lopdf::{Dictionary, Object};
 use sheaf_edit::DestView;
 
 use super::Cx;

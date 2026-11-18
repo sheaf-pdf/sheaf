@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use lopdf::{Object, StringFormat, dictionary};
+use crate::pdf::{Object, StringFormat, dictionary};
 use sha2::Digest as _;
 
 use super::*;
@@ -298,7 +298,7 @@ fn byte_ranges_are_hashed_as_given_and_cut_at_the_end() {
 /// the caps.
 #[test]
 fn a_byte_range_that_isn_t_pairs_is_unknown() {
-    let pdf = lopdf::Document::with_version("1.7");
+    let pdf = crate::pdf::Document::with_version("1.7");
     let limits = Limits::DEFAULT.forms;
     let sig = |range: Vec<Object>, contents: Object| {
         let dict = dictionary! { "ByteRange" => range, "Contents" => contents };

@@ -1823,7 +1823,7 @@ mod tests {
             .as_reference()
             .unwrap();
         let first = f.pages[0];
-        let kids: Vec<lopdf::Object> = [first, f.pages[1], first].map(Into::into).into();
+        let kids: Vec<crate::pdf::Object> = [first, f.pages[1], first].map(Into::into).into();
         f.dict(tree).set("Kids", kids);
         f.dict(tree).set("Count", 3);
         let mut d = crate::tx::tests::opened(f.bytes(), "twice.pdf");

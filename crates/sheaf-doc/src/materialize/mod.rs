@@ -115,9 +115,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::pdf::{ByteSource as _, Object, ObjectId, Stream, XrefKind};
 use anyhow::{Context as _, Result};
 use in_progress::Progress;
-use lopdf::{ByteSource as _, Object, ObjectId, Stream, XrefKind};
 
 pub use key::ObjKey;
 #[cfg(any(test, feature = "fixtures"))]
@@ -222,7 +222,7 @@ pub(crate) fn append_onto_saved(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(changed()),
         Err(e) => return Err(stopped(anyhow::Error::new(e))),
     };
-    let base = lopdf::FileBytes::new(file).map_err(|e| stopped(e.into()))?;
+    let base = crate::pdf::FileBytes::new(file).map_err(|e| stopped(e.into()))?;
     if base.len() as u64 != record.stamp.len {
         return Err(changed());
     }
@@ -520,7 +520,7 @@ fn rewrite(
 
 /// The page tree of `pdf`, a Rewrite's graph, whose nodes hold nothing
 /// but their place in it.
-fn written_tree(pdf: &lopdf::Document) -> TreeShape {
+fn written_tree(pdf: &crate::pdf::Document) -> TreeShape {
     let mut tree = TreeShape::of(pdf);
     for node in &mut tree.nodes {
         node.from = None;

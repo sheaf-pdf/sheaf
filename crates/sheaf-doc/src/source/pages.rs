@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Error, LazyPdf, Object, ObjectId};
+use crate::pdf::{Dictionary, Error, LazyPdf, Object, ObjectId};
 
 use super::{OpenError, PageTreeError, PageTreeLimits};
 use crate::geom::{Geom, Rect};

@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use in_progress::NoProgress;
-use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::annot::caret_box;
 use sheaf_doc::materialize::Came;
+use sheaf_doc::pdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_doc::realize::{EngineKey, Realizer, ViewInputs};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::tx::fixture::add;

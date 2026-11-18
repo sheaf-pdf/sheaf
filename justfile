@@ -197,6 +197,9 @@ boundaries:
     bad=$(cargo tree -p sheaf-edit -e normal --prefix none | awk '{print $1}' | sort -u \
       | grep -E '^sheaf-' | grep -vx 'sheaf-edit' || true)
     [ -z "$bad" ] || { echo "sheaf-edit depends on: $bad"; exit 1; }
+    bad=$(cargo tree --workspace -e all -i lopdf --prefix depth | awk '/^1sheaf-/ {print $1}' | sed 's/^1//' | sort -u \
+      | grep -vx 'sheaf-doc' || true)
+    [ -z "$bad" ] || { echo "crates outside sheaf-doc depend on lopdf directly: $bad"; exit 1; }
     cargo build -p sheaf-edit --target wasm32-wasip2
 
 [doc("Workspace clippy, -D warnings")]

@@ -1345,7 +1345,7 @@ fn an_op_is_named_as_op_json_names_it() {
 /// takes the part, which it draws. Adopted alone, it does.
 #[test]
 fn a_grouped_part_is_not_adopted_beside_its_comment() {
-    use lopdf::{Object, dictionary};
+    use crate::pdf::{Object, dictionary};
     let mut f = crate::forms::fixture::Form::new(1);
     let rect = |x: i64| vec![x.into(), 10.into(), (x + 20).into(), 30.into()];
     let text = f.pdf.add_object(dictionary! {
@@ -1394,10 +1394,10 @@ fn a_grouped_part_is_not_adopted_beside_its_comment() {
 /// page is.
 #[test]
 fn an_adopted_comment_keeps_its_thread_on_its_page() {
-    use lopdf::{Object, dictionary};
+    use crate::pdf::{Object, dictionary};
     let mut f = crate::forms::fixture::Form::new(2);
     let rect = |x: i64| vec![x.into(), 10.into(), (x + 20).into(), 30.into()];
-    let mut note = |nm: &str, irt: Option<lopdf::ObjectId>| {
+    let mut note = |nm: &str, irt: Option<crate::pdf::ObjectId>| {
         let mut dict = dictionary! {
             "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(10),
             "NM" => Object::string_literal(nm), "Contents" => Object::string_literal(nm),

@@ -3,7 +3,7 @@
 //! says is a header; and one Acrobat drew, a form its `/PieceInfo` says is
 //! a header. For tests here and in other crates (the `fixtures` feature).
 
-use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use crate::pdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 
 /// A header Acrobat drew after the page's content, as it writes it: its
 /// form, `/HeaderFm`, drawn in an artifact.

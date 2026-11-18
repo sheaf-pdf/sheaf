@@ -62,7 +62,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Object, ObjectId, Stream, dictionary};
+use crate::pdf::{Dictionary, Object, ObjectId, Stream, dictionary};
 
 use super::{Cx, Shown};
 use crate::annot::{self, Annot, AnnotId, AnnotKind, Emitted};
@@ -686,7 +686,7 @@ pub(crate) fn mark_kept<'b>(
 ///
 /// [`Closure::writes_page`]: crate::materialize::copy::Closure::writes_page
 pub(crate) fn leads_nowhere(
-    pdf: &lopdf::LazyPdf,
+    pdf: &crate::pdf::LazyPdf,
     dict: &Dictionary,
     written: impl Fn(ObjectId) -> bool,
 ) -> bool {
@@ -702,7 +702,7 @@ pub(crate) fn leads_nowhere(
 /// entry is a page of `pdf`, `Some(None)` when it's null or there's none,
 /// and None for anything else. A named destination is the name tree's to
 /// resolve.
-fn link_dest(pdf: &lopdf::LazyPdf, dict: &Dictionary) -> Option<Option<ObjectId>> {
+fn link_dest(pdf: &crate::pdf::LazyPdf, dict: &Dictionary) -> Option<Option<ObjectId>> {
     let deref = |o: &Object| pdf.dereference(o).ok().map(|(_, o)| o.clone());
     let dest = match dict.get(b"Dest") {
         Ok(dest) => deref(dest),
@@ -1000,7 +1000,7 @@ pub(crate) fn blob_form(
     index: u32,
 ) -> anyhow::Result<(Vec<Object>, crate::geom::Rect, crate::geom::Affine)> {
     let src = blob.source(&crate::source::Limits::DEFAULT)?;
-    let mut dst = lopdf::Document::new();
+    let mut dst = crate::pdf::Document::new();
     let form = (crate::stamp_lib::page_forms(&src, &[index], &mut dst)?).remove(0);
     let order: Vec<ObjectId> = std::iter::once(form.id)
         .chain(dst.objects.keys().copied().filter(|&id| id != form.id))

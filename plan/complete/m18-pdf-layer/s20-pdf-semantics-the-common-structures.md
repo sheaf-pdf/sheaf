@@ -1,6 +1,6 @@
 # M18 slice 20: pdf-semantics: the common structures
 
-Status: open · Part of [M18: the PDF layer](../README.md) · in pdf-lint's workspace, by pdf-lint's agent
+Status: done · Part of [M18: the PDF layer](../../m18-pdf-layer/README.md) · in pdf-lint's workspace, by pdf-lint's agent
 
 **What:** pdf-semantics starts with the structures both tools implement
 today, each once, read and written, over pdf-structure's resolver
@@ -28,9 +28,9 @@ defaulted), as the notes' views do.
 
 Not generated from Arlington here: the rest of pdf-semantics, and
 whether generated code carries the model's terms, are
-[later](../scope.md#weighed-for-the-family).
+[later](../../m18-pdf-layer/scope.md#weighed-for-the-family).
 
-**From sheaf** ([from-sheaf.md](../from-sheaf.md#pdf-semantics-slices-20-and-21)).
+**From sheaf** ([from-sheaf.md](../../m18-pdf-layer/from-sheaf.md#pdf-semantics-slices-20-and-21)).
 
 **Where:** `crates/pdf-semantics/`.
 
@@ -39,3 +39,7 @@ whether generated code carries the model's terms, are
 - pdf-lint's reports on sheaf's corpus, unchanged;
 - round trips: written, then read, gives what was written;
 - a fuzz body for the walks: loops, depth, any bytes, no panic.
+
+## Notes
+
+Landed on `sheaf-pdf/pdf-lint` `main` (`crates/pdf-semantics`: dates, trees, page trees with `Rules::Pdfium`, destinations, actions, outlines, labels, embedded files, OCGs, viewer prefs, `/Info`, XMP).
