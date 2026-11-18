@@ -93,7 +93,7 @@ oracles, the Arlington tests and the 7k gate.
 | [5](../complete/m18-pdf-layer/s05-pdf-structure-lazy-reads.md) | pdf-structure, lazy reads | done | 4 | pdf-lint |
 | [6](../complete/m18-pdf-layer/s06-pdf-filters-and-pdf-crypt-for-writing.md) | pdf-filters and pdf-crypt, for writing | done | — | pdf-lint |
 | [7](../complete/m18-pdf-layer/s07-pdf-structure-writing.md) | pdf-structure, writing | done | 3, 5, 6 | pdf-lint |
-| [8](slices/s08-sheaf-reads-through-pdf-structure.md) | sheaf reads through pdf-structure | open | 1, 5 | sheaf |
+| [8](../complete/m18-pdf-layer/s08-sheaf-reads-through-pdf-structure.md) | sheaf reads through pdf-structure | done | 1, 5 | sheaf |
 | [9](slices/s09-copies-without-a-second-parse.md) | Copies without a second parse, and object-stream members copied | open | 8 | sheaf |
 | [10](slices/s10-an-in-memory-document-of-sheaf-s-own.md) | An in-memory document of sheaf's own | open | 1, 8; F15 (soft) | sheaf |
 | [11](slices/s11-pdf-objects-types-through-sheaf.md) | pdf-objects' types through sheaf | open | 3, 10 | sheaf |

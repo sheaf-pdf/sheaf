@@ -31,6 +31,10 @@ pub struct Crypt {
     dict: Dictionary,
     /// Its number.
     at: ObjectId,
+    /// The catalog's `/Metadata` stream id when `/EncryptMetadata` is false
+    /// (ISO 32000-2 §7.6.4.2: only the document-level metadata stream is left
+    /// unencrypted, not component `/Type /Metadata` streams).
+    unencrypted_metadata: Option<ObjectId>,
     /// The trailer's `/ID[0]`, which RC4's and AES-128's keys are made
     /// from.
     first_id: Option<Vec<u8>>,
@@ -45,12 +49,22 @@ impl Crypt {
         let Some((state, at)) = pdf.encryption() else {
             return Ok(None);
         };
+        let unencrypted_metadata = (!state.encrypt_metadata())
+            .then(|| {
+                pdf.catalog()
+                    .ok()?
+                    .get(b"Metadata")
+                    .and_then(Object::as_reference)
+                    .ok()
+            })
+            .flatten();
         let ivs = Hmac::new_from_slice(state.file_encryption_key())
             .expect("HMAC takes a key of any length");
         Ok(Some(Crypt {
             state: state.clone(),
             dict: pdf.get_dictionary(at)?.clone(),
             at,
+            unencrypted_metadata,
             first_id: super::first_id(pdf.trailer()),
             ivs,
         }))
@@ -105,10 +119,29 @@ impl Crypt {
     ) -> crate::pdf::Result<Object> {
         let iv_key = key.bytes();
         let mut obj = obj.clone();
+        let saved_type = if !self.state.encrypt_metadata()
+            && Some(id) != self.unencrypted_metadata
+            && obj.type_name().ok() == Some(b"Metadata")
+        {
+            match &mut obj {
+                Object::Stream(s) => s.dict.remove(b"Type"),
+                Object::Dictionary(d) => d.remove(b"Type"),
+                _ => None,
+            }
+        } else {
+            None
+        };
         encryption::encrypt_object_with(&self.state, id, &mut obj, &mut |payload| {
             self.iv(&iv_key, payload)
         })
         .map_err(crate::pdf::Error::Decryption)?;
+        if let Some(t) = saved_type {
+            match &mut obj {
+                Object::Stream(s) => s.dict.set("Type", t),
+                Object::Dictionary(d) => d.set("Type", t),
+                _ => {}
+            }
+        }
         Ok(obj)
     }
 

@@ -4,7 +4,7 @@ Status: open · Part of [M18: the PDF layer](../README.md) · in sheaf
 
 **What:** the door's object types become pdf-objects', the migration's
 real cost ([sheaf.md](../sheaf.md#pdf-objects)). The conversion of
-[slice 8](s08-sheaf-reads-through-pdf-structure.md) goes: pdf-structure
+[slice 8](../../complete/m18-pdf-layer/s08-sheaf-reads-through-pdf-structure.md) goes: pdf-structure
 hands sheaf pdf-objects objects as they are.
 
 - `sheaf_doc::pdf`'s `Object`, `Dictionary`, `Stream`, `ObjectId`,

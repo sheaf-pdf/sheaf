@@ -8,7 +8,7 @@ for a document type behind the door with only what sheaf calls on it
 ([slice 1](../../complete/m18-pdf-layer/s01-one-door-for-lopdf.md)'s inventory): objects by id, the
 trailer, new ids, adding, pruning what nothing reaches, walking.
 
-- **Loaded whole** through pdf-structure ([slice 8](s08-sheaf-reads-through-pdf-structure.md)),
+- **Loaded whole** through pdf-structure ([slice 8](../../complete/m18-pdf-layer/s08-sheaf-reads-through-pdf-structure.md)),
   for the Rewrite graph (`materialize/graph.rs`, `copy.rs`, `kept.rs`,
   `number.rs`, `verify.rs`) and `recovery.rs`. If
   [F15](../../backlog/F15.md) has landed, the Rewrite graph reads

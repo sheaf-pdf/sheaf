@@ -725,7 +725,12 @@ fn allocator_numbers_above_size_and_xref_streams() {
     let views = views();
     let (_, r) = realized(&views, &d, p0, &ViewInputs::plugin());
     let bytes = r.segments.concat();
-    let pdf = LazyPdf::open(Arc::from(bytes.as_slice()), None, &ReadLimits::DEFAULT).unwrap();
+    let pdf = LazyPdf::open(
+        Arc::<[u8]>::from(bytes.as_slice()),
+        None,
+        &ReadLimits::DEFAULT,
+    )
+    .unwrap();
     let written = numbered(&r.segments[1]);
     let own: HashSet<u32> = src.pdf().ids().map(|id| id.0).collect();
     let fresh: Vec<u32> = written.into_iter().filter(|n| !own.contains(n)).collect();

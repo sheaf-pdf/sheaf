@@ -146,7 +146,7 @@ Status: open
 | [F26](F26.md) | skrifa past 0.46, for read-fonts' Type 1 parser of 0.43 and later | feature | 2026-10-24, the content interpreter's wrap-up |
 | [F27](F27.md) | Research: what sheaf should read from a corrupt Flate stream (corpus 5208359) | research | 2026-10-24, the content interpreter's wrap-up |
 | [F28](F28.md) | Register the `SHEF` prefix before the first release | feature | 2026-10-25, F24 |
-| [F29](F29.md) | Research: how the Arlington tier holds a damaged form pdf-lint reads nothing of | research | 2026-10-26, the pdf-lint item's slice 1 |
+| [F30](F30.md) | Upstream: pdf-structure XRef stream cap check before inflate and `/XRefStm` deduplication | upstream | 2026-11-18, M18 slice 8 |
 
 Outside material already compared against sheaf: [sources
 checked](../complete/backlog-sources-checked.md).

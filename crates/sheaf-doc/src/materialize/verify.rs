@@ -658,7 +658,7 @@ fn shown(items: &[&str]) -> String {
 fn reads_back(out: &Written, graph: &Graph) -> Result<()> {
     use std::sync::Arc;
     let read = crate::pdf::LazyPdf::open(
-        Arc::from(out.bytes),
+        Arc::<[u8]>::from(out.bytes),
         out.password,
         &crate::source::Limits::DEFAULT.reader,
     )?;

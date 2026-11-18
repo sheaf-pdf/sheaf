@@ -38,7 +38,7 @@ B3's `holds_linearization`, `source/limits.rs`, the fuzz bodies of
 - whole and lazy agree, object for object, on sheaf's corpus;
 - a fuzz body that opens and reads lazily, under the caps;
 - open and per-object times beside `LazyPdf`'s on sheaf's heavy 7k
-  file, a bench here; [slice 8](../../m18-pdf-layer/slices/s08-sheaf-reads-through-pdf-structure.md)
+  file, a bench here; [slice 8](s08-sheaf-reads-through-pdf-structure.md)
   holds the 7k gate.
 
 ## Notes

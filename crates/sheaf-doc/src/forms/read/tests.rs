@@ -951,7 +951,7 @@ fn a_cross_reference_stream_many_sections_share_is_read_once() {
     let at = bytes.len();
     bytes.extend_from_slice(padding.as_bytes());
     let header = bytes.len();
-    let dict = "/Type /XRef /Size 1000000 /W [1 4 2] /Filter /FlateDecode";
+    let dict = "/Type /XRef /Size 1000100 /Index [100 1000000] /W [1 4 2] /Filter /FlateDecode";
     let head = format!("99 0 obj\n<< {dict} /Length {} >>\nstream\n", entries.len());
     bytes.extend_from_slice(head.as_bytes());
     bytes.extend_from_slice(&entries);

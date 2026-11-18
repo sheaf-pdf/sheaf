@@ -27,7 +27,7 @@ use syn::{
 /// `ObjectId`, each with why.
 const ALLOWED: &[(&str, &str)] = &[
     (
-        "pdf.rs",
+        "pdf/",
         "the single door to the PDF object and structure layer (M18 slice 1)",
     ),
     (

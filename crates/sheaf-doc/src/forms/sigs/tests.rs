@@ -214,7 +214,9 @@ impl Signature {
     }
 }
 
-/// 1263925's signature dictionary doesn't decrypt.
+/// 1263925's `/SigRef` `/DigestValue` is unpadded, which broke lopdf's
+/// object decryption; pdf-structure reads the signature dictionary and
+/// its `/FieldMDP` lock cleanly (as qpdf and pyHanko do).
 #[test]
 fn the_corpus_s_undecryptable_signature_asks() {
     let Some(corpus) = Corpus::or_skip() else {
@@ -227,10 +229,8 @@ fn the_corpus_s_undecryptable_signature_asks() {
     };
     let sigs = read_back_bytes(bytes);
     assert_eq!(sigs.signed.len(), 1);
-    // Its field's, read where the form is whole.
-    assert!(sigs.signed[0].unreadable && !sigs.signed[0].field.is_empty());
-    let impact = sig_impact(&sigs, Pending::Append, SigClass::FILL, &BTreeSet::new());
-    assert_eq!(impact[0].verdict, Verdict::Invalid);
+    assert!(!sigs.signed[0].unreadable && !sigs.signed[0].field.is_empty());
+    assert!(!sigs.signed[0].locks.is_empty());
 }
 
 fn read_back_bytes(bytes: Vec<u8>) -> Signatures {
@@ -372,5 +372,5 @@ fn the_corpus_s_signatures() {
     eprintln!(
         "{files} files: {signatures} signatures, {certified} certifying; usage rights in {rights}"
     );
-    assert_eq!(unreadable, ["forms/safedocs/1263925.pdf"]);
+    assert!(unreadable.is_empty(), "{unreadable:?}");
 }

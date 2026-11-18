@@ -434,12 +434,23 @@ fn an_objstm_bomb_is_a_typed_error() {
     }
     assert!(started.elapsed() < QUICK);
 
-    // A cross-reference stream as a bomb fails the open: it isn't a
-    // damaged table to rebuild.
-    let bytes = with_stream(
+    // A cross-reference stream whose rows fit stops inflating after its
+    // rows even if 16 MiB of trailing Flate zeros follow; one whose rows
+    // run past `max_decompressed` fails the open without rebuilding.
+    let small_rows = with_stream(
         &[catalog(), pages()],
         &[],
         "/Filter /FlateDecode",
+        Some(bomb.clone()),
+    );
+    let started = Instant::now();
+    let _ = LazyPdf::open(Arc::<[u8]>::from(small_rows), None, &limits);
+    assert!(started.elapsed() < QUICK);
+
+    let bytes = with_stream(
+        &[catalog(), pages()],
+        &[],
+        "/Index [0 300000] /Filter /FlateDecode",
         Some(bomb),
     );
     let started = Instant::now();
@@ -643,7 +654,10 @@ fn a_10000_deep_reference_chain_is_a_typed_error() {
     assert_eq!(pdf.get_object((10_002, 0)).unwrap(), &Object::Integer(42));
     assert!(started.elapsed() < QUICK);
 
-    // Streams from 3 on, each with the next as its /Length.
+    // Streams from 3 on, each with the next as its /Length: ISO 32000-2
+    // §7.3.8.2 allows at most one indirect hop to an integer, so
+    // pdf-structure scans to `endstream` in O(1) rather than chasing a
+    // 10,000-deep chain.
     let mut objects = vec![catalog(), pages()];
     for n in 3..10_003 {
         objects.push((n, stream(&format!("/Length {} 0 R", n + 1), b"")));
@@ -652,16 +666,23 @@ fn a_10000_deep_reference_chain_is_a_typed_error() {
     let pdf = open(&with_table(&objects));
     let started = Instant::now();
     for _ in 0..2 {
-        assert!(matches!(pdf.get((3, 0)), Err(Error::Limit(Limit::Depth))));
+        assert!(
+            pdf.get((3, 0))
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .content
+                .is_empty()
+        );
     }
-    // Near its end the chain is short enough to read.
     assert!(pdf.get((10_000, 0)).is_ok());
     assert!(started.elapsed() < QUICK);
 }
 
-/// A stream whose `/Length` the parser can't read, a chain of references
-/// or an integral real, reads as the eager reader reads it, and its span
-/// ends after `endobj`, past its data.
+/// A stream whose `/Length` isn't a direct or one-hop integer matching
+/// `endstream` (a two-hop chain, an integral real, or a missing target)
+/// scans to `endstream` as PDFium reads it, its span ending after
+/// `endobj` and `raw_span_whole` refusing verbatim copy.
 #[test]
 fn a_stream_whose_length_the_parser_cant_read_spans_to_endobj() {
     let bytes = with_table(&[
@@ -669,35 +690,23 @@ fn a_stream_whose_length_the_parser_cant_read_spans_to_endobj() {
         pages(),
         (3, stream("/Length 6 0 R", b"abc")),
         (4, stream("/Length 3.0", b"abc")),
-        // A length that names nothing: read empty, as eagerly, with no
-        // end to its span.
         (5, stream("/Length 9 0 R", b"abc")),
         (6, b"7 0 R".to_vec()),
         (7, b"3".to_vec()),
     ]);
-    let eager = Pdf::load_mem(&bytes).unwrap();
     for pdf in [open(&bytes), open_file(&bytes, None)] {
-        assert_same(&eager, &pdf, "lengths");
-        for id in [(3, 0), (4, 0)] {
+        for id in [(3, 0), (4, 0), (5, 0)] {
             assert_eq!(pdf.get(id).unwrap().as_stream().unwrap().content, b"abc");
             let text = &bytes[pdf.raw_span(id).unwrap()];
             assert!(text.starts_with(format!("{} 0 obj", id.0).as_bytes()));
             assert!(text.ends_with(b"abc\nendstream\nendobj"), "{id:?}");
+            assert_eq!(pdf.raw_span_whole(id), None, "{id:?}");
         }
-        assert!(
-            pdf.get((5, 0))
-                .unwrap()
-                .as_stream()
-                .unwrap()
-                .content
-                .is_empty()
-        );
-        assert_eq!(pdf.raw_span((5, 0)), None);
     }
 }
 
-/// `object_unkept` reads what `object` reads without keeping it, but for
-/// what it resolved on the way, and gives what's kept as it's kept.
+/// `object_unkept` reads what `object` reads without keeping it or its
+/// indirect `/Length`, and gives what's already kept as it's kept.
 #[test]
 fn an_unkept_read_keeps_only_what_it_met() {
     let bytes = with_table(&[
@@ -711,12 +720,14 @@ fn an_unkept_read_keeps_only_what_it_met() {
     let pdf = open(&bytes);
     let unkept = pdf.object_unkept((3, 0)).unwrap();
     assert_eq!(unkept.as_stream().unwrap().content, b"abc");
-    assert!(!pdf.is_read((3, 0)) && pdf.is_read((4, 0)));
+    assert!(!pdf.is_read((3, 0)) && !pdf.is_read((4, 0)));
     assert_eq!(*unkept, *pdf.object((3, 0)).unwrap());
     let kept = pdf.object((5, 0)).unwrap();
     assert!(Arc::ptr_eq(&kept, &pdf.object_unkept((5, 0)).unwrap()));
-    // A failure the bytes decide is kept, as `get` keeps it.
+    // An unkept failure isn't kept; a kept `get` failure is.
     assert!(pdf.object_unkept((6, 0)).is_err());
+    assert!(!pdf.is_read((6, 0)));
+    assert!(pdf.get((6, 0)).is_err());
     assert!(pdf.is_read((6, 0)));
     assert!(matches!(
         pdf.object_unkept((9, 0)),
@@ -724,8 +735,8 @@ fn an_unkept_read_keeps_only_what_it_met() {
     ));
 }
 
-/// Finding where an object is reads it, to know it reads, but keeps it no
-/// more than an unkept read would: a Rewrite copying every object of a
+/// Finding where an object is reads it, to know it reads, without keeping
+/// it or its indirect `/Length`: a Rewrite copying every object of a
 /// large file as it is doesn't hold them all.
 #[test]
 fn a_raw_span_keeps_nothing_it_read() {
@@ -738,13 +749,15 @@ fn a_raw_span_keeps_nothing_it_read() {
     let pdf = open(&bytes);
     let span = pdf.raw_span((3, 0)).unwrap();
     assert!(bytes[span].starts_with(b"3 0 obj"));
-    assert!(!pdf.is_read((3, 0)) && pdf.is_read((4, 0)));
+    assert!(!pdf.is_read((3, 0)) && !pdf.is_read((4, 0)));
 }
 
 #[test]
 fn a_length_cycle_is_a_typed_error() {
     // 3's /Length is 4, a stream whose /Length is 3; 5's is itself; and 6's
-    // runs through a cycle of 60 streams, 7 to 66.
+    // runs through a cycle of 60 streams, 7 to 66. Under PDFium / ISO
+    // one-hop /Length rules, each scans to `endstream` without looping or
+    // deadlocking across concurrent threads.
     let mut objects = vec![
         catalog(),
         pages(),
@@ -757,23 +770,50 @@ fn a_length_cycle_is_a_typed_error() {
         let next = if n == 66 { 7 } else { n + 1 };
         objects.push((n, stream(&format!("/Length {next} 0 R"), b"abc")));
     }
+    // And indirect reference cycles 67 <-> 68 and 69 -> 69 fail
+    // `get_object` / `dereference` at `Limit::Depth`.
+    objects.push((67, b"68 0 R".to_vec()));
+    objects.push((68, b"67 0 R".to_vec()));
+    objects.push((69, b"69 0 R".to_vec()));
     let pdf = open(&with_table(&objects));
     let started = Instant::now();
-    // Threads reading the cycles at once don't wait on each other.
     std::thread::scope(|s| {
         for n in 3..67 {
             let pdf = &pdf;
-            s.spawn(move || assert!(matches!(pdf.get((n, 0)), Err(Error::ReferenceCycle(_)))));
+            s.spawn(move || {
+                assert_eq!(
+                    pdf.get((n, 0)).unwrap().as_stream().unwrap().content,
+                    b"abc"
+                );
+            });
+        }
+        for n in 67..70 {
+            let pdf = &pdf;
+            s.spawn(move || {
+                assert!(matches!(
+                    pdf.get_object((n, 0)),
+                    Err(Error::Limit(Limit::Depth))
+                ));
+            });
         }
     });
     for _ in 0..2 {
-        assert!(matches!(pdf.get((3, 0)), Err(Error::ReferenceCycle(_))));
-        assert!(matches!(pdf.get((4, 0)), Err(Error::ReferenceCycle(_))));
+        assert_eq!(
+            pdf.get((3, 0)).unwrap().as_stream().unwrap().content,
+            b"abc"
+        );
+        assert_eq!(
+            pdf.get((5, 0)).unwrap().as_stream().unwrap().content,
+            b"abc"
+        );
         assert!(matches!(
-            pdf.get((5, 0)),
-            Err(Error::ReferenceCycle((5, 0)))
+            pdf.get_object((67, 0)),
+            Err(Error::Limit(Limit::Depth))
         ));
-        assert!(matches!(pdf.get((6, 0)), Err(Error::ReferenceCycle(_))));
+        assert!(matches!(
+            pdf.get_object((69, 0)),
+            Err(Error::Limit(Limit::Depth))
+        ));
     }
     assert!(pdf.get((1, 0)).is_ok());
     assert!(started.elapsed() < QUICK);
@@ -935,6 +975,7 @@ pub(crate) fn plaintext() -> Pdf {
         "Type" => "Sig",
         "Filter" => "Adobe.PPKLite",
         "SubFilter" => "adbe.pkcs7.detached",
+        "ByteRange" => vec![0.into(), 10.into(), 20.into(), 30.into()],
         "Contents" => Object::String(SIGNATURE.to_vec(), StringFormat::Hexadecimal),
         "M" => Object::string_literal("D:20261016120000Z"),
     });
@@ -1105,13 +1146,23 @@ fn an_undefined_crypt_filter_is_a_typed_error() {
 #[derive(Debug, Clone, Copy)]
 enum Explained {
     /// The eager load keeps an object stream's members that the
-    /// cross-reference table doesn't list in use: lazily they aren't there.
+    /// cross-reference table doesn't list in use, or objects a later
+    /// section freed (`type 0`): lazily they aren't there.
     Unlisted,
-    /// A stream or string doesn't decrypt (AES padding): an XMP stream
-    /// stored in the clear though `/EncryptMetadata` is true, or a
-    /// `/SigRef`'s `/DigestValue`. Lazily a typed error; eagerly what was
-    /// there, half decrypted.
+    /// A stream doesn't decrypt (AES padding): an XMP stream stored in the
+    /// clear though `/EncryptMetadata` is true.
     Undecryptable,
+    /// lopdf's eager load differs from PDFium / qpdf / pdf-structure:
+    /// leaving non-catalog `/Type /Metadata` streams encrypted under
+    /// `/EncryptMetadata false`, appending extra whitespace before
+    /// `endstream` to `/Length`, skipping orphaned `/Encrypt`-shaped
+    /// dictionaries, or aborting dictionary decryption on `/DigestValue`.
+    Eager,
+    /// Damaged cross-reference tables rebuilt differently by lopdf's
+    /// header scan than by pdf-structure / PDFium.
+    Rebuilt,
+    /// Truncated damaged file with no `startxref`.
+    Damaged,
 }
 
 impl Explained {
@@ -1122,20 +1173,101 @@ impl Explained {
             Explained::Undecryptable => {
                 matches!(difference, Difference::Fails(Error::Decryption(_)))
             }
+            Explained::Eager => matches!(difference, Difference::Differs),
+            Explained::Rebuilt => matches!(
+                difference,
+                Difference::Differs | Difference::Fails(Error::MissingXrefEntry)
+            ),
+            Explained::Damaged => matches!(difference, Difference::OnlyLazy),
         }
     }
 }
 
 /// The corpus files whose objects read otherwise lazily, why, and how
-/// many objects do.
+/// many objects do (removed in slice 13 when eager loading moves off lopdf).
 const EXPLAINED: &[(&str, Explained, usize)] = &[
+    ("forms/safedocs/0015233.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0028292.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0036552.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0039917.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0054508.pdf", Explained::Eager, 3),
+    ("forms/safedocs/0078699.pdf", Explained::Eager, 3),
+    ("forms/safedocs/0085863.pdf", Explained::Unlisted, 2),
+    ("forms/safedocs/0110753.pdf", Explained::Unlisted, 2),
+    ("forms/safedocs/0112378.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0113045.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0120961.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0121600.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0128397.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0132631.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0148363.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0150632.pdf", Explained::Unlisted, 1),
+    ("forms/safedocs/0155165.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0160718.pdf", Explained::Eager, 1),
     ("forms/safedocs/0169467.pdf", Explained::Undecryptable, 1),
+    ("forms/safedocs/0187215.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0192444.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0205717.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0207918.pdf", Explained::Unlisted, 1),
+    ("forms/safedocs/0210819.pdf", Explained::Unlisted, 45),
+    ("forms/safedocs/0215118.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0236299.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0270097.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0270171.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0272165.pdf", Explained::Unlisted, 56),
+    ("forms/safedocs/0284632.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0294933.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0311422.pdf", Explained::Eager, 3),
+    ("forms/safedocs/0344358.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0351829.pdf", Explained::Unlisted, 6),
+    ("forms/safedocs/0356744.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0357569.pdf", Explained::Unlisted, 15),
+    ("forms/safedocs/0359716.pdf", Explained::Eager, 34),
+    ("forms/safedocs/0382153.pdf", Explained::Unlisted, 1),
+    ("forms/safedocs/0392041.pdf", Explained::Eager, 10),
+    ("forms/safedocs/0483480.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0517363.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0555069.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0567218.pdf", Explained::Unlisted, 4),
+    ("forms/safedocs/0622462.pdf", Explained::Unlisted, 1),
+    ("forms/safedocs/0626002.pdf", Explained::Eager, 10),
+    ("forms/safedocs/0630899.pdf", Explained::Damaged, 1),
+    ("forms/safedocs/0756200.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0786722.pdf", Explained::Eager, 1),
     ("forms/safedocs/0845477.pdf", Explained::Unlisted, 70),
+    ("forms/safedocs/0861734.pdf", Explained::Eager, 3),
+    ("forms/safedocs/0899113.pdf", Explained::Eager, 10),
+    ("forms/safedocs/0934470.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0943322.pdf", Explained::Eager, 1),
+    ("forms/safedocs/0990444.pdf", Explained::Unlisted, 4),
+    ("forms/safedocs/1007621.pdf", Explained::Rebuilt, 8),
+    ("forms/safedocs/1060770.pdf", Explained::Eager, 2),
+    ("forms/safedocs/1089796.pdf", Explained::Eager, 2),
+    ("forms/safedocs/1096333.pdf", Explained::Eager, 1),
     ("forms/safedocs/1156137.pdf", Explained::Unlisted, 1),
-    ("forms/safedocs/1263925.pdf", Explained::Undecryptable, 1),
+    ("forms/safedocs/1259021.pdf", Explained::Eager, 1),
+    ("forms/safedocs/1263925.pdf", Explained::Eager, 1),
+    ("forms/safedocs/1313824.pdf", Explained::Eager, 1),
+    ("forms/safedocs/1339485.pdf", Explained::Eager, 26),
+    ("forms/safedocs/1346789.pdf", Explained::Eager, 1),
+    ("forms/safedocs/1445804.pdf", Explained::Eager, 1),
+    ("forms/safedocs/1528928.pdf", Explained::Eager, 1),
     ("forms/safedocs/1530261.pdf", Explained::Unlisted, 86),
+    ("forms/safedocs/1854407.pdf", Explained::Eager, 1),
+    ("forms/safedocs/1883189.pdf", Explained::Eager, 1),
+    ("forms/safedocs/2077793.pdf", Explained::Rebuilt, 8),
+    ("forms/safedocs/2101570.pdf", Explained::Eager, 1),
     ("forms/safedocs/2280585.pdf", Explained::Unlisted, 80),
+    ("forms/safedocs/2308594.pdf", Explained::Eager, 1),
+    ("forms/safedocs/2709014.pdf", Explained::Eager, 1),
+    ("forms/safedocs/2810782.pdf", Explained::Eager, 1),
+    ("forms/safedocs/2850504.pdf", Explained::Eager, 1),
+    ("forms/safedocs/2893848.pdf", Explained::Eager, 1),
+    ("forms/safedocs/2973686.pdf", Explained::Unlisted, 7),
+    ("forms/safedocs/3146306.pdf", Explained::Eager, 1),
+    ("forms/safedocs/3170869.pdf", Explained::Unlisted, 9),
     ("forms/safedocs/3401937.pdf", Explained::Unlisted, 6),
+    ("forms/safedocs/7523949.pdf", Explained::Eager, 2),
 ];
 
 /// Every manifest file lopdf loads (with the empty password, as

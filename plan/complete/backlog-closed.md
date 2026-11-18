@@ -675,3 +675,15 @@ Entries move here when they close, saying where they went. IDs are never reused.
 - **Notes:** pdf-lint is Greg's to change upstream. Held by 17 rows of
   `crates/sheaf-ops/tests/arlington_allowed.tsv`, one per form; they go
   when a pdf-lint release with the fix is taken.
+
+## F29: Research: how the Arlington tier holds a damaged form pdf-lint reads nothing of
+
+- **Closed:** 2026-11-18. Resolved in M18 slice 8: sheaf and pdf-lint
+  0.2.0-rc.1 both read through `pdf-structure`'s `Recovery::Verified`
+  (`1819139.pdf` recovered by both, `4422502.pdf`'s trailer lacking `/Root`
+  refused by both), so `arlington_allowed.tsv` needs no `F29` row.
+- **Found:** 2026-10-26, Claude, during the pdf-lint item's slice 1
+  (the corpus tier on pdf-lint)
+- **What:** decide, on merit, how `just tier-arlington` checks a save of
+  a damaged form whose `startxref` names no cross-reference.
+- **Overlap:** the [pdf-lint item](pdf-lint.md); B46.

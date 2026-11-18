@@ -26,7 +26,7 @@ use crate::store::BlobId;
 /// matter. A save that writes it encrypts with the source's
 /// [`crypt`](crate::source::Source::crypt).
 pub fn eager(src: &Source) -> Result<Pdf> {
-    crate::file::load_pdf_mem(src.bytes(), src.password())
+    Ok(src.pdf().to_document()?)
 }
 
 /// A Rewrite's objects: the primary's, the emitted ones over them.

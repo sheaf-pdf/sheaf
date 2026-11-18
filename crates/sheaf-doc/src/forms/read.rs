@@ -1056,7 +1056,7 @@ fn color(o: &Object) -> Option<Color> {
         .ok()?
         .iter()
         .map(|p| match p.as_float() {
-            Ok(v) if v.is_finite() => v.clamp(0.0, 1.0) as f32,
+            Ok(v) if (v as f32).is_finite() => (v as f32).clamp(0.0, 1.0),
             _ => 0.0,
         })
         .collect();

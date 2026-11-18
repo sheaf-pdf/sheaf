@@ -139,7 +139,7 @@ from.
   signatures; the conformance tier is M14's and M17's ground, and the
   notes' fit as WebAssembly plugins meets [document
   transforms](../topics/plugins/document-transforms.md). Test cases:
-  [F29](../backlog/F29.md)'s two forms.
+  [F29](../complete/backlog-closed.md#f29-research-how-the-arlington-tier-holds-a-damaged-form-pdf-lint-reads-nothing-of)'s two forms.
 - **A convention, not a crate: `diag`.** Each crate's faults say where
   in its own input; pdf-objects' spans say where in the file; a sink is a
   type parameter sheaf passes as a no-op. A crate under the codecs would

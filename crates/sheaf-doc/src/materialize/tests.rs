@@ -169,7 +169,7 @@ pub(super) fn source(bytes: &[u8], password: Option<&str>) -> Src {
 
 /// `bytes` read lazily with `password`.
 pub(super) fn lazy(bytes: &[u8], password: Option<&str>) -> LazyPdf {
-    LazyPdf::open(Arc::from(bytes), password, &Limits::DEFAULT.reader).unwrap()
+    LazyPdf::open(Arc::<[u8]>::from(bytes), password, &Limits::DEFAULT.reader).unwrap()
 }
 
 /// The object numbers `pdf`'s table lists in use.
@@ -397,7 +397,11 @@ fn an_encrypted_base_rewrites_encrypted() {
             }
             assert!(
                 matches!(
-                    LazyPdf::open(Arc::from(&out.bytes[..]), None, &Limits::DEFAULT.reader),
+                    LazyPdf::open(
+                        Arc::<[u8]>::from(&out.bytes[..]),
+                        None,
+                        &Limits::DEFAULT.reader,
+                    ),
                     Err(crate::pdf::Error::InvalidPassword)
                 ),
                 "{name}"

@@ -130,7 +130,7 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
     let src = doc.primary();
     let before = src.pdf();
     let after = match LazyPdf::open(
-        Arc::from(written.bytes.as_slice()),
+        Arc::<[u8]>::from(written.bytes.as_slice()),
         src.password(),
         &Limits::DEFAULT.reader,
     ) {
@@ -200,13 +200,18 @@ fn identity(entry: &Entry, corpus: &Corpus) -> Option<Identity> {
 /// of them written changed before; and 0092321's fields no longer copy
 /// its two catalogs as kids, nor the usage rights (`/Perms`, `/UR3`)
 /// only those copies reached, which a Rewrite's own catalog drops: 15
-/// objects, 14 of them copied as they were, 1 changed.
+/// objects, 14 of them copied as they were, 1 changed. M18 slice 8 moved
+/// them to 4,388, 2,267,675, 921,586 and 431: 4422502's damaged trailer
+/// has no `/Root` under `pdf-structure` (closing F29), incremental `type
+/// 0` free entries (0150632, 3170869, …) drop freed objects lopdf kept,
+/// and 2,121 streams with multi-EOL whitespace before `endstream` copy
+/// verbatim.
 const IDENTITY: Baseline = Baseline {
     manifest: 4392,
-    files: 4389,
-    survived: 2_269_688,
-    raw: 919_465,
-    changed: 432,
+    files: 4388,
+    survived: 2_267_675,
+    raw: 921_586,
+    changed: 431,
 };
 
 struct Baseline {

@@ -393,7 +393,7 @@ measurements, hand checks for Greg, what review found, Found.)
      the form's when a save moves its page into or out of an object
      stream. 43 findings in 19 saves of 17 forms, held by 17 rows, one
      per form. Reproduced with qpdf and the `pdf-lint` binary alone.
-   - **[F29](../backlog/F29.md), new:** 1819139 and 4422502's
+   - **[F29](backlog-closed.md#f29-research-how-the-arlington-tier-holds-a-damaged-form-pdf-lint-reads-nothing-of), new:** 1819139 and 4422502's
      `startxref` names nothing, so pdf-lint reads little of them, while
      sheaf opens them by lopdf's recovery: their faults in what sheaf
      merges (78 FieldTx `/DR` deprecated, 9 `/Tabs` too-new) aren't
